@@ -951,6 +951,22 @@ class GitNoteWriter:
         # back. `None` means the file did not exist.
         prior = {path: (path.read_bytes() if path.exists() else None) for path, _ in planned}
         written = [file.path for _, file in planned]
+        # **The honest note count, computed here because this is the only frame that holds the facts
+        # it needs.** `prior` is the pre-write bytes of every planned target and the flag pair says
+        # which of them is a *subject*; a batch's caller has neither. `BatchingNoteWriter.flush`
+        # reported `len(batch)` on any commit, so a batch of fifty where forty-nine were
+        # byte-identical to the tree and one was new moved `chemclaw_notes_recorded_total` by
+        # **fifty** — measured against a real bare remote, the same magnitude as the undercount
+        # `D-2026-09-14-a-counter-of-commits-is-not-a-counter-of-notes` fixed, in the other
+        # direction.
+        #
+        # The row that carried this said the number was not available at this layer because a
+        # changed-file count "counts dependency notes and retirement rewrites too". It does not have
+        # to: `_build_write` tags a dependency `overwrite=False` and a retirement `amendment=True`,
+        # and there is exactly one subject file per `NoteWrite`, so the partition is a filter rather
+        # than a third meaning of the field.
+        subjects = _changed_subjects(planned, prior)
+        committed = False
         try:
             for note_path, file in planned:
                 note_path.parent.mkdir(parents=True, exist_ok=True)
@@ -968,7 +984,8 @@ class GitNoteWriter:
             # from `written=False` to a non-retryable `GitWriteError`, and `durable/publish.py`
             # drops the note. `tests/test_knowledge.py` drives that combination.
             returncode, _ = await self._run("diff", "--cached", "--quiet", "HEAD", "--", *written)
-            if returncode != 0:
+            committed = returncode != 0
+            if committed:
                 # **Path-limited, for the reason the worktree used to supply.** The gate this
                 # replaced committed inside a linked worktree with its own index, so residue staged
                 # in the shared checkout structurally could not reach a note's commit. There is no
@@ -1040,9 +1057,21 @@ class GitNoteWriter:
         # readable locally, which is exactly the state a stale cache hides.
         invalidate_cache()
         commit = await self._read("rev-parse", "HEAD")
-        return await self._push(commit)
+        return await self._push(
+            commit,
+            subjects=len(subjects),
+            planned_subjects=_subject_count(planned),
+            committed=committed,
+        )
 
-    async def _push(self, commit: str | None) -> WriteOutcome:
+    async def _push(
+        self,
+        commit: str | None,
+        *,
+        subjects: int = 1,
+        planned_subjects: int = 1,
+        committed: bool = True,
+    ) -> WriteOutcome:
         """Push the base branch, and report `written` by what the *remote* now has.
 
         **Separated so the no-diff path can reach it too.** A push that fails leaves a commit on the
@@ -1056,6 +1085,19 @@ class GitNoteWriter:
         ahead = await self._read("rev-list", "--count", f"{self._remote}/{self._base}..HEAD")
         if ahead == "0":
             return WriteOutcome(reference=commit or self._base, notes=0)
+        # **`subjects` is the count only where this call is what committed them.** Reaching here
+        # without having committed means an *earlier* attempt's commit is still unpushed and this
+        # call is what lands it — the case this method's docstring exists for, where reporting
+        # nothing stranded a note on one pod and told the caller it had failed. Those bytes are this
+        # write's own, rewritten byte-identically, so `subjects` is 0 and the notes in that commit
+        # are exactly the ones this write names. Falling back to "one note per write, or the batch"
+        # keeps `written` true there, which is what twenty-odd readers depend on.
+        #
+        # The residual is narrow and stated rather than hidden: a batch whose every file is
+        # byte-identical *and* whose earlier push failed reports the whole batch, of which some
+        # notes were already on the remote. It needs both conditions at once, and the alternative —
+        # reporting 0 — is the stranded-note failure that path was written to close.
+        landed = subjects if committed else planned_subjects
         try:
             # Through `_git`, so a push reaches the classifier written for it. Every wording in
             # `_AUTH_FAILURE_MARKERS` is a *push*-side refusal, and this raised its own
@@ -1076,7 +1118,7 @@ class GitNoteWriter:
                 f"readable here; only the push to {self._remote} did not happen, so re-record "
                 "nothing and change nothing: the next attempt pushes this same commit."
             ) from exc
-        return WriteOutcome(reference=commit or self._base)
+        return WriteOutcome(reference=commit or self._base, notes=landed)
 
     def _is_a_persons_note(self, note_path: Path) -> bool:
         """Whether a human's note is already at `note_path` — the check both policies below read.
@@ -1305,10 +1347,59 @@ class BatchingNoteWriter:
         outcome = await self._inner.write(
             NoteWrite(files=files, message=f"Add {len(batch)} backfilled note(s)")
         )
-        # The one place a write carries more than one note, and therefore the one place that has to
-        # say so. An inner no-op (every file byte-identical) stays 0: nothing reached the graph,
-        # however many notes were in the batch.
-        return WriteOutcome(reference=outcome.reference, notes=len(batch) if outcome.written else 0)
+        # **A pass-through, because the count moved to where the facts are.** This returned
+        # `len(batch) if outcome.written else 0`, which is right at both ends and wrong in the
+        # middle:
+        # a batch of fifty where forty-nine were byte-identical and one was new committed once and
+        # reported fifty. `_changed_subjects` compares each planned subject against the bytes that
+        # target already held, so the inner write now answers the question this wrapper was guessing
+        # at, and there is nothing left here for a batch to know that its writer does not.
+        return outcome
+
+
+def _changed_subjects(
+    planned: list[tuple[Path, NoteFile]], prior: dict[Path, bytes | None]
+) -> list[str]:
+    """The distinct subject notes this write genuinely changes — the honest `notes` count.
+
+    **A subject is what a `NoteWrite` is *about*, and the other two kinds of file in one are not
+    notes reaching the graph.** `record._build_write` tags a dependency `overwrite=False` and a
+    retirement `amendment=True`, and emits exactly one subject per write, so the partition is a
+    filter on two flags rather than the "third meaning of the field" the backlog row believed made
+    this number unavailable. Driven over a batch carrying a dependency and a retirement beside four
+    subjects: the flags say four, git's own changed-file count says two, and the honest answer is
+    one.
+
+    **Distinct, because a batch may name one subject twice.** Two writes for the same note id in one
+    batch produce two entries at one path, and they are one note in the graph.
+
+    Args:
+        planned: The `(absolute path, file)` pairs this write will put in the tree.
+        prior: What each of those paths held before, `None` for a path that did not exist — the map
+            the rollback already builds, read here rather than re-read so the comparison is against
+            the same bytes the restore would put back.
+
+    Returns:
+        The repo-relative paths of the subject notes whose bytes this write changes.
+    """
+    changed = {
+        file.path
+        for note_path, file in planned
+        if file.overwrite
+        and not file.amendment
+        and prior.get(note_path) != file.content.encode("utf-8")
+    }
+    return sorted(changed)
+
+
+def _subject_count(planned: list[tuple[Path, NoteFile]]) -> int:
+    """How many distinct subject notes this write names, changed or not.
+
+    Separate from `_changed_subjects` because the two answer different questions and one path needs
+    the weaker one: a push that lands an *earlier* attempt's commit staged nothing now, so "what did
+    this call change" is zero while "what is this write about" is the batch. See `_push`.
+    """
+    return len({file.path for _, file in planned if file.overwrite and not file.amendment})
 
 
 def default_writer() -> NoteWriter:
