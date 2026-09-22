@@ -19,6 +19,7 @@ from rdkit import Chem
 from chemclaw.core.chem import (
     STANDARDIZATION_VERSION,
     InvalidSmilesError,
+    _is_organic,
     canonical_smiles,
     compound_id,
     standard_smiles,
@@ -743,11 +744,19 @@ _STANDARDIZATION_AT_THIS_VERSION = (
     ("[K+].[K+].[O-]C([O-])=O", "O=C([O-])[O-].[K+].[K+]"),
     ("[Na+].[NH-]C#N", "N#C[NH-].[Na+]"),
     ("[Ca+2].[N-]=C=[N-]", "[Ca+2].[N-]=C=[N-]"),
-    # And the cost std10 does carry, pinned so it cannot move in silence: urea hydrogen peroxide
-    # is a bench oxidant and this collapses it onto urea. See
-    # `test_a_neutral_co_former_is_stripped_like_a_counterion` for the root cause, which is not
-    # `_is_organic` and predates it.
-    ("NC(N)=O.OO", "NC(N)=O"),
+    # Which fragment is kept when exactly one is organic — the module's own answer, not RDKit's.
+    # Every row above exercises this branch on a species where the two agree, which is why none of
+    # them moved when they were made to disagree; this one is the disagreement.
+    ("[NH4+].[O-]C=O", "O=CO"),
+    ("[NH4+].CC(=O)[O-]", "CC(=O)O"),
+    ("[Na+].[O-]C=O", "O=CO"),
+    # A neutral co-former is not a counterion: urea hydrogen peroxide is a bench oxidant and stays
+    # one, while a charged spectator and a known solvent still go. See
+    # `test_a_neutral_co_former_is_not_a_counterion`.
+    ("NC(N)=O.OO", "NC(N)=O.OO"),
+    ("CCN.OO", "CCN.OO"),
+    ("CCN.O", "CCN"),
+    ("CN(C)C(=[N+](C)C)On1nnc2ccccc21.F[B-](F)(F)F", "CN(C)C(On1nnc2ccccc21)=[N+](C)C"),
 )
 
 
@@ -823,8 +832,6 @@ def test_the_organic_line_is_where_the_version_says_it_is() -> None:
     A fragment-level test rather than a `standardize` one: this is the predicate, and what
     `standardize` does with its answer is the behaviour table below.
     """
-    from chemclaw.core.chem import _is_organic
-
     wrong = {}
     for name, smiles, expected in _THE_ORGANIC_LINE:
         molecule = Chem.MolFromSmiles(smiles)
@@ -872,28 +879,80 @@ def test_the_degree_clause_is_what_keeps_the_cyanamides_out() -> None:
     assert compound_id("[Ca+2].[N-]=C=[N-]") != compound_id("[Na+].[NH-]C#N")
 
 
-def test_a_neutral_co_former_is_stripped_like_a_counterion() -> None:
-    """Urea hydrogen peroxide is a bench oxidant and this makes it urea. Pinned, not fixed.
+def test_the_parent_is_the_fragment_this_module_calls_organic() -> None:
+    """RDKit's chooser and `_is_organic` answer "which fragment is the compound?" differently.
 
-    **Not caused by `std10` and reachable because of it.** `standardize` sends a string with
-    exactly one organic fragment to `FragmentParent`, which keeps the parent and discards the
-    rest "as counterions" — and it never asks whether a discarded fragment is *charged*. So a
-    neutral co-former that is not a solvent goes the same way as a bromide. The control below
-    shows the shape predates the bump: ethylamine·H2O2 already collapsed at std9, when urea was
-    still called inorganic and UHP was kept whole by accident.
+    **The behaviour table above could not see this, and that is the finding.** Every one of its
+    salt rows exercises the keep-one-organic-fragment branch, and on every one of them
+    `rdMolStandardize.FragmentParent` happens to agree — so the pipeline could be changed here
+    without a single row moving. The disagreement only shows on a species where the chooser's
+    metric wins: it counts atoms *including hydrogens* and defaults to `preferOrganic=False`, so
+    `[NH4+]` (five atoms) beats formate (four), and `Uncharger` then turned ammonium formate into
+    **ammonia**.
 
-    It is asserted rather than fixed because the fix is a decision about which neutral co-formers
-    are part of an identity — a curated solvent list, which is the table this module opens by
-    refusing, or RDKit's own `FragmentRemover` — and it moves every solvate at once.
-    `docs/planning/BACKLOG.md` carries the row.
+    Driven against RDKit rather than asserted, so this reds if upstream changes its mind — which
+    would be the day to re-read the call site, not to delete this.
     """
-    assert compound_id("NC(N)=O.OO") == compound_id("NC(N)=O"), (
-        "if this stops holding the row has been worked; update it rather than deleting this"
+    from rdkit.Chem.MolStandardize import rdMolStandardize
+
+    pair = Chem.MolFromSmiles("[NH4+].[O-]C=O")
+    chooser = Chem.MolToSmiles(rdMolStandardize.LargestFragmentChooser().choose(pair))
+    assert chooser == "[NH4+]", (
+        f"RDKit now keeps {chooser!r} for ammonium formate. The call site no longer asks it, so "
+        "nothing breaks — but the measurement this test records has changed; re-read it"
     )
-    assert compound_id("CCN.OO") == compound_id("CCN")  # the control: the shape predates std10
-    assert compound_id("CCN.O") == compound_id(
-        "CCN"
-    )  # a hydrate, which is the case it is right for
+    assert standard_smiles("[NH4+].[O-]C=O") == "O=CO", (
+        "ammonium formate standardized to the inorganic half; the module's own `_is_organic` says "
+        "which fragment is the compound and `standardize` must use that answer"
+    )
+    # The control: the module's answer and RDKit's agree on every salt the table already pins, so
+    # the change above moves exactly one thing.
+    for written in ("CC[NH3+].[Br-]", "[NH4+].CC(=O)[O-]", "NC(=[NH2+])N.[Cl-]", "[Na+].[O-]C=O"):
+        molecule = Chem.MolFromSmiles(written)
+        organic = [f for f in Chem.GetMolFrags(molecule, asMols=True) if _is_organic(f)]
+        assert len(organic) == 1, written
+        assert Chem.MolToSmiles(organic[0]) == Chem.MolToSmiles(
+            rdMolStandardize.FragmentParent(molecule)
+        ), written
+
+
+def test_a_neutral_co_former_is_not_a_counterion() -> None:
+    """Urea hydrogen peroxide is a bench oxidant, and it used to be urea.
+
+    `standardize` discarded every other fragment on the strength of the count alone, without
+    asking what a discarded fragment *is* — so a neutral co-former went the same way as a
+    bromide. Two ways a spectator earns discarding now, and between them they need no list of
+    this repository's own: it carries a charge, or it is a solvent RDKit's curated list knows.
+
+    **The charge half is what keeps the coupling reagents working**, and driving the list alone is
+    how that was found: `FragmentRemover` is a *pharmaceutical salt* list, and measured it carries
+    hexafluorophosphate but **not** tetrafluoroborate — so a version that asked only the list left
+    TBTU and TSTU carrying their anions while HATU and PyBOP were fine. Charge reads all of them
+    without naming any. (A first version of this docstring said the list knew neither, which was
+    the half that had not been driven.)
+
+    **And the question is asked of each spectator, not of the set.** `all(...)` over them coupled
+    them: one unrecognised neutral preserved every other fragment too, so `CC[NH3+].[Cl-].OO` kept
+    its chloride. Whether a bromide is a counterion cannot depend on what else is in the string.
+    """
+    assert compound_id("NC(N)=O.OO") != compound_id("NC(N)=O"), "UHP is not urea"
+    assert compound_id("CCN.OO") != compound_id("CCN"), "and the same for any organic-H2O2"
+    # The three that must still collapse: a charged counterion, a known solvent, and the salt of
+    # an organic acid whose counterion this module has always discarded.
+    assert compound_id("CC[NH3+].[Br-]") == compound_id("CCN")
+    assert compound_id("CCN.O") == compound_id("CCN")
+    assert compound_id("CC(=O)[O-].[Na+]") == compound_id("CC(=O)O")
+    # And the counterion RDKit's list does not know, which is why charge is read first.
+    assert standard_smiles("CN(C)C(=[N+](C)C)On1nnc2ccccc21.F[B-](F)(F)F") == standard_smiles(
+        "CN(C)C(=[N+](C)C)On1nnc2ccccc21"
+    ), "TBTU kept its tetrafluoroborate; a salt list curated for pharma does not know it"
+    # The coupling, driven: an unrecognised neutral beside a counterion keeps only itself.
+    assert standard_smiles("CC[NH3+].[Cl-].OO") == "CCN.OO", (
+        "the chloride survived because a peroxide was in the same string"
+    )
+    assert standard_smiles("NC(N)=O.OO.O") == "NC(N)=O.OO", (
+        "and the water went while the H2O2 stayed"
+    )
 
 
 def test_the_standardization_version_is_pinned_to_the_behaviour_it_names() -> None:
@@ -921,7 +980,7 @@ def test_the_standardization_version_is_pinned_to_the_behaviour_it_names() -> No
     the runbook's — delete the corpus's `corpus_cursors` row and re-run the ELN sync. Read that
     before adding a row here with a new number.
     """
-    assert STANDARDIZATION_VERSION == "std10", (
+    assert STANDARDIZATION_VERSION == "std11", (
         "the standardization version changed. That is a decision with a cost — see this test's "
         "docstring — so update the literal and the table below together, and say in the commit "
         "message which rows moved"

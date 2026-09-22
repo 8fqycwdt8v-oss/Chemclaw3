@@ -195,37 +195,29 @@ topic).
 
 ## 2 — Answers that are wrong without saying so
 
-- [ ] **A neutral co-former is discarded as if it were a counterion, so urea hydrogen peroxide is
-      urea** — [M], `src/chemclaw/core/chem.py::standardize`. When a string has exactly one organic
-      fragment, `standardize` hands it to `rdMolStandardize.FragmentParent` and calls the rest
-      counterions — without asking whether a discarded fragment carries a *charge*. Driven:
-      `NC(N)=O.OO` and `NC(N)=O` share one `compound_id`, so UHP (carbamide peroxide), a bench
-      oxidant, is the same compound as urea for the cache, the fingerprint rows and the hazard
-      screen. The shape predates `std10` — `CCN.OO` already collapsed to `CCN` — and `std10` is
-      what pulled urea into it by making the fragment organic.
+- [ ] **A salt written neutral and the same salt written ionic get two `compound_id`s, for the
+      counterions RDKit's catalogue omits** — [M], opened 2026-09-22 by the review of
+      `D-2026-09-22-the-parent-is-the-fragment-this-module-calls-organic`. That decision discards a
+      *neutral* spectator only when RDKit's fragment catalogue knows it, so the two spellings of one
+      salt diverge whenever the catalogue does not carry the counterion: driven,
+      `CCN.OCl(=O)(=O)=O` keeps its perchloric acid while `CC[NH3+].[O-]Cl(=O)(=O)=O` strips the
+      perchlorate. One substance, two ids — which is `D-2026-07-31-two-spellings-of-one-molecule`,
+      the defect `core/chem.py` exists to prevent.
 
-      **Not a one-line guard, which is why it is a row.** "Discard only charged fragments" breaks
-      the hydrate (`CCN.O` -> `CCN` is right) and every solvate the module deliberately strips, so
-      the fix needs a notion of which neutral co-formers are part of an identity: a curated
-      solvent list, which is the table `core/chem.py` opens by refusing, or RDKit's own
-      `rdMolStandardize.FragmentRemover`, whose list is curated upstream and would make the answer
-      somebody else's to maintain. Either moves every solvate at once and needs a
-      `STANDARDIZATION_VERSION` bump. Pinned meanwhile by
-      `tests/test_compound_identity.py::test_a_neutral_co_former_is_stripped_like_a_counterion`
-      and by a row of `_STANDARDIZATION_AT_THIS_VERSION`, so it cannot move in silence.
+      **Measured, the set is small and enumerable**: the neutral spectators the catalogue omits that
+      can also ionise — perchloric, tetrafluoroboric, sulfamic, thiocyanic, carbonic,
+      hypophosphorous and boric acid. Everything it carries (HCl, HBr, HF, HI, H2SO4, H3PO4, HNO3,
+      the group-1/2 metals) agrees from both spellings, and an adduct that cannot ionise (H2O2, BH3,
+      I2, CO2) is correctly kept from both.
 
-- [ ] **Ammonium formate standardizes to ammonia** — [M], `src/chemclaw/core/chem.py::standardize`.
-      Driven: `standard_smiles("[NH4+].[O-]C=O")` returns `'N'`. `FragmentParent` picks `[NH4+]`
-      over the formate as the parent — neither fragment is organic by any version of
-      `_is_organic`, so `organic == 0` is not the branch; the pick happens inside RDKit — and
-      `Uncharger` then neutralises it. `_neutralization_is_protonation` does not refuse it because
-      the neutralisation *adds* a hydrogen, which is the shape that guard exists to allow.
-      Ammonium formate is a transfer-hydrogenation reagent; ammonia is a different substance in
-      every way that matters, and the note, the cache key and the hazard screen all follow the id.
-      Identical at `std9` and `std10`, so it is neither caused nor fixed by
-      `D-2026-09-22-a-version-bump-costs-the-same-whenever-it-is-taken`; found while driving it.
-      Weigh the fix against the same question the row above asks, because both are about which
-      fragment `FragmentParent` is allowed to keep.
+      **`Reionizer` does not close it** — driven, `Cleanup` normalises perchloric acid to a
+      charge-separated but net-neutral form and reionizing does not move the proton to the amine, so
+      the charge clause cannot see it. The candidates are a pKa-shaped predicate (the same one
+      `D-2026-09-09-a-map-number-is-not-a-molecule` declines for the alkali/alkoxide case) or an
+      explicit list of ionisable neutrals, which is the table this module opens by refusing. Weigh
+      both against how rare the neutral spelling of a perchlorate salt is; the trade was taken
+      knowingly, against four wrong identities that shipped. Anchors:
+      `core/chem.py::standardize`, `tests/test_compound_identity.py::_STANDARDIZATION_AT_THIS_VERSION`.
 
 - [ ] **A `STANDARDIZATION_VERSION` bump retires the fingerprint rows and re-keys nothing, so the
       graph keeps a note per superseded spelling forever** — [L],
