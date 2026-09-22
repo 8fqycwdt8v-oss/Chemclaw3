@@ -536,7 +536,11 @@ source_paths = [
     # `spend_cap.py` is first because it is the **smallest of the four by source length** (309 lines
     # against `loop_cap.py`'s 333, `skill_backend.py`'s 367 and `plan_gate.py`'s 671), so it buys the
     # cheapest available answer to "what does one of these cost". Lines are a proxy for mutant count
-    # and not a measurement of it; the measured cost of *this* addition is recorded below.
+    # and not a measurement of it, and **the cost of this addition is not recorded anywhere yet**:
+    # `make mutants` has not completed a run since `D-2026-09-22-a-mutation-backstop-that-cannot-start`
+    # found it failing before any mutant is tested. An earlier draft of this comment said the cost
+    # was "recorded below" — there is nothing below that records it. `mutants/mutmut-stats.json` is
+    # the file that will, and the `BACKLOG.md` row carries what is left to do.
     "src/chemclaw/agent/spend_cap.py",
     "src/chemclaw/api/budget.py",
     "src/chemclaw/api/runner_trace.py",
@@ -617,6 +621,14 @@ pytest_add_cli_args_test_selection = [
     "tests/test_budget.py",
     "tests/test_concurrency_claims.py",
     "tests/test_runner.py",
+    # Added with `agent/spend_cap.py` below, and the pairing is the point: a source path whose own
+    # test file is unlisted reports every mutant on the lines that file covers as a survivor, no
+    # matter how well tested the module is. Measured before adding it — the only listed file that
+    # touches the module is `test_runner.py`, at **70%** statement coverage of `spend_cap.py`
+    # (missing 135, 156-159, 191, 215-217, 231, 284-295, 301), against **96%** from
+    # `test_spend_cap.py`'s own 18 tests. So ~18 statements' worth of mutants were unkillable by
+    # construction, which is exactly the failure this list's comment below warns about.
+    "tests/test_spend_cap.py",
     "tests/test_disconnect_teardown.py",
     "tests/test_note.py",
     # Kills 24 of `note.py`'s mutants on its own — every typed-link (`split_link`) and `outgoing_*`

@@ -805,6 +805,33 @@ def test_a_refusal_is_not_bounded_by_the_ceiling_that_caused_it() -> None:
     )
 
 
+def _zip_with_truncated_markup() -> bytes:
+    """A structurally valid `.docx` container whose `word/document.xml` stops mid-element.
+
+    This is the unclassified population in its cheapest honest form: the archive opens, its central
+    directory is sound, `_refuse_a_bomb` has nothing to say about it, and the failure happens inside
+    lxml for a reason no caller can name — what an interrupted network copy leaves on a share.
+    """
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as container:
+        container.writestr("[Content_Types].xml", "<?xml version='1.0'?><Types/>")
+        container.writestr("word/document.xml", "<?xml version='1.0'?><w:document><w:body>")
+    return buffer.getvalue()
+
+
+def _zip_that_declares_too_much() -> bytes:
+    """A `.docx` whose central directory declares more expansion than the ceiling allows.
+
+    Deflated zeroes, so it is ~64 KiB on disk for 64 MiB declared — `_refuse_a_bomb` reads the
+    declared `file_size` and never decompresses, which is the whole point of refusing there.
+    """
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as container:
+        container.writestr("[Content_Types].xml", "<?xml version='1.0'?><Types/>")
+        container.writestr("word/document.xml", b"\0" * (settings.document_max_expanded_bytes + 1))
+    return buffer.getvalue()
+
+
 def test_an_unbounded_parse_does_not_blame_the_document_for_what_it_cannot_know() -> None:
     """`parse_attachment` sets no ceiling, so it cannot report a verdict a ceiling establishes.
 
@@ -818,9 +845,17 @@ def test_an_unbounded_parse_does_not_blame_the_document_for_what_it_cannot_know(
     The decision is `D-2026-09-22-an-unbounded-parse-may-not-blame-the-document`: this path stays
     in-process, and its refusal states what it cannot establish rather than guessing. The parser's
     own words are kept, because an operator debugging a share needs them.
+
+    **The input is a structurally valid zip with truncated markup, and it has to be.** The first
+    version of this test passed `b"not a zip at all"`, which never reaches the broad arm at all:
+    `_refuse_a_bomb` refuses it from the central directory, and that is a *classified* fact. So the
+    test asserted the new behaviour while exercising none of it — and, until a review measured it,
+    hid a defect in which the classified refusal grew the caveat. A truncated `word/document.xml` is
+    the population this is actually about: the file is a legal container, and a parse of it fails
+    somewhere inside a C library for a reason this system cannot name.
     """
-    with pytest.raises(DocumentParseError) as refused:
-        parse_attachment("report.docx", b"not a zip at all")
+    with pytest.raises(UnclassifiedParseError) as refused:
+        parse_attachment("report.docx", _zip_with_truncated_markup())
 
     message = str(refused.value)
     assert "could not read report.docx" in message, (
@@ -831,33 +866,61 @@ def test_an_unbounded_parse_does_not_blame_the_document_for_what_it_cannot_know(
         f"cannot establish: {message}"
     )
     assert "no memory ceiling" in message, message
+    assert ".." not in message, (
+        f"the caveat was appended to a cause that already ended in a period: {message}"
+    )
+    assert message.count("report.docx") == 1, (
+        f"the document is named twice in one refusal: {message}"
+    )
 
 
 def test_a_classified_refusal_is_not_buried_under_a_caveat_about_memory() -> None:
     """The caveat belongs to the unclassified population only, and burying the rest is the same bug.
 
-    An unsupported format, an over-expanding archive and a scanned PDF are statements about the
+    An unsupported format, a container that is not a zip and a scanned PDF are statements about the
     document that hold whether or not a ceiling was set. Wrapping them in "we do not know whether
     this machine had enough memory" would be the same what-do-I-actually-know failure pointed the
     other way — a refusal that is *less* specific than the thing it knows.
-    """
-    with pytest.raises(DocumentParseError) as unsupported:
-        parse_attachment("notes.zzz", b"hello")
 
-    assert "not a supported format" in str(unsupported.value)
-    assert "not established here" not in str(unsupported.value), (
-        f"a classified refusal grew the unbounded caveat: {unsupported.value}"
-    )
+    **Every named population is driven, because naming three and checking one is how the fourth got
+    buried.** The first version of this test listed three and asserted only the unsupported-format
+    arm; the `BadZipFile` arm was meanwhile raising `UnclassifiedParseError`, so "File is not a zip
+    file" arrived followed by a paragraph about memory not being established — about the one thing
+    that was.
+    """
+    populations = {
+        "unsupported format": (("notes.zzz", b"hello"), "not a supported format"),
+        "not a zip container": (("report.docx", b"not a zip at all"), "File is not a zip file"),
+        "over-expanding archive": (("bomb.docx", _zip_that_declares_too_much()), "past the"),
+        "scanned PDF": (("scan.pdf", _blank_pdf_bytes()), "so it is a scan"),
+    }
+    for population, ((name, raw), expected) in populations.items():
+        with pytest.raises(DocumentParseError) as refused:
+            parse_attachment(name, raw)
+        message = str(refused.value)
+        assert expected in message, f"{population}: {message}"
+        assert not isinstance(refused.value, UnclassifiedParseError), (
+            f"{population} is a classified fact and must not carry the unclassified type: {message}"
+        )
+        assert "not established here" not in message, (
+            f"{population} grew the unbounded caveat: {message}"
+        )
 
 
 def test_only_the_unknown_failures_carry_the_type_the_caveat_keys_on() -> None:
     """`UnclassifiedParseError` marks the population, so no caller reads a message to guess.
 
     This is the half that keeps the decision from rotting: the distinction is in the *type*, and a
-    caller that sniffed "unknown error" out of a string would break on the next lxml release. Both
-    broad arms in `parse_document` raise it and nothing else does — asserted by deriving the set
-    from the module rather than from a list here, so a third broad arm added later is covered or
-    red.
+    caller that sniffed "unknown error" out of a string would break on the next lxml release.
+
+    **The derivation is over `except` handlers, not over `raise` statements, and the difference is
+    the whole guard.** Counting `raise UnclassifiedParseError(...)` nodes and asserting a number is
+    what the first version did, and a review showed it passes unchanged when a *third* broad arm is
+    added that raises the base class — the exact regression the docstring claimed it prevented. So
+    this walks the module for every broad handler anywhere in it (bare `except`, `except Exception`,
+    `except BaseException`) and requires each one to raise this type, and requires that no *narrow*
+    handler does. A third broad arm is then covered or red, and a classified arm that reaches for
+    the unclassified type — which is how `zipfile.BadZipFile` got the memory caveat — is red too.
     """
     import ast
 
@@ -869,18 +932,37 @@ def test_only_the_unknown_failures_carry_the_type_the_caveat_keys_on() -> None:
         / "documents"
         / "parse.py"
     )
-    raised = [
-        node.exc.func.id
-        for node in ast.walk(ast.parse(source.read_text(encoding="utf-8")))
-        if isinstance(node, ast.Raise)
-        and isinstance(node.exc, ast.Call)
-        and isinstance(node.exc.func, ast.Name)
-    ]
-    broad = [name for name in raised if name == "UnclassifiedParseError"]
+    tree = ast.parse(source.read_text(encoding="utf-8"))
 
-    assert len(broad) == 2, (
-        "the two broad `except` arms in parse_document are what this type marks; the count moved, "
-        f"so either an arm was added without it or one stopped using it: {raised}"
+    def raises_unclassified(handler: ast.ExceptHandler) -> bool:
+        return any(
+            isinstance(node, ast.Raise)
+            and isinstance(node.exc, ast.Call)
+            and isinstance(node.exc.func, ast.Name)
+            and node.exc.func.id == "UnclassifiedParseError"
+            for node in ast.walk(handler)
+        )
+
+    def is_broad(handler: ast.ExceptHandler) -> bool:
+        if handler.type is None:
+            return True
+        return isinstance(handler.type, ast.Name) and handler.type.id in {
+            "Exception",
+            "BaseException",
+        }
+
+    handlers = [node for node in ast.walk(tree) if isinstance(node, ast.ExceptHandler)]
+    assert handlers, "parse.py has no `except` handlers at all, so this derivation is measuring air"
+
+    uncovered = [h.lineno for h in handlers if is_broad(h) and not raises_unclassified(h)]
+    assert not uncovered, (
+        f"broad `except` arms at lines {uncovered} do not raise UnclassifiedParseError, so a "
+        "failure this system cannot explain is reported as a verdict on the document"
+    )
+    misplaced = [h.lineno for h in handlers if not is_broad(h) and raises_unclassified(h)]
+    assert not misplaced, (
+        f"narrow `except` arms at lines {misplaced} raise UnclassifiedParseError, so a classified "
+        "refusal is about to be buried under a caveat about memory it does not need"
     )
     assert issubclass(UnclassifiedParseError, DocumentParseError), (
         "it must stay a DocumentParseError or every existing handler — the share sync's "

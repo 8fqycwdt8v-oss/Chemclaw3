@@ -25,8 +25,10 @@ Five spot-checks against `HEAD`, four of which corrected the row:
 
 The row's instruction was to measure the run's cost before extending it. **The run did not run.**
 
-- [x] Measured on `origin/main` with no other change: `make mutants` exits non-zero in **27 s**,
-      before a single mutant is tested. Verified by reverting `pyproject.toml` alone.
+- [x] Measured: `make mutants` exits non-zero before a single mutant is tested. **27 s** locally —
+      on the 15-path config, which the log's own "15 files mutated" says; the `origin/main` 14-path
+      config reaches the identical failure and I recorded no wall clock for it. The figure that
+      belongs to `main` is CI's: **29 s** in the scheduled workflow's own mutate step.
 - [x] **Blocker 1** — two derived guards collided. `api/runner_trace.py` is in `source_paths`, so
       mutmut rewrites `ToolCallTrace` inside `mutants/` with 45 generated names
       (`xǁToolCallTraceǁissued__mutmut_3`, …); `tests/test_runner.py`'s offered-methods guard walks
@@ -41,17 +43,34 @@ The row's instruction was to measure the run's cost before extending it. **The r
       recreates it empty at the next session's start, and `TEST_SCHEMA` is a module constant. So
       `_MIGRATED` kept an unchanged key for a vanished schema, `migrated_db_or_skip` applied nothing,
       and every unqualified name resolved through the search_path to `public`.
-      **Reproduced in 0.37 s**: two `pytest.main()` calls on one test in one process — session 1
-      isolated and green, session 2 appending 24 rows to `public.audit_events`. The count assertion
-      is the harmless end; the same suite `TRUNCATE`s `note_index`.
+      **Reproduced in ≈4.4 s of pytest time**: two `pytest.main()` calls on one test in one process
+      — 4.04 s for session 1, isolated and green, and 0.38 s for session 2, which appends 24 rows to
+      `public.audit_events`. (0.37 s appears in no log at all; it was the second session's duration,
+      misremembered, quoted as the whole reproduction.) A mutant run selects 16 test files, of which
+      **2** contain a `TRUNCATE`/`DELETE FROM` and only one runs a (scoped) delete, so what leaked
+      here was audit rows — repo-wide it is 52 of 417 files, not "a third", and the `note_index`
+      truncations are in two files a mutation run never selects.
       Fixed in `drop_test_schema`, which now discards the memo entries naming the schema it just
       dropped — the statement that falsifies the memo is the only place a second dropper cannot
       forget. `tests/test_isolation_across_sessions.py` drives two real in-process sessions; verified
       it reds with the fix stashed (session 1 passes, session 2 fails) and greens with it.
       The 96 residue rows my measurements left in `public.audit_events` were deleted.
-- [x] My first diagnosis of blocker 2 was wrong and measuring is what corrected it. I read the
-      earlier run's `test_knowledge` pytest-timeout as the blocker and wrote it into the row; with
-      `PYTEST_TIMEOUT_SCALE=4` that test passes and the run dies somewhere else entirely.
+- [x] My first diagnosis of blocker 2 was wrong, and so was my first correction of it. I read the
+      earlier run's `test_knowledge` pytest-timeout as the blocker and wrote it into the row; the next
+      attempt died elsewhere, so I rewrote the row saying "with `PYTEST_TIMEOUT_SCALE=4` that test
+      passes" — which I never observed. It does not: the scale applied (720 s) and it timed out anyway.
+      The second attempt simply stopped earlier in the same file order under `-x`. **A failure you did
+      not reach is not a failure you disproved.**
+- [ ] **Blocker 3, root-caused and not fixed here.** With both above fixed, the clean baseline gets
+      through 271 tests in **12m33s** and hangs in
+      `test_concurrent_writes_serialize_and_both_notes_land`. Not the mutated code — it passes in
+      3.56 s alone against `mutants/src`. It is the second in-process session again:
+      `kg/git_writer._WRITE_LOCK` is a module-level `asyncio.Lock`, `Lock.acquire` resolves its loop
+      only on the *contended* path, so the lock binds to the first loop that races on it and a second
+      `asyncio.run` raises `RuntimeError: ... is bound to a different event loop` **from the waiter**,
+      leaving the lock permanently `[locked]` and `asyncio.run`'s shutdown cancelling a holder that
+      never finishes. Reproduced in milliseconds with no pytest at all. `core/temporal_client`
+      `._CONNECT_LOCK` has the same defect. That is product code, so it is Wave 6.
 - [x] One of the four gates added, not four, honouring the row's instruction now that a measurement
       is possible: `agent/spend_cap.py`, the smallest of the four **by source length** (309 lines
       against 333 / 367 / 671). Lines are a proxy for mutant count and the comment says so — my
@@ -74,27 +93,46 @@ words (`unknown error (<string>, line 0)`) as an accusation against a document t
       operator command where a slow parse costs the operator their own wait, and the format tests
       assert what each parser extracts. Neither is a shared replica, which is why
       `parse_attachment_isolated` exists for the upload route.
-- [x] `UnclassifiedParseError`, a `DocumentParseError` subclass, marks the two broad `except` arms in
-      `parse_document`; `read_without_a_ceiling(name, cause)` keeps the parser's message verbatim and
-      adds what an unbounded path cannot establish. **The distinction is in the type, not the string**
-      — a caller cannot sniff an allocation failure out of a parser's message, which is why
-      `_at_ceiling` measures `VmData` instead.
-- [x] A classified refusal passes through untouched: unsupported format, over-expanding archive,
-      scanned PDF. Burying those under a memory caveat is the same failure pointed the other way.
-- [x] By inheritance, so every existing handler is unchanged; verified nothing in `src/` or `tests/`
-      tests the exact class rather than catching it.
-- [x] Three tests: the caveat present on an unclassified population, **absent** on a classified one,
-      and the set of broad arms derived from `parse.py`'s own AST (== 2), so a third added later is
-      either covered or red.
+- [x] `UnclassifiedParseError`, a `DocumentParseError` subclass, marks **the one** broad `except` arm
+      in `parse_document`; `read_without_a_ceiling(cause)` keeps the parser's message verbatim and adds
+      what an unbounded path cannot establish. **The distinction is in the type, not the string** — a
+      caller cannot sniff an allocation failure out of a parser's message, which is why `_at_ceiling`
+      measures `VmData` instead, and the wording keeps the type rather than rewrapping as the base
+      class, which would erase the distinction it is keyed on.
+- [x] **I wrote "the two broad arms" and a review measured it false**, in five places and in the
+      implementation. The second site was `_refuse_a_bomb`'s `except zipfile.BadZipFile` — narrow and
+      *classified*, "this is not a zip archive", and not an allocation failure since `zipfile` raises
+      `MemoryError` when it runs out. So "File is not a zip file" arrived followed by a paragraph
+      about memory not being established: the caveat on the one population with a definite verdict,
+      which is the exact failure this row exists to fix, committed inside the fix.
+- [x] A classified refusal passes through untouched, and **all four** named populations are now driven
+      — unsupported format, not-a-zip container, over-expanding archive, scanned PDF. Naming three and
+      asserting one is how the fourth got buried.
+- [x] By inheritance, so every existing handler is unchanged. One caller does read the class *name*
+      (`sync.py` counts by `type(exc).__name__`), and `tests/test_document_share.py` pinned the
+      literal `DocumentParseError` there — so the more precise type reddened a test that was green on
+      main. The assertion is on the suffix now; the operator's line gets strictly more specific.
+- [x] The AST guard **rewritten to derive `except` handlers rather than count `raise` statements**. The
+      first version asserted "two raises" and passes unchanged when a third broad arm is added that
+      raises the base class — measured — so it held neither direction. It now requires every broad
+      handler to raise this type and no narrow one to, and the second assertion is what would have
+      caught the defect above.
 - [x] ADR (`D-2026-09-22-an-unbounded-parse-may-not-blame-the-document`) and the row deleted, 43 → 42.
 
 ## Verification
 
-- [x] `make lint` (ruff lint + format) and `make prose-validate` green.
-- [x] `tests/test_parse_isolation.py` 17 passed · `tests/test_decision_log.py` 20 passed ·
-      `tests/test_isolation_across_sessions.py` 2 passed, and red with the fix stashed.
-- [ ] `make type` and the full serial suite over the wave's changes.
-- [ ] Fresh-context subagent review, read-only, before the PR.
+- [x] `make lint` (ruff lint + format), `make type` (962 files) and `make prose-validate` green.
+- [x] `tests/test_decision_log.py` 20 passed · `tests/test_isolation_across_sessions.py` 2 passed,
+      and red with the fix stashed (session 1 passes, session 2 fails).
+- [x] **Two fresh-context subagent reviews, read-only.** Between them: one red test this commit caused,
+      the one-vs-two broad arms error and the buried classified refusal behind it, an AST guard that
+      did not hold its advertised property, four copies of a false "no CI job runs it", a misquoted
+      27 s, an invented 0.37 s, an unsupported "27 minutes", a 3x-overstated blast radius, a
+      `_forget_migrations_in` docstring promising more than substring matching can give, a "recorded
+      below" with nothing below it, and `spend_cap.py` added as a mutation source with its own test
+      file outside the selection (70% vs 96% coverage, ~18 statements of unkillable mutants). All
+      fixed above.
+- [ ] `make lint type` and the full serial suite over the review fixes.
 - [ ] PR, merge on green CI, delete the branch.
 
 ## Review
@@ -104,13 +142,19 @@ misstated — and in both cases the error made the defect look smaller than it w
 
 **R1's row treated the backstop as a working control that was merely too narrow.** It was empty.
 Every module in `source_paths`, `agent/authz.py` included, had been outside the backstop for as long
-as the collision had existed, and nothing said so: the target exits non-zero, which only a person
-running it deliberately would see, and no CI job runs it. The row's cited cost — "the run is hours
-long" — describes a full-repository run in a comment the row was reading, not the 14-path run, which
-had never completed at all.
+as the collision had existed. The row's cited cost — "the run is hours long" — describes a
+full-repository run in a comment the row was reading, not this list, whose last completed run on
+record is 825 mutants in 2m57s from 2026-08-27, when it held seven paths.
 
-**The lesson is the cheapest possible check on a gate is whether it starts**, and nobody had spent
-27 seconds on it. Behind that was a worse finding the row could not have predicted: from its second
+**And I wrote four times that no CI job runs it, which a review falsified.**
+`.github/workflows/mutants.yml` has run it weekly on `main` since 2026-08-28, gates on the kill rate,
+and files an issue on failure. All four scheduled runs failed; issue #295 has been open since the
+first, with three comments. So the control reported its own death every Monday for a month into the
+tracker this repository works its backlog in — and the backlog row about it was written as though the
+control were healthy. A signal nobody reads is not a missing signal.
+
+**The lesson is still that the cheapest possible check on a gate is whether it starts**, and nobody
+had spent 29 seconds on it. Behind that was a worse finding the row could not have predicted: from its second
 in-process session onward, the mutation run was operating destructively on the developer's own
 database. Three properties of the suite's isolation — the session fixture, the migration memo and
 `TEST_SCHEMA`'s uuid4 suffix — were each written against "one run is one process", true of `make
@@ -124,7 +168,7 @@ still holds. So the asymmetry is the decision: a chemist uploading through the A
 parse and a refusal that distinguishes the causes; an operator running a backfill gets an unbounded
 parse and a refusal that says so.
 
-Lessons 126–128 added. 126 is the one worth repeating: I wrote "`plan_gate.py` is the smallest of
+Lessons 126–132 added. 126 is the one worth repeating: I wrote "`plan_gate.py` is the smallest of
 the four by mutant count" when it is the **largest** by source length and I had measured no mutant
 counts at all — a comparative claim, inside the config comment justifying the choice, with no
 measurement behind either half of it.

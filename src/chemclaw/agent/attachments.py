@@ -152,16 +152,16 @@ def parse_attachment(name: str, raw: bytes, declared_type: str | None = None) ->
     line 0. `UnclassifiedParseError` is the type that marks exactly that population, and
     `read_without_a_ceiling` is the wording it earns here.
 
-    A *classified* refusal passes through untouched: an over-expanding archive, an unsupported
-    format and a scanned PDF are all statements about the document that hold whether or not a
-    ceiling was set, and burying them under a caveat about memory would be the same
-    what-do-I-actually-know failure in the other direction.
+    A *classified* refusal passes through untouched: an over-expanding archive, a container that is
+    not a zip at all, an unsupported format and a scanned PDF are all statements about the document
+    that hold whether or not a ceiling was set, and burying them under a caveat about memory would
+    be the same what-do-I-actually-know failure in the other direction.
     """
     name = _accepted_name(name, raw)
     try:
         parsed = parse_document(name, raw, declared_type)
     except UnclassifiedParseError as exc:
-        raise read_without_a_ceiling(name, exc) from exc
+        raise read_without_a_ceiling(exc) from exc
     return Attachment(
         name=name, content_type=parsed.content_type, text=parsed.text, rows=parsed.rows
     )

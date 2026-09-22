@@ -133,14 +133,19 @@ _MIGRATED: set[tuple[str, str]] = set()
 def _forget_migrations_in(schema: str) -> None:
     """Discard the memo entries that claimed migrations are applied inside `schema`.
 
-    Matched on the schema appearing in the recorded DSN, because that is where the schema's identity
-    lives: `schema_dsn` carries it on `options=-c search_path=...` rather than as a parameter any
-    store takes. Only entries naming this schema go, so dropping one schema cannot make another's
-    tests pay a re-migration they do not need.
+    Matched on the schema's identity where it actually lives — the rendered `search_path` option
+    `schema_dsn` puts on the DSN — and **not** on the schema name appearing anywhere in the string.
+    A bare `schema in dsn` was the first spelling and a review measured two false positives it
+    cannot avoid: `TEST_SCHEMA` is a prefix of the derived `f"{TEST_SCHEMA}_no_checkpointer"` and
+    `_no_ledger` names, so dropping the base schema would forget a derived one's memo; and a schema
+    name occurring in a database name or a password would match too. Both cost only an idempotent
+    re-migration, which is why this is a correctness-of-the-claim fix rather than a bug fix — but
+    the claim is what the next reader relies on.
     """
-    for dsn, migrations_dir in list(_MIGRATED):
-        if schema in dsn:
-            _MIGRATED.discard((dsn, migrations_dir))
+    rendered = quote(f"-c search_path={schema},public")
+    for entry in list(_MIGRATED):
+        if rendered in entry[0]:
+            _MIGRATED.discard(entry)
 
 
 async def migrated_db_or_skip() -> None:

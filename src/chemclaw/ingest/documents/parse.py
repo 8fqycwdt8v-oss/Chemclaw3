@@ -117,7 +117,12 @@ def _refuse_a_bomb(name: str, raw: bytes) -> None:
         with zipfile.ZipFile(io.BytesIO(raw)) as container:
             expanded = sum(item.file_size for item in container.infolist())
     except zipfile.BadZipFile as exc:
-        raise UnclassifiedParseError(f"could not read {name}: {exc}") from exc
+        # `DocumentParseError`, not `UnclassifiedParseError`: this is a *classified* fact about the
+        # document — its central directory is not a zip's — and it is not an allocation failure
+        # wearing a parse error's clothes, because `zipfile` reading a central directory raises
+        # `MemoryError` when it runs out. A caveat about memory here would bury a refusal that is
+        # already precise, which is what `read_without_a_ceiling` exists not to do.
+        raise DocumentParseError(f"could not read {name}: {exc}") from exc
     if expanded > ceiling:
         raise DocumentParseError(
             f"{name} expands to {expanded} bytes from {len(raw)} on disk, past the "
@@ -159,7 +164,7 @@ def too_large_to_read(name: str) -> DocumentParseError:
     )
 
 
-def read_without_a_ceiling(name: str, cause: DocumentParseError) -> DocumentParseError:
+def read_without_a_ceiling(cause: UnclassifiedParseError) -> UnclassifiedParseError:
     """The refusal an unclassified failure earns on a path that set **no** memory ceiling.
 
     **Where `too_large_to_read` above says "this document is too big", this says "we do not know".**
@@ -177,17 +182,25 @@ def read_without_a_ceiling(name: str, cause: DocumentParseError) -> DocumentPars
     `D-2026-09-22-an-unbounded-parse-may-not-blame-the-document` is why the path stays unbounded
     rather than growing a forkserver, and carries the trigger for revisiting that.
 
+    **It takes no `name`**, because `cause` already carries the sanitized one — this is raised only
+    from `UnclassifiedParseError`'s single construction site, whose message opens "could not read
+    <name>". A `name` parameter beside that put the document in the sentence twice.
+
     Args:
-        name: The document's sanitized name, as every other refusal here names it.
         cause: The unclassified failure, whose own words are kept verbatim.
 
     Returns:
-        The refusal to raise, a `DocumentParseError` so every existing handler is unchanged.
+        The refusal to raise — still an `UnclassifiedParseError`, so the caveat does not *erase* the
+        distinction the type carries. Rewrapping as the base class would leave the unbounded path
+        unable to tell its two populations apart, which is the thing this whole change is about.
     """
-    return DocumentParseError(
-        f"{cause}. This parse ran with no memory ceiling, so whether {name} is malformed or simply "
-        "needs more memory than this machine had is not established here — the parser's own words "
-        "above are all there is. An upload through the API is bounded and would say which."
+    # The trailing period goes because `cause` may or may not end in one — a parser's own wording is
+    # not ours to predict — and "zip file.. This parse" is how that reads when it does.
+    return UnclassifiedParseError(
+        f"{str(cause).rstrip('.')}. This parse ran with no memory ceiling, so whether the document "
+        "is malformed or simply needs more memory than this machine had is not established here — "
+        "the parser's own words above are all there is. An upload through the API is bounded and "
+        "would say which."
     )
 
 

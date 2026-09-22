@@ -1771,33 +1771,57 @@ free number at the end of its section.
 
 127. **A control I was asked to widen was not running at all.** The row said four refusal gates were
      outside the weekly mutation backstop and asked for the runtime to be measured before extending it.
-     Measured: `make mutants` fails in 27 seconds on `origin/main`, in the phase before any mutant is
-     tested — so every module already in it was outside it too, and the "hours long" figure the row
-     reasoned from described a run nobody had completed. **Before widening a control, run it.** The
-     cheapest possible check on a gate is whether it starts, and a row that describes a gate as narrow
-     has assumed the harder half.
+     Measured: `make mutants` fails before any mutant is tested — 27 s locally, 29 s in CI's own step
+     on `main` — so every module already in it was outside it too, and the "hours long" figure the row
+     reasoned from described a full-repository run rather than this list. **Before widening a control,
+     run it.** The cheapest possible check on a gate is whether it starts, and a row that describes a
+     gate as narrow has assumed the harder half.
 
 128. **Two derived guards collided, and each was right.** `api/runner_trace.py` is a mutation source,
      so inside `mutants/` its class carries 45 generated method names; a guard requiring every
      non-underscore member to have a caller cannot pass against names nothing could call. Both guards
      are the shape this repository prefers — a rule over the tree rather than a list somebody maintains
      — and neither was written with the other in view. **A guard that walks a class sees whatever
-     rewrote that class; a guard that rewrites the tree must survive the tree's own guards.** The
-     collision was invisible because the only signal was a non-zero exit from a target no CI job runs.
+     rewrote that class; a guard that rewrites the tree must survive the tree's own guards.**
 
 129. **"One run is one process" was an unnamed assumption in three places, and a harness that reuses a
      process ran the destructive suite against the real database.** `mutmut` calls `pytest.main()`
      in-process — stats, baseline, then once per mutant — while the session-scoped isolation fixture
      drops `TEST_SCHEMA` at session end and `TEST_SCHEMA` is a module constant, so the migration memo
      kept an unchanged key for a vanished schema and every unqualified name fell through the
-     search_path to `public`. Reproduced in 0.37 s once stated as a hypothesis, against 27 minutes per
-     mutmut attempt. **When a test harness reuses the process, every module-level memo is shared state
+     search_path to `public`. Reproduced in ~4.4 s of pytest time once stated as a hypothesis, against
+     attempts through the harness itself that ran 27 s, 74 s, 283 s and one whose clean-test phase alone
+     took 12m33s. **When a test harness reuses the process, every module-level memo is shared state
      across sessions** — and the memo has to be invalidated by whatever destroys the thing it
      describes, not by the caller who happens to remember.
 
-130. **I diagnosed a background failure from the last thing in the log and wrote it into a backlog row.**
-     The earlier mutation attempt died on a `test_knowledge` pytest-timeout, so I recorded that as the
-     second blocker; with `PYTEST_TIMEOUT_SCALE=4` that test passes and the run dies somewhere else
-     entirely, on a defect of a completely different kind. **The last line of a log is where a run
-     stopped, not why.** Re-run under the remedy before writing the cause down, especially into a
-     document the next session reads as state.
+130. **I diagnosed a background failure from the last thing in the log, wrote it into a backlog row,
+     then corrected it the wrong way.** The earlier mutation attempt died on a `test_knowledge`
+     pytest-timeout, so I recorded that as the second blocker. The next attempt died somewhere else,
+     so I rewrote the row to say the timeout was a misreading and that "with `PYTEST_TIMEOUT_SCALE=4`
+     that test passes" — which I had never observed. It does not pass: the scale applied (720 s = 180
+     x 4) and it timed out anyway. The second attempt simply stopped *earlier* in the same file order,
+     under `-x`, so it never reached the test I had declared innocent. **A failure you did not reach
+     is not a failure you disproved.** Both halves of this were the same error: reading an ordering
+     artefact of `-x` as a fact about a test, once to blame it and once to clear it.
+
+131. **A module-level `asyncio.Lock` is bound to the first event loop that contends on it, and the
+     second loop deadlocks rather than erroring.** `kg/git_writer._WRITE_LOCK` and
+     `core/temporal_client._CONNECT_LOCK` are both constructed at import. `Lock.acquire` only calls
+     `_get_loop()` on the *contended* path, so the binding happens on the first race and not on the
+     first use — which is why this survives every test that takes the lock alone. A second
+     `asyncio.run` in the same process then raises `RuntimeError: ... is bound to a different event
+     loop` **from the waiter**, leaving the lock permanently `[locked]` with its holder mid-cancel, so
+     `asyncio.run`'s own shutdown never finishes. Presents as a wall-clock timeout with no error.
+     **A synchronization primitive at module scope is process-scoped state pretending to be
+     loop-scoped**; resolve it per running loop.
+
+132. **I wrote "no CI job runs it" four times about a job that runs weekly and had been failing for a
+     month.** `.github/workflows/mutants.yml` runs `make mutants` on a Monday cron, gates on the kill
+     rate, and files a GitHub issue on failure. All four scheduled runs had failed and issue #295 had
+     been open for three weeks with three comments. I inferred the absence from `make mutants` not
+     being in the `ci` target and never listed `.github/workflows/`. **"Nothing checks this" is a
+     claim about a search, so do the search** — and the finding it cost me was the better one: the
+     control did report its own death, into the tracker this repository works its backlog in, and the
+     backlog row about it was written as though the control were healthy. A signal nobody reads is not
+     a missing signal, and the two have different fixes.

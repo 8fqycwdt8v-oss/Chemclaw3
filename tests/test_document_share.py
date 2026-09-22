@@ -2470,7 +2470,11 @@ def test_a_systematic_read_failure_costs_log_lines_by_the_pass_not_by_the_corpus
         "one line per file in the corpus, and the reason is in every one of them"
     )
     summary = warnings[0].getMessage()
-    assert "40" in summary and "DocumentParseError" in summary, (
+    # The reason is the *class name* `sync.py` counts by (`type(exc).__name__`), so it moves when a
+    # refusal is classified more precisely — which is a feature and is why this asserts the suffix
+    # rather than one name. `UnclassifiedParseError` is what a corrupt PDF earns today, and pinning
+    # `DocumentParseError` here is what turned that improvement into a red test.
+    assert "40" in summary and "ParseError x40" in summary, (
         f"the one line an operator reads must carry the count and the distinct reasons: {summary!r}"
     )
     # The individual paths are not lost, they are moved: DEBUG is where a per-file trail belongs.
