@@ -164,6 +164,32 @@ class TemporalSettings(BaseSettings):
     # ends, so its ceiling is about memory, not connections, and its chart entry says so.
     worker_max_concurrent_activities: int = Field(default=8, ge=1)
 
+    # **What a worker holds between tasks, which no setting here chose until 2026-09-22.**
+    # `max_concurrent_activities` bounds activities and nothing bounded the workflow side, so the
+    # ceiling was whatever the SDK picks. Measured on this version (1.31.0): `Worker.__init__`
+    # passes `None` through to `WorkerTuner.create_fixed`, whose `or 100` is the real default for
+    # workflow-task slots — not the 500 the constructor's own docstring mentions, which belongs to
+    # the *resource-based* tuner. And the workflow-task ceiling is not the one that holds memory:
+    # a task slot is occupied only while a workflow is being advanced, while `max_cached_workflows`
+    # (SDK default 1,000) is what keeps a started workflow resident between its tasks.
+    #
+    # **Measured against the real broker, not reasoned about.** A worker with N workflows parked in
+    # `wait_condition`, RSS sampled from `/proc/self/status` against an idle baseline of 65.8 MiB:
+    # 50 → 137 KiB each, 100 → 114, 250 → 82, 500 → 73, 1,000 → **71 KiB each**, converging as the
+    # fixed cost amortises. Scaling the workflow's own state at 200 cached: 16 KiB of state → 91
+    # KiB each, 64 → 142, 256 → 347. So a cached workflow costs about **75 KiB plus 1.35x whatever
+    # it holds** — the excess being the event history the cache keeps for replay.
+    #
+    # (The first fixture said state was free, because `["y" * 1024 for _ in range(n)]` is
+    # constant-folded into `n` references to **one** string. A live-instance count found it.)
+    #
+    # 1,000 at the shipped `resources.worker.requests.memory` of 1Gi is 75 MiB for trivial
+    # workflows and ~340 MiB for ones carrying 256 KiB — a third of the request, before the worker
+    # has done anything else. `tests/test_workers.py` holds the inequality against the chart rather
+    # than restating a number here, which is the shape
+    # `D-2026-09-18-a-second-process-in-the-pod-is-memory-the-chart-never-declared` uses.
+    worker_max_cached_workflows: int = Field(default=1000, ge=1)
+
     # The ceiling `durable/interceptor.py` holds every activity *result* to, measured as the
     # serialized payload the worker is about to upload.
     #

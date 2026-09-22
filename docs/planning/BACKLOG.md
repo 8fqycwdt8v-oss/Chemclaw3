@@ -92,14 +92,24 @@ topic).
   queue — one boolean on the personal row and an admin listing that reads it — and it is worth
   building only once somebody actually wants a promotion and cannot get one.
 
-- [ ] **`max_concurrent_workflow_tasks` is set nowhere, so nothing this repository chose bounds
-  workflow-task concurrency** — [M]. `durable/background_worker.py` sets `max_concurrent_activities`
-  and stops there, so the workflow-task ceiling is whatever the SDK defaults to. A **child workflow
-  is not an activity**, so the activity ceiling does not bound the bundle children core starts at
-  all — which is the population `D-2026-09-12-a-ceiling-that-funds-one-attempt-does-not-fund-a-sequence`
-  has just finished reasoning about from the *inside* of one child. Measure what a saturated worker
-  actually holds before choosing a number: a ceiling set from the SDK's default is the same
-  unexamined posture this row is about, one value further on.
+- [ ] **Nobody has measured what this system's own workflows carry, so the worker's cache bound is
+  asserted at a placeholder** — [S], opened 2026-09-22 by
+  `D-2026-09-22-the-ceiling-that-holds-memory-is-the-cache-not-the-task-slot`, which closed the
+  unbounded-memory half of the old `max_concurrent_workflow_tasks` row. A cached workflow is
+  measured at **~75 KiB plus 1.35x its own state**; what is *not* measured is the second term for
+  the workflows this repository actually runs. `tests/test_workers.py` asserts the inequality at
+  `_STATE_THE_BOUND_IS_ASSERTED_AT_KIB = 256`, a placeholder wearing a name that says so — the size
+  at which the shipped cache takes a third of the worker's memory request, rather than a reading of
+  anything. `BoCampaignWorkflow` and the durable calc workflows are the ones to sample; the harness
+  is the parked-workflow RSS sweep the ADR describes, pointed at the real broker because the
+  dev-server binary is not fetchable here.
+
+  **The other half of that ADR stays declined and needs a different measurement.**
+  `max_concurrent_workflow_tasks` is left at the SDK's 100 because its bound is CPU, the worker's
+  limit is 2 cores, and nothing has measured what a workflow task costs. A number chosen without
+  that is the unexamined posture the old row was about, one value further on. Anchors:
+  `core/config/temporal.py::worker_max_cached_workflows`,
+  `tests/test_workers.py::test_the_workflow_cache_fits_the_memory_the_chart_asks_for`.
 
 - [ ] **An SSH host alias derives the alias, not the host ssh dials** — [S], opened 2026-09-22 by
   the review of `D-2026-09-22-a-destination-that-is-a-name-is-still-a-destination`.

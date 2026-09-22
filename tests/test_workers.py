@@ -10,7 +10,9 @@ queue as of D-118 — so the bundle case below is not an extra, it is where the 
 """
 
 from collections.abc import Iterable
+from pathlib import Path
 
+from chemclaw.core.config import settings
 from chemclaw.durable.background_worker import BACKGROUND_ACTIVITIES, BACKGROUND_WORKFLOWS
 from chemclaw.durable.eln_sync import ElnSyncWorkflow, load_sync_cursor, store_sync_cursor
 
@@ -68,3 +70,81 @@ def test_registration_lists_have_no_duplicates() -> None:
 def test_worker_registration_lists_are_non_empty() -> None:
     """The worker registers at least one workflow and one activity."""
     assert BACKGROUND_WORKFLOWS and BACKGROUND_ACTIVITIES
+
+
+#: What a cached workflow costs a worker, measured 2026-09-22 against the broker `make up` runs.
+#:
+#: A worker with N workflows parked in `wait_condition`, RSS read from `/proc/self/status` against
+#: an idle baseline of 65.8 MiB: 50 -> 137 KiB each, 100 -> 114, 250 -> 82, 500 -> 73, 1,000 -> 71,
+#: converging as the fixed cost amortises. Scaling the workflow's own state at 200 cached: 16 KiB
+#: -> 91 KiB each, 64 -> 142, 256 -> 347. So the model below: a fixed overhead plus rather more
+#: than the state itself, the excess being the replay history the cache keeps beside it.
+_CACHED_WORKFLOW_OVERHEAD_KIB = 75
+_CACHED_WORKFLOW_STATE_MULTIPLIER = 1.35
+
+#: The per-workflow state this bound is checked against. Not a measurement of this system's
+#: workflows — nobody has made one — but the size at which the shipped cache would take a *third*
+#: of the worker's memory request, which is the point where the inequality is worth asserting.
+_STATE_THE_BOUND_IS_ASSERTED_AT_KIB = 256
+
+
+def test_the_workflow_cache_fits_the_memory_the_chart_asks_for() -> None:
+    """The cache ceiling is a memory bound, so it is held against the chart rather than restated.
+
+    **`max_concurrent_activities` does not bound this and nothing else did.** A workflow-task slot
+    is held only while a workflow is being advanced; `max_cached_workflows` is what keeps a started
+    workflow *resident between its tasks*, and until 2026-09-22 it was whatever the SDK picked
+    (1,000). A child workflow is not an activity, so the activity ceiling never reached the bundle
+    children core starts either — which is the `BACKLOG.md` row this closes.
+
+    The inequality rather than a number, on the
+    `D-2026-09-18-a-second-process-in-the-pod-is-memory-the-chart-never-declared` model: raising
+    the ceiling, shrinking the chart's request, or a workflow that carries more state each move the
+    same comparison, and only one of the three is a config edit somebody would think to check.
+    """
+    import yaml
+
+    chart = yaml.safe_load(
+        (Path(__file__).resolve().parents[1] / "deploy/helm/chemclaw/values.yaml").read_text()
+    )
+    request = chart["resources"]["worker"]["requests"]["memory"]
+    assert request.endswith("Gi"), f"the worker's memory request is now {request}; re-read this"
+    request_kib = int(request[:-2]) * 1024 * 1024
+
+    each = (
+        _CACHED_WORKFLOW_OVERHEAD_KIB
+        + _CACHED_WORKFLOW_STATE_MULTIPLIER * _STATE_THE_BOUND_IS_ASSERTED_AT_KIB
+    )
+    cache = settings.worker_max_cached_workflows * each
+    assert cache <= request_kib / 2, (
+        f"{settings.worker_max_cached_workflows} cached workflows at {each:.0f} KiB each is "
+        f"{cache / 1024:.0f} MiB against a worker request of {request} — more than half of it "
+        "before the worker has done anything else. Lower worker_max_cached_workflows, or raise "
+        "resources.worker.requests.memory in the chart, and say which in the commit message"
+    )
+
+
+def test_the_worker_arms_the_cache_ceiling_it_declares() -> None:
+    """A setting nothing passes to the SDK is a number in a file.
+
+    Read off the constructor call rather than by starting a worker, because the shape this guards
+    is "somebody added the setting and not the argument" — which a running worker would not show.
+    """
+    import ast
+
+    source = (
+        Path(__file__).resolve().parents[1] / "src/chemclaw/durable/background_worker.py"
+    ).read_text()
+    passed = {
+        keyword.arg
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "Worker"
+        for keyword in node.keywords
+    }
+    assert "max_cached_workflows" in passed, (
+        "`worker_max_cached_workflows` is declared and not passed to `Worker`, so the SDK's own "
+        "default is still the ceiling this repository thinks it chose"
+    )
+    assert "max_concurrent_activities" in passed
