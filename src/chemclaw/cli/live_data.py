@@ -71,7 +71,7 @@ from chemclaw.ingest.eln.json_adapter import JsonExportAdapter
 from chemclaw.ingest.eln.ord import OrdReaction
 from chemclaw.ingest.eln.ord_adapter import OrdJsonAdapter
 from chemclaw.ingest.eln.record import record_from_ord_reaction
-from chemclaw.ingest.eln.warehouse.expr import pattern_budget
+from chemclaw.ingest.eln.warehouse.expr import PatternBudgetError, pattern_budget
 
 logger = logging.getLogger(__name__)
 
@@ -596,6 +596,13 @@ async def check_prose_yields_its_numbers(eln_export_dir: Path) -> Check:
                 continue
             try:
                 reaction = adapter.map_to_ord(raw)
+            except PatternBudgetError:
+                # **Not swallowed, which the broad arm below would do.** `PatternBudgetError` is a
+                # bare `Exception`, so exhausting the page budget used to skip every remaining entry
+                # and let this check *pass* with a quietly smaller denominator — the exact "silent
+                # denominator" failure this function's own docstring names two paragraphs up. A
+                # binding too expensive to map a page is a finding, not a skippable entry.
+                raise
             except Exception:
                 continue
             checked += 1

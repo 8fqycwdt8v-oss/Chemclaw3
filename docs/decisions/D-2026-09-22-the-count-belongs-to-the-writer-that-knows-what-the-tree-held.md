@@ -44,8 +44,8 @@ retirement rewrites too, which is a third meaning of the field". Measured, both 
   `prior[path] != file.content.encode("utf-8")`.
 - Dependencies and retirements are separable by flags, not by inspection. `record._build_write` tags a
   dependency `overwrite=False` and a retirement `amendment=True`, and emits exactly **one** subject per
-  `NoteWrite`. Driven over a batch carrying both beside four subjects: the flags say four subjects,
-  git's changed-file count says two, and the honest answer is one.
+  `NoteWrite`. Driven over a write carrying one subject, one dependency and one retirement: git's
+  changed-file count says three, the flags say one subject, and the honest answer is the subject.
 
 ## Decision
 
@@ -63,12 +63,24 @@ true of a mixed batch. Every `written` reader is untouched.
 
 ## Consequences
 
-**One path keeps the weaker count, and it is the one `_push` exists for.** Reaching the push with
-nothing committed *now* means an earlier attempt's commit is still unpushed and this call is what lands
-it — the stranded-note failure that method's docstring records, where reporting nothing told the caller
-the write had failed while the note sat on one pod's disk. Those bytes are this write's own, rewritten
-byte-identically, so `_changed_subjects` is empty there. So `notes` falls back to the *planned* subject
-count on that path, which keeps `written` true.
+**Two paths keep a weaker count, and both exist to keep `written` a fact about the commit.**
+
+The first is the one `_push` exists for. Reaching the push with nothing committed *now* means an
+earlier attempt's commit is still unpushed and this call is what lands it — the stranded-note failure
+that method's docstring records, where reporting nothing told the caller the write had failed while the
+note sat on one pod's disk. Those bytes are this write's own, rewritten byte-identically, so
+`_changed_subjects` is empty there, and `notes` falls back to the *planned* subject count.
+
+The second was found by review, after the first version of this change shipped without it. A write
+whose **subject** is byte-identical while a *dependency* or a *retirement* changed does commit, and
+`_changed_subjects` counts only subjects — so it returned 0, and `written` went false on a write that
+committed and pushed. Driven on real git: re-recording an identical note whose dependency file had gone
+missing returned `notes=0 written=False` where the previous implementation returned `notes=1
+written=True`. That breaks `WriteOutcome`'s own stated contract (`notes=0` means "nothing was
+committed") and undercounts the metric this change exists to correct, in a case the old code got right.
+So the committed path is floored at 1. The cost is one over-count in that narrow case, which is
+precisely what shipped before, and the 50x batch overcount is untouched by it: 49 identical plus one
+new still reports 1.
 
 The residual is narrow and recorded rather than hidden: a batch whose every file is byte-identical **and**
 whose earlier push failed reports the whole batch, of which some notes were already on the remote. It
@@ -83,9 +95,11 @@ paragraph above necessary: the push-retry path is the one place where the two ge
 handled by choosing the count rather than by adding a field.
 
 **A drifted figure in the superseded ADR, corrected here rather than there** (a merged ADR is never
-edited): it says "the four in `git_writer.py` say which case they are". There are now **six**
-`WriteOutcome(` constructions in that file, and one of them relies on the `notes` default of 1 rather
-than saying so.
+edited): it says "the four in `git_writer.py` say which case they are". Before this change there were
+**six**, one of which relied on the `notes` default of 1 rather than saying so. After it there are
+**five**, and every one passes `notes=` explicitly — the defaulted construction is the one this
+change replaced. A review caught the first version of this paragraph quoting the *pre-change* count
+inside the document that changes it, which is the same defect class as the figures it corrects.
 
 **What holds it:** `tests/test_backfill_batching.py::test_a_batch_that_changed_some_of_its_notes_counts_only_those`
 drives the partial batch through the real CLI against a real bare remote and checks the metric delta
@@ -95,6 +109,6 @@ from "counted a number that happens to match". Driven against the previous imple
 believed impossible.
 
 **Unchanged:** the conversational path is one note per write and was already exact as a count of
-*subjects*. It is not, and has never been, a count of note *files* — a write carrying two dependency
+*subjects* — which the floor above is what preserves. It is not, and has never been, a count of note *files* — a write carrying two dependency
 notes puts three files in the graph and moves the counter by one. That is the right reading of "notes
 recorded" and is now what the code computes rather than what it happened to return.

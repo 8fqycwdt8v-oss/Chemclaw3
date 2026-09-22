@@ -24,6 +24,7 @@ from chemclaw.ingest.eln.warehouse.binding import BindingError, load_binding
 from chemclaw.ingest.eln.warehouse.expr import (
     PatternBudgetError,
     TransformError,
+    _cell_budget,
     apply_transforms,
     pattern_budget,
     resolve_path,
@@ -795,7 +796,9 @@ def test_clamp_refuses_the_one_number_it_cannot_hold_in_a_range() -> None:
 _SLOW_BUT_COMPLETING = {"regex": {"pattern": r"a*a*a*$"}}
 _SLOW_CELL = "a" * 6000 + "b"
 
-#: What a real binding's pattern costs, for the ratio the page budget's generosity rests on.
+#: What a real binding's pattern costs, for the ratio the budget's generosity rests on: 0.0024 ms
+#: warm. An earlier comment said 0.472 ms, which was the first call including the `lru_cache`
+#: compile miss — so every test below warms the cache before it times anything.
 _HONEST = {"regex": {"pattern": r"(\d{3,6})"}}
 
 
@@ -815,9 +818,10 @@ def test_a_page_of_slow_but_completing_cells_is_refused_before_the_activity_dead
     Driven at a small budget rather than the shipped one, because the property is the ratio and not
     the number: a test that spent 150 s proving a 150 s bound would be the slowest in the suite.
     """
+    apply_transforms(_SLOW_CELL, [_SLOW_BUT_COMPLETING])  # warm the compile cache
     spent = time.perf_counter()
     read = 0
-    with pytest.raises(PatternBudgetError, match="spent their whole") as refused:
+    with pytest.raises(PatternBudgetError, match="matching budget") as refused:
         with pattern_budget(0.5):
             for _ in range(500):
                 apply_transforms(_SLOW_CELL, [_SLOW_BUT_COMPLETING])
@@ -825,13 +829,15 @@ def test_a_page_of_slow_but_completing_cells_is_refused_before_the_activity_dead
     elapsed = time.perf_counter() - spent
 
     assert read, "nothing was read, so this measured the first cell rather than a page"
-    assert f"after {read} cell" in str(refused.value), (
+    assert "transform(s) ran" in str(refused.value) or "transform(s), the last" in str(
+        refused.value
+    ), (
         "the refusal must say how far the page got — that number is what separates 'this binding "
         "is too expensive for this page size' from 'one pattern is pathological'; it said "
         f"{refused.value}"
     )
-    # The clamp is the point: each cell may run for the *lesser* of the per-cell budget and what the
-    # page has left, so the last cell cannot carry the page a whole cell-budget past its bound.
+    # The clamp is the point: each search may run for the *lesser* of the per-cell budget and what
+    # the page has left, so the last one cannot carry the page a whole cell-budget past its bound.
     assert elapsed < 0.5 + settings.eln_regex_timeout_seconds, (
         f"the page overshot its 0.5s budget by {elapsed - 0.5:.3f}s, which is more than the clamp "
         "should allow"
@@ -841,27 +847,110 @@ def test_a_page_of_slow_but_completing_cells_is_refused_before_the_activity_dead
 def test_an_honest_page_is_nowhere_near_the_budget() -> None:
     """The trade the row named — refusing an honest slow pattern against bounding total work.
 
-    It is settled by a ratio rather than argued. An honest cell measured 0.472 ms against a 0.25 s
-    per-cell ceiling, so a whole honest page of 2,000 cells is under a second where the shipped page
-    budget is 150 s. At three orders of magnitude apart, a budget generous enough never to touch an
-    honest binding still bounds the pathological one well inside the activity deadline.
+    It is settled by a ratio rather than argued. An honest cell measures 0.0024 ms warm against a
+    0.25 s per-cell ceiling, so a whole honest page of 2,000 cells is 0.0048 s where the shipped
+    page budget is 150 s — ~31,000x of headroom, and the pathological pattern is ~68,000x an honest
+    one.
 
-    Asserted as a *fraction of the shipped budget* rather than as a duration, so it does not become
-    a
-    timing test that reds on a loaded machine.
+    **The bar was `budget / 20` and a review pointed out it cannot fail**: 7.5 s against a measured
+    0.0048 s needs a 1,500x regression before it reds, so it held nothing. It is now stated against
+    the *pathological* cell, which is the comparison the argument actually rests on — an honest page
+    must stay cheaper than one bad cell — and which moves with the machine rather than with a
+    setting.
     """
     cells = 2000
+    apply_transforms("batch 4471 of 12", [_HONEST])  # warm the compile cache; see `_HONEST`
+    started = time.perf_counter()
+    apply_transforms(_SLOW_CELL, [_SLOW_BUT_COMPLETING])
+    one_bad_cell = time.perf_counter() - started
+
     started = time.perf_counter()
     with pattern_budget():
         for _ in range(cells):
             apply_transforms("batch 4471 of 12", [_HONEST])
     spent = time.perf_counter() - started
 
-    assert spent < settings.eln_regex_page_budget_seconds / 20, (
-        f"{cells} honest cells cost {spent:.3f}s against a "
-        f"{settings.eln_regex_page_budget_seconds}s "
-        "page budget; the headroom this bound relies on is gone"
+    assert spent < one_bad_cell, (
+        f"{cells} honest cells cost {spent:.4f}s, which is no longer cheaper than the single "
+        f"pathological cell this bound exists for ({one_bad_cell:.4f}s); the ratio the budget's "
+        "generosity rests on is gone"
     )
+
+
+def test_the_page_budget_does_not_charge_what_happens_between_matches() -> None:
+    """It bounds *matching* time, and the first version bounded a wall clock instead.
+
+    `pattern_budget` is opened around the page loop — a loop whose body awaits five stores per
+    entry, and in `durable/memory_jobs.read_corpus` every `fetch_new_entries` of every page of every
+    source.
+    A `monotonic()` deadline there bills Postgres and the source to a budget named for the regex
+    engine: driven, **1.13 ms** of actual matching exhausted a 500 ms budget, and the refusal then
+    told the site to simplify patterns costing microseconds.
+
+    Worse than a wrong message. `PatternBudgetError` is non-retryable by name, so a page that used
+    to reach `eln_sync_timeout_seconds` and be *retried* would fail permanently at half of it,
+    with no cursor advanced. This is the arm that keeps the accumulator an accumulator.
+    """
+    apply_transforms("batch 4471 of 12", [_HONEST])
+    matched = 0.0
+
+    with pattern_budget(0.25):
+        for _ in range(20):
+            started = time.perf_counter()
+            apply_transforms("batch 4471 of 12", [_HONEST])
+            matched += time.perf_counter() - started
+            time.sleep(0.02)
+
+    assert matched < 0.01, f"the matching itself cost {matched:.4f}s, so this arm proves little"
+
+
+def test_a_pattern_cut_short_by_the_page_is_not_reported_as_innocent() -> None:
+    """The refusal must not claim no transform exceeded its ceiling when one was never let try.
+
+    A clamped search is given exactly what the page had left, so it times out at the instant the
+    page runs dry — which made the "pattern is at fault" arm unreachable. Driven over 39 clamped
+    remainings against `(a+)+$`, it fired **0** times, so every catastrophic pattern was reported
+    under a sentence asserting the page's aggregate cost was the whole story.
+    """
+    catastrophic = {"regex": {"pattern": r"(a+)+$"}}
+    apply_transforms(_SLOW_CELL, [_SLOW_BUT_COMPLETING])
+
+    with pytest.raises(PatternBudgetError) as refused:
+        with pattern_budget(0.45):
+            for _ in range(3):
+                apply_transforms(_SLOW_CELL, [_SLOW_BUT_COMPLETING])
+            apply_transforms("a" * 4000 + "b", [catastrophic])
+
+    message = str(refused.value)
+    assert "not established here" in message, message
+    assert "No single one exceeded" not in message, (
+        "the page refusal claimed every transform stayed inside its ceiling, about a pattern that "
+        f"was never given its full allowance: {message}"
+    )
+
+
+def test_a_spent_page_never_offers_the_engine_a_negative_timeout() -> None:
+    """`regex` reads a negative `timeout` as *no* timeout, which would disable the bound entirely.
+
+    Measured: `regex.search(text, timeout=-1.0)` completes in 0.17 s with no `TimeoutError`, where
+    `timeout=0.0` raises immediately. `_cell_budget`'s `remaining <= 0.0` arm is the only thing
+    keeping a negative out, and nothing pinned it — a later simplification to a bare
+    `min(cell, remaining)` would pass every other test in this file with the page bound gone.
+    """
+    assert _cell_budget()[0] > 0.0, "no page open should give the per-cell budget, not a negative"
+
+    with pattern_budget(0.05):
+        for _ in range(500):
+            try:
+                apply_transforms(_SLOW_CELL, [_SLOW_BUT_COMPLETING])
+            except PatternBudgetError:
+                break
+        budget, page_bound = _cell_budget()
+
+    assert budget >= 0.0, (
+        f"a spent page offered {budget}s to the engine, which disables the timeout"
+    )
+    assert page_bound, "a spent page must report that it is the binding constraint"
 
 
 def test_the_two_refusals_name_different_causes() -> None:
@@ -869,20 +958,25 @@ def test_the_two_refusals_name_different_causes() -> None:
 
     They are not interchangeable: the per-cell refusal tells a site its pattern is catastrophic,
     which
-    is false of a binding whose every cell stayed inside the ceiling. Driven with both budgets open,
-    so
-    the clamped-cell path is the one under test rather than the unclamped one.
+    is false of a binding whose every transform stayed inside the ceiling.
+
+    **The claim this docstring made about its own arms was false, and a review caught it.** It said
+    the pattern arm was "driven with both budgets open, so the clamped-cell path is the one under
+    test" — but at a 30 s page budget `_cell_budget` returns the per-cell 0.25 s and reports
+    `page_bound=False`, so it drove exactly the *unclamped* path it claimed to avoid. The clamped
+    case has its own test now
+    (`test_a_pattern_cut_short_by_the_page_is_not_reported_as_innocent`), and this one asserts the
+    unclamped arm while saying so.
     """
     with pytest.raises(PatternBudgetError, match="did not finish within") as cell:
         with pattern_budget(30.0):
             apply_transforms("a" * 4000 + "b", [{"regex": {"pattern": r"(a+)+$"}}])
-    assert "spent their whole" not in str(cell.value)
+    assert "matching budget" not in str(cell.value)
 
-    with pytest.raises(PatternBudgetError, match="spent their whole") as page:
+    with pytest.raises(PatternBudgetError, match="matching budget") as page:
         with pattern_budget(0.3):
             for _ in range(500):
                 apply_transforms(_SLOW_CELL, [_SLOW_BUT_COMPLETING])
-    assert "No single cell exceeded" in str(page.value)
     assert "did not finish within" not in str(page.value)
 
 
@@ -893,7 +987,7 @@ def test_a_page_refusal_quotes_the_budget_actually_in_force() -> None:
     repository
     keeps finding in its own prose, arriving in a message a site will act on.
     """
-    with pytest.raises(PatternBudgetError, match="whole 0.4s budget"):
+    with pytest.raises(PatternBudgetError, match="whole 0.4s matching budget"):
         with pattern_budget(0.4):
             for _ in range(500):
                 apply_transforms(_SLOW_CELL, [_SLOW_BUT_COMPLETING])
@@ -992,7 +1086,8 @@ def test_that_guard_is_measuring_the_callers_and_not_the_definitions() -> None:
     """
     callers = _modules_mapping_entries_in_a_loop()
 
-    assert len(callers) >= 3, (
-        "fewer page-mapping callers than the three measured (ingest/eln/sync.py, "
-        f"durable/memory_jobs.py, cli/live_data.py), so the guard above asserts little: {callers}"
+    assert len(callers) >= 4, (
+        "fewer page-mapping callers than the four measured (ingest/eln/sync.py, "
+        "durable/memory_jobs.py, cli/live_data.py, ingest/eln/validate.py), so the guard above "
+        f"asserts little: {callers}"
     )

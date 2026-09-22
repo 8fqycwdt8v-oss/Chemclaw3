@@ -350,23 +350,51 @@ def _compiled(pattern: str) -> regex.Pattern[str]:
 
 @dataclass
 class _PageBudget:
-    """One page's remaining regex budget, and what it has been spent on.
+    """Matching time this page has left, and what it spent — **an accumulator, not a wall clock**.
 
-    `cells` is carried so a refusal can say how far the page got, which is the one number a site
-    needs to tell "my binding is slow" from "one pattern is pathological" — the same reason
-    `ScanDeadlineExceeded` carries `reached` rather than formatting a duration nobody can act on.
+    **The first spelling was a deadline, and a review measured what that charged.** It held
+    `monotonic() + budget` and compared against the clock, while the manager below is opened
+    *around the page loop* — a loop whose body awaits five stores per entry and, in
+    `durable/memory_jobs.read_corpus`, every `fetch_new_entries` of every page of every source.
+    So a "budget for every `regex` transform together" was billing Postgres and the source:
+    driven, **1.13 ms** of actual matching exhausted a 500 ms budget, and the refusal then told
+    the site to simplify patterns costing microseconds.
+
+    That was worse than a wrong message. `PatternBudgetError` is non-retryable by name in
+    `durable/publish._BAD_DATA_TYPES`, so a page that used to reach `eln_sync_timeout_seconds`
+    and be **retried** would instead fail permanently at half of it, with no cursor advanced —
+    the wedge `ingest/eln/sync.py` documents at length for a different cause.
+
+    So this accumulates the time `regex` itself is given, charged per search. Nothing between two
+    matches is billed, which is what makes the name true and what makes exhausting it mean what
+    the refusal says it means.
+
+    `searches` is deliberately not called `cells`: a binding may run several `regex` steps on one
+    value and a NULL column runs none, so this counts applications of the transform. The earlier
+    field was `cells` and the message said "cell(s)", which the same review falsified — two steps
+    per row inflated it twofold, and mostly-empty columns deflated it arbitrarily.
     """
 
-    deadline: float
     #: The budget this page was opened with, carried so a refusal quotes the number actually in
     #: force. It read `settings.eln_regex_page_budget_seconds` first, which is a different number
     #: whenever a caller passed one — driven at a 2 s budget, the refusal said 150 s.
     budget: float
-    cells: int = 0
+    spent: float = 0.0
+    searches: int = 0
 
     def remaining(self) -> float:
-        """Seconds left, which may be negative once the page has overrun."""
-        return self.deadline - monotonic()
+        """Matching seconds left, negative once a clamped search has overrun slightly."""
+        return self.budget - self.spent
+
+    def charge(self, seconds: float) -> None:
+        """Bill one search, whether it matched, missed or timed out.
+
+        A timed-out search is billed for the same reason a successful one is: it spent the page's
+        allowance. Not billing it would let a page of timeouts run forever, one per-cell budget
+        at a time, which is the multiplication this bound exists to stop.
+        """
+        self.spent += seconds
+        self.searches += 1
 
 
 #: The budget for the page in flight, or `None` where no page has opened one.
@@ -399,15 +427,22 @@ def pattern_budget(seconds: float | None = None) -> Iterator[None]:
     cells reached before the activity's own deadline. `map_to_ord` is synchronous CPU work, so no
     asyncio timer interrupts it and the retry runs the identical page.
 
-    **An honest binding cannot notice this.** An honest cell measured 0.472 ms, so a whole honest
-    page of 2,000 cells is 0.94 s against a 150 s ceiling — ~160x of headroom. The trade the row
-    behind this named — refusing an honest slow pattern against bounding total work — is settled by
-    that ratio rather than argued: at three orders of magnitude apart, a budget generous enough to
-    never touch an honest page still bounds the pathological one well inside the activity deadline,
-    which is what buys a *refusal naming its cause* instead of a killed activity with nothing to
-    say.
+    **An honest binding cannot notice this.** An honest cell measures **0.0024 ms** warm, so a whole
+    honest page of 2,000 cells is **0.0048 s** against a 150 s ceiling — ~31,000x of headroom, and
+    the pathological pattern is ~68,000x an honest one. The trade the row behind this named —
+    refusing an honest slow pattern against bounding total work — is settled by that ratio rather
+    than argued: four orders of magnitude apart, a budget generous enough never to touch an honest
+    page still bounds the pathological one well inside the activity deadline, which is what buys a
+    *refusal naming its cause* instead of a killed activity with nothing to say.
 
-    Re-entrant by design: a nested call keeps the outer deadline, because the outer one is the bound
+    **Those figures are the corrected ones.** The first version said 0.472 ms and ~160x, and in the
+    same table also said 0.042 s for the page — two numbers 22x apart for one measurement, neither
+    right. The 0.472 ms was the *first* call, including this module's `lru_cache` compile miss
+    (0.3 ms on its own). A review falsified it; the corrected ratio makes the argument far more
+    strongly,
+    which is why the wrong number was never load-bearing and is recorded here anyway.
+
+    Re-entrant by design: a nested call keeps the outer budget, because the outer one is the bound
     that matters and a page is not made cheaper by being processed in parts.
 
     Args:
@@ -418,7 +453,7 @@ def pattern_budget(seconds: float | None = None) -> Iterator[None]:
         yield
         return
     budget = settings.eln_regex_page_budget_seconds if seconds is None else seconds
-    token = _page_budget.set(_PageBudget(deadline=monotonic() + budget, budget=budget))
+    token = _page_budget.set(_PageBudget(budget=budget))
     try:
         yield
     finally:
@@ -445,23 +480,50 @@ def _cell_budget() -> tuple[float, bool]:
     return min(cell, remaining), remaining < cell
 
 
-def _page_refusal(pattern: str) -> str:
-    """What a page that spent its whole regex budget says, naming how far it got.
+def _charge(seconds: float) -> None:
+    """Bill one search against the page in flight, where a page opened a budget at all."""
+    page = _page_budget.get()
+    if page is not None:
+        page.charge(seconds)
 
-    The two numbers are what separate the two causes a site has to act on differently: many cells
-    means the *binding* is too expensive for this page size, a handful means one pattern is
-    pathological in a way the per-cell ceiling was too generous to catch.
+
+def _page_refusal(pattern: str, *, cut_short: float | None = None) -> str:
+    """What a page that spent its whole matching budget says, naming how far it got.
+
+    The count is applications of the `regex` transform rather than cells — a binding may run
+    several on one value, and a NULL column runs none — and it is what separates the two causes a
+    site acts on differently: many searches means the *binding* is too expensive for this page
+    size, a handful means one pattern is pathological in a way the per-cell ceiling was too
+    generous to catch.
+
+    Args:
+        pattern: The pattern the budget ran out on, for a site to look at first.
+        cut_short: The clamped allowance this search was given, when the budget ran out *inside*
+            it. **The message must not then claim the pattern is innocent**, which is what the
+            single-message version did for every clamped timeout — measured, the arm that would
+            have blamed the pattern fired 0 times in 39 clamped runs against `(a+)+$`.
     """
     page = _page_budget.get()
-    cells = page.cells if page is not None else 0
+    searches = page.searches if page is not None else 0
     budget = page.budget if page is not None else settings.eln_regex_page_budget_seconds
-    return (
-        f"the 'regex' transforms on this page spent their whole {budget}s budget after {cells} "
-        f"cell(s), the last of them {pattern!r}. No single cell exceeded "
-        f"CHEMCLAW_ELN_REGEX_TIMEOUT_SECONDS, so this is the page's total cost rather than one bad "
-        "pattern: reduce CHEMCLAW_ELN_SYNC_BATCH_SIZE, simplify the patterns this binding runs per "
-        "row, or raise CHEMCLAW_ELN_REGEX_PAGE_BUDGET_SECONDS — which must stay inside "
+    remedy = (
+        "reduce CHEMCLAW_ELN_SYNC_BATCH_SIZE, simplify the patterns this binding runs per row, or "
+        "raise CHEMCLAW_ELN_REGEX_PAGE_BUDGET_SECONDS — which must stay inside "
         "CHEMCLAW_ELN_SYNC_TIMEOUT_SECONDS to be worth anything"
+    )
+    if cut_short is not None:
+        return (
+            f"the 'regex' transforms on this page spent their whole {budget}s matching budget, and "
+            f"it ran out inside {pattern!r} — which was given only the {cut_short:.3f}s the page "
+            "had left rather than its full CHEMCLAW_ELN_REGEX_TIMEOUT_SECONDS, so whether that "
+            f"pattern alone is too expensive is not established here. {searches} transform(s) ran. "
+            f"Either way this page is over its matching budget: {remedy}"
+        )
+    return (
+        f"the 'regex' transforms on this page spent their whole {budget}s matching budget after "
+        f"{searches} transform(s), the last of them {pattern!r}. No single one exceeded "
+        "CHEMCLAW_ELN_REGEX_TIMEOUT_SECONDS, so this is the page's total matching cost rather than "
+        f"one bad pattern: {remedy}"
     )
 
 
@@ -484,16 +546,25 @@ def _regex(value: Any, options: Mapping[str, Any]) -> Any:
     budget, page_bound = _cell_budget()
     if budget <= 0.0:
         raise PatternBudgetError(_page_refusal(pattern))
+    started = monotonic()
     try:
         match = _compiled(pattern).search(text, timeout=budget)
     except TimeoutError as exc:
-        # **Which budget ran out decides which refusal this is**, and the two need different words:
-        # one names a pattern to rewrite, the other names a page that cost too much in aggregate
-        # while every individual cell stayed inside its ceiling. Re-read rather than inferred from
-        # `page_bound`, because a cell clamped by the page can still be the pattern's own fault when
-        # it would have exceeded the per-cell budget too.
-        if page_bound and _cell_budget()[0] <= 0.0:
-            raise PatternBudgetError(_page_refusal(pattern)) from exc
+        _charge(monotonic() - started)
+        # **Three outcomes, not two, and the middle one is what a review falsified.** The first
+        # version had two and claimed to tell them apart by re-reading the remaining budget. That
+        # re-read is always spent by then: a clamped search is given exactly what was left, so it
+        # times out at the instant the page runs dry. Driven over 39 clamped remainings against
+        # `(a+)+$`, the "pattern is at fault" arm fired **0** times — every catastrophic pattern was
+        # reported as a page that cost too much in aggregate, under a sentence asserting no single
+        # cell had exceeded its ceiling.
+        #
+        # Clamped means this search never had its full per-cell allowance, so what the pattern alone
+        # costs is *not established*. Saying so is both honest and the actionable thing, because the
+        # remedies differ. Unclamped means it had the whole per-cell budget and blew it, which is
+        # the only case that names a pattern to rewrite.
+        if page_bound:
+            raise PatternBudgetError(_page_refusal(pattern, cut_short=budget)) from exc
         raise PatternBudgetError(
             f"the 'regex' transform {pattern!r} did not finish within "
             f"{settings.eln_regex_timeout_seconds}s on one {len(text)}-character cell, so it "
@@ -501,9 +572,7 @@ def _regex(value: Any, options: Mapping[str, Any]) -> Any:
             "quantifier such as `(a+)+` is the usual cause — or raise "
             "CHEMCLAW_ELN_REGEX_TIMEOUT_SECONDS if the pattern is genuinely this expensive"
         ) from exc
-    page = _page_budget.get()
-    if page is not None:
-        page.cells += 1
+    _charge(monotonic() - started)
     if match is None:
         return None
     group = int(options.get("group", 0))

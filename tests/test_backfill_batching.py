@@ -522,12 +522,16 @@ def test_a_dependency_and_a_retirement_in_a_batch_are_not_counted_as_notes(
     """The row behind this believed they could not be separated, and they can.
 
     It said the changed-file count "counts *dependency* notes and retirement rewrites too, which is
-    a
-    third meaning of the field". `record._build_write` tags a dependency `overwrite=False` and a
+    a third meaning of the field". `record._build_write` tags a dependency `overwrite=False` and a
     retirement `amendment=True`, and emits exactly one subject per write, so the partition is a
-    filter
-    on two flags. Measured over a batch carrying both beside four subjects: the flags say four
-    subjects, git's own changed-file count says two, and the honest answer is one.
+    filter on two flags.
+
+    **This test builds one subject, one dependency and one retirement — three files, all three newly
+    changed — and requires the count to be 1.** An earlier version of this docstring described a
+    scenario the body does not build (four subjects, a changed-file count of two), and a review
+    caught that none of those numbers corresponded to what runs. Three files is the minimal shape
+    that separates the flags from the file count: git sees three, the flags see one subject, and the
+    honest answer is the subject.
 
     Driven on the writer rather than through the CLI, because the CLI has no way to ask for a
     dependency — which is also why this is the test that pins the distinction rather than a comment.

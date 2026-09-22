@@ -1723,3 +1723,40 @@ free number at the end of its section.
      and never commit while another agent holds write access** — the instruction to restore was mine,
      and `git checkout --` discards an *unstaged* change rather than a mutation, which is the part I
      should have specified.
+
+121. **I timed a function's first call and published the number as its cost.** An honest `regex`
+     transform measured 0.472 ms; warm, it is 0.0024 ms. The difference is this module's own
+     `lru_cache` compile miss, 0.3 ms, which I had written the cache to avoid and then included in the
+     measurement of what it costs. The wrong figure reached four files and a commit message, and the
+     *corrected* ratio argues the same point 200x more strongly — so the number was never load-bearing,
+     which is exactly why nothing caught it. **Warm any cache before timing what it protects**, and
+     when a figure exists to support an argument, check it hardest when it already agrees with you.
+
+122. **My own table gave two mutually exclusive numbers for one measurement and I shipped it.** The same
+     five-row table said an honest cell costs 0.472 ms *and* that 2,000 of them cost 0.042 s — 22x apart
+     by its own arithmetic. I have spent this session deleting exactly this defect from other people's
+     prose. **Multiply the table out before the table ships**: two figures about one quantity are a
+     product waiting to disagree, and a reader who checks will find it before a reviewer does.
+
+123. **I put a wall-clock deadline where I had promised an accumulator, then documented the promise.**
+     `pattern_budget` was opened around a loop whose body awaits five stores per entry; a
+     `monotonic()` deadline there charges Postgres to a budget named for the regex engine — 1.13 ms of
+     matching exhausted 500 ms. The config comment even said the writes were given "the other half",
+     while the code billed them to this one. Worse, the refusal is non-retryable, so I converted a
+     retryable timeout into a permanent wedge at half the duration. **When a bound is named after one
+     kind of work, measure it against a page that does the other kind** — and if the manager wraps an
+     `await`, a clock is the wrong instrument.
+
+124. **A two-way branch where one arm is unreachable reads as a working distinction.** I decided
+     "page's fault vs pattern's fault" by re-reading the remaining budget after a timeout — which is
+     always spent, because a clamped search is given exactly what was left. 0 of 39 clamped runs took
+     the pattern arm. The comment beside it asserted the opposite and sounded careful. **A branch whose
+     condition is derived from the same quantity that triggered it is not a branch**; drive both arms
+     or the second one is decoration.
+
+125. **A filter that counts one kind of thing cannot be floored at zero when a caller needs a boolean.**
+     `_changed_subjects` counts subjects, and `written` is `notes > 0` — so a commit that changed only a
+     *dependency* reported "nothing was written" about a commit that landed and pushed. The ADR I wrote
+     named "one field, two questions" as the tension and then failed to handle it on the path where the
+     two differ. **When a derived boolean has twenty readers, enumerate the inputs that make it false**
+     before narrowing what feeds it.

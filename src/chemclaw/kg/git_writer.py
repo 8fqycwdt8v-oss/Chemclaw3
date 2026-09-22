@@ -1097,7 +1097,26 @@ class GitNoteWriter:
         # byte-identical *and* whose earlier push failed reports the whole batch, of which some
         # notes were already on the remote. It needs both conditions at once, and the alternative —
         # reporting 0 — is the stranded-note failure that path was written to close.
-        landed = subjects if committed else planned_subjects
+        #
+        # **Floored at 1 where a commit landed, because a review measured what the unfloored form
+        # broke.** `_changed_subjects` counts *subjects*, so a write whose subject is byte-identical
+        # while a dependency or a retirement changed gets 0 — and a commit did land and was pushed.
+        # Driven on real git against a real bare remote, re-recording an identical note whose
+        # dependency file had gone missing: this returned `notes=0 written=False` where
+        # `origin/main` returned `notes=1 written=True`, so `written` went false on a write that
+        # committed. That
+        # breaks `WriteOutcome`'s own contract ("`notes=0` is the idempotent no-op — every file was
+        # byte-identical … so nothing was committed") and undercounts the very metric this change
+        # exists to correct, in a case the previous code got right.
+        #
+        # So the floor is what keeps `written` a fact about the commit while `notes` stays a count
+        # of subjects. The cost is one over-count in that narrow case — a dependency-only commit
+        # reports
+        # one note — which is exactly what shipped before and is the safe direction: the 50x batch
+        # overcount this change removes is untouched by it (49 identical plus one new still reports
+        # 1). `D-2026-09-14` refused to store `written` separately, so this is where the two
+        # questions one field answers are reconciled.
+        landed = max(subjects, 1) if committed else planned_subjects
         try:
             # Through `_git`, so a push reaches the classifier written for it. Every wording in
             # `_AUTH_FAILURE_MARKERS` is a *push*-side refusal, and this raised its own

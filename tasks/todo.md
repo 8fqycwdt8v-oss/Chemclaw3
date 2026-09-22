@@ -21,23 +21,29 @@ case is a pattern that is slow and *completes*.
 | `a*a*a*$` over a 6,000-char cell | **165 ms** — 66% of the per-cell budget, never refused |
 | twenty such cells x 100-entry batch | **330 s** vs `eln_sync_timeout_seconds` 300 s (1.1x over) |
 | cells reached before the activity deadline | 1,818 of 2,000 |
-| an honest cell (`(\d{3,6})`) | **0.472 ms** — 349x cheaper |
-| an honest page of 2,000 cells | **0.042 s** |
+| an honest cell (`(\d{3,6})`), warm | **0.0024 ms** — ~68,000x cheaper |
+| an honest page of 2,000 cells | **0.0048 s** — ~31,000x inside the budget |
 
 - [x] `eln_regex_page_budget_seconds`, half of `eln_sync_timeout_seconds` — stated as a *split*, not a
       measurement, because the page also writes and nobody has measured that.
-- [x] `expr.pattern_budget()` — a re-entrant contextvar deadline; `_cell_budget()` clamps each
-      `search` to what the page has left, so the last cell cannot overshoot by a whole cell budget.
-      Driven: refused at 2.00 s against a 2 s budget, **+0.001 s** overshoot, vs 32.5 s unbounded.
-- [x] Two refusals, not one: the per-cell one names a pattern to rewrite, the page one names how far
-      the page got. `_PageBudget` carries the budget so the message quotes the number in force — it
-      read the *setting* first and said 150 s at a 2 s budget.
-- [x] Opened inside `sync_entries`, `memory_jobs.read_corpus` and both `live_data` loops rather than at
-      each activity, for the reason `turn_caps` was extracted.
-- [ ] A derived test: a module that maps entries in a loop must enter it.
-- [ ] Tests: the measured case refused; an honest page untouched; the overshoot bound; the two
-      refusals distinguished; `PatternBudgetError` still non-retryable.
-- [ ] ADR + delete the row.
+- [x] `expr.pattern_budget()` — a re-entrant contextvar **accumulator of matching time**;
+      `_cell_budget()` clamps each `search` to what the page has left, so the last one cannot
+      overshoot by a whole cell budget. Driven: +0.001 s of overshoot at a 2 s budget, vs 32.5 s
+      unbounded. It was a wall-clock *deadline* first, which billed the page's own stores and fetches
+      — a review measured 1.13 ms of matching exhausting a 500 ms budget.
+- [x] **Three** refusals, not two: a page spent before the search, a page spent *inside* one (which
+      must not claim the pattern is innocent, since it never got its full allowance), and a pattern
+      that blew its own ceiling unclamped. The two-way version's pattern arm was unreachable — driven
+      over 39 clamped remainings, it fired 0 times.
+- [x] Opened inside `sync_entries`, `memory_jobs.read_corpus`, `ingest/eln/validate.py` and both
+      `live_data` loops — five sites — rather than at each activity, for the reason `turn_caps` was
+      extracted.
+- [x] A derived test: a module with a `map_to_ord` call *inside* a loop must name it. It found the
+      `validate.py` site; a companion test pins the four it matches so it cannot pass vacuously.
+- [x] Tests: the measured case refused; an honest page untouched; the overshoot bound; all three
+      refusals distinguished; I/O not billed; a spent page never handing the engine a negative
+      timeout (which `regex` reads as *no* timeout).
+- [x] ADR + delete the row.
 
 ## R2 — a batched flush books the whole batch as notes recorded
 
@@ -53,13 +59,16 @@ before it asks git the same question as a boolean.
 - Exactly as large as the undercount `D-2026-09-14` fixed, in the other direction.
 - Nothing turns red: the two counter tests sit on the all-new and all-noop ends, so a partially
   identical batch is covered by neither — the same coverage shape that ADR called out.
-- [ ] `WriteOutcome` (or the inner call) yields the subject paths that changed; the batcher counts
-      **distinct** ones.
-- [ ] A superseding ADR: `D-2026-09-14` writes `len(batch)` into a merged document, and its own guard
-      sentence ("notes recorded", not "notes offered") already forbids what the mixed batch does.
-- [ ] Also drifted there: it says "the four in `git_writer.py`"; there are six `WriteOutcome(`
-      constructions and one relies on the default.
-- [ ] A test over a mixed batch, checked against `git diff-tree --name-only` as well as the metric.
+- [x] `_changed_subjects` counts the **distinct** changed subjects; `flush` is a pass-through, so
+      `len(batch)` is deleted rather than corrected.
+- [x] Floored at 1 where a commit landed. Without it, a write whose subject is identical while a
+      *dependency* changed reported `notes=0 written=False` on a write that committed and pushed —
+      a regression a review measured against `origin/main`, breaking `WriteOutcome`'s own contract.
+- [x] A superseding ADR, since `D-2026-09-14` writes `len(batch)` into a merged document.
+- [x] A test over a mixed batch, checked against `git diff-tree --name-only` as well as the metric,
+      plus the dependency-only commit arm.
+- [x] The count of `WriteOutcome(` constructions: **five** at HEAD, none defaulted. My first ADR text
+      quoted the pre-change six inside the document that changes it.
 
 ## R3 — a front door scaled to zero renders a release where every pod refuses to start
 
@@ -86,19 +95,22 @@ and nothing in `deploy/` or `docs/` asks for one. So `service_fleet_replicas` st
 chart refuses to render a zero front door, beside its 19 existing `fail` guards — a render-time
 refusal naming the key instead of eleven crash-looping pods and a stuck upgrade.
 
-- [ ] The chart guard, covering both reachable arms and the `minReplicas > maxReplicas` case.
-- [ ] The rollout-peak arithmetic charges 3 front-door pools + a readiness pool for a Deployment that
-      never surges (137 declared vs 120 honest). Safe direction, but "the arithmetic is right at zero"
-      does not survive the peak keys — decide whether to fix or record it.
-- [ ] `service.replicas` rendering nowhere under the shipped HPA: prose, or a guard.
-- [ ] ADR + delete the row.
+- [x] The chart guard in `chemclaw.frontDoorProcesses`, covering both reachable arms. Verified it
+      refuses nothing legitimate (fixed count with the HPA off, `maxReplicas=1`) and is safe on an
+      empty, null or non-numeric value.
+- [x] The rollout-peak over-declaration (137 vs 120) becomes unreachable once zero is refused, so it
+      is recorded rather than fixed.
+- [x] `service.replicas` rendering nowhere under the shipped HPA: documented in `values.yaml` and
+      pinned by a test that reds if it ever becomes live.
+- [x] ADR + delete the row.
 
 ## Verification
 
-- [ ] `make helm-validate` renders only defaults plus the flag union, so it could not have caught R3.
-      Whatever guard lands needs its own render arm.
+- [x] `make helm-validate` renders only defaults plus the flag union, so it could not have caught R3.
+      The new tests carry their own render arms.
+- [x] Fresh-context subagent review — read-only this time. Five confirmed defects and eight falsified
+      figures, all listed below and all fixed.
 - [ ] Full serial suite; `make lint type` immediately before the commit; staged-content check.
-- [ ] Fresh-context subagent review before the PR.
 
 ## Review
 
@@ -109,8 +121,8 @@ was — which is now six of eighteen worked rows found stale or misstated.
 **R1's mechanism was wrong.** The row described the accumulation as per-cell timeouts adding up; they
 cannot, because a cell that exceeds its budget ends the page after one cell non-retryably. The reachable
 case is a *polynomial* pattern that completes at 66% of the budget: 165 ms a cell, 330 s a page against a
-300 s activity deadline. Finding that changed what the fix had to bound, and the honest-page ratio (349x)
-is what settles the trade the row said needed deciding.
+300 s activity deadline. Finding that changed what the fix had to bound, and the honest-page ratio
+(~68,000x) is what settles the trade the row said needed deciding.
 
 **R2's premise was false.** It recorded the honest count as unavailable at that layer and a changed-file
 count as unable to separate dependencies from subjects. `prior` already holds the pre-write bytes of
@@ -133,3 +145,49 @@ Two things I got wrong mid-wave and fixed by measuring:
 The derived guard over page loops found a fourth one I had missed (`ingest/eln/validate.py`), and its
 first spelling over-matched three modules that map one entry at a time, so it now asks whether the call
 is *inside* the loop and a companion test stops it passing vacuously.
+
+### What the fresh-context review found
+
+Five confirmed defects and eight falsified figures. Three of the defects were mine, introduced by this
+wave, and the figures are the category this whole session has been about — so they are listed in full.
+
+**The page budget was a wall clock, not a matching budget.** `pattern_budget` is opened *around* the
+page loop, whose body awaits five stores per entry and, in `memory_jobs.read_corpus`, every
+`fetch_new_entries` of every page of every source. A `monotonic()` deadline there bills Postgres and the
+source: driven, **1.13 ms** of matching exhausted a 500 ms budget. And it was worse than a wrong
+message — `PatternBudgetError` is non-retryable, so a page that used to reach the 300 s activity timeout
+and be *retried* would fail permanently at 150 s with no cursor advanced. It is now an accumulator of
+the time the engine is actually given.
+
+**The page-vs-pattern branch was unreachable.** A clamped search is given exactly what the page has
+left, so it times out at the instant the page runs dry — my "re-read the remaining budget" test is
+always spent by then. Over 39 clamped remainings against `(a+)+$` the pattern arm fired **0** times, so
+every catastrophic pattern was reported under a sentence claiming no transform had exceeded its ceiling.
+Three outcomes now, and the clamped one says the pattern's own cost is *not established*.
+
+**`_changed_subjects` regressed the non-batched path.** A write whose subject is byte-identical while a
+dependency or retirement changed does commit, and counting only subjects gave `notes=0 written=False` on
+a write that committed and pushed — breaking `WriteOutcome`'s stated contract and undercounting the
+metric this fix exists to correct, in a case the old code got right. Floored at 1 where a commit landed.
+
+**`cells` counted regex applications, not cells** (several steps per value, none for a NULL column), in
+a number the refusal makes load-bearing. Renamed `searches` and the message says "transform(s)".
+
+**`live_data`'s prose check swallowed the refusal** through `except Exception`, so exhausting the budget
+skipped every remaining entry and the check still passed with a smaller denominator — the "silent
+denominator" failure its own docstring names.
+
+**The falsified figures.** An honest cell is **0.0024 ms** warm, not 0.472 ms: I timed the first call,
+including this module's `lru_cache` compile miss (0.3 ms on its own). So 349x → ~68,000x, 0.94 s → 0.0048
+s, ~160x → ~31,000x. My own table also gave 0.472 ms and 0.042 s for the same measurement — 22x apart,
+both wrong — which is precisely the "two mutually exclusive numbers for one fact" defect I have been
+deleting from this repository all session. Corrected in `core/config/eln.py`, `.env.example`,
+`expr.pattern_budget`, the tests and here. Also: the R2 ADR quoted the *pre-change* count of
+`WriteOutcome(` constructions inside the document that changes it (five at HEAD, none defaulted); two
+test docstrings described scenarios their bodies do not build; and the derived guard's docstring claimed
+`validate.py` was excluded when it is correctly matched.
+
+Confirmed correct and left alone: 165 ms, 66%, 330 s, 1,818 of 2,000, +0.001 s of overshoot, the 50x
+batch overcount, and every figure in R3.
+
+Lessons 121–125 added.

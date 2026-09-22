@@ -50,13 +50,19 @@ class ElnSettings(BaseSettings):
     # work, so no asyncio timer interrupts it; 1,818 of 2,000 cells were reached before the
     # activity's own deadline.
     #
-    # **Half of `eln_sync_timeout_seconds`, and that is a split rather than a measurement.** The
-    # page also writes, and nobody here has measured what that costs, so the regex half is given
-    # half — enough that a refusal is *reported* by the activity instead of the activity being
-    # killed, which is the whole gain over the status quo. It is not a tight bound and does not need
-    # to be: an honest cell measured **0.472 ms**, so a whole honest page of 2,000 cells is 0.94 s
-    # and this ceiling is ~160x it. The pathological page is refused at 150 s, naming how far it
-    # got. Raising `eln_sync_timeout_seconds` without raising this only shrinks the regex share.
+    # **Half of `eln_sync_timeout_seconds`, and that is a split rather than a measurement.** This
+    # bounds *matching* time only — `expr._PageBudget` accumulates what `regex` is given per search
+    # rather than running a wall clock, so the page's writes and fetches are not charged to it. Half
+    # is therefore a generous share rather than an arithmetic one, and what it buys is that a
+    # refusal is *reported* by the activity instead of the activity being killed with nothing to
+    # say.
+    #
+    # It does not need to be tight. An honest cell measures **0.0024 ms** warm, so a whole honest
+    # page of 2,000 cells is **0.0048 s** and this ceiling is ~31,000x it; the pathological pattern
+    # above is ~68,000x an honest one. (An earlier version of this comment said 0.472 ms and ~160x:
+    # that timed the first call, including the `lru_cache` compile miss, which is 0.3 ms on its own.
+    # A review caught it, and the corrected ratio makes the same argument far more strongly.)
+    # Raising `eln_sync_timeout_seconds` without raising this only shrinks the matching share.
     eln_regex_page_budget_seconds: float = Field(default=150.0, gt=0)
     # The sync fetches from this far *behind* its high-water cursor, so an export file that
     # lands late with an older payload timestamp (an upstream export-job retry) is still picked
