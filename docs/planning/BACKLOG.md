@@ -96,13 +96,18 @@ topic).
   asserted at a placeholder** — [S], opened 2026-09-22 by
   `D-2026-09-22-the-ceiling-that-holds-memory-is-the-cache-not-the-task-slot`, which closed the
   unbounded-memory half of the old `max_concurrent_workflow_tasks` row. A cached workflow is
-  measured at **~75 KiB plus 1.35x its own state**; what is *not* measured is the second term for
-  the workflows this repository actually runs. `tests/test_workers.py` asserts the inequality at
-  `_STATE_THE_BOUND_IS_ASSERTED_AT_KIB = 256`, a placeholder wearing a name that says so — the size
-  at which the shipped cache takes a third of the worker's memory request, rather than a reading of
-  anything. `BoCampaignWorkflow` and the durable calc workflows are the ones to sample; the harness
-  is the parked-workflow RSS sweep the ADR describes, pointed at the real broker because the
-  dev-server binary is not fetchable here.
+  measured at **~85 KiB fixed plus ~1.05x its own state plus a history term**; what is *not*
+  measured is either of the last two for the workflows this repository actually runs, and the
+  history term's own coefficient is unsettled — two runs put it at 0.95 and at ~1.8 KiB per
+  signal, so the constant is named an *allowance* rather than a measurement. `tests/test_workers.py`
+  asserts the inequality at `_STATE_THE_BOUND_IS_ASSERTED_AT_KIB = 256` and
+  `_CACHED_WORKFLOW_HISTORY_ALLOWANCE_KIB = 175`, placeholders wearing names that say so — together
+  the shape of a long-lived campaign parent, rather than a reading of anything.
+  `BoCampaignWorkflow` and the durable calc workflows are the ones to sample; the harness is the
+  parked-workflow RSS sweep the ADR describes, pointed at the real broker because the dev-server
+  binary is not fetchable here. **Sampling them is what would let the ceiling move**: it ships at
+  750 rather than the SDK's 1,000 only because the allowance is conservative, so a real reading
+  either justifies the headroom or returns it.
 
   **The other half of that ADR stays declined and needs a different measurement.**
   `max_concurrent_workflow_tasks` is left at the SDK's 100 because its bound is CPU, the worker's

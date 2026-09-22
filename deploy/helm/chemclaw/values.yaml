@@ -970,6 +970,18 @@ config:
   # same reason the pool is: the two numbers only mean anything together, and a reader changing one
   # has to see the other. A bundle whose activities are long waits overrides it in its own entry.
   CHEMCLAW_WORKER_MAX_CONCURRENT_ACTIVITIES: "8"
+  # How many started workflows a worker keeps resident between their tasks — the ceiling the
+  # activity one above does not reach, because a child workflow is not an activity. Stated here
+  # rather than left to the code default for the reason the pool pair is: this number and
+  # `resources.worker.requests.memory` only mean anything together. Measured at roughly 70-85 KiB
+  # per cached workflow plus ~1.05x its own state plus a history term, so 750 is ~62 MiB for
+  # trivial workflows and ~387 MiB for ones carrying 256 KiB of state and a campaign parent's
+  # history — both off the same three constants, rather than the first off the raw measurement
+  # and the second off the model. `tests/test_workers.py` holds the inequality and fails if the
+  # two stop fitting, whichever of them moved. The SDK's own default is 1,000, which
+  # that shape does not fit inside half of this request — raising the request instead would have
+  # charged every bundle's worker for cache slots no queue has been shown to need.
+  CHEMCLAW_WORKER_MAX_CACHED_WORKFLOWS: "750"
   # Stated rather than left to the code default, because the chart *derives* the publish target from
   # it: the knowledge-sync containers write to `knowledge.noteRepoPath` + this, which is exactly how
   # `Settings.knowledge_path` resolves. Left implicit, the chart would have to name the notes
