@@ -17,7 +17,15 @@
 - [x] **Say it at the point of use too**: `_probe_database`'s docstring named `_try_cancel` without
       its new bound, so a reader checking upstream would have found the bound and concluded the
       docstring was stale.
-- [ ] Full serial `make cov`, fresh-context subagent review, PR, merge on green CI.
+- [x] **Fresh-context subagent review.** Four defects in the derivation, all fixed in `6901d62f`,
+      each now a test that fails without the fix: `get-url` returned the *fetch* URL where `git
+      push` uses `pushurl`; `_host_from_url` outside the `try` made one legal `.git/config` an
+      import-time crash in every process; the `"."` guard was a string comparison that `./`,
+      `src/..`, `$PWD`, an absolute path and a symlink all walked past; and a comma in a derived
+      host is two allowed hosts on the compiled layer and none on the Python one.
+- [x] **Full serial `make cov`**: **10,609 passed, 8 skipped**, coverage **89.93%** against a floor
+      of 84.0, 34m25s, with Postgres and Temporal up.
+- [ ] PR, and merge when CI is green.
 
 ## Measurements this wave rests on
 
@@ -33,4 +41,18 @@
 
 ## Review
 
-Pending the gate and the subagent review.
+**The review found more than the wave did.** Two of its four findings — the `pushurl` case and
+the crashloop — make the shipped guard do the wrong thing, and neither was reachable from the tests
+written with the change: they drove the *forms a URL can take* and never the *ways git can be
+configured*, nor the ways `urlsplit` can refuse one. The third and fourth are the same shape one
+level out: a predicate spelled twice (`repo_dir == "."` here, `Path.resolve()` there) drifted
+apart, and a value crossing a layer boundary re-created the divergence the design was placed to
+prevent — through the data rather than through the code.
+
+What generalises: **an ADR that says "none raises" is a claim a test should hold**, and this one
+said it while the code could crashloop every component. The fix is not more prose. `core/checkout.py`
+exists so the two spellings cannot drift, `test_the_derivation_and_the_writers_refusal_ask_the_same_question`
+holds them together, and five mutations of the new code are each caught by a named test.
+
+The psycopg finding needed no fix and was the wave's other half: a trigger that reads as met, and
+the near-miss measurement that would have closed the row wrongly.
