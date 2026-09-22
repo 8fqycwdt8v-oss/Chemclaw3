@@ -763,11 +763,36 @@ readOnlyRootFilesystem: {{ .Values.securityContext.readOnlyRootFilesystem }}
        target is denominated against — and three copies of "the HPA ceiling, or the fixed replica
        count when the HPA is off" is three places for the fourth reader to get it wrong. */ -}}
 {{- define "chemclaw.frontDoorProcesses" -}}
+{{- $processes := 0 -}}
+{{- $key := "" -}}
 {{- if .Values.service.autoscaling.enabled -}}
-{{- .Values.service.autoscaling.maxReplicas | int -}}
+{{- $processes = .Values.service.autoscaling.maxReplicas | int -}}
+{{- $key = "service.autoscaling.maxReplicas" -}}
 {{- else -}}
-{{- .Values.service.replicas | int -}}
+{{- $processes = .Values.service.replicas | int -}}
+{{- $key = "service.replicas" -}}
 {{- end -}}
+{{- /* **A zero front door is refused at render time, because it renders a release in which every
+       pod refuses to start.** `service_fleet_replicas` is `Field(default=1, gt=0)`, and
+       `config.yaml` puts this number in the ConfigMap every pod reads through `envFrom` — so a
+       zero does not merely scale the front door to nothing, it fails `Settings()` at
+       `core/config/__init__.py`'s module-level singleton. Driven over nine entrypoints: all nine
+       exit 1, and `deploy/entrypoint.sh` runs `python -m chemclaw.cli.egress_preload` under
+       `set -euo pipefail` *before* its `case`, so every container dies in the shell prologue — the
+       seven connector Deployments, the background worker, and the migrate/schedules/convert hook
+       Jobs, which means `helm upgrade` never converges either.
+
+       Refused rather than allowed because there is no front-doorless release to allow: every
+       optional component here has an `enabled` gate and the front door has none, `deployment-service.yaml`
+       and the Service open with no `if`, and nothing in `deploy/` or `docs/` asks for one. So this
+       number is structurally the front door's own pod count, and zero is not a smaller release —
+       it is a broken one. `kubeconform` cannot catch it (the value is a valid string in a valid
+       ConfigMap) and `make helm-validate` never sets a replica count, so a `fail` here is the only
+       thing between an operator's `--set` and eleven crash-looping pods with a stuck upgrade. */ -}}
+{{- if lt $processes 1 -}}
+{{- fail (printf "%s must be at least 1: it renders CHEMCLAW_SERVICE_FLEET_REPLICAS into the ConfigMap every pod reads, and Settings refuses a value below 1 — so %s=%v does not scale the front door down, it stops every pod in the release from starting, the migration hook included. There is no front-doorless release: the front door has no enabled gate." $key $key $processes) -}}
+{{- end -}}
+{{- $processes -}}
 {{- end -}}
 
 {{- /* The surge, validated: pods, not a percentage, and not a negative one.

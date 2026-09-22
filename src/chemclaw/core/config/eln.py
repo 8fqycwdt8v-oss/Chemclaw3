@@ -35,6 +35,35 @@ class ElnSettings(BaseSettings):
     # no match is 0.24 ms — so the ceiling is ~1,000x the worst honest case and the shortest
     # catastrophic one tested reaches it in 0.25 s rather than never.
     eln_regex_timeout_seconds: float = Field(default=0.25, gt=0)
+    # How long **every** `regex` transform together may spend on one page, which is the bound the
+    # per-cell one above does not compose into. `warehouse/adapter._read` runs one match per
+    # reaction field, per attribute, and per component and impurity *row*, so a page is
+    # `eln_sync_batch_size x cells_per_entry` matches and the per-cell ceiling multiplies.
+    #
+    # **The reachable case is a pattern that is slow and *completes*, which is why the per-cell
+    # bound cannot see it.** A pattern that exceeds 0.25 s is refused and, because
+    # `PatternBudgetError` is in `durable/publish._BAD_DATA_TYPES`, ends the page after one cell. A
+    # *polynomial* pattern never trips it: measured on this box, `a*a*a*$` over a 6,000-character
+    # cell is **165 ms** — 66% of the per-cell budget, no refusal — and twenty such cells across a
+    # 100-entry batch is **330 s**, which is past `eln_sync_timeout_seconds` (1.1x) and past the
+    # heartbeat, after which the retry runs the identical page. `map_to_ord` is synchronous CPU
+    # work, so no asyncio timer interrupts it; 1,818 of 2,000 cells were reached before the
+    # activity's own deadline.
+    #
+    # **Half of `eln_sync_timeout_seconds`, and that is a split rather than a measurement.** This
+    # bounds *matching* time only — `expr._PageBudget` accumulates what `regex` is given per search
+    # rather than running a wall clock, so the page's writes and fetches are not charged to it. Half
+    # is therefore a generous share rather than an arithmetic one, and what it buys is that a
+    # refusal is *reported* by the activity instead of the activity being killed with nothing to
+    # say.
+    #
+    # It does not need to be tight. An honest cell measures **0.0024 ms** warm, so a whole honest
+    # page of 2,000 cells is **0.0048 s** and this ceiling is ~31,000x it; the pathological pattern
+    # above is ~68,000x an honest one. (An earlier version of this comment said 0.472 ms and ~160x:
+    # that timed the first call, including the `lru_cache` compile miss, which is 0.3 ms on its own.
+    # A review caught it, and the corrected ratio makes the same argument far more strongly.)
+    # Raising `eln_sync_timeout_seconds` without raising this only shrinks the matching share.
+    eln_regex_page_budget_seconds: float = Field(default=150.0, gt=0)
     # The sync fetches from this far *behind* its high-water cursor, so an export file that
     # lands late with an older payload timestamp (an upstream export-job retry) is still picked
     # up instead of being silently dropped forever. Re-fetching the window is safe and cheap

@@ -541,17 +541,6 @@ topic).
       costs the alert its series during a database outage. That trade is the decision.
       Anchors: `core/config/__init__.py::pg_endpoint`, `core/db.py::_session_store_max_connections`.
 
-- [ ] **A front door scaled to zero renders a release in which every pod refuses to start** — [S],
-      found 2026-09-05 by a fresh-context chart review. `service_fleet_replicas` is
-      `Field(default=1, gt=0)` and `config.yaml` renders `service.replicas` straight into the shared
-      ConfigMap, so `--set service.replicas=0` (or `autoscaling.maxReplicas=0`) gives every pod in
-      the release a value `Settings` rejects — workers and connector servers included, none of which
-      has a front door. `helm template` and `kubeconform` both pass, so `make helm-validate` is
-      green. The arithmetic is *right* at zero (measured: `readiness=0`, and the per-server figures
-      match a real fleet with the bound relaxed); only the bound refuses it. Deciding whether a
-      front-doorless release is legal is the work. Anchors: `core/config/service.py`,
-      `deploy/helm/chemclaw/templates/config.yaml`.
-
 - [ ] **`/readyz` cannot bound a Postgres that accepts the socket and stops answering** — [S],
       found 2026-09-05, upstream in origin and recorded here because `api/routes/ops.py` claimed
       otherwise. `asyncio.wait_for` bounds acquisition; on a warm pooled connection psycopg's
@@ -564,27 +553,6 @@ topic).
       route, and a second in-process timeout cannot cancel what the first one could not. Worth
       revisiting if psycopg gains a cancel that respects a deadline. Anchors:
       `api/routes/ops.py::_probe_database`, `core/db.py::connection`.
-
-- [ ] **A batched flush books the whole batch as notes recorded when any one of them committed** —
-  [S]. `kg/git_writer.py::BatchingNoteWriter.flush` returns
-  `notes=len(batch) if outcome.written else 0`, and `outcome.written` is `notes > 0` on the *inner*
-  write, which is one commit however many files it carried. Driven against a local bare remote: a
-  batch of four where three notes were byte-identical to what the tree already held and one was new
-  committed once and reported `notes=4`, so `chemclaw_notes_recorded_total` moved by four for one
-  note reaching the graph — the same class of error
-  `D-2026-09-14-a-counter-of-commits-is-not-a-counter-of-notes` fixed in the other direction, now
-  overcounting instead of undercounting. Backfill-only (`cli/backfill_corpus`); the conversational
-  path is one note per write and is exact.
-
-  **Not fixed as a defect because the honest number is not available at that layer and making it
-  available is a contract change.** `WriteOutcome.notes` means "notes that reached the graph", and
-  the inner writer knows only "something was committed": it has the bytes each target held (`prior`)
-  and could count the files that changed, but that number counts *dependency* notes and retirement
-  rewrites too, which is a third meaning of the field beside the two D-2026-09-14 already weighs. The
-  fix is either `WriteOutcome` carrying the paths it wrote so the batcher can count its own subjects,
-  or a decision that the counter counts note *files* — both of which are ADR-sized rather than a
-  commit and a test. Anchors: `kg/git_writer.py::BatchingNoteWriter.flush`,
-  `kg/record.py::WriteOutcome`, `D-2026-09-14-a-counter-of-commits-is-not-a-counter-of-notes`.
 
 - [ ] **`retrieval_source_weights` has no upper bound, and the mix it produces is not a property of
   the weight alone** — [S]. `core/config/retrieval.py`'s validator refuses non-finite and
