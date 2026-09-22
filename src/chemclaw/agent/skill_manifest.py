@@ -33,9 +33,10 @@ that wants it must read the file.
 """
 
 import logging
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from functools import cache
 from pathlib import Path
+from typing import Any
 
 import frontmatter
 from deepagents.middleware.skills import (
@@ -216,6 +217,62 @@ def _declared_tools(
 UNREADABLE_DECLARATION: frozenset[str] = frozenset({"\x00unreadable-skill-manifest"})
 
 
+def declared_triple(metadata: Mapping[str, Any]) -> tuple[str, frozenset[str], frozenset[str]]:
+    """`(name, declared tools, required tools)` off already-parsed frontmatter, or raise.
+
+    **The reading half, split out because a stored skill has no path.** The two stored tiers hold a
+    body under a store key rather than a file under a directory, and `agent/stored_skill_tools.py`
+    needs exactly this answer about exactly these three keys. Two readers would be two opinions
+    about what a `tools:` declaration is, in a filter whose contract is that a declaration can only
+    ever cost a skill its visibility — so the parse is one function and only the *fallback* differs
+    (a directory name for a file, a store key's name for a body).
+
+    **It re-implements `SkillManifest`'s strip-and-require-non-empty rather than validating through
+    it, and must stay in step with it.** That is deliberate and pre-existing: validating the whole
+    manifest here made *any* frontmatter defect erase the `tools:` declaration, which
+    `ToolScopedSkills` reads as "declares nothing" and leaves visible — a read error that *widens*.
+    The two rules to keep aligned are `str_strip_whitespace` and `min_length=1` on `name`.
+
+    It raises rather than returning a sentinel, because the caller is what knows the fallback name
+    and what to log about the thing that could not be read. See `_declared_pair` for why every
+    failure has to fail *closed*.
+
+    Args:
+        metadata: The frontmatter mapping, from `frontmatter.load` or `frontmatter.loads`.
+
+    Returns:
+        The stripped name and the two declarations, each as a frozenset of tool names.
+
+    Raises:
+        TypeError: When `name` is not a string, or `tools`/`requires` is not a list.
+        ValueError: When `name` is empty or whitespace.
+        KeyError: When there is no `name` at all.
+    """
+    name = metadata["name"]
+    tools = metadata.get("tools") or []
+    if not isinstance(name, str) or not isinstance(tools, list):
+        raise TypeError(f"name must be a string and tools a list, got {type(name)}/{type(tools)}")
+    # Stripped and required non-empty, which is what `SkillManifest`'s `str_strip_whitespace` plus
+    # `min_length=1` did before this read the keys directly.
+    #
+    # **An empty name does not "stay out of the map".** The raise reaches the caller, which keys the
+    # entry by its own fallback — driven, a filed skill with `name: '   '` is keyed `'empty-name'`.
+    # That is the right answer for the reason `_declared_pair`'s `except` arm gives: a manifest
+    # whose own name cannot be read is one whose `tools:` declaration cannot be trusted either. What
+    # must not happen is the entry going missing, which reads as "declares nothing" and leaves the
+    # skill visible.
+    if not name.strip():
+        raise ValueError("a skill's `name` is empty")
+    requires = metadata.get("requires") or []
+    if not isinstance(requires, list):
+        raise TypeError(f"requires must be a list, got {type(requires)}")
+    return (
+        name.strip(),
+        frozenset(str(tool) for tool in tools),
+        frozenset(str(tool) for tool in requires),
+    )
+
+
 def _declared_pair(path: Path) -> tuple[str, frozenset[str], frozenset[str]]:
     """One skill's `(name, declared tools, required tools)`, scoped to nothing when unreadable.
 
@@ -251,34 +308,7 @@ def _declared_pair(path: Path) -> tuple[str, frozenset[str], frozenset[str]]:
     conversation in the deployment.
     """
     try:
-        metadata = frontmatter.load(path).metadata
-        name = metadata["name"]
-        tools = metadata.get("tools") or []
-        if not isinstance(name, str) or not isinstance(tools, list):
-            raise TypeError(
-                f"name must be a string and tools a list, got {type(name)}/{type(tools)}"
-            )
-        # Stripped and required non-empty, which is what `SkillManifest`'s `str_strip_whitespace`
-        # plus `min_length=1` did before this read the keys directly.
-        #
-        # **It does not "stay out of the map", and this comment said it did** ("an empty name cannot
-        # be the key of anything, so it stays out of the map rather than claiming `\"\"`"). The
-        # raise goes to the arm below, which keys the entry by the *directory* — driven, `name: '
-        # '` returns `('empty-name', UNREADABLE_DECLARATION)`. That is the right answer for the
-        # reason that arm gives: a manifest whose own name cannot be read is one whose `tools:`
-        # declaration cannot be trusted either, and the directory is the string `make
-        # skill-validate` requires it to match. What must not happen is the entry going missing,
-        # which reads as "declares nothing" and leaves the skill visible.
-        if not name.strip():
-            raise ValueError("a skill's `name` is empty")
-        requires = metadata.get("requires") or []
-        if not isinstance(requires, list):
-            raise TypeError(f"requires must be a list, got {type(requires)}")
-        return (
-            name.strip(),
-            frozenset(str(tool) for tool in tools),
-            frozenset(str(tool) for tool in requires),
-        )
+        return declared_triple(frontmatter.load(path).metadata)
     except Exception as exc:
         # WARNING rather than the helper's ERROR default: `make skill-validate` is a CI gate over
         # exactly this, so an unreadable manifest is caught before it ships and a live occurrence

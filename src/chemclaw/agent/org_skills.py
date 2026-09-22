@@ -41,12 +41,20 @@ enough ago is evicted and is no longer a revert target.
 **What this tier does *not* get, stated because three of them are deliberate.** It is not per-actor,
 so `agent/leaver.py` does not sweep it — an erasure request that finds a departing person's words in
 an organisation's skill is a content question for an admin (a revert, or a retire), not a prefix
-sweep, and `tests/test_leaver.py` holds that as an assertion rather than as an absence. It is not
-narrowed by `EnabledSkills`, which names *shipped* skills and would therefore delete this tier
-outright — the trap `agent/local_skills.py` already names one tier over. It is not yet narrowed by
-`ToolScopedSkills`, which would need each body's frontmatter parsed out of the store inside a
-possibly-synchronous `ls`; the gap is stated in `docs/planning/BACKLOG.md` with the same
-parse-on-write shape the personal tier's row already proposes.
+sweep, and `tests/test_leaver.py` holds that as an assertion rather than as an absence.
+
+**It is not narrowed by `EnabledSkills` — and this paragraph asserted that while it was.** The
+reason given here was right: that setting names *shipped* skills, so applying it would delete this
+tier outright rather than narrow it. Driven with `CHEMCLAW_SKILLS_ENABLED=development-report`,
+`ls('/org/')` came back empty, on a tier that acts on everybody's turns. The exclusion is structural
+now rather than asserted — `skill_access.SkillNarrowing` builds one predicate per kind of tier, and
+the mount takes `.stored`.
+
+**It is narrowed by `ToolScopedSkills`**, which this paragraph recorded as a gap needing each body's
+frontmatter parsed out of the store "inside a possibly-synchronous `ls`". That framing is what made
+it look expensive: `agent/stored_skill_tools.py` reads the bodies in the async caller instead, off
+the same paged search a listing already costs, and the builder is handed the declarations the way it
+is already handed the store.
 
 **The prefix is the cost, and it is the reason the row cap is small.** Every org skill's name and
 description sit in the system message of every model call every chemist makes — and again in every
@@ -72,7 +80,7 @@ from chemclaw.agent.audit import bounded_repr
 from chemclaw.agent.local_skills import LOCAL_SKILL_FILENAME, SkillRefused, storable_name
 from chemclaw.agent.refusal_route import routed
 from chemclaw.agent.session_store import _session_connection, _session_dsn
-from chemclaw.agent.skill_store import PermittedStoreBackend
+from chemclaw.agent.skill_store import PermittedStoreBackend, paged_items
 from chemclaw.core.config import settings
 from chemclaw.core.ids import stable_hash
 from chemclaw.core.logging import log_event
@@ -256,33 +264,14 @@ async def _one_writer_per_org(name: str) -> AsyncIterator[None]:
             await conn.commit()
 
 
-#: How many rows one page of a listing walk asks for — `local_skills._LISTING_PAGE`'s reason
-#: exactly:
-#: `BaseStore.asearch` defaults to 10, which is not a page size a caller chose.
-_LISTING_PAGE = 100
-
-
-async def _all_keys(store: Any, namespace: tuple[str, ...]) -> dict[str, Any]:
-    """Every item in one namespace, paged.
-
-    The walk terminates on a page that adds nothing, which also ends it against a store that ignores
-    `offset` — the guard `scratchpad.BoundedStoreBackend` carries for the same reason. Un-paged, a
-    listing answers ten and reads as the whole tier, which for this tier would mean an administrator
-    unable to see or retire the eleventh skill acting on everybody's turns.
-    """
-    held: dict[str, Any] = {}
-    while True:
-        page = await store.asearch(namespace, limit=_LISTING_PAGE, offset=len(held))
-        fresh = {item.key: item for item in page if item.key not in held}
-        if not fresh:
-            break
-        held.update(fresh)
-    return held
-
-
 async def list_org_skills(store: Any) -> list[str]:
-    """The names of every skill the organisation keeps, sorted — **all** of them."""
-    held = await _all_keys(store, org_skills_namespace())
+    """The names of every skill the organisation keeps, sorted — **all** of them.
+
+    Paged through `skill_store.paged_items`, which both tiers and the capability narrowing now
+    share: un-paged this answers ten and reads as the whole tier, which here would mean an
+    administrator unable to see or retire the eleventh skill acting on everybody's turns.
+    """
+    held = await paged_items(store, org_skills_namespace())
     suffix = f"/{LOCAL_SKILL_FILENAME}"
     return sorted(key[1 : -len(suffix)] for key in held if key.endswith(suffix))
 
@@ -313,7 +302,7 @@ async def list_org_versions(store: Any, name: str) -> list[OrgSkillVersion]:
     """
     if not storable_name(name):
         return []
-    held = await _all_keys(store, org_versions_namespace(name))
+    held = await paged_items(store, org_versions_namespace(name))
     versions = [_version_of(item) for item in held.values()]
     return sorted(
         (version for version in versions if version is not None),
@@ -371,7 +360,7 @@ async def _record_a_version(store: Any, name: str, body: str, activated_by: str)
             }
         ),
     )
-    held = await _all_keys(store, org_versions_namespace(name))
+    held = await paged_items(store, org_versions_namespace(name))
     cap = settings.agent_org_skill_versions_max
     if len(held) <= cap:
         return

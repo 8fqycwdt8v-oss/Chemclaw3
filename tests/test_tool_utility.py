@@ -387,11 +387,15 @@ def test_the_skills_arm_keeps_every_tool_and_reaches_no_skill() -> None:
 
     assert profile.name == "skills-removed"
     assert profile.skill_names == frozenset()
-    # Every discovered skill is refused, whatever it is called.
-    assert [name for name in _SHIPPED_SKILL_NAMES if permits(name)] == []
+    # Every discovered skill is refused, whatever it is called — and on **both** tiers, which is the
+    # half `skill_access.SkillNarrowing` made assertable. `ProfileScopedSkills` is deliberately in
+    # the stored narrowing too, because a tier acting on every turn escaping this arm would mean the
+    # arm measured a system that still had skills.
+    assert [name for name in _SHIPPED_SKILL_NAMES if permits.filed(name)] == []
+    assert [name for name in _SHIPPED_SKILL_NAMES if permits.stored(name)] == []
     # And the same predicate with `skill_names` unset refuses none of them — which is what makes
     # the empty set the narrowing rather than the default. `None` here would be `default` renamed.
-    assert [name for name in _SHIPPED_SKILL_NAMES if not unnarrowed(name)] == []
+    assert [name for name in _SHIPPED_SKILL_NAMES if not unnarrowed.filed(name)] == []
     # The tool surface is untouched: this arm narrows nothing a tool gate can see.
     assert profile.tool_names is None
     assert _capability_tools(profile) == _capability_tools(DEFAULT_PROFILE)

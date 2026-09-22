@@ -69,7 +69,6 @@ nothing had been started. The fix is not a name added to that set: `write_file` 
 """
 
 import logging
-from collections.abc import Callable
 from functools import cache
 from typing import Any, cast
 
@@ -84,6 +83,7 @@ from chemclaw.agent.local_skills import (
     local_skills_backend,
 )
 from chemclaw.agent.org_skills import ORG_SKILLS_ROOT, org_skills_backend
+from chemclaw.agent.skill_access import SkillNarrowing
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import get_current_actor
 from chemclaw.core.ids import stable_hash
@@ -443,7 +443,7 @@ def scratchpad_backend(
     skills: CompositeBackend,
     store: Any | None = None,
     *,
-    permits: Callable[[str], bool],
+    permits: SkillNarrowing,
 ) -> CompositeBackend:
     """Extend a turn's skills backend with a scratchpad and, when enabled, durable memories.
 
@@ -465,11 +465,15 @@ def scratchpad_backend(
         skills: The narrowed skills backend for this profile (`langgraph_agent.skills_backend`).
         store: This process's `AsyncPostgresStore` from `memory_store()`, or `None` for a turn with
             no durable memory.
-        permits: The narrowing this turn computed (`langgraph_agent.skill_narrowing`), applied to
-            the stored skills tiers as well as to the filed ones. **Required rather than
-            defaulted**, because the personal tier shipped with no backend predicate at all — it was
-            narrowed in the prompt and served every body to anyone who guessed a path — and a
-            default here is how that reopens by omission.
+        permits: The narrowing this turn computed (`langgraph_agent.skill_narrowing`). **Its
+            `stored` half is what the two stored tiers get** — a different predicate from the one
+            the filed trees get, and not an oversight: `EnabledSkills` names *shipped* skills, so
+            applying it here deleted both tiers outright rather than narrowing them, which is what
+            `skill_access.SkillNarrowing` carries the measurement for. Taking the whole value rather
+            than a bare predicate is what makes the two impossible to swap at this call site.
+            **Required rather than defaulted**, because the personal tier shipped with no backend
+            predicate at all — it was narrowed in the prompt and served every body to anyone who
+            guessed a path — and a default here is how that reopens by omission.
 
     Returns:
         A backend routing `/skills/…` as given, `/org/…` to the store whenever there is one,
@@ -487,14 +491,14 @@ def scratchpad_backend(
         # hold them and an actor to own them. A *different* first namespace component, so the
         # tiers are separately erasable and a bug in one cannot serve another's rows — see
         # `agent/local_skills.py`, which also says why this is stored rather than filed.
-        routes[LOCAL_SKILLS_ROOT] = local_skills_backend(store, actor, permits)
+        routes[LOCAL_SKILLS_ROOT] = local_skills_backend(store, actor, permits.stored)
     # **The organisation's tier needs a store and no actor**, which is why it is mounted here rather
     # than in the branch above. It is nobody's namespace: every turn resolves the same one, so an
     # unauthenticated turn is still entitled to the deployment's own judgment — and there is no
     # per-actor prefix to erase, which `agent/org_skills.py` states as a decision rather than
     # leaving as an absence.
     if store is not None:
-        routes[ORG_SKILLS_ROOT] = org_skills_backend(store, permits)
+        routes[ORG_SKILLS_ROOT] = org_skills_backend(store, permits.stored)
     return CompositeBackend(default=StateBackend(), routes=routes)
 
 

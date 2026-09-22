@@ -60,6 +60,7 @@ from chemclaw.agent.session_events import claim_unconsumed
 from chemclaw.agent.skill_fingerprint import skill_fingerprint
 from chemclaw.agent.spend_cap import spend_hit_cap, turn_billed_tokens
 from chemclaw.agent.state import turn_config
+from chemclaw.agent.stored_skill_tools import stored_skill_declarations
 from chemclaw.agent.tool_result_size import bounded_content
 from chemclaw.agent.turn_ambient import reset_tolerantly, turn_caps
 from chemclaw.agent.turn_cost import TurnCost, record_turn_cost
@@ -344,10 +345,22 @@ async def run_turn(
                 # single run showed the build 38% slower and that was noise; the residual 16.6 ms
                 # is the switch interval and is not removable here.
                 #
-                # The two awaits are hoisted rather than moved into the thread, because acquiring a
+                # The awaits are hoisted rather than moved into the thread, because acquiring a
                 # pooled connection is the loop's to do.
+                #
+                # The third one reads what the two stored skills tiers declare about tools, so
+                # `ToolScopedSkills` narrows them as it narrows a filed tree — it is `await` for the
+                # same reason the other two are, and it is here because the builder that needs it is
+                # synchronous. It is one paged search per mounted tier over a capped namespace, on
+                # the same store `turn_store()` just returned.
+                #
+                # It takes no actor: it reads the same `get_current_actor()` the mount resolves
+                # its namespace from, which is why this call sits inside `_turn_ambient`. Passing
+                # the request's raw value made the two spell one actor two ways for a padded oid —
+                # see `stored_skill_declarations`, which carries the measurement.
                 checkpointer = await _turn_checkpointer()
                 store = await turn_store()
+                stored_skills = await stored_skill_declarations(store)
                 graph = await asyncio.to_thread(
                     graph_factory,
                     profile=profile,
@@ -357,6 +370,7 @@ async def run_turn(
                     connectors=turn_tools,
                     checkpointer=checkpointer,
                     store=store,
+                    stored_skills=stored_skills,
                 )
                 # `turn_config`, not a bare `configurable`: it also carries the graph's step
                 # ceiling, which nothing here had ever chosen — the framework bakes 9999, and

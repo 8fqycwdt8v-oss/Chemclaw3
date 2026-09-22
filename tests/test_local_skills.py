@@ -26,6 +26,7 @@ from chemclaw.agent.local_skills import (
 )
 from chemclaw.agent.profiles import AgentProfile
 from chemclaw.agent.scratchpad import memory_namespace, scratchpad_backend
+from chemclaw.agent.skill_access import SkillNarrowing
 from chemclaw.agent.skill_backend import SkillsReadOnlyRefusal
 from chemclaw.agent.skill_store import PermittedStoreBackend
 from chemclaw.core.config import settings
@@ -57,7 +58,7 @@ def _mounted(store: Any, actor: str) -> Any:
         return scratchpad_backend(
             skills_backend(AgentProfile(name="default"), []),
             store,
-            permits=lambda _name: True,
+            permits=SkillNarrowing.permissive(),
         )
     finally:
         reset_current_identity(tokens)

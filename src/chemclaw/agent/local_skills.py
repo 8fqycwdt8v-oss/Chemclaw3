@@ -41,25 +41,32 @@ answering the same chemist. `StoreBackend` over the `AsyncPostgresStore` that al
 erasure key `agent/leaver.py` already sweeps by prefix, so a departing person's local skills leave
 with their memories instead of needing a second mechanism that could disagree.
 
-**None of the four narrowings applies here, and three of them must not.** `EnabledSkills`,
-`ProfileScopedSkills` and `RoleScopedSkills` answer governance questions about a *shared* corpus —
-did this deployment turn it on, is this agent about it, may this caller see it — and none has an
-answer for a skill whose only reader is the person who wrote it. The first would delete the tier
-outright: a deployment that sets `CHEMCLAW_SKILLS_ENABLED` is naming shared skills, so every local
-one would fall out of a list it was never going to be in. What bounds this tier instead is
-structural and stronger than a predicate — the namespace closes over one actor, so another chemist's
-turn cannot reach it at all.
+**Which narrowings apply here is now `skill_access.SkillNarrowing.stored`, and this paragraph used
+to be wrong about all four of them.** It said none applied and that three must not; measured,
+`EnabledSkills`, `ProfileScopedSkills` and `RoleScopedSkills` all did, and the one it wanted —
+`ToolScopedSkills` — did not. Each half mattered on its own:
 
-**`ToolScopedSkills` is the one that would have been worth keeping, and it is not applied. Said
-plainly because the alternative is prose claiming a narrowing that is not there.** It asks whether
-this agent can do any of what a skill teaches, which is as true of a personal skill as a shipped
-one, and a local skill about tools the turn cannot reach is misleading in exactly the way that
-narrowing exists to prevent. It is absent because the shared tree gets it from `declared_tools`
-reading frontmatter off a *directory*, and this tier is stored rather than filed: applying it would
-mean parsing every local skill's frontmatter out of the store synchronously, inside a backend whose
-whole reason for existing is that it is not a filesystem. The cost of the gap is bounded and
-one-sided — a chemist may be offered their own skill about a tool this profile lacks, and the worst
-outcome is judgment they wrote being unhelpful to them. `docs/planning/BACKLOG.md` carries the row.
+- **`EnabledSkills` deleted the tier outright, exactly as this paragraph predicted while claiming it
+  did not.** Driven with `CHEMCLAW_SKILLS_ENABLED=development-report`, `ls('/mine/')` came back
+  empty. A deployment that sets it is naming *shared* skills — `make skill-validate` checks every
+  name in it against the discovered trees, so a personal name cannot legally appear there — and a
+  narrowing whose basis cannot name a member of a set can only empty that set. It is excluded now.
+- **`ProfileScopedSkills` applies, and must.** `skill_names: frozenset()` is a profile author
+  writing down that this agent reaches no skill at all, which is what the `skills-removed.yaml`
+  control arm is; a tier escaping it would silently measure a system that still had skills, which is
+  the defect this tier's own backend predicate was added to close.
+- **`RoleScopedSkills` applies and is a no-op**, because its keys are validated against the filed
+  trees too. The one name where it could bite is a name both a filed tree and this tier hold, and
+  `UnreservedNames` removes that case from the listing regardless.
+- **`ToolScopedSkills` applies now**, which is what the row asked for. It asks whether this agent
+  can do any of what a skill teaches — as true of a personal skill as of a shipped one — and a
+  local skill about tools the turn cannot reach is misleading in exactly the way that narrowing
+  exists to prevent. What was in the way is real and is not solved by parsing inside a synchronous
+  `ls`: `agent/stored_skill_tools.py` reads the bodies in the *async caller*, the same hoisted-await
+  seam the store and the checkpointer already use, and hands the declarations to the builder.
+
+What bounds this tier *beyond* any of them is structural and stronger than a predicate — the
+namespace closes over one actor, so another chemist's turn cannot reach it at all.
 """
 
 import logging
@@ -75,7 +82,7 @@ from chemclaw.agent.audit import bounded_repr
 from chemclaw.agent.refusal_route import routed
 from chemclaw.agent.session_store import _session_connection, _session_dsn
 from chemclaw.agent.skill_manifest import SkillManifest
-from chemclaw.agent.skill_store import PermittedStoreBackend
+from chemclaw.agent.skill_store import PermittedStoreBackend, paged_items
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.ids import stable_hash
@@ -324,7 +331,10 @@ def local_skills_backend(
     Args:
         store: The process's store.
         actor: Whose tier this is, in the turn's own actor spelling.
-        permits: `agent/skill_access.skill_permits`' composed narrowing, applied per reach.
+        permits: `agent/skill_access.SkillNarrowing.stored` — the **stored** half of this
+            turn's narrowing, applied per reach. A half rather than the whole composition,
+            because `EnabledSkills` names shipped skills and applying it here emptied this
+            tier rather than narrowing it; `SkillNarrowing` carries that measurement.
     """
     namespace = local_skills_namespace(actor)
     return PermittedStoreBackend(
@@ -470,15 +480,6 @@ async def save_local_skill(store: Any, actor: str, name: str, body: str) -> None
     )
 
 
-#: How many rows one page of the listing walk asks for.
-#:
-#: The same shape — and the same reason — as `scratchpad._EVICTION_PAGE`: `BaseStore.asearch`
-#: defaults to `limit=10`, which is not a page size a caller chose, it is a default a caller who
-#: passed nothing inherited. This tier's cap is `agent_local_skills_max`, so one page normally
-#: answers the whole namespace and the loop runs once.
-_LISTING_PAGE = 100
-
-
 async def list_local_skills(store: Any, actor: str) -> list[str]:
     """The names of one chemist's own skills, sorted — **all** of them.
 
@@ -493,17 +494,11 @@ async def list_local_skills(store: Any, actor: str) -> list[str]:
     is acting on their turns and withdraw it. A listing that is confidently short is worse than no
     listing, because it answers the question wrongly rather than not at all.
 
-    The walk terminates on a page that adds nothing, which also ends it against a store that
-    ignores `offset` — the same guard `scratchpad.BoundedStoreBackend` carries for the same reason.
+    The paging itself is `skill_store.paged_items`, shared with the organisation's tier and with the
+    capability narrowing that reads the bodies — one walk, because it was two copies of the same
+    loop before a third caller arrived.
     """
-    namespace = local_skills_namespace(actor)
-    held: dict[str, Any] = {}
-    while True:
-        page = await store.asearch(namespace, limit=_LISTING_PAGE, offset=len(held))
-        fresh = {item.key: item for item in page if item.key not in held}
-        if not fresh:
-            break
-        held.update(fresh)
+    held = await paged_items(store, local_skills_namespace(actor))
     suffix = f"/{LOCAL_SKILL_FILENAME}"
     return sorted(key[1 : -len(suffix)] for key in held if key.endswith(suffix))
 

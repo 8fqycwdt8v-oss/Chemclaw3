@@ -180,6 +180,16 @@ _EXPECTED_SUBSYSTEMS = {
     "session_transcript",
     "skill_manifest",
     "spend_cap",
+    # `agent/stored_skill_tools._unreadable`, the stored tiers' door into the same degradation
+    # `skill_manifest` counts for the filed trees — a `SKILL.md` whose frontmatter cannot be read,
+    # so the skill is scoped to nothing rather than left visible. A **separate** label rather than
+    # the same one, because what an operator does about it differs: a filed occurrence is an
+    # authoring fault in a corpus `make skill-validate` gates, while a stored one is a body somebody
+    # saved before a rule tightened, reachable only through a route and fixable only by its owner or
+    # an administrator. The message deliberately carries the exception *type* and never its text,
+    # since a parser quotes what it choked on and that would be a person's own words in a shared
+    # log.
+    "stored_skill_manifest",
     # `science/calc/geometry.check_server_address`, added with the geometry store
     # (D-2026-08-21-a-geometry-is-an-address-not-a-payload). It is the one degradation in this
     # system that is *only* visible as a counter: a `structure_id` the calculation server and this

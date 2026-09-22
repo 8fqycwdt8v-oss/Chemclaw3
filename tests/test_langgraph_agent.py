@@ -475,7 +475,7 @@ def _a_skill_this_deployment_lists() -> str:
         available=_advertised_names(get_profile(None), _capability_tools()),
         gates={},
     )
-    return sorted(name for name in declared_tools(directories) if permits(name))[0]
+    return sorted(name for name in declared_tools(directories) if permits.filed(name))[0]
 
 
 def test_the_skills_middleware_is_attached_and_narrows_by_role(
@@ -553,7 +553,7 @@ def test_the_backend_narrows_skills_by_the_shared_predicate(
                 required=required_tools(every_dir),
                 available=bound,
                 gates=settings.skill_role_gates,
-            )(name)
+            ).filed(name)
         }
         graph = _skill_names(skills_backend(profile, tools, available=bound))
     finally:

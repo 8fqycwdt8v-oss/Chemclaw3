@@ -56,6 +56,51 @@ from chemclaw.agent.skill_backend import SkillsReadOnlyRefusal
 REFUSED = "This path is not part of the skills available to you."
 
 
+#: How many rows one page of a namespace walk asks for.
+#:
+#: `BaseStore.asearch` defaults to `limit=10`, which is not a page size a caller chose — it is a
+#: default a caller who passed nothing inherited. Un-paged, a listing answers ten and reads as the
+#: whole tier: measured on the personal tier, a chemist with twelve saved skills was listed ten
+#: while the prompt carried twelve, and the two beyond the page were undeletable through the route
+#: that exists to remove them.
+LISTING_PAGE = 100
+
+
+async def paged_items(store: Any, namespace: tuple[str, ...]) -> dict[str, Any]:
+    """Every item in one namespace, keyed by store key — the whole tier rather than one page.
+
+    **One walk because the loop had reached two copies and a third caller** (Rule of Three). The
+    callers are each tier's own listing, which answers a route's "what is acting on my turns", the
+    organisation tier's version listing and its version-cap walk, and `agent/stored_skill_tools.py`,
+    which reads the bodies for the capability narrowing — five call sites in three modules. A paging
+    walk is exactly the kind of thing that stays in step until one copy is edited.
+
+    A fourth copy survives in `agent/scratchpad.py`'s eviction walk (`_EVICTION_PAGE`) and is not
+    collapsed here: that one pages in order to *evict*, so it writes under a different cap as it
+    goes, and folding it in would give this function a second purpose its other callers do not have.
+    Named rather than left for a reader to find.
+
+    The walk terminates on a page that adds nothing, which also ends it against a store that ignores
+    `offset` — the same guard `scratchpad.BoundedStoreBackend` carries for the same reason.
+
+    Args:
+        store: The process's store.
+        namespace: The namespace tuple to walk.
+
+    Returns:
+        `{store key: item}`, where an item carries both `.key` and `.value`, so a caller wanting the
+        bodies does not need a second round trip.
+    """
+    held: dict[str, Any] = {}
+    while True:
+        page = await store.asearch(namespace, limit=LISTING_PAGE, offset=len(held))
+        fresh = {item.key: item for item in page if item.key not in held}
+        if not fresh:
+            break
+        held.update(fresh)
+    return held
+
+
 def skill_of(path: str) -> str:
     """The skill a mounted path belongs to — its first segment, which is what the gate asks about.
 

@@ -1648,3 +1648,78 @@ free number at the end of its section.
      `CHEMCLAW_ARTIFACT_STORE_MAX_BYTES: 10737418240` renders as `"1.073741824e+10"`. **When I write
      "the whole class", enumerate the places the class can occur before the sentence goes in** — here
      it was two renderers and I checked the one I had just touched.
+
+112. **Two modules each documented an absence, both cited the other, and the absence was not there.**
+     `local_skills.py` said none of the four narrowings applied to the personal tier and that three
+     "must not", giving `EnabledSkills` deleting the tier outright as the reason; `org_skills.py` said
+     it "is **not** narrowed by `EnabledSkills` … would therefore delete this tier outright — the trap
+     `agent/local_skills.py` already names one tier over". Both were passing the same `permits` to the
+     mount, so both were narrowed by it, and one `CHEMCLAW_SKILLS_ENABLED` entry emptied `ls('/mine/')`
+     and `ls('/org/')`. The prose was not wrong about the *mechanism* — it predicted the outcome
+     exactly — it was wrong that the mechanism was absent. **Prose asserting an absence is the shape to
+     measure first, not last**, and a second module citing the first is agreement between two readers
+     of the same sentence rather than evidence.
+
+113. **A narrowing that runs and cannot narrow reads as applied.** `ToolScopedSkills` was composed
+     into the predicate the stored mounts got, so every reading of the code said the gate was there;
+     what was missing was an *entry* in the declaration map, and `_permits` reads a missing entry as
+     "declares nothing" and permits. **A predicate's coverage is its input set, not its call site** —
+     the question to ask of a filter is not "is it in the chain" but "what does it answer for a
+     member of this set", and here the answer was `True` by construction for every stored skill.
+
+114. **The invariant in the docstring was a conflation of two claims, one load-bearing and one false.**
+     `skill_narrowing` said "one predicate for every tier" and gave a real defect as the reason — a
+     tier narrowed in the prompt and not at the backend. The part that closed that hole is *computed
+     once and handed to every mount*; "every tier gets the same answer" rode along and was never
+     separately true. **When a docstring states an invariant and a reason, check that the reason
+     entails the invariant and not something weaker** — I nearly kept a wrong rule because the
+     paragraph defending it was about something I agreed with.
+
+115. **I introduced a log field that would have carried a person's private vocabulary.** Merging the
+     stored declarations into `declared` would have put every personal skill's name into
+     `_log_narrowing`'s `skills=` field on every turn its owner takes — and `local_skills.py` already
+     refuses exactly that for a metric label, in a comment I had read that hour. The merge is for the
+     predicate; the log keeps the filed map. **When a private set joins a shared one, walk every reader
+     of the shared one before the merge lands**, because the reader that leaks is never the one the
+     change is about.
+
+116. **I wrote "this cannot happen" in a comment and it happened on the first measurement.** Merging
+     the stored declarations over the filed ones, I argued the collision was unreachable because
+     `UnreservedNames` removes a stored skill under a shipped name. True — of the *stored* predicate.
+     Both predicates read the **same** merged map, so a grandfathered `/mine/deep-research` declaring
+     one unbindable tool made the *reviewed* `deep-research` invisible in a turn binding all twelve
+     tools it declares. **A guarantee that holds on one output of a shared input is not a guarantee
+     about the input**, and the tell was that I wrote "the merge order is not load-bearing" instead of
+     driving the order I had chosen.
+
+117. **My headline measurement for a new narrowing measured a different narrowing.** I drove
+     `UnreservedNames` with a `skill_role_gates` entry, saw the personal copy absent, and wrote that
+     into the docstring, the test, the ADR and the commit message. A mutation review showed the test
+     stayed green with the narrowing deleted: `RoleScopedSkills` is in the same composition, so the
+     gate was doing all the work and my arm could not distinguish them. The mechanism that actually
+     binds is the enable-list — the one narrowing this change moved. **When measuring a new predicate,
+     run the arm with it removed**; "the outcome I wanted, with the feature on" is not a measurement,
+     and a single-arm probe is how a false figure reaches four documents at once.
+
+118. **A backlog row's own measurement can have expired, and the row is the last place that shows it.**
+     R7's premise was true when written — with the stored mounts ungated, a role gate did promote the
+     personal copy — and was silently closed months later by the backend predicate a different ADR
+     added. That makes five stale rows of fifteen worked in this series. What is new here: my *fix for
+     the other row in the same commit* re-opened it, which is the real reason the two belonged
+     together. **Re-derive a row's mechanism, not just its symptom, and check whether the rest of your
+     own diff changes it.**
+
+119. **I used a script to rewrap over-long prose and it silently broke string literals.** Twice: it
+     split an f-string across lines and mangled a Markdown bullet's continuation indent, in files that
+     had just passed tests. Both were caught by `ruff`, and one was two characters from being a
+     plausible-looking message. **A line-length fixer must not touch code lines**, and a tool I wrote
+     to save a minute of editing cost three rounds of repair — the second time in this session that
+     an automated edit over prose damaged something a human would not have.
+
+120. **A reviewer's `git checkout --` landed inside my commit window and the commit shipped without a
+     file.** I had identified the hazard, wrote it down, and then committed anyway while a subagent was
+     mutating the tree — my content checks ran a minute before `git add -A`, not against the staged
+     tree. The committed tree could not even import. **Verify the staged content, not the working tree,
+     and never commit while another agent holds write access** — the instruction to restore was mine,
+     and `git checkout --` discards an *unstaged* change rather than a mutation, which is the part I
+     should have specified.
