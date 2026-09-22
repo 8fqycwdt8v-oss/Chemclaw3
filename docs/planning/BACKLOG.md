@@ -174,6 +174,38 @@ topic).
 
 ## 2 — Answers that are wrong without saying so
 
+- [ ] **A neutral co-former is discarded as if it were a counterion, so urea hydrogen peroxide is
+      urea** — [M], `src/chemclaw/core/chem.py::standardize`. When a string has exactly one organic
+      fragment, `standardize` hands it to `rdMolStandardize.FragmentParent` and calls the rest
+      counterions — without asking whether a discarded fragment carries a *charge*. Driven:
+      `NC(N)=O.OO` and `NC(N)=O` share one `compound_id`, so UHP (carbamide peroxide), a bench
+      oxidant, is the same compound as urea for the cache, the fingerprint rows and the hazard
+      screen. The shape predates `std10` — `CCN.OO` already collapsed to `CCN` — and `std10` is
+      what pulled urea into it by making the fragment organic.
+
+      **Not a one-line guard, which is why it is a row.** "Discard only charged fragments" breaks
+      the hydrate (`CCN.O` -> `CCN` is right) and every solvate the module deliberately strips, so
+      the fix needs a notion of which neutral co-formers are part of an identity: a curated
+      solvent list, which is the table `core/chem.py` opens by refusing, or RDKit's own
+      `rdMolStandardize.FragmentRemover`, whose list is curated upstream and would make the answer
+      somebody else's to maintain. Either moves every solvate at once and needs a
+      `STANDARDIZATION_VERSION` bump. Pinned meanwhile by
+      `tests/test_compound_identity.py::test_a_neutral_co_former_is_stripped_like_a_counterion`
+      and by a row of `_STANDARDIZATION_AT_THIS_VERSION`, so it cannot move in silence.
+
+- [ ] **Ammonium formate standardizes to ammonia** — [M], `src/chemclaw/core/chem.py::standardize`.
+      Driven: `standard_smiles("[NH4+].[O-]C=O")` returns `'N'`. `FragmentParent` picks `[NH4+]`
+      over the formate as the parent — neither fragment is organic by any version of
+      `_is_organic`, so `organic == 0` is not the branch; the pick happens inside RDKit — and
+      `Uncharger` then neutralises it. `_neutralization_is_protonation` does not refuse it because
+      the neutralisation *adds* a hydrogen, which is the shape that guard exists to allow.
+      Ammonium formate is a transfer-hydrogenation reagent; ammonia is a different substance in
+      every way that matters, and the note, the cache key and the hazard screen all follow the id.
+      Identical at `std9` and `std10`, so it is neither caused nor fixed by
+      `D-2026-09-22-a-version-bump-costs-the-same-whenever-it-is-taken`; found while driving it.
+      Weigh the fix against the same question the row above asks, because both are about which
+      fragment `FragmentParent` is allowed to keep.
+
 - [ ] **A `STANDARDIZATION_VERSION` bump retires the fingerprint rows and re-keys nothing, so the
       graph keeps a note per superseded spelling forever** — [L],
       `src/chemclaw/core/chem.py::compound_id`, `src/chemclaw/ingest/eln/compound.py:85-92`.
@@ -198,23 +230,7 @@ topic).
       that a bump is "a permanent doubling" of `molecule_fingerprints`/`reaction_fingerprints`
       because the runtime role holds no `DELETE`.
 
-- [ ] **A bare guanidinium salt never reaches the neutralisation branch, so it does not collapse
-      onto its free base** — [M], `src/chemclaw/core/chem.py::_is_organic`. `standardize` reaches
-      `Uncharger` only when some fragment is `_is_organic`, which requires a carbon bonded to
-      hydrogen or to another carbon, and guanidinium's carbon has three nitrogen neighbours.
-      Measured: guanidine hydrochloride has `organic == 0`, returns before both the strip and the
-      neutralisation, and does not collapse — before the `std7`/`std8` work and after it. Metformin
-      and acetamidine are covered only because their substituents happen to make them organic by
-      that test, which is why the class-scope claim in
-      `tests/test_compound_identity.py::test_an_amine_salt_drawn_as_an_ion_pair_is_its_free_base`
-      has been narrowed to the shipped corpus. Nothing in `data/` contains a guanidine today, so
-      this is latent; widening `_is_organic` is the fix to weigh, and it moves every fragment-count
-      branch at once, so it needs the `standardize` behaviour table in
-      `test_the_standardization_version_is_pinned_to_the_behaviour_it_names` re-measured and almost
-      certainly a version bump.
-
-- [ ] **Three first-party refusal gates are still outside the weekly mutation backstop, and the
-      run's cost is still unmeasured** — [S], `pyproject.toml` `[tool.mutmut].source_paths`.
+- [ ] **Three first-party refusal gates are still outside the weekly mutation backstop** — [S], `pyproject.toml` `[tool.mutmut].source_paths`.
       `agent/spend_cap.py` joined it on 2026-09-22 (the smallest of the four by source length), which
       leaves `agent/plan_gate.py`, `agent/skill_backend.py` and `agent/loop_cap.py`. The original row
       asked for each addition's runtime to be measured first, on the ground that "the comment above it
@@ -248,27 +264,42 @@ topic).
       | `agent/spend_cap.py`'s own share | **29 mutants** — 0.8% of the run, ~18 s |
 
       So the row's premise is answered twice over. "The run is hours long" is 30 minutes, and the
-      addition it wanted priced costs **~18 seconds** of it; the three remaining gates are 333, 367 and
-      671 lines against `spend_cap.py`'s 309, so they are the same order. The per-module figure is the
+      addition it wanted priced costs **~18 seconds** of it; the three remaining gates are 671, 367 and
+      333 lines (`plan_gate.py`, `skill_backend.py`, `loop_cap.py`) against `spend_cap.py`'s 309, so
+      they are the same order. The per-module figure is the
       count of distinct `x_<function>__mutmut_<n>` symbols in the mutated copy of the file, which is a
       proxy for what mutmut scheduled rather than a reading of its own ledger.
 
-      **But the gate does not pass, and that is the finding to work next.** It scores
-      `killed / total` = 1612/3640 = **44.3%** against `MUTATION_SCORE_FLOOR: "72.0"`, so the weekly job
-      now fails on its kill rate where it used to fail on starting. The floor is not the problem and
-      neither is a sudden regression: `total` counts the 1009 mutants **no selected test reaches**, and
-      `pytest_add_cli_args_test_selection` is a hand-kept list — read it, do not count it here — never widened as
-      `source_paths` grew from the seven the floor was recorded against (74.7% and 76.8%, per
-      `mutants.yml`'s own comments) to fifteen. `agent/spend_cap.py` shipping with `tests/test_spend_cap.py`
-      outside the selection — fixed in the same commit as this row — was one instance of the pattern,
-      not the whole of it.
+      **The gate did not pass, and that half is now done.** It scored `killed / total` = 1612/3640
+      = **44.3%** against `MUTATION_SCORE_FLOOR: "72.0"` — not a regression: `total` counted the
+      1009 mutants **no selected test reaches**, because `pytest_add_cli_args_test_selection` is a
+      hand-kept list that was never widened as `source_paths` grew. Six test files were paired with
+      the modules they cover and the run repeated on 2026-09-22: **2260 killed of 3640 — 62.1%** —
+      with 866 survived, **446 reached by no selected test (12.3%)**, 68 timed out, 0 suspicious or
+      segfault, in **87 minutes at 0.70 mutations/second**. The floor is now 57.0 and there is a
+      second gate on the `no_tests` share at 16.0, both measured rather than chosen, and
+      `tests/test_mutation_workflow.py` pins the floor to the `source_paths` list, the test
+      selection and the two rate-moving knobs it was measured under — because a rate is only comparable while its population is, which is how 72.0 (825
+      mutants) outlived two widenings.
 
-      So the work is: pair every `source_paths` entry with the tests that exercise it, re-measure, and
-      then decide whether 72.0 is still the right floor for a fifteen-module list — with the remaining
-      three gates added once the denominator means something. A derived guard that fails when a declared
-      source path has no test file in the selection is the shape that stops this recurring. Anchors:
+      **The derived pairing guard the last version of this row asked for is disqualified by
+      measurement, and that is recorded here so nobody builds it.** The obvious rule — a declared
+      source path must have its module name or dotted path mentioned in some selected test file —
+      finds a hit for **all fifteen**, including `templates/resolve.py`, which had eight such
+      "hits" at 19% coverage. Mentioning a module is not covering it. What replaced it is the
+      `no_tests` ceiling above: the run's own answer to the same question, measured instead of
+      inferred.
+
+      **What is left is the three gates**, and adding them now costs two things rather than one:
+      the mutants themselves (`plan_gate.py` 671, `skill_backend.py` 367,
+      `loop_cap.py` 333, against `spend_cap.py`'s 309, so the same order as its ~18 s) *and* a
+      re-measurement
+      of the floor, because the population pin reds until the new list and the new number are
+      written together. Budget a 90-minute run for it, not a config edit; the job's own
+      `timeout-minutes` is 240 since 2026-09-22, raised because the first completed run was 87
+      minutes against a cap of 60. Anchors:
       `pyproject.toml` `[tool.mutmut]`, `.github/workflows/mutants.yml`,
-      `mutants/mutmut-cicd-stats.json`.
+      `tests/test_mutation_workflow.py`, `mutants/mutmut-cicd-stats.json`.
 
 - [ ] **`Chemclaw3_ui` has no surface for the four `/skills/mine` routes, the six `/skills/org`
       ones, or the proposal queue** — [M], opened by
@@ -458,40 +489,30 @@ topic).
   `_bounded_file`, `agent/tool_result_shape.py::rewritten_command_files`,
   `deepagents.backends.state.StateBackend`.
 
-- [ ] **The model-facing prose guards scan the in-process registry and four bundles, not the
-      surface** — [M], found 2026-09-15 in the round-two review.
-      `tests/test_prose_contract.py::test_no_tool_description_tells_the_model_about_a_tier_that_is_gone`
-      and `::test_no_tool_description_tells_the_model_to_expect_a_review_gate` read
-      `registered_tools()` plus `glob("connectors/*/server/tools.py")`. Three classes of text the
-      model is sent are outside that: the `description:` on the 14 `workflow:` job entries in the
-      connector manifests, which `src/chemclaw/connectors/jobs.py:226` assembles into a tool
-      docstring and its own comment calls "the job's model-facing documentation" — and which is
-      **all** of the `results` bundle, since it ships no `server/tools.py`; the bundle skills
-      (`connectors/*/skills/*/SKILL.md` — seven bundles ship one as of 2026-09-22: bo, calc,
-      kinetics, safety, suitability, thermalsafety, unitops, where this row named three); and
-      `agent/chemclaw_agent.py::_INSTRUCTION_BLOCKS`. Driven: every forbidden string at once in
-      `connectors/results/connector.yaml`'s job `description:` left both guards green.
+- [ ] **Prose the model is sent from modules other than `agent/chemclaw_agent.py` is outside the
+      prose guards** — [M], found 2026-09-22 reviewing
+      `D-2026-09-22-an-exemption-is-a-quote-not-a-file`, which widened
+      `tests/test_prose_contract.py`'s universe from two classes to six and said so. The six are
+      enumerable: a registry, an `ast` walk over `@server.tool()`, a manifest, a directory of
+      `SKILL.md`, two prompt-block tuples, `data/profiles/` and the template launchers. Prompt text
+      written as a string constant in an ordinary module is not — there is no decorator, no
+      manifest and no directory that says "this string is sent to a model".
 
-      **The universe and the patterns are one problem, not two, which is why this is a row rather
-      than a widening.** Shipped prose in those places names the removed tier and the removed gate
-      *in order to say they are gone* — `connectors/calc/connector.yaml:23` "there is no DFT tier",
-      `agent/chemclaw_agent.py:240` "never present one as if it were DFT",
-      `connectors/safety/skills/safety-screening/SKILL.md:77` "the PR gate … was deleted",
-      `skills/deep-research/SKILL.md:95` "propose the next point(s)" — so widening with today's
-      patterns reds on correct text. Both directions are already measurable: the review-gate
-      pattern also misses `a PR`/`PRs`, "awaits review", "staged behind the knowledge gate" and
-      "submits the finding to the review queue". The shape that works is probably sentence-level
-      with a negation/past-tense exclusion; measure the false-positive rate over the three classes
-      before building it, the way
-      `D-2026-09-11-the-debt-was-in-the-claims-not-in-the-code` measured 82.9% and declined.
+      **A live instance, driven**: `src/chemclaw/durable/hypothesis_tournament.py:546-557` builds a
+      prompt containing *"There is no DFT and no cluster here: if it needs one, it is 'physical'"* —
+      correct text of exactly the exempted kind, which is why widening to it needs a fourth
+      `_TRUE_ABOUT_WHAT_IS_GONE` entry and not just a loader. The same module's `_TEMPLATE_HINTS` is
+      a second. Fifteen modules under `src/chemclaw` hold prompt text (`verifier.py`, `condense.py`,
+      `plan_scope.py`, `compaction.py`, `skill_backend.py`, `api/runner.py` among them).
 
-      **This row is now the only live instance of its shape, which is worth saying because it is
-      not the whole shape.** "A guard satisfied while the thing it protects is false" was worked on
-      `tests/test_repo_map.py` and `tests/test_readiness_record.py` by
-      `D-2026-09-18-a-mutation-watched-failing-is-half-a-guard` — six mutations, all green over a
-      live false statement, all closed. None of that touches this row: what is open here is the
-      *universe* those two prose-contract guards read and the patterns they read it with, and no
-      derivation used there reaches it. A reader who takes the class as closed would skip this.
+      **The first question is how to find them, not how to scan them**, and it is the same question
+      `D-2026-09-15-a-capability-in-the-fleet-cannot-refute-a-denial-this-tree-declares-no-bundle-for`
+      answered for a different surface by making the declaration explicit. Candidates: a marker the
+      prompt constants carry (cheap, and only as good as whoever remembers it), or a derived rule
+      over what reaches a model call — which is what the arms of this guard would have to become.
+      Measure the false-positive rate over the found set before building either, the way the ADR
+      above did for the patterns. Anchors: `tests/test_prose_contract.py::_model_facing_descriptions`,
+      `src/chemclaw/durable/hypothesis_tournament.py`.
 
 - [ ] **An agent-recorded note the model could not date reaches no subscriber who has a
       watermark** — [M], found 2026-09-15 in the review of the wave 2/4/7 merge.

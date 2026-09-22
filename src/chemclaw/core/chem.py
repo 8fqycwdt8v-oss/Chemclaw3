@@ -64,8 +64,8 @@ only balances a charge (`_REACTIVE_METALS`); a **metal–carbon bond** is the re
 the same metals in an ionic salt have none (`_is_organometallic`); and a salt has **exactly one**
 organic fragment, while a solvate has two or more; and a real conjugate acid/base pair is one whose
 neutralization **adds** hydrogens rather than removing them. Sodium benzoate and LDA fail all four
-and still collapse. See `_is_organic` for why "organic" is a C–H/C–C test and not "contains a
-carbon".
+and still collapse. See `_is_organic` for why "organic" is a bond test — C–H, C–C, or a carbon
+holding two nitrogens — and not "contains a carbon".
 
 **What the fourth guard deliberately does not cover, stated because it is a decision and not an
 oversight** (`D-2026-09-09-a-map-number-is-not-a-molecule`). An alkali salt of an *organic*
@@ -163,7 +163,27 @@ from chemclaw.core.ids import stable_hash
 # documented re-sync. Third, the cost is at its minimum today: `std8` shipped hours ago in the
 # commit this fixes, so the generation being retired is the smallest one that will ever exist, and
 # it grows every day the decision is deferred.
-STANDARDIZATION_VERSION = "std9"
+#
+# `std9` -> `std10` because `_is_organic` was a C–H/C–C test and therefore called **urea**
+# inorganic (`D-2026-09-22-a-version-bump-costs-the-same-whenever-it-is-taken`). Guanidine,
+# thiourea, melamine, the cyanurates and the aminotetrazoles with it: their carbons hold nitrogens
+# and no hydrogen or carbon, so `standardize` returned before the strip and the neutralisation and
+# a bare guanidinium salt never collapsed onto its free base — while acetamidine and metformin
+# did, because their substituents happen to put a C–C bond elsewhere in the fragment. The widened
+# clause is a carbon with **three or more heavy neighbours, two of them nitrogen**; a
+# two-coordinate carbon is the linear family — cyanide, cyanate, thiocyanate, cyanamide — which
+# stays inorganic so its alkali salts stay distinct. `tests/test_compound_identity.py::
+# test_the_organic_line_is_where_the_version_says_it_is` is the drive, one row per species, and
+# `_STANDARDIZATION_AT_THIS_VERSION` pins what `standardize` then does.
+#
+# **The bump is not cheaper because the defect is latent, and the first draft of this paragraph
+# said it was.** A definition bump retires *every* row under the old definition, not the rows
+# whose standard form changed, because `STANDARDIZATION_VERSION` is a token in
+# `molecule_definition()` and `reaction_definition()` — so the cost is the same whenever it is
+# taken. What latency bounds is the damage of *not* taking it. The two together are still an
+# argument for now rather than later: the bill does not grow, and the population of rows keyed
+# under the wrong identity does.
+STANDARDIZATION_VERSION = "std10"
 
 # The d- and f-block by atomic number — Sc→Zn, Y→Cd, La→Hg (lanthanides included) and Ac onward.
 # A block rather than a hand-picked element list, because the property being asserted is a block
@@ -251,26 +271,52 @@ def _standardized(smiles: str) -> str | None:
 
 
 def _is_organic(fragment: Chem.Mol) -> bool:
-    """Whether a fragment is organic: does it hold a carbon bonded to hydrogen or to carbon?
+    """Whether a fragment holds a carbon bonded to hydrogen, to carbon, or to two nitrogens.
 
-    The C–H/C–C test rather than the obvious "does it contain a carbon", because the obvious one
-    calls carbonate and bicarbonate organic — and then `FragmentParent` keeps `[O-]C([O-])=O` as
-    the "parent" of K2CO3 and throws the potassium away, which is precisely how K2CO3, Cs2CO3,
-    Na2CO3 and NaHCO3 collapsed into one compound. Cyanide fails the test for the same reason and
-    equally correctly: NaCN and KCN are two reagents, not one.
+    The nitrogen clause carries a third condition — the carbon must have three or more heavy
+    neighbours — and that condition is the part a measurement decided; see below.
 
-    It is the classical organic/inorganic line (carbonates, cyanides, carbides and CO/CO2 are the
-    conventional carbon-containing exceptions), and it is deliberately a *structural* test rather
-    than an element list, so no table has to be kept in step with the reagents chemists write.
+    The C–H/C–C part is the test rather than the obvious "does it contain a carbon", because the
+    obvious one calls carbonate and bicarbonate organic — and then `FragmentParent` keeps
+    `[O-]C([O-])=O` as the "parent" of K2CO3 and throws the potassium away, which is precisely how
+    K2CO3, Cs2CO3, Na2CO3 and NaHCO3 collapsed into one compound. Cyanide fails it for the same
+    reason and equally correctly: NaCN and KCN are two reagents, not one.
+
+    **The third clause is there because C–H/C–C alone called urea inorganic**
+    (`D-2026-09-22-a-version-bump-costs-the-same-whenever-it-is-taken`). Guanidine's carbon has
+    three nitrogen neighbours and no hydrogen; urea's, thiourea's and melamine's have two
+    nitrogens and no carbon. So a bare guanidinium salt never reached the neutralisation branch
+    and did not collapse onto its free base, while acetamidine and metformin did — only because
+    their substituents happen to put a C–C bond somewhere else in the fragment. That is an
+    identity that turns on where the chemist drew a methyl.
+
+    **The clause reads the carbon's coordination as well as its nitrogens, and the coordination
+    is what keeps the cyanamides out.** Three heavy neighbours with two or more nitrogens is the
+    urea/guanidine/amidine family — planar or tetrahedral carbon, substituted. Two heavy
+    neighbours is the linear family: cyanide (`[C-]#N`), cyanate (`[N-]=C=O`), thiocyanate
+    (`[S-]C#N`), cyanamide (`N#CN`) and dicyanamide, which must stay inorganic so their alkali
+    salts stay distinct. Counting nitrogens alone was the first spelling and it swept the
+    cyanamides in: measured, `[Ca+2].[N-]=C=[N-]` then neutralised to the **carbodiimide**
+    tautomer while `[Na+].[NH-]C#N` gave the nitrile one, which `_TAUTOMERS.Canonicalize` does
+    not merge — so calcium cyanamide took the same `compound_id` as free HN=C=NH and a different
+    one from sodium cyanamide. Reading the degree costs nothing and never reaches that molecule.
+
+    It stays the classical organic/inorganic line (carbonates, cyanides and CO/CO2 are the
+    conventional carbon-containing exceptions, and urea has been the canonical organic compound
+    since 1828), and it stays a *structural* test rather than an element list, so no table has to
+    be kept in step with the reagents chemists write.
     """
-    return any(
-        atom.GetAtomicNum() == 6
-        and (
-            atom.GetTotalNumHs(includeNeighbors=True) > 0
-            or any(neighbor.GetAtomicNum() == 6 for neighbor in atom.GetNeighbors())
-        )
-        for atom in fragment.GetAtoms()
-    )
+    for atom in fragment.GetAtoms():
+        if atom.GetAtomicNum() != 6:
+            continue
+        if atom.GetTotalNumHs(includeNeighbors=True) > 0:
+            return True
+        neighbours = [neighbour.GetAtomicNum() for neighbour in atom.GetNeighbors()]
+        if 6 in neighbours:
+            return True
+        if len(neighbours) >= 3 and neighbours.count(7) >= 2:
+            return True
+    return False
 
 
 def _is_organometallic(mol: Chem.Mol) -> bool:

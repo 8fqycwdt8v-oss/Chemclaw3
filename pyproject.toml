@@ -581,8 +581,31 @@ also_copy = [
     "examples",
     "infra",
     "knowledge",
+    # The result-sink schema, added 2026-09-22 together with `tests/test_publish_end_to_end.py`
+    # below. **`also_copy` and the test selection are coupled, and nothing relates them**: that
+    # test reaches `cli/sink_schema.ddl`, which globs `schema/result-store/*.sql` from the
+    # repository root, so inside `mutants/` it raised `SystemExit: no schema files found` during
+    # the *stats* phase — the run refusing to start, the same class as the three blockers
+    # `D-2026-09-22-a-mutation-backstop-that-cannot-start` records. Widening the selection is
+    # therefore never only a selection edit: it is a question about what the added file reads,
+    # and `schema/` was the one root directory this list did not carry.
+    "schema",
     "skills",
     "tasks",
+    # The rest of the tracked root, added 2026-09-22 when the guard below stopped filtering files
+    # and dotfiles out. **The asymmetry is the whole argument**: copying a file no test reads costs
+    # the bytes, while missing one a selected test reads aborts the run in the stats phase with a
+    # message about that file and nothing about the copy. So the rule the guard enforces is "every
+    # tracked root entry", not "the ones somebody thinks are needed" — a judgement nobody can make
+    # ahead of the next test added to the selection.
+    ".dockerignore",
+    ".git-blame-ignore-revs",
+    ".gitignore",
+    ".pre-commit-config.yaml",
+    ".trivyignore.yaml",
+    "Jenkinsfile",
+    "LICENSE",
+    "SECURITY-REVIEW-2026-08-28.md",
 ]
 # The suite twice over is the honest budget here. A mutant that merely makes a test *slow* is not
 # killed by it, and the default multiplier declares a timeout a kill.
@@ -643,4 +666,17 @@ pytest_add_cli_args_test_selection = [
     "tests/test_note_visibility.py",
     "tests/test_store.py",
     "tests/test_postgres_store.py",
+    # **Six files paired with a `source_paths` entry that nothing in this list reached.** A mutant on
+    # a line no selected test executes is reported `no_tests`, and `total` counts it — which is why
+    # the first completed run scored 1612/3640 = 44.3% against a floor of 72.0 while **1009 mutants
+    # (27.7%) were reached by no test at all**. The list had never been widened as `source_paths`
+    # grew from the seven the floor was recorded against to fifteen.
+    #
+    # Each line is the measured lift on its own module, selection-alone against selection-plus-file:
+    "tests/test_fulltext.py",  # core/fulltext.py      44% -> 100%
+    "tests/test_quantities.py",  # core/quantities.py  69% ->  92%
+    "tests/test_logging.py",  # core/logging.py        62% ->  81%
+    "tests/test_templates.py",  # templates/resolve.py 19% ->  87%
+    "tests/test_publish_end_to_end.py",  # publish/outbox.py 31% -> 62%
+    "tests/test_compound_identity.py",  # core/chem.py  69% ->  84%
 ]
