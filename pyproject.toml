@@ -592,6 +592,20 @@ also_copy = [
     "schema",
     "skills",
     "tasks",
+    # The rest of the tracked root, added 2026-09-22 when the guard below stopped filtering files
+    # and dotfiles out. **The asymmetry is the whole argument**: copying a file no test reads costs
+    # the bytes, while missing one a selected test reads aborts the run in the stats phase with a
+    # message about that file and nothing about the copy. So the rule the guard enforces is "every
+    # tracked root entry", not "the ones somebody thinks are needed" — a judgement nobody can make
+    # ahead of the next test added to the selection.
+    ".dockerignore",
+    ".git-blame-ignore-revs",
+    ".gitignore",
+    ".pre-commit-config.yaml",
+    ".trivyignore.yaml",
+    "Jenkinsfile",
+    "LICENSE",
+    "SECURITY-REVIEW-2026-08-28.md",
 ]
 # The suite twice over is the honest budget here. A mutant that merely makes a test *slow* is not
 # killed by it, and the default multiplier declares a timeout a kill.

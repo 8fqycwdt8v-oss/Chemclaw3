@@ -221,10 +221,11 @@ def test_a_source_path_that_stopped_resolving_fails_the_gate(tmp_path: Path) -> 
 
     The rate on the survivors is *higher* than the recorded floor here — that is the trap. mutmut
     yields nothing for an entry that is neither a file nor a directory and says nothing about it,
-    so the only evidence left is the absent `.meta`.
+    so the only evidence left is the absent `.meta`. No floor value is named in this comment: the
+    one that was named went stale in the commit that moved the floor, two functions below.
     """
     dropped = "src/chemclaw/api/budget.py"
-    stats = dict(_HEALTHY, total=750, killed=580)  # 77.3%, comfortably above the 72.0 floor
+    stats = dict(_HEALTHY, total=750, killed=559)  # 74.5%, comfortably above the floor
     result = _run_gate(_gate_workspace(tmp_path, stats=stats, missing=dropped))
     assert result.returncode != 0, result.stdout
     assert dropped in result.stdout + result.stderr
@@ -265,24 +266,47 @@ def _effective_also_copy() -> list[str]:
     return list(json.loads(result.stdout.strip().splitlines()[-1]))
 
 
-def test_every_root_directory_is_either_copied_into_the_run_or_declared_absent() -> None:
-    """A directory the repository has and the mutation tree does not is a run that cannot start.
+def _tracked_root_entries() -> set[str]:
+    """Every top-level name git tracks — files and directories, dotfiles included.
 
-    Driven rather than read: the list comes from mutmut's own config loader, and the directories
-    come from the working tree, so adding either side without the other is what goes red. `schema`
-    is why this exists — `tests/test_publish_end_to_end.py` joined the selection, reached
-    `cli/sink_schema.ddl`, and globbed `schema/result-store/*.sql` inside a `mutants/` that had no
-    `schema/` at all.
+    From git rather than `iterdir()`, and both halves of that matter. `iterdir()` misses nothing
+    but *adds* whatever the working tree happens to hold: `.gitignore` already anticipates
+    `htmlcov/`, `build/`, `dist/`, `coverage`, `site`, `target/` and `venv/`, and any of them
+    present would red this guard for a directory no CI checkout has. Git also gives the dotfiles
+    and the root files, which `iterdir()` would have handed over and the first version of this
+    guard then filtered away — see the docstring below for why that mattered.
+    """
+    listed = subprocess.run(
+        ["git", "ls-tree", "--name-only", "HEAD"],
+        capture_output=True,
+        text=True,
+        cwd=_ROOT,
+        check=True,
+    )
+    return {name.strip() for name in listed.stdout.splitlines() if name.strip()}
+
+
+def test_every_tracked_root_entry_is_either_copied_into_the_run_or_declared_absent() -> None:
+    """A root entry the repository has and the mutation tree does not is a run that cannot start.
+
+    Driven rather than read: the copied set comes from mutmut's own config loader and the entries
+    come from git, so adding either side without the other is what goes red. `schema` is why this
+    exists — `tests/test_publish_end_to_end.py` joined the selection, reached `cli/sink_schema.ddl`,
+    and globbed `schema/result-store/*.sql` inside a `mutants/` that had no `schema/` at all.
+
+    **Files and dotfiles are in scope, and the first version of this guard filtered both out.**
+    Driven then: removing `Makefile`, `.env.example` or `.github` from `also_copy` left it green,
+    because it only looked at non-dot directories — and `tests/test_logging.py` and
+    `tests/test_audit.py`, one of them a file the same change added to the selection, both already
+    mention `.env.example`. The trigger case was itself a file glob that happened to bottom out in
+    a directory.
     """
     copied = {name.rstrip("/") for name in _effective_also_copy()}
-    roots = {
-        entry.name for entry in _ROOT.iterdir() if entry.is_dir() and not entry.name.startswith(".")
-    }
-    uncovered = sorted(roots - copied - set(_NOT_COPIED))
+    uncovered = sorted(_tracked_root_entries() - copied - set(_NOT_COPIED))
     assert not uncovered, (
-        f"root directories missing from [tool.mutmut] also_copy: {uncovered}. A test the run "
-        "selects that reads one of these fails the run before it scores anything. Add it to "
-        "`also_copy`, or to `_NOT_COPIED` here with the reason it must not be copied."
+        f"root entries missing from [tool.mutmut] also_copy: {uncovered}. A test the run selects "
+        "that reads one of these fails the run before it scores anything. Add it to `also_copy`, "
+        "or to `_NOT_COPIED` here with the reason it must not be copied."
     )
 
 
@@ -309,10 +333,18 @@ def test_a_selection_that_stopped_covering_a_module_fails_the_gate(tmp_path: Pat
     of 3,640 mutants were in that state and the rate read 44.3% — a number that looks like badly
     tested code and was a selection that named six test files too few.
     """
-    stats = dict(_HEALTHY, no_tests=200)  # 24.2% of 825, well over the recorded ceiling
+    # Categories must still sum to `total`, or the new accounting check fires first and says
+    # something true but different. Taken out of `killed`, which also puts the rate under the
+    # floor — deliberately, because that is what the real case looks like and the gate must now
+    # report *both*.
+    stats = dict(_HEALTHY, no_tests=200, killed=468)  # 24.2% of 825, well over the ceiling
     result = _run_gate(_gate_workspace(tmp_path, stats=stats, missing=None))
     assert result.returncode != 0, result.stdout
-    assert "no selected test" in result.stdout + result.stderr
+    reported = result.stdout + result.stderr
+    assert "no selected test" in reported
+    # Both, not the first one reached: the canonical failure trips the rate as well, and exiting
+    # on the rate alone is what would report the uninformative half.
+    assert "below the recorded floor" in reported, reported
 
 
 #: The `source_paths` the recorded floor was measured over, pinned beside it.
@@ -347,24 +379,79 @@ _THE_POPULATION_THE_FLOOR_WAS_MEASURED_OVER = (
 )
 
 
-def test_the_floor_is_pinned_to_the_population_it_was_measured_over() -> None:
-    """Changing which modules are mutated changes what the rate means; the floor must move with it.
+#: The test selection the recorded floor was measured over, pinned beside it.
+#:
+#: **This is the input that actually moved the number, and the first version of this pin left it
+#: out.** With `source_paths` byte-identical, pairing six test files with the modules they cover
+#: moved the rate 44.3% -> 62.1% and the no-test share 27.7% -> 12.3%. A pin on `source_paths`
+#: alone holds the lever that did not move and leaves the one that did unguarded; the `no_tests`
+#: ceiling is a backstop for it, but it is an 87-minute weekly one rather than a gate.
+_THE_SELECTION_THE_FLOOR_WAS_MEASURED_OVER = (
+    "tests/test_audit.py",
+    "tests/test_audit_store.py",
+    "tests/test_authz.py",
+    "tests/test_budget.py",
+    "tests/test_compound_identity.py",
+    "tests/test_concurrency_claims.py",
+    "tests/test_disconnect_teardown.py",
+    "tests/test_fulltext.py",
+    "tests/test_knowledge.py",
+    "tests/test_logging.py",
+    "tests/test_metrics_bridge.py",
+    "tests/test_note.py",
+    "tests/test_note_visibility.py",
+    "tests/test_postgres_store.py",
+    "tests/test_properties_core.py",
+    "tests/test_publish_end_to_end.py",
+    "tests/test_quantities.py",
+    "tests/test_relations.py",
+    "tests/test_runner.py",
+    "tests/test_spend_cap.py",
+    "tests/test_store.py",
+    "tests/test_templates.py",
+    "tests/test_tool_authz.py",
+)
 
-    Both directions, so neither edit can be made alone: the literal below is what was in
+#: The other two settings that move the rate without touching either list above.
+#:
+#: `timeout_multiplier` reclassifies mutants between `killed` and `timeout` — 68 of them on the
+#: measured run, 1.9 points of the rate — and the `only_mutate`/`do_not_mutate` filters change
+#: which mutants exist at all. Neither is a population in the sense the two tuples above are, so
+#: they are pinned as values rather than enumerated.
+_THE_KNOBS_THE_FLOOR_WAS_MEASURED_UNDER = {
+    "timeout_multiplier": 4.0,
+    "only_mutate": [],
+    "do_not_mutate": [],
+}
+
+
+def test_the_floor_is_pinned_to_the_population_it_was_measured_over() -> None:
+    """Changing what is mutated, or what runs against it, changes what the rate means.
+
+    Every direction, so no edit can be made alone: the literals above are what was in
     `pyproject.toml` when 62.1% was measured, and the floor in the workflow is what that
-    measurement produced.
+    measurement produced. Equality rather than a subset check, so a *removal* reds too.
     """
-    declared = tomllib.loads((_ROOT / "pyproject.toml").read_text())["tool"]["mutmut"][
-        "source_paths"
-    ]
-    assert sorted(declared) == sorted(_THE_POPULATION_THE_FLOOR_WAS_MEASURED_OVER), (
+    mutmut = tomllib.loads((_ROOT / "pyproject.toml").read_text())["tool"]["mutmut"]
+    assert sorted(mutmut["source_paths"]) == sorted(_THE_POPULATION_THE_FLOOR_WAS_MEASURED_OVER), (
         "[tool.mutmut].source_paths changed, so the kill rate is over a different population and "
         "the recorded floor in .github/workflows/mutants.yml is a number about the old one. "
         "Re-run `make mutants`, write the new floor and the new list together, and say in the "
         "commit message what the rate moved from and to"
     )
+    selection = mutmut["pytest_add_cli_args_test_selection"]
+    assert sorted(selection) == sorted(_THE_SELECTION_THE_FLOOR_WAS_MEASURED_OVER), (
+        "[tool.mutmut].pytest_add_cli_args_test_selection changed, which moves the kill rate "
+        "without changing a line of source: it decides which mutants any test reaches at all. "
+        "Re-run `make mutants` and write the new numbers beside the new list"
+    )
+    for knob, value in _THE_KNOBS_THE_FLOOR_WAS_MEASURED_UNDER.items():
+        assert mutmut.get(knob, value) == value, (
+            f"[tool.mutmut].{knob} changed, which moves the rate without changing a test. "
+            "Re-measure before trusting the recorded floor"
+        )
     gate = _steps()["Gate on the kill rate, on the coverage, and on the harness having worked"]
-    assert gate["env"]["MUTATION_SCORE_FLOOR"] == "59.0", (
+    assert gate["env"]["MUTATION_SCORE_FLOOR"] == "57.0", (
         "the recorded floor moved. Update the list above with it, or say beside the number which "
         "measurement it came from"
     )

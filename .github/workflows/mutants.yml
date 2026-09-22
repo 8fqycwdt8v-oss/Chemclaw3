@@ -28,7 +28,8 @@ on:
   schedule:
     - cron: "0 2 * * 1"
   # The run is expensive and its result is a report, so it is never attached to a push. Manual
-  # dispatch is how a branch that changes one of the seven modules gets checked before merge.
+  # dispatch is how a branch that changes one of the declared source paths gets checked before
+  # merge.
   workflow_dispatch:
 
 # `issues: write` is the notification, and it is here rather than left to GitHub's default because
@@ -43,21 +44,28 @@ permissions:
 jobs:
   mutants:
     runs-on: ubuntu-latest
-    # Measured 2026-08-27 on a 4-core sandbox against real Postgres: 825 mutants over the seven
-    # modules in **2m57s** warm, plus one full stats collection on a cold checkout (this job is
-    # always cold). mutmut parallelises over `os.cpu_count()` children and runs only the tests its
-    # stats say touch each mutant, so the cost tracks the seven modules rather than the suite. 60 is
-    # a large multiple of the measurement deliberately: the bound is here to stop a hung mutant
-    # holding a runner, not to police the duration.
-    timeout-minutes: 60
+    # **60 was below the run, and that is how a weekly job dies without saying so.** The 2026-08-27
+    # measurement behind it was 825 mutants in 2m57s warm over seven source paths; the list is
+    # fifteen now and the first run that ever completed took **87 minutes** (3,640 mutants at 0.70
+    # mutations/second, 2026-09-22, 4-core sandbox, real Postgres, cold). A job-level
+    # `timeout-minutes` *cancels* the job, every step below is guarded by `!cancelled()`, and the
+    # notification fired on `failure()` alone — so the cap would have produced no stats, no
+    # artifact, no gate and no issue. The notification step now also fires on cancellation, and the
+    # cap is a bound on a hung mutant rather than a budget for the run.
+    #
+    # 240 is deliberately a large multiple of 87 and not a forecast: mutmut parallelises over
+    # `os.cpu_count()`, and a shared runner's core count is not something this file can know.
+    timeout-minutes: 240
 
-    # **Real Postgres, and this is not copied from `ci.yml` for symmetry.** Six of the eighteen
-    # files in `pytest_add_cli_args_test_selection` gate on `tests/pg.py::migrated_db_or_skip` —
-    # `test_store.py`, `test_postgres_store.py`, `test_audit_store.py`, `test_note_proposals.py`,
-    # `test_concurrency_claims.py`, `test_pr_gate_read_window.py`. Without a database they skip and
-    # still report green, so every mutant in `science/calc/store.py` and `agent/audit_store.py`
-    # would be scored SURVIVED for a reason that has nothing to do with the mutation. That is worse
-    # than not running: it manufactures survivors in exactly the two modules this job exists for.
+    # **Real Postgres, and this is not copied from `ci.yml` for symmetry.** Several files in
+    # `pytest_add_cli_args_test_selection` gate on `tests/pg.py::migrated_db_or_skip`; derive the
+    # set rather than reading it here, because the list this paragraph used to give named two files
+    # that do not exist (`test_note_proposals.py`, `test_pr_gate_read_window.py`) and one that does
+    # not gate, and `tests/test_docstring_paths.py` cannot catch a bare filename with no directory
+    # segment. Without a database those files skip and still report green, so every mutant in
+    # `science/calc/store.py` and `agent/audit_store.py` would be scored SURVIVED for a reason that
+    # has nothing to do with the mutation. That is worse than not running: it manufactures
+    # survivors in exactly the two modules this job exists for.
     services:
       postgres:
         image: pgvector/pgvector:pg16
@@ -133,9 +141,9 @@ jobs:
       # two test files the selection did not name — so acting on one before re-running it against
       # the whole suite produces tests for behaviour already pinned. Running this checkout twice on
       # 2026-08-27 added a second leg: 171 survivors then 155, same commit, same configuration, so a
-      # survivor is not even a stable observation. And the standing state is 34 `no_tests` and 2
+      # survivor is not even a stable observation. The state *then* was 34 `no_tests` and 2
       # timeouts both times, with seventeen of the survivors already adjudicated equivalent or
-      # harmless. A gate on any of those at zero would be red the day it merged, which is how a
+      # harmless; at fifteen source paths it is 446 and 68. A gate on any of those at zero would be red the day it merged, which is how a
       # weekly job stops being read.
       #
       # So the gates are the **kill rate against a recorded floor** and the **`no_tests` share
@@ -160,13 +168,16 @@ jobs:
       # cannot see *which* mutants are in `total`: mutmut's `walk_all_files` falls through to
       # `walk(path)` for a `source_paths` entry that is neither a file nor a directory, which
       # yields nothing — no warning, no error, and `_load_config` never stats the paths. So a
-      # module moved without `pyproject.toml` following it is scored on six modules instead of
-      # seven, and the rate usually goes *up*, because the aggregate loses a below-average module.
-      # Measured over run 1's per-module counts, dropping any one of the seven leaves a rate above
-      # this floor, and five of the seven leave it *above the baseline* — so no floor on the rate
-      # can catch this, and a floor on the count would move whenever a module legitimately grows.
-      # What is checked instead is coverage: every declared source path must have left results
-      # behind, named one by one.
+      # module moved without `pyproject.toml` following it is scored on one module fewer than it
+      # declares, and the rate usually goes *up*, because the aggregate loses a below-average
+      # module.
+      # Measured 2026-08-27 over that run's per-module counts, when the list was seven: dropping
+      # any one of them left a rate above the floor, and five of the seven left it *above the
+      # baseline* — so no floor on the rate catches this, while a floor on the count would move
+      # whenever a module legitimately grows. That measurement is over a population this config no
+      # longer has and has not been repeated at fifteen paths; it is the reason the coverage check
+      # exists and not evidence about today's numbers. What is checked is coverage: every declared
+      # source path must have left results behind, named one by one.
       - name: Gate on the kill rate, on the coverage, and on the harness having worked
         if: ${{ !cancelled() }}
         env:
@@ -181,19 +192,30 @@ jobs:
           # config had fallen short of; it was a number about a different set of modules, and the
           # first completed run would have failed on it.
           #
-          # 59.0 is one and a half of the recorded spread below that observation, read
-          # proportionally (1.5 × 1.9 ≈ 2.9), which is the same margin rule the 72.0 comment
-          # applied and the reason it is not set at the observation. It rests on **one**
-          # observation of this population, not two: the variance here has never been measured,
-          # because until this week no run finished. The weekly artifacts are what will build that
-          # distribution, and this number is to be raised against it rather than left alone.
+          # **57.0 is 5.1 points below that observation, and the margin is stated as the absolute
+          # number it is.** An earlier draft of this comment said "one and a half of the recorded
+          # spread, read proportionally (1.5 × 1.9 ≈ 2.9)" and then wrote 59.0, which is neither:
+          # the proportional reading gives 59.7 and the absolute one 59.25. Two methods named,
+          # a third number written. Restated: this rests on **one** observation of this
+          # population, the variance of which has never been measured because until this week no
+          # run here finished, and it will run on a shared runner whose core count this file
+          # cannot know. So the margin is set wide deliberately and raised from the weekly
+          # artifacts, which is the direction the 72.0 comment asked for and never got.
+          #
+          # The largest movable term is the **timeout** count: 68 of 3,640, worth 1.9 points of
+          # the rate on its own, against 2 of 825 in 2026-08-27's run. It is not a *uniform*-speed
+          # risk — mutmut's per-mutant wall limit is `(estimated_time_of_tests + timeout_constant)
+          # × timeout_multiplier`, and `estimated_time_of_tests` is measured in the same run's own
+          # clean-test phase, so a slower machine scales the budget with the test — but it is a
+          # variance risk, and a shared runner has more of it than a sandbox. Five points covers
+          # roughly a tripling of that term with nothing else moving.
           #
           # What moved the rate is worth recording beside the number. At the config this workflow
           # ran on before 2026-09-22 the same 3,640 mutants scored **1,612 killed — 44.3%** —
           # with 1,009 `no_tests`. Pairing the test selection with the modules it claims to cover
           # moved it to 62.1% and cut `no_tests` from 27.7% to 12.3%. Nothing about the code
           # changed; the backstop had simply not been asked to run the tests that cover it.
-          MUTATION_SCORE_FLOOR: "59.0"
+          MUTATION_SCORE_FLOOR: "57.0"
           # Measured on the same run: 446 of 3,640, **12.3%**. A mutant nothing reaches is not a
           # survivor — it is a hole in the *selection*, and it is the number the widening above
           # was aimed at, so it is the one to hold. The ceiling is set with headroom rather than
@@ -222,6 +244,17 @@ jobs:
                   f"over a smaller set of modules than it claims: {unmutated}"
               )
 
+          # Every category this gate reads, by name, so a schema change is a sentence rather than a
+          # `KeyError` traceback under an issue body that offers three other explanations. mutmut
+          # 3.7's `save_cicd_stats` writes all of these; a future version that stops is a thing to
+          # be told about.
+          missing = [k for k in ("killed", "survived", "total", "no_tests", "timeout") if k not in stats]
+          if missing:
+              sys.exit(
+                  f"mutants/mutmut-cicd-stats.json has no {missing}. mutmut's stats schema changed "
+                  "under this gate; re-read `save_cicd_stats` before trusting any number above."
+              )
+
           broken = {k: stats.get(k, 0) for k in ("suspicious", "segfault") if stats.get(k, 0)}
           if broken:
               sys.exit(f"the mutation harness itself reported {broken}; the counts above mean nothing")
@@ -229,30 +262,52 @@ jobs:
           total = stats["total"]
           if not total:
               sys.exit("the run scored no mutants at all")
+
+          # `total` is mutmut's sum over *every* status, including two it never exports:
+          # `not_checked` and `caught_by_type_check`. So a run killed part-way through reports a
+          # large invisible remainder, the kill rate collapses, and the floor below would diagnose
+          # it as badly tested code. Anything unaccounted for is the harness, not the tests.
+          accounted = sum(
+              stats.get(k, 0)
+              for k in ("killed", "survived", "no_tests", "timeout", "skipped", "suspicious", "segfault")
+          )
+          if accounted != total:
+              sys.exit(
+                  f"{total - accounted} of {total} mutants are in a category the stats file does "
+                  "not name (mutmut counts `not_checked` and `caught_by_type_check` in `total` and "
+                  "exports neither), so the run did not finish and the rate below is not a score."
+              )
+
           score = 100.0 * stats["killed"] / total
           floor = float(os.environ["MUTATION_SCORE_FLOOR"])
-          print(
-              f"kill rate {score:.1f}% ({stats['killed']}/{total}); floor {floor:.1f}%. "
-              f"{stats['survived']} survived, {stats['no_tests']} reached by no selected test, "
-              f"{stats['timeout']} timed out — published, not gated."
-          )
-          if score < floor:
-              sys.exit(f"kill rate {score:.1f}% is below the recorded floor of {floor:.1f}%")
-
-          # The second gate, and it is on the selection rather than on the tests. `no_tests` means
-          # mutmut reached the mutant with nothing that exercises it; the kill rate cannot see it,
-          # because such a mutant is neither killed nor survived-under-test — it inflates `total`
-          # and depresses the rate without saying why.
+          # `no_tests` is the second gate and it is on the *selection* rather than on the tests: a
+          # mutant nothing exercises is neither killed nor survived-under-test, so it inflates
+          # `total` and depresses the rate without saying why. Both are computed and printed before
+          # either exits, because the canonical failure — a module joining `source_paths` without
+          # its tests joining the selection — fails *both*, and exiting on the rate first would
+          # report the uninformative one. Driven: the pre-widening run (1612/3640 killed, 1009
+          # no_tests) is exactly that case.
           uncovered = 100.0 * stats["no_tests"] / total
           ceiling = float(os.environ["MUTATION_NO_TESTS_CEILING"])
-          print(f"no-test share {uncovered:.1f}% ({stats['no_tests']}/{total}); ceiling {ceiling:.1f}%.")
+          print(
+              f"kill rate {score:.1f}% ({stats['killed']}/{total}); floor {floor:.1f}%. "
+              f"no-test share {uncovered:.1f}% ({stats['no_tests']}/{total}); ceiling {ceiling:.1f}%. "
+              f"{stats['survived']} survived, {stats['timeout']} timed out — published, not gated."
+          )
+          failures = []
           if uncovered > ceiling:
-              sys.exit(
+              failures.append(
                   f"{uncovered:.1f}% of mutants were reached by no selected test, above the "
                   f"recorded ceiling of {ceiling:.1f}%. That is a gap in "
                   "[tool.mutmut].pytest_add_cli_args_test_selection, not in the tests: a module "
                   "joined source_paths without the tests that cover it joining the selection."
               )
+          if score < floor:
+              failures.append(
+                  f"kill rate {score:.1f}% is below the recorded floor of {floor:.1f}%"
+              )
+          if failures:
+              sys.exit("\n".join(failures))
           PY
 
       # The half that makes the schedule worth having. Deduplicated on the label, so a failure that
@@ -267,20 +322,29 @@ jobs:
       # idempotent, so it is not a failure to swallow, and swallowing one is how this step would
       # go quiet again. Repository settings are not in this checkout, so the workflow carrying its
       # own label is the only form of this that a reviewer can see.
+      #
+      # **And it fires on cancellation as well as failure**, because a job-level `timeout-minutes`
+      # *cancels* the job: every step above is guarded by `!cancelled()`, so a run that outlasts
+      # the cap produces no stats, no artifact and no gate, and `failure()` alone is false — the
+      # exact shape this step exists to prevent, one level up. The cap was 60 minutes against an
+      # 87-minute run until 2026-09-22, so this was not hypothetical. The cost is that a human
+      # cancelling a manual dispatch also files one; that is the cheap side of the trade, and the
+      # body says which case it was.
       - name: File an issue when the run reports something
-        if: ${{ failure() }}
+        if: ${{ failure() || cancelled() }}
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          OUTCOME: ${{ cancelled() && 'cancelled — the job hit its timeout or was stopped' || 'failed' }}
         run: |
           gh label create mutation-testing --force \
             --color ededed --description "the weekly mutants workflow reported something"
           existing=$(gh issue list --label mutation-testing --state open --limit 1 --json number --jq '.[0].number')
           if [ -n "$existing" ]; then
-            gh issue comment "$existing" --body "Weekly mutation run failed again: $RUN_URL"
+            gh issue comment "$existing" --body "Weekly mutation run reported again (\`$OUTCOME\`): $RUN_URL"
           else
             gh issue create \
               --title "Weekly mutation run needs attention" \
               --label mutation-testing \
-              --body "The scheduled \`mutants\` workflow failed: the kill rate fell below the floor recorded in \`.github/workflows/mutants.yml\`, the harness reported a \`suspicious\` or \`segfault\` mutant, or the run died outright. Counts and the full non-killed list are in the run's summary and its \`mutation-report\` artifact: $RUN_URL — see \`D-2026-08-27-a-survivor-is-not-a-failing-build\` for what each category means. A **survivor** alone does not fail this job: re-apply one to the real source and run the whole suite before treating it as a finding."
+              --body "The scheduled \`mutants\` workflow failed: the kill rate fell below the floor recorded in \`.github/workflows/mutants.yml\`, the `no_tests` share rose above its ceiling, the harness reported a \`suspicious\` or \`segfault\` mutant, the stats file lost a category this gate reads, or the run was **cancelled** — which is what a job-level timeout looks like, and which produces no stats and no artifact at all. This run: \`$OUTCOME\`. Counts and the full non-killed list are in the run's summary and its \`mutation-report\` artifact: $RUN_URL — see \`D-2026-08-27-a-survivor-is-not-a-failing-build\` for what each category means. A **survivor** alone does not fail this job: re-apply one to the real source and run the whole suite before treating it as a finding."
           fi

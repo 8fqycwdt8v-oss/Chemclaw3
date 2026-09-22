@@ -264,8 +264,9 @@ topic).
       | `agent/spend_cap.py`'s own share | **29 mutants** — 0.8% of the run, ~18 s |
 
       So the row's premise is answered twice over. "The run is hours long" is 30 minutes, and the
-      addition it wanted priced costs **~18 seconds** of it; the three remaining gates are 333, 367 and
-      671 lines against `spend_cap.py`'s 309, so they are the same order. The per-module figure is the
+      addition it wanted priced costs **~18 seconds** of it; the three remaining gates are 671, 367 and
+      333 lines (`plan_gate.py`, `skill_backend.py`, `loop_cap.py`) against `spend_cap.py`'s 309, so
+      they are the same order. The per-module figure is the
       count of distinct `x_<function>__mutmut_<n>` symbols in the mutated copy of the file, which is a
       proxy for what mutmut scheduled rather than a reading of its own ledger.
 
@@ -275,10 +276,10 @@ topic).
       hand-kept list that was never widened as `source_paths` grew. Six test files were paired with
       the modules they cover and the run repeated on 2026-09-22: **2260 killed of 3640 — 62.1%** —
       with 866 survived, **446 reached by no selected test (12.3%)**, 68 timed out, 0 suspicious or
-      segfault, in **87 minutes at 0.70 mutations/second**. The floor is now 59.0 and there is a
+      segfault, in **87 minutes at 0.70 mutations/second**. The floor is now 57.0 and there is a
       second gate on the `no_tests` share at 16.0, both measured rather than chosen, and
-      `tests/test_mutation_workflow.py` pins the floor to the `source_paths` list it was measured
-      over — because a rate is only comparable while its population is, which is how 72.0 (825
+      `tests/test_mutation_workflow.py` pins the floor to the `source_paths` list, the test
+      selection and the two rate-moving knobs it was measured under — because a rate is only comparable while its population is, which is how 72.0 (825
       mutants) outlived two widenings.
 
       **The derived pairing guard the last version of this row asked for is disqualified by
@@ -290,10 +291,13 @@ topic).
       inferred.
 
       **What is left is the three gates**, and adding them now costs two things rather than one:
-      the mutants themselves (`plan_gate.py`, `skill_backend.py` and `loop_cap.py` are 333, 367 and
-      671 lines against `spend_cap.py`'s 309, so the same order as its ~18 s) *and* a re-measurement
+      the mutants themselves (`plan_gate.py` 671, `skill_backend.py` 367,
+      `loop_cap.py` 333, against `spend_cap.py`'s 309, so the same order as its ~18 s) *and* a
+      re-measurement
       of the floor, because the population pin reds until the new list and the new number are
-      written together. Budget an 90-minute run for it, not a config edit. Anchors:
+      written together. Budget a 90-minute run for it, not a config edit; the job's own
+      `timeout-minutes` is 240 since 2026-09-22, raised because the first completed run was 87
+      minutes against a cap of 60. Anchors:
       `pyproject.toml` `[tool.mutmut]`, `.github/workflows/mutants.yml`,
       `tests/test_mutation_workflow.py`, `mutants/mutmut-cicd-stats.json`.
 
