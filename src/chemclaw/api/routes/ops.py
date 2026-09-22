@@ -177,6 +177,15 @@ async def _probe_database(front: FrontDoorState) -> bool:
     `_try_cancel` (which dials the same frozen server), and then re-waits on the socket with no
     timeout of its own.
 
+    **That cancel has since gained a deadline and the leg is still unbounded**, said here because
+    the version number reads like a fix. psycopg 3.3 added `AsyncConnection.cancel_safe(timeout=)`
+    and `_try_cancel` now delegates to it with `timeout=5.0` — but it is the *re-wait* after it
+    that has no bound. Re-driven on 3.3.4 against a paused Postgres: an in-flight `SELECT 1` on an
+    already-checked-out connection, under a 2 s `asyncio.wait_for`, did not return within 120 s.
+    The same drive through `core/db.py::connection` returns at its budget, 4 of 4, because a pool
+    checkout that has to open a connection hangs in the *connect* leg instead — which this wrapper
+    has always bounded, and which is the measurement that would wrongly close the `BACKLOG.md` row.
+
     What bounds it in a deployment is the kubelet, not this function: the chart derives
     `readinessProbe.timeoutSeconds` from this setting plus the connector budget plus a margin — 5 s
     on the shipped values, `failureThreshold: 3` — so a 7.6 s answer is a failed probe whatever it
