@@ -5,6 +5,7 @@ import os
 import pathlib
 import re
 import socket
+import subprocess
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -1496,3 +1497,125 @@ def test_a_loopback_name_does_not_seed_the_resolved_ip_allowlist() -> None:
         netguard._resolved_ips.clear()
         netguard._resolved_ips.update(saved)
         netguard._reset_for_tests(netguard.derive_allowed(settings))
+
+
+# --- the git note remote, the one destination that is a *name* rather than a field --------------
+
+
+def _clone_with_remote(tmp_path: Path, url: str, *, name: str = "origin") -> str:
+    """A real checkout with a real remote, so the resolution is driven rather than mocked."""
+    repo = tmp_path / "notes"
+    repo.mkdir()
+    for args in (["init", "-q"], ["remote", "add", name, url]):
+        subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
+    return str(repo)
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://git.example.com/org/notes.git", "git.example.com"),
+        ("git@git.example.com:org/notes.git", "git.example.com"),
+        ("ssh://git@git.example.com:2222/org/notes.git", "git.example.com"),
+        ("https://GIT.EXAMPLE.COM/org/notes.git", "git.example.com"),
+        # Every spelling of "nowhere off this box". `_host_from_url` reads `../notes` as the host
+        # `..`, which is why the path forms are refused before it rather than after.
+        ("/srv/notes.git", None),
+        ("file:///srv/notes.git", None),
+        ("../notes", None),
+        ("~/notes", None),
+        ("notes", None),
+    ],
+)
+def test_the_git_note_remote_resolves_to_the_host_it_would_push_to(
+    tmp_path: Path, url: str, expected: str | None
+) -> None:
+    """Driven against real `git remote add`, because the scp-like form is the one that surprises.
+
+    `git@host:path` has no scheme, so anything reading it as a URL sees no host unless it is asked
+    the right way; `/srv/notes.git` and `../notes` have no host at all and must not contribute one.
+    """
+    netguard._git_remote_host.cache_clear()
+    assert netguard._git_remote_host(_clone_with_remote(tmp_path, url), "origin") == expected
+
+
+def test_a_deployment_that_left_note_repo_dir_at_its_default_derives_no_git_host(
+    tmp_path: Path,
+) -> None:
+    """The dev checkout must not put the *source* repository's host on the allowlist.
+
+    At `"."` the writer refuses the write before it can push — `git_writer` commits into the
+    running application's own tree and would push to the source repository — so there is no
+    destination to allow, and deriving one would widen every dev checkout for a push that cannot
+    happen. Asserted against a real remote, so this is the `"."` guard and not a missing repo.
+    """
+    netguard._git_remote_host.cache_clear()
+    real = _clone_with_remote(tmp_path, "https://git.example.com/org/notes.git")
+    assert netguard._git_remote_host(real, "origin") == "git.example.com", "fixture sanity"
+    assert netguard._git_remote_host(".", "origin") is None
+    assert netguard._git_remote_host("", "origin") is None
+    assert netguard._git_remote_host(real, "") is None
+
+
+def test_an_unresolvable_remote_contributes_nothing_rather_than_failing(tmp_path: Path) -> None:
+    """Absent beats wrong: a deployment can still name the host in `egress_allow`.
+
+    Three ways to have no answer — a directory that is not a checkout, a checkout with no such
+    remote, and a remote whose name would otherwise read as a flag. None of them may raise, because
+    `derive_allowed` runs at arm time in every process and a raise there is a crashloop.
+    """
+    netguard._git_remote_host.cache_clear()
+    plain = tmp_path / "not-a-checkout"
+    plain.mkdir()
+    assert netguard._git_remote_host(str(plain), "origin") is None
+    assert netguard._git_remote_host(str(tmp_path / "does-not-exist"), "origin") is None
+    repo = _clone_with_remote(tmp_path, "https://git.example.com/org/notes.git", name="upstream")
+    assert netguard._git_remote_host(repo, "origin") is None
+    assert netguard._git_remote_host(repo, "upstream") == "git.example.com"
+    assert netguard._git_remote_host(repo, "--upload-pack=touch /tmp/pwned") is None
+
+
+def test_the_derived_allowlist_carries_the_git_note_remote(tmp_path: Path) -> None:
+    """End to end: the host reaches `derive_allowed`, which is what both guard layers arm from.
+
+    The compiled `LD_PRELOAD` layer reads this same set through `cli/egress_preload.py`, so a host
+    added anywhere else would be permitted by one layer and refused by the other.
+    """
+    netguard._git_remote_host.cache_clear()
+
+    class _S:
+        llm_base_url = "https://llm.internal.example:8000/v1"
+        llm_fallback_base_url = ""
+        postgres_dsn = "postgresql://u:p@pg.internal:5432/db"
+        temporal_address = "temporal.internal:7233"
+        calc_server_url = ""
+        rxnlabel_server_url = ""
+        connector_urls: dict[str, str] = {}
+        egress_allow = ""
+        note_repo_dir = _clone_with_remote(tmp_path, "git@notes.example.com:org/knowledge.git")
+        git_remote = "origin"
+
+    assert "notes.example.com" in netguard.derive_allowed(_S())
+
+
+def test_the_git_remote_is_a_destination_no_field_suffix_would_have_found() -> None:
+    """Why this needed its own derivation, pinned so the reason cannot be forgotten.
+
+    `test_every_destination_field_is_derived_or_declared` walks `Settings` for names ending in
+    `_url`, `_endpoint`, `_address` or `_dsn` — the shape every other destination takes.
+    `git_remote` ends in none of them, and its *value* is `"origin"`, so neither the field's name
+    nor its contents name a host. That is the whole reason the git push was the last unbounded
+    dial after the compiled layer armed, and the reason no suffix rule can be widened to catch it.
+    """
+    from chemclaw.core.config import settings as live
+
+    assert hasattr(live, "git_remote"), "the field this test is about has been renamed"
+    assert not _DESTINATION_FIELD.search("git_remote")
+    assert _host_from_url_is_useless_on(live.git_remote), (
+        "git_remote now looks like a destination; if it holds a URL, derive it like the others"
+    )
+
+
+def _host_from_url_is_useless_on(value: str) -> bool:
+    """Whether the setting's own value names no host, which is the premise of the test above."""
+    return "://" not in value and ":" not in value

@@ -124,7 +124,9 @@ from __future__ import annotations
 import logging
 import os
 import socket
+import subprocess
 from collections.abc import Iterable
+from functools import lru_cache
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -268,6 +270,66 @@ def _host_from_dsn(dsn: str) -> str | None:
     return None
 
 
+#: How long `git remote get-url` may take. It reads `.git/config` and opens no socket, so this is a
+#: bound on a wedged filesystem rather than on the network; a process that cannot answer it in five
+#: seconds has a problem this allowlist is not going to fix.
+_GIT_REMOTE_TIMEOUT_SECONDS = 5.0
+
+
+@lru_cache(maxsize=8)
+def _git_remote_host(repo_dir: str, remote: str) -> str | None:
+    """The host `kg/git_writer.py` would push notes to, or `None` if it would push nowhere.
+
+    **This is the one destination that is not on the settings object.** `git_remote` is the string
+    `"origin"` — a name, resolved inside the checkout — so every other entry in `derive_allowed`
+    can be read off a field and this one cannot. It went from unbounded to bounded when
+    `D-2026-09-12-the-layer-that-binds-grpc-is-libc-not-socket-py` armed the compiled layer: a
+    child process inherits `LD_PRELOAD`, so `git push` is now refused like any other dial, and a
+    deployment that pushes notes off-box had to name its git host in `egress_allow` by hand.
+
+    **Resolved here rather than in `cli/egress_preload.py`**, although that is where the subprocess
+    would be cheapest. The two layers arm from *one* derivation — the compiled guard reads what
+    this function returns and the in-process guard patches `socket` with it — and a host added on
+    one side only would be a destination one layer refuses and the other permits, which is the
+    defect this family keeps finding.
+
+    **Only when a deployment has moved `note_repo_dir` off its default.** At `"."` the writer
+    refuses the write before it can push (`git_writer._require_dedicated_checkout`: committing into
+    the running application's own tree and pushing to the source repository), so there is no
+    destination to allow — and deriving one anyway would put the *source* repository's host on the
+    allowlist of every dev checkout, which is a widening for a push that cannot happen. A single
+    comparison rather than importing that predicate, because `core/` may not import `kg/`.
+
+    A local-path remote is not a destination and returns `None`; so does any failure — no git, no
+    checkout, no such remote. That direction is deliberate: an absent entry refuses a push that a
+    deployment can still name in `egress_allow`, while a wrong entry opens a host nobody declared.
+    """
+    if not repo_dir or repo_dir == "." or not remote:
+        return None
+    try:
+        # A fixed argv, no shell, and `--` before the remote name so a remote called `-x` is a
+        # remote and not a flag.
+        found = subprocess.run(
+            ["git", "-C", repo_dir, "remote", "get-url", "--", remote],
+            capture_output=True,
+            text=True,
+            timeout=_GIT_REMOTE_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if found.returncode != 0:
+        return None
+    url = found.stdout.strip()
+    # A path is not a destination. `_host_from_url` reads `../notes` as the host `..`, which would
+    # put a nonsense entry on the allowlist, and `file://` and an absolute path have no host at all.
+    if not url or url.startswith(("file://", "/", ".", "~")):
+        return None
+    if "://" not in url and ":" not in url:
+        return None  # a bare relative path, e.g. `notes`
+    return _host_from_url(url)
+
+
 def derive_allowed(settings: Any) -> frozenset[str]:
     """Build the allowlist from the destinations this deployment actually dials.
 
@@ -356,6 +418,15 @@ def derive_allowed(settings: Any) -> frozenset[str]:
         add(os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT"))
     if getattr(settings, "vector_store_provider", "pgvector") != "pgvector":
         add(settings.vector_store_url)
+    # The git note remote, which is a *name* on this object rather than a destination — see
+    # `_git_remote_host` for why it is resolved here and not in the entrypoint that runs the
+    # subprocess for the compiled layer.
+    remote_host = _git_remote_host(
+        str(getattr(settings, "note_repo_dir", "") or ""),
+        str(getattr(settings, "git_remote", "") or ""),
+    )
+    if remote_host:
+        hosts.add(remote_host)
     for extra in (settings.egress_allow or "").split(","):
         host = extra.strip().lower()
         if host:
@@ -741,3 +812,4 @@ def _reset_for_tests(allowed: Iterable[str] = ()) -> None:
     """
     global _allowed
     _allowed = frozenset(allowed)
+    _git_remote_host.cache_clear()

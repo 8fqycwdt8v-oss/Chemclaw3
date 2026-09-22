@@ -101,24 +101,25 @@ topic).
   actually holds before choosing a number: a ceiling set from the SDK's default is the same
   unexamined posture this row is about, one value further on.
 
-- [ ] **The `git` remote is now a destination a deployment must declare, and nothing derives it** —
-  [S], what is left of "the egress guard is blind to gRPC and to Temporal" after
+- [ ] **The IPv4-mapped arm of the compiled egress guard is unmeasured here** — [S], the last of
+  "the egress guard is blind to gRPC and to Temporal" after
   `D-2026-09-12-the-layer-that-binds-grpc-is-libc-not-socket-py`. The blindness
   itself is closed: `core/netguard_preload.c` interposes libc's `connect`, `getaddrinfo`, `sendto`
   and `sendmsg` through `LD_PRELOAD`, armed by `deploy/entrypoint.sh` from the allowlist
   `netguard.derive_allowed` returns, and driven against a real gRPC server over a non-loopback route
   it refuses the plain socket, `grpc` and `temporalio` alike — grpc's own C-core reporting
   `connect failed: ... Operation not permitted` — while loopback and an allowlisted address continue
-  to work. Two things remain:
-  - **`git` is now bounded and nothing derives its host.** A child inherits `LD_PRELOAD`, so
-    `kg/git_writer.py`'s `git push` is refused unless the remote is named in
-    `CHEMCLAW_EGRESS_ALLOW` — the first time that destination has been bounded at all, and a
-    behaviour change for any deployment pushing notes off-box. `git_remote` is the string `"origin"`,
-    so resolving it means `git remote get-url` in a subprocess; the entrypoint already runs one
-    interpreter to derive the allowlist and is the one place that could afford it.
-  - **The IPv4-mapped arm is unmeasured on hosts without `AF_INET6`**, which includes this sandbox:
-    `test_an_ipv4_mapped_address_is_not_a_way_around_the_check` skips with the reason in the message.
-  Anchors: `core/netguard_preload.c`, `core/netguard_preload.py`, `deploy/entrypoint.sh`,
+  to work. **The git half is closed** by
+  `D-2026-09-22-a-destination-that-is-a-name-is-still-a-destination`: `netguard.derive_allowed`
+  resolves `git remote get-url` inside the note checkout, so both guard layers arm with the host,
+  and it does so only once `note_repo_dir` has moved off its default.
+
+  **What is left is one arm nobody here can drive.** `test_an_ipv4_mapped_address_is_not_a_way_around_the_check`
+  skips on a host without `AF_INET6`, which includes this sandbox, and the skip carries the reason
+  in its message. The unwrapping it would measure is the one place the compiled guard reads an
+  address rather than a name, so a wrong answer there is a bypass rather than an outage — which is
+  why an unmeasured arm is worth a row rather than a shrug. It needs a host with IPv6 enabled, not
+  new code. Anchors: `core/netguard_preload.c`, `core/netguard_preload.py`, `deploy/entrypoint.sh`,
   `kg/git_writer.py`.
 
 - [ ] **What "network-exposed" means for a process that only makes outbound calls** — [M],
