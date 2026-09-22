@@ -604,7 +604,7 @@ topic).
   image is broken" are the same picture to everything but the container log** — [M].
   `durable/background_worker.py:99` calls `connect()` before `Worker(...)` is built and therefore
   before `durable/serve.py::serve_worker` opens the probe surface, so the process exits 1 at
-  `core/temporal_client.py:209` and `:9000/healthz` and `/readyz` never answer at all. Driven
+  `core/temporal_client.py:215` and `:9000/healthz` and `/readyz` never answer at all. Driven
   2026-09-19 against a dead address: exit 1, a clear `SubsystemUnavailableError` in the log, and both
   probe routes unanswered (`curl` → no connection). The PodMonitor target simply disappears, so
   `ChemclawTargetDown` fires for this exactly as it fires for a broken image.

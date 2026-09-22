@@ -80,7 +80,9 @@ bound did not exist that had shipped. Lesson 137.
       again, with my work on both sides this time. Fixed by not backticking them, rather than by
       spending entries in an allowlist whose friction is the point. And `test_context_budget`'s
       fourth sample, which turned R3 from a row into a fix.
-- [ ] Full suite over the fixes, fresh-context review, PR, merge on green CI.
+- [x] **Fresh-context review, read-only.** It confirmed the thing I most suspected and found a
+      defect that loses reader-visible content. See R5.
+- [ ] Full suite over the review fixes, then PR and merge on green CI.
 - [ ] Substantive rows from the audit's 30 live ones — next wave.
 
 ## R4 — the audit, and the guard it argued for
@@ -146,3 +148,50 @@ say the opposite, because I had put `retracted` in the marker set — caught onl
 arms instead of the one I expected to fail.
 
 Lessons 137-139.
+
+## R5 — what the review found, including that my "ratio" was not one
+
+- [x] **The ELN cross-reference rendered nowhere.** My topic-table edit appended text *after* the
+      row's closing pipe, making a fourth cell in a three-column table, and GFM drops the surplus —
+      so the pointer to the new ADR reached no reader of the index. Every existing test passed,
+      because they read ids, headings and ledger membership, never the table as a table. Moved into
+      column 2 (it first landed in column 1, which I caught by checking rather than assuming), and
+      `test_every_topic_row_has_the_three_columns_its_header_declares` now holds it — scoped to that
+      one table on purpose, because a general arity guard needs a real Markdown parser: cells carry
+      pipes inside code spans and the ledger below has its own column count. Falsified by
+      reintroducing the surplus cell.
+- [x] **My `ci.yml` fix named a string that does not exist.** I wrote that a stopped variable would
+      show as `"could not be read" with no path`; the epilogue says "could not be read" either way,
+      and the per-test reason for a missing checkout *does* name a path. Corrected to the real pair:
+      `no Chemclaw3-mcp checkout at <path> (set CHEMCLAW_MCP_REPO or CHEMCLAW_MCP_CHECKOUT)` against
+      `<path> has no .venv`. Same failure class as the sentence I was fixing.
+- [x] Two stale counts removed from `ci.yml` rather than renumbered — "sixteen cross-repo tests"
+      measures **19**, and the epilogue is what counts it.
+- [x] **The exemption guard could pass vacuously.** It took the *first* line citing an exempted
+      anchor, so a decoy earlier in the file satisfied it while the real sentence claimed the
+      opposite. `all(...)` over every citing line now, and the review's own attack re-run against
+      the fix reds as it should.
+- [x] **The rate assertion was an absolute rate bound wearing a ratio's clothes** — exactly what I
+      had asked the reviewer to check. Measured over 38 runs and four machine configurations:
+      `blocked_wall` is pinned at 1283-1306 ms by the busy-wait's `perf_counter` deadlines and
+      `blocked_beats` is 0-1, so the denominator was the constant 0.78/s and the assertion reduced
+      to `beats/wall > 1.95/s`. The margin was **one beat**: CI's 2 cleared it by 1.5x and 1 would
+      not. That is the defect the docstring records fixing once already, reintroduced by me.
+- [x] So I took the escape hatch the comment itself named, and the reviewer's argument for doing it
+      now rather than on the next red: a `sleep(0)` heartbeat counts loop turns, and **both** arms
+      gain the resolution, which is what makes it a ratio. Measured here: offloaded 215-3533 beats
+      against a control that reads a stable **3** rather than 0-1, so 215x to 3140x; and the block
+      is now 1.0x *by construction* — driven three times, both arms score 3 beats over the same
+      1285 ms wall, where `max(blocked_beats, 1)` previously let a two-beat mutant score 2.0x.
+      Bar 5, and the comment says plainly that CI's behaviour under the new instrument is
+      **unmeasured**, and that a red there is a finding about what the offload buys on two cores
+      rather than a number to lower.
+- [x] Three more figures I had touched and left stale: the repo-wide destructive-statement count is
+      47 of 418, not 52 of 417; the `note_index` truncations are in three files, not two; and
+      `core/temporal_client.py:209` is now :215 — in the same sentence whose other half I had just
+      fixed from :98 to :99, which is the residual the new guard's docstring declines to cover. The
+      `path:LINE` count in that docstring is gone rather than corrected: it has been wrong twice.
+- [x] A pre-existing contradiction the new ADR exposed: `tests/test_warehouse_binding.py` said
+      `ingest/eln/validate.py` "needs no page bound at all" two functions from an assertion
+      requiring four callers including it. The code says the ADR is right; the docstring was written
+      when `validate.py` was an over-match and never updated when it became a real site.

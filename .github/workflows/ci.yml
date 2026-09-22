@@ -157,7 +157,9 @@ jobs:
         with:
           fetch-depth: 0
 
-      # The sibling fleet, because sixteen tests in this suite read it and had **never run in CI**:
+      # The sibling fleet, because a set of tests in this suite read it and had **never run in CI**
+      # — the count is `tests/conftest.py`'s epilogue to report, not this file's to transcribe, and
+      # the "sixteen" that stood here measured 19:
       # all of `tests/test_sibling_manifest_agreement.py` — whose subject is
       # `D-2026-09-07-a-claim-about-another-repository-is-checked-by-reading-it` — plus the
       # `test_context_floor.py` arms that check `SERVED_ELSEWHERE_ALLOWANCE` and `PREFIX_BOUND`,
@@ -245,8 +247,9 @@ jobs:
       # Lint and type used to ride along on this line and now run in `static` above, in parallel.
       # They are still gates and still block a merge; what changed is that they no longer report
       # their answer eleven minutes after they knew it.
-      # `CHEMCLAW_MCP_REPO` is what the sixteen cross-repo tests read; without it they skip, and
-      # `tests/conftest.py`'s epilogue then names what the run is not evidence about.
+      # `CHEMCLAW_MCP_REPO` is what the cross-repo tests read; without it they skip, and
+      # `tests/conftest.py`'s epilogue then names what the run is not evidence about — and counts
+      # them, which is why no number appears here.
       #
       # **That epilogue block is present on every run, and it is expected rather than a symptom.**
       # This comment used to say the opposite — "that epilogue block should be absent from a CI log
@@ -260,10 +263,13 @@ jobs:
       # `SERVED_ELSEWHERE_ALLOWANCE`, `FLEET_PUBLISHED_ALLOWANCE` and therefore `PREFIX_BOUND`
       # unchecked in CI by design — the epilogue's job is to say so, and it does.
       #
-      # What would signal the variable stopping is a *different* skip reason: "could not be read"
-      # with no path, against the current "<path> has no .venv". Installing the sibling here is the
-      # decision nobody has taken, and it is a real one — it buys those three allowances a gate and
-      # costs every `check` run that install.
+      # The two cases are told apart by the *per-test* reason, not by the epilogue's summary line,
+      # which says "could not be read" either way: `no Chemclaw3-mcp checkout at <path> (set
+      # CHEMCLAW_MCP_REPO or CHEMCLAW_MCP_CHECKOUT)` is the variable failing to arrive, against the
+      # current `<path> has no .venv — run \`make install\` there`. A review caught this sentence
+      # naming a string that appears nowhere, which is the same failure class the rewrite was for.
+      # Installing the sibling here is the decision nobody has taken, and it is a real one — it buys
+      # those three allowances a gate and costs every `check` run that install.
       - name: Test with the coverage floor
         run: make cov
         env:

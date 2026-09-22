@@ -100,8 +100,10 @@ _RETROSPECTIVE = re.compile(r"\b(?:reached|grew to|used to|once held|was|were|ha
 #:
 #: Paths resolve from the repository root or from `src/chemclaw/`, because the file writes both.
 #:
-#: **`path:LINE` citations are outside this and that is a known residual.** The file carries eleven,
-#: and when this guard was written **five had drifted** — `retention.py:498` was about a different
+#: **`path:LINE` citations are outside this and that is a known residual.** The file carries a
+#: handful — counted by the same `grep` that found them, not restated here, because this
+#: comment has already had that number wrong twice — and when this guard was written
+#: **five had drifted** — `retention.py:498` was about a different
 #: table than the sentence claimed, `runbook.md:1996` had become an unrelated `ALTER TABLE`,
 #: `background_worker.py:98` had become the line above `connect()`. A line number rots on any edit
 #: above it and nothing can check the *intent*, only the number, so the fix is to cite the symbol
@@ -201,10 +203,12 @@ def test_every_never_existed_exemption_is_still_cited_as_nonexistent() -> None:
             f"`{anchor}` is exempted in `_NEVER_EXISTED` and is no longer cited in BACKLOG.md, so "
             "the entry exempts nothing; delete it."
         )
-        sentence = next(line for line in text.splitlines() if f"`{anchor}`" in line)
-        assert _NONEXISTENT.search(sentence), (
-            f"the line citing `{anchor}` no longer says it does not exist, so this exemption is "
-            f"hiding a dead anchor rather than recording a retraction: {sentence.strip()[:200]}"
+        citing = [line for line in text.splitlines() if f"`{anchor}`" in line]
+        silent = [line for line in citing if not _NONEXISTENT.search(line)]
+        assert not silent, (
+            f"{len(silent)} line(s) citing `{anchor}` do not say it does not exist, so this "
+            f"exemption is hiding a dead anchor rather than recording a retraction: "
+            f"{silent[0].strip()[:200]}"
         )
 
 

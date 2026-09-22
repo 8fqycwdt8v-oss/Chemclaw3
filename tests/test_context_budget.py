@@ -925,7 +925,7 @@ def test_a_burst_of_cold_prefix_measurements_leaves_the_loop_schedulable() -> No
 
     async def heartbeat(stop: asyncio.Event, beats: list[float]) -> None:
         while not stop.is_set():
-            await asyncio.sleep(0.001)
+            await asyncio.sleep(0)
             beats.append(time.perf_counter())
 
     async def burst() -> tuple[int, float]:
@@ -975,44 +975,49 @@ def test_a_burst_of_cold_prefix_measurements_leaves_the_loop_schedulable() -> No
         f"{work * 1000:.0f} ms of nominal work, so it is not doing the work this assertion is "
         "about — the control has stopped being a control"
     )
-    # **A *rate*, against the control measured in the same process — and the absolute count it
-    # replaces was the fourth duration-shaped form of this assertion to fail.**
+    # **A rate, against the control measured in the same process, on a heartbeat that counts loop
+    # turns.** Both halves were needed, and the count this replaces was the fourth duration-shaped
+    # form of this assertion to fail.
     #
-    # The two arms run for different lengths: on the CI runner the offloaded burst is ~660 ms and
-    # the control ~1285 ms, because offloading is a halving. So a raw count penalises the arm for
-    # being *faster* — fewer milliseconds in which to accumulate ticks — and compares it against a
-    # bar calibrated where the offloaded window was 430-565 ms on a quicker box. Measured, the bar
-    # at 4 failed 3 of 4 CI runs (2, 3, pass, 3 beats) while every local configuration gave 22-38:
-    # isolated, under `--cov`, on two cores via `taskset`, and in the full `make cov` run.
+    # *Why a rate.* The two arms run for different lengths — on the CI runner ~660 ms offloaded
+    # against ~1285 ms blocked, because offloading is a halving — so a raw count penalises the arm
+    # for being *faster*, and compares it against a bar calibrated where the offloaded window was
+    # 430-565 ms on a quicker box. The absolute bar of 4 failed 3 of 4 CI runs (2, 3, pass, 3 beats)
+    # while every local configuration gave 22-38: isolated, under `--cov`, on two cores via
+    # `taskset`, and in the full `make cov` run.
     #
-    # Beats per second, offloaded over blocked, is scale-free and is what the docstring above was
-    # already reasoning about when it said "18-28 against 0-1":
+    # *Why `sleep(0)` and not `sleep(0.001)`.* A rate alone was not enough, and a review measured
+    # why: with a 1 ms heartbeat the control scored 0-1 beats over a wall pinned at 1283-1306 ms by
+    # `_costly_conversion`'s `perf_counter` deadlines — 38 runs, four machine configurations — so
+    # the denominator was a *constant* and the "ratio" was an absolute rate bound wearing a
+    # ratio's clothes: the exact defect the docstring above records fixing once already. It also
+    # left the margin at one tick: CI's `beats=2` cleared the bar by 1.5x, and `beats=1` would not.
     #
-    #   CI run 1   2 / 0.664 s  vs 1 / 1.283 s  =  3.86x
-    #   CI run 2   3 / 0.660 s  vs 1 / 1.285 s  =  5.84x
-    #   CI run 4   3 / 0.655 s  vs 1 / 1.283 s  =  5.88x
-    #   here       22-38 / 0.43-0.565 s         =  ~65-113x
-    #   block      identical code path          =  1.0x by construction
+    # Counting loop turns instead fixes both ends, because *both* arms gain the resolution. Measured
+    # here, four runs: offloaded 215-3533 beats against a control that now reads a stable **3**
+    # rather than 0-1, giving 215x to 3140x. And the block is 1.0x by construction in a way it was
+    # not before — driven three times with `asyncio.to_thread` replaced by an inline await, both
+    # arms
+    # score 3 beats over the same 1285 ms wall, where `max(blocked_beats, 1)` previously let a
+    # mutant with two beats score 2.0x.
     #
-    # **The bar is 2.5 and the headroom is thinner than this file would like, which is worth saying
-    # rather than hiding in a constant.** 2.5 sits 1.5x below the worst honest observation and 2.5x
-    # above the block; the old standard of "3.2x below the worst honest run and 4x above the block"
-    # is not available, because CI's honest run is 3.86x and the block is 1.0x. If a future CI
-    # observation lands under 2.5, the *instrument* is what needs changing and not the bar: a
-    # heartbeat of `asyncio.sleep(0)` would count loop turns instead of 1 ms ticks and give two
-    # orders of magnitude more resolution, at the cost of measuring schedulability rather than
-    # millisecond responsiveness — which is a different property, and the 1 ms tick is the one the
-    # kubelet probes care about.
+    # **What is not measured is CI.** The bar is 5 — 43x below the worst honest local run and 5x
+    # above the block — but nobody has run this instrument on that runner, and its old regime (three
+    # 1 ms firings in 660 ms) has an unexplained cause that `taskset`, spinners and coverage could
+    # not reproduce. If it reds there, the ratio is telling us the loop genuinely does not turn
+    # during the burst on two cores, which is a finding about what the offload buys rather than a
+    # flaky test — and the next move is to read it, not to lower this number.
     #
-    # `max(blocked_beats, 1)` because the control's count quantises at 0-1, and a control that got
-    # zero would otherwise divide by zero on the arm this test exists to catch.
+    # `max(blocked_beats, 1)` stays as a division guard only; with this heartbeat the control has
+    # not
+    # been observed below 3.
     offloaded_rate = beats / wall
     blocked_rate = max(blocked_beats, 1) / blocked_wall
-    assert offloaded_rate > 2.5 * blocked_rate, (
+    assert offloaded_rate > 5 * blocked_rate, (
         f"the event loop was scheduled {beats} time(s) in a {wall * 1000:.0f} ms burst "
         f"({offloaded_rate:.1f}/s), against {blocked_beats} in {blocked_wall * 1000:.0f} ms "
         f"({blocked_rate:.1f}/s) when the same measurement runs on the loop — a ratio of "
-        f"{offloaded_rate / blocked_rate:.2f}x against a floor of 2.5x, where deleting the offload "
+        f"{offloaded_rate / blocked_rate:.2f}x against a floor of 5x, where deleting the offload "
         "gives 1.0x: the sweep is running on the loop that serves every other turn's stream and "
         "both kubelet probes"
     )
