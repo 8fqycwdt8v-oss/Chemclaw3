@@ -140,6 +140,11 @@ _ARGUED: dict[tuple[str, str], str] = {
         "is generalising, so the word is the measurement's own subject"
     ),
     # ---- the PR-gate, on and after 2026-09-05 ----------------------------------------------
+    ("the PR-gate", "D-2026-09-22-an-exemption-is-a-quote-not-a-file"): (
+        "the dead word is the guard's own pattern — `\\bPR[- ]gate\\b` is what refuses prose "
+        "promising the model a control that was deleted, so naming it is naming the string the "
+        "check matches, and the ADR's one shipped exemption is a sentence that says it is gone"
+    ),
     ("the PR-gate", "D-2026-09-19-a-refusal-that-cannot-expire-is-not-a-decision"): (
         "same audit, other term — it reports how many ADRs still describe the gate as live and "
         "records that ten of the dozen worst-reading stale constraints rest on that one deletion"
