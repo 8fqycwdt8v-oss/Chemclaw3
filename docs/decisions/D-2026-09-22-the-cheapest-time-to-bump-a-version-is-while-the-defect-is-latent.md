@@ -74,6 +74,18 @@ the boundary is asserted and not merely described.
 as the case its class claim could not reach. Guanidine and acetamidine hydrochlorides are now rows
 in that list, so the sentence that used to except them is an assertion instead.
 
+**The bump's second cost is the one `durable/retention.py` does not name, and it is still open.**
+A definition bump retires the fingerprint rows, and `compound_id` carries no version — so a
+superseded-spelling `compound_note` keeps its own id in the knowledge graph with no cleanup path,
+and `compound_dependencies` re-derives `compound_id(note.compound_smiles)` and returns `[]` when it
+no longer matches the note's own wikilink. That is the `BACKLOG.md` row *"A `STANDARDIZATION_VERSION`
+bump retires the fingerprint rows and re-keys nothing"*, which stays open because both its candidate
+fixes are decisions rather than defect fixes. It does not change the argument above — in this
+repository's corpus the generation being retired is empty, so there is no superseded note to strand
+— but a deployment that has ingested a guanidinium, urea or melamine salt inherits exactly that row,
+and the recovery is the runbook's re-sync. Naming it here rather than only in the row, because this
+is the second bump in as many weeks and the cost accounting in `retention.py` covers only the disk.
+
 **Revisit when:** a corpus arrives holding an alkali cyanamide or dicyanamide salt whose counterion
 a chemist is deliberately varying — sodium against calcium cyanamide is the real pair — where the
 collapse onto the free acid discards the variable under study. That is the same cost
