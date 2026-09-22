@@ -25,6 +25,7 @@ from chemclaw.ingest.eln.warehouse.expr import (
     PatternBudgetError,
     TransformError,
     apply_transforms,
+    pattern_budget,
     resolve_path,
 )
 
@@ -784,4 +785,214 @@ def test_clamp_refuses_the_one_number_it_cannot_hold_in_a_range() -> None:
         apply_transforms(float("nan"), [{"clamp": {"min": 0.0, "max": 100.0}}])
     assert apply_transforms(101.3, [{"clamp": {"min": 0.0, "max": 100.0}}]) == 100.0, (
         "an out-of-range but finite number is still held, which is what clamp is for"
+    )
+
+
+# A pattern whose cost is *polynomial* rather than exponential, so it lands inside the per-cell
+# budget instead of blowing through it. This is the case the per-cell bound cannot see, and the
+# reason the page bound exists: measured on this box at 165 ms over a 6,000-character cell, 66% of
+# the shipped 0.25 s, and it returns a match rather than raising.
+_SLOW_BUT_COMPLETING = {"regex": {"pattern": r"a*a*a*$"}}
+_SLOW_CELL = "a" * 6000 + "b"
+
+#: What a real binding's pattern costs, for the ratio the page budget's generosity rests on.
+_HONEST = {"regex": {"pattern": r"(\d{3,6})"}}
+
+
+def test_a_page_of_slow_but_completing_cells_is_refused_before_the_activity_deadline() -> None:
+    """The bound the per-cell one does not compose into.
+
+    **The row behind this described the accumulation as timeouts adding up, and they cannot.**
+    `PatternBudgetError` is in `durable/publish._BAD_DATA_TYPES`, so a cell that *exceeds* the
+    per-cell budget ends the page after one cell, non-retryably. The reachable case is a pattern
+    that
+    is slow and completes: measured, `a*a*a*$` over a 6,000-character cell is 165 ms with no
+    refusal,
+    and twenty such cells across the shipped 100-entry batch is 330 s — past
+    `eln_sync_timeout_seconds`, past the heartbeat, and `map_to_ord` is synchronous CPU work no
+    asyncio timer interrupts, so the retry runs the identical page.
+
+    Driven at a small budget rather than the shipped one, because the property is the ratio and not
+    the number: a test that spent 150 s proving a 150 s bound would be the slowest in the suite.
+    """
+    spent = time.perf_counter()
+    read = 0
+    with pytest.raises(PatternBudgetError, match="spent their whole") as refused:
+        with pattern_budget(0.5):
+            for _ in range(500):
+                apply_transforms(_SLOW_CELL, [_SLOW_BUT_COMPLETING])
+                read += 1
+    elapsed = time.perf_counter() - spent
+
+    assert read, "nothing was read, so this measured the first cell rather than a page"
+    assert f"after {read} cell" in str(refused.value), (
+        "the refusal must say how far the page got — that number is what separates 'this binding "
+        "is too expensive for this page size' from 'one pattern is pathological'; it said "
+        f"{refused.value}"
+    )
+    # The clamp is the point: each cell may run for the *lesser* of the per-cell budget and what the
+    # page has left, so the last cell cannot carry the page a whole cell-budget past its bound.
+    assert elapsed < 0.5 + settings.eln_regex_timeout_seconds, (
+        f"the page overshot its 0.5s budget by {elapsed - 0.5:.3f}s, which is more than the clamp "
+        "should allow"
+    )
+
+
+def test_an_honest_page_is_nowhere_near_the_budget() -> None:
+    """The trade the row named — refusing an honest slow pattern against bounding total work.
+
+    It is settled by a ratio rather than argued. An honest cell measured 0.472 ms against a 0.25 s
+    per-cell ceiling, so a whole honest page of 2,000 cells is under a second where the shipped page
+    budget is 150 s. At three orders of magnitude apart, a budget generous enough never to touch an
+    honest binding still bounds the pathological one well inside the activity deadline.
+
+    Asserted as a *fraction of the shipped budget* rather than as a duration, so it does not become
+    a
+    timing test that reds on a loaded machine.
+    """
+    cells = 2000
+    started = time.perf_counter()
+    with pattern_budget():
+        for _ in range(cells):
+            apply_transforms("batch 4471 of 12", [_HONEST])
+    spent = time.perf_counter() - started
+
+    assert spent < settings.eln_regex_page_budget_seconds / 20, (
+        f"{cells} honest cells cost {spent:.3f}s against a "
+        f"{settings.eln_regex_page_budget_seconds}s "
+        "page budget; the headroom this bound relies on is gone"
+    )
+
+
+def test_the_two_refusals_name_different_causes() -> None:
+    """One names a pattern to rewrite; the other names a page that cost too much in aggregate.
+
+    They are not interchangeable: the per-cell refusal tells a site its pattern is catastrophic,
+    which
+    is false of a binding whose every cell stayed inside the ceiling. Driven with both budgets open,
+    so
+    the clamped-cell path is the one under test rather than the unclamped one.
+    """
+    with pytest.raises(PatternBudgetError, match="did not finish within") as cell:
+        with pattern_budget(30.0):
+            apply_transforms("a" * 4000 + "b", [{"regex": {"pattern": r"(a+)+$"}}])
+    assert "spent their whole" not in str(cell.value)
+
+    with pytest.raises(PatternBudgetError, match="spent their whole") as page:
+        with pattern_budget(0.3):
+            for _ in range(500):
+                apply_transforms(_SLOW_CELL, [_SLOW_BUT_COMPLETING])
+    assert "No single cell exceeded" in str(page.value)
+    assert "did not finish within" not in str(page.value)
+
+
+def test_a_page_refusal_quotes_the_budget_actually_in_force() -> None:
+    """It read `settings.eln_regex_page_budget_seconds` first and said 150 s at a 2 s budget.
+
+    A refusal carrying a number that is not the one that bound it is the defect class this
+    repository
+    keeps finding in its own prose, arriving in a message a site will act on.
+    """
+    with pytest.raises(PatternBudgetError, match="whole 0.4s budget"):
+        with pattern_budget(0.4):
+            for _ in range(500):
+                apply_transforms(_SLOW_CELL, [_SLOW_BUT_COMPLETING])
+
+
+def test_a_nested_budget_keeps_the_outer_deadline() -> None:
+    """`sync_entries` opens one and calls `_replay_record_ids`, which maps entries of its own.
+
+    A nested budget that started over would make the page bound `pages x budget` — the same
+    multiplying failure the per-cell bound has, one layer out. Re-entrancy is asserted rather than
+    assumed because it is the difference between a bound and a suggestion.
+    """
+    with pattern_budget(0.3):
+        with pytest.raises(PatternBudgetError, match="spent their whole 0.3s"):
+            with pattern_budget(600.0):
+                for _ in range(500):
+                    apply_transforms(_SLOW_CELL, [_SLOW_BUT_COMPLETING])
+
+
+def test_no_budget_open_leaves_the_per_cell_bound_exactly_as_it_was() -> None:
+    """Every caller that maps a single entry outside a page is unchanged.
+
+    The page bound is additive: with no page open, `_cell_budget` returns the per-cell setting and
+    the
+    per-cell refusal is the only one reachable. This is the arm that says the change cannot make a
+    one-off mapping stricter than it was.
+    """
+    with pytest.raises(PatternBudgetError, match="did not finish within"):
+        apply_transforms("a" * 4000 + "b", [{"regex": {"pattern": r"(a+)+$"}}])
+    assert apply_transforms("batch 4471 of 12", [_HONEST]) == "4471"
+
+
+def _modules_mapping_entries_in_a_loop() -> list[str]:
+    """Every first-party module with a `map_to_ord` call **lexically inside** a loop.
+
+    "Inside" matters, and the first version of this guard got it wrong: pairing any `map_to_ord`
+    call
+    with any loop in the same file also caught `durable/eln_sync.py` (a per-entry heartbeating
+    *wrapper*, which runs under its caller's budget), `ingest/eln/adapter.py` (which declares the
+    protocol) and `ingest/eln/validate.py` — three modules that map one entry at a time and need no
+    page bound at all. A guard that over-matches is a guard somebody silences.
+    """
+    import ast
+
+    source_root = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
+    found = []
+    for path in sorted(source_root.rglob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        if "map_to_ord" not in text:
+            continue
+        for node in ast.walk(ast.parse(text)):
+            if not isinstance(node, ast.For | ast.While):
+                continue
+            if any(
+                isinstance(inner, ast.Attribute) and inner.attr == "map_to_ord"
+                for inner in ast.walk(node)
+            ):
+                found.append(str(path.relative_to(source_root)))
+                break
+    return found
+
+
+def test_every_module_that_maps_entries_in_a_loop_enters_the_page_budget() -> None:
+    """Derived, because the alternative was measured to fail on two drivers out of three.
+
+    `agent/turn_ambient.turn_caps` exists because four per-turn ambients opened by hand in three
+    drivers were opened correctly in one of them, and the test that "proved" it called the opener in
+    its own helper. This is the same shape: a page bound is only a bound where the page opens it,
+    and
+    a behavioural test per caller covers the callers somebody thought of.
+
+    It does not check *placement* — a module could still open one budget per entry, which is why
+    `cli/live_data.py` carries a comment saying why it does not — but it makes a new page loop with
+    no
+    budget a red test rather than a gap nobody measures.
+    """
+    source_root = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
+    missing = [
+        name
+        for name in _modules_mapping_entries_in_a_loop()
+        if "pattern_budget" not in (source_root / name).read_text(encoding="utf-8")
+    ]
+
+    assert not missing, (
+        "these modules map ELN entries in a loop and open no regex page budget, so the per-cell "
+        f"ceiling multiplies by the page with nothing bounding the product: {missing}"
+    )
+
+
+def test_that_guard_is_measuring_the_callers_and_not_the_definitions() -> None:
+    """The guard above would pass vacuously on an empty set, so this pins what it found.
+
+    A `def map_to_ord` is not a caller, and the adapters that define it must not need a budget — the
+    budget belongs to whoever maps a *page* of entries. Requiring the three measured callers is what
+    makes the assertion above a measurement rather than a tautology.
+    """
+    callers = _modules_mapping_entries_in_a_loop()
+
+    assert len(callers) >= 3, (
+        "fewer page-mapping callers than the three measured (ingest/eln/sync.py, "
+        f"durable/memory_jobs.py, cli/live_data.py), so the guard above asserts little: {callers}"
     )

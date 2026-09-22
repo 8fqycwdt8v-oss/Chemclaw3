@@ -35,6 +35,29 @@ class ElnSettings(BaseSettings):
     # no match is 0.24 ms — so the ceiling is ~1,000x the worst honest case and the shortest
     # catastrophic one tested reaches it in 0.25 s rather than never.
     eln_regex_timeout_seconds: float = Field(default=0.25, gt=0)
+    # How long **every** `regex` transform together may spend on one page, which is the bound the
+    # per-cell one above does not compose into. `warehouse/adapter._read` runs one match per
+    # reaction field, per attribute, and per component and impurity *row*, so a page is
+    # `eln_sync_batch_size x cells_per_entry` matches and the per-cell ceiling multiplies.
+    #
+    # **The reachable case is a pattern that is slow and *completes*, which is why the per-cell
+    # bound cannot see it.** A pattern that exceeds 0.25 s is refused and, because
+    # `PatternBudgetError` is in `durable/publish._BAD_DATA_TYPES`, ends the page after one cell. A
+    # *polynomial* pattern never trips it: measured on this box, `a*a*a*$` over a 6,000-character
+    # cell is **165 ms** — 66% of the per-cell budget, no refusal — and twenty such cells across a
+    # 100-entry batch is **330 s**, which is past `eln_sync_timeout_seconds` (1.1x) and past the
+    # heartbeat, after which the retry runs the identical page. `map_to_ord` is synchronous CPU
+    # work, so no asyncio timer interrupts it; 1,818 of 2,000 cells were reached before the
+    # activity's own deadline.
+    #
+    # **Half of `eln_sync_timeout_seconds`, and that is a split rather than a measurement.** The
+    # page also writes, and nobody here has measured what that costs, so the regex half is given
+    # half — enough that a refusal is *reported* by the activity instead of the activity being
+    # killed, which is the whole gain over the status quo. It is not a tight bound and does not need
+    # to be: an honest cell measured **0.472 ms**, so a whole honest page of 2,000 cells is 0.94 s
+    # and this ceiling is ~160x it. The pathological page is refused at 150 s, naming how far it
+    # got. Raising `eln_sync_timeout_seconds` without raising this only shrinks the regex share.
+    eln_regex_page_budget_seconds: float = Field(default=150.0, gt=0)
     # The sync fetches from this far *behind* its high-water cursor, so an export file that
     # lands late with an older payload timestamp (an upstream export-job retry) is still picked
     # up instead of being silently dropped forever. Re-fetching the window is safe and cheap

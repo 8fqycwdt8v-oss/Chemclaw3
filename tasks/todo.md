@@ -1,128 +1,103 @@
-# Wave 3 — the two stored skills tiers are narrowed by the wrong three of four
+# Wave 4 — three bounds deferred as "a decision rather than an edit", now decided
 
-Two backlog rows ([S] each) plus a defect neither names, which the measurement found and which both
-stored-tier modules' own docstrings say cannot happen.
+The remaining backlog has a different character from waves 1–3: the self-contained defects are worked,
+and what is left is mostly rows that *chose* not to fix something and said why. Seven of the 45 carry
+an explicit decline with a trigger. These three do not — each says the fix is ADR-sized, and each was
+right that it is a decision. **All three also turn out to be wrong about something**, which is now
+five of fifteen worked rows found stale or misstated, and is why each is re-derived before any code.
 
-## What was measured before any code was written
+## R1 — a per-cell regex budget does not add up to a page bound
 
-Driven through `scratchpad_backend` over an `InMemoryStore`, at zero bound tools:
+Row: `eln_regex_timeout_seconds` bounds one `search`, and `warehouse/adapter._read` runs one per
+reaction field, per attribute, and per component and impurity *row*.
 
-| narrowing | what the prose claims | what happens |
-|---|---|---|
-| `EnabledSkills` | `local_skills.py`: "would delete the tier outright" (as a reason it does not apply); `org_skills.py`: "It is **not** narrowed by `EnabledSkills` … would therefore delete this tier outright" | **deletes both tiers outright.** `CHEMCLAW_SKILLS_ENABLED=development-report` → `ls('/mine/')` and `ls('/org/')` both `[]` |
-| `ProfileScopedSkills` | `local_skills.py`: "must not" apply | applies, **deliberately** — `test_org_skills.py::test_the_control_arm_that_removes_skills_removes_this_tier_too` |
-| `RoleScopedSkills` | `local_skills.py`: "must not" apply | applies; a no-op in practice because `skill_role_gates`' keys are validated against the *filed* trees |
-| `ToolScopedSkills` | "the one that would have been worth keeping, and it is not applied" | correct — and correct **by accident**: the predicate runs, the declaration map simply has no entry, which `_permits` reads as "declares nothing" and leaves visible |
+**What the row got wrong about its own mechanism.** It describes the accumulation as timeouts adding
+up. They cannot: `PatternBudgetError` is in `durable/publish._BAD_DATA_TYPES`, so a cell that exceeds
+the per-cell budget ends the page after **one** cell, non-retryably (Wave 1). Measured: the reachable
+case is a pattern that is slow and *completes*.
 
-R6's own control: a personal skill declaring `[compute_thermochemistry, sample_conformers]` is served
-and listed at zero bound tools, in a turn where **34 of 39** filed skills are hidden by that same
-predicate.
+| measured on this box | |
+|---|---|
+| `a*a*a*$` over a 6,000-char cell | **165 ms** — 66% of the per-cell budget, never refused |
+| twenty such cells x 100-entry batch | **330 s** vs `eln_sync_timeout_seconds` 300 s (1.1x over) |
+| cells reached before the activity deadline | 1,818 of 2,000 |
+| an honest cell (`(\d{3,6})`) | **0.472 ms** — 349x cheaper |
+| an honest page of 2,000 cells | **0.042 s** |
 
-## The shape of the fix
+- [x] `eln_regex_page_budget_seconds`, half of `eln_sync_timeout_seconds` — stated as a *split*, not a
+      measurement, because the page also writes and nobody has measured that.
+- [x] `expr.pattern_budget()` — a re-entrant contextvar deadline; `_cell_budget()` clamps each
+      `search` to what the page has left, so the last cell cannot overshoot by a whole cell budget.
+      Driven: refused at 2.00 s against a 2 s budget, **+0.001 s** overshoot, vs 32.5 s unbounded.
+- [x] Two refusals, not one: the per-cell one names a pattern to rewrite, the page one names how far
+      the page got. `_PageBudget` carries the budget so the message quotes the number in force — it
+      read the *setting* first and said 150 s at a 2 s budget.
+- [x] Opened inside `sync_entries`, `memory_jobs.read_corpus` and both `live_data` loops rather than at
+      each activity, for the reason `turn_caps` was extracted.
+- [ ] A derived test: a module that maps entries in a loop must enter it.
+- [ ] Tests: the measured case refused; an honest page untouched; the overshoot bound; the two
+      refusals distinguished; `PatternBudgetError` still non-retryable.
+- [ ] ADR + delete the row.
 
-One decision rather than three patches: **`skill_permits` produces a narrowing per tier, because a
-stored tier and a filed tree are not asked the same question.** A narrowing whose basis is a
-deployment's list of *filed* names cannot narrow a stored tier — it can only empty it.
+## R2 — a batched flush books the whole batch as notes recorded
 
-- [ ] 1. `agent/skill_access.py` — `skill_permits` returns a frozen `SkillNarrowing(filed, stored)`
-      built from **one** tuple of narrowing objects, so there is no second composition to keep in
-      step. `stored` is that tuple minus `EnabledSkills`, plus the reserved-name rule (R7).
-      `SkillNarrowing.permissive()` for the tests that are about something else.
-- [ ] 2. `skills_backend` takes the `SkillNarrowing` and uses `.filed`; `scratchpad_backend` takes it
-      and uses `.stored`, so the two cannot be swapped at a call site.
-- [ ] 3. **R6** — `skill_manifest`: extract the frontmatter read from `_declared_pair` so a *body*
-      and a *path* answer through one function. New `agent/stored_skill_tools.py`:
-      `async def stored_skill_declarations(store, actor)`, one `asearch` per tier, fail-closed to
-      `UNREADABLE_DECLARATION`. Threaded `api/runner.py` → `build_langgraph_agent(stored_skills=…)`
-      → `skill_narrowing`, the same hoisted-await seam `store` and `checkpointer` already use.
-      **Read rather than parse-on-write** (the row proposes the latter): `asearch` already returns
-      each item's whole `value` including `content`, so the declarations come off the paged search a
-      listing already costs — one source of truth, no migration, no drift.
-- [ ] 4. **R6 privacy** — `_log_narrowing` keeps the **filed** map. A stored name in that DEBUG line
-      would put a person's private vocabulary in a log field, which `_count_a_local_load` refuses to
-      put in a metric label for exactly the same reason.
-- [ ] 5. **R7** — the read side agrees with the write side's *discovered* basis: a stored skill under
-      a name this deployment ships is never served. Closes the grandfathered names and the ones a
-      rename into `skills/` creates; `deep-research` is the measured case.
-- [ ] 6. Correct the prose in `local_skills.py` and `org_skills.py`, which is wrong about all four.
-- [ ] 7. ADR: a stored tier and a filed tree are not asked the same question.
-- [ ] 8. Delete both backlog rows in the commit that closes them.
+**The row's premise is false, and that makes the fix a commit rather than an ADR-sized contract
+change.** It says the honest number "is not available at that layer" because a changed-file count
+"counts *dependency* notes and retirement rewrites too". Measured: those are separable by the
+`(overwrite, amendment)` flag pair, there is exactly one subject file per `NoteWrite`, and
+`_write_and_commit` already holds `prior` — the pre-write bytes of every planned path — one line
+before it asks git the same question as a boolean.
+
+- Reproduced at HEAD: batch of 4, three byte-identical, one new → metric **+4** for one note.
+- At the shipped `backfill_commit_batch_size` 50: 49 identical + 1 new → metric **+50**.
+- Exactly as large as the undercount `D-2026-09-14` fixed, in the other direction.
+- Nothing turns red: the two counter tests sit on the all-new and all-noop ends, so a partially
+  identical batch is covered by neither — the same coverage shape that ADR called out.
+- [ ] `WriteOutcome` (or the inner call) yields the subject paths that changed; the batcher counts
+      **distinct** ones.
+- [ ] A superseding ADR: `D-2026-09-14` writes `len(batch)` into a merged document, and its own guard
+      sentence ("notes recorded", not "notes offered") already forbids what the mixed batch does.
+- [ ] Also drifted there: it says "the four in `git_writer.py`"; there are six `WriteOutcome(`
+      constructions and one relies on the default.
+- [ ] A test over a mixed batch, checked against `git diff-tree --name-only` as well as the metric.
+
+## R3 — a front door scaled to zero renders a release where every pod refuses to start
+
+**The row's headline reproducer does not reproduce.** `--set service.replicas=0` is a **no-op**:
+`service.autoscaling.enabled` ships true, and both readers of `service.replicas` are gated on the HPA
+being off. Under shipped defaults `service.replicas: 2` renders **nowhere at all** — dead config
+carrying no prose, which is its own finding.
+
+It does reproduce two other ways (`autoscaling.enabled=false` + `replicas=0`, or `maxReplicas=0`),
+and the blast radius is **worse** than the row states:
+
+- The failure is at `core/config/__init__.py`'s module-level singleton, so it is not about which
+  process *reads* the setting — every process that imports `chemclaw.core.config` dies. Driven over
+  nine entrypoints: all nine.
+- `deploy/entrypoint.sh` runs `python -m chemclaw.cli.egress_preload` under `set -euo pipefail`
+  *before* its `case`, so every container dies in the shell prologue.
+- The `migrate`/`schedules`/`convert` hook Jobs fail too, so `helm upgrade` never converges.
+- `maxReplicas=0` is strictly worse than `replicas=0`: the HPA-on branch omits `replicas` entirely, so
+  a rejected HPA leaves Kubernetes defaulting the front door to 1 crash-looping pod.
+
+**The decision is that the bound is right and the chart should say so.** There is no front-doorless
+story: no `service.enabled` gate exists, `deployment-service.yaml` and the Service open with no `if`,
+and nothing in `deploy/` or `docs/` asks for one. So `service_fleet_replicas` stays `gt=0` and the
+chart refuses to render a zero front door, beside its 19 existing `fail` guards — a render-time
+refusal naming the key instead of eleven crash-looping pods and a stuck upgrade.
+
+- [ ] The chart guard, covering both reachable arms and the `minReplicas > maxReplicas` case.
+- [ ] The rollout-peak arithmetic charges 3 front-door pools + a readiness pool for a Deployment that
+      never surges (137 declared vs 120 honest). Safe direction, but "the arithmetic is right at zero"
+      does not survive the peak keys — decide whether to fix or record it.
+- [ ] `service.replicas` rendering nowhere under the shipped HPA: prose, or a guard.
+- [ ] ADR + delete the row.
 
 ## Verification
 
-- [x] Every claim in the table above as a test, both arms — `tests/test_stored_skill_tools.py`, 17
-      tests, each with its defect arm (`stored=False`, `reserved=frozenset()`, the enable-list arm
-      that still hides a filed skill).
-- [x] The full serial suite — **1 failed, 10505 passed**: a new `degraded` subsystem label
-      (`stored_skill_manifest`) undeclared in `tests/test_degraded.py`'s label space. Declared, with
-      the reason it is separate from the filed tier's.
-- [x] Two fresh-context adversarial reviews. Six findings, all fixed, listed below.
-- [x] The three mutations that previously left the file green now each turn it red.
-- [ ] `make lint type` immediately before the commit (lesson 107), and the full suite re-run over the
-      review fixes.
+- [ ] `make helm-validate` renders only defaults plus the flag union, so it could not have caught R3.
+      Whatever guard lands needs its own render arm.
+- [ ] Full serial suite; `make lint type` immediately before the commit; staged-content check.
+- [ ] Fresh-context subagent review before the PR.
 
 ## Review
-
-All eight steps done. Three things worth recording beyond the diff:
-
-**The row's framing was inverted and the measurement is what said so.** R6 asked for one narrowing to
-be *added*; what was actually wrong was that three narrowings were being applied that two module
-docstrings said were not, and one of them (`EnabledSkills`) emptied both stored tiers outright. Both
-docstrings named that exact outcome as their reason for believing it did not happen. Re-checking each
-row against `HEAD` before writing code is what found it — the fourth time in this wave series that a
-row's own framing was stale.
-
-**I introduced a defect and caught it by measuring a comment I had written.** The declaration merge
-originally put the stored entries over the filed ones, with a comment arguing the collision could not
-happen because `UnreservedNames` removes it. That is true of the stored predicate and silent about the
-filed one, which reads the same map: a grandfathered `/mine/deep-research` declaring one unbindable
-tool made the **reviewed** `deep-research` invisible in a turn binding all twelve tools it declares.
-Driven, fixed, and pinned by
-`test_a_stored_declaration_cannot_hide_the_reviewed_skill_of_that_name`.
-
-**One privacy hazard avoided rather than shipped.** Merging the stored names into the map
-`_log_narrowing` reads would have put every personal skill's name into a DEBUG field on every turn its
-owner takes — the thing `local_skills._count_a_local_load` refuses to do to a metric label. The
-narrowing reads both maps; the log keeps the filed one.
-
-Lessons 112–120 added.
-
-### What the two reviews found
-
-**My headline measurement for `UnreservedNames` measured a different narrowing.** I drove it with a
-`skill_role_gates` entry, saw the personal copy absent, and put that in the docstring, the test, the
-ADR and the commit message. `RoleScopedSkills` is in the same composition, so the gate was doing all
-the work: a mutation review showed the test stayed green both with `UnreservedNames` deleted and with
-`reserved=` emptied at the production call site. Driven over four arms, the mechanism that binds is the
-**enable-list** — the one narrowing this change moves. Re-derived further: the row's own premise was
-true when written, closed silently since by `D-2026-09-20`'s backend predicate, and **re-opened by the
-`EnabledSkills` fix in this same commit**, which is the real reason the two rows belong together. Test,
-docstring, ADR and commit message all corrected; a second test now records the role-gate scenario as
-*not* the mechanism, so the next reader does not reach for it again.
-
-**The `/mine` ↔ `/org` merge was backwards.** I keyed a colliding name from the personal body, citing
-mount order. Measured: `_skills_middleware` lists `/mine`, `/org`, filed, and upstream resolves
-*last*-source-wins, so the **organisation's** body is served — `local_skills.save_local_skill` says so
-in its own comment. One person's private document was deciding the visibility of a skill acting on
-everybody's turns. The tiers are now read `/mine` first, and the test asserts the served path beside
-the declaration, which is the assertion whose absence let the wrong direction pass.
-
-**The reader resolved the actor from a different spelling than the mount.** `api/runner.py` passed the
-request's raw value; `scratchpad_backend` resolves through `get_current_actor()`, which strips. For a
-padded oid the two spelled one actor two ways, the declarations came back empty, and a missing entry
-reads as "declares nothing" — the whole `/mine` tier silently unscoped. Fixed at the root: the reader
-takes no actor and asks the same ambient the mount asks.
-
-**The stored `requires:` half bought nothing.** Dropping it from the merge left the file green, because
-the assertions read the reader's map rather than the visibility it buys. Now driven through the mount,
-with the arm where `tools:` alone would keep the skill visible.
-
-**A log line could carry a person's own words.** `_unreadable(str(exc))` passed parser text through, and
-a YAML parser quotes what it choked on — a body with `name: !project_<something> x` put that tag
-verbatim into a shared WARNING, against the module docstring's own absolute claim. It now logs the
-exception *type*.
-
-Plus four count/wording corrections: `paged_items` has five call sites in three modules (not "three
-callers"), with `scratchpad.py`'s eviction walk named as the fourth copy deliberately left alone;
-`_name_of` is *stricter* than both listings rather than the same filter; `StoredSkillTools`' maps are
-read-only by convention, not by `frozen=True`; `StoredSkillTools.__bool__` was dead and is gone.

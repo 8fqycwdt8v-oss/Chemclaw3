@@ -24,6 +24,7 @@ from chemclaw.ingest.eln.adapter import ElnAdapter, RawEntry, entry_window
 from chemclaw.ingest.eln.ingest import ingest_reaction
 from chemclaw.ingest.eln.record import record_from_ord_reaction
 from chemclaw.ingest.eln.records import ReactionRecordStore
+from chemclaw.ingest.eln.warehouse.expr import pattern_budget
 from chemclaw.science.fingerprints.store import FingerprintStore
 from chemclaw.science.labels.store import LabelIndex
 
@@ -138,105 +139,124 @@ async def sync_entries(
     withdrawn: set[tuple[str, str]] = set()
     cursor = since
     horizon = datetime.now(UTC) + timedelta(seconds=settings.eln_sync_future_tolerance_seconds)
-    for raw in entries:
-        # **The cursor advances on the timestamp the entry was *fetched* by**, which for a source
-        # that reports amendments is the later of the two (`entry_window`) — the one definition of
-        # "the timestamp an entry is filtered on", and until this the one place that did not use it.
-        # Advancing on `created_at` alone wedges a source permanently: the fetch filters, orders and
-        # truncates on the amendment watermark, so once more than one page of already-created rows
-        # has been amended, every fetch returns that same page, the cursor never moves past it, and
-        # reactions created afterwards are never ingested again. Nothing reports it — the batch is
-        # not truncated by the *workflow's* reckoning either, so the wedge guard in
-        # `durable/eln_sync.py` is never reached and the log reads `ingested=N rejected=0`.
-        window = entry_window(raw.created_at, raw.modified_at, raw.retracted_at)
-        # **A timestamp beyond the wall clock costs the cursor, and only sometimes the entry.**
-        # Nothing ever lowers a stored cursor, so an implausible value that became one would
-        # silently skip every later real entry — that is the whole of what this guard is for.
-        #
-        # A *creation* stamp past the horizon says the record is not about anything that has
-        # happened, so the entry is rejected and reported. An *amendment* stamp past it says
-        # somebody typed a year wrong in a metadata field of an entry whose chemistry is real: the
-        # earlier form of this guard checked `entry_window` and so rejected that entry outright,
-        # and — because the fetch filters on the same watermark — re-fetched and re-rejected it on
-        # every run, forever, costing the corpus a real experiment for a typo. So the entry ingests
-        # and only the cursor refuses the value. It is re-fetched each run and, once its record is
-        # stored, skipped by the body comparison below at the cost of one lookup.
-        if raw.created_at > horizon:
-            rejected.append(
-                RejectedEntry(
-                    entry_id=raw.entry_id,
-                    reason=f"created_at {raw.created_at.isoformat()} is implausibly far "
-                    "in the future (beyond wall clock + tolerance)",
-                    created_at=raw.created_at,
+    # **One regex budget for the whole page, opened here so no caller can forget it.**
+    # `eln_regex_timeout_seconds` bounds one cell and this loop runs one `regex` transform per
+    # reaction field, per attribute and per component and impurity *row*, so the per-cell ceiling
+    # multiplies by `eln_sync_batch_size x cells_per_entry` and composes into no page bound at all.
+    # Measured: a polynomial pattern at 66% of the per-cell budget never trips it and costs a
+    # 100-entry page 330 s, past `eln_sync_timeout_seconds` — after which the retry runs the
+    # identical page. `expr.pattern_budget` carries the arithmetic and the honest-page headroom.
+    #
+    # Inside this function rather than at each activity, for the reason
+    # `agent/turn_ambient.turn_caps` was extracted: a bound every caller has to remember is a
+    # bound two of three callers were measured not to have. `tests/test_warehouse_binding.py`
+    # derives the rest — a module that maps entries in a loop must enter this.
+    with pattern_budget():
+        for raw in entries:
+            # **The cursor advances on the timestamp the entry was *fetched* by**, which for a
+            # source that reports amendments is the later of the two (`entry_window`) — the one
+            # definition of "the timestamp an entry is filtered on", and until this the one place
+            # that did not use it. Advancing on `created_at` alone wedges a source permanently: the
+            # fetch filters, orders and truncates on the amendment watermark, so once more than one
+            # page of already-created rows has been amended, every fetch returns that same page, the
+            # cursor never moves past it, and reactions created afterwards are never ingested again.
+            # Nothing reports it — the batch is not truncated by the *workflow's* reckoning either,
+            # so the wedge guard in `durable/eln_sync.py` is never reached and the log reads
+            # `ingested=N rejected=0`.
+            window = entry_window(raw.created_at, raw.modified_at, raw.retracted_at)
+            # **A timestamp beyond the wall clock costs the cursor, and only sometimes the entry.**
+            # Nothing ever lowers a stored cursor, so an implausible value that became one would
+            # silently skip every later real entry — that is the whole of what this guard is for.
+            #
+            # A *creation* stamp past the horizon says the record is not about anything that has
+            # happened, so the entry is rejected and reported. An *amendment* stamp past it says
+            # somebody typed a year wrong in a metadata field of an entry whose chemistry is real:
+            # the earlier form of this guard checked `entry_window` and so rejected that entry
+            # outright, and — because the fetch filters on the same watermark — re-fetched and
+            # re-rejected it on every run, forever, costing the corpus a real experiment for a typo.
+            # So the entry ingests and only the cursor refuses the value. It is re-fetched each run
+            # and, once its record is stored, skipped by the body comparison below at the cost of
+            # one lookup.
+            if raw.created_at > horizon:
+                rejected.append(
+                    RejectedEntry(
+                        entry_id=raw.entry_id,
+                        reason=f"created_at {raw.created_at.isoformat()} is implausibly far "
+                        "in the future (beyond wall clock + tolerance)",
+                        created_at=raw.created_at,
+                    )
                 )
-            )
-            continue
-        if window > horizon:
-            logger.warning(
-                "eln entry %s reports an amendment at %s, beyond the wall clock: ingesting it, "
-                "but the sync cursor stays at %s and this entry is re-fetched every run until "
-                "the source is corrected",
-                raw.entry_id,
-                window.isoformat(),
-                cursor.isoformat(),
-            )
-        else:
-            cursor = max(cursor, window)
-        try:
-            reaction = adapter.map_to_ord(raw)
-            record = record_from_ord_reaction(reaction)
-            if raw.created_at <= since:
-                # The entry was seen before, so what is stored decides whether there is anything
-                # new in it. An *amendment* arrives here too: an ELN corrects an entry in place and
-                # `created_at` does not move, so a corrected entry is by definition an old one —
-                # which is also why the adapter has to widen its fetch window (`entry_window`) or
-                # this branch never sees it at all. Loaded lazily, once per run, and only when a
-                # replay actually happened; keyed on the ids this batch holds, never on the corpus.
-                if stored is None:
-                    replayed = _replay_record_ids(adapter, entries, since)
-                    stored = await record_store.bodies(replayed, source)
-                    # **The withdrawal is not in the body, so the body cannot decide this alone.**
-                    # A source withdrawing an entry re-exports it unchanged with a tombstone on it,
-                    # which is byte-identical prose — so the comparison below skipped the ingest
-                    # and the retraction never reached the row. Measured end to end: the second
-                    # sync of a withdrawn entry booked it as `skipped_existing` and `retracted()`
-                    # stayed empty. Asked in the same lazy, id-keyed way as the bodies, over the
-                    # same page, against `066`'s partial index.
-                    withdrawn = await record_store.retracted([(source, one) for one in replayed])
-                if stored.get(record.reaction_id) == record.body and (
-                    (source, record.reaction_id) in withdrawn
-                ) == (raw.retracted_at is not None):
-                    # Byte-identical to what is stored *and* in the same withdrawal state: nothing
-                    # to index or write, so skip the whole ingest. A different body falls through
-                    # and overwrites the record, which is what an amendment is — no versioning
-                    # scheme and no review needed, because the transcription asserts nothing
-                    # either way. So does a changed withdrawal, in either direction: a retraction
-                    # landing, and a re-publication lifting one.
-                    skipped_existing.append(raw.entry_id)
-                    continue
-            await ingest_reaction(
-                reaction,
-                reaction_store,
-                molecule_store,
-                record_store,
-                label_index=label_index,
-                source=source,
-                retracted_at=raw.retracted_at,
-            )
-        except (ChemclawError, ValidationError) as exc:
-            # The shared bad-data base covers *any* per-entry failure: an adapter's
-            # mapping error, a validation failure, and a fingerprint that cannot be
-            # computed (e.g. a schema-valid but degenerate reaction). Enumerating
-            # concrete types here once turned one bad entry into a batch abort.
-            # pydantic's ValidationError is caught alongside because it is a *sibling*
-            # ValueError, not a ChemclawError — e.g. an entry id that is not a valid
-            # note slug fails at Note construction, which is deterministic bad data
-            # per entry, exactly what reject-and-continue exists for.
-            rejected.append(
-                RejectedEntry(entry_id=raw.entry_id, reason=str(exc), created_at=raw.created_at)
-            )
-            continue
-        ingested.append(raw.entry_id)
+                continue
+            if window > horizon:
+                logger.warning(
+                    "eln entry %s reports an amendment at %s, beyond the wall clock: ingesting it, "
+                    "but the sync cursor stays at %s and this entry is re-fetched every run until "
+                    "the source is corrected",
+                    raw.entry_id,
+                    window.isoformat(),
+                    cursor.isoformat(),
+                )
+            else:
+                cursor = max(cursor, window)
+            try:
+                reaction = adapter.map_to_ord(raw)
+                record = record_from_ord_reaction(reaction)
+                if raw.created_at <= since:
+                    # The entry was seen before, so what is stored decides whether there is anything
+                    # new in it. An *amendment* arrives here too: an ELN corrects an entry in place
+                    # and `created_at` does not move, so a corrected entry is by definition an old
+                    # one — which is also why the adapter has to widen its fetch window
+                    # (`entry_window`) or this branch never sees it at all. Loaded lazily, once per
+                    # run, and only when a replay actually happened; keyed on the ids this batch
+                    # holds, never on the corpus.
+                    if stored is None:
+                        replayed = _replay_record_ids(adapter, entries, since)
+                        stored = await record_store.bodies(replayed, source)
+                        # **The withdrawal is not in the body, so the body cannot decide this
+                        # alone.** A source withdrawing an entry re-exports it unchanged with a
+                        # tombstone on it, which is byte-identical prose — so the comparison below
+                        # skipped the ingest and the retraction never reached the row. Measured end
+                        # to end: the second sync of a withdrawn entry booked it as
+                        # `skipped_existing` and `retracted()` stayed empty. Asked in the same lazy,
+                        # id-keyed way as the bodies, over the same page, against `066`'s partial
+                        # index.
+                        withdrawn = await record_store.retracted(
+                            [(source, one) for one in replayed]
+                        )
+                    if stored.get(record.reaction_id) == record.body and (
+                        (source, record.reaction_id) in withdrawn
+                    ) == (raw.retracted_at is not None):
+                        # Byte-identical to what is stored *and* in the same withdrawal state:
+                        # nothing to index or write, so skip the whole ingest. A different body
+                        # falls through and overwrites the record, which is what an amendment is —
+                        # no versioning scheme and no review needed, because the transcription
+                        # asserts nothing either way. So does a changed withdrawal, in either
+                        # direction: a retraction landing, and a re-publication lifting one.
+                        skipped_existing.append(raw.entry_id)
+                        continue
+                await ingest_reaction(
+                    reaction,
+                    reaction_store,
+                    molecule_store,
+                    record_store,
+                    label_index=label_index,
+                    source=source,
+                    retracted_at=raw.retracted_at,
+                )
+            except (ChemclawError, ValidationError) as exc:
+                # The shared bad-data base covers *any* per-entry failure: an adapter's
+                # mapping error, a validation failure, and a fingerprint that cannot be
+                # computed (e.g. a schema-valid but degenerate reaction). Enumerating
+                # concrete types here once turned one bad entry into a batch abort.
+                # pydantic's ValidationError is caught alongside because it is a *sibling*
+                # ValueError, not a ChemclawError — e.g. an entry id that is not a valid
+                # note slug fails at Note construction, which is deterministic bad data
+                # per entry, exactly what reject-and-continue exists for.
+                rejected.append(
+                    RejectedEntry(entry_id=raw.entry_id, reason=str(exc), created_at=raw.created_at)
+                )
+                continue
+            ingested.append(raw.entry_id)
     # The summary is a return value the scheduler stores; also log the outcome so an admin
     # running this under a Temporal Schedule sees it without opening the workflow result, and
     # gets a WARNING trail of exactly which entries were rejected and why.

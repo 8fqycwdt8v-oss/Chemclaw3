@@ -46,6 +46,7 @@ from chemclaw.durable.publish import (
     note_publish_retry,
     queue_wait_timeout,
 )
+from chemclaw.ingest.eln.warehouse.expr import pattern_budget
 
 logger = logging.getLogger(__name__)
 
@@ -107,94 +108,105 @@ async def read_corpus() -> CorpusRead:
     reactions: list[OrdReaction] = []
     skipped = 0
     unfinished: list[str] = []
-    # The bound is on what this activity *holds*, not on what it reads, because that is where the
-    # cost measured: `settings.memory_corpus_max_reactions` and the comment beside it.
-    cap = settings.memory_corpus_max_reactions
-    capped = False
-    for adapter in active_ingest_sources():
-        # Per source, because entry ids are only unique within one.
-        seen: set[str] = set()
-        since = datetime.min.replace(tzinfo=UTC)
-        while True:
-            page = await adapter.fetch_new_entries(since)
-            fresh = [raw for raw in page if raw.entry_id not in seen]
-            if not fresh:
-                # Nothing new: either the source is exhausted, or it is stuck on a page it cannot
-                # get past. The second is what `fetch_was_truncated` still being true means.
-                if fetch_was_truncated(adapter):
-                    unfinished.append(getattr(adapter, "name", type(adapter).__name__))
-                break
-            seen.update(raw.entry_id for raw in fresh)
-            for raw in fresh:
-                # **Inside the per-entry loop, not around the page**, because a drop directory
-                # returns its whole corpus as one page: measured, a cap of 2,500 checked between
-                # pages let 10,000 reactions through and marked the read incomplete about a corpus
-                # it had already materialised — a bound that reports itself and bounds nothing.
-                if cap and len(reactions) >= cap:
-                    capped = True
+    # One regex budget for this whole activity, not per page: a drop directory returns its entire
+    # corpus as one page and a warehouse source returns many, so a per-page budget would bound
+    # neither. `expr.pattern_budget` is re-entrant, so the per-entry `map_to_ord` calls below keep
+    # this deadline rather than each opening their own — see it for what the per-cell bound misses.
+    with pattern_budget():
+        # The bound is on what this activity *holds*, not on what it reads, because that is where
+        # the cost measured: `settings.memory_corpus_max_reactions` and the comment beside it.
+        cap = settings.memory_corpus_max_reactions
+        capped = False
+        for adapter in active_ingest_sources():
+            # Per source, because entry ids are only unique within one.
+            seen: set[str] = set()
+            since = datetime.min.replace(tzinfo=UTC)
+            while True:
+                page = await adapter.fetch_new_entries(since)
+                fresh = [raw for raw in page if raw.entry_id not in seen]
+                if not fresh:
+                    # Nothing new: either the source is exhausted, or it is stuck on a page it
+                    # cannot get past. The second is what `fetch_was_truncated` still being true
+                    # means.
+                    if fetch_was_truncated(adapter):
+                        unfinished.append(getattr(adapter, "name", type(adapter).__name__))
                     break
-                try:
-                    reactions.append(adapter.map_to_ord(raw))
-                except ChemclawError as exc:
-                    # A malformed entry is the sync's problem to report, not this job's — skip it
-                    # and move on. Catch only ChemclawError (the bad-data contract), so an
-                    # unexpected error surfaces instead of being silently dropped; log the skip
-                    # so a corpus that quietly loses reactions is diagnosable.
-                    logger.info("memory job skipped an unmappable ELN entry: %s", exc)
-                    skipped += 1
-                    continue
+                seen.update(raw.entry_id for raw in fresh)
+                for raw in fresh:
+                    # **Inside the per-entry loop, not around the page**, because a drop directory
+                    # returns its whole corpus as one page: measured, a cap of 2,500 checked between
+                    # pages let 10,000 reactions through and marked the read incomplete about a
+                    # corpus it had already materialised — a bound that reports itself and bounds
+                    # nothing.
+                    if cap and len(reactions) >= cap:
+                        capped = True
+                        break
+                    try:
+                        reactions.append(adapter.map_to_ord(raw))
+                    except ChemclawError as exc:
+                        # A malformed entry is the sync's problem to report, not this job's — skip
+                        # it and move on. Catch only ChemclawError (the bad-data contract), so an
+                        # unexpected error surfaces instead of being silently dropped; log the skip
+                        # so a corpus that quietly loses reactions is diagnosable.
+                        logger.info("memory job skipped an unmappable ELN entry: %s", exc)
+                        skipped += 1
+                        continue
+                if capped:
+                    # Stop here and say so. Raising would lose the pass entirely; continuing would
+                    # exchange a partial note for a killed worker, which is the trade
+                    # `memory_corpus_max_reactions` exists to refuse.
+                    break
+                if not fetch_was_truncated(adapter):
+                    break
+                since = max(
+                    entry_window(raw.created_at, raw.modified_at, raw.retracted_at) for raw in fresh
+                )
             if capped:
-                # Stop here and say so. Raising would lose the pass entirely; continuing would
-                # exchange a partial note for a killed worker, which is the trade
-                # `memory_corpus_max_reactions` exists to refuse.
                 break
-            if not fetch_was_truncated(adapter):
-                break
-            since = max(
-                entry_window(raw.created_at, raw.modified_at, raw.retracted_at) for raw in fresh
+        if skipped:
+            logger.warning(
+                "memory corpus read is incomplete: %d entr(y/ies) could not be mapped, so "
+                "this pass "
+                "saw %d reaction(s) and not the whole record",
+                skipped,
+                len(reactions),
             )
         if capped:
-            break
-    if skipped:
-        logger.warning(
-            "memory corpus read is incomplete: %d entr(y/ies) could not be mapped, so this pass "
-            "saw %d reaction(s) and not the whole record",
-            skipped,
-            len(reactions),
+            logger.warning(
+                "memory corpus read is incomplete: it stopped at "
+                "memory_corpus_max_reactions=%d, so this pass saw %d reaction(s) and not the whole "
+                "record. Raise the bound if the worker "
+                "has the memory for it (~40 kB resident per reaction, measured) or narrow "
+                "CHEMCLAW_DATA_SOURCES; the notes this pass writes are marked partial either way.",
+                cap,
+                len(reactions),
+            )
+        if unfinished:
+            logger.warning(
+                "memory corpus read is incomplete: %s still reported rows waiting after the "
+                "last page "
+                "it could serve, so this pass saw %d reaction(s) and not the whole record",
+                ", ".join(unfinished),
+                len(reactions),
+            )
+        return CorpusRead(
+            reactions=reactions, complete=not skipped and not unfinished and not capped
         )
-    if capped:
-        logger.warning(
-            "memory corpus read is incomplete: it stopped at memory_corpus_max_reactions=%d, so "
-            "this pass saw %d reaction(s) and not the whole record. Raise the bound if the worker "
-            "has the memory for it (~40 kB resident per reaction, measured) or narrow "
-            "CHEMCLAW_DATA_SOURCES; the notes this pass writes are marked partial either way.",
-            cap,
-            len(reactions),
-        )
-    if unfinished:
-        logger.warning(
-            "memory corpus read is incomplete: %s still reported rows waiting after the last page "
-            "it could serve, so this pass saw %d reaction(s) and not the whole record",
-            ", ".join(unfinished),
-            len(reactions),
-        )
-    return CorpusRead(reactions=reactions, complete=not skipped and not unfinished and not capped)
 
-
-# The builders run in a worker thread, not on the activity's event loop. Each one does full DRFP
-# fingerprinting, O(n²) Tanimoto, NetworkX component analysis *and* a synchronous full corpus
-# parse (`load_notes` inside `_units`) — and the `background-jobs` queue's single worker shares
-# one loop across ELN sync, reindex, retention and every other activity, so an inline builder
-# stalled all of them for the duration, Temporal heartbeats included.
-# `observation_jobs.mine_observations_activity` threads its parse for exactly this reason; the
-# three activities that do strictly more blocking work never got the same treatment.
-#
-# Completeness travels into the builder (`corpus_complete`), because the retirement half acts on
-# "this run no longer mints that id" — which is state change, and nothing stands between it and
-# the graph: it lands when the write does. This line said "gated only by a reviewer who cannot know
-# the read was partial", which `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` falsified in
-# the direction that matters — there is no reviewer, so the builder's own care is the whole control.
-# `memory.jobs._units` says what it does with it.
+    # The builders run in a worker thread, not on the activity's event loop. Each one does full DRFP
+    # fingerprinting, O(n²) Tanimoto, NetworkX component analysis *and* a synchronous full corpus
+    # parse (`load_notes` inside `_units`) — and the `background-jobs` queue's single worker shares
+    # one loop across ELN sync, reindex, retention and every other activity, so an inline builder
+    # stalled all of them for the duration, Temporal heartbeats included.
+    # `observation_jobs.mine_observations_activity` threads its parse for exactly this reason; the
+    # three activities that do strictly more blocking work never got the same treatment.
+    #
+    # Completeness travels into the builder (`corpus_complete`), because the retirement half acts on
+    # "this run no longer mints that id" — which is state change, and nothing stands between it and
+    # the graph: it lands when the write does. This line said "gated only by a reviewer who cannot
+    # know the read was partial", which `D-2026-09-05-the-gate-follows-behaviour-not-knowledge`
+    # falsified in the direction that matters — there is no reviewer, so the builder's own care is
+    # the whole control. `memory.jobs._units` says what it does with it.
 
 
 @durable_activity("background")
