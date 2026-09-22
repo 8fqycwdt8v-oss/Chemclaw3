@@ -207,3 +207,26 @@ commit and its own ADR (`D-2026-09-22-a-lock-built-at-import-belongs-to-one-even
 - [x] `make lint`, `make type` (964 files), `make prose-validate` green; `test_loop_local_locks` 5,
       `test_knowledge` 50, `test_temporal_client` and the six repo-hygiene guards 1174 passed.
 - [ ] `make mutants` re-run to see whether it now completes, and the full serial suite.
+
+## The suite, twice, and a test that cannot run in this sandbox
+
+- [x] Run 1: **10541 passed, 7 skipped, 3 failed** (23:26). Two were guards this session's own prose
+      tripped — `core/aio.py` citing `_locked` while defining `locked`, and "issue #295" read as a
+      pointer to rule 295. Both guards were right; both sentences rephrased.
+- [x] Run 2: **10543 passed, 7 skipped, 1 failed** (23:12), and the one failure was a *different arm*
+      of the same test. Run 1 failed its `in_flight` assertion; run 2 failed its budget precondition.
+      Fixing the arm that fired told me nothing about the other one.
+- [x] `in_flight` was a real race: the slot comes back when the worker thread does — the production
+      comment says so — and that thread is still killing the child, measured at 0.058 s from the
+      test's own log, while the assertion allowed one loop turn. Bounded at 5 s, which is two orders
+      of magnitude from the wedge it regresses against (`in_flight` still at 2 after five seconds).
+- [x] The budget precondition is a property of **this box**. Five samples: fork round trip **0.165 s
+      median** against CI's **0.030 s**, parse 0.205 s against CI's 0.258 s — so the parse is healthy
+      and the required ratio of 4 measures 1.24. The guard was right to refuse and wrong to refuse by
+      failing. It now skips when the *fork* is the outlier and still fails when the *parse* got
+      cheap, with both arms driven on faked clocks.
+- [x] `tests/conftest.py::_report_slow_fork_skips` — the fourth reporter beside Postgres, Temporal
+      and helm, so a run that skips these says what it is therefore not evidence about. Verified
+      firing: "3 tests were skipped because creating a process costs more here than the deadline
+      they derive".
+- [ ] A third full run, then the PR.

@@ -1845,3 +1845,24 @@ free number at the end of its section.
      uncontended case, which is the easier one to write, I would have recorded "the weak map releases
      them" and shipped a leak in exactly the case the class exists for. **A weak mapping promises that
      *it* is not the retainer, never that the key dies** — so check whether the value can reach it.
+
+135. **A hard `assert` on a machine-dependent precondition reds the gate for a property of the box.**
+     `tests/test_parse_isolation.py` derives its budgets from what its fixture costs to parse, with a
+     floor of one fork round trip, and failed when the floor had no room. Measured over five runs in
+     this remote sandbox: a **0.165 s median** fork round trip against the **0.030 s** the CI runner
+     measures, with the parse at 0.205 s — matching CI's 0.258 s, so nothing was wrong with the parse
+     and the ratio was 1.24 against a required 4. That is not a defect this tree can fix. The guard
+     was right to refuse; it was wrong to refuse by *failing*, which is the "teaches everybody to
+     re-run" shape `D-2026-09-13` names. **When a precondition cannot be met, the two cases have
+     different answers**: the box being slow is a skip that says what the run is not evidence about,
+     and the fixture having got cheap is still a failure. Both arms now, and both driven with the
+     clocks faked — a machine-dependent branch is otherwise exercised by nobody on purpose.
+
+136. **I fixed the wrong half of that test first and the second full run told me.** Its first failure
+     was `in_flight == 0` one loop turn after the caller was freed, and the race there is real (the
+     slot comes back when the worker thread does, and the kill it is doing measured 0.058 s), so I
+     bounded the wait and re-ran. The next run failed the *budget* guard instead — a different arm of
+     the same fragile test, which the first run had passed only because the fork happened to be fast
+     that minute. **A flaky test can have more than one flake**, and fixing the one that fired tells
+     you nothing about the others. Characterising the distribution — five samples, median, against
+     the figure the docstring records for CI — is what found the second.

@@ -69,6 +69,15 @@ from tests.test_document_formats import _blank_pdf_bytes  # type: ignore[attr-de
 # budget working: a CSV slow enough for it is a CSV whose rendered text does not fit one parse.
 _SLOW_CSV = (b",".join([b"a" * 24] * 8) + b"\n") * 100_000
 
+# Above this, a fork round trip is the reason a derived deadline has no room, and no change to
+# `_parse_csv` can be. 2.7x the 0.030 s the CI runner measures and a fifth of the 0.165 s median
+# this remote sandbox does — see `_budgets_the_slow_fixture_overruns`, which is the only reader.
+_FORK_IS_THE_PROBLEM = 0.08
+
+# The marker the three fixture-timed tests skip under when this box cannot express the scenario.
+# Spelled once so a run's epilogue and a reader are looking at the same string.
+_SLOW_FIXTURE_SKIP = "process creation is too expensive on this box"
+
 
 def test_a_parse_child_is_still_inside_the_no_egress_posture() -> None:
     """A parse now runs in a process this repository did not previously have, so say what it may do.
@@ -154,18 +163,69 @@ def _budgets_the_slow_fixture_overruns() -> tuple[float, float]:
     So the budgets are derived from what the parse costs on the box running the test. A quarter is
     the margin; the floor is one fork round trip, because a deadline under that kills the child
     before it reads a byte and the test would be about process creation instead.
+
+    **When that floor is not clear, which of the two measurements moved decides whether this is a
+    failure or a skip**, and it used to be a failure either way. The ratio can collapse from below —
+    `_parse_csv` got faster once already and will again — and that must red the gate, because the
+    three tests downstream stop being evidence about a parse outrunning its deadline. It can equally
+    collapse from above, on a box where creating a process is expensive: measured in the Claude Code
+    Remote sandbox, five runs gave a **0.165 s median** fork round trip against the **0.030 s** the
+    CI runner measures, with the parse at 0.205 s — matching CI's 0.258 s, so nothing was wrong with
+    the parse and the ratio was 1.24 against a required 4. That is not a defect this repository can
+    fix and it is not evidence about anything; `_FORK_IS_THE_PROBLEM` is where the two cases part.
+    The bound is 2.7x CI's own figure, so no change to `_parse_csv` can reach it, and well under
+    this sandbox's — which is the property that keeps the failure arm real.
     """
     cost = _in_process_parse_seconds(_SLOW_CSV)
     fork = _fork_round_trip_seconds()
     deadline = cost / 4
+    if deadline <= fork and fork > _FORK_IS_THE_PROBLEM:
+        pytest.skip(
+            f"{_SLOW_FIXTURE_SKIP}: a fork round trip costs {fork:.3f}s here against the 0.030s a "
+            f"CI runner measures, so a deadline this {cost:.3f}s parse overruns four times over "
+            f"({deadline:.3f}s) is under it. The parse is not the problem — process creation is, "
+            "and this box cannot express a parse outrunning its deadline at all"
+        )
     assert deadline > fork, (
         f"_SLOW_CSV parses in {cost:.3f}s here, so a deadline it overruns four times over is "
         f"{deadline:.3f}s — under the {fork:.3f}s a fork round trip costs, so the child would be "
         "killed before it read a byte and this would be about process creation rather than about a "
-        "parse outrunning its deadline. Growing the fixture is not the way out: driven, 40 MB of "
-        "the same CSV is refused by `document_parse_memory_bytes` before the deadline is reached."
+        "parse outrunning its deadline. A fork that cheap means the *parse* got faster, which is "
+        "what this arm is for. Growing the fixture is not the way out: driven, 40 MB of the same "
+        "CSV is refused by `document_parse_memory_bytes` before the deadline is reached."
     )
     return cost, deadline
+
+
+def test_the_fixture_guard_tells_a_slow_box_from_a_fast_parse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both arms of `_budgets_the_slow_fixture_overruns`' floor, driven with the clocks faked.
+
+    The floor used to fail either way, which reddened the gate in the Claude Code Remote sandbox for
+    a property of the sandbox. Splitting it is only safe if the *failure* arm still fires, so both
+    are asserted here rather than left to whichever box happens to run the suite — the whole defect
+    being that a machine-dependent branch is exercised by nobody on purpose.
+
+    Fake seconds, not real ones: this asserts the branch, and measuring it for real would reproduce
+    the sampling problem one level up.
+    """
+    monkeypatch.setattr("tests.test_parse_isolation._in_process_parse_seconds", lambda raw: 0.200)
+
+    # A slow fork with a healthy parse is the box's fault, so the scenario is inexpressible here.
+    monkeypatch.setattr("tests.test_parse_isolation._fork_round_trip_seconds", lambda: 0.165)
+    with pytest.raises(pytest.skip.Exception, match=_SLOW_FIXTURE_SKIP):
+        _budgets_the_slow_fixture_overruns()
+
+    # A *cheap* fork with no room left means the parse got faster, which must still red the gate.
+    monkeypatch.setattr("tests.test_parse_isolation._fork_round_trip_seconds", lambda: 0.060)
+    with pytest.raises(AssertionError, match="the .parse. got faster"):
+        _budgets_the_slow_fixture_overruns()
+
+    # And a healthy ratio returns the budgets untouched.
+    monkeypatch.setattr("tests.test_parse_isolation._fork_round_trip_seconds", lambda: 0.030)
+    cost, deadline = _budgets_the_slow_fixture_overruns()
+    assert (cost, deadline) == (0.200, 0.050)
 
 
 def _warm_the_forkserver() -> None:
