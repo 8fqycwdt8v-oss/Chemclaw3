@@ -234,14 +234,41 @@ topic).
       second in-process pytest session hung with no exception
       (`D-2026-09-22-a-lock-built-at-import-belongs-to-one-event-loop`).
 
-      **What is left is the measurement, which needs one completed run.** The work is, in order: let
-      `make mutants` finish once and record what it costs, then add the remaining three one at a time.
-      Nothing about the three is in doubt — each is a refusal whose surviving mutant is a tool call that
-      should not have happened, the same argument `core/chem.py` and `core/logging.py` were added on —
-      only what they cost. Note that a completed run tests every mutant of all 15 paths, so the first
-      figure is a *baseline*, not this addition's marginal cost; the marginal cost needs a second run
-      with `spend_cap.py` removed, or `mutmut results` read per file. Anchors: `pyproject.toml`
-      `[tool.mutmut]`, `mutants/mutmut-stats.json`.
+      **The measurement exists now, and it answers the row while replacing it with a bigger
+      question.** First completed run, 2026-09-22, 15 source paths, `PYTEST_TIMEOUT_SCALE=4`:
+
+      | | |
+      |---|---|
+      | wall | **30m04s** (05:58:47 → 06:28:51), 3640 mutants at **1.57 mutations/second** |
+      | killed | 1612 |
+      | survived | 988 |
+      | reached by no selected test | **1009** (27.7% of all mutants) |
+      | timed out | 31 |
+      | suspicious / segfault | 0 / 0 |
+      | `agent/spend_cap.py`'s own share | **29 mutants** — 0.8% of the run, ~18 s |
+
+      So the row's premise is answered twice over. "The run is hours long" is 30 minutes, and the
+      addition it wanted priced costs **~18 seconds** of it; the three remaining gates are 333, 367 and
+      671 lines against `spend_cap.py`'s 309, so they are the same order. The per-module figure is the
+      count of distinct `x_<function>__mutmut_<n>` symbols in the mutated copy of the file, which is a
+      proxy for what mutmut scheduled rather than a reading of its own ledger.
+
+      **But the gate does not pass, and that is the finding to work next.** It scores
+      `killed / total` = 1612/3640 = **44.3%** against `MUTATION_SCORE_FLOOR: "72.0"`, so the weekly job
+      now fails on its kill rate where it used to fail on starting. The floor is not the problem and
+      neither is a sudden regression: `total` counts the 1009 mutants **no selected test reaches**, and
+      `pytest_add_cli_args_test_selection` is a hand-kept list of 16 files that was never widened as
+      `source_paths` grew from the seven the floor was recorded against (74.7% and 76.8%, per
+      `mutants.yml`'s own comments) to fifteen. `agent/spend_cap.py` shipping with `tests/test_spend_cap.py`
+      outside the selection — fixed in the same commit as this row — was one instance of the pattern,
+      not the whole of it.
+
+      So the work is: pair every `source_paths` entry with the tests that exercise it, re-measure, and
+      then decide whether 72.0 is still the right floor for a fifteen-module list — with the remaining
+      three gates added once the denominator means something. A derived guard that fails when a declared
+      source path has no test file in the selection is the shape that stops this recurring. Anchors:
+      `pyproject.toml` `[tool.mutmut]`, `.github/workflows/mutants.yml`,
+      `mutants/mutmut-cicd-stats.json`.
 
 - [ ] **`Chemclaw3_ui` has no surface for the four `/skills/mine` routes, the six `/skills/org`
       ones, or the proposal queue** — [M], opened by

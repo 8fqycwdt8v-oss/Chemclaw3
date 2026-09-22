@@ -2,7 +2,7 @@
 
 **Status:** accepted · **Date:** 2026-09-22 · Supersedes nothing. Found while working the `BACKLOG.md`
 row *"Four first-party refusal gates are outside the weekly mutation backstop"*, whose instruction was
-to measure the run's cost before extending it. The run does not run.
+to measure the run's cost before extending it. The run did not run.
 
 ## Context
 
@@ -102,17 +102,35 @@ much as outside.
 possible. `agent/spend_cap.py` is first because it is the smallest of the four by source length (309
 lines against `loop_cap.py`'s 333, `skill_backend.py`'s 367 and `plan_gate.py`'s 671), so it buys the
 cheapest available answer to what one of these costs. Lines are a proxy for mutant count and not a
-measurement of it, which is stated where it is used.
+measurement of it, which is stated where it is used — and the completed run has since priced the real
+thing at **29 mutants, ~18 seconds**, so the proxy was pointing the right way and the caution was still
+worth writing.
 
 ## Consequences
 
 **The row's premise is corrected rather than carried forward.** "The run is hours long" describes a
-*full-repository* run, in the comment the row cites. What the 14-path run costs is still unknown: the
-last completed run on record is `mutants.yml`'s own note of **825 mutants in 2m57s warm**, from
-2026-08-27, when `source_paths` held **seven** entries — so "it had never completed" is true of this
-list and not of the target.
+*full-repository* run, in the comment the row cites, and the only completed run on record before this
+one is `mutants.yml`'s own note of **825 mutants in 2m57s warm**, from 2026-08-27, when `source_paths`
+held **seven** entries — so "it had never completed" was true of this list and not of the target. It
+completes now, at 30m04s for 3640 mutants, which is the figure above and the one the row gets.
 
-**The run still does not complete, and a third blocker is why.** With the guard fixed and the
+**The run completes now, and the measurement changes what the row is about.** 30m04s for 3640
+mutants at 1.57 mutations/second, with the three blockers below fixed: 1612 killed, 988 survived,
+**1009 reached by no selected test**, 31 timed out, 0 suspicious. `agent/spend_cap.py`'s own share is
+29 mutants — 0.8% of the run, about 18 seconds — so "the run is hours long", the sentence the row
+declined to widen the list on, priced an addition at ~18 s of a half-hour run.
+
+**And the gate still fails, for a reason worth more than the cost figure.** It scores
+`killed / total` = 1612/3640 = **44.3%** against `MUTATION_SCORE_FLOOR: "72.0"`, because `total`
+counts the 1009 mutants nothing in `pytest_add_cli_args_test_selection` reaches. That selection is a
+hand-kept list of 16 files and was never widened as `source_paths` grew from the seven the floor was
+recorded against — 74.7% and 76.8%, in this workflow's own comments — to fifteen. So the weekly job
+goes from failing to *start* to failing on a denominator nobody maintained, and `spend_cap.py`
+arriving with its own test file outside the selection was one instance of that, caught here only
+because a reviewer measured its coverage. The floor is not wrong; it is being read against a set it
+was not measured on. `BACKLOG.md` carries the work.
+
+**The third blocker was why it did not complete before.** With the guard fixed and the
 isolation escape fixed, the clean-test baseline gets through 271 of its tests in **12m33s** and then
 `tests/test_knowledge.py::test_concurrent_writes_serialize_and_both_notes_land` hits pytest-timeout —
 at 180 s, and again at 720 s under `PYTEST_TIMEOUT_SCALE=4`, so it is a hang rather than a slow test.
