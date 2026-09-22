@@ -536,6 +536,40 @@ def _report_helm_skips(terminalreporter: TerminalReporter) -> None:
     )
 
 
+def _report_slow_fork_skips(terminalreporter: TerminalReporter) -> None:
+    """Say when a box's own process-creation cost took the parse-deadline tests away.
+
+    The fourth thing a green line can be silent about, and the only one that is a property of the
+    *machine* rather than of a missing dependency. `tests/test_parse_isolation.py` derives its
+    budgets from what the fixture costs to parse here, with a floor of one fork round trip — below
+    that the child is killed before it reads a byte and the test is about process creation. In this
+    remote sandbox a fork round trip measured a **0.165 s median against the CI runner's 0.030 s**,
+    so the floor has no room and three tests cannot express the scenario at all.
+
+    Reported rather than left to `-ra`, because the thing that made this worth a section is that it
+    used to be a *failure*: a red gate for a machine property is what teaches everybody to re-run,
+    and a silent skip of the wedge regression is what the wedge got shipped behind the first time.
+    Matched on the marker the test module spells, imported rather than restated, the way
+    `_report_sibling_skips` matches `tests/siblings.SIBLING_SKIP`.
+    """
+    from tests.test_parse_isolation import _SLOW_FIXTURE_SKIP
+
+    skipped = [
+        report
+        for report in terminalreporter.stats.get("skipped", [])
+        if _SLOW_FIXTURE_SKIP in str(report.longrepr)
+    ]
+    if not skipped:
+        return
+    terminalreporter.write_sep("=", "Parse-deadline tests did not run", yellow=True)
+    terminalreporter.write_line(
+        f"{len(skipped)} tests were skipped because creating a process costs more here than the "
+        "deadline they derive, so this run is not evidence that a parse past its deadline frees "
+        "its upload slot — the wedge those tests regress against. CI's runner forks ~5x faster "
+        "and runs them."
+    )
+
+
 # The marker `tests/temporal_env.py::start_env_or_skip` puts in its skip reason. Matched the same
 # way, for the same reason: the number a reader needs is how many tests did not run.
 _TEMPORAL_SKIP = "Temporal test server unavailable"
@@ -620,8 +654,8 @@ def pytest_terminal_summary(terminalreporter: TerminalReporter) -> None:
     Every section is about the same misreading: a run's headline number is believed without the
     things that qualify it. A timed-out test proves nothing about the assertions it never
     reached, and a skipped Postgres, Temporal or helm test proves nothing at all — see
-    `_report_postgres_skips`, `_report_temporal_skips`, `_report_helm_skips` and
-    `_report_sibling_skips`.
+    `_report_postgres_skips`, `_report_temporal_skips`, `_report_helm_skips`,
+    `_report_sibling_skips` and `_report_slow_fork_skips`.
 
     `FAILED tests/test_pka.py::test_… - Failed: Timeout (>180.0s) from pytest-timeout` in the
     short summary was read as a numerical failure by two separate reviewers of this repository, and
@@ -636,6 +670,7 @@ def pytest_terminal_summary(terminalreporter: TerminalReporter) -> None:
     _report_helm_skips(terminalreporter)
     _report_public_schema_shadowing(terminalreporter)
     _report_sibling_skips(terminalreporter)
+    _report_slow_fork_skips(terminalreporter)
     timed_out = sorted(
         report.nodeid
         for report in terminalreporter.stats.get("failed", [])

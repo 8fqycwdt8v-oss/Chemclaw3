@@ -45,6 +45,7 @@ import time
 from collections.abc import AsyncIterator, Iterable, Iterator, Sequence
 from pathlib import Path
 
+from chemclaw.core.aio import LoopLocalLock
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.logging import log_event, secret_env_names
@@ -54,8 +55,20 @@ from chemclaw.kg.record import NoteFile, NoteWrite, NoteWriter, WriteOutcome
 
 log = logging.getLogger(__name__)
 
-# Serializes every write in this process — see the module docstring.
-_WRITE_LOCK = asyncio.Lock()
+# Serializes every write on this event loop — see the module docstring, and `core/aio.py` for why
+# it is not one `asyncio.Lock()` here. It was, and a module-level `asyncio.Lock` binds itself to the
+# first loop that *contends* on it: a second `asyncio.run` in the same process then raised
+# `RuntimeError: ... is bound to a different event loop` from the waiter and left the lock
+# permanently held, so the symptom was a hang with no exception. Measured — one `asyncio.run` of two
+# concurrent writes passes in 3.4 s and the identical second call never returns, which is what stops
+# `make mutants` (`D-2026-09-22-a-mutation-backstop-that-cannot-start`).
+#
+# **Per loop rather than per process is a real weakening, and it is the right one.** Two loops in
+# one process no longer serialize against each other — reachable only from two *simultaneous* loops
+# in separate threads, where the exclusive `flock` below is what actually protects the checkout and
+# would refuse the second writer fast. Sequential loops, which is the case that occurs, get exactly
+# the old behaviour. A permanent wedge is not a stronger guarantee than that.
+_WRITE_LOCK = LoopLocalLock("kg.git_writer's write lock")
 
 # The advisory-lock file guarding the checkout across processes. It lives under `.git/` because
 # nothing else writes there: no reader's `rglob` reaches it (`knowledge_path` is

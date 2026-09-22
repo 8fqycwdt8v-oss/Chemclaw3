@@ -1760,3 +1760,109 @@ free number at the end of its section.
      named "one field, two questions" as the tension and then failed to handle it on the path where the
      two differ. **When a derived boolean has twenty readers, enumerate the inputs that make it false**
      before narrowing what feeds it.
+
+126. **I wrote a reason into a config comment that I had not checked, and it was backwards.** Adding a
+     refusal gate to the mutation list, I said "`plan_gate.py` is first because it is the smallest of
+     the four by mutant count" — it is the *largest* of the four by source length (671 lines against
+     309). I had not measured mutant counts at all, and lines were the only proxy I had. Caught it
+     within a minute because the number was checkable, but it was already written. **A ranking claim
+     needs the ranking in front of you**, and where a proxy is all that is available, name it as a
+     proxy in the same sentence.
+
+127. **A control I was asked to widen was not running at all.** The row said four refusal gates were
+     outside the weekly mutation backstop and asked for the runtime to be measured before extending it.
+     Measured: `make mutants` fails before any mutant is tested — 27 s locally, 29 s in CI's own step
+     on `main` — so every module already in it was outside it too, and the "hours long" figure the row
+     reasoned from described a full-repository run rather than this list. **Before widening a control,
+     run it.** The cheapest possible check on a gate is whether it starts, and a row that describes a
+     gate as narrow has assumed the harder half.
+
+128. **Two derived guards collided, and each was right.** `api/runner_trace.py` is a mutation source,
+     so inside `mutants/` its class carries 45 generated method names; a guard requiring every
+     non-underscore member to have a caller cannot pass against names nothing could call. Both guards
+     are the shape this repository prefers — a rule over the tree rather than a list somebody maintains
+     — and neither was written with the other in view. **A guard that walks a class sees whatever
+     rewrote that class; a guard that rewrites the tree must survive the tree's own guards.**
+
+129. **"One run is one process" was an unnamed assumption in three places, and a harness that reuses a
+     process ran the destructive suite against the real database.** `mutmut` calls `pytest.main()`
+     in-process — stats, baseline, then once per mutant — while the session-scoped isolation fixture
+     drops `TEST_SCHEMA` at session end and `TEST_SCHEMA` is a module constant, so the migration memo
+     kept an unchanged key for a vanished schema and every unqualified name fell through the
+     search_path to `public`. Reproduced in ~4.4 s of pytest time once stated as a hypothesis, against
+     attempts through the harness itself that ran 27 s, 74 s, 283 s and one whose clean-test phase alone
+     took 12m33s. **When a test harness reuses the process, every module-level memo is shared state
+     across sessions** — and the memo has to be invalidated by whatever destroys the thing it
+     describes, not by the caller who happens to remember.
+
+130. **I diagnosed a background failure from the last thing in the log, wrote it into a backlog row,
+     then corrected it the wrong way.** The earlier mutation attempt died on a `test_knowledge`
+     pytest-timeout, so I recorded that as the second blocker. The next attempt died somewhere else,
+     so I rewrote the row to say the timeout was a misreading and that "with `PYTEST_TIMEOUT_SCALE=4`
+     that test passes" — which I had never observed. It does not pass: the scale applied (720 s = 180
+     x 4) and it timed out anyway. The second attempt simply stopped *earlier* in the same file order,
+     under `-x`, so it never reached the test I had declared innocent. **A failure you did not reach
+     is not a failure you disproved.** Both halves of this were the same error: reading an ordering
+     artefact of `-x` as a fact about a test, once to blame it and once to clear it.
+
+131. **A module-level `asyncio.Lock` is bound to the first event loop that contends on it, and the
+     second loop deadlocks rather than erroring.** `kg/git_writer._WRITE_LOCK` and
+     `core/temporal_client._CONNECT_LOCK` are both constructed at import. `Lock.acquire` only calls
+     `_get_loop()` on the *contended* path, so the binding happens on the first race and not on the
+     first use — which is why this survives every test that takes the lock alone. A second
+     `asyncio.run` in the same process then raises `RuntimeError: ... is bound to a different event
+     loop` **from the waiter**, leaving the lock permanently `[locked]` with its holder mid-cancel, so
+     `asyncio.run`'s own shutdown never finishes. Presents as a wall-clock timeout with no error.
+     **A synchronization primitive at module scope is process-scoped state pretending to be
+     loop-scoped**; resolve it per running loop.
+
+132. **I wrote "no CI job runs it" four times about a job that runs weekly and had been failing for a
+     month.** `.github/workflows/mutants.yml` runs `make mutants` on a Monday cron, gates on the kill
+     rate, and files a GitHub issue on failure. All four scheduled runs had failed and that issue had
+     been open for three weeks with three comments. I inferred the absence from `make mutants` not
+     being in the `ci` target and never listed `.github/workflows/`. **"Nothing checks this" is a
+     claim about a search, so do the search** — and the finding it cost me was the better one: the
+     control did report its own death, into the tracker this repository works its backlog in, and the
+     backlog row about it was written as though the control were healthy. A signal nobody reads is not
+     a missing signal, and the two have different fixes.
+
+133. **A lock that only binds when it is contended is a lock that passes every test taking it alone.**
+     `asyncio.Lock.acquire` resolves its event loop on the *contended* path only — the fast path sets
+     the lock held and returns before `_get_loop()` — so a module-level one binds to the first loop that
+     races on it, which is the first time it does its work. Two of these sat in `src/` behind comments
+     that had *considered* the multi-loop case and priced it as one extra connect, because the
+     uncontended path is what they were picturing. The real cost is a hang with no exception: the
+     second loop's waiter raises while the holder keeps the lock, so `asyncio.run`'s shutdown cannot
+     finish cancelling it and the lock is left permanently held. **When a failure needs two conditions
+     — a second loop *and* contention — a test that arranges one of them proves nothing**, and that is
+     the shape to look for whenever something passes alone and hangs in company.
+
+134. **The obvious fix leaked, and one arm of the measurement would have hidden it.** A
+     `WeakKeyDictionary` keyed by the event loop is the textbook shape for per-loop state, and here it
+     cannot work: the value is an `asyncio.Lock`, and a contended one stores `_loop` — its own key — so
+     the entry keeps itself alive. Measured over three loops with a collection in between: **0 of 3**
+     entries survive when the lock is never contended and **3 of 3** when it is. Had I checked only the
+     uncontended case, which is the easier one to write, I would have recorded "the weak map releases
+     them" and shipped a leak in exactly the case the class exists for. **A weak mapping promises that
+     *it* is not the retainer, never that the key dies** — so check whether the value can reach it.
+
+135. **A hard `assert` on a machine-dependent precondition reds the gate for a property of the box.**
+     `tests/test_parse_isolation.py` derives its budgets from what its fixture costs to parse, with a
+     floor of one fork round trip, and failed when the floor had no room. Measured over five runs in
+     this remote sandbox: a **0.165 s median** fork round trip against the **0.030 s** the CI runner
+     measures, with the parse at 0.205 s — matching CI's 0.258 s, so nothing was wrong with the parse
+     and the ratio was 1.24 against a required 4. That is not a defect this tree can fix. The guard
+     was right to refuse; it was wrong to refuse by *failing*, which is the "teaches everybody to
+     re-run" shape `D-2026-09-13` names. **When a precondition cannot be met, the two cases have
+     different answers**: the box being slow is a skip that says what the run is not evidence about,
+     and the fixture having got cheap is still a failure. Both arms now, and both driven with the
+     clocks faked — a machine-dependent branch is otherwise exercised by nobody on purpose.
+
+136. **I fixed the wrong half of that test first and the second full run told me.** Its first failure
+     was `in_flight == 0` one loop turn after the caller was freed, and the race there is real (the
+     slot comes back when the worker thread does, and the kill it is doing measured 0.058 s), so I
+     bounded the wait and re-ran. The next run failed the *budget* guard instead — a different arm of
+     the same fragile test, which the first run had passed only because the fork happened to be fast
+     that minute. **A flaky test can have more than one flake**, and fixing the one that fired tells
+     you nothing about the others. Characterising the distribution — five samples, median, against
+     the figure the docstring records for CI — is what found the second.

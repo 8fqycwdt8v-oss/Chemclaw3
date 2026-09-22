@@ -213,15 +213,62 @@ topic).
       `test_the_standardization_version_is_pinned_to_the_behaviour_it_names` re-measured and almost
       certainly a version bump.
 
-- [ ] **Four first-party refusal gates are outside the weekly mutation backstop** — [S],
-      `pyproject.toml` `[tool.mutmut].source_paths`. `agent/authz.py` is covered and
-      `agent/plan_gate.py`, `agent/skill_backend.py`, `agent/spend_cap.py` and `agent/loop_cap.py`
-      are not, although each is a control of the same kind — a refusal whose surviving mutant is a
-      tool call that should not have happened. `core/chem.py` and `core/logging.py` were added on
-      2026-09-19 for exactly that argument, after three mutations of theirs passed a full subset.
-      Not added in the same change because the list is short on purpose — the comment above it
-      records that the run is hours long — so each addition needs its runtime measured rather than
-      assumed. Measure `make mutants` with one of them added before adding the rest.
+- [ ] **Three first-party refusal gates are still outside the weekly mutation backstop, and the
+      run's cost is still unmeasured** — [S], `pyproject.toml` `[tool.mutmut].source_paths`.
+      `agent/spend_cap.py` joined it on 2026-09-22 (the smallest of the four by source length), which
+      leaves `agent/plan_gate.py`, `agent/skill_backend.py` and `agent/loop_cap.py`. The original row
+      asked for each addition's runtime to be measured first, on the ground that "the comment above it
+      records that the run is hours long".
+
+      **That premise was false and is the reason this row is rewritten rather than closed.**
+      `D-2026-09-22-a-mutation-backstop-that-cannot-start` measured `make mutants` failing in 27
+      seconds on `origin/main`, before a single mutant ran, so the backstop was covering *nothing* and
+      the hours-long figure described a full-repository run that nobody had done. Two blockers were
+      found and both are fixed: a derived guard in `tests/test_runner.py` that counted mutmut's own
+      generated method names, and — behind it — a schema-isolation escape that had the suite running
+      against `public` from its second in-process pytest session onward (`tests/pg.py`,
+      `tests/test_isolation_across_sessions.py`).
+
+      A **third** blocker was root-caused and fixed too: `kg/git_writer._WRITE_LOCK` was a
+      module-level `asyncio.Lock`, which binds to the first event loop that *contends* on it, so the
+      second in-process pytest session hung with no exception
+      (`D-2026-09-22-a-lock-built-at-import-belongs-to-one-event-loop`).
+
+      **The measurement exists now, and it answers the row while replacing it with a bigger
+      question.** First completed run, 2026-09-22, 15 source paths, `PYTEST_TIMEOUT_SCALE=4`:
+
+      | | |
+      |---|---|
+      | wall | **30m04s** (05:58:47 → 06:28:51), 3640 mutants at **1.57 mutations/second** |
+      | killed | 1612 |
+      | survived | 988 |
+      | reached by no selected test | **1009** (27.7% of all mutants) |
+      | timed out | 31 |
+      | suspicious / segfault | 0 / 0 |
+      | `agent/spend_cap.py`'s own share | **29 mutants** — 0.8% of the run, ~18 s |
+
+      So the row's premise is answered twice over. "The run is hours long" is 30 minutes, and the
+      addition it wanted priced costs **~18 seconds** of it; the three remaining gates are 333, 367 and
+      671 lines against `spend_cap.py`'s 309, so they are the same order. The per-module figure is the
+      count of distinct `x_<function>__mutmut_<n>` symbols in the mutated copy of the file, which is a
+      proxy for what mutmut scheduled rather than a reading of its own ledger.
+
+      **But the gate does not pass, and that is the finding to work next.** It scores
+      `killed / total` = 1612/3640 = **44.3%** against `MUTATION_SCORE_FLOOR: "72.0"`, so the weekly job
+      now fails on its kill rate where it used to fail on starting. The floor is not the problem and
+      neither is a sudden regression: `total` counts the 1009 mutants **no selected test reaches**, and
+      `pytest_add_cli_args_test_selection` is a hand-kept list of 16 files that was never widened as
+      `source_paths` grew from the seven the floor was recorded against (74.7% and 76.8%, per
+      `mutants.yml`'s own comments) to fifteen. `agent/spend_cap.py` shipping with `tests/test_spend_cap.py`
+      outside the selection — fixed in the same commit as this row — was one instance of the pattern,
+      not the whole of it.
+
+      So the work is: pair every `source_paths` entry with the tests that exercise it, re-measure, and
+      then decide whether 72.0 is still the right floor for a fifteen-module list — with the remaining
+      three gates added once the denominator means something. A derived guard that fails when a declared
+      source path has no test file in the selection is the shape that stops this recurring. Anchors:
+      `pyproject.toml` `[tool.mutmut]`, `.github/workflows/mutants.yml`,
+      `mutants/mutmut-cicd-stats.json`.
 
 - [ ] **`Chemclaw3_ui` has no surface for the four `/skills/mine` routes, the six `/skills/org`
       ones, or the proposal queue** — [M], opened by
@@ -500,30 +547,6 @@ topic).
       same shared objects, and got it back when they exited, where `Rss` moved 0.016%. Anchors:
       `deploy/helm/chemclaw/values.yaml` `resources.service`,
       `tests/test_deploy_chart.py::test_a_pod_that_starts_a_parse_forkserver_fits_the_memory_it_declares`.
-
-- [ ] **A parse reached outside the isolate child is bounded by nothing, so its broad arm has
-      nothing to name** — [S], what is left of "a parse refused by a C parser's own allocation
-      failure arrives unnamed" after that row was checked against `HEAD` and found **already
-      closed**, at a different site than it proposed.
-      `D-2026-09-19-a-refusal-that-blames-the-document-is-worse-than-one-that-says-nothing` put
-      `isolate._at_ceiling` in the child, where the ceiling is *known*, rather than in
-      `parse_document`'s broad arm, where it is not: it renames any failure that happened with the
-      budget spent, so all three arms reach `too_large_to_read` and a markup-heavy `.docx` that lxml
-      refused with "Unable to allocate output buffer" now says so.
-      `tests/test_parse_isolation.py::test_a_document_stopped_by_the_budget_says_so_even_when_a_c_parser_reported_it`
-      holds both populations. The row's anchors were the two it did not use.
-
-      **The residual is the path that does not go through `isolate` at all.**
-      `agent/attachments.py::parse_attachment` calls `parse_document` directly — the CLI's
-      `backfill_corpus` and the format tests reach it — and no `RLIMIT_DATA` is set on that process,
-      so `_at_ceiling` has no ceiling to read back and its broad arm cannot distinguish "out of
-      budget" from "malformed". It is the smaller case (an operator at a terminal rather than a
-      chemist in a turn) and the honest fix is a decision: either that path gets the forkserver too,
-      which costs a process per attachment on a path that parses one file at a time, or it states
-      that it is unbounded and says "could not be read" meaning it. Anchors:
-      `src/chemclaw/agent/attachments.py::parse_attachment`,
-      `src/chemclaw/ingest/documents/isolate.py::_at_ceiling`,
-      `src/chemclaw/ingest/documents/isolate.py::_bound_allocations`.
 
 - [ ] **Neither net sees one Postgres server that two DSNs spell differently** — [M], found
       2026-09-05 by a fresh-context review of `D-2026-09-05-a-pool-count-is-not-a-connection-count`,

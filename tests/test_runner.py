@@ -363,6 +363,19 @@ def test_every_method_the_trace_offers_is_one_the_shipped_turn_calls() -> None:
     *class* and not the name: a method a turn stops calling is announced by its own tests
     continuing to pass. Whoever adds a provider that streams argument fragments adds the caller in
     the same change.
+
+    **The `__mutmut_` filter is what lets `make mutants` start at all, and its absence stopped the
+    whole run.** `api/runner_trace.py` is in `[tool.mutmut].source_paths`, so inside `mutants/` this
+    class carries mutmut's scaffolding beside its real methods — `xǁToolCallTraceǁissued__mutmut_3`
+    and 44 more. Those names pass the `_` filter above, no module under `api/` calls them (nothing
+    could), and this test therefore failed in the *stats* phase that runs before a single mutant is
+    tested: `failed to collect stats. runner returned 1`, in 27 seconds. Driven on `origin/main`
+    with no other change, so the weekly backstop was covering **nothing** while reading as
+    configured.
+
+    They are not methods the class offers; they are a harness's rewriting of the ones it does, and
+    the subject here is the shipped surface. `D-2026-09-22-a-mutation-backstop-that-cannot-start`
+    carries the finding.
     """
     src = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
     api = (src / "api").rglob("*.py")
@@ -372,7 +385,9 @@ def test_every_method_the_trace_offers_is_one_the_shipped_turn_calls() -> None:
     offered = [
         name
         for name, value in vars(runner_trace.ToolCallTrace).items()
-        if not name.startswith("_") and callable(getattr(value, "fget", value))
+        if not name.startswith("_")
+        and "__mutmut_" not in name
+        and callable(getattr(value, "fget", value))
     ]
     unused = [name for name in offered if f".{name}" not in readers]
     assert unused == [], (
