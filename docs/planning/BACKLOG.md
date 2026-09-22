@@ -598,8 +598,31 @@ topic).
       Bounded in a deployment by the kubelet — the chart derives `readinessProbe.timeoutSeconds`
       from this budget and ships 5 s with `failureThreshold: 3`, so the pod goes not-ready either
       way — which is why this is a row and not a fix: the correct outcome is reached by the wrong
-      route, and a second in-process timeout cannot cancel what the first one could not. Worth
-      revisiting if psycopg gains a cancel that respects a deadline. Anchors:
+      route, and a second in-process timeout cannot cancel what the first one could not.
+
+      **The trigger reads as fired and is not, which is why it is rewritten here.** It used to say
+      "worth revisiting if psycopg gains a cancel that respects a deadline". psycopg 3.3.4 ships
+      `AsyncConnection.cancel_safe(timeout=...)` and `_try_cancel` now delegates to it with
+      `timeout=5.0` — that cancel, in as many words. Driven 2026-09-22 on that version against a
+      `docker pause`d Postgres: an in-flight `SELECT 1` on an already-checked-out connection under
+      `asyncio.wait_for(..., 2.0)` **did not return within 120 s**. The bounded cancel is not the
+      bound — `wait()`'s except arm re-waits on the socket after it with no timeout of its own — so
+      upstream gained the capability the trigger named without closing the leg this row is about.
+
+      **And the obvious re-measurement measures the wrong leg.** The same drive through
+      `core/db.py::connection` (a pool, as the probe uses) returned at exactly its budget, 4 of 4,
+      with a `TimeoutError`, because the hang there is the *connect* leg that `asyncio.wait_for` has
+      always bounded; `AsyncConnection.wait` was never entered. Whoever re-runs this must hold the
+      connection before pausing, or they will confirm a fix that is not there.
+
+      **No libpq knob reaches it either.** `tcp_user_timeout` and the keepalives bound a peer that
+      stops ACKing, and a paused container's kernel keeps ACKing — the freeze is at the application
+      layer, which is also why a server-side `statement_timeout` cannot fire.
+
+      New trigger: psycopg bounds the **re-wait** in `AsyncConnection.wait`'s cancellation arm, or
+      exposes a deadline on it. Today that arm calls `_try_cancel(timeout=5.0)` and then a bare
+      `waiting.wait_async(gen, self.pgconn.socket, interval=interval)`; the file that would show it
+      is psycopg's own `connection_async.py`. Anchors:
       `api/routes/ops.py::_probe_database`, `core/db.py::connection`.
 
 - [ ] **`retrieval_source_weights` has no upper bound, and the mix it produces is not a property of
