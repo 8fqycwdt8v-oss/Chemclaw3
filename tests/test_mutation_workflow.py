@@ -1,6 +1,6 @@
-"""The weekly mutation job's two self-checks, driven rather than read.
+"""The weekly mutation job's self-checks, driven rather than read.
 
-Both of the things this file pins were *stated* controls that could not act, and neither was
+The first two things this file pins were *stated* controls that could not act, and neither was
 visible from the workflow's own prose:
 
 - **the notification.** The failure step files an issue under a `mutation-testing` label that does
@@ -19,6 +19,9 @@ Neither is checkable by reading the YAML for a string: what matters is what the 
 Python in it *do*. So the notification step runs against a `gh` stand-in that refuses an unknown
 label exactly as the real one does, and the gate step runs against a synthetic `mutants/` tree with
 one module's results missing.
+
+The third is not about the workflow but about whether the run can start at all: `also_copy` builds
+the tree the run executes in, and the selected tests read files from it. See `_NOT_COPIED` below.
 """
 
 import json
@@ -220,3 +223,74 @@ def test_a_source_path_that_stopped_resolving_fails_the_gate(tmp_path: Path) -> 
     result = _run_gate(_gate_workspace(tmp_path, stats=stats, missing=dropped))
     assert result.returncode != 0, result.stdout
     assert dropped in result.stdout + result.stderr
+
+
+# The mutation run executes inside `mutants/`, a tree built by copying: `source_paths` for the
+# modules being mutated, `also_copy` for everything else. Nothing relates that list to the tests
+# the run selects, so widening the selection can import a file the copy never made — which is a
+# `SystemExit` in the *stats* phase, before a single mutant is scored, and reads as mutmut being
+# broken rather than as a missing directory.
+#
+# Deliberately absent, and the only one:
+_NOT_COPIED: dict[str, str] = {
+    # mutmut's own output tree — the destination of every copy above, so copying it into itself
+    # would recurse. `make mutants` writes it and `.gitignore` hides it.
+    "mutants": "the destination of the copy, not a source for it",
+}
+
+
+def _effective_also_copy() -> list[str]:
+    """`also_copy` as mutmut resolves it — ours plus the defaults upstream appends to it.
+
+    Read through `Config`, which is the accessor `mutmut.__main__.copy_also_copy_files` itself
+    uses, rather than by restating upstream's defaults here: `tests/`, `pyproject.toml` and the
+    lock files are copied because upstream appends them, and the day it stops this test is what
+    says so.
+    """
+    probe = (
+        "import json\n"
+        "from mutmut.configuration import Config\n"
+        "Config.ensure_loaded()\n"
+        "print(json.dumps([str(p) for p in Config.get().also_copy]))\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-"], input=probe, capture_output=True, text=True, cwd=_ROOT
+    )
+    assert result.returncode == 0, result.stderr
+    return list(json.loads(result.stdout.strip().splitlines()[-1]))
+
+
+def test_every_root_directory_is_either_copied_into_the_run_or_declared_absent() -> None:
+    """A directory the repository has and the mutation tree does not is a run that cannot start.
+
+    Driven rather than read: the list comes from mutmut's own config loader, and the directories
+    come from the working tree, so adding either side without the other is what goes red. `schema`
+    is why this exists — `tests/test_publish_end_to_end.py` joined the selection, reached
+    `cli/sink_schema.ddl`, and globbed `schema/result-store/*.sql` inside a `mutants/` that had no
+    `schema/` at all.
+    """
+    copied = {name.rstrip("/") for name in _effective_also_copy()}
+    roots = {
+        entry.name for entry in _ROOT.iterdir() if entry.is_dir() and not entry.name.startswith(".")
+    }
+    uncovered = sorted(roots - copied - set(_NOT_COPIED))
+    assert not uncovered, (
+        f"root directories missing from [tool.mutmut] also_copy: {uncovered}. A test the run "
+        "selects that reads one of these fails the run before it scores anything. Add it to "
+        "`also_copy`, or to `_NOT_COPIED` here with the reason it must not be copied."
+    )
+
+
+def test_an_exemption_cannot_claim_a_directory_the_copy_already_makes() -> None:
+    """An exemption that is *also* copied is a reason nobody will re-read when it stops holding.
+
+    `mutants/` cannot exist after this: the exemption above says copying it would recurse, and if
+    a future `also_copy` names it anyway, exactly one of the two is right and this says which
+    pair to look at.
+    """
+    copied = {name.rstrip("/") for name in _effective_also_copy()}
+    contradicted = sorted(copied & set(_NOT_COPIED))
+    assert not contradicted, (
+        f"declared absent from the mutation tree and copied into it anyway: {contradicted}"
+    )
+    assert all(reason.strip() for reason in _NOT_COPIED.values()), "an exemption needs its reason"

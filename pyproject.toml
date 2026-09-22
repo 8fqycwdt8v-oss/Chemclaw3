@@ -581,6 +581,15 @@ also_copy = [
     "examples",
     "infra",
     "knowledge",
+    # The result-sink schema, added 2026-09-22 together with `tests/test_publish_end_to_end.py`
+    # below. **`also_copy` and the test selection are coupled, and nothing relates them**: that
+    # test reaches `cli/sink_schema.ddl`, which globs `schema/result-store/*.sql` from the
+    # repository root, so inside `mutants/` it raised `SystemExit: no schema files found` during
+    # the *stats* phase — the run refusing to start, the same class as the three blockers
+    # `D-2026-09-22-a-mutation-backstop-that-cannot-start` records. Widening the selection is
+    # therefore never only a selection edit: it is a question about what the added file reads,
+    # and `schema/` was the one root directory this list did not carry.
+    "schema",
     "skills",
     "tasks",
 ]
