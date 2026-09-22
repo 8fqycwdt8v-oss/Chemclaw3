@@ -195,28 +195,6 @@ topic).
 
 ## 2 — Answers that are wrong without saying so
 
-- [ ] **A neutral co-former is discarded as if it were a counterion, so urea hydrogen peroxide is
-      urea** — [M], `src/chemclaw/core/chem.py::standardize`. When a string has exactly one organic
-      fragment, `standardize` hands it to `rdMolStandardize.FragmentParent` and calls the rest
-      counterions — without asking whether a discarded fragment carries a *charge*. Driven:
-      `NC(N)=O.OO` and `NC(N)=O` share one `compound_id`, so UHP (carbamide peroxide), a bench
-      oxidant, is the same compound as urea for the cache, the fingerprint rows and the hazard
-      screen. The shape predates `std10` — `CCN.OO` already collapsed to `CCN` — and `std10` is
-      what pulled urea into it by making the fragment organic.
-
-      **Not a one-line guard, which is why it is a row.** "Discard only charged fragments" breaks
-      the hydrate (`CCN.O` -> `CCN` is right) and every solvate the module deliberately strips, so
-      the fix needs a notion of which neutral co-formers are part of an identity: a curated
-      solvent list, which is the table `core/chem.py` opens by refusing, or RDKit's own
-      `rdMolStandardize.FragmentRemover`, whose list is curated upstream and would make the answer
-      somebody else's to maintain. Either moves every solvate at once and needs a
-      `STANDARDIZATION_VERSION` bump. **The sibling question is settled**:
-      `D-2026-09-22-the-parent-is-the-fragment-this-module-calls-organic` fixed *which* fragment is
-      kept once the discarding is agreed, so what is left here is only which neutral fragments may
-      be discarded at all. Pinned meanwhile by
-      `tests/test_compound_identity.py::test_a_neutral_co_former_is_stripped_like_a_counterion`
-      and by a row of `_STANDARDIZATION_AT_THIS_VERSION`, so it cannot move in silence.
-
 - [ ] **A `STANDARDIZATION_VERSION` bump retires the fingerprint rows and re-keys nothing, so the
       graph keeps a note per superseded spelling forever** — [L],
       `src/chemclaw/core/chem.py::compound_id`, `src/chemclaw/ingest/eln/compound.py:85-92`.

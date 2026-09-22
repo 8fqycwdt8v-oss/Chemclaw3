@@ -750,11 +750,13 @@ _STANDARDIZATION_AT_THIS_VERSION = (
     ("[NH4+].[O-]C=O", "O=CO"),
     ("[NH4+].CC(=O)[O-]", "CC(=O)O"),
     ("[Na+].[O-]C=O", "O=CO"),
-    # And the cost std10 does carry, pinned so it cannot move in silence: urea hydrogen peroxide
-    # is a bench oxidant and this collapses it onto urea. See
-    # `test_a_neutral_co_former_is_stripped_like_a_counterion` for the root cause, which is not
-    # `_is_organic` and predates it.
-    ("NC(N)=O.OO", "NC(N)=O"),
+    # A neutral co-former is not a counterion: urea hydrogen peroxide is a bench oxidant and stays
+    # one, while a charged spectator and a known solvent still go. See
+    # `test_a_neutral_co_former_is_not_a_counterion`.
+    ("NC(N)=O.OO", "NC(N)=O.OO"),
+    ("CCN.OO", "CCN.OO"),
+    ("CCN.O", "CCN"),
+    ("CN(C)C(=[N+](C)C)On1nnc2ccccc21.F[B-](F)(F)F", "CN(C)C(On1nnc2ccccc21)=[N+](C)C"),
 )
 
 
@@ -914,28 +916,30 @@ def test_the_parent_is_the_fragment_this_module_calls_organic() -> None:
         ), written
 
 
-def test_a_neutral_co_former_is_stripped_like_a_counterion() -> None:
-    """Urea hydrogen peroxide is a bench oxidant and this makes it urea. Pinned, not fixed.
+def test_a_neutral_co_former_is_not_a_counterion() -> None:
+    """Urea hydrogen peroxide is a bench oxidant, and it used to be urea.
 
-    **Not caused by `std10` and reachable because of it.** `standardize` sends a string with
-    exactly one organic fragment to `FragmentParent`, which keeps the parent and discards the
-    rest "as counterions" — and it never asks whether a discarded fragment is *charged*. So a
-    neutral co-former that is not a solvent goes the same way as a bromide. The control below
-    shows the shape predates the bump: ethylamine·H2O2 already collapsed at std9, when urea was
-    still called inorganic and UHP was kept whole by accident.
+    `standardize` discarded every other fragment on the strength of the count alone, without
+    asking what a discarded fragment *is* — so a neutral co-former went the same way as a
+    bromide. Two ways a spectator earns discarding now, and between them they need no list of
+    this repository's own: it carries a charge, or it is a solvent RDKit's curated list knows.
 
-    It is asserted rather than fixed because the fix is a decision about which neutral co-formers
-    are part of an identity — a curated solvent list, which is the table this module opens by
-    refusing, or RDKit's own `FragmentRemover` — and it moves every solvate at once.
-    `docs/planning/BACKLOG.md` carries the row.
+    **The charge half is what keeps the coupling reagents working**, and driving the list alone
+    is how that was found: `FragmentRemover` is a *pharmaceutical salt* list, it knows neither
+    tetrafluoroborate nor hexafluorophosphate, and a first version that asked only the list left
+    TBTU carrying its BF4. Charge reads it without naming it.
     """
-    assert compound_id("NC(N)=O.OO") == compound_id("NC(N)=O"), (
-        "if this stops holding the row has been worked; update it rather than deleting this"
-    )
-    assert compound_id("CCN.OO") == compound_id("CCN")  # the control: the shape predates std10
-    assert compound_id("CCN.O") == compound_id(
-        "CCN"
-    )  # a hydrate, which is the case it is right for
+    assert compound_id("NC(N)=O.OO") != compound_id("NC(N)=O"), "UHP is not urea"
+    assert compound_id("CCN.OO") != compound_id("CCN"), "and the same for any organic-H2O2"
+    # The three that must still collapse: a charged counterion, a known solvent, and the salt of
+    # an organic acid whose counterion this module has always discarded.
+    assert compound_id("CC[NH3+].[Br-]") == compound_id("CCN")
+    assert compound_id("CCN.O") == compound_id("CCN")
+    assert compound_id("CC(=O)[O-].[Na+]") == compound_id("CC(=O)O")
+    # And the counterion RDKit's list does not know, which is why charge is read first.
+    assert standard_smiles("CN(C)C(=[N+](C)C)On1nnc2ccccc21.F[B-](F)(F)F") == standard_smiles(
+        "CN(C)C(=[N+](C)C)On1nnc2ccccc21"
+    ), "TBTU kept its tetrafluoroborate; a salt list curated for pharma does not know it"
 
 
 def test_the_standardization_version_is_pinned_to_the_behaviour_it_names() -> None:

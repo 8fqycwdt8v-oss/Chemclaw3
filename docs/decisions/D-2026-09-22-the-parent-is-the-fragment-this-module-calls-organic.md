@@ -1,8 +1,9 @@
 # D-2026-09-22-the-parent-is-the-fragment-this-module-calls-organic — `std11`
 
-**Status:** accepted · **Date:** 2026-09-22 · Supersedes nothing; amends no merged ADR. Closes the
-`BACKLOG.md` row *"Ammonium formate standardizes to ammonia"*, and corrects that row, which was
-wrong about the mechanism.
+**Status:** accepted · **Date:** 2026-09-22 · Supersedes nothing; amends no merged ADR. Closes two
+`BACKLOG.md` rows — *"Ammonium formate standardizes to ammonia"*, which it also **corrects**, and
+*"A neutral co-former is discarded as if it were a counterion"* — because both are the same branch
+asking somebody else a question it had already answered.
 
 ## Context
 
@@ -46,10 +47,28 @@ not delegated.
   into one compound. Taking a flag that makes today's case pass, at the cost of re-adopting a
   predicate this file argues against, would be a fix that reads correct and is not.
 
+**And the same branch discarded the rest without asking what they were.** Having chosen the parent
+it dropped every other fragment on the strength of the count alone, never asking whether a
+discarded fragment carries a charge or is a solvent — so urea hydrogen peroxide, a bench oxidant,
+became urea, and ethylamine·H2O2 became ethylamine. A spectator now earns discarding two ways, and
+between them they need no list of this repository's own:
+
+- **It carries a charge.** The string balances, so an inorganic ion beside one organic fragment is
+  that fragment's counterion by construction — bromide, sodium, nitrate, tetrafluoroborate,
+  hexafluorophosphate.
+- **It is a solvent RDKit's curated list knows.** A solvate of one organic fragment is that
+  fragment, and a solvent list is exactly the table `D-2026-08-01` refuses to keep in step by hand.
+
+**Asking that list alone was the first spelling and it regressed TBTU**, which is why the charge
+clause leads. `FragmentRemover` is a *pharmaceutical salt* list: driven, it knows neither
+tetrafluoroborate nor hexafluorophosphate, so TBTU kept its BF4 and HATU would have kept its PF6.
+Reading the charge covers both without naming either, and without a table to maintain.
+
 - **`STANDARDIZATION_VERSION` moves to `std11`.** Measured over every parseable carbon-bearing
-  SMILES the tree holds — 6,472 of them across `data/`, `knowledge/`, `src/`, `tests/`, `docs/`,
-  `skills/` and `schema/` — **exactly one** standard form changes, and it is ammonium formate, from
-  `N` to `O=CO`. The bump is taken for the reason
+  SMILES the tree holds — 6,481 of them across `data/`, `knowledge/`, `src/`, `tests/`, `docs/`,
+  `skills/` and `schema/` — **three** standard forms change: ammonium formate from `N` to `O=CO`,
+  and UHP and ethylamine·H2O2 from the stripped organic fragment back to the whole string. None of
+  the 68 shipped reagent structures moves. The bump is taken for the reason
   `D-2026-09-22-a-version-bump-costs-the-same-whenever-it-is-taken` gives: a bump retires every row
   under the old definition whenever it is taken, so its cost does not grow with delay while the
   population keyed wrong does.
@@ -73,10 +92,10 @@ that changed in upstream's chooser — its metric, its tie-breaking, its salt li
 to change this system's notion of compound identity without a line of this repository moving. The
 one remaining delegation on this path is `Uncharger`, which answers a different question.
 
-**Revisit when:** a string arrives with exactly one organic fragment where the organic half is
-*not* the compound. The shape would be a co-crystal whose other component is a named reagent rather
-than a counterion or a solvent — which is the open `BACKLOG.md` row about urea hydrogen peroxide,
-approached from the other side: that row asks which *neutral* fragments may be discarded, and this
-decision fixes which fragment is kept once the discarding is agreed. The file that would show it is
+**Revisit when:** a *charged* spectator turns out to be part of an identity rather than its
+counterion, or a solvate a chemist means to keep is stripped because the list calls its partner a
+solvent. Both are the same residual from the other side: the charge clause and the list are now the
+whole of "what may be discarded", and neither reads intent. The nearest real candidate is an ionic
+liquid used as a reagent, where the anion is the point. The file that would show it is
 `_STANDARDIZATION_AT_THIS_VERSION`, which would need a row whose expected value is argued rather
-than measured.
+than measured — and the drive to re-run is the corpus sweep above, which is what said three.

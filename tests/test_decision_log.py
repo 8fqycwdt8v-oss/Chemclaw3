@@ -1246,6 +1246,17 @@ def test_the_topic_cursor_is_not_ahead_of_the_record() -> None:
 # different claim — "this guarantee is enforced right now, here" — which is why it is checked here
 # and there rather than exempted with the paths.
 _RETIRED_TEST_CITATIONS: dict[str, str] = {
+    # Renamed because it stopped being true, which is the good direction. It was written as a pin
+    # on a defect `D-2026-09-22-a-version-bump-costs-the-same-whenever-it-is-taken` recorded and
+    # deliberately did not fix — urea hydrogen peroxide taking urea's `compound_id` — with a
+    # docstring saying so and a `BACKLOG.md` row beside it. The row was worked two commits later
+    # (`D-2026-09-22-the-parent-is-the-fragment-this-module-calls-organic`), and a test whose name
+    # asserts the defect cannot survive the fix.
+    "test_a_neutral_co_former_is_stripped_like_a_counterion": (
+        "renamed to `test_a_neutral_co_former_is_not_a_counterion` when the defect it pinned was "
+        "fixed: a spectator is now discarded only if it is charged or a known solvent, so UHP "
+        "keeps its peroxide"
+    ),
     # Split in two, because it was one test standing for two different facts and only one of them
     # was the fact its ADR argued. `D-2026-09-09-a-migration-run-reports-what-it-applied-not-that-
     # the-schema-matches` justifies the positive-evidence trade entirely on **privilege** — a split
