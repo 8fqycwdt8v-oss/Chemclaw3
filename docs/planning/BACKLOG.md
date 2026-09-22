@@ -489,6 +489,31 @@ topic).
   `_bounded_file`, `agent/tool_result_shape.py::rewritten_command_files`,
   `deepagents.backends.state.StateBackend`.
 
+- [ ] **Prose the model is sent from modules other than `agent/chemclaw_agent.py` is outside the
+      prose guards** — [M], found 2026-09-22 reviewing
+      `D-2026-09-22-an-exemption-is-a-quote-not-a-file`, which widened
+      `tests/test_prose_contract.py`'s universe from two classes to six and said so. The six are
+      enumerable: a registry, an `ast` walk over `@server.tool()`, a manifest, a directory of
+      `SKILL.md`, two prompt-block tuples, `data/profiles/` and the template launchers. Prompt text
+      written as a string constant in an ordinary module is not — there is no decorator, no
+      manifest and no directory that says "this string is sent to a model".
+
+      **A live instance, driven**: `src/chemclaw/durable/hypothesis_tournament.py:546-557` builds a
+      prompt containing *"There is no DFT and no cluster here: if it needs one, it is 'physical'"* —
+      correct text of exactly the exempted kind, which is why widening to it needs a fourth
+      `_TRUE_ABOUT_WHAT_IS_GONE` entry and not just a loader. The same module's `_TEMPLATE_HINTS` is
+      a second. Fifteen modules under `src/chemclaw` hold prompt text (`verifier.py`, `condense.py`,
+      `plan_scope.py`, `compaction.py`, `skill_backend.py`, `api/runner.py` among them).
+
+      **The first question is how to find them, not how to scan them**, and it is the same question
+      `D-2026-09-15-a-capability-in-the-fleet-cannot-refute-a-denial-this-tree-declares-no-bundle-for`
+      answered for a different surface by making the declaration explicit. Candidates: a marker the
+      prompt constants carry (cheap, and only as good as whoever remembers it), or a derived rule
+      over what reaches a model call — which is what the arms of this guard would have to become.
+      Measure the false-positive rate over the found set before building either, the way the ADR
+      above did for the patterns. Anchors: `tests/test_prose_contract.py::_model_facing_descriptions`,
+      `src/chemclaw/durable/hypothesis_tournament.py`.
+
 - [ ] **An agent-recorded note the model could not date reaches no subscriber who has a
       watermark** — [M], found 2026-09-15 in the review of the wave 2/4/7 merge.
       `durable/digest._is_new` reads an absent `valid_from` as *open-ended* — true for as long as
