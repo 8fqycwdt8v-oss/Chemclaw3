@@ -1,56 +1,45 @@
-# Wave 8 — the denominator nobody kept
+# Wave 8 — the mutation backstop's own coverage, the prose surface, and the organic line
 
-Wave 7 merged as #436. Its audit left 30 live rows; this wave starts with the one wave 7's own
-finding pointed at: the mutation gate scores 44.3% against a floor of 72.0, and the reason is that
-`total` counts 1009 mutants (27.7%) that no selected test reaches.
+## Items
 
-## R1 — pair the selection with the source paths it claims to cover
+- [x] **Pair the mutation selection with the source paths it claims to cover** (`826ba28c`).
+      Six test files added to `pytest_add_cli_args_test_selection`, each with the coverage lift
+      measured rather than guessed.
+- [x] **Copy the schema tree, and guard the list that says what is copied** (`c35ff891`).
+      The widened selection would not start: `tests/test_publish_end_to_end.py` reaches
+      `cli/sink_schema.ddl`, which globs `schema/result-store/*.sql` from the repository root, and
+      `mutants/` had no `schema/`. The finding is that `also_copy` and the selection are coupled and
+      nothing related them; the guard drives both sides (mutmut's own `Config` for the copied set,
+      the working tree for the directories) with `mutants/` the single declared absence. Proven
+      non-vacuous by removing `schema` again.
+- [x] **Widen the model-facing prose guards to the surface** (`0e60f65c`). Three classes were
+      outside — the durable jobs' assembled docstrings (all of the `results` bundle), every
+      `SKILL.md`, and `_INSTRUCTION_BLOCKS`. Measured first: eight hits, all eight correct text.
+      The pattern shape the row proposed is disqualified by the one true positive the file has,
+      which is itself past tense. Two narrowings are correct by construction; the recall widening
+      is free. Three exemptions remain, each a quote containing its match, with a guard against a
+      stale one and a guard against a vacuous one. ADR + ledger + row deleted.
+- [x] **Widen `_is_organic`, bump to std10** (`1051dc2e`). The C–H/C–C test called urea inorganic
+      and left a bare guanidinium salt short of the neutralisation branch. Widened to a carbon
+      holding two nitrogens; twenty species driven, every defended inorganic case holds. Exactly
+      one behaviour-table row moves. ADR + ledger + row deleted.
+- [ ] **Set the `no_tests` ceiling in `.github/workflows/mutants.yml` from the new run**, not from
+      a guess, and say where the number came from. The previous run scored 1612/3640 killed with
+      1009 `no_tests` (27.7%) against a floor of 72.0.
+- [ ] Full serial suite, fresh-context subagent review, PR, merge on green CI.
 
-- [x] Measured the pairing. Of 15 `source_paths`, only **5** had their obvious `tests/test_<stem>.py`
-      in `pytest_add_cli_args_test_selection`, and three of those files *existed and were simply not
-      listed*. Per-source-path coverage from the 17-file selection:
+## Measurements this wave rests on
 
-      | module | covered |
-      |---|---|
-      | `agent/authz.py` | 99% |
-      | `agent/audit_store.py`, `agent/spend_cap.py`, `kg/record.py` | 95-96% |
-      | `science/calc/store.py`, `kg/note.py` | 90-92% |
-      | `api/runner_trace.py`, `kg/git_writer.py`, `api/budget.py` | 77-86% |
-      | `core/chem.py`, `core/quantities.py` | 69% |
-      | `core/logging.py` | 62% |
-      | `core/fulltext.py` | **44%** |
-      | `publish/outbox.py` | **31%** |
-      | `templates/resolve.py` | **19%** |
+- `also_copy` vs. the working tree: `mutants` and `tests` were the only root directories absent,
+  and `tests/` is absent because *mutmut appends it* — so the guard reads the effective list
+  through `Config` rather than restating upstream's defaults.
+- Prose guards, widened universe: 8 hits / 8 false positives with the patterns as they stood.
+  Recall widening (`PRs`, review queue, knowledge gate, awaits review): 0 new hits.
+  `propose[sd]? (?:what|it|them|the)`: 0 true positives, 4 false positives -> dropped.
+- `_is_organic`: urea, thiourea, guanidine, cyanamide, melamine all `organic == 0` before.
+  After: cyanide, cyanate, thiocyanate, carbonate, bicarbonate, CO, CO2, CS2, phosgene, CF4 and
+  azide all still inorganic.
 
-      A mutant on a line no selected test executes is `no_tests` by construction, and `total` counts
-      it. So the 44.3% was arithmetic, not a regression.
-- [x] Six files added, each with its measured lift recorded on its own line in `pyproject.toml`
-      rather than as a bare filename: `test_fulltext.py` (44 -> **100%**), `test_templates.py`
-      (19 -> 87%), `test_quantities.py` (69 -> 92%), `test_logging.py` (62 -> 83%),
-      `test_compound_identity.py` (69 -> 84%), `test_publish_end_to_end.py` (31 -> 64%).
-- [x] Re-measured the widened selection: 23 files, **726 tests in 2:14**, and the weakest module is
-      now `publish/outbox.py` at 64% against `templates/resolve.py`'s 19% before.
-- [ ] A fresh mutation run, to see what the gate actually scores now.
+## Review
 
-## R2 — the guard the row asked for is the wrong shape, and measuring said so
-
-The row's closing line asks for "a derived guard that fails when a declared source path has no test
-file in the selection". I built the static version first and **it passes on the broken state**.
-
-- [x] Driven over the 15 source paths: a rule matching a module's name or dotted path inside any
-      selected file finds a hit for **every one of them**, including `templates/resolve.py` — which
-      had 8 such "hits" while being covered at 19%. The word `resolve` appears in test prose
-      everywhere. A naming rule cannot tell a file that exercises a module from one that mentions it.
-- [x] So the check belongs where the evidence already is: the mutation run's own
-      `mutants/mutmut-cicd-stats.json` reports `no_tests`, and `.github/workflows/mutants.yml`
-      already gates on `killed / total`. A ceiling on the `no_tests` **share** turns "the selection
-      drifted from the declaration" into a red build instead of a silent drag on the kill rate.
-- [x] That is also what the workflow's own reasoning asks for. Its comment records the standing
-      state as "**34 `no_tests`** and 2 timeouts both times" — measured when `source_paths` held
-      seven modules, against 1009 at fifteen — and argues for "a rate, not a count, because a count
-      breaks the first time one of these modules legitimately grows".
-- [ ] Set the ceiling from the new run rather than from a guess, and say where the number came from.
-
-## Verification
-
-- [ ] `make lint type`, the full serial suite, a fresh-context review, PR, merge on green CI.
+Pending the mutation run and the full serial suite.
