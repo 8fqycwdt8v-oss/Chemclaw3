@@ -229,6 +229,11 @@ topic).
       against `public` from its second in-process pytest session onward (`tests/pg.py`,
       `tests/test_isolation_across_sessions.py`).
 
+      A **third** blocker was root-caused and fixed too: `kg/git_writer._WRITE_LOCK` was a
+      module-level `asyncio.Lock`, which binds to the first event loop that *contends* on it, so the
+      second in-process pytest session hung with no exception
+      (`D-2026-09-22-a-lock-built-at-import-belongs-to-one-event-loop`).
+
       **What is left is the measurement, which needs one completed run.** The work is, in order: let
       `make mutants` finish once and record what it costs, then add the remaining three one at a time.
       Nothing about the three is in doubt — each is a refusal whose surviving mutant is a tool call that

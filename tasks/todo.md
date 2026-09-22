@@ -61,7 +61,7 @@ The row's instruction was to measure the run's cost before extending it. **The r
       passes" — which I never observed. It does not: the scale applied (720 s) and it timed out anyway.
       The second attempt simply stopped earlier in the same file order under `-x`. **A failure you did
       not reach is not a failure you disproved.**
-- [ ] **Blocker 3, root-caused and not fixed here.** With both above fixed, the clean baseline gets
+- [x] **Blocker 3, root-caused and fixed (Wave 6).** With both above fixed, the clean baseline gets
       through 271 tests in **12m33s** and hangs in
       `test_concurrent_writes_serialize_and_both_notes_land`. Not the mutated code — it passes in
       3.56 s alone against `mutants/src`. It is the second in-process session again:
@@ -70,7 +70,8 @@ The row's instruction was to measure the run's cost before extending it. **The r
       `asyncio.run` raises `RuntimeError: ... is bound to a different event loop` **from the waiter**,
       leaving the lock permanently `[locked]` and `asyncio.run`'s shutdown cancelling a holder that
       never finishes. Reproduced in milliseconds with no pytest at all. `core/temporal_client`
-      `._CONNECT_LOCK` has the same defect. That is product code, so it is Wave 6.
+      `._CONNECT_LOCK` has the same defect. Both are now `core/aio.LoopLocalLock`, resolved per
+      running loop — see the Wave 6 section below.
 - [x] One of the four gates added, not four, honouring the row's instruction now that a measurement
       is possible: `agent/spend_cap.py`, the smallest of the four **by source length** (309 lines
       against 333 / 367 / 671). Lines are a proxy for mutant count and the comment says so — my
@@ -172,3 +173,37 @@ Lessons 126–132 added. 126 is the one worth repeating: I wrote "`plan_gate.py`
 the four by mutant count" when it is the **largest** by source length and I had measured no mutant
 counts at all — a comparative claim, inside the config comment justifying the choice, with no
 measurement behind either half of it.
+
+## Wave 6 — a lock built at import belongs to one event loop
+
+Wave 5's third blocker, which is product code rather than test scaffolding, so it gets its own
+commit and its own ADR (`D-2026-09-22-a-lock-built-at-import-belongs-to-one-event-loop`).
+
+- [x] `asyncio.Lock.acquire` resolves its loop **only on the contended path** — the fast path sets
+      `_locked` and returns before `_get_loop()`. Measured both arms: two sequential `asyncio.run`
+      calls raise nothing when the lock is never contended, and `RuntimeError: ... is bound to a
+      different event loop` when it is. That is why two of these survived in `src/` behind comments
+      that had considered the multi-loop case: the uncontended path is what they pictured.
+- [x] The failure is a **hang, not an error**. The *waiter* raises while the holder keeps the lock,
+      so `asyncio.run`'s shutdown cannot finish cancelling the holder and the lock stays `[locked]`
+      for everyone after. Driven on the real writer: 3.4 s for the first `asyncio.run`, no return
+      from the second.
+- [x] `core/aio.LoopLocalLock` — one `asyncio.Lock` per running loop, an async context manager so
+      both call sites read unchanged. Two real callers, which is what the Rule of Three asks.
+- [x] **A `WeakKeyDictionary` cannot implement it, and one arm of the measurement would have hidden
+      that.** A contended `asyncio.Lock` stores `_loop`, its own key, so the entry keeps itself
+      alive: 0 of 3 entries survive when uncontended, **3 of 3** when contended. A plain dict that
+      discards closed loops when read holds the same property by a checkable route.
+- [x] The weakening is stated at both declarations: two *simultaneous* loops no longer serialize,
+      which `git_writer`'s exclusive `flock` and `temporal_client`'s "a second channel is a cost,
+      not a fault" already cover. Sequential loops keep the old semantics.
+- [x] A rule over the tree, not a list of two modules:
+      `test_no_asyncio_primitive_is_built_at_import_time_in_src` walks every module in `src/` for a
+      loop-bound primitive constructed at import, class bodies included.
+- [x] The regression pinned where it bit —
+      `test_two_sequential_event_loops_can_both_write_concurrently` drives two real loops through
+      `GitNoteWriter`, verified to **time out** with the fix stashed and pass with it. It is in the
+      mutation selection, so the run exercises it.
+- [x] `make lint`, `make type` (964 files), `make prose-validate` green; `test_loop_local_locks` 5,
+      `test_knowledge` 50, `test_temporal_client` and the six repo-hygiene guards 1174 passed.
+- [ ] `make mutants` re-run to see whether it now completes, and the full serial suite.

@@ -363,6 +363,54 @@ def test_concurrent_writes_serialize_and_both_notes_land(tmp_path: Path) -> None
     assert "knowledge/job-result/job-b.md" in files
 
 
+def test_two_sequential_event_loops_can_both_write_concurrently(tmp_path: Path) -> None:
+    """The write lock survives a second event loop in the same process.
+
+    **This is the regression test for a hang, so it is written as "the second one returns".**
+    `_WRITE_LOCK` was a module-level `asyncio.Lock`, which binds to the first loop that *contends*
+    on it — so the test above passed, and an identical second call in the same process never came
+    back. What happens is that the second loop's waiter raises `RuntimeError: ... is bound to a
+    different event loop` while the holder still has the lock, and `asyncio.run`'s shutdown then
+    cannot finish cancelling that holder.
+
+    Measured before the fix: 3.4 s for the first `asyncio.run` and no return at all from the second,
+    killed at pytest-timeout's 180 s and again at 720 s under `PYTEST_TIMEOUT_SCALE=4`. It is what
+    stopped `make mutants` from completing, since `mutmut` runs the suite through `pytest.main()`
+    once per mutant in one process — and the mechanism, with its sibling in
+    `core/temporal_client`, is `tests/test_loop_local_locks.py`'s subject.
+
+    Two loops rather than three because two is the whole property, and each has to *contend*: a
+    single write would take `asyncio.Lock`'s fast path and never resolve a loop, which is exactly
+    why this went unnoticed.
+    """
+    remote, work = _make_remote_and_clone(tmp_path)
+    writer = GitNoteWriter(repo_dir=str(work), base_branch="main", remote="origin")
+
+    async def both(suffix: str) -> tuple[str, str]:
+        ref_a, ref_b = await asyncio.gather(
+            writer.write(_note_write(f"job-{suffix}-a", content=f"note {suffix} a\n")),
+            writer.write(_note_write(f"job-{suffix}-b", content=f"note {suffix} b\n")),
+        )
+        return ref_a.reference, ref_b.reference
+
+    for loop_number, suffix in enumerate(("first", "second"), start=1):
+        refs = asyncio.run(both(suffix))
+        assert len(set(refs)) == 2, f"loop {loop_number} produced one commit for two writes: {refs}"
+
+    files = subprocess.run(
+        ["git", "-C", str(remote), "ls-tree", "-r", "--name-only", "main"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    for suffix in ("first", "second"):
+        for half in ("a", "b"):
+            assert f"knowledge/job-result/job-{suffix}-{half}.md" in files, (
+                f"job-{suffix}-{half} never reached the remote, so one loop's writes were lost: "
+                f"{files}"
+            )
+
+
 def test_second_process_holding_the_checkout_is_rejected(tmp_path: Path) -> None:
     """A submit against a checkout flocked by *another process* fails fast, then recovers.
 

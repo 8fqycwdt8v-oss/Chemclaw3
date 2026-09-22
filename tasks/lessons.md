@@ -1825,3 +1825,23 @@ free number at the end of its section.
      control did report its own death, into the tracker this repository works its backlog in, and the
      backlog row about it was written as though the control were healthy. A signal nobody reads is not
      a missing signal, and the two have different fixes.
+
+133. **A lock that only binds when it is contended is a lock that passes every test taking it alone.**
+     `asyncio.Lock.acquire` resolves its event loop on the *contended* path only — the fast path sets
+     `_locked` and returns before `_get_loop()` — so a module-level one binds to the first loop that
+     races on it, which is the first time it does its work. Two of these sat in `src/` behind comments
+     that had *considered* the multi-loop case and priced it as one extra connect, because the
+     uncontended path is what they were picturing. The real cost is a hang with no exception: the
+     second loop's waiter raises while the holder keeps the lock, so `asyncio.run`'s shutdown cannot
+     finish cancelling it and the lock is left permanently held. **When a failure needs two conditions
+     — a second loop *and* contention — a test that arranges one of them proves nothing**, and that is
+     the shape to look for whenever something passes alone and hangs in company.
+
+134. **The obvious fix leaked, and one arm of the measurement would have hidden it.** A
+     `WeakKeyDictionary` keyed by the event loop is the textbook shape for per-loop state, and here it
+     cannot work: the value is an `asyncio.Lock`, and a contended one stores `_loop` — its own key — so
+     the entry keeps itself alive. Measured over three loops with a collection in between: **0 of 3**
+     entries survive when the lock is never contended and **3 of 3** when it is. Had I checked only the
+     uncontended case, which is the easier one to write, I would have recorded "the weak map releases
+     them" and shipped a leak in exactly the case the class exists for. **A weak mapping promises that
+     *it* is not the retainer, never that the key dies** — so check whether the value can reach it.
