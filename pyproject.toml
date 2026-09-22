@@ -643,4 +643,17 @@ pytest_add_cli_args_test_selection = [
     "tests/test_note_visibility.py",
     "tests/test_store.py",
     "tests/test_postgres_store.py",
+    # **Six files paired with a `source_paths` entry that nothing in this list reached.** A mutant on
+    # a line no selected test executes is reported `no_tests`, and `total` counts it — which is why
+    # the first completed run scored 1612/3640 = 44.3% against a floor of 72.0 while **1009 mutants
+    # (27.7%) were reached by no test at all**. The list had never been widened as `source_paths`
+    # grew from the seven the floor was recorded against to fifteen.
+    #
+    # Each line is the measured lift on its own module, selection-alone against selection-plus-file:
+    "tests/test_fulltext.py",  # core/fulltext.py      44% -> 100%
+    "tests/test_quantities.py",  # core/quantities.py  69% ->  92%
+    "tests/test_logging.py",  # core/logging.py        62% ->  81%
+    "tests/test_templates.py",  # templates/resolve.py 19% ->  87%
+    "tests/test_publish_end_to_end.py",  # publish/outbox.py 31% -> 62%
+    "tests/test_compound_identity.py",  # core/chem.py  69% ->  84%
 ]
