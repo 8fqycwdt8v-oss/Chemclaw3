@@ -975,15 +975,46 @@ def test_a_burst_of_cold_prefix_measurements_leaves_the_loop_schedulable() -> No
         f"{work * 1000:.0f} ms of nominal work, so it is not doing the work this assertion is "
         "about — the control has stopped being a control"
     )
-    # **A count, and the bar is measured rather than chosen.** Four runs on a quiet box: the
-    # offloaded arm was scheduled 18-28 times during its burst, the un-offloaded control 0-1. Under
-    # six CPU spinners on four cores, 13-26 against 1. So the bar at 4 sits 3.2x below the worst
-    # honest run *under load* and 4x above the block.
-    assert beats > 4, (
-        f"the event loop was scheduled {beats} time(s) during a {wall * 1000:.0f} ms burst, "
-        f"against {blocked_beats} when the same measurement runs on the loop "
-        f"(wall {blocked_wall * 1000:.0f} ms): the sweep is running on the loop that serves every "
-        "other turn's stream and both kubelet probes"
+    # **A *rate*, against the control measured in the same process — and the absolute count it
+    # replaces was the fourth duration-shaped form of this assertion to fail.**
+    #
+    # The two arms run for different lengths: on the CI runner the offloaded burst is ~660 ms and
+    # the control ~1285 ms, because offloading is a halving. So a raw count penalises the arm for
+    # being *faster* — fewer milliseconds in which to accumulate ticks — and compares it against a
+    # bar calibrated where the offloaded window was 430-565 ms on a quicker box. Measured, the bar
+    # at 4 failed 3 of 4 CI runs (2, 3, pass, 3 beats) while every local configuration gave 22-38:
+    # isolated, under `--cov`, on two cores via `taskset`, and in the full `make cov` run.
+    #
+    # Beats per second, offloaded over blocked, is scale-free and is what the docstring above was
+    # already reasoning about when it said "18-28 against 0-1":
+    #
+    #   CI run 1   2 / 0.664 s  vs 1 / 1.283 s  =  3.86x
+    #   CI run 2   3 / 0.660 s  vs 1 / 1.285 s  =  5.84x
+    #   CI run 4   3 / 0.655 s  vs 1 / 1.283 s  =  5.88x
+    #   here       22-38 / 0.43-0.565 s         =  ~65-113x
+    #   block      identical code path          =  1.0x by construction
+    #
+    # **The bar is 2.5 and the headroom is thinner than this file would like, which is worth saying
+    # rather than hiding in a constant.** 2.5 sits 1.5x below the worst honest observation and 2.5x
+    # above the block; the old standard of "3.2x below the worst honest run and 4x above the block"
+    # is not available, because CI's honest run is 3.86x and the block is 1.0x. If a future CI
+    # observation lands under 2.5, the *instrument* is what needs changing and not the bar: a
+    # heartbeat of `asyncio.sleep(0)` would count loop turns instead of 1 ms ticks and give two
+    # orders of magnitude more resolution, at the cost of measuring schedulability rather than
+    # millisecond responsiveness — which is a different property, and the 1 ms tick is the one the
+    # kubelet probes care about.
+    #
+    # `max(blocked_beats, 1)` because the control's count quantises at 0-1, and a control that got
+    # zero would otherwise divide by zero on the arm this test exists to catch.
+    offloaded_rate = beats / wall
+    blocked_rate = max(blocked_beats, 1) / blocked_wall
+    assert offloaded_rate > 2.5 * blocked_rate, (
+        f"the event loop was scheduled {beats} time(s) in a {wall * 1000:.0f} ms burst "
+        f"({offloaded_rate:.1f}/s), against {blocked_beats} in {blocked_wall * 1000:.0f} ms "
+        f"({blocked_rate:.1f}/s) when the same measurement runs on the loop — a ratio of "
+        f"{offloaded_rate / blocked_rate:.2f}x against a floor of 2.5x, where deleting the offload "
+        "gives 1.0x: the sweep is running on the loop that serves every other turn's stream and "
+        "both kubelet probes"
     )
     assert blocked_beats < beats, (
         f"the un-offloaded control was scheduled {blocked_beats} time(s) against the offloaded "

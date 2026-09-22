@@ -1894,3 +1894,21 @@ free number at the end of its section.
      withdrawn; only "never existed" licenses the exemption. **An allowlist needs its own falsifying
      test, and both arms driven** — the arm that protects the guard from abuse is the one nobody
      thinks to break, and a keyword match over a whole line will find the keyword somewhere.
+
+140. **I pushed two commits after running only the tests I thought I had touched.** Wave 7's guard
+     added docstrings that deliberately cite dead paths as *examples* of dead paths — and
+     `tests/test_docstring_paths.py` requires every backticked module pointer in a file to resolve.
+     I had run that guard earlier in the wave and it passed; I did not re-run it after the edits that
+     broke it, so CI found it 33 minutes later. **The set of tests a change affects is not the set of
+     files it edits**, and in a repository whose guards read the tree as data it is routinely larger.
+     The cheap habit that would have caught it: before pushing, run the guards that read prose
+     (`test_docstring_paths`, `test_prose_contract`, the register tests) whatever the change was,
+     because those are the ones any edit can trip.
+
+141. **Two derived guards collided again, and the second time it was mine on both sides.** The wave-5
+     collision was mutmut's rewriting against a class-member guard. This one is a new guard whose
+     explanatory docstring cites the very dead paths it was written to catch, tripping the older
+     guard that holds prose to the tree. The lesson generalises past the pair: **a guard's own
+     documentation is prose in the tree, so it is subject to every rule the tree holds prose to** —
+     and an allowlist meant to cost a review conversation is the wrong place to put an example, which
+     is why the fix was to stop backticking them rather than to exempt them.

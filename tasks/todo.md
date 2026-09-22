@@ -47,9 +47,9 @@ bound did not exist that had shipped. Lesson 137.
       the current "<path> has no .venv"), and states that installing the sibling in CI is a real
       decision nobody has taken, with what it buys and costs.
 
-## R3 — the loop-schedulability row I promised on #435
+## R3 — the loop-schedulability assertion, added as a row and then fixed
 
-- [x] Added, with all seven measurements. The finding worth keeping is the *shape*: the assertion
+- [x] Added as a row first, with all seven measurements. The finding worth keeping is the *shape*: the assertion
       counts heartbeat beats over windows of different length (660 ms offloaded against 1285 ms
       control on CI) and compares the raw count to an absolute bar, so the arm that offloads
       successfully is measured over a shorter window and allowed fewer beats **for being faster**.
@@ -57,6 +57,17 @@ bound did not exist that had shipped. Lesson 137.
       under load; an absolute count has the same defect one step along. The fix is a rate against the
       control in the same process — 3.86x and 5.84x on CI's samples, ~77x here, 1.0x by construction
       if the offload is deleted.
+- [x] **Then fixed, because a fourth CI sample made it 3 failures in 4 runs** (2, 3, pass, 3 beats),
+      which is the common case on that runner rather than an outlier. The assertion is now a rate:
+      beats-per-second offloaded over beats-per-second blocked, with `max(blocked_beats, 1)` because
+      the control quantises at 0-1. Bar **2.5**, set from the four observations — 3.86x, 5.84x,
+      5.88x, ~50-113x — and the old standard of "3.2x below the worst honest run and 4x above the
+      block" is **not available**, since CI's honest run is 3.86x against a block of 1.0x. The
+      comment says that plainly instead of burying it in a constant, and names the instrument change
+      (an `asyncio.sleep(0)` heartbeat, counting loop turns rather than 1 ms ticks) as what to do if
+      a future observation lands under the bar.
+- [x] Verified both ways: 3 of 3 passes here, and with `asyncio.to_thread` replaced by an inline
+      call — the defect the test exists for — it reds at exactly **1.00x**. Row deleted, 42 -> 41.
 
 ## Verification
 
@@ -64,8 +75,13 @@ bound did not exist that had shipped. Lesson 137.
       `test_deferred_register`, `test_claude_md_figures`, `test_lessons_stay_a_digest`,
       `test_docstring_paths` — all green. `ci.yml` parses.
 - [x] A read-only audit of all 42 rows against the tree. See R4.
-- [ ] Substantive rows now that the audit says which are real.
-- [ ] Full suite, fresh-context review, PR, merge on green CI.
+- [x] **CI found two failures I had not run for.** `test_docstring_paths` reds on the new guard's
+      own docstrings, which cite dead paths as examples of dead paths — the wave-5 guard collision
+      again, with my work on both sides this time. Fixed by not backticking them, rather than by
+      spending entries in an allowlist whose friction is the point. And `test_context_budget`'s
+      fourth sample, which turned R3 from a row into a fix.
+- [ ] Full suite over the fixes, fresh-context review, PR, merge on green CI.
+- [ ] Substantive rows from the audit's 30 live ones — next wave.
 
 ## R4 — the audit, and the guard it argued for
 

@@ -90,12 +90,13 @@ _RETROSPECTIVE = re.compile(r"\b(?:reached|grew to|used to|once held|was|were|ha
 #:
 #: **Narrower than every backticked path on purpose.** Measured over the file, 140 backticked tokens
 #: look path-like and 124 resolve; most of the rest are ordinary prose shorthand — `fanout.py`,
-#: `serve.py`, `spend_cap.py`, `server/tools.py` — which a reader resolves from context and which no
+#: `serve.py` and `spend_cap.py`, plus bare `server/`-relative names — which a reader resolves from
+#: context and which no
 #: guard should turn into a style rule. Requiring a directory *and* a symbol excludes those by
 #: construction rather than by an allowlist, and leaves 41 citations of which 3 were dead: one
 #: naming a module that never existed, one naming `note_reindex_effective` in
 #: `retrieval/vector_index.py` when it is a `Settings` property, and one naming a
-#: `tests/test_sibling_manifest_agreement.py::_DISPATCHERS` that had become a `_Seam` field.
+#: `_DISPATCHERS` in `tests/test_sibling_manifest_agreement.py` that had become a `_Seam` field.
 #:
 #: Paths resolve from the repository root or from `src/chemclaw/`, because the file writes both.
 #:
@@ -109,7 +110,8 @@ _RETROSPECTIVE = re.compile(r"\b(?:reached|grew to|used to|once held|was|were|ha
 _ANCHOR = re.compile(r"`([\w./-]+/[\w.-]+\.(?:py|c|sh|ya?ml|sql|toml|tpl)::[\w.]+)`")
 
 #: Anchors the file cites in order to say they do **not** exist. One today: a retracted ADR claim
-#: that the human gate ran through `agent/interaction_tools.py::start_approval`, which the row
+#: that the human gate ran through a `start_approval` in an `agent/interaction_tools` module,
+#: which the row
 #: quotes precisely to record that neither the module nor the function was ever in `src/`.
 #:
 #: Same discipline as `_HISTORICAL` above: an entry must still be cited, and the sentence citing it
