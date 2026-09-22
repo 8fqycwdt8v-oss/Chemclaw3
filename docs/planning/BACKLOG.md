@@ -198,21 +198,6 @@ topic).
       that a bump is "a permanent doubling" of `molecule_fingerprints`/`reaction_fingerprints`
       because the runtime role holds no `DELETE`.
 
-- [ ] **A bare guanidinium salt never reaches the neutralisation branch, so it does not collapse
-      onto its free base** — [M], `src/chemclaw/core/chem.py::_is_organic`. `standardize` reaches
-      `Uncharger` only when some fragment is `_is_organic`, which requires a carbon bonded to
-      hydrogen or to another carbon, and guanidinium's carbon has three nitrogen neighbours.
-      Measured: guanidine hydrochloride has `organic == 0`, returns before both the strip and the
-      neutralisation, and does not collapse — before the `std7`/`std8` work and after it. Metformin
-      and acetamidine are covered only because their substituents happen to make them organic by
-      that test, which is why the class-scope claim in
-      `tests/test_compound_identity.py::test_an_amine_salt_drawn_as_an_ion_pair_is_its_free_base`
-      has been narrowed to the shipped corpus. Nothing in `data/` contains a guanidine today, so
-      this is latent; widening `_is_organic` is the fix to weigh, and it moves every fragment-count
-      branch at once, so it needs the `standardize` behaviour table in
-      `test_the_standardization_version_is_pinned_to_the_behaviour_it_names` re-measured and almost
-      certainly a version bump.
-
 - [ ] **Three first-party refusal gates are still outside the weekly mutation backstop, and the
       run's cost is still unmeasured** — [S], `pyproject.toml` `[tool.mutmut].source_paths`.
       `agent/spend_cap.py` joined it on 2026-09-22 (the smallest of the four by source length), which

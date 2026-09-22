@@ -234,17 +234,16 @@ def test_an_amine_salt_drawn_as_an_ion_pair_is_its_free_base() -> None:
     test also missed it: that salt has *two* organic fragments, so there is no `FragmentParent`, the
     proton moves N->O, the net H count is unchanged, and the guard passes.
 
-    **"Uniform across the class" is the wider claim and it is false, so the boundary is named here
-    rather than left to be discovered.** `standardize` only reaches `Uncharger` when some fragment
-    is `_is_organic`, which requires a carbon bonded to hydrogen or to another carbon — and
-    guanidinium's carbon has three nitrogen neighbours and nothing else. Measured, guanidine
-    hydrochloride has `organic == 0`, returns before either the strip or the neutralisation, and
-    does **not** collapse onto its free base, before this change or after it. Metformin is in the
-    list above only because its N-methyls make it organic by that test, which is an accident of
-    substitution rather than the class being covered; acetamidine is covered for the same accidental
-    reason. This is a pre-existing limit of `_is_organic` and not something the cation arm changed,
-    and it is out of scope here — a bare guanidinium is not in the shipped corpus, which is why the
-    narrower sentence above is the true one. `docs/planning/BACKLOG.md` carries the row.
+    **"Uniform across the class" was the wider claim and it was false; `std10` is what made it
+    true.** `standardize` only reaches `Uncharger` when some fragment is `_is_organic`, and that
+    test used to require a carbon bonded to hydrogen or to another carbon — which guanidinium's
+    carbon, with three nitrogen neighbours and nothing else, does not have. Measured then: guanidine
+    hydrochloride had `organic == 0`, returned before both the strip and the neutralisation, and did
+    not collapse; metformin and acetamidine were covered only because their substituents put a C–C
+    bond elsewhere in the fragment, which is an accident of substitution rather than the class being
+    covered. `D-2026-09-22-the-cheapest-time-to-bump-a-version-is-while-the-defect-is-latent`
+    widened `_is_organic` with a carbon-two-nitrogens clause and bumped the version, so the bare
+    guanidinium below is the class boundary asserted rather than named as a limit.
     """
     for name, base, salt in (
         ("ethylamine", "CCN", "CC[NH3+].[Br-]"),
@@ -252,6 +251,9 @@ def test_an_amine_salt_drawn_as_an_ion_pair_is_its_free_base() -> None:
         ("lidocaine", "CCN(CC)CC(=O)Nc1c(C)cccc1C", "CC[NH+](CC)CC(=O)Nc1c(C)cccc1C.[Cl-]"),
         ("propranolol", "CC(C)NCC(O)COc1cccc2ccccc12", "CC(C)[NH2+]CC(O)COc1cccc2ccccc12.[Cl-]"),
         ("metformin", "CN(C)C(=N)N=C(N)N", "CN(C)C(=[NH2+])N=C(N)N.[Cl-]"),
+        # The case the narrower sentence used to except: no C–H and no C–C anywhere in the cation.
+        ("guanidine", "NC(N)=N", "NC(=[NH2+])N.[Cl-]"),
+        ("acetamidine", "CC(N)=N", "CC(=[NH2+])N.[Cl-]"),
     ):
         assert compound_id(salt) == compound_id(base), (
             f"{name} as an ion pair is a different compound from its free base: "
@@ -721,8 +723,17 @@ _STANDARDIZATION_AT_THIS_VERSION = (
     ("CCN.C1CCOC1", "C1CCOC1.CCN"),
     ("CC[Mg]Br", "C[CH2][Mg][Br]"),
     ("[OH-].[Na+]", "[Na+].[OH-]"),
-    # and the boundary of `_is_organic`: a bare guanidinium salt reaches no branch at all
-    ("NC(=[NH2+])N.[Cl-]", "NC(N)=[NH2+].[Cl-]"),
+    # and the boundary of `_is_organic`, which moved at std10: a carbon with two nitrogen
+    # neighbours is organic, so a bare guanidinium salt now reaches the neutralisation branch
+    ("NC(=[NH2+])N.[Cl-]", "N=C(N)N"),
+    ("NC(N)=O.Cl", "NC(N)=O"),
+    ("Nc1nc(N)nc(N)n1.Cl", "Nc1nc(N)nc(N)n1"),
+    # one nitrogen is the other side of that line, and these must stay two reagents apiece
+    ("[Na+].[C-]#N", "[C-]#N.[Na+]"),
+    ("[K+].[C-]#N", "[C-]#N.[K+]"),
+    ("[K+].[S-]C#N", "N#C[S-].[K+]"),
+    ("[Na+].[N-]=C=O", "[N-]=C=O.[Na+]"),
+    ("[K+].[K+].[O-]C([O-])=O", "O=C([O-])[O-].[K+].[K+]"),
 )
 
 
@@ -751,7 +762,7 @@ def test_the_standardization_version_is_pinned_to_the_behaviour_it_names() -> No
     the runbook's — delete the corpus's `corpus_cursors` row and re-run the ELN sync. Read that
     before adding a row here with a new number.
     """
-    assert STANDARDIZATION_VERSION == "std9", (
+    assert STANDARDIZATION_VERSION == "std10", (
         "the standardization version changed. That is a decision with a cost — see this test's "
         "docstring — so update the literal and the table below together, and say in the commit "
         "message which rows moved"
