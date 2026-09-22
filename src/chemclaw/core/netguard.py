@@ -123,11 +123,16 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import socket
+import subprocess
 from collections.abc import Iterable
+from functools import lru_cache
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from chemclaw.core.checkout import is_the_processes_own_checkout
 from chemclaw.core.http import is_loopback_host
 
 logger = logging.getLogger(__name__)
@@ -268,6 +273,109 @@ def _host_from_dsn(dsn: str) -> str | None:
     return None
 
 
+#: How long `git remote get-url` may take. It reads `.git/config` and opens no socket, so this is a
+#: bound on a wedged filesystem rather than on the network; a process that cannot answer it in five
+#: seconds has a problem this allowlist is not going to fix.
+_GIT_REMOTE_TIMEOUT_SECONDS = 5.0
+
+#: What a hostname may contain: letters, digits, dots, hyphens, underscores, and the colons of an
+#: unbracketed IPv6 literal. Anything else is junk from a malformed remote URL and must not reach
+#: the allowlist — **a comma most of all**. `core/netguard_preload.c::parse_allowlist` splits the
+#: environment variable on commas, so a single derived entry containing one becomes *two* allowed
+#: hosts on the compiled layer and one entry matching nothing on the Python layer. That is a host
+#: permitted by one layer and refused by the other, which is the divergence this whole function is
+#: placed in `derive_allowed` to prevent.
+_A_PLAUSIBLE_HOST = re.compile(r"\A[A-Za-z0-9._:-]+\Z")
+
+
+def _push_hosts_for(repo_dir: str, remote: str) -> frozenset[str]:
+    """Resolve the checkout, then ask `_push_hosts` — which caches on what it is given.
+
+    The resolution is here and not inside the cache because the *key* is the thing that has to be
+    unambiguous: a relative `repo_dir` names different directories under different working
+    directories, and measured, two clones both reached as `notes` returned the first one's host for
+    the second.
+    """
+    if not repo_dir or not remote or is_the_processes_own_checkout(repo_dir):
+        return frozenset()
+    try:
+        resolved = str(Path(repo_dir).resolve())
+    except OSError:
+        return frozenset()
+    return _push_hosts(resolved, remote)
+
+
+@lru_cache(maxsize=8)
+def _push_hosts(repo_dir: str, remote: str) -> frozenset[str]:
+    """The hosts `kg/git_writer.py` would push notes to, or empty if it would push nowhere.
+
+    `repo_dir` is already resolved (see `_push_hosts_for`). Cached because arming happens once per
+    process and the CLI and the tests would otherwise pay a subprocess per call.
+
+    **This is the one destination that is not on the settings object.** `git_remote` is the string
+    `"origin"` — a name, resolved inside the checkout — so every other entry in `derive_allowed`
+    can be read off a field and this one cannot. It went from unbounded to bounded when
+    `D-2026-09-12-the-layer-that-binds-grpc-is-libc-not-socket-py` armed the compiled layer: a
+    child process inherits `LD_PRELOAD`, so `git push` is now refused like any other dial.
+
+    **Resolved here rather than in `cli/egress_preload.py`**, although that is where the subprocess
+    would be cheapest. The two layers arm from *one* derivation — the compiled guard reads what
+    this function returns and the in-process guard patches `socket` with it — and a host added on
+    one side only would be a destination one layer refuses and the other permits.
+
+    **`--push --all`, and each word of that is a defect a review drove.** Plain `get-url` returns
+    the *fetch* URL, and `git push` uses `remote.<name>.pushurl` when it is set — so with a
+    `pushurl`, a `pushInsteadOf` rewrite, or several push URLs, the derived entry was wrong in both
+    directions at once: the host that would be dialled was missing, and a host nothing dials was
+    added. `--all` is for the several-URL case, which git allows and this returns one per line.
+
+    **Only when the checkout is not this process's own.** At `note_repo_dir="."` — or any other
+    spelling of the same directory — `git_writer._require_dedicated_checkout` refuses the write
+    before it can push, so there is no destination to allow, and deriving one would put the
+    *source* repository's host on every dev checkout's allowlist. The question is asked through
+    `core/checkout.py`, which both sides now share; a bare `repo_dir == "."` was the first spelling
+    and it let `./`, `$PWD`, `src/..` and a symlink through.
+
+    A local-path remote is not a destination and contributes nothing; so does any failure — no git,
+    no checkout, no such remote, a URL `urlsplit` refuses. That direction is deliberate: an absent
+    entry refuses a push a deployment can still name in `egress_allow`, while a wrong entry opens a
+    host nobody declared. **Nothing here may raise**: `derive_allowed` runs at
+    `chemclaw.core.config` import in every process, so an exception is an import-time crashloop —
+    which the first version could produce, because `_host_from_url` sat outside its `try` and
+    `urlsplit` raises `ValueError` on an unbalanced `[` that git accepts as a remote URL.
+    """
+    try:
+        # A fixed argv, no shell, and `--` before the remote name so a remote called `-x` is a
+        # remote and not a flag.
+        found = subprocess.run(
+            ["git", "-C", repo_dir, "remote", "get-url", "--push", "--all", "--", remote],
+            capture_output=True,
+            text=True,
+            timeout=_GIT_REMOTE_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return frozenset()
+    if found.returncode != 0:
+        return frozenset()
+    hosts: set[str] = set()
+    for line in found.stdout.splitlines():
+        url = line.strip()
+        # A path is not a destination. `_host_from_url` reads `../notes` as the host `..`, and
+        # `file://` and an absolute path have no host at all.
+        if not url or url.startswith(("file://", "/", ".", "~")):
+            continue
+        if "://" not in url and ":" not in url:
+            continue  # a bare relative path, e.g. `notes`
+        try:
+            host = _host_from_url(url)
+        except ValueError:
+            continue  # git accepts `https://[oops/path`; `urlsplit` does not
+        if host and _A_PLAUSIBLE_HOST.match(host):
+            hosts.add(host)
+    return frozenset(hosts)
+
+
 def derive_allowed(settings: Any) -> frozenset[str]:
     """Build the allowlist from the destinations this deployment actually dials.
 
@@ -356,6 +464,13 @@ def derive_allowed(settings: Any) -> frozenset[str]:
         add(os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT"))
     if getattr(settings, "vector_store_provider", "pgvector") != "pgvector":
         add(settings.vector_store_url)
+    # The git note remote, which is a *name* on this object rather than a destination — see
+    # `_git_remote_host` for why it is resolved here and not in the entrypoint that runs the
+    # subprocess for the compiled layer.
+    hosts |= _push_hosts_for(
+        str(getattr(settings, "note_repo_dir", "") or ""),
+        str(getattr(settings, "git_remote", "") or ""),
+    )
     for extra in (settings.egress_allow or "").split(","):
         host = extra.strip().lower()
         if host:
@@ -529,10 +644,12 @@ def _env_reading_destinations(settings: Any) -> list[tuple[str, str, tuple[str, 
     environment and is measurably proxied — `_git_child_env` keeps every proxy variable on purpose,
     and a `git ls-remote` behind a loopback recorder sent it
     `CONNECT notes.example.invalid:443`. Its URL is still not on this
-    object (`git_remote` is the string `"origin"`, and resolving it means `git remote get-url` in a
-    subprocess at *config import*, a cost every entrypoint would pay at every start for a
-    destination only one subsystem uses), so it cannot be a row here — a row needs a host to put in
-    the message and to test `proxy_bypass` against. It is instead what `ambient_proxies` is for:
+    object — `git_remote` is the string `"origin"` — but it is now *derived*: `_push_hosts_for`
+    runs `git remote get-url --push --all` at config import, one subprocess per process, and puts
+    the result on the allowlist. It still cannot be a row **here**, for a different reason than the
+    one this paragraph used to give: this table is keyed on the setting a deployment writes down,
+    and there is none to key on. A future row would have to be keyed on the derived host.
+    It is instead what `ambient_proxies` is for:
     a carrier with no derivable destination refuses on the *proxy*, under the enforced posture only.
     That is a narrower claim than a row would make and it is the one this function can support.
     """
@@ -741,3 +858,4 @@ def _reset_for_tests(allowed: Iterable[str] = ()) -> None:
     """
     global _allowed
     _allowed = frozenset(allowed)
+    _push_hosts.cache_clear()

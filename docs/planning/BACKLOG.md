@@ -101,24 +101,45 @@ topic).
   actually holds before choosing a number: a ceiling set from the SDK's default is the same
   unexamined posture this row is about, one value further on.
 
-- [ ] **The `git` remote is now a destination a deployment must declare, and nothing derives it** —
-  [S], what is left of "the egress guard is blind to gRPC and to Temporal" after
+- [ ] **An SSH host alias derives the alias, not the host ssh dials** — [S], opened 2026-09-22 by
+  the review of `D-2026-09-22-a-destination-that-is-a-name-is-still-a-destination`.
+  `netguard._push_hosts_for` resolves `git remote get-url --push --all` and takes the host out of
+  the URL, which is right for every form git itself resolves — `insteadOf` included, since
+  `get-url` expands it. It is wrong for an ssh alias: `git@notes-alias:o/n.git` with
+  `Host notes-alias` / `HostName real-git.internal.example` in `~/.ssh/config` derives
+  `notes-alias`, and ssh dials `real-git.internal.example`, which the compiled guard then refuses
+  at `getaddrinfo`. The git half is measured; the ssh half was not, because `ssh` is not installed
+  in this sandbox.
+
+  **Not fixed with the rest of that ADR because the fix is a second mechanism, not a flag.** The
+  others were `--push --all`, a resolved path and a character class. This one means running
+  `ssh -G <alias>` — a second subprocess, reading a config file this tree does not otherwise touch,
+  in a function that must never raise and runs at config import in every process — for a
+  configuration nothing here ships or tests. Weigh that against the workaround, which is the one a
+  deployment already had for the git remote before it was derived at all: name the real host in
+  `CHEMCLAW_EGRESS_ALLOW`. The symptom is identical, so the cost of not fixing it is a deployment
+  that must declare one host by hand rather than a refusal nobody can diagnose. Anchors:
+  `core/netguard.py::_push_hosts`, `kg/git_writer.py::_git_child_env`.
+
+- [ ] **The IPv4-mapped arm of the compiled egress guard is unmeasured here** — [S], the last of
+  "the egress guard is blind to gRPC and to Temporal" after
   `D-2026-09-12-the-layer-that-binds-grpc-is-libc-not-socket-py`. The blindness
   itself is closed: `core/netguard_preload.c` interposes libc's `connect`, `getaddrinfo`, `sendto`
   and `sendmsg` through `LD_PRELOAD`, armed by `deploy/entrypoint.sh` from the allowlist
   `netguard.derive_allowed` returns, and driven against a real gRPC server over a non-loopback route
   it refuses the plain socket, `grpc` and `temporalio` alike — grpc's own C-core reporting
   `connect failed: ... Operation not permitted` — while loopback and an allowlisted address continue
-  to work. Two things remain:
-  - **`git` is now bounded and nothing derives its host.** A child inherits `LD_PRELOAD`, so
-    `kg/git_writer.py`'s `git push` is refused unless the remote is named in
-    `CHEMCLAW_EGRESS_ALLOW` — the first time that destination has been bounded at all, and a
-    behaviour change for any deployment pushing notes off-box. `git_remote` is the string `"origin"`,
-    so resolving it means `git remote get-url` in a subprocess; the entrypoint already runs one
-    interpreter to derive the allowlist and is the one place that could afford it.
-  - **The IPv4-mapped arm is unmeasured on hosts without `AF_INET6`**, which includes this sandbox:
-    `test_an_ipv4_mapped_address_is_not_a_way_around_the_check` skips with the reason in the message.
-  Anchors: `core/netguard_preload.c`, `core/netguard_preload.py`, `deploy/entrypoint.sh`,
+  to work. **The git half is closed** by
+  `D-2026-09-22-a-destination-that-is-a-name-is-still-a-destination`: `netguard.derive_allowed`
+  resolves `git remote get-url` inside the note checkout, so both guard layers arm with the host,
+  and it does so only once `note_repo_dir` has moved off its default.
+
+  **What is left is one arm nobody here can drive.** `test_an_ipv4_mapped_address_is_not_a_way_around_the_check`
+  skips on a host without `AF_INET6`, which includes this sandbox, and the skip carries the reason
+  in its message. The unwrapping it would measure is the one place the compiled guard reads an
+  address rather than a name, so a wrong answer there is a bypass rather than an outage — which is
+  why an unmeasured arm is worth a row rather than a shrug. It needs a host with IPv6 enabled, not
+  new code. Anchors: `core/netguard_preload.c`, `core/netguard_preload.py`, `deploy/entrypoint.sh`,
   `kg/git_writer.py`.
 
 - [ ] **What "network-exposed" means for a process that only makes outbound calls** — [M],
@@ -597,8 +618,31 @@ topic).
       Bounded in a deployment by the kubelet — the chart derives `readinessProbe.timeoutSeconds`
       from this budget and ships 5 s with `failureThreshold: 3`, so the pod goes not-ready either
       way — which is why this is a row and not a fix: the correct outcome is reached by the wrong
-      route, and a second in-process timeout cannot cancel what the first one could not. Worth
-      revisiting if psycopg gains a cancel that respects a deadline. Anchors:
+      route, and a second in-process timeout cannot cancel what the first one could not.
+
+      **The trigger reads as fired and is not, which is why it is rewritten here.** It used to say
+      "worth revisiting if psycopg gains a cancel that respects a deadline". psycopg 3.3.4 ships
+      `AsyncConnection.cancel_safe(timeout=...)` and `_try_cancel` now delegates to it with
+      `timeout=5.0` — that cancel, in as many words. Driven 2026-09-22 on that version against a
+      `docker pause`d Postgres: an in-flight `SELECT 1` on an already-checked-out connection under
+      `asyncio.wait_for(..., 2.0)` **did not return within 120 s**. The bounded cancel is not the
+      bound — `wait()`'s except arm re-waits on the socket after it with no timeout of its own — so
+      upstream gained the capability the trigger named without closing the leg this row is about.
+
+      **And the obvious re-measurement measures the wrong leg.** The same drive through
+      `core/db.py::connection` (a pool, as the probe uses) returned at exactly its budget, 4 of 4,
+      with a `TimeoutError`, because the hang there is the *connect* leg that `asyncio.wait_for` has
+      always bounded; `AsyncConnection.wait` was never entered. Whoever re-runs this must hold the
+      connection before pausing, or they will confirm a fix that is not there.
+
+      **No libpq knob reaches it either.** `tcp_user_timeout` and the keepalives bound a peer that
+      stops ACKing, and a paused container's kernel keeps ACKing — the freeze is at the application
+      layer, which is also why a server-side `statement_timeout` cannot fire.
+
+      New trigger: psycopg bounds the **re-wait** in `AsyncConnection.wait`'s cancellation arm, or
+      exposes a deadline on it. Today that arm calls `_try_cancel(timeout=5.0)` and then a bare
+      `waiting.wait_async(gen, self.pgconn.socket, interval=interval)`; the file that would show it
+      is psycopg's own `connection_async.py`. Anchors:
       `api/routes/ops.py::_probe_database`, `core/db.py::connection`.
 
 - [ ] **`retrieval_source_weights` has no upper bound, and the mix it produces is not a property of
