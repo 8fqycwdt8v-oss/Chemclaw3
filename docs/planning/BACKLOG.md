@@ -541,17 +541,6 @@ topic).
       costs the alert its series during a database outage. That trade is the decision.
       Anchors: `core/config/__init__.py::pg_endpoint`, `core/db.py::_session_store_max_connections`.
 
-- [ ] **A front door scaled to zero renders a release in which every pod refuses to start** — [S],
-      found 2026-09-05 by a fresh-context chart review. `service_fleet_replicas` is
-      `Field(default=1, gt=0)` and `config.yaml` renders `service.replicas` straight into the shared
-      ConfigMap, so `--set service.replicas=0` (or `autoscaling.maxReplicas=0`) gives every pod in
-      the release a value `Settings` rejects — workers and connector servers included, none of which
-      has a front door. `helm template` and `kubeconform` both pass, so `make helm-validate` is
-      green. The arithmetic is *right* at zero (measured: `readiness=0`, and the per-server figures
-      match a real fleet with the bound relaxed); only the bound refuses it. Deciding whether a
-      front-doorless release is legal is the work. Anchors: `core/config/service.py`,
-      `deploy/helm/chemclaw/templates/config.yaml`.
-
 - [ ] **`/readyz` cannot bound a Postgres that accepts the socket and stops answering** — [S],
       found 2026-09-05, upstream in origin and recorded here because `api/routes/ops.py` claimed
       otherwise. `asyncio.wait_for` bounds acquisition; on a warm pooled connection psycopg's

@@ -63,6 +63,18 @@ route:
 
 service:
   port: 8080
+  # **Read only when `autoscaling.enabled` is false, and it ships true — so on the shipped defaults
+  # this value renders nowhere at all.** `chemclaw.frontDoorProcesses` takes
+  # `autoscaling.maxReplicas` while the HPA is on, and `deployment-service.yaml` omits `replicas`
+  # entirely in that branch (it is the HPA's to own). Measured: `--set service.replicas=0` changes
+  # not one byte of the shipped render. It is stated here because a `--set` that silently does
+  # nothing is worse than one that is refused: an operator scaling the front door on a default
+  # release has to turn the HPA off, or move `autoscaling.maxReplicas`.
+  #
+  # Neither may be zero. Both are refused at render time — see `chemclaw.frontDoorProcesses`, which
+  # carries the measurement: this number reaches every pod through the shared ConfigMap, and
+  # `Settings` refuses it below 1, so a zero stops the whole release from starting rather than
+  # scaling the front door down.
   replicas: 2
   # How long the Route's router is given to stop sending new requests to a pod that is going away,
   # before the pod is told to stop. Kubernetes removes the Endpoint and sends SIGTERM *concurrently*,

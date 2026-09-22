@@ -6574,3 +6574,102 @@ def test_no_rendered_setting_reaches_a_pod_in_scientific_notation(
         f"`int_parsing`, so the container crash-loops on start: {offenders}. Render it with "
         "`int64` rather than `| quote`, which prints a Helm float the way Go does"
     )
+
+
+@pytest.mark.parametrize(
+    ("overrides", "named"),
+    [
+        pytest.param(
+            ("--set", "service.autoscaling.maxReplicas=0"), "maxReplicas", id="hpa-ceiling"
+        ),
+        pytest.param(
+            (
+                "--set",
+                "service.autoscaling.enabled=false",
+                "--set",
+                "service.replicas=0",
+            ),
+            "service.replicas",
+            id="fixed-count",
+        ),
+    ],
+)
+def test_a_release_with_no_front_door_refuses_to_render(
+    overrides: tuple[str, ...], named: str
+) -> None:
+    """A zero front door renders a release in which every pod refuses to start.
+
+    `service_fleet_replicas` is `Field(default=1, gt=0)` and `config.yaml` renders this number into
+    the ConfigMap **every** pod reads through `envFrom`, so a zero does not scale the front door
+    down. It fails `Settings()` at `core/config/__init__.py`'s module-level singleton — which is why
+    this is not a question of which component reads the setting. Driven over nine entrypoints, all
+    nine exit 1, and `deploy/entrypoint.sh` runs `python -m chemclaw.cli.egress_preload` under
+    `set -euo pipefail` *before* its `case`, so every container dies in the shell prologue: the
+    seven connector Deployments, the background worker, and the migrate/schedules/convert hook Jobs
+    — so `helm upgrade` never converges either.
+
+    **Both arms, because the backlog row's own reproducer is not one of them.** It named
+    `--set service.replicas=0`, which on the shipped defaults changes not one byte: the HPA ships
+    enabled and `chemclaw.frontDoorProcesses` reads `maxReplicas` in that branch. The two that do
+    reach it are parametrised here.
+
+    Neither `helm template` nor `kubeconform` could catch this — the value is a valid string in a
+    valid ConfigMap — and `make helm-validate` renders only the defaults plus the flag union, so it
+    never sets a replica count. A render-time `fail` naming the key is the only thing between an
+    operator's `--set` and eleven crash-looping pods.
+    """
+    refused = _render(*overrides)
+
+    assert refused.returncode != 0, (
+        "the chart still renders a release whose every pod refuses to start on "
+        f"{overrides}:\n{refused.stdout[:2000]}"
+    )
+    assert named in refused.stderr, refused.stderr
+    assert "CHEMCLAW_SERVICE_FLEET_REPLICAS" in refused.stderr, (
+        "the refusal must name the setting that actually refuses the value, since that is what an "
+        f"operator has to look up: {refused.stderr}"
+    )
+
+
+def test_the_front_door_count_the_chart_refuses_is_the_one_settings_refuses() -> None:
+    """The chart's bound and `Settings`' bound are one decision, asserted against each other.
+
+    Two places state "at least one front door" and a chart guard that drifted from the field would
+    be the worst of both: a render that succeeds into a crash-loop, or one that refuses a value the
+    code would have taken. Read off `model_fields` rather than transcribed, so moving the field
+    moves this.
+    """
+    from chemclaw.core.config import Settings
+
+    constraints = Settings.model_fields["service_fleet_replicas"].metadata
+    floors = [getattr(item, "gt", None) for item in constraints]
+    assert 0 in floors, (
+        "service_fleet_replicas no longer carries `gt=0`, so the chart guard refusing zero is now "
+        f"stricter than the code it protects: {constraints}"
+    )
+
+    # And the value one above the floor still renders, so the guard is a floor rather than a ban.
+    assert _render("--set", "service.autoscaling.maxReplicas=1").returncode == 0
+
+
+def test_the_fixed_replica_count_renders_nowhere_while_the_hpa_is_on() -> None:
+    """`service.replicas` is dead config on the shipped defaults, and that is now written down.
+
+    The backlog row behind this change was built on `--set service.replicas=0` reaching the
+    ConfigMap. It does not: `service.autoscaling.enabled` ships true, `chemclaw.frontDoorProcesses`
+    reads `maxReplicas` in that branch, and `deployment-service.yaml` omits `replicas` entirely
+    because the HPA owns it. So a `--set` an operator would reasonably expect to scale the front
+    door silently does nothing.
+
+    Pinned as a test rather than left to the comment in `values.yaml`, because the comment is only
+    true while this remains true — and if a later change makes `service.replicas` live under the
+    HPA, this reds and that comment gets corrected with it.
+    """
+    baseline = _render()
+    overridden = _render("--set", "service.replicas=1")
+
+    assert baseline.returncode == 0 and overridden.returncode == 0
+    assert baseline.stdout == overridden.stdout, (
+        "service.replicas now changes the shipped render, so the values.yaml comment saying it is "
+        "read only when the HPA is off is stale"
+    )

@@ -101,3 +101,35 @@ refusal naming the key instead of eleven crash-looping pods and a stuck upgrade.
 - [ ] Fresh-context subagent review before the PR.
 
 ## Review
+
+Three rows closed, three ADRs, 45 → 43 open. **Every one of the three was wrong about something**, and
+in each case the error was in the direction that made the fix look harder or the defect smaller than it
+was — which is now six of eighteen worked rows found stale or misstated.
+
+**R1's mechanism was wrong.** The row described the accumulation as per-cell timeouts adding up; they
+cannot, because a cell that exceeds its budget ends the page after one cell non-retryably. The reachable
+case is a *polynomial* pattern that completes at 66% of the budget: 165 ms a cell, 330 s a page against a
+300 s activity deadline. Finding that changed what the fix had to bound, and the honest-page ratio (349x)
+is what settles the trade the row said needed deciding.
+
+**R2's premise was false.** It recorded the honest count as unavailable at that layer and a changed-file
+count as unable to separate dependencies from subjects. `prior` already holds the pre-write bytes of
+every planned target, and the flag pair separates the three kinds of file exactly — so the ADR-sized
+contract change was a filter on two flags, and `len(batch)` deleted rather than corrected.
+
+**R3's reproducer does not reproduce.** `--set service.replicas=0` changes not one byte of the shipped
+render, because the HPA ships enabled and both readers of that key are gated on it being off. The blast
+radius is meanwhile *worse* than stated: the failure is at the config singleton, so all nine entrypoints
+die, and `entrypoint.sh`'s egress preload kills every container before its `case` — hook Jobs included,
+which is what turns a broken release into a stuck upgrade.
+
+Two things I got wrong mid-wave and fixed by measuring:
+
+- My first R1 driver used a timing-out pattern and measured the wrong thing entirely; the page it
+  "proved" unbounded actually aborts after one cell.
+- The page refusal quoted `settings.eln_regex_page_budget_seconds` rather than the budget in force, so it
+  said 150 s at a 2 s budget — a false figure in a message a site acts on.
+
+The derived guard over page loops found a fourth one I had missed (`ingest/eln/validate.py`), and its
+first spelling over-matched three modules that map one entry at a time, so it now asks whether the call
+is *inside* the loop and a companion test stops it passing vacuously.
