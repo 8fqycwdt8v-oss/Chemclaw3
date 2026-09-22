@@ -42,7 +42,12 @@ from chemclaw.core.session_context import get_current_session_id
 from chemclaw.core.tool_registry import tool
 from chemclaw.ingest.documents.formats import content_type_for
 from chemclaw.ingest.documents.isolate import parse_document_isolated
-from chemclaw.ingest.documents.parse import DocumentParseError, parse_document
+from chemclaw.ingest.documents.parse import (
+    DocumentParseError,
+    UnclassifiedParseError,
+    parse_document,
+    read_without_a_ceiling,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -137,9 +142,26 @@ def parse_attachment(name: str, raw: bytes, declared_type: str | None = None) ->
     extracts. The upload route uses `parse_attachment_isolated` instead, because there a parse that
     does not terminate takes a shared replica down: see that function and
     `ingest/documents/isolate.py`.
+
+    **In-process also means *unbounded*, and the refusal now says so rather than implying a verdict
+    it cannot reach** (`D-2026-09-22-an-unbounded-parse-may-not-blame-the-document`). No
+    `RLIMIT_DATA` is set here, so `isolate._at_ceiling` has no ceiling to read back and an
+    allocation failure inside a C parser is indistinguishable from a malformed file — lxml reports
+    its own as
+    `unknown error (<string>, line 0)`, which tells an operator their legal document is broken at
+    line 0. `UnclassifiedParseError` is the type that marks exactly that population, and
+    `read_without_a_ceiling` is the wording it earns here.
+
+    A *classified* refusal passes through untouched: an over-expanding archive, an unsupported
+    format and a scanned PDF are all statements about the document that hold whether or not a
+    ceiling was set, and burying them under a caveat about memory would be the same
+    what-do-I-actually-know failure in the other direction.
     """
     name = _accepted_name(name, raw)
-    parsed = parse_document(name, raw, declared_type)
+    try:
+        parsed = parse_document(name, raw, declared_type)
+    except UnclassifiedParseError as exc:
+        raise read_without_a_ceiling(name, exc) from exc
     return Attachment(
         name=name, content_type=parsed.content_type, text=parsed.text, rows=parsed.rows
     )

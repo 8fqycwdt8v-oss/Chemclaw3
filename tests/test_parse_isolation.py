@@ -35,6 +35,7 @@ from chemclaw.agent import attachments
 from chemclaw.agent.attachments import (
     AttachmentError,
     AttachmentUnavailable,
+    parse_attachment,
     parse_attachment_off_loop,
 )
 from chemclaw.core import netguard
@@ -49,6 +50,7 @@ from chemclaw.ingest.documents.isolate import (
 from chemclaw.ingest.documents.parse import (
     DocumentParseError,
     ScannedDocumentError,
+    UnclassifiedParseError,
     parse_document,
 )
 from tests.egress_probe import egress_posture
@@ -800,4 +802,87 @@ def test_a_refusal_is_not_bounded_by_the_ceiling_that_caused_it() -> None:
     assert "UNCHANGED-HARD" in result.stdout, (
         "releasing moved the hard limit, which is irreversible for the process and is not what "
         f"this is for: {result.stdout!r}"
+    )
+
+
+def test_an_unbounded_parse_does_not_blame_the_document_for_what_it_cannot_know() -> None:
+    """`parse_attachment` sets no ceiling, so it cannot report a verdict a ceiling establishes.
+
+    `D-2026-09-19-a-refusal-that-blames-the-document-is-worse-than-one-that-says-nothing` put
+    `_at_ceiling` in the isolate child, where the ceiling is *known*. The residual is the path that
+    never forks: `cli/backfill_corpus.py` and the format tests call `parse_attachment`, no
+    `RLIMIT_DATA` is set on that process, and a C parser that reports its own allocation failure —
+    lxml does exactly that — arrives as `unknown error (<string>, line 0)`. Indistinguishable from a
+    malformed file, and worded as an accusation against a document that may be perfectly legal.
+
+    The decision is `D-2026-09-22-an-unbounded-parse-may-not-blame-the-document`: this path stays
+    in-process, and its refusal states what it cannot establish rather than guessing. The parser's
+    own words are kept, because an operator debugging a share needs them.
+    """
+    with pytest.raises(DocumentParseError) as refused:
+        parse_attachment("report.docx", b"not a zip at all")
+
+    message = str(refused.value)
+    assert "could not read report.docx" in message, (
+        f"the parser's own words must survive — an operator needs them: {message}"
+    )
+    assert "not established here" in message, (
+        "the refusal reads as a verdict on the document, which is the one thing an unbounded parse "
+        f"cannot establish: {message}"
+    )
+    assert "no memory ceiling" in message, message
+
+
+def test_a_classified_refusal_is_not_buried_under_a_caveat_about_memory() -> None:
+    """The caveat belongs to the unclassified population only, and burying the rest is the same bug.
+
+    An unsupported format, an over-expanding archive and a scanned PDF are statements about the
+    document that hold whether or not a ceiling was set. Wrapping them in "we do not know whether
+    this machine had enough memory" would be the same what-do-I-actually-know failure pointed the
+    other way — a refusal that is *less* specific than the thing it knows.
+    """
+    with pytest.raises(DocumentParseError) as unsupported:
+        parse_attachment("notes.zzz", b"hello")
+
+    assert "not a supported format" in str(unsupported.value)
+    assert "not established here" not in str(unsupported.value), (
+        f"a classified refusal grew the unbounded caveat: {unsupported.value}"
+    )
+
+
+def test_only_the_unknown_failures_carry_the_type_the_caveat_keys_on() -> None:
+    """`UnclassifiedParseError` marks the population, so no caller reads a message to guess.
+
+    This is the half that keeps the decision from rotting: the distinction is in the *type*, and a
+    caller that sniffed "unknown error" out of a string would break on the next lxml release. Both
+    broad arms in `parse_document` raise it and nothing else does — asserted by deriving the set
+    from the module rather than from a list here, so a third broad arm added later is covered or
+    red.
+    """
+    import ast
+
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "chemclaw"
+        / "ingest"
+        / "documents"
+        / "parse.py"
+    )
+    raised = [
+        node.exc.func.id
+        for node in ast.walk(ast.parse(source.read_text(encoding="utf-8")))
+        if isinstance(node, ast.Raise)
+        and isinstance(node.exc, ast.Call)
+        and isinstance(node.exc.func, ast.Name)
+    ]
+    broad = [name for name in raised if name == "UnclassifiedParseError"]
+
+    assert len(broad) == 2, (
+        "the two broad `except` arms in parse_document are what this type marks; the count moved, "
+        f"so either an arm was added without it or one stopped using it: {raised}"
+    )
+    assert issubclass(UnclassifiedParseError, DocumentParseError), (
+        "it must stay a DocumentParseError or every existing handler — the share sync's "
+        "reject-and-continue net, the upload route, the isolate child — stops catching it"
     )

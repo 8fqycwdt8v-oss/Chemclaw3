@@ -1760,3 +1760,44 @@ free number at the end of its section.
      named "one field, two questions" as the tension and then failed to handle it on the path where the
      two differ. **When a derived boolean has twenty readers, enumerate the inputs that make it false**
      before narrowing what feeds it.
+
+126. **I wrote a reason into a config comment that I had not checked, and it was backwards.** Adding a
+     refusal gate to the mutation list, I said "`plan_gate.py` is first because it is the smallest of
+     the four by mutant count" — it is the *largest* of the four by source length (671 lines against
+     309). I had not measured mutant counts at all, and lines were the only proxy I had. Caught it
+     within a minute because the number was checkable, but it was already written. **A ranking claim
+     needs the ranking in front of you**, and where a proxy is all that is available, name it as a
+     proxy in the same sentence.
+
+127. **A control I was asked to widen was not running at all.** The row said four refusal gates were
+     outside the weekly mutation backstop and asked for the runtime to be measured before extending it.
+     Measured: `make mutants` fails in 27 seconds on `origin/main`, in the phase before any mutant is
+     tested — so every module already in it was outside it too, and the "hours long" figure the row
+     reasoned from described a run nobody had completed. **Before widening a control, run it.** The
+     cheapest possible check on a gate is whether it starts, and a row that describes a gate as narrow
+     has assumed the harder half.
+
+128. **Two derived guards collided, and each was right.** `api/runner_trace.py` is a mutation source,
+     so inside `mutants/` its class carries 45 generated method names; a guard requiring every
+     non-underscore member to have a caller cannot pass against names nothing could call. Both guards
+     are the shape this repository prefers — a rule over the tree rather than a list somebody maintains
+     — and neither was written with the other in view. **A guard that walks a class sees whatever
+     rewrote that class; a guard that rewrites the tree must survive the tree's own guards.** The
+     collision was invisible because the only signal was a non-zero exit from a target no CI job runs.
+
+129. **"One run is one process" was an unnamed assumption in three places, and a harness that reuses a
+     process ran the destructive suite against the real database.** `mutmut` calls `pytest.main()`
+     in-process — stats, baseline, then once per mutant — while the session-scoped isolation fixture
+     drops `TEST_SCHEMA` at session end and `TEST_SCHEMA` is a module constant, so the migration memo
+     kept an unchanged key for a vanished schema and every unqualified name fell through the
+     search_path to `public`. Reproduced in 0.37 s once stated as a hypothesis, against 27 minutes per
+     mutmut attempt. **When a test harness reuses the process, every module-level memo is shared state
+     across sessions** — and the memo has to be invalidated by whatever destroys the thing it
+     describes, not by the caller who happens to remember.
+
+130. **I diagnosed a background failure from the last thing in the log and wrote it into a backlog row.**
+     The earlier mutation attempt died on a `test_knowledge` pytest-timeout, so I recorded that as the
+     second blocker; with `PYTEST_TIMEOUT_SCALE=4` that test passes and the run dies somewhere else
+     entirely, on a defect of a completely different kind. **The last line of a log is where a run
+     stopped, not why.** Re-run under the remedy before writing the cause down, especially into a
+     document the next session reads as state.

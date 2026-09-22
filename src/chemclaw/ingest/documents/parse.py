@@ -43,6 +43,28 @@ class DocumentParseError(ValueError):
     """A document that cannot be read, with a message naming what is supported."""
 
 
+class UnclassifiedParseError(DocumentParseError):
+    """A third-party parser failed and **this system does not know why**.
+
+    Its own type because "we could not read it" and "we read it and it is over the limit" are
+    different facts, and only the first one can be a *memory* failure wearing a parse error's
+    clothes. A C parser that reports its own allocation failure never lets CPython raise
+    `MemoryError` — lxml does exactly that — so a legal markup-heavy `.docx` arrives here as
+    `unknown error (<string>, line 0)`, indistinguishable from a genuinely broken file.
+
+    `ingest/documents/isolate._at_ceiling` is what separates the two populations, and it can only do
+    so where a ceiling was set. So the distinction has to be *in the type* rather than in the
+    message: a caller that parses without a ceiling has no way to sniff an allocation failure out of
+    the string, and every reading of the string it might try is one the next parser version breaks.
+    `agent/attachments.parse_attachment` is that caller, and
+    `D-2026-09-22-an-unbounded-parse-may-not-blame-the-document` is why it does not simply grow a
+    forkserver.
+
+    A `DocumentParseError` by inheritance, so every existing `except` arm — the share sync's
+    reject-and-continue net, the upload route, the isolate child — is unchanged.
+    """
+
+
 class ScannedDocumentError(DocumentParseError):
     """A PDF with no text layer at all — a scan or an image-only export.
 
@@ -95,7 +117,7 @@ def _refuse_a_bomb(name: str, raw: bytes) -> None:
         with zipfile.ZipFile(io.BytesIO(raw)) as container:
             expanded = sum(item.file_size for item in container.infolist())
     except zipfile.BadZipFile as exc:
-        raise DocumentParseError(f"could not read {name}: {exc}") from exc
+        raise UnclassifiedParseError(f"could not read {name}: {exc}") from exc
     if expanded > ceiling:
         raise DocumentParseError(
             f"{name} expands to {expanded} bytes from {len(raw)} on disk, past the "
@@ -134,6 +156,38 @@ def too_large_to_read(name: str) -> DocumentParseError:
         f"({settings.document_parse_memory_bytes} bytes). Reading it whole would take the pod's "
         "memory from every other request in flight; the relevant sheet, or the file split into "
         "parts, will work."
+    )
+
+
+def read_without_a_ceiling(name: str, cause: DocumentParseError) -> DocumentParseError:
+    """The refusal an unclassified failure earns on a path that set **no** memory ceiling.
+
+    **Where `too_large_to_read` above says "this document is too big", this says "we do not know".**
+    Those are the only two honest sentences available, and which one a caller may use is decided by
+    whether it bounded the parse. `isolate._at_ceiling` can pick the first because it knows the
+    ceiling it set; `agent/attachments.parse_attachment` parses in-process with no `RLIMIT_DATA` at
+    all, so for it an allocation failure and a malformed file are the *same observation* — and the
+    parser's own words for the first ("unknown error (<string>, line 0)", "Unable to allocate output
+    buffer") read as an accusation against the document.
+
+    So this keeps the parser's message, because an operator debugging a share needs it, and states
+    plainly what the message cannot establish. It does not guess: no string in `cause` is inspected,
+    for the reason `UnclassifiedParseError` exists as a type.
+
+    `D-2026-09-22-an-unbounded-parse-may-not-blame-the-document` is why the path stays unbounded
+    rather than growing a forkserver, and carries the trigger for revisiting that.
+
+    Args:
+        name: The document's sanitized name, as every other refusal here names it.
+        cause: The unclassified failure, whose own words are kept verbatim.
+
+    Returns:
+        The refusal to raise, a `DocumentParseError` so every existing handler is unchanged.
+    """
+    return DocumentParseError(
+        f"{cause}. This parse ran with no memory ceiling, so whether {name} is malformed or simply "
+        "needs more memory than this machine had is not established here — the parser's own words "
+        "above are all there is. An upload through the API is bounded and would say which."
     )
 
 
@@ -428,5 +482,5 @@ def parse_document(name: str, raw: bytes, declared_type: str | None = None) -> P
         # every library below is a third-party parser over them. "This file could not be read" is
         # the honest statement about any failure in that region, and it is the statement the callers
         # already handle — one counted refusal rather than a dead job.
-        raise DocumentParseError(f"could not read {name}: {exc}") from exc
+        raise UnclassifiedParseError(f"could not read {name}: {exc}") from exc
     return ParsedDocument(content_type=content_type, text=text, rows=rows)

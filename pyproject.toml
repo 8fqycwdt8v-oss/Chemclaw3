@@ -526,6 +526,18 @@ fail_under = 84
 source_paths = [
     "src/chemclaw/agent/authz.py",
     "src/chemclaw/agent/audit_store.py",
+    # Added by the wave-5 backlog pass. Four refusal gates were outside this list —
+    # `agent/plan_gate.py`, `agent/skill_backend.py`, `agent/spend_cap.py` and `agent/loop_cap.py` —
+    # each a control of the same kind as `authz.py` above: a refusal whose surviving mutant is a tool
+    # call that should not have happened. Only **one** lands here, because the row asking for them
+    # says why: "the list is short on purpose — the comment above it records that the run is hours
+    # long — so each addition needs its runtime measured rather than assumed."
+    #
+    # `spend_cap.py` is first because it is the **smallest of the four by source length** (309 lines
+    # against `loop_cap.py`'s 333, `skill_backend.py`'s 367 and `plan_gate.py`'s 671), so it buys the
+    # cheapest available answer to "what does one of these cost". Lines are a proxy for mutant count
+    # and not a measurement of it; the measured cost of *this* addition is recorded below.
+    "src/chemclaw/agent/spend_cap.py",
     "src/chemclaw/api/budget.py",
     "src/chemclaw/api/runner_trace.py",
     "src/chemclaw/core/chem.py",
