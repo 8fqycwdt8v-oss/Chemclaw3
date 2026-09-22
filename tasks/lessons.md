@@ -1866,3 +1866,49 @@ free number at the end of its section.
      that minute. **A flaky test can have more than one flake**, and fixing the one that fired tells
      you nothing about the others. Characterising the distribution — five samples, median, against
      the figure the docstring records for CI — is what found the second.
+
+137. **I ticked "ADR + delete the row" in a plan file for work I had not done.** Wave 4 shipped the
+     ELN page budget — `eln_regex_page_budget_seconds`, `expr.pattern_budget`, five call sites, tests
+     — and neither wrote the ADR nor deleted the `BACKLOG.md` row. `tasks/todo.md` recorded both as
+     complete. Two waves later my own triage then counted that row among the actionable ones, so the
+     miss cost a second reader — me — real time, and anyone reading the backlog was told a bound did
+     not exist that had shipped. **A checkbox is a claim, so check it against the artifact**: the ADR
+     is a file in `docs/decisions/` and the deletion is a `grep` returning nothing, and both are one
+     command. The code landing is not evidence that the record did.
+
+138. **I nearly filed a deliberate design as a defect.** CI's log carries a "Cross-repository checks
+     did not run" block on every run, and `ci.yml`'s comment says that block "should be absent — its
+     presence means this variable stopped reaching them". I had the workflow fix half-drafted when I
+     read `tests/siblings.py::sibling_python`, whose docstring splits the two costs on purpose and
+     argues only one is plausible in CI: reading manifests needs a shallow clone, running the servers
+     to measure schemas needs RDKit, torch and a T5 checkpoint's dependencies. The skip is designed
+     and the epilogue's job is to announce it. **The false thing was one sentence of diagnosis, not
+     the behaviour it described** — so read the code the comment is about before believing the
+     comment, including when the comment is the one reporting a problem.
+
+139. **I drove the arm I expected to fail and the other one was the broken one.** A new allowlist
+     guard had two arms: a dead anchor must red, and an exemption whose sentence stops saying the
+     citation never existed must red. The first worked. The second passed against a sentence I had
+     rewritten to claim the opposite — because `retracted` was in my marker set and the exempted line
+     says "is retracted" about something else on the same line. A retraction says a claim was
+     withdrawn; only "never existed" licenses the exemption. **An allowlist needs its own falsifying
+     test, and both arms driven** — the arm that protects the guard from abuse is the one nobody
+     thinks to break, and a keyword match over a whole line will find the keyword somewhere.
+
+140. **I pushed two commits after running only the tests I thought I had touched.** Wave 7's guard
+     added docstrings that deliberately cite dead paths as *examples* of dead paths — and
+     `tests/test_docstring_paths.py` requires every backticked module pointer in a file to resolve.
+     I had run that guard earlier in the wave and it passed; I did not re-run it after the edits that
+     broke it, so CI found it 33 minutes later. **The set of tests a change affects is not the set of
+     files it edits**, and in a repository whose guards read the tree as data it is routinely larger.
+     The cheap habit that would have caught it: before pushing, run the guards that read prose
+     (`test_docstring_paths`, `test_prose_contract`, the register tests) whatever the change was,
+     because those are the ones any edit can trip.
+
+141. **Two derived guards collided again, and the second time it was mine on both sides.** The wave-5
+     collision was mutmut's rewriting against a class-member guard. This one is a new guard whose
+     explanatory docstring cites the very dead paths it was written to catch, tripping the older
+     guard that holds prose to the tree. The lesson generalises past the pair: **a guard's own
+     documentation is prose in the tree, so it is subject to every rule the tree holds prose to** —
+     and an allowlist meant to cost a review conversation is the wrong place to put an example, which
+     is why the fix was to stop backticking them rather than to exempt them.

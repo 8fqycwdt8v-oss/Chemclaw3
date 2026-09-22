@@ -1026,9 +1026,15 @@ def _modules_mapping_entries_in_a_loop() -> list[str]:
     "Inside" matters, and the first version of this guard got it wrong: pairing any `map_to_ord`
     call
     with any loop in the same file also caught `durable/eln_sync.py` (a per-entry heartbeating
-    *wrapper*, which runs under its caller's budget), `ingest/eln/adapter.py` (which declares the
-    protocol) and `ingest/eln/validate.py` — three modules that map one entry at a time and need no
-    page bound at all. A guard that over-matches is a guard somebody silences.
+    *wrapper*, which runs under its caller's budget) and `ingest/eln/adapter.py` (which declares the
+    protocol) — two modules that map one entry at a time and need no page bound at all. A guard that
+    over-matches is a guard somebody silences.
+
+    **`ingest/eln/validate.py` was in that list and should not have been.** It was written down as a
+    third over-match and is a genuine page-mapping caller: it opens a `pattern_budget()` and the
+    guard's live set names it. The sentence outlived the fix, so for a while this file said
+    `validate.py` "needs no page bound at all" two functions away from an assertion requiring four
+    callers including it.
     """
     import ast
 
@@ -1081,8 +1087,9 @@ def test_that_guard_is_measuring_the_callers_and_not_the_definitions() -> None:
     """The guard above would pass vacuously on an empty set, so this pins what it found.
 
     A `def map_to_ord` is not a caller, and the adapters that define it must not need a budget — the
-    budget belongs to whoever maps a *page* of entries. Requiring the three measured callers is what
-    makes the assertion above a measurement rather than a tautology.
+    budget belongs to whoever maps a *page* of entries. Requiring the four measured callers is what
+    makes the assertion above a measurement rather than a tautology — "three" here was the same
+    stale count the docstring above carried.
     """
     callers = _modules_mapping_entries_in_a_loop()
 

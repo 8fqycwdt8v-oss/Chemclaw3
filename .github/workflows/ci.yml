@@ -157,7 +157,9 @@ jobs:
         with:
           fetch-depth: 0
 
-      # The sibling fleet, because sixteen tests in this suite read it and had **never run in CI**:
+      # The sibling fleet, because a set of tests in this suite read it and had **never run in CI**
+      # — the count is `tests/conftest.py`'s epilogue to report, not this file's to transcribe, and
+      # the "sixteen" that stood here measured 19:
       # all of `tests/test_sibling_manifest_agreement.py` — whose subject is
       # `D-2026-09-07-a-claim-about-another-repository-is-checked-by-reading-it` — plus the
       # `test_context_floor.py` arms that check `SERVED_ELSEWHERE_ALLOWANCE` and `PREFIX_BOUND`,
@@ -245,10 +247,29 @@ jobs:
       # Lint and type used to ride along on this line and now run in `static` above, in parallel.
       # They are still gates and still block a merge; what changed is that they no longer report
       # their answer eleven minutes after they knew it.
-      # `CHEMCLAW_MCP_REPO` is what the sixteen cross-repo tests read; without it they skip, and
-      # `tests/conftest.py`'s epilogue then names what the run is not evidence about. With the
-      # checkout above they run, so that epilogue block should be absent from a CI log — its
-      # presence means this variable stopped reaching them.
+      # `CHEMCLAW_MCP_REPO` is what the cross-repo tests read; without it they skip, and
+      # `tests/conftest.py`'s epilogue then names what the run is not evidence about — and counts
+      # them, which is why no number appears here.
+      #
+      # **That epilogue block is present on every run, and it is expected rather than a symptom.**
+      # This comment used to say the opposite — "that epilogue block should be absent from a CI log
+      # — its presence means this variable stopped reaching them" — which is a diagnosis a reader
+      # acts on and it is wrong in both halves. The variable reaches them; what is absent is the
+      # sibling's own `.venv`. `tests/siblings.py::sibling_python` splits the two costs on purpose
+      # and argues only one is plausible here: reading the fleet's manifests needs a shallow clone,
+      # while *running* its servers to measure their tool schemas needs a built environment with
+      # RDKit, torch and a T5 checkpoint's dependencies. So the manifest-reading tests run against
+      # the checkout above, and the **5** schema-measuring ones skip, which leaves
+      # `SERVED_ELSEWHERE_ALLOWANCE`, `FLEET_PUBLISHED_ALLOWANCE` and therefore `PREFIX_BOUND`
+      # unchecked in CI by design — the epilogue's job is to say so, and it does.
+      #
+      # The two cases are told apart by the *per-test* reason, not by the epilogue's summary line,
+      # which says "could not be read" either way: `no Chemclaw3-mcp checkout at <path> (set
+      # CHEMCLAW_MCP_REPO or CHEMCLAW_MCP_CHECKOUT)` is the variable failing to arrive, against the
+      # current `<path> has no .venv — run \`make install\` there`. A review caught this sentence
+      # naming a string that appears nowhere, which is the same failure class the rewrite was for.
+      # Installing the sibling here is the decision nobody has taken, and it is a real one — it buys
+      # those three allowances a gate and costs every `check` run that install.
       - name: Test with the coverage floor
         run: make cov
         env:

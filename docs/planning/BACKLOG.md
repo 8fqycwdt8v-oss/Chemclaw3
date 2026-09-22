@@ -193,8 +193,8 @@ topic).
       folding the version into `compound_id` invalidates every stored id at every future bump and
       breaks every citation to one, and rewriting the notes is a migration over layer 4 that
       `kg/record.py` — append and supersede, never rewrite — has no verb for. The recovery that
-      *does* exist is `docs/guides/runbook.md:1996`: delete the corpus's `corpus_cursors` row and
-      re-run the ELN sync. Weigh it against `src/chemclaw/durable/retention.py:498`, which records
+      *does* exist is `docs/guides/runbook.md:2015`: delete the corpus's `corpus_cursors` row and
+      re-run the ELN sync. Weigh it against `src/chemclaw/durable/retention.py:516`, which records
       that a bump is "a permanent doubling" of `molecule_fingerprints`/`reaction_fingerprints`
       because the runtime role holds no `DELETE`.
 
@@ -257,7 +257,7 @@ topic).
       `killed / total` = 1612/3640 = **44.3%** against `MUTATION_SCORE_FLOOR: "72.0"`, so the weekly job
       now fails on its kill rate where it used to fail on starting. The floor is not the problem and
       neither is a sudden regression: `total` counts the 1009 mutants **no selected test reaches**, and
-      `pytest_add_cli_args_test_selection` is a hand-kept list of 16 files that was never widened as
+      `pytest_add_cli_args_test_selection` is a hand-kept list — read it, do not count it here — never widened as
       `source_paths` grew from the seven the floor was recorded against (74.7% and 76.8%, per
       `mutants.yml`'s own comments) to fifteen. `agent/spend_cap.py` shipping with `tests/test_spend_cap.py`
       outside the selection — fixed in the same commit as this row — was one instance of the pattern,
@@ -361,7 +361,7 @@ topic).
       the index** — [M], measured 2026-09-16 by the dependency audit that proposed deleting one of
       the two lexical rankers and had to withdraw it. Anchors: `agent/graph_tools.py::_scan_notes`
       and its `_relevance`, `retrieval/retrievers.py::LexicalRetriever`,
-      `retrieval/vector_index.py::note_reindex_effective`, `CHEMCLAW_DATA_SOURCES`.
+      `core/config/__init__.py::note_reindex_effective`, `CHEMCLAW_DATA_SOURCES`.
 
       Two lexical rankers run over one corpus, and `_scan_notes` justified its 151 ms event-loop
       stall (836 ms at eight concurrent, 10k-note corpus) by saying there is no database to push the
@@ -467,7 +467,8 @@ topic).
       connector manifests, which `src/chemclaw/connectors/jobs.py:226` assembles into a tool
       docstring and its own comment calls "the job's model-facing documentation" — and which is
       **all** of the `results` bundle, since it ships no `server/tools.py`; the bundle skills
-      (`connectors/{bo,calc,safety}/skills/*/SKILL.md`); and
+      (`connectors/*/skills/*/SKILL.md` — seven bundles ship one as of 2026-09-22: bo, calc,
+      kinetics, safety, suitability, thermalsafety, unitops, where this row named three); and
       `agent/chemclaw_agent.py::_INSTRUCTION_BLOCKS`. Driven: every forbidden string at once in
       `connectors/results/connector.yaml`'s job `description:` left both guards green.
 
@@ -496,10 +497,12 @@ topic).
       watermark** — [M], found 2026-09-15 in the review of the wave 2/4/7 merge.
       `durable/digest._is_new` reads an absent `valid_from` as *open-ended* — true for as long as
       anyone has known — and therefore as not news, which is correct about the field and wrong
-      about the question a digest asks. Measured on the shipped corpus: **33 of 40 notes carry no
-      `valid_from`**, across ten types (`compound` 9, `playbook` 5, `campaign` 3, `interaction` 3,
-      `job-result` 3, `bo-candidate` 2, `failure-mode` 2, `optimization-campaign` 2, `report` 2,
-      `experiment-proposal` 1). Two producers are closed —
+      about the question a digest asks. Re-measured on the shipped corpus 2026-09-22: **34 of 41
+      notes carry no `valid_from`**, across twelve types (`compound` 9, `playbook` 5, `campaign` 3,
+      `interaction` 3, `job-result` 3, `report` 2, `failure-mode` 2, `bo-candidate` 2,
+      `optimization-campaign` 2, `experiment-proposal` 1, `analytical-method` 1,
+      `hypothesis-field` 1). The row previously said 33 of 40 across ten, omitting the last two
+      types, and its own per-type numbers summed to 32 rather than to its stated total. Two producers are closed —
       `retrieval.harness.report_note(drafted_on=…)` and
       `durable.job_record.note_with_run_provenance(ran_on=…)`, both cases where validity and
       arrival are the same day by construction. `agent/graph_tools.py:554`
@@ -597,29 +600,11 @@ topic).
 
 ## 4 — Operating it
 
-- [ ] **A per-cell regex budget does not add up to a page bound** — [S], opened 2026-09-21 by
-  `D-2026-09-21-a-pattern-that-cannot-be-timed-out-is-run-by-an-engine-that-can`, which bounds the
-  catastrophic case and states this one as what it did not do. `eln_regex_timeout_seconds` bounds
-  one `search`, and `warehouse/adapter.py::_read` runs one per reaction field, per attribute, and
-  per component and impurity **row** — so a page is `eln_sync_batch_size x cells_per_entry`
-  matches. At the shipped 100-entry batch, a pattern spending most of its 0.25 s on each of twenty
-  cells per entry is 500 s: past `eln_sync_timeout_seconds` and past the heartbeat, because
-  `map_to_ord` is synchronous CPU work no asyncio timer can interrupt, after which the retry runs
-  the identical page.
-  **Pre-existing rather than introduced**, and that is why it is a row and not a defect: the same
-  pattern under `re` cost the same page about 3x faster, so the engine swap made it worse in degree
-  and not in kind. What closes it is a cumulative budget — per entry, or per activity — and that is
-  a decision rather than an edit, because it trades refusing an honest slow pattern against
-  bounding total work, and the per-entry form gives a binding with twenty regex cells 12 ms each.
-  Anchors: `ingest/eln/warehouse/expr.py::_regex`, `ingest/eln/warehouse/adapter.py::_read`,
-  `core/config/eln.py::eln_regex_timeout_seconds`.
-
-
 - [ ] **A worker whose broker is down never opens its probe port, so "Temporal is down" and "the
   image is broken" are the same picture to everything but the container log** — [M].
-  `durable/background_worker.py:98` calls `connect()` before `Worker(...)` is built and therefore
+  `durable/background_worker.py:99` calls `connect()` before `Worker(...)` is built and therefore
   before `durable/serve.py::serve_worker` opens the probe surface, so the process exits 1 at
-  `core/temporal_client.py:209` and `:9000/healthz` and `/readyz` never answer at all. Driven
+  `core/temporal_client.py:215` and `:9000/healthz` and `/readyz` never answer at all. Driven
   2026-09-19 against a dead address: exit 1, a clear `SubsystemUnavailableError` in the log, and both
   probe routes unanswered (`curl` → no connection). The PodMonitor target simply disappears, so
   `ChemclawTargetDown` fires for this exactly as it fires for a broken image.
@@ -795,21 +780,30 @@ only holds defects can only ever restore the system to what it already intended 
       argument contract still reaches the right tool is a `make live-ab` question, not a reading
       question.
 
-- [ ] **The probed surface has a long thin tail: 39 of 114 tools rest on one probe** — [S],
+- [ ] **The probed surface has a long thin tail: about a third of tools rest on one probe** — [S],
       measured 2026-09-15 (it read 45, measured 2026-09-14 and stale inside its own merge range —
       `feba79b` added 36 probes in it, 28 of them `process-chemistry.yaml`), and it replaces the concentration row rather than continuing it.
 
       **The concentration is gone and the row's headline was stale.** `gather_evidence` is in
-      **139 of 333** probes — **41.7%**, against the 50% (116/232) the headline was written from and
+      **141 of 342** probes — **41.2%** re-measured 2026-09-22, where this row said 139 of 333 and
+      41.7%, against the 50% (116/232) the headline was written from and
       the 60% bound `tests/test_probe_coverage.py` already holds. Widened: 55% of tool-naming probes
       touch any retrieval tool and only **14%** touch nothing but retrieval, so "the corpus mostly
       measures one retrieval path" does not reproduce.
 
-      What the same measurement found instead: **39 of 114 agent-callable tools are named by
-      exactly one probe** — 34% of the surface resting on a single phrasing, where a probe the model
-      happens to answer reads as coverage. It is thin and it is **not hollow**: zero of those 39
-      rest on a bucket-C probe, which `test_no_tools_only_coverage_is_a_question_the_surface_cannot_
-      answer` now holds, so a tool cannot arrive with coverage that never calls it.
+      What the same measurement found instead: **agent-callable tools named by exactly one probe**
+      — roughly a third of the surface resting on a single phrasing, where a probe the model happens
+      to answer reads as coverage. **The number is deliberately not written here**, because two
+      careful re-measurements on 2026-09-22 disagreed: 49 of 124 with none unprobed, against 47 of
+      124 with two, depending on whether `load_profiles()` had run and how exemptions were counted.
+      A figure that moves with the measurer's setup belongs in the measurement, not in the row —
+      derive it from `tests/test_probe_coverage.py::_probes` and `::_expected_tools` with
+      `load_profiles()` called first, which is what the two runs differed on. The row's own 39 of
+      114 was from 2026-09-15 and is stale in both terms.
+
+      It is thin and it is **not hollow**: none of those single-probe tools rest on a bucket-C
+      probe, which `test_no_tools_only_coverage_is_a_question_the_surface_cannot_answer` now holds,
+      so a tool cannot arrive with coverage that never calls it.
 
       Deliberately **not** a ratchet on the count. A bound on "how many tools have one probe" blocks
       every new tool until somebody writes it a second question, which taxes adding capability
@@ -820,13 +814,15 @@ only holds defects can only ever restore the system to what it already intended 
 - [ ] **`deep-research` has no index behind it** — [M]. `agent/research_tools.py::gather_evidence`
       sweeps the knowledge graph, the ELN, the mounted document share and the fingerprint store —
       every one internal. `skills/deep-research/SKILL.md` describes a capability whose corpus is
-      whatever notes exist (39 on this checkout). `Chemclaw3-mcp/MODULES.md` files `litsearch`
+      whatever notes exist (41 on this checkout, 2026-09-22). `Chemclaw3-mcp/MODULES.md` files `litsearch`
       (Europe PMC / OpenAlex / Crossref bulk, built at image time, no egress) as *proposed*, and says
       in as many words that it "gives Chemclaw3's existing `deep-research` skill a real index".
       ChemRAG measured **+17.4% average relative gain** from a chemistry corpus and — the design input
       that matters — that corpus choice is task-dependent: reaction prediction wants literature,
       nomenclature wants structured databases. A process chemist asking "has anyone run this coupling
-      on a deactivated aryl chloride" currently gets whatever those 40 notes happen to say.
+      on a deactivated aryl chloride" currently gets whatever that corpus happens to say — this row
+      said 39 and then 40 for one count three sentences apart, which is why the number now appears
+      once, with the date it was measured.
 
 - [ ] **A cut tool result is unrecoverable, and the store that would hold it is downstream of the
       cut** — [M], the last open Wave 1 item ("make a cleared tool result retrievable by address").
@@ -894,7 +890,7 @@ only holds defects can only ever restore the system to what it already intended 
 
 - [ ] **A routing corpus where the right profile is not inferable from the question's surface**
       — [M]. Seven profiles ship and genuinely narrow (`evidence` reaches zero side-effecting tools,
-      `safety` one, `default` all 49); what `D-2026-08-15` deleted is automatic routing between
+      `safety` one, `default` all of them — `authz.side_effecting_tools()` answers 54 as of 2026-09-22, where this row said 49); what `D-2026-08-15` deleted is automatic routing between
       them. Re-opening it needs a corpus the retired one did not contain: cases where the profile a
       question *needs* differs from the profile its wording suggests, compared on **answers** rather
       than on which specialist was picked. Until that corpus exists a router is a guess with a
@@ -1205,7 +1201,7 @@ those belong in.
   and `_calibrated` hands it to `remote_version`, which asks the server `calculation_key` for that
   tool. Three things make it invisible to
   `tests/test_sibling_manifest_agreement.py::test_the_calc_seam_calls_only_tools_the_fleet_records_serving`:
-  `remote_version` is not in `_DISPATCHERS`, its tool argument is a tuple-unpacked local rather
+  `remote_version` is not in `_CALC_SEAM.dispatchers`, its tool argument is a tuple-unpacked local rather
   than a literal, and the names live in a dict value rather than at a call site. Measured on
   2026-09-18: both names it currently holds — `predict_solubility` and `predict_pka` — are covered
   by other sites, so nothing is unchecked today and a *third* calibrated row would be. The obvious
@@ -1217,5 +1213,5 @@ those belong in.
   calculators are actually planned before either is built.
   Anchors: `src/chemclaw/connectors/calc/server/tools.py::_CALIBRATED`,
   `src/chemclaw/connectors/calc/remote.py::remote_version`,
-  `tests/test_sibling_manifest_agreement.py::_DISPATCHERS`,
+  `tests/test_sibling_manifest_agreement.py::_CALC_SEAM`,
   `docs/decisions/D-2026-09-18-a-seam-read-in-one-direction-cannot-see-a-surface-grow.md`.

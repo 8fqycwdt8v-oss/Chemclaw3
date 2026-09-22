@@ -52,6 +52,9 @@ _DATED = r"D-\d{4}-\d{2}-\d{2}-[a-z0-9-]+"
 _FILENAME = re.compile(rf"^(?:{_NUMBERED}-[a-z0-9-]+|{_DATED})$")
 _HEADING = re.compile(rf"^# ({_NUMBERED}|{_DATED}) — ", re.MULTILINE)
 # The id cell tolerates a bare id (a legacy reservation) and a `[id](file.md)` link (written up).
+#: A backticked code span, blanked before counting a table row's columns.
+_CODE_SPAN = re.compile(r"`[^`\n]*`")
+
 _INDEX_ROW = re.compile(
     rf"^\| \[?({_NUMBERED}|{_DATED})\]?(?:\([^)]*\))? \| ([^|]*)\|", re.MULTILINE
 )
@@ -88,6 +91,58 @@ def _sort_key(path: Path) -> tuple[int, int, str]:
 def _adr_files() -> list[Path]:
     """Every ADR file in record order — the record itself."""
     return sorted(_DECISIONS.glob("D-*.md"), key=_sort_key)
+
+
+def test_every_topic_row_has_the_three_columns_its_header_declares() -> None:
+    r"""A surplus cell renders nowhere, so whatever is in it reaches no reader.
+
+    Found by a review, not by this file: a cross-reference appended to the *end* of a topic row —
+    after its closing pipe rather than inside the "Read this now" column — became a fourth cell in a
+    three-column table, and GitHub rendered none of it. Every other test here passed, because they
+    read ids, headings and ledger membership; none parses the table as a table.
+
+    The failure mode is why it is worth a test. An over-long row does not look broken in the diff,
+    the link resolves if you grep for it, `prose-validate` is happy because the path exists, and the
+    only symptom is a pointer no reader sees — the same "green because nobody looked at the thing
+    itself" shape the rest of this file exists for.
+
+    **Scoped to the *By topic* table, and that is a deliberate narrowing rather than laziness.** A
+    general arity guard over this file needs a real Markdown parser: cells carry `|` inside code
+    spans (`a|b` alternations, escaped `\|` in quoted data), the allocation ledger below has its own
+    column count, and a naive split flags thirty-odd legitimate rows. Blanking code spans fixes most
+    of that and not all of it. The topic table is where the defect happened and where a dropped cell
+    costs the most, because it is the index a reader starts from.
+    """
+    lines = _INDEX.read_text(encoding="utf-8").splitlines()
+    try:
+        start = next(
+            number
+            for number, line in enumerate(lines)
+            if line.startswith("| Topic | Read this now")
+        )
+    except StopIteration:  # pragma: no cover - the header is what the rest of this test is about
+        raise AssertionError(
+            "docs/decisions/README.md has no `| Topic | Read this now` header, so this guard is "
+            "checking nothing; the table was renamed or removed"
+        ) from None
+
+    wrong: list[tuple[int, int]] = []
+    for offset, line in enumerate(lines[start:], start=start + 1):
+        if not line.startswith("|"):
+            break
+        if set(line.strip()) <= set("|-: "):
+            continue
+        cells = len(_CODE_SPAN.sub("", line).strip().strip("|").split("|"))
+        if cells != 3:
+            wrong.append((offset, cells))
+    assert len(wrong) == 0, (
+        f"`By topic` rows (line, cells) {wrong} do not have the header's three columns. A surplus "
+        "cell is dropped by the renderer, so whatever is in it reaches no reader: put it inside "
+        "the column it belongs to and re-close the row."
+    )
+    assert offset > start + 3, (
+        "the `By topic` table parsed as fewer than two rows, so this guard is checking nothing"
+    )
 
 
 def _index_rows() -> list[tuple[str, str]]:
