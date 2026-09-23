@@ -170,3 +170,59 @@ before adding a module" assumed the addition was the expensive term. It is not: 
 wall clock fell 87 -> 82m40s. The expensive thing was never the modules — it was the stretch of
 not pairing the test selection with them, which is what took the rate from 44.3% to 62.1% with no
 code change at all.
+
+---
+
+# Wave 13 — two declared ceilings that no measurement backs
+
+Picked from 41 open rows after classifying every one. Most of this file is **not** a work queue:
+eight rows are argued non-fixes carrying a live trigger (the SSH alias, the IPv6 guard arm,
+`/readyz`, the worker probe port, the connector sweep, the event-loop defang, the `/scratch/` cap,
+`_CALIBRATED`), and eighteen are blocked on something this environment does not have — a gateway
+with credit, an IPv6 host, a companion repo, an embeddings endpoint, an upstream fix.
+
+The two taken are the same defect in two resources: **a ceiling this repository declares, split or
+sized by something that was never measured**, each closing by landing a derived number in a test
+that already exists rather than by changing behaviour.
+
+## Row A — neither net sees one Postgres server that two DSNs spell differently [M]
+
+`core/config.pg_endpoint` is a string comparison, so `localhost` against `127.0.0.1` is charged and
+alerted as *two* servers, each inside its own ceiling, and the real total is checked by nothing.
+The released expression before the split gauge existed would have caught it, so this is a **runtime
+regression** for that configuration.
+
+Reproduced first, against the live server: both spellings answer `system_identifier`
+**7687905078163619878**. And the row's load-bearing claim — that an unprivileged role can read it —
+holds: a freshly created `NOSUPERUSER NOCREATEDB NOCREATEROLE` role read it fine. 1.5 ms here
+rather than the row's 0.24, same order.
+
+- [ ] The row frames the decision as a trade: the fix belongs on the gauge, where a pool has
+      already connected, and "costs the alert its series during a database outage". **Check whether
+      that trade is actually forced.** A `system_identifier` is assigned at initdb and never
+      changes, so it can be *learned once and cached* — string comparison until a pool has
+      connected, measured identity after, and the cached value survives an outage. If that holds it
+      is strictly better than both options the row names, which is the "is there a more elegant
+      way" CLAUDE.md asks for.
+- [ ] Whatever ships, `pg_endpoint`'s own docstring is where the refusal is recorded and must stay
+      true — it is long, exact, and currently argues the measurement cannot live *there*, which
+      stays right.
+- [ ] Anchors: `core/config/__init__.py::pg_endpoint`, `core/db.py::_session_store_max_connections`.
+
+## Row B — nothing bounds what a turn costs the front door's memory [M]
+
+`resources.service` was sized against a resident set with **no turn in flight** (431.9 MiB), and
+`CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS` is 12 — so the one part of the pod that scales with load is
+the part no number covers. The CPU half is measured (0.581 s per turn, which is why `requests.cpu`
+is 1); the memory half never has been.
+
+- [ ] Drive a turn against the mock LLM and express the peak as MiB per admitted permit, so
+      `tests/test_deploy_chart.py::test_a_pod_that_starts_a_parse_forkserver_fits_the_memory_it_declares`
+      can take a third term.
+- [ ] **Sample the cgroup's peak, not `Pss`** — the row corrected itself on this and says why:
+      `Pss` is a system-wide proportional share that understates a cgroup's charge. Watch for
+      cgroup v2, which names it `memory.peak` rather than `memory.max_usage_in_bytes`.
+
+## Review
+
+Pending.
