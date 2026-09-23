@@ -583,6 +583,11 @@ async def connection(
         await pool.open()  # idempotent; the first caller starts the pool's background workers
         try:
             async with pool.connection() as conn:
+                # One round trip on the *first* borrow against this endpoint and none afterwards,
+                # which is what lets the fleet gauge tell one server spelled two ways from two
+                # servers. Here rather than in the gauge because a scrape must not make a network
+                # call; here rather than at pool construction because no connection exists yet.
+                await _learn_server_identity(conn, dsn)
                 yield conn
         except (PoolTimeout, PoolClosed) as exc:
             # Both are `psycopg.OperationalError` subclasses raised only by the checkout itself, so
@@ -831,8 +836,96 @@ def unregister_connection(conn: Any) -> None:
         _HELD_CONNECTIONS[:] = [entry for entry in _HELD_CONNECTIONS if entry[0] is not conn]
 
 
-def _held_connections_on(endpoint: tuple[str, str] | None) -> int:
-    """How many live registered connections this process holds on one endpoint.
+#: `pg_endpoint(dsn) -> system_identifier`, for every endpoint a borrow has already reached.
+#:
+#: **The measurement `pg_endpoint`'s docstring says cannot live there.** That docstring is right
+#: that `Settings()` runs at import with no loop and no pool, so a validator cannot dial; it named
+#: the runtime as the place a measurement could live and nothing had put one there, which is the
+#: `BACKLOG.md` row this closes. A string comparison reads one server spelled two ways as two, so
+#: a split whose halves name one box is charged to two ceilings and the real total is checked by
+#: nothing — a regression against the single summed expression that preceded the split gauge.
+#:
+#: `system_identifier` is the exact answer: assigned once at `initdb`, never changing for the life
+#: of a server, and readable by an unprivileged role — driven against a freshly created
+#: `NOSUPERUSER NOCREATEDB NOCREATEROLE` role, and 1.5 ms on the loopback server `make up` runs.
+#: `inet_server_addr()` is not: measured, one server answers `NULL` over a socket, `127.0.0.1` over
+#: loopback and its bridge address over the bridge, which is the DSN's own spelling laundered
+#: through the kernel.
+#:
+#: **Learned once per endpoint and kept, which is what makes this cost the alert nothing.** The
+#: gauge's own docstring refused a measured identity because it "would be unknown until a pool
+#: filled, so the fleet-ceiling alert would lose its series during a database outage" — true of an
+#: identity read at scrape time, and not of one cached. Before the first borrow this falls back to
+#: the string comparison, which is exactly today's behaviour; after it, the cached value answers,
+#: and it answers through an outage because the value cannot change while the server is the same
+#: server. So the trade the row framed as the decision is not forced, and neither branch is ever
+#: worse than what shipped.
+_SERVER_IDENTITY: dict[tuple[str, str], int] = {}
+
+#: Endpoints whose identity could not be read, so the attempt is made **once**. A role without the
+#: grant, or a fork of Postgres with no `pg_control_system()`, would otherwise pay a failed query on
+#: every borrow for the life of the process. One warning, then the string comparison for good.
+_IDENTITY_UNREADABLE: set[tuple[str, str]] = set()
+
+
+async def _learn_server_identity(conn: Any, dsn: str) -> None:
+    """Read one endpoint's `system_identifier`, at most once per process, never during a scrape.
+
+    Called from `connection()` on a borrow that has already succeeded, so it adds one round trip to
+    the *first* borrow against an endpoint and nothing to any later one. It is deliberately not
+    called from the gauge: a Prometheus gauge source is synchronous and a scrape must not make a
+    network call, which is the rule `jobs_in_flight_refresh_seconds` states one subject over.
+
+    Never raises. An endpoint whose identity cannot be read is recorded as unreadable and the
+    caller keeps the string comparison — a worse answer than a measured one and the same answer as
+    before this existed, which is the right direction for a failure in a path that only ever
+    *sharpens* an accounting.
+    """
+    endpoint = pg_endpoint(dsn)
+    if endpoint is None or endpoint in _SERVER_IDENTITY or endpoint in _IDENTITY_UNREADABLE:
+        return
+    try:
+        async with conn.cursor() as cur:
+            await cur.execute("SELECT system_identifier FROM pg_control_system()")
+            row = await cur.fetchone()
+        if row is None:
+            raise ValueError("pg_control_system() returned no row")
+        _SERVER_IDENTITY[endpoint] = int(row[0])
+    except Exception as exc:
+        _IDENTITY_UNREADABLE.add(endpoint)
+        logger.warning(
+            "postgres.identity_unreadable",
+            extra={
+                "endpoint": f"{endpoint[0]}:{endpoint[1]}",
+                "error": str(exc),
+                "consequence": (
+                    "two DSNs naming this server can no longer be recognised as one, so a split "
+                    "deployment is charged to two connection ceilings"
+                ),
+            },
+        )
+
+
+def same_server(one: str, other: str) -> bool:
+    """Whether two DSNs name one Postgres server, measured where a borrow has already answered.
+
+    Falls back to `pg_endpoint`'s string comparison when either side is unmeasured, so this is
+    never *less* able to tell two DSNs apart than the comparison it replaces. `None` endpoints keep
+    that comparison's strict branch: two DSNs this cannot compare are treated as one server, which
+    sums their pools against one ceiling rather than checking each against a ceiling that may not
+    exist.
+    """
+    here, there = pg_endpoint(one), pg_endpoint(other)
+    if here is not None and there is not None:
+        measured_here = _SERVER_IDENTITY.get(here)
+        measured_there = _SERVER_IDENTITY.get(there)
+        if measured_here is not None and measured_there is not None:
+            return measured_here == measured_there
+    return here == there
+
+
+def _live_held_connections() -> list[tuple[Any, str]]:
+    """Every registered connection this process still holds, dropping the closed ones as it goes.
 
     A closed one is dropped rather than counted, so a holder that closed without unregistering
     stops inflating the reading the moment it does — which is the direction that matters for a
@@ -841,7 +934,21 @@ def _held_connections_on(endpoint: tuple[str, str] | None) -> int:
     with _POOL_REGISTRY_LOCK:
         live = [(conn, info) for conn, info in _HELD_CONNECTIONS if not conn.closed]
         _HELD_CONNECTIONS[:] = live
-    return sum(1 for _, info in live if pg_endpoint(info) == endpoint)
+    return live
+
+
+def _held_connections_on(endpoint: tuple[str, str] | None) -> int:
+    """How many live registered connections this process holds on one *endpoint*."""
+    return sum(1 for _, info in _live_held_connections() if pg_endpoint(info) == endpoint)
+
+
+def _held_connections_on_server(dsn: str) -> int:
+    """How many live registered connections this process holds on the *server* `dsn` names.
+
+    The endpoint form above is kept for `_process_max_connections`, whose question is about one
+    configured DSN rather than about whether two DSNs are one box.
+    """
+    return sum(1 for _, info in _live_held_connections() if same_server(info, dsn))
 
 
 def _all_pools() -> list[Any]:
@@ -883,13 +990,29 @@ def _session_store_max_connections() -> int:
     `chemclaw_pg_pool_max_size` answers "what may this process open", which is configuration and
     needs no database. A label carrying a measured cluster identity would be unknown until a pool
     filled, so the fleet-ceiling alert would lose its series during a database outage.
+
+    **Which servers there are is measured here, and that is new.** `pg_endpoint` compares strings,
+    so `localhost` against `127.0.0.1` — one server — split the fleet in two, each half charged to
+    its own ceiling and the real total checked by nothing. `same_server` answers it from the
+    `system_identifier` a borrow already read. The subtraction above still stands: what is measured
+    is *how many servers there are*, not what this process may open, so the gauge keeps needing no
+    database and keeps its series through an outage. See `_SERVER_IDENTITY`.
     """
     if not settings.fleet_connections_per_server()[1]:
         return 0
-    there = pg_endpoint(settings.session_store_dsn)
+    there = settings.session_store_dsn
+    # **A split the measurement disproves is not a split.** `fleet_connections_per_server` decided
+    # there were two servers from the two DSN strings, at import, with no database to ask. Once a
+    # borrow has answered and the two spellings turn out to name one box, carving anything out of
+    # the process total would charge the whole of it to a server that does not exist — measured,
+    # 32 of 32 against a `localhost`/`127.0.0.1` pair. Zero is the honest answer and it is the one
+    # that restores the pre-split behaviour for this configuration: one sum against one ceiling,
+    # which is the expression the row records as having been regressed.
+    if same_server(settings.postgres_dsn, there):
+        return 0
     return sum(
-        int(pool.max_size) for pool in _all_pools() if pg_endpoint(str(pool.conninfo)) == there
-    ) + _held_connections_on(there)
+        int(pool.max_size) for pool in _all_pools() if same_server(str(pool.conninfo), there)
+    ) + _held_connections_on_server(there)
 
 
 def pool_stats() -> dict[str, int]:

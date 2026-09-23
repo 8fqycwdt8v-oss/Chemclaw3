@@ -546,22 +546,6 @@ topic).
       `deploy/helm/chemclaw/values.yaml` `resources.service`,
       `tests/test_deploy_chart.py::test_a_pod_that_starts_a_parse_forkserver_fits_the_memory_it_declares`.
 
-- [ ] **Neither net sees one Postgres server that two DSNs spell differently** — [M], found
-      2026-09-05 by a fresh-context review of `D-2026-09-05-a-pool-count-is-not-a-connection-count`,
-      whose own "what this does not do" says a measured cluster identity is a row and then did not
-      write one. Both halves split the fleet with `core/config.pg_endpoint`, a string comparison:
-      `Settings.fleet_connections_per_server` at startup and `db._session_store_max_connections`
-      for the runtime gauge. So `localhost` against `127.0.0.1` — one server — is charged and
-      alerted as two, each inside its own ceiling, and the real total is checked by nothing.
-      Measured: a front door's 49 declared connections split 16 primary / 33 session on one
-      database. The *released* expression before the split gauge existed would have caught it,
-      comparing one sum against one ceiling, so this is a regression at runtime for that
-      configuration. `SELECT system_identifier FROM pg_control_system()` answers it exactly (0.24 ms,
-      readable by an unprivileged role) and cannot answer it in a validator that runs at import with
-      no loop and no pool — so the fix belongs on the gauge, where a pool has already connected, and
-      costs the alert its series during a database outage. That trade is the decision.
-      Anchors: `core/config/__init__.py::pg_endpoint`, `core/db.py::_session_store_max_connections`.
-
 - [ ] **`/readyz` cannot bound a Postgres that accepts the socket and stops answering** — [S],
       found 2026-09-05, upstream in origin and recorded here because `api/routes/ops.py` claimed
       otherwise. `asyncio.wait_for` bounds acquisition; on a warm pooled connection psycopg's
