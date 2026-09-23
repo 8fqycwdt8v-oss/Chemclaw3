@@ -92,7 +92,7 @@ join `agent/spend_cap.py` (309) in `[tool.mutmut].source_paths`. The row's own p
 answered: the run is 87 minutes, not hours, and `spend_cap.py`'s share was ~18 s.
 
 - [x] Measured, selection-alone against selection-plus-file: `plan_gate.py` **66% -> 87%**,
-      `skill_backend.py` **51% -> 90%**, `loop_cap.py` **88% -> 97%**. Two of the three would have
+      `skill_backend.py` **51% -> 90%**, `loop_cap.py` **88% -> 100%**. Two of the three would have
       reported a large block of mutants as survivors purely from being unpaired.
 - [x] Three source paths and their three test files added in one edit; the population pin reds
       until the floor is re-measured, which is what it is for.
@@ -125,7 +125,33 @@ deployment writes down.
 
 ## Review
 
-**Both rows closed and deleted from `BACKLOG.md`** (42 -> 40 open).
+**Both rows closed and deleted from `BACKLOG.md`**; one new row opened by the review, so 42 -> 41.
+
+**The fresh-context review found ten things and every factual one was reproduced before acting.**
+Three mattered:
+
+- **The test named for the central design choice did not discriminate it.** A floor reading
+  `chunk.retriever` instead of the legs' offered lists passed all 131 retrieval tests. The fixture
+  was wrong, not the argument: on it, the naive reading reserves *nothing* for the two legs it
+  cannot see, so it is also the identity there. Rewritten around a fixture where the naive floor
+  **evicts** `n3` and `n1` from a three-slot window and substitutes the two worst-ranked notes in
+  the fusion — a worse answer than no floor at all. The `retriever`-reading mutant is now caught by
+  exactly the test named for it, and two other wrong implementations are caught by three others.
+- **The ADR dropped the reachability qualifier the row had measured.** `retrieval_mode` ships
+  `graph`, so this code is never called by default; and in `hybrid`, every leg is cut to
+  `retrieval_top_k` (8) before fusion, so five legs offer at most 40 into a cut of 40 and the count
+  cap cannot bind. The guard ships **inert**, arming only when a deployment moves off those
+  numbers. That is a fine thing to ship and a bad thing to leave unsaid — the ADR read as if a live
+  starvation had been fixed.
+- **A justification invented to reinforce a true argument contradicted the code.** Four documents
+  said the offered-list read is what makes the floor work under `corpora`, "where `_fuse_by_corpus`
+  relabels `retriever` to the corpus name". It relabels on a `model_copy` and returns the
+  originals — its own comment says that is the point. The real argument never needed the second one.
+
+And `loop_cap.py`'s lift is **88% -> 100%**, not the 97% first written: 97% is what
+`tests/test_loop_cap_floor.py` scores *alone*, missing lines `tests/test_runner.py` already covers.
+Two measurements of different things reported as one before-and-after — which is the fourth time
+this session the instrument, not the logic, was the defect.
 
 **What the wave turned on, twice, was refusing to read a count off the wrong field.** Row B's floor
 would have been wrong if it counted a leg's survivors by `chunk.retriever` — the fusion keeps the

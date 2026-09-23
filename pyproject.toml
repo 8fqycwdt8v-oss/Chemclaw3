@@ -560,10 +560,13 @@ source_paths = [
     # all three are well above the repository's 84% line already.
     #
     # Their own test files go into `pytest_add_cli_args_test_selection` in the same edit, never
-    # after: an unpaired source path reports every mutant on the lines only its own file covers as
-    # a survivor, which is how the score reached 44.3% against a floor of 72.0 before. Measured
+    # after: an unpaired source path leaves every mutant on the lines only its own file covers
+    # reported **`no_tests`** — not `survived`, which is the word an earlier draft of this comment
+    # used and which the gate's own text refuses ("a mutant nothing reaches is not a survivor — it
+    # is a hole in the *selection*"). `total` counts it either way, which is how the score reached
+    # 44.3% against a floor of 72.0: 1,009 `no_tests`, against 988 that genuinely survived. Measured
     # that way here, selection-alone against selection-plus-file: `plan_gate.py` **66% -> 87%**,
-    # `skill_backend.py` **51% -> 90%**, `loop_cap.py` **88% -> 97%**.
+    # `skill_backend.py` **51% -> 90%**, `loop_cap.py` **88% -> 100%**.
     "src/chemclaw/agent/plan_gate.py",
     "src/chemclaw/agent/skill_backend.py",
     "src/chemclaw/agent/loop_cap.py",
@@ -695,7 +698,7 @@ pytest_add_cli_args_test_selection = [
     # a line no selected test executes is reported `no_tests`, and `total` counts it — which is why
     # the first completed run scored 1612/3640 = 44.3% against a floor of 72.0 while **1009 mutants
     # (27.7%) were reached by no test at all**. The list had never been widened as `source_paths`
-    # grew from the seven the floor was recorded against to fifteen.
+    # grew from the seven the floor was recorded against to eighteen.
     #
     # Each line is the measured lift on its own module, selection-alone against selection-plus-file:
     "tests/test_fulltext.py",  # core/fulltext.py      44% -> 100%
@@ -706,9 +709,15 @@ pytest_add_cli_args_test_selection = [
     "tests/test_compound_identity.py",  # core/chem.py  69% ->  84%
     # Paired with the three refusal gates added to `source_paths` in the same edit, and measured
     # the same way. `loop_cap.py` is the one already mostly reached — `test_runner.py` drives the
-    # loop — and it is listed anyway, because the 9 points it gains are the floor's own statements
-    # (`109-110` is all that is left uncovered after it).
+    # loop — and it is listed anyway, because the 12 points it gains take it to **100%**: the
+    # selection alone misses `220-228, 257->exit, 288, 329->333`, and this file closes all of them.
+    #
+    # **It is 100% and not the 97% an earlier draft of this comment said**, and the way that number
+    # was wrong is worth keeping: 97% is what `tests/test_loop_cap_floor.py` scores *on its own*,
+    # missing `109-110`, which `tests/test_runner.py` already covers through `api/runner`. Two
+    # measurements of different things, reported as the before-and-after of one — the same
+    # instrument error this repository keeps finding, one directory over.
     "tests/test_plan_gate.py",  # agent/plan_gate.py       66% ->  87%
     "tests/test_skill_backend.py",  # agent/skill_backend.py   51% ->  90%
-    "tests/test_loop_cap_floor.py",  # agent/loop_cap.py    88% ->  97%
+    "tests/test_loop_cap_floor.py",  # agent/loop_cap.py    88% -> 100%
 ]

@@ -422,32 +422,68 @@ def test_the_floor_is_the_identity_wherever_no_leg_was_at_zero() -> None:
     )
 
 
-def test_the_floor_reads_what_a_leg_offered_not_who_found_the_note_first() -> None:
-    """A leg whose every note another leg also found is represented, not starved.
+def _a_floor_that_reads_the_retriever_field(
+    fused: list[EvidenceChunk], legs: list[list[EvidenceChunk]], limit: int
+) -> list[EvidenceChunk]:
+    """The floor this repository did **not** build, written out so a test can separate the two.
 
-    `representative.setdefault` keeps the first chunk seen for a note, so here every survivor
-    carries `retriever="graph"` and a floor reading that field would see four legs at zero and
-    promote chunks to fix a starvation that is not happening. Both halves are asserted: the naive
-    reading is shown to be wrong, and the floor is shown to be inert.
+    Identical to `with_no_leg_cut_out` except for where it gets a leg's identity: this one asks
+    `chunk.retriever`, which after the fusion's `representative.setdefault` names only the leg
+    that found a note *first*. Described in a comment rather than coded, the difference is a claim;
+    coded, it is a fixture.
     """
-    shared = [f"note-{i}" for i in range(6)]
-    legs = [[_chunk(note, leg) for note in shared] for leg in ("graph", "lexical", "vector")]
-    fused = reciprocal_rank_fusion(legs, k=60, weights={"graph": 10.0})
+    reserved = set()
+    for leg in legs:
+        places = [index for index, chunk in enumerate(fused) if chunk.retriever == leg[0].retriever]
+        if places:
+            reserved.add(places[0])
+    keep = set(reserved)
+    for index in range(len(fused)):
+        if len(keep) >= limit:
+            break
+        keep.add(index)
+    return [chunk for index, chunk in enumerate(fused) if index in keep] + [
+        chunk for index, chunk in enumerate(fused) if index not in keep
+    ]
 
-    assert Counter(chunk.retriever for chunk in fused) == {"graph": 6}, (
-        "every representative is graph's copy, which is exactly why the count that field gives "
-        "cannot be what a floor reads"
-    )
-    assert _kept_per_leg(fused[:4], legs) == {"graph": 4, "lexical": 4, "vector": 4}
-    assert with_no_leg_cut_out(fused, legs, limit=4)[:4] == fused[:4]
 
-    # And the floor this one is not: reading `retriever` sees `lexical` and `vector` at zero and
-    # promotes to fix it. Written out rather than described, because "the naive version would be
-    # wrong" is the kind of claim that survives in a comment after it stops being true — and
-    # because an inertness assertion alone is satisfied by a floor that does nothing at all.
-    by_retriever = {chunk.retriever for chunk in fused[:4]}
-    assert {leg[0].retriever for leg in legs} - by_retriever == {"lexical", "vector"}, (
-        "the naive reading must see two legs at zero here, or this test is not about anything"
+def test_the_floor_reads_what_a_leg_offered_not_who_found_the_note_first() -> None:
+    """Reading `chunk.retriever` would evict well-ranked chunks to fix a starvation that is not one.
+
+    Three legs whose notes overlap heavily. Every one of them offered every note in the window, so
+    **nothing is starved and the correct answer is the identity** — and it is the case a
+    `retriever`-reading floor gets worst, because the representatives all carry whichever leg ran
+    first, so it sees two legs at zero and reserves a slot for each from the only chunks that *do*
+    carry their labels: the two lowest-ranked notes in the fusion.
+
+    Both directions of that error are here. The naive reading **under**-reserves for a leg whose
+    notes were all found first by another, and then **over**-promotes on the strength of a label
+    that means nothing — evicting `n3` and `n1` from a three-slot window and substituting `n9` and
+    `n6`. That is not a smaller improvement than this floor; it is a worse answer than no floor.
+
+    An earlier version of this test asserted only that this floor is inert here, which every floor
+    that does nothing also satisfies — including the identity. It named the design choice in its
+    title and did not separate it.
+    """
+    legs = [
+        [_chunk(note, leg) for note in notes]
+        for leg, notes in (
+            ("alpha", ["n0", "n3", "n1", "n4", "n5", "n8", "n7", "n2"]),
+            ("beta", ["n3", "n2", "n4", "n1", "n9", "n8"]),
+            ("gamma", ["n7", "n5", "n4", "n8", "n6", "n1", "n3"]),
+        )
+    ]
+    fused = reciprocal_rank_fusion(legs, k=60, weights={"alpha": 2.0, "beta": 2.0, "gamma": 1.0})
+
+    # Nothing is starved: at a window of three, all three legs offered all three notes.
+    assert _kept_per_leg(fused[:3], legs) == {"alpha": 3, "beta": 3, "gamma": 3}
+    assert with_no_leg_cut_out(fused, legs, limit=3)[:3] == fused[:3], "the correct answer is inert"
+
+    naive = _a_floor_that_reads_the_retriever_field(fused, legs, 3)[:3]
+    assert naive != fused[:3], "the field-reading floor must move this window, or nothing separates"
+    assert _kept_per_leg(naive, legs) == {"alpha": 1, "beta": 2, "gamma": 2}, (
+        "the field-reading floor should make every leg's representation *worse* here, which is "
+        "what makes this a design choice rather than a preference"
     )
 
 

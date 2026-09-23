@@ -46,7 +46,7 @@ jobs:
     runs-on: ubuntu-latest
     # **60 was below the run, and that is how a weekly job dies without saying so.** The 2026-08-27
     # measurement behind it was 825 mutants in 2m57s warm over seven source paths; the list is
-    # fifteen now and the first run that ever completed took **87 minutes** (3,640 mutants at 0.70
+    # eighteen now and the first run that ever completed took **87 minutes** (3,640 mutants at 0.70
     # mutations/second, 2026-09-22, 4-core sandbox, real Postgres, cold). A job-level
     # `timeout-minutes` *cancels* the job, every step below is guarded by `!cancelled()`, and the
     # notification fired on `failure()` alone — so the cap would have produced no stats, no
@@ -223,7 +223,11 @@ jobs:
           # the rate on its own, against 2 of 825 in 2026-08-27's run — and 43 of 4,057, **1.1
           # points**, on 2026-09-23's. So the term the margin was sized for has now been seen
           # three times and its spread is 0.2 to 1.9 points; five points still covers a tripling
-          # of the largest of those. It is not a *uniform*-speed
+          # of the smallest and twice the largest. **Not a tripling of the largest** — 3 x 1.9 is
+          # 5.7, above both five and the 5.1-point margin this comment states — and the sentence
+          # this replaces said it did, having dropped a "roughly" that was carrying the claim. What
+          # five points does cover is the whole observed spread twice over. It is not a
+          # *uniform*-speed
           # risk — mutmut's per-mutant wall limit is `(estimated_time_of_tests + timeout_constant)
           # × timeout_multiplier`, and `estimated_time_of_tests` is measured in the same run's own
           # clean-test phase, so a slower machine scales the budget with the test — but it is a

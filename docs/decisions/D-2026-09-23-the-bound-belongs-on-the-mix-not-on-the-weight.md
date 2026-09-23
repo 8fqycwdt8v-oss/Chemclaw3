@@ -27,6 +27,20 @@ The same weight starves four legs at one cut and starves nothing at another. So 
 function of `weight × legs × cut`, and a ceiling on the first term alone would refuse deployments
 that are fine and admit deployments that are not.
 
+**And it is not reachable at the shipped numbers, which the row said and an earlier draft of this
+ADR dropped.** `retrieval_mode` ships `graph`, so the fused arm this guard lives on is not even
+entered by a default deployment; and in `hybrid`, every leg is cut to `retrieval_top_k` (8) before
+fusion — `retrieval/retrievers.py:319`, `:772`, `:824` — so five legs offer at most 40 candidates
+into a cut of `gather_evidence_max_chunks` (40) and the count cap never binds. The starvation above
+is produced by a 45-deep `graph` leg, which is a leg `retrieval_top_k` cannot currently produce.
+
+So **this guard ships inert, deliberately, and arms only when a deployment moves off those numbers**
+— switches to `hybrid` *and* raises `retrieval_top_k`, adds legs, or lowers
+`gather_evidence_max_chunks`. That is the right time to have it rather than a reason not to: the
+knob that triggers it is one a deployment sets by itself, the failure is silent, and nothing reports
+it — the per-source counters show the starved leg returning its chunks and they all die in the
+fusion.
+
 **This is `D-2026-08-01-a-cap-that-starves-a-source` reached through a knob.** That decision made
 truncation round-robin across sources precisely so a flat cut could not take a leg to zero, and it
 left the fused path alone on the argument that RRF ranks by position and so cannot be dominated the
@@ -59,11 +73,17 @@ leave no contributing leg at zero, promoting the fewest entries that makes that 
 - **Leg membership is read from the legs' own offered lists, never from `chunk.retriever`.** The
   fusion keeps the first chunk seen for a note, so a note three legs found carries the name of
   whichever ran first; counting by that field credits earlier legs and pins later ones at zero —
-  the error `fanout.record_kept_chunks` records having measured as `graph 16, lexical 0,
-  vector 0`. Reading the offered lists is also what makes this hold unchanged under `corpora`,
-  where `_fuse_by_corpus` relabels a representative's `retriever` to its corpus name. A test
-  constructs the case where the naive reading sees two legs at zero and asserts both halves: that
-  it would, and that this floor is inert.
+  the error `fanout.record_kept_chunks` records having measured as `graph 16, lexical 0, vector 0`.
+  A `retriever`-reading floor errs in **both** directions: it under-reserves when a leg's notes were
+  all found first by another leg, and over-promotes when a leg's own-labelled chunk sits outside the
+  window.
+
+  **The corpus path is not a second argument for this, and an earlier draft of this ADR said it
+  was.** `_fuse_by_corpus` relabels a representative's `retriever` to its corpus name on a
+  `model_copy` and returns the originals by note id — its own comment says that is the point — so
+  the relabelling never escapes it and a `retriever`-reading floor would not see a corpus name.
+  The first argument stands alone; the second was invented to reinforce it and contradicted the
+  code.
 
 - **Applied to the `hybrid` arm of `gather_evidence` only.** The `graph` arm is
   `_interleave_dedup`, which gives every leg its best hit before any leg gets its second — the same
@@ -76,8 +96,10 @@ leave no contributing leg at zero, promoting the fewest entries that makes that 
 ## Consequences
 
 **A deployment can write any positive weight and cannot silently delete a leg with it.** What a
-large weight now buys is the window minus one slot per other leg, which is a mix a reader can
-predict from the weight and the leg count.
+large weight buys is the window minus one slot per other leg, which is a mix a reader can predict
+from the weight and the leg count. **At the shipped settings it buys nothing, because nothing was
+being lost** — see the reachability paragraph above; this is a guard on a configuration a
+deployment can reach rather than a fix for one it is in.
 
 **The character budget is not covered and the docstring says so.** `gather_evidence_max_chars` is a
 second cut spending down the same order, so a promoted chunk far enough into the window can still

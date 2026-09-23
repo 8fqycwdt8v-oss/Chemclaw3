@@ -238,14 +238,23 @@ def with_no_leg_cut_out(
     `representative.setdefault`, a note found by three legs carries the name of whichever found it
     *first*, so counting a leg's survivors by that field credits earlier legs and pins later ones
     at zero — the error `fanout.record_kept_chunks` documents having measured as `graph 16,
-    lexical 0, vector 0`. Reading each leg's own offered list is also what makes this work
-    unchanged under `corpora`, where `_fuse_by_corpus` relabels `retriever` to the corpus name.
+    lexical 0, vector 0`.
+
+    **The corpus path is not a second reason for that, though an earlier draft said it was.**
+    `_fuse_by_corpus` does relabel `retriever` to the corpus name — on a `model_copy`, returning
+    the originals by note id, which its own comment says is the point ("the chunk a caller receives
+    must still name the leg that found it"). So the relabelling never escapes that function and a
+    `retriever`-reading floor would not see a corpus name here. The reason above stands on its own;
+    this one was invented to reinforce it and contradicted the code eighty lines up.
 
     **What it does not reach is the character budget.** `gather_evidence_max_chars` is a second cut
-    that spends down this same order, so a promoted chunk far enough into the window can still be
-    cut by it. The promotion puts each leg's best hit at its own fused position rather than at the
-    front, so a leg is no likelier to be cut by chars than it was before — what is bounded here is
-    the count cap, which is the one the row is about.
+    that spends down this same order, so a promoted chunk can still be cut by it. A promoted leg is
+    nonetheless strictly better off than before: it was *certainly* cut by the count cap and now
+    merely might be cut by the character one. That is the whole claim. An earlier draft argued it
+    from the promoted chunks landing "at their own fused position", which is not what happens —
+    measured on the case above they land at the *end* of the window, `lexical-0` moving from fused
+    index 10 to output index 4 and `warehouse-0` from 13 to 7. What is bounded here is the count
+    cap, which is the cut the row is about.
     """
     place_of = {chunk.source_note_id: index for index, chunk in enumerate(fused)}
     reserved: set[int] = set()
@@ -255,10 +264,12 @@ def with_no_leg_cut_out(
         )
         if places:
             reserved.add(places[0])
-    # More legs than slots: the legs whose best hit the fusion placed highest get the window. A
-    # deployment in that state has asked for fewer chunks than it has sources and no ordering can
-    # satisfy every leg, so the fused ranking decides it rather than the leg order.
-    keep = set(sorted(reserved)[:limit])
+    # No `[:limit]` on `reserved`: with more legs than slots the fill loop below stops at `limit`
+    # and the output's first `limit` entries are the lowest reserved indices either way, so a slice
+    # here changed only the discarded tail. It read as if it decided which legs go without, and it
+    # never did — the fused ranking decides that, which is the right answer and was already the
+    # behaviour. Fuzzed both ways: 0 windows differ over 5,000 sweeps at every limit.
+    keep = set(reserved)
     for index in range(len(fused)):
         if len(keep) >= limit:
             break

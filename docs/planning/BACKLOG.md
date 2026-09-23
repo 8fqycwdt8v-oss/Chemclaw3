@@ -258,6 +258,23 @@ topic).
       that a bump is "a permanent doubling" of `molecule_fingerprints`/`reaction_fingerprints`
       because the runtime role holds no `DELETE`.
 
+- [ ] **`plan_gate.py` is paired with one of the five test files that cover it** — [S], opened
+      2026-09-23 by the review of the wave that added it to the mutation backstop.
+      `tests/test_plan_gate.py` takes the selection from 66% to 87% of the module; adding the four
+      siblings that already cover it — `tests/test_plan_scope.py`, `test_plan_state.py`,
+      `test_plan_inbox.py`, `test_plan_link.py` — reaches **90.7%**, closing lines 218-235 and 670.
+      Those residual lines are precisely the `no_tests` mutants `[tool.mutmut]`'s own comment says
+      pairing exists to prevent.
+
+      **Not done in that wave because the price is another full run, not a config edit.**
+      `tests/test_mutation_workflow.py` pins the floor to the *selection* as well as the population,
+      by design, so four more files red it and the floor has to be re-measured — ~80 minutes. The
+      run that would pay for it is one that has another reason to happen: the next `source_paths`
+      addition, or a `no_tests` share that stops having headroom (it is 11.7% against a ceiling of
+      16.0, so it has some). Bundling this with the next re-measurement costs nothing; taking it
+      alone costs an hour and a half for ~4 points on one module. Anchors: `pyproject.toml`
+      `[tool.mutmut].pytest_add_cli_args_test_selection`, `tests/test_mutation_workflow.py`.
+
 - [ ] **`Chemclaw3_ui` has no surface for the four `/skills/mine` routes, the six `/skills/org`
       ones, or the proposal queue** — [M], opened by
       `D-2026-09-18-a-skill-a-chemist-keeps-is-behaviour-they-approved` and widened by
