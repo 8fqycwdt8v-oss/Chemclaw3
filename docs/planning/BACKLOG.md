@@ -652,24 +652,6 @@ topic).
       is psycopg's own `connection_async.py`. Anchors:
       `api/routes/ops.py::_probe_database`, `core/db.py::connection`.
 
-- [ ] **`retrieval_source_weights` has no upper bound, and the mix it produces is not a property of
-  the weight alone** — [S]. `core/config/retrieval.py`'s validator refuses non-finite and
-  non-positive weights and stops there. Driven over five legs at `retrieval_fusion_k=60`, counting
-  the retriever of each kept chunk: uniform weighting keeps `graph 2 / lexical 2 / share 2 /
-  vector 1 / warehouse 1` out of eight, `{"graph": 10}` keeps `graph 8` and nothing else, and at a
-  thirty-chunk cut it keeps `graph 22` against 2 from each other leg. That is the starvation
-  `D-2026-08-01-a-cap-that-starves-a-source` is about, reachable through a knob rather than a cap.
-
-  **Not reachable at the shipped numbers, which is why it is a row.** `retrieval_top_k` is 8 and
-  `gather_evidence_max_chunks` is 40, so five legs offer at most 40 candidates into a cut of 40 and
-  the merge cap never binds — no weight can starve anything until a deployment raises the leg count
-  or lowers the cap. And there is no ceiling to add: the validator's own docstring argues the point
-  ("a weight has no upper bound to clamp toward"), and measured, the damage is a function of
-  `weight x legs x cut` rather than of the weight, so a bound belongs on the surviving *mix* — a
-  per-source floor in the merge — not on the number a deployment writes down. Anchors:
-  `core/config/retrieval.py::_weights_are_positive`, `retrieval/hybrid.py::reciprocal_rank_fusion`,
-  `core/config/retrieval.py::gather_evidence_max_chunks`.
-
 ## 4 — Operating it
 
 - [ ] **A worker whose broker is down never opens its probe port, so "Temporal is down" and "the

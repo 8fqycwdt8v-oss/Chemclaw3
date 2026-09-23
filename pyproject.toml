@@ -542,6 +542,25 @@ source_paths = [
     # was "recorded below" — there is nothing below that records it. `mutants/mutmut-stats.json` is
     # the file that will, and the `BACKLOG.md` row carries what is left to do.
     "src/chemclaw/agent/spend_cap.py",
+    # The other three, added 2026-09-23 once the row's premise had been measured away. It asked for
+    # each addition's runtime to be priced first, on the ground that "the run is hours long"; the
+    # first completed run is **87 minutes**, and `spend_cap.py`'s own share of it was **29 mutants,
+    # ~18 s**. These are 671, 367 and 333 lines against its 309 — the same order — so the price is
+    # known well enough to stop paying for it one module at a time.
+    #
+    # Every one is a refusal gate of the same kind as `authz.py` at the top of this list: a
+    # surviving mutant is a tool call, a skill write, or a model call that should not have
+    # happened. What makes them worth the minutes is that a *coverage* floor cannot see this —
+    # all three are well above the repository's 84% line already.
+    #
+    # Their own test files go into `pytest_add_cli_args_test_selection` in the same edit, never
+    # after: an unpaired source path reports every mutant on the lines only its own file covers as
+    # a survivor, which is how the score reached 44.3% against a floor of 72.0 before. Measured
+    # that way here, selection-alone against selection-plus-file: `plan_gate.py` **66% -> 87%**,
+    # `skill_backend.py` **51% -> 90%**, `loop_cap.py` **88% -> 97%**.
+    "src/chemclaw/agent/plan_gate.py",
+    "src/chemclaw/agent/skill_backend.py",
+    "src/chemclaw/agent/loop_cap.py",
     "src/chemclaw/api/budget.py",
     "src/chemclaw/api/runner_trace.py",
     "src/chemclaw/core/chem.py",
@@ -679,4 +698,11 @@ pytest_add_cli_args_test_selection = [
     "tests/test_templates.py",  # templates/resolve.py 19% ->  87%
     "tests/test_publish_end_to_end.py",  # publish/outbox.py 31% -> 62%
     "tests/test_compound_identity.py",  # core/chem.py  69% ->  84%
+    # Paired with the three refusal gates added to `source_paths` in the same edit, and measured
+    # the same way. `loop_cap.py` is the one already mostly reached — `test_runner.py` drives the
+    # loop — and it is listed anyway, because the 9 points it gains are the floor's own statements
+    # (`109-110` is all that is left uncovered after it).
+    "tests/test_plan_gate.py",  # agent/plan_gate.py       66% ->  87%
+    "tests/test_skill_backend.py",  # agent/skill_backend.py   51% ->  90%
+    "tests/test_loop_cap_floor.py",  # agent/loop_cap.py    88% ->  97%
 ]

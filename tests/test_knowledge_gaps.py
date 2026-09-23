@@ -28,7 +28,7 @@ from chemclaw.kg.render import render_note
 from chemclaw.kg.validate import validate
 from chemclaw.memory.playbook import find_playbook_candidates
 from chemclaw.retrieval.evidence import EvidenceChunk
-from chemclaw.retrieval.hybrid import reciprocal_rank_fusion
+from chemclaw.retrieval.hybrid import reciprocal_rank_fusion, with_no_leg_cut_out
 
 
 def _write(directory: Path, note: Note) -> None:
@@ -326,6 +326,165 @@ def test_a_weighted_source_cannot_starve_another_source_out_of_the_cap() -> None
     assert {f"{source}-0" for source in depths} <= best, (
         "a weight may reorder tiers; it may not push a source's own best hit below another "
         f"source's tail — survivors: {dict(surviving)}"
+    )
+
+
+#: The five legs and depths the `BACKLOG.md` row measured its starvation over, kept as one
+#: constant because three tests below are about the *same* sweep seen at different cuts.
+_THE_LEGS_THE_ROW_MEASURED = {"graph": 45, "lexical": 8, "share": 10, "vector": 7, "warehouse": 12}
+
+
+def _the_sweep_the_row_measured() -> list[list[EvidenceChunk]]:
+    """One ranked list per leg, every note unique to its leg — the worst case for a floor.
+
+    Unique on purpose: overlap is what *rescues* a leg, because a note several legs offer collects
+    several votes and rises. A sweep where nothing overlaps is the one where a weight can put one
+    leg's whole list above every other leg's best hit.
+    """
+    return [
+        [_chunk(f"{leg}-{rank}", leg) for rank in range(depth)]
+        for leg, depth in _THE_LEGS_THE_ROW_MEASURED.items()
+    ]
+
+
+def _kept_per_leg(kept: list[EvidenceChunk], legs: list[list[EvidenceChunk]]) -> dict[str, int]:
+    """Count survivors by what each leg **offered**, never by `chunk.retriever`.
+
+    The fusion keeps the first chunk it sees for a note, so a note three legs found carries the
+    name of whichever ran first; counting by that field credits earlier legs and pins later ones
+    at zero — the error `fanout.record_kept_chunks` records having measured as `graph 16,
+    lexical 0, vector 0`. A test that counted that way would report a starvation the floor is not
+    able to fix and miss one it is.
+    """
+    survivors = {chunk.source_note_id for chunk in kept}
+    return {
+        leg[0].retriever: len(survivors & {chunk.source_note_id for chunk in leg})
+        for leg in legs
+        if leg
+    }
+
+
+def test_a_weight_can_take_the_whole_window_and_the_floor_gives_every_leg_one_back() -> None:
+    """The `BACKLOG.md` row's own reproduction, both halves, at the shipped `retrieval_fusion_k`.
+
+    The weight is not exotic: `retrieval_source_weights` refuses zero, negative and non-finite and
+    nothing else, and its validator argues — correctly — that there is no upper bound to clamp a
+    weight toward. So `{"graph": 10}` is a value the config accepts and means, and at a cut of
+    eight it keeps `graph 8` and nothing else. That is the starvation
+    `D-2026-08-01-a-cap-that-starves-a-source` exists to prevent, reached through a knob rather
+    than through the flat cut that ADR removed.
+    """
+    legs = _the_sweep_the_row_measured()
+    fused = reciprocal_rank_fusion(legs, k=60, weights={"graph": 10.0})
+
+    assert _kept_per_leg(fused[:8], legs) == {
+        "graph": 8,
+        "lexical": 0,
+        "share": 0,
+        "vector": 0,
+        "warehouse": 0,
+    }
+
+    floored = with_no_leg_cut_out(fused, legs, limit=8)
+    assert _kept_per_leg(floored[:8], legs) == {
+        "graph": 4,
+        "lexical": 1,
+        "share": 1,
+        "vector": 1,
+        "warehouse": 1,
+    }, "every leg that offered something keeps one, and the weight still buys graph the rest"
+
+
+def test_the_floor_is_the_identity_wherever_no_leg_was_at_zero() -> None:
+    """A guard that moves a ranking nobody complained about is a second retrieval policy.
+
+    Swept over the shipped uniform case and the weight that starves, at the cut the sweep ships
+    with (`gather_evidence_max_chunks`, 40) and two smaller ones. Identity is asserted on the
+    chunk list rather than on a per-leg count, because a count can match while the order moved —
+    and the order is what the fusion is for.
+    """
+    legs = _the_sweep_the_row_measured()
+    moved = []
+    for weights in (None, {"graph": 1.5, "vector": 0.8}, {"graph": 10.0}):
+        fused = reciprocal_rank_fusion(legs, k=60, weights=weights)
+        for cut in (8, 30, 40):
+            floored = with_no_leg_cut_out(fused, legs, limit=cut)
+            starved = [leg for leg, n in _kept_per_leg(fused[:cut], legs).items() if n == 0]
+            if fused[:cut] != floored[:cut]:
+                moved.append((weights, cut, starved))
+            assert starved or fused[:cut] == floored[:cut], (
+                f"nothing was starved at weights={weights} cut={cut} and the floor moved the "
+                "ranking anyway"
+            )
+
+    assert moved == [({"graph": 10.0}, 8, ["lexical", "share", "vector", "warehouse"])], (
+        f"exactly one of the nine cases should move, and it is the starved one: {moved}"
+    )
+
+
+def test_the_floor_reads_what_a_leg_offered_not_who_found_the_note_first() -> None:
+    """A leg whose every note another leg also found is represented, not starved.
+
+    `representative.setdefault` keeps the first chunk seen for a note, so here every survivor
+    carries `retriever="graph"` and a floor reading that field would see four legs at zero and
+    promote chunks to fix a starvation that is not happening. Both halves are asserted: the naive
+    reading is shown to be wrong, and the floor is shown to be inert.
+    """
+    shared = [f"note-{i}" for i in range(6)]
+    legs = [[_chunk(note, leg) for note in shared] for leg in ("graph", "lexical", "vector")]
+    fused = reciprocal_rank_fusion(legs, k=60, weights={"graph": 10.0})
+
+    assert Counter(chunk.retriever for chunk in fused) == {"graph": 6}, (
+        "every representative is graph's copy, which is exactly why the count that field gives "
+        "cannot be what a floor reads"
+    )
+    assert _kept_per_leg(fused[:4], legs) == {"graph": 4, "lexical": 4, "vector": 4}
+    assert with_no_leg_cut_out(fused, legs, limit=4)[:4] == fused[:4]
+
+    # And the floor this one is not: reading `retriever` sees `lexical` and `vector` at zero and
+    # promotes to fix it. Written out rather than described, because "the naive version would be
+    # wrong" is the kind of claim that survives in a comment after it stops being true — and
+    # because an inertness assertion alone is satisfied by a floor that does nothing at all.
+    by_retriever = {chunk.retriever for chunk in fused[:4]}
+    assert {leg[0].retriever for leg in legs} - by_retriever == {"lexical", "vector"}, (
+        "the naive reading must see two legs at zero here, or this test is not about anything"
+    )
+
+
+def test_a_window_smaller_than_the_leg_count_is_decided_by_the_fusion() -> None:
+    """Fewer slots than legs cannot satisfy every leg, so the ranking decides which go without.
+
+    Asserted because the alternative is worse and is what a naive loop does: reserve in
+    `ranked_lists` order and the window is filled by whichever legs the *config* happens to list
+    first, which is a retrieval decision taken by a file's line order.
+    """
+    legs = _the_sweep_the_row_measured()
+    fused = reciprocal_rank_fusion(legs, k=60, weights={"graph": 10.0})
+    floored = with_no_leg_cut_out(fused, legs, limit=2)
+
+    assert len(floored) == len(fused), "the floor reorders; it never drops a chunk"
+    kept = _kept_per_leg(floored[:2], legs)
+    assert sum(kept.values()) == 2 and kept["graph"] == 1, (
+        f"graph's best hit is the fusion's own top and must keep its slot: {kept}"
+    )
+
+
+def test_the_floor_holds_under_the_two_stage_corpus_fusion() -> None:
+    """`corpora` relabels a representative's `retriever` to its corpus name; the floor is unmoved.
+
+    The two-stage path fuses within each corpus, relabels on a `model_copy` and fuses across — so
+    a floor that read `retriever` would be reading corpus names by the time it ran. This one reads
+    `source_note_id`, which the relabelling does not touch, so the same guarantee holds on both
+    paths rather than on the one it was written against.
+    """
+    legs = _the_sweep_the_row_measured()
+    corpora = ["knowledge-notes", "knowledge-notes", "sharedrive", "knowledge-notes", "warehouse"]
+    fused = reciprocal_rank_fusion(legs, k=60, weights={"graph": 10.0}, corpora=corpora)
+
+    starved = [leg for leg, n in _kept_per_leg(fused[:8], legs).items() if n == 0]
+    floored = with_no_leg_cut_out(fused, legs, limit=8)
+    assert not [leg for leg, n in _kept_per_leg(floored[:8], legs).items() if n == 0], (
+        f"legs starved under the corpus path and the floor did not reach them: {starved}"
     )
 
 
