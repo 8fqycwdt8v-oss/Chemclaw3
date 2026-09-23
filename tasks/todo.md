@@ -91,14 +91,20 @@ sweep — and stay as they are).
 join `agent/spend_cap.py` (309) in `[tool.mutmut].source_paths`. The row's own premise is already
 answered: the run is 87 minutes, not hours, and `spend_cap.py`'s share was ~18 s.
 
-- [ ] Measure each module's coverage lift, selection-alone against selection-plus-file, which is
-      the method the list's own comment established. An unpaired source path reports every mutant
-      on the lines its test file covers as a survivor.
-- [ ] Add the three source paths and their paired test files together.
-- [ ] Re-measure `MUTATION_SCORE_FLOOR` and `MUTATION_NO_TESTS_CEILING` on the new population —
-      `tests/test_mutation_workflow.py` pins the floor to the `source_paths` list, the selection
-      and the two rate-moving knobs, so it reds until the new list and the new numbers are written
-      together. Budget ~90 minutes, not a config edit.
+- [x] Measured, selection-alone against selection-plus-file: `plan_gate.py` **66% -> 87%**,
+      `skill_backend.py` **51% -> 90%**, `loop_cap.py` **88% -> 97%**. Two of the three would have
+      reported a large block of mutants as survivors purely from being unpaired.
+- [x] Three source paths and their three test files added in one edit; the population pin reds
+      until the floor is re-measured, which is what it is for.
+- [x] Re-measured. **4,057 mutants, 2,555 killed — 63.0%** — 986 survived, 473 no-test (11.7%),
+      43 timed out, 0 suspicious or segfault, 82m40s at 0.76/s. Both rates improved (62.1% ->
+      63.0%, 12.3% -> 11.7%). **The floor stays at 57.0**: the rule stated in the workflow is five
+      points under the observation, which gives 58.0, and keeping 57.0 is the more conservative of
+      the two rather than a one-point ratchet on a nine-tenths-of-a-point move. The number not
+      moving is a result, not an omission — the pin made re-deriving it compulsory.
+- [x] **The row's own question answered exactly.** +417 mutants and the wall clock went *down*,
+      87 -> 82m40s. The addition is smaller than the run-to-run variance, so at this size it is
+      not the term that decides the run's length — the opposite of "the run is hours long".
 
 ## Row B — `retrieval_source_weights` has no upper bound [S]
 
@@ -108,12 +114,33 @@ argues "a weight has no upper bound to clamp toward". So the bound belongs on th
 — a per-source floor in `retrieval/hybrid.py::reciprocal_rank_fusion` — not on the number a
 deployment writes down.
 
-- [ ] Reproduce the starvation first: five legs at `retrieval_fusion_k=60`, `{"graph": 10}`,
-      counting the retriever of each kept chunk. The row reports `graph 8` of 8 and, at a
-      thirty-chunk cut, `graph 22` against 2 from each other leg.
-- [ ] Design the floor, then measure the mix it produces rather than asserting it.
-- [ ] `D-2026-08-01-a-cap-that-starves-a-source` is the decision this is the other half of.
+- [x] Reproduced exactly: `graph 8 / 0 / 0 / 0 / 0` at a cut of 8, `graph 22` against 2 each at 30.
+- [x] Floor designed, and the mix measured rather than asserted. Nine cases swept (three
+      weightings x three cuts) and **exactly one moves** — the starved one. A floor of
+      `limit // (2 x legs)` was measured too and rejected: it acts on cuts that were never starved.
+- [x] `D-2026-09-23-the-bound-belongs-on-the-mix-not-on-the-weight` amends
+      `D-2026-08-01-a-cap-that-starves-a-source` by supplying the half it did not reach — the
+      ceiling the row asked for is **declined**, because measured the damage is `weight x legs x
+      cut` rather than a property of the weight.
 
 ## Review
 
-Pending.
+**Both rows closed and deleted from `BACKLOG.md`** (42 -> 40 open).
+
+**What the wave turned on, twice, was refusing to read a count off the wrong field.** Row B's floor
+would have been wrong if it counted a leg's survivors by `chunk.retriever` — the fusion keeps the
+first finder, so a note three legs found credits one and pins two at zero, which is the error
+`fanout.record_kept_chunks` already had measured and recorded. The tests count by what each leg
+*offered* for the same reason, and one of them constructs the case where the naive reading sees two
+legs starved that are not.
+
+**And a test that asserts inertness is satisfied by a change that does nothing.** Four of the five
+new tests red when `with_no_leg_cut_out` is replaced by the identity; the fifth did not, because its
+whole content is "the floor does not move this". It was rewritten to assert the naive reading *would*
+have moved it, so it now discriminates the design choice it is named after rather than restating it.
+
+**Row A's premise was already dead and the run confirmed the second half too.** "Measure the runtime
+before adding a module" assumed the addition was the expensive term. It is not: +417 mutants, and the
+wall clock fell 87 -> 82m40s. The expensive thing was never the modules — it was the stretch of
+not pairing the test selection with them, which is what took the rate from 44.3% to 62.1% with no
+code change at all.

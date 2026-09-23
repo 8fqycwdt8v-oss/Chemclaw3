@@ -363,6 +363,9 @@ def test_a_selection_that_stopped_covering_a_module_fails_the_gate(tmp_path: Pat
 _THE_POPULATION_THE_FLOOR_WAS_MEASURED_OVER = (
     "src/chemclaw/agent/audit_store.py",
     "src/chemclaw/agent/authz.py",
+    "src/chemclaw/agent/loop_cap.py",
+    "src/chemclaw/agent/plan_gate.py",
+    "src/chemclaw/agent/skill_backend.py",
     "src/chemclaw/agent/spend_cap.py",
     "src/chemclaw/api/budget.py",
     "src/chemclaw/api/runner_trace.py",
@@ -385,7 +388,10 @@ _THE_POPULATION_THE_FLOOR_WAS_MEASURED_OVER = (
 #: out.** With `source_paths` byte-identical, pairing six test files with the modules they cover
 #: moved the rate 44.3% -> 62.1% and the no-test share 27.7% -> 12.3%. A pin on `source_paths`
 #: alone holds the lever that did not move and leaves the one that did unguarded; the `no_tests`
-#: ceiling is a backstop for it, but it is an 87-minute weekly one rather than a gate.
+#: ceiling is a backstop for it, but it is an 80-odd-minute weekly one rather than a gate.
+#:
+#: Both tuples moved together on 2026-09-23, which is the only way they may move: three refusal
+#: gates joined `source_paths` and their own three test files joined this one in the same edit.
 _THE_SELECTION_THE_FLOOR_WAS_MEASURED_OVER = (
     "tests/test_audit.py",
     "tests/test_audit_store.py",
@@ -397,15 +403,18 @@ _THE_SELECTION_THE_FLOOR_WAS_MEASURED_OVER = (
     "tests/test_fulltext.py",
     "tests/test_knowledge.py",
     "tests/test_logging.py",
+    "tests/test_loop_cap_floor.py",
     "tests/test_metrics_bridge.py",
     "tests/test_note.py",
     "tests/test_note_visibility.py",
+    "tests/test_plan_gate.py",
     "tests/test_postgres_store.py",
     "tests/test_properties_core.py",
     "tests/test_publish_end_to_end.py",
     "tests/test_quantities.py",
     "tests/test_relations.py",
     "tests/test_runner.py",
+    "tests/test_skill_backend.py",
     "tests/test_spend_cap.py",
     "tests/test_store.py",
     "tests/test_templates.py",
@@ -414,8 +423,9 @@ _THE_SELECTION_THE_FLOOR_WAS_MEASURED_OVER = (
 
 #: The other two settings that move the rate without touching either list above.
 #:
-#: `timeout_multiplier` reclassifies mutants between `killed` and `timeout` — 68 of them on the
-#: measured run, 1.9 points of the rate — and the `only_mutate`/`do_not_mutate` filters change
+#: `timeout_multiplier` reclassifies mutants between `killed` and `timeout` — 43 of them on the
+#: measured run, 1.1 points of the rate, down from 68 and 1.9 on the run before — and the
+#: `only_mutate`/`do_not_mutate` filters change
 #: which mutants exist at all. Neither is a population in the sense the two tuples above are, so
 #: they are pinned as values rather than enumerated.
 _THE_KNOBS_THE_FLOOR_WAS_MEASURED_UNDER = {
