@@ -57,6 +57,18 @@ async def run_bundle_worker(connector: str) -> None:
         # rather than database work — `calc`, whose CREST searches hold a slot for their whole
         # runtime — raises it in the chart, where the memory that bounds it is also declared.
         max_concurrent_activities=settings.worker_max_concurrent_activities,
+        # **And this is the worker the cache ceiling is actually about.** A child workflow is not
+        # an activity, so the line above never reached the children core starts — and those
+        # children run *here*, on the bundle's own derived queue: `durable/connector_job.py` starts
+        # one with `task_queue=job.task_queue`, and `hypothesis_tournament.py` and
+        # `template_activities.py` with `bundle_queue(connector)`. The workflow that holds a CREST
+        # search's state between its tasks is therefore cached in this process, never in core's.
+        #
+        # A first draft of `D-2026-09-22-the-ceiling-that-holds-memory-is-the-cache-not-the-task-
+        # slot` armed the background worker alone — the one population the row behind it was not
+        # about. Nothing observable differed, because that draft's value *was* the SDK's default;
+        # the omission became invisible for exactly as long as the number was unexamined.
+        max_cached_workflows=settings.worker_max_cached_workflows,
         # Every activity this worker serves, bound to the turn that asked for it and recorded on
         # its way in and out (`durable/interceptor.py`). Here rather than in `serve_worker` for
         # the reason `graceful_shutdown_timeout` is: it is a property of what the worker *serves*,

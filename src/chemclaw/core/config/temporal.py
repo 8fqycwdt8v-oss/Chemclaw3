@@ -164,6 +164,66 @@ class TemporalSettings(BaseSettings):
     # ends, so its ceiling is about memory, not connections, and its chart entry says so.
     worker_max_concurrent_activities: int = Field(default=8, ge=1)
 
+    # **What a worker holds between tasks, which no setting here chose until 2026-09-22.**
+    # `max_concurrent_activities` bounds activities and nothing bounded the workflow side, so the
+    # ceiling was whatever the SDK picks. Two of those defaults matter and neither is the one the
+    # constructor's docstring makes obvious:
+    #
+    # - **workflow-task slots default to 100**, not 500: `Worker.__init__` passes `None` through to
+    #   `WorkerTuner.create_fixed`, whose `or 100` is the real number.
+    # - **the 500 in that docstring is a *thread pool*, and it does apply here.** It is
+    #   `workflow_task_executor`'s: `_workflow.py` builds
+    #   `ThreadPoolExecutor(max_workers=max_concurrent_workflow_tasks or 500)`, so leaving the task
+    #   ceiling unset — which this deployment does, deliberately — gives a pool sized 500. A first
+    #   version of this comment dismissed that 500 as belonging to the resource-based tuner, which
+    #   is a different 500 in a different file (`_tuning.py`'s `_DEFAULT_RESOURCE_SLOTS_MAX`) and
+    #   is not in any constructor docstring. `max_workers` is a ceiling on threads created on
+    #   demand rather than an allocation, so it is recorded here rather than acted on.
+    #
+    # **The ceiling that holds memory is neither of those.** A task slot is occupied only while a
+    # workflow is being advanced; `max_cached_workflows` (SDK default 1,000) is what keeps a
+    # started workflow resident between its tasks. Driven: with the cache off, 200 started-and-
+    # parked workflows leave **zero** instances resident and the RSS delta falls from 70 MiB to 12.
+    #
+    # **Measured against the real broker, and the model has three terms because two were not
+    # enough.** Per cached workflow: a fixed overhead of **~70-85 KiB** (two runs, two park shapes,
+    # converging from 137 KiB at 50 cached to ~65-71 at 1,000); **~1.05x the workflow's own state**
+    # (at 200 cached: 16 KiB of state -> +17, 64 -> +66, 256 -> +275 over the zero-state figure);
+    # and **a history term**, which is the one the first version of this comment did not have.
+    #
+    # That first version said the excess over state was "the event history the cache keeps for
+    # replay" — and it cannot be, because the excess is *flat* in state. History is its own axis:
+    # at zero state, 200 cached workflows cost 69 KiB each with no signals, 199 with twenty, and
+    # 246 with a hundred. Two independent runs put the slope at 0.95 and at ~1.8 KiB per signal, so
+    # what is established is that the axis is real and can triple a low-state workflow, **not** its
+    # coefficient. A long-lived campaign parent is exactly the shape that lives on it.
+    #
+    # (The state arm read zero at every size until a live-object count caught the fixture:
+    # `["y" * 1024 for _ in range(n)]` is constant-folded into *n* references to one string.)
+    #
+    # **750 rather than the SDK's 1,000, and the third term is what moved it.** Under the two-term
+    # model this comment first carried, 1,000 workflows at 256 KiB of state came to ~340 MiB and
+    # fitted the shipped `resources.worker.requests.memory` of 1Gi with room to spare. Add the
+    # history allowance and the same 1,000 come to ~516 MiB — over half the worker's whole request
+    # before it has done anything else, and the inequality in `tests/test_workers.py` says so. 750
+    # of that shape is ~387 MiB.
+    #
+    # **Lowering the ceiling rather than raising the request**, because the request is the default
+    # for *every* worker Deployment, core's and each bundle's, so raising it costs scheduling
+    # density across the fleet to buy cache slots nobody has shown a queue needs. What a slot buys
+    # is avoiding one replay: an evicted workflow is re-created from its history on its next task,
+    # which is broker traffic and CPU, never a wrong answer. And the working set this cache is for
+    # is workflows being *advanced*, not workflows that are open — a durable wait parked for weeks
+    # under `awaiting_max_days` should be evicted, which is the behaviour a smaller cache gets
+    # right rather than the regression it looks like.
+    #
+    # 750 and not the 991 the inequality permits: the history coefficient is the term this file
+    # is least sure of (0.95 against ~1.8 KiB per signal, two runs), so the ceiling does not sit at
+    # the bar it is checked against. `tests/test_workers.py` holds that inequality against the
+    # chart rather than restating a number here, which is the shape
+    # `D-2026-09-18-a-second-process-in-the-pod-is-memory-the-chart-never-declared` uses.
+    worker_max_cached_workflows: int = Field(default=750, ge=1)
+
     # The ceiling `durable/interceptor.py` holds every activity *result* to, measured as the
     # serialized payload the worker is about to upload.
     #

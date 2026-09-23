@@ -113,6 +113,12 @@ async def main() -> None:
         # magnitude smaller — and this queue's work is almost entirely database work (the retention
         # sweep, the reindex, the chain verification, every job record).
         max_concurrent_activities=settings.worker_max_concurrent_activities,
+        # What the worker holds *between* tasks, which the activity ceiling above does not bound:
+        # a cached workflow is a started one kept resident so its next task replays from memory
+        # instead of from history. Set here because the SDK's own default would otherwise be the
+        # choice, and measured rather than adopted — `core/config/temporal.py` carries the numbers
+        # and `tests/test_workers.py` holds them against the chart's memory request.
+        max_cached_workflows=settings.worker_max_cached_workflows,
         # Every activity this worker serves, bound to the turn that asked for it and recorded on
         # its way in and out (`durable/interceptor.py`). Here rather than in `serve_worker` for
         # the reason `graceful_shutdown_timeout` is: it is a property of what the worker *serves*,
