@@ -76,3 +76,44 @@ it was about, and now a fixture that allocated one object and reported 51,200.
 ## Review
 
 Pending the gate and the subagent review.
+
+---
+
+# Wave 12 — the backstop covers the gates, and a knob that starves is bounded where it starves
+
+Two rows, both actionable (several neighbours in §4 are argued non-fixes with live triggers —
+the SSH alias, the IPv4-mapped arm, `/readyz`'s re-wait, the worker probe port, the connector
+sweep — and stay as they are).
+
+## Row A — three first-party refusal gates are still outside the weekly mutation backstop [S]
+
+`agent/plan_gate.py` (671 lines), `agent/skill_backend.py` (367) and `agent/loop_cap.py` (333)
+join `agent/spend_cap.py` (309) in `[tool.mutmut].source_paths`. The row's own premise is already
+answered: the run is 87 minutes, not hours, and `spend_cap.py`'s share was ~18 s.
+
+- [ ] Measure each module's coverage lift, selection-alone against selection-plus-file, which is
+      the method the list's own comment established. An unpaired source path reports every mutant
+      on the lines its test file covers as a survivor.
+- [ ] Add the three source paths and their paired test files together.
+- [ ] Re-measure `MUTATION_SCORE_FLOOR` and `MUTATION_NO_TESTS_CEILING` on the new population —
+      `tests/test_mutation_workflow.py` pins the floor to the `source_paths` list, the selection
+      and the two rate-moving knobs, so it reds until the new list and the new numbers are written
+      together. Budget ~90 minutes, not a config edit.
+
+## Row B — `retrieval_source_weights` has no upper bound [S]
+
+The row names its own fix and the reason a ceiling is the wrong shape: measured, the damage is a
+function of `weight x legs x cut` rather than of the weight, and the validator's docstring already
+argues "a weight has no upper bound to clamp toward". So the bound belongs on the surviving *mix*
+— a per-source floor in `retrieval/hybrid.py::reciprocal_rank_fusion` — not on the number a
+deployment writes down.
+
+- [ ] Reproduce the starvation first: five legs at `retrieval_fusion_k=60`, `{"graph": 10}`,
+      counting the retriever of each kept chunk. The row reports `graph 8` of 8 and, at a
+      thirty-chunk cut, `graph 22` against 2 from each other leg.
+- [ ] Design the floor, then measure the mix it produces rather than asserting it.
+- [ ] `D-2026-08-01-a-cap-that-starves-a-source` is the decision this is the other half of.
+
+## Review
+
+Pending.
