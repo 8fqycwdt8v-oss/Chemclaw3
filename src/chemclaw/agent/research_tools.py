@@ -31,7 +31,11 @@ from chemclaw.ingest.rejections import IngestRejection, refusals_matching
 from chemclaw.ingest.sources.registry import active_retrieve_corpora, active_retrieve_sources
 from chemclaw.retrieval.evidence import EvidenceChunk, EvidenceSweep, Hits, SourceRetriever
 from chemclaw.retrieval.fanout import record_kept_chunks, sweep_sources
-from chemclaw.retrieval.hybrid import reciprocal_rank_fusion, restated_as_position
+from chemclaw.retrieval.hybrid import (
+    reciprocal_rank_fusion,
+    restated_as_position,
+    with_no_leg_cut_out,
+)
 from chemclaw.retrieval.retrievers import FingerprintReactionRetriever
 from chemclaw.science.fingerprints.store import default_reaction_store
 
@@ -435,6 +439,16 @@ async def gather_evidence(
             k=settings.retrieval_fusion_k,
             weights=settings.retrieval_source_weights_map,
             corpora=[corpus_of.get(name, name) for name, _ in sources],
+        )
+        # The cut below is a prefix of this order, and a weight can make that prefix one leg.
+        # `with_no_leg_cut_out` is the RRF-side half of
+        # `D-2026-08-01-a-cap-that-starves-a-source` — see there for why the floor is one chunk
+        # rather than a share, and for the measurement that it changes nothing unless a leg is
+        # actually at zero. Applied here and not in the `else` arm because round-robin already
+        # gives every leg its best hit before any leg gets its second, which is the same
+        # guarantee arrived at by construction.
+        merged = with_no_leg_cut_out(
+            merged, ranked_lists, limit=settings.gather_evidence_max_chunks
         )
     else:
         # Round-robin, not a flat union re-sorted by score: the cap below has to be survivable by

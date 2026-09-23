@@ -46,7 +46,7 @@ jobs:
     runs-on: ubuntu-latest
     # **60 was below the run, and that is how a weekly job dies without saying so.** The 2026-08-27
     # measurement behind it was 825 mutants in 2m57s warm over seven source paths; the list is
-    # fifteen now and the first run that ever completed took **87 minutes** (3,640 mutants at 0.70
+    # eighteen now and the first run that ever completed took **87 minutes** (3,640 mutants at 0.70
     # mutations/second, 2026-09-22, 4-core sandbox, real Postgres, cold). A job-level
     # `timeout-minutes` *cancels* the job, every step below is guarded by `!cancelled()`, and the
     # notification fired on `failure()` alone — so the cap would have produced no stats, no
@@ -192,8 +192,25 @@ jobs:
           # config had fallen short of; it was a number about a different set of modules, and the
           # first completed run would have failed on it.
           #
-          # **57.0 is 5.1 points below that observation, and the margin is stated as the absolute
-          # number it is.** An earlier draft of this comment said "one and a half of the recorded
+          # **Re-measured 2026-09-23 on a wider population, and the floor did not move.** Three
+          # refusal gates — `agent/plan_gate.py`, `agent/skill_backend.py`, `agent/loop_cap.py` —
+          # joined `source_paths` with their own test files, taking the run from 3,640 mutants to
+          # **4,057**: **2,555 killed — 63.0%** — with 986 survived, 473 reached by no selected
+          # test (11.7%), 43 timed out, 0 suspicious or segfault, in **82m40s at 0.76
+          # mutations/second**. Both rates improved (62.1% -> 63.0%, 12.3% -> 11.7%), and under
+          # the rule stated below — five points under the observation — 63.0 gives 58.0, so 57.0
+          # is kept as the more conservative of the two rather than ratcheted by one point on a
+          # nine-tenths-of-a-point move. **The number being unchanged is a result here, not an
+          # omission**: it was re-derived from the new run, and the pin in
+          # `tests/test_mutation_workflow.py` is what made re-deriving it compulsory.
+          #
+          # The +417 mutants cost less than the run-to-run variance: wall clock went *down*, 87
+          # minutes to 82m40s, on a larger population. That is noise rather than a speedup, and
+          # it is the honest reading of the row's "measure the runtime before adding a module" —
+          # at this size the addition is not the term that decides the run's length.
+          #
+          # **57.0 is 5.1 points below the 62.1% observation, and the margin is stated as the
+          # absolute number it is.** An earlier draft of this comment said "one and a half of the recorded
           # spread, read proportionally (1.5 × 1.9 ≈ 2.9)" and then wrote 59.0, which is neither:
           # the proportional reading gives 59.7 and the absolute one 59.25. Two methods named,
           # a third number written. Restated: this rests on **one** observation of this
@@ -203,7 +220,14 @@ jobs:
           # artifacts, which is the direction the 72.0 comment asked for and never got.
           #
           # The largest movable term is the **timeout** count: 68 of 3,640, worth 1.9 points of
-          # the rate on its own, against 2 of 825 in 2026-08-27's run. It is not a *uniform*-speed
+          # the rate on its own, against 2 of 825 in 2026-08-27's run — and 43 of 4,057, **1.1
+          # points**, on 2026-09-23's. So the term the margin was sized for has now been seen
+          # three times and its spread is 0.2 to 1.9 points; five points still covers a tripling
+          # of the smallest and twice the largest. **Not a tripling of the largest** — 3 x 1.9 is
+          # 5.7, above both five and the 5.1-point margin this comment states — and the sentence
+          # this replaces said it did, having dropped a "roughly" that was carrying the claim. What
+          # five points does cover is the whole observed spread twice over. It is not a
+          # *uniform*-speed
           # risk — mutmut's per-mutant wall limit is `(estimated_time_of_tests + timeout_constant)
           # × timeout_multiplier`, and `estimated_time_of_tests` is measured in the same run's own
           # clean-test phase, so a slower machine scales the budget with the test — but it is a
@@ -216,7 +240,8 @@ jobs:
           # moved it to 62.1% and cut `no_tests` from 27.7% to 12.3%. Nothing about the code
           # changed; the backstop had simply not been asked to run the tests that cover it.
           MUTATION_SCORE_FLOOR: "57.0"
-          # Measured on the same run: 446 of 3,640, **12.3%**. A mutant nothing reaches is not a
+          # Measured on the same run: 446 of 3,640, **12.3%**, and 473 of 4,057 — **11.7%** — on
+          # 2026-09-23's wider one, so the ceiling holds with more headroom than it was set with. A mutant nothing reaches is not a
           # survivor — it is a hole in the *selection*, and it is the number the widening above
           # was aimed at, so it is the one to hold. The ceiling is set with headroom rather than
           # at the observation for the reason the floor is: a gate that reds on ordinary movement

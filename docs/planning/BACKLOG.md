@@ -258,76 +258,22 @@ topic).
       that a bump is "a permanent doubling" of `molecule_fingerprints`/`reaction_fingerprints`
       because the runtime role holds no `DELETE`.
 
-- [ ] **Three first-party refusal gates are still outside the weekly mutation backstop** — [S], `pyproject.toml` `[tool.mutmut].source_paths`.
-      `agent/spend_cap.py` joined it on 2026-09-22 (the smallest of the four by source length), which
-      leaves `agent/plan_gate.py`, `agent/skill_backend.py` and `agent/loop_cap.py`. The original row
-      asked for each addition's runtime to be measured first, on the ground that "the comment above it
-      records that the run is hours long".
+- [ ] **`plan_gate.py` is paired with one of the five test files that cover it** — [S], opened
+      2026-09-23 by the review of the wave that added it to the mutation backstop.
+      `tests/test_plan_gate.py` takes the selection from 66% to 87% of the module; adding the four
+      siblings that already cover it — `tests/test_plan_scope.py`, `test_plan_state.py`,
+      `test_plan_inbox.py`, `test_plan_link.py` — reaches **90.7%**, closing lines 218-235 and 670.
+      Those residual lines are precisely the `no_tests` mutants `[tool.mutmut]`'s own comment says
+      pairing exists to prevent.
 
-      **That premise was false and is the reason this row is rewritten rather than closed.**
-      `D-2026-09-22-a-mutation-backstop-that-cannot-start` measured `make mutants` failing in 27
-      seconds on `origin/main`, before a single mutant ran, so the backstop was covering *nothing* and
-      the hours-long figure described a full-repository run that nobody had done. Two blockers were
-      found and both are fixed: a derived guard in `tests/test_runner.py` that counted mutmut's own
-      generated method names, and — behind it — a schema-isolation escape that had the suite running
-      against `public` from its second in-process pytest session onward (`tests/pg.py`,
-      `tests/test_isolation_across_sessions.py`).
-
-      A **third** blocker was root-caused and fixed too: `kg/git_writer._WRITE_LOCK` was a
-      module-level `asyncio.Lock`, which binds to the first event loop that *contends* on it, so the
-      second in-process pytest session hung with no exception
-      (`D-2026-09-22-a-lock-built-at-import-belongs-to-one-event-loop`).
-
-      **The measurement exists now, and it answers the row while replacing it with a bigger
-      question.** First completed run, 2026-09-22, 15 source paths, `PYTEST_TIMEOUT_SCALE=4`:
-
-      | | |
-      |---|---|
-      | wall | **30m04s** (05:58:47 → 06:28:51), 3640 mutants at **1.57 mutations/second** |
-      | killed | 1612 |
-      | survived | 988 |
-      | reached by no selected test | **1009** (27.7% of all mutants) |
-      | timed out | 31 |
-      | suspicious / segfault | 0 / 0 |
-      | `agent/spend_cap.py`'s own share | **29 mutants** — 0.8% of the run, ~18 s |
-
-      So the row's premise is answered twice over. "The run is hours long" is 30 minutes, and the
-      addition it wanted priced costs **~18 seconds** of it; the three remaining gates are 671, 367 and
-      333 lines (`plan_gate.py`, `skill_backend.py`, `loop_cap.py`) against `spend_cap.py`'s 309, so
-      they are the same order. The per-module figure is the
-      count of distinct `x_<function>__mutmut_<n>` symbols in the mutated copy of the file, which is a
-      proxy for what mutmut scheduled rather than a reading of its own ledger.
-
-      **The gate did not pass, and that half is now done.** It scored `killed / total` = 1612/3640
-      = **44.3%** against `MUTATION_SCORE_FLOOR: "72.0"` — not a regression: `total` counted the
-      1009 mutants **no selected test reaches**, because `pytest_add_cli_args_test_selection` is a
-      hand-kept list that was never widened as `source_paths` grew. Six test files were paired with
-      the modules they cover and the run repeated on 2026-09-22: **2260 killed of 3640 — 62.1%** —
-      with 866 survived, **446 reached by no selected test (12.3%)**, 68 timed out, 0 suspicious or
-      segfault, in **87 minutes at 0.70 mutations/second**. The floor is now 57.0 and there is a
-      second gate on the `no_tests` share at 16.0, both measured rather than chosen, and
-      `tests/test_mutation_workflow.py` pins the floor to the `source_paths` list, the test
-      selection and the two rate-moving knobs it was measured under — because a rate is only comparable while its population is, which is how 72.0 (825
-      mutants) outlived two widenings.
-
-      **The derived pairing guard the last version of this row asked for is disqualified by
-      measurement, and that is recorded here so nobody builds it.** The obvious rule — a declared
-      source path must have its module name or dotted path mentioned in some selected test file —
-      finds a hit for **all fifteen**, including `templates/resolve.py`, which had eight such
-      "hits" at 19% coverage. Mentioning a module is not covering it. What replaced it is the
-      `no_tests` ceiling above: the run's own answer to the same question, measured instead of
-      inferred.
-
-      **What is left is the three gates**, and adding them now costs two things rather than one:
-      the mutants themselves (`plan_gate.py` 671, `skill_backend.py` 367,
-      `loop_cap.py` 333, against `spend_cap.py`'s 309, so the same order as its ~18 s) *and* a
-      re-measurement
-      of the floor, because the population pin reds until the new list and the new number are
-      written together. Budget a 90-minute run for it, not a config edit; the job's own
-      `timeout-minutes` is 240 since 2026-09-22, raised because the first completed run was 87
-      minutes against a cap of 60. Anchors:
-      `pyproject.toml` `[tool.mutmut]`, `.github/workflows/mutants.yml`,
-      `tests/test_mutation_workflow.py`, `mutants/mutmut-cicd-stats.json`.
+      **Not done in that wave because the price is another full run, not a config edit.**
+      `tests/test_mutation_workflow.py` pins the floor to the *selection* as well as the population,
+      by design, so four more files red it and the floor has to be re-measured — ~80 minutes. The
+      run that would pay for it is one that has another reason to happen: the next `source_paths`
+      addition, or a `no_tests` share that stops having headroom (it is 11.7% against a ceiling of
+      16.0, so it has some). Bundling this with the next re-measurement costs nothing; taking it
+      alone costs an hour and a half for ~4 points on one module. Anchors: `pyproject.toml`
+      `[tool.mutmut].pytest_add_cli_args_test_selection`, `tests/test_mutation_workflow.py`.
 
 - [ ] **`Chemclaw3_ui` has no surface for the four `/skills/mine` routes, the six `/skills/org`
       ones, or the proposal queue** — [M], opened by
@@ -651,24 +597,6 @@ topic).
       `waiting.wait_async(gen, self.pgconn.socket, interval=interval)`; the file that would show it
       is psycopg's own `connection_async.py`. Anchors:
       `api/routes/ops.py::_probe_database`, `core/db.py::connection`.
-
-- [ ] **`retrieval_source_weights` has no upper bound, and the mix it produces is not a property of
-  the weight alone** — [S]. `core/config/retrieval.py`'s validator refuses non-finite and
-  non-positive weights and stops there. Driven over five legs at `retrieval_fusion_k=60`, counting
-  the retriever of each kept chunk: uniform weighting keeps `graph 2 / lexical 2 / share 2 /
-  vector 1 / warehouse 1` out of eight, `{"graph": 10}` keeps `graph 8` and nothing else, and at a
-  thirty-chunk cut it keeps `graph 22` against 2 from each other leg. That is the starvation
-  `D-2026-08-01-a-cap-that-starves-a-source` is about, reachable through a knob rather than a cap.
-
-  **Not reachable at the shipped numbers, which is why it is a row.** `retrieval_top_k` is 8 and
-  `gather_evidence_max_chunks` is 40, so five legs offer at most 40 candidates into a cut of 40 and
-  the merge cap never binds — no weight can starve anything until a deployment raises the leg count
-  or lowers the cap. And there is no ceiling to add: the validator's own docstring argues the point
-  ("a weight has no upper bound to clamp toward"), and measured, the damage is a function of
-  `weight x legs x cut` rather than of the weight, so a bound belongs on the surviving *mix* — a
-  per-source floor in the merge — not on the number a deployment writes down. Anchors:
-  `core/config/retrieval.py::_weights_are_positive`, `retrieval/hybrid.py::reciprocal_rank_fusion`,
-  `core/config/retrieval.py::gather_evidence_max_chunks`.
 
 ## 4 — Operating it
 

@@ -199,3 +199,81 @@ def restated_as_position(chunks: list[EvidenceChunk]) -> list[EvidenceChunk]:
         chunk.model_copy(update={"score": round(1.0 / (1 + position), 4)})
         for position, chunk in enumerate(chunks)
     ]
+
+
+def with_no_leg_cut_out(
+    fused: list[EvidenceChunk],
+    ranked_lists: list[list[EvidenceChunk]],
+    *,
+    limit: int,
+) -> list[EvidenceChunk]:
+    """Reorder a fused ranking so the first `limit` entries leave no contributing leg at zero.
+
+    **This is the RRF-side half of `D-2026-08-01-a-cap-that-starves-a-source`.** That decision made
+    truncation round-robin across sources so a flat cut could not take a whole leg to zero — and it
+    left the fused path alone, on the argument that RRF ranks by position and so cannot be
+    dominated the way a score-sorted union was. That argument stopped holding when
+    `retrieval_source_weights` arrived: a weight divides the rank, so a large enough one puts one
+    leg's whole list above every other leg's best hit, and the cut then takes only that leg. Driven
+    at the shipped `retrieval_fusion_k=60` over five legs, counting the retriever of each kept
+    chunk: uniform weighting keeps `graph 2 / lexical 2 / share 2 / vector 1 / warehouse 1` out of
+    eight, and `{"graph": 10}` keeps **`graph 8` and nothing else**.
+
+    **The floor is one chunk per leg, and it is a floor rather than a share on purpose.** One is
+    exactly what round-robin's first pass gives, so this says the same thing the ADR said, at the
+    one cut it did not reach. Anything larger is an allocation, and the shape of allocation the ADR
+    considered — proportional to what a leg returned — it rejected outright, for rewarding a source
+    that returns many weak hits. Measured on the same five legs, a floor of `limit // (2 x legs)`
+    moves cuts that were never starved (at 30: `graph 22` becomes 18; at 40: 30 becomes 24), which
+    is a second policy rather than a guard against the first one failing.
+
+    **Inert unless a leg is actually at zero**, by construction and measured: if every leg already
+    has a representative inside the first `limit`, every reserved position is already below it and
+    the reordering is the identity. Uniform weighting is byte-identical at cuts of 8, 30 and 40,
+    and so is `{"graph": 10}` at 30 and 40 — where nothing was starved. Only the cut of 8 moves,
+    to `graph 4 / lexical 1 / share 1 / vector 1 / warehouse 1`: the weight still buys graph half
+    the window, which is what a deployment that wrote `10` asked for.
+
+    **Leg membership comes from `ranked_lists`, never from `chunk.retriever`.** After the fusion's
+    `representative.setdefault`, a note found by three legs carries the name of whichever found it
+    *first*, so counting a leg's survivors by that field credits earlier legs and pins later ones
+    at zero — the error `fanout.record_kept_chunks` documents having measured as `graph 16,
+    lexical 0, vector 0`.
+
+    **The corpus path is not a second reason for that, though an earlier draft said it was.**
+    `_fuse_by_corpus` does relabel `retriever` to the corpus name — on a `model_copy`, returning
+    the originals by note id, which its own comment says is the point ("the chunk a caller receives
+    must still name the leg that found it"). So the relabelling never escapes that function and a
+    `retriever`-reading floor would not see a corpus name here. The reason above stands on its own;
+    this one was invented to reinforce it and contradicted the code eighty lines up.
+
+    **What it does not reach is the character budget.** `gather_evidence_max_chars` is a second cut
+    that spends down this same order, so a promoted chunk can still be cut by it. A promoted leg is
+    nonetheless strictly better off than before: it was *certainly* cut by the count cap and now
+    merely might be cut by the character one. That is the whole claim. An earlier draft argued it
+    from the promoted chunks landing "at their own fused position", which is not what happens —
+    measured on the case above they land at the *end* of the window, `lexical-0` moving from fused
+    index 10 to output index 4 and `warehouse-0` from 13 to 7. What is bounded here is the count
+    cap, which is the cut the row is about.
+    """
+    place_of = {chunk.source_note_id: index for index, chunk in enumerate(fused)}
+    reserved: set[int] = set()
+    for offered in ranked_lists:
+        places = sorted(
+            place_of[chunk.source_note_id] for chunk in offered if chunk.source_note_id in place_of
+        )
+        if places:
+            reserved.add(places[0])
+    # No `[:limit]` on `reserved`: with more legs than slots the fill loop below stops at `limit`
+    # and the output's first `limit` entries are the lowest reserved indices either way, so a slice
+    # here changed only the discarded tail. It read as if it decided which legs go without, and it
+    # never did — the fused ranking decides that, which is the right answer and was already the
+    # behaviour. Fuzzed both ways: 0 windows differ over 5,000 sweeps at every limit.
+    keep = set(reserved)
+    for index in range(len(fused)):
+        if len(keep) >= limit:
+            break
+        keep.add(index)
+    return [chunk for index, chunk in enumerate(fused) if index in keep] + [
+        chunk for index, chunk in enumerate(fused) if index not in keep
+    ]
