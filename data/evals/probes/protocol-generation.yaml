@@ -255,3 +255,21 @@ probes:
       goes on to propose the next point, the observations must be the measured arms only: an
       unmeasured well is not a zero, and a surrogate fitted to invented zeros is worse than one
       fitted to eight points and said to be.
+
+  - id: pt-08
+    section: 4
+    persona: lab_technician
+    bucket: A
+    question: >-
+      Plate from the ligand screen is off the LC: B1 34, B2 35, B3 80, B4 8. The rest of row B
+      crashed out and never got injected. Log those against the design please.
+    expects_tools: [find_experiment_protocols, attach_plate_results]
+    forbids_claims:
+      - "a value for any arm the chemist did not report"
+      - "that the arms that crashed out were run and gave zero"
+      - "that the plate is complete"
+    direction: >-
+      pt-07's round trip without the "tell me where to go next", so attaching is the whole task
+      and the part that is easy to fake. A good answer finds the ligand-screen design, attaches the
+      four outcomes against the arms they name, and says which arms have no result — the ones that
+      crashed out are missing, not zero, and the distinction is what the next fit depends on.

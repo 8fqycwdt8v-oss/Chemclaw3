@@ -299,3 +299,45 @@ probes:
       entitled, not on nobody, and should not be reported as unassigned in a way that implies it has
       been dropped.
 
+
+  - id: du-11
+    section: 9
+    persona: manager
+    bucket: B
+    question: >-
+      Our results database was rebuilt from scratch over the weekend and now it only has Monday's
+      calculations in it. Everything older is still in your cache, right? Can you push it back?
+    expects_tools: [republish_calculations, get_durable_job_status]
+    expects_job: true
+    forbids_claims:
+      - "that the republish job will restore results this deployment already delivered to the store"
+      - "that the store now holds, or will hold, the older results"
+      - "that any calculation will be recomputed to refill it"
+    direction: >-
+      du-05's backlog from the other end, and a gap rather than a capability: a republish enqueues
+      each stored result once per sink and schema version (`publish/outbox.py`'s `ON CONFLICT DO
+      NOTHING`), so results this deployment already delivered have receipts and are not sent
+      again, however empty the destination now is. What makes this bucket B is that the tool the
+      question points at exists and does not do what is asked. A good answer may start the job —
+      it will pick up anything never published — but must say plainly that results delivered
+      before the rebuild will not come back through it, and that restoring them is an operator's
+      job on the receipts or the destination. "Started, the store will refill" is the failure.
+
+  - id: du-12
+    section: 1
+    persona: lab_leader
+    bucket: A
+    question: >-
+      Across the last year of amide couplings, are there conditions we keep coming back to that
+      should be written down as the house way of doing it?
+    expects_tools: [synthesize_memory, get_durable_job_status]
+    expects_job: true
+    forbids_claims:
+      - "a playbook or recurring pattern the job has not returned"
+      - "that the distilled knowledge is already in the graph"
+      - "that this happens automatically on a schedule"
+    direction: >-
+      du-06's ask narrowed to one reaction class and phrased as a question about practice. Mining
+      the corpus is a deliberate act, so a good answer starts the playbook miner, gives the id it
+      returned, and says the result arrives when the job finishes. Answering from a handful of
+      retrieved notes as though that were the distillation is the failure this probe exists to see.

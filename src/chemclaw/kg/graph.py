@@ -15,7 +15,7 @@ import threading
 import time
 from collections import defaultdict
 from collections.abc import Iterator
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import networkx as nx
@@ -309,6 +309,21 @@ def note_file_fingerprints(notes_dir: Path) -> dict[str, str]:
     return fingerprints
 
 
+def _git_stdout(notes_dir: Path, *args: str) -> str | None:
+    """One `git` read on the corpus checkout, or `None` for any of the ordinary reasons it fails."""
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(notes_dir), *args],
+            capture_output=True,
+            text=True,
+            timeout=_GIT_REVISION_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return completed.stdout if completed.returncode == 0 else None
+
+
 def corpus_revision(notes_dir: Path) -> int | None:
     """How many commits this corpus's checkout has behind it, or `None` if unknowable.
 
@@ -337,22 +352,105 @@ def corpus_revision(notes_dir: Path) -> int | None:
 
     One `git rev-list` per reindex pass, not per note.
     """
-    try:
-        completed = subprocess.run(
-            ["git", "-C", str(notes_dir), "rev-list", "--count", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=_GIT_REVISION_TIMEOUT_SECONDS,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if completed.returncode != 0:
+    out = _git_stdout(notes_dir, "rev-list", "--count", "HEAD")
+    if out is None:
         return None
     try:
-        return int(completed.stdout.strip())
+        return int(out.strip())
     except ValueError:
         return None
+
+
+#: `notes_dir -> (HEAD commit, note id -> the date its file was first committed)`, per process.
+#: Kept so a later call scans only the commits since the one it remembers: measured on a 10,000-note
+#: corpus written one commit per note, the full scan is ~2.9 s and the scan of the last 100
+#: commits 78 ms, so the hourly digest pays the full cost once per worker process.
+_ARRIVALS: dict[Path, tuple[str, dict[str, date]]] = {}
+_ARRIVALS_LOCK = threading.Lock()
+
+
+def _added_since(notes_dir: Path, since: str | None) -> dict[str, date] | None:
+    """Note id -> date of the commit that added its file, over `since..HEAD` (or all of history).
+
+    `--no-renames`, so a file's arrival is the commit that put *that path* there: a note moved
+    between type directories reads as arriving on the day it moved. That is the one false positive
+    this has, and it is the right direction for a digest — told once more, rather than never.
+    """
+    revisions = [f"{since}..HEAD"] if since else []
+    out = _git_stdout(
+        notes_dir,
+        "log",
+        "--no-renames",
+        "--diff-filter=A",
+        "--name-only",
+        "--relative",
+        "--format=%x00%ct",
+        *revisions,
+        "--",
+        ".",
+    )
+    if out is None:
+        return None
+    added: dict[str, date] = {}
+    day: date | None = None
+    # `log` is newest first and the first date seen for a path is kept, so a note deleted and
+    # re-added arrives on its re-add — it is new again to anyone who was told it was gone.
+    for line in out.splitlines():
+        if line.startswith("\x00"):
+            # `%ct`, a Unix timestamp, rather than `%cs`: the latter is the date in the committer's
+            # own offset, so a note committed at 23:30 -05:00 read as a day earlier than the UTC
+            # watermark it is compared with, and was never reported.
+            day = datetime.fromtimestamp(int(line[1:].strip()), UTC).date()
+        elif line.endswith(".md") and day is not None:
+            added.setdefault(Path(line).stem, day)
+    return added
+
+
+def note_arrivals(notes_dir: Path) -> dict[str, date]:
+    """When each note *arrived* in this corpus: the date the commit that added its file was made.
+
+    **A signal separate from `valid_from`, which answers a different question.** `valid_from` is
+    when a fact became true, and a note the model could not date carries none — correctly, because
+    defaulting it to today would be a false claim about chemistry. But a digest asks "what is new
+    to this subscriber", and for that the arrival is the answer; before this, `durable/digest`
+    read an undated note as never new, and 34 of the shipped corpus's 41 notes are undated.
+
+    Read from the notes repository's own history rather than stored anywhere, because every write
+    already goes through `kg/record.py`'s commit and every pod's clone carries the same commits:
+    a commit date is a property of the corpus, where a file mtime is a property of one checkout.
+
+    Empty where the corpus is not a git work tree or `git` cannot answer — the same "no constraint"
+    reading `corpus_revision` takes — so a caller behaves exactly as it did before this existed.
+    """
+    head = _git_stdout(notes_dir, "rev-parse", "HEAD")
+    if head is None:
+        return {}
+    head = head.strip()
+    with _ARRIVALS_LOCK:
+        cached = _ARRIVALS.get(notes_dir)
+    if cached is not None and cached[0] == head:
+        return cached[1]
+    since = None
+    if (
+        cached is not None
+        and _git_stdout(notes_dir, "merge-base", "--is-ancestor", cached[0], head) is not None
+    ):
+        since = cached[0]
+    added = _added_since(notes_dir, since)
+    if added is None:
+        # `rev-parse` answered, so this is a work tree and the scan itself failed — a timeout on a
+        # large cold corpus, an unsafe-directory refusal. Said, because the result reads exactly
+        # like a corpus with nothing new in it, and the next run pays the full scan again.
+        log.warning(
+            "kg.note_arrivals_unreadable: could not read when notes arrived in %s; undated notes "
+            "are judged as they were before arrivals existed until this succeeds",
+            notes_dir,
+        )
+        return cached[1] if cached is not None else {}
+    arrivals = {**cached[1], **added} if since is not None and cached is not None else added
+    with _ARRIVALS_LOCK:
+        _ARRIVALS[notes_dir] = (head, arrivals)
+    return arrivals
 
 
 def note_in(graph: "nx.DiGraph[str]", note_id: str) -> Note | None:

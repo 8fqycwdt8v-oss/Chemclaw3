@@ -488,29 +488,6 @@ topic).
       above did for the patterns. Anchors: `tests/test_prose_contract.py::_model_facing_descriptions`,
       `src/chemclaw/durable/hypothesis_tournament.py`.
 
-- [ ] **An agent-recorded note the model could not date reaches no subscriber who has a
-      watermark** — [M], found 2026-09-15 in the review of the wave 2/4/7 merge.
-      `durable/digest._is_new` reads an absent `valid_from` as *open-ended* — true for as long as
-      anyone has known — and therefore as not news, which is correct about the field and wrong
-      about the question a digest asks. Re-measured on the shipped corpus 2026-09-22: **34 of 41
-      notes carry no `valid_from`**, across twelve types (`compound` 9, `playbook` 5, `campaign` 3,
-      `interaction` 3, `job-result` 3, `report` 2, `failure-mode` 2, `bo-candidate` 2,
-      `optimization-campaign` 2, `experiment-proposal` 1, `analytical-method` 1,
-      `hypothesis-field` 1). The row previously said 33 of 40 across ten, omitting the last two
-      types, and its own per-type numbers summed to 32 rather than to its stated total. Two producers are closed —
-      `retrieval.harness.report_note(drafted_on=…)` and
-      `durable.job_record.note_with_run_provenance(ran_on=…)`, both cases where validity and
-      arrival are the same day by construction. `agent/graph_tools.py:554`
-      (`record_knowledge_note`) is not: the model may legitimately not know when a fact became
-      true, and defaulting `valid_from` to today would trade a silence for a false claim about
-      chemistry. **The real fix is an arrival signal separate from `valid_from`**, which the
-      subscription watermark cannot express today: `agent/subscriptions.py:68` bounds
-      `last_seen_note_ids` to one day of matches *on purpose* (DARK-7), and an undated-id set
-      grows with the corpus instead. The candidate worth measuring is the notes repository's own
-      git history — one `git log --diff-filter=A --name-only` over `knowledge/` gives every note's
-      add-date in one subprocess, cacheable behind the same corpus fingerprint `load_notes` already
-      uses. Measure that scan on a 10k-note corpus before building it.
-
 - [ ] **A `pending_requests` row whose run was terminated, or lost with its worker, has no
       collector** — [M]. What is left of the `pending_requests` settle row after
       `D-2026-09-13-a-cancellation-arriving-before-the-timer-leaves-the-row-waiting`, which closed
@@ -745,36 +722,17 @@ only holds defects can only ever restore the system to what it already intended 
       argument contract still reaches the right tool is a `make live-ab` question, not a reading
       question.
 
-- [ ] **The probed surface has a long thin tail: about a third of tools rest on one probe** — [S],
-      measured 2026-09-15 (it read 45, measured 2026-09-14 and stale inside its own merge range —
-      `feba79b` added 36 probes in it, 28 of them `process-chemistry.yaml`), and it replaces the concentration row rather than continuing it.
-
-      **The concentration is gone and the row's headline was stale.** `gather_evidence` is in
-      **141 of 342** probes — **41.2%** re-measured 2026-09-22, where this row said 139 of 333 and
-      41.7%, against the 50% (116/232) the headline was written from and
-      the 60% bound `tests/test_probe_coverage.py` already holds. Widened: 55% of tool-naming probes
-      touch any retrieval tool and only **14%** touch nothing but retrieval, so "the corpus mostly
-      measures one retrieval path" does not reproduce.
-
-      What the same measurement found instead: **agent-callable tools named by exactly one probe**
-      — roughly a third of the surface resting on a single phrasing, where a probe the model happens
-      to answer reads as coverage. **The number is deliberately not written here**, because two
-      careful re-measurements on 2026-09-22 disagreed: 49 of 124 with none unprobed, against 47 of
-      124 with two, depending on whether `load_profiles()` had run and how exemptions were counted.
-      A figure that moves with the measurer's setup belongs in the measurement, not in the row —
-      derive it from `tests/test_probe_coverage.py::_probes` and `::_expected_tools` with
-      `load_profiles()` called first, which is what the two runs differed on. The row's own 39 of
-      114 was from 2026-09-15 and is stale in both terms.
-
-      It is thin and it is **not hollow**: none of those single-probe tools rest on a bucket-C
-      probe, which `test_no_tools_only_coverage_is_a_question_the_surface_cannot_answer` now holds,
-      so a tool cannot arrive with coverage that never calls it.
-
-      Deliberately **not** a ratchet on the count. A bound on "how many tools have one probe" blocks
-      every new tool until somebody writes it a second question, which taxes adding capability
-      rather than bounding risk. What is open is ordinary corpus work: second questions for the
-      tools that matter most, chosen by what a deployment actually calls rather than by the list's
-      order.
+- [ ] **About a third of tools still rest on one probe, and they are the compute and job tail**
+      — [S], narrowed 2026-09-24. Derived from `tests/test_probe_coverage.py::_probes` and
+      `::_expected_tools` with `load_profiles()` called first (two earlier measurements disagreed
+      on exactly that): 47 of 124 tools had one probe. The seven whose effect persists past the turn
+      — preferences, watches, skill proposals, plate observations, the results store, the knowledge
+      graph, a saved workflow — now have a second phrasing (ws-21..24, pt-08, du-11, du-12). What
+      remains is the semiempirical and prediction surface (`run_*`, `compute_*`, `enumerate_*`,
+      `predict_*`), where a missed call costs a re-run rather than a state change. It is **not** a
+      ratchet on the count, for the reason it never was: that taxes adding a tool rather than
+      bounding risk. Choose the next second questions by what a deployment calls —
+      `audit_events` per tool name — once one exists to read.
 
 - [ ] **`deep-research` has no index behind it** — [M]. `agent/research_tools.py::gather_evidence`
       sweeps the knowledge graph, the ELN, the mounted document share and the fingerprint store —
