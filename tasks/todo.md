@@ -223,6 +223,55 @@ is 1); the memory half never has been.
       `Pss` is a system-wide proportional share that understates a cgroup's charge. Watch for
       cgroup v2, which names it `memory.peak` rather than `memory.max_usage_in_bytes`.
 
+## Handoff — state at the end of this session
+
+**Branch `claude/backlog-implementation-waves-ax8llz`, two commits ahead of `origin/main`, tree
+clean, nothing unpushed.** Waves 8-12 are merged (PRs #437-#441). Wave 13 is half done.
+
+### Done — Row A, committed as `6ae9bf6e`
+
+`core/db.same_server` reads `system_identifier` off a borrow and caches it per endpoint; a split
+the measurement disproves collapses to 0. ADR
+`D-2026-09-23-the-server-says-which-server-it-is`, both ledger rows written, `BACKLOG.md` row
+deleted (41 -> 40 open). Four tests in `tests/test_fleet_pools.py`, each driven red against its own
+regression. `make lint type` green; `tests/test_fleet_pools.py` and `tests/test_decision_log.py`
+green. **The full serial `make cov` has NOT been run since Row A landed.**
+
+### Left to do, in order
+
+1. **Start the infrastructure first.** The container restarts lose it, and it is down right now:
+   `sudo -n dockerd &` then `make up` and `make db-migrate`. Without it ~216 Postgres-backed tests
+   skip and still print green — and Row A's own tests are among the ones that need a live server.
+2. **Row B — nothing bounds what a turn costs the front door's memory** (`BACKLOG.md`, the row
+   anchored on `deploy/helm/chemclaw/values.yaml` `resources.service`). Not started. Drive a turn
+   against the mock LLM (`chemclaw.cli.mock_llm` on loopback, no credential needed), express the
+   peak as MiB per admitted permit, and land it as a third term in
+   `tests/test_deploy_chart.py::test_a_pod_that_starts_a_parse_forkserver_fits_the_memory_it_declares`.
+   **Sample the cgroup's peak, not `Pss`** — the row corrected itself on this and says why. Watch
+   for cgroup v2, which names it `memory.peak`, not `memory.max_usage_in_bytes`.
+   `CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS` is 12 and the idle floor is 431.9 MiB.
+3. **Full serial `make cov`** (~34 min with infra up; it is the gate CI runs, and `make test
+   PYTEST_WORKERS=4` is a local loop only — a failure under it is re-run serially before believed).
+4. **Fresh-context subagent review** before the PR. Every wave this session found real defects
+   this way, including three in Wave 12 and one in Row A's own first attempt.
+5. **PR, merge on green CI, delete the branch, restart it from the new `origin/main`, start Wave
+   14.** Squash-merge is the convention on `main`. CI's `check` job runs `make cov`; expect the
+   push-triggered suite's `check` to show `cancelled` when opening the PR starts a fresh suite —
+   that is concurrency supersession, not a failure, so confirm the *newest* suite is green.
+
+### If Row B turns out to be blocked or not worth it
+
+Say so and close the wave with Row A alone rather than padding it. The next best actionable rows,
+from a triage of all 41: **the probe-coverage tail** (`tests/test_probe_coverage.py`, [S], no
+infrastructure, the row names both the shape and the anti-shape — deliberately *not* a ratchet on
+the count) and **an arrival signal for undated notes** (`durable/digest._is_new`, ~1-2 days).
+
+Do not re-open these: the SSH host alias, the IPv6 guard arm, `/readyz`, the worker probe port, the
+connector readiness sweep, the event-loop defang, the `/scratch/` cap, `_CALIBRATED`. All eight are
+argued non-fixes carrying a live trigger, and `_CALIBRATED` has zero current defect by its own
+measurement. Eighteen more rows are blocked on a gateway with credit, an IPv6 host, a companion
+repo, or an upstream fix.
+
 ## Review
 
-Pending.
+Pending Row B.
