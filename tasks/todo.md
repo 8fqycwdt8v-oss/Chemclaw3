@@ -223,6 +223,32 @@ is 1); the memory half never has been.
       `Pss` is a system-wide proportional share that understates a cgroup's charge. Watch for
       cgroup v2, which names it `memory.peak` rather than `memory.max_usage_in_bytes`.
 
+### Row B — what measuring it found (2026-09-24, in progress)
+
+Method: the real front door (`uvicorn chemclaw.api.app:create_app --factory`, the live lane's exact
+argv and environment) started inside its own cgroup-v1 memory cgroup; every other lane process
+outside it. Anon = `memory.stat total_rss` sampled at 10 ms (v1's `max_usage_in_bytes` folds in page
+cache, which here is 229 MiB of mostly inactive file). Turns driven with `live_storm.storm` against
+the mock LLM.
+
+- Idle, no turn: 314.6 anon, reproduced four times to 0.2 MiB (Pss 432 is anon + file share).
+- **Warm-up, once**: the first ~50 turns at c=1 add +65 to +67 MiB anon, flat thereafter (3 runs).
+- **Concurrency high-water**: stepping c=1 -> 4 -> 8 -> 12 adds ~5-6 MiB per permit, retained
+  (allocator high-water), +56 MiB at 12. c=16 and c=24 add ~0 and refuse the excess — the
+  admission cap bounds it. `c-parallel` and `f-call-flood` add nothing once warm.
+- **Thread length is the real term.** A turn loads the whole checkpointed thread (no window;
+  compaction trims only the request). 12 sessions x 100 turns of 95,000-char messages (one em dash
+  each) drove the front door alone to **1,268 MiB anon**, linear in stored thread length, past the
+  1 GiB limit at ~turn 75 — ~7.6 bytes of pod per stored char per permit.
+- The only bound on a thread is `budget_max_turns_per_session` (100), counted **in-process** in an
+  LRU — a restart or another replica resets it.
+- The existing inequality already fails with the short-turn terms alone: 432 + 91 + 70 (warm-up) +
+  ~60 (12-permit high-water) + 448 (two parses at 160 MiB x 1.4) = ~1,100 against 1,024; and warm
+  idle (~653) sits over the 640Mi request.
+
+Also found and fixed on the way (`f8e52cc7`): the background worker could not boot at all —
+`durable/memory_jobs.py` imported `regex` outside the sandbox pass-through (since #434).
+
 ## Handoff — state at the end of this session
 
 **Branch `claude/backlog-implementation-waves-ax8llz`, two commits ahead of `origin/main`, tree
