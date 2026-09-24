@@ -125,6 +125,13 @@ def test_cores_workers_import_no_bundle() -> None:
     assert not heavy, f"core's worker loaded a bundle-only dependency: {heavy}"
 
 
+#: The queue the registry probes below register on. Not `background`: the registry is
+#: process-global, so a probe registered there stays in `registered_workflows("background")` for
+#: every test that runs afterwards — including the sandbox check, which would then try to validate
+#: a class that was never a workflow.
+_PROBE_QUEUE = "registry-probe"
+
+
 def _probe(name: str, module: str) -> type:
     """A stand-in for a decorated workflow class; the registry reads only these two."""
     return type(name, (), {"__module__": module, "__doc__": "probe"})
@@ -133,12 +140,12 @@ def _probe(name: str, module: str) -> type:
 def test_a_name_claimed_by_two_modules_is_rejected() -> None:
     """Two definitions sharing a Temporal name means the worker silently drops one."""
     first = _probe("RegistryCollisionProbe", "chemclaw.durable.probe_one")
-    durable_workflow("background")(first)
+    durable_workflow(_PROBE_QUEUE)(first)
     with pytest.raises(ValueError, match="claimed by both"):
-        durable_workflow("background")(
+        durable_workflow(_PROBE_QUEUE)(
             _probe("RegistryCollisionProbe", "chemclaw.durable.probe_two")
         )
-    assert first in registered_workflows("background")
+    assert first in registered_workflows(_PROBE_QUEUE)
 
 
 def test_re_registering_the_same_definition_is_allowed() -> None:
@@ -149,9 +156,9 @@ def test_re_registering_the_same_definition_is_allowed() -> None:
     die on its first piece of work.
     """
     module = "chemclaw.durable.reimport_probe"
-    durable_workflow("background")(_probe("RegistryReimportProbe", module))
-    durable_workflow("background")(_probe("RegistryReimportProbe", module))  # must not raise
-    names = [item.__name__ for item in registered_workflows("background")]
+    durable_workflow(_PROBE_QUEUE)(_probe("RegistryReimportProbe", module))
+    durable_workflow(_PROBE_QUEUE)(_probe("RegistryReimportProbe", module))  # must not raise
+    names = [item.__name__ for item in registered_workflows(_PROBE_QUEUE)]
     assert names.count("RegistryReimportProbe") == 1
 
 
@@ -163,6 +170,71 @@ def test_describe_names_what_a_worker_serves() -> None:
     line = describe(bundle_queue("calc"))
     assert "workflows=[CalcJobWorkflow]" in line
     assert "run_xtb_calculation" in line
+
+
+def _every_served_workflow() -> list[tuple[str, type]]:
+    """Every workflow every shipped worker serves, as `(queue, class)`, derived from the imports.
+
+    Core's worker and each bundle that ships a `worker` module, imported for their registration
+    side effect — the same imports the processes themselves perform — so a new bundle worker is
+    covered the day it exists.
+    """
+    import importlib
+    import importlib.util
+
+    import chemclaw.durable.background_worker  # noqa: F401 — registration
+    from chemclaw.connectors.queues import bundle_queue
+    from chemclaw.connectors.registry import discovered
+
+    queues = ["background"]
+    for bundle in sorted(discovered()):
+        module = f"chemclaw.connectors.{bundle}.worker"
+        if importlib.util.find_spec(module) is not None:
+            importlib.import_module(module)
+            queues.append(bundle_queue(bundle))
+    return [(queue, cls) for queue in queues for cls in registered_workflows(queue)]
+
+
+def test_every_served_workflow_passes_the_sandbox_its_worker_validates_it_in() -> None:
+    """A workflow module whose import graph trips the sandbox takes its whole worker down at boot.
+
+    `Worker(...)` validates every workflow it is handed in Temporal's import sandbox before it
+    polls anything, and one refusal raises out of the constructor. So one import placed outside
+    `workflow.unsafe.imports_passed_through()` is not a defect in one workflow: it is every job on
+    that queue. Driven: `durable/memory_jobs.py` imported `ingest.eln.warehouse.expr` unpassed,
+    which imports `regex`, whose module body calls `locale.getpreferredencoding` — refused inside
+    the sandbox — and `python -m chemclaw.durable.background_worker` exited on startup with
+    `Failed validating workflow PublishNoteWorkflow`. Nothing in the suite constructs the real
+    worker, because doing so needs a broker, so it was green throughout.
+
+    This runs the same validation the constructor runs, with the runner it defaults to and no
+    broker: `SandboxedWorkflowRunner.prepare_workflow` is the call `Worker.__init__` makes per
+    workflow. Inside an event loop because the sandbox's validation instantiates the workflow.
+    """
+    from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner
+
+    served = _every_served_workflow()
+    assert served, "no worker registered a workflow — the imports above registered nothing"
+
+    async def validate() -> list[str]:
+        runner = SandboxedWorkflowRunner()
+        refused = []
+        for queue, cls in served:
+            definition = workflow._Definition.must_from_class(cls)
+            try:
+                runner.prepare_workflow(definition)
+            # Every refusal is collected rather than the first, so one run names them all.
+            except Exception as exc:
+                cause = exc.__cause__ or exc
+                refused.append(f"{queue}/{definition.name}: {type(cause).__name__}: {cause}")
+        return refused
+
+    refused = asyncio.run(validate())
+    assert not refused, (
+        "these workflows fail Temporal's sandbox validation, so the worker serving them refuses to "
+        "start at all — pass the offending first-party import through "
+        "`workflow.unsafe.imports_passed_through()`:\n" + "\n".join(refused)
+    )
 
 
 def test_every_workflow_on_the_job_path_can_actually_fail() -> None:
