@@ -43,7 +43,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.core.config import settings
     from chemclaw.durable.registry import durable_activity, durable_workflow
     from chemclaw.kg.conflicts import conflict_index
-    from chemclaw.kg.graph import load_notes
+    from chemclaw.kg.graph import load_notes, note_arrivals
     from chemclaw.kg.note import Note
     from chemclaw.kg.search import query_terms, term_coverage
 
@@ -111,6 +111,8 @@ async def collect_digests() -> list[DigestItem]:
     once. Freshness is judged on the note's
     own `valid_from` (populated from the experiment date, gap KNW-1) — the honest "when did this
     become knowledge" signal, rather than a file mtime that a git sync would reset on every pull.
+    A note with no `valid_from` is judged on when its file was committed to the corpus instead
+    (`kg.graph.note_arrivals`), which every clone shares for the same reason an mtime is not.
 
     Notes are read through `settings.knowledge_path`, like every other reader. This was
     `Path(settings.knowledge_dir)` raw, which resolves against the process CWD (`/app` in the image)
@@ -154,6 +156,9 @@ def _match_corpus(subscriptions: Sequence[Subscription]) -> list[DigestItem]:
     # current-evidence sweep, and reporting it as disagreeing with its own replacement is noise
     # rather than news.
     disputes = conflict_index(settings.knowledge_path, date.today())
+    # When each note reached the corpus, for the notes that carry no `valid_from` — see `_is_new`.
+    # One `git log` per run, incremental after the first in this process.
+    arrivals = note_arrivals(settings.knowledge_path)
     digests: list[DigestItem] = []
     for subscription in subscriptions:
         # Tokenized once per subscription, not once per note: the query does not vary across the
@@ -164,7 +169,8 @@ def _match_corpus(subscriptions: Sequence[Subscription]) -> list[DigestItem]:
         matches = [
             note.id
             for note in notes
-            if _matches(note, subscription, terms) and _is_new(note, subscription)
+            if _matches(note, subscription, terms)
+            and _is_new(note, subscription, arrivals.get(note.id))
         ]
         if matches:
             digests.append(
@@ -240,7 +246,7 @@ def _matches(note: Note, subscription: Subscription, terms: Sequence[str]) -> bo
     return bool(terms) and term_coverage(note, terms) == len(terms)
 
 
-def _is_new(note: Note, subscription: Subscription) -> bool:
+def _is_new(note: Note, subscription: Subscription, arrived: date | None = None) -> bool:
     """Whether a note became knowledge after this subscriber was last told.
 
     `>=` rather than `>` on the date, because a note's `valid_from` is a *date* and the digest
@@ -262,9 +268,9 @@ def _is_new(note: Note, subscription: Subscription) -> bool:
 
     What `None` means is not a gap to be patched around: `Note.is_current` reads it as
     *open-ended* — true for as long as anyone has known — so a note carrying it is by definition
-    not something that became knowledge after a subscriber was last told. The branch now says
-    that, and the honest consequence is stated rather than hidden: a genuinely new note that omits
-    its date reaches only a subscriber who has never been told anything.
+    not something that became knowledge after a subscriber was last told — about the *fact*. Whether
+    the *note* is new to this subscriber is a different question, and the last paragraph answers
+    it.
 
     **How much that consequence was worth was asserted here and never measured, and the number is
     the reason this paragraph was rewritten.** It used to read "a distilled rule is the one note
@@ -277,24 +283,25 @@ def _is_new(note: Note, subscription: Subscription) -> bool:
     already had one digest would never again be told that a report was drafted or that a connector
     job wrote its result.
 
-    The producers are what close that, not this branch: `retrieval.harness.report_note` takes
-    `drafted_on` and `durable.job_record.note_with_run_provenance` takes `ran_on`, each dating a
-    note whose validity date and arrival date are the same day by construction. What stays open is
-    `agent.graph_tools.record_knowledge_note`, where the model may legitimately omit the date — a
-    note about chemistry the model cannot date is genuinely open-ended, and defaulting it to today
-    would trade this silence for a false claim about when something became true. That residual is a
-    `docs/planning/BACKLOG.md` row with its measurement, because closing it needs an *arrival*
-    signal separate from `valid_from`, which this subscription's bounded watermark cannot express.
+    The producers closed part of that: `retrieval.harness.report_note` takes `drafted_on` and
+    `durable.job_record.note_with_run_provenance` takes `ran_on`, each dating a note whose validity
+    date and arrival date are the same day by construction. The rest is `arrived` — the date the
+    note's file was committed to the corpus (`kg.graph.note_arrivals`) — which stands in for a
+    missing `valid_from` and for nothing else. `agent.graph_tools.record_knowledge_note` is the
+    case it exists for: the model may legitimately not know when a fact became true, and
+    defaulting `valid_from` to today would trade this silence for a false claim about chemistry,
+    where the arrival is simply true. With neither date — a corpus that is not a git work tree —
+    the branch is what it was: not new.
     """
-    valid_from = note.valid_from
+    when = note.valid_from or arrived
     if subscription.last_seen_at is None:
         # Nobody has been told anything yet, so everything matching is news.
         return True
-    if valid_from is None:
+    if when is None:
         return False
-    if valid_from > subscription.last_seen_at.date():
+    if when > subscription.last_seen_at.date():
         return True
-    if valid_from < subscription.last_seen_at.date():
+    if when < subscription.last_seen_at.date():
         return False
     return note.id not in subscription.last_seen_note_ids
 

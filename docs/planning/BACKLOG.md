@@ -488,29 +488,6 @@ topic).
       above did for the patterns. Anchors: `tests/test_prose_contract.py::_model_facing_descriptions`,
       `src/chemclaw/durable/hypothesis_tournament.py`.
 
-- [ ] **An agent-recorded note the model could not date reaches no subscriber who has a
-      watermark** — [M], found 2026-09-15 in the review of the wave 2/4/7 merge.
-      `durable/digest._is_new` reads an absent `valid_from` as *open-ended* — true for as long as
-      anyone has known — and therefore as not news, which is correct about the field and wrong
-      about the question a digest asks. Re-measured on the shipped corpus 2026-09-22: **34 of 41
-      notes carry no `valid_from`**, across twelve types (`compound` 9, `playbook` 5, `campaign` 3,
-      `interaction` 3, `job-result` 3, `report` 2, `failure-mode` 2, `bo-candidate` 2,
-      `optimization-campaign` 2, `experiment-proposal` 1, `analytical-method` 1,
-      `hypothesis-field` 1). The row previously said 33 of 40 across ten, omitting the last two
-      types, and its own per-type numbers summed to 32 rather than to its stated total. Two producers are closed —
-      `retrieval.harness.report_note(drafted_on=…)` and
-      `durable.job_record.note_with_run_provenance(ran_on=…)`, both cases where validity and
-      arrival are the same day by construction. `agent/graph_tools.py:554`
-      (`record_knowledge_note`) is not: the model may legitimately not know when a fact became
-      true, and defaulting `valid_from` to today would trade a silence for a false claim about
-      chemistry. **The real fix is an arrival signal separate from `valid_from`**, which the
-      subscription watermark cannot express today: `agent/subscriptions.py:68` bounds
-      `last_seen_note_ids` to one day of matches *on purpose* (DARK-7), and an undated-id set
-      grows with the corpus instead. The candidate worth measuring is the notes repository's own
-      git history — one `git log --diff-filter=A --name-only` over `knowledge/` gives every note's
-      add-date in one subprocess, cacheable behind the same corpus fingerprint `load_notes` already
-      uses. Measure that scan on a 10k-note corpus before building it.
-
 - [ ] **A `pending_requests` row whose run was terminated, or lost with its worker, has no
       collector** — [M]. What is left of the `pending_requests` settle row after
       `D-2026-09-13-a-cancellation-arriving-before-the-timer-leaves-the-row-waiting`, which closed
