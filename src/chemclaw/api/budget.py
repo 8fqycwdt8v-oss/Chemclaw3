@@ -391,8 +391,25 @@ class BudgetTracker:
         task.add_done_callback(_PENDING.discard)
 
 
+class ThreadTooLong(BudgetExceeded):
+    """A turn refused because its session's stored conversation is at `session_max_thread_bytes`.
+
+    A `BudgetExceeded` so every handler of a spent session budget answers it the same way, and its
+    own class so it is counted apart: the token budget's counter drives an alert whose remedy —
+    read `chemclaw_tokens_total`, raise the window — does nothing for a conversation that is simply
+    too long to load.
+    """
+
+
+def refused_metric(exc: BudgetExceeded) -> str:
+    """The counter a refused turn is booked on, by which budget refused it."""
+    if isinstance(exc, ThreadTooLong):
+        return "chemclaw_turns_refused_thread_size_total"
+    return "chemclaw_turns_refused_budget_total"
+
+
 async def check_thread_size(session_id: str) -> None:
-    """Raise `BudgetExceeded` if this session's stored conversation is at its size ceiling.
+    """Raise `ThreadTooLong` if this session's stored conversation is at its size ceiling.
 
     **A session budget in the unit that kills the pod.** Every turn loads the whole thread, so what
     an admitted turn costs the front door grows with the conversation it continues — measured at
@@ -402,9 +419,10 @@ async def check_thread_size(session_id: str) -> None:
     reads the stored thread itself, which every replica sees.
 
     Not behind `budget_enabled`, because it is a memory bound rather than a cost one — a deployment
-    that meters no spend still runs twelve permits in one container. Called after the admission
-    permit, beside `BudgetTracker.check`, so the read is one of at most
-    `service_max_concurrent_turns` and a refused turn never loads what it was refused for.
+    that meters no spend still runs twelve permits in one container. Called twice, like
+    `BudgetTracker.check`: at request entry, so a spent thread gets a clean 429 before it takes a
+    claim or queues for a permit, and after the permit, which is the check that binds and the one
+    that guarantees a refused turn never loads what it was refused for.
 
     A database that cannot answer admits the turn: the load that follows reads the same database,
     so refusing here would add an outage rather than prevent one.
@@ -425,7 +443,7 @@ async def check_thread_size(session_id: str) -> None:
         )
         return
     if stored >= cap:
-        raise BudgetExceeded(
+        raise ThreadTooLong(
             f"This conversation has reached its size limit ({stored / 1024**2:.1f} MiB stored, "
             f"against {cap / 1024**2:.1f} MiB). Start a new session to continue — this one's "
             "transcript stays readable."

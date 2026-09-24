@@ -57,6 +57,17 @@ async def test_the_stored_size_is_the_newest_blob_a_turn_would_load(
         first = await stored_thread_bytes(thread)
         await graph.ainvoke({"messages": [HumanMessage("y" * 50_000)]}, config)
         second = await stored_thread_bytes(thread)
+        # The newest checkpoint's blob gone — the torn state a sweep racing a turn leaves — must
+        # read as nothing, never as the older copy the prune kept beside it.
+        async with (await checkpointer_module._checkpoint_pool()).connection() as conn:
+            await conn.execute(
+                "DELETE FROM checkpoint_blobs b USING (SELECT checkpoint FROM checkpoints"
+                " WHERE thread_id = %(t)s AND checkpoint_ns = '' ORDER BY checkpoint_id DESC"
+                " LIMIT 1) AS newest WHERE b.thread_id = %(t)s AND b.channel = 'messages'"
+                " AND b.version = newest.checkpoint -> 'channel_versions' ->> 'messages'",
+                {"t": thread},
+            )
+        torn = await stored_thread_bytes(thread)
     finally:
         await close_checkpointer()
 
@@ -64,6 +75,9 @@ async def test_the_stored_size_is_the_newest_blob_a_turn_would_load(
     assert 100_000 <= second < 120_000, (
         f"two 50,000-char messages stored as {second} bytes — the read is not the newest blob, or "
         "it is summing the superseded copies the prune keeps beside it"
+    )
+    assert torn == 0, (
+        f"a newest checkpoint with no blob read as {torn} bytes — an older copy's size"
     )
 
 
@@ -118,15 +132,8 @@ async def test_a_size_that_cannot_be_read_admits_the_turn_and_is_counted(
     assert METRICS.value("chemclaw_degraded_total") == before + 1
 
 
-def test_the_front_door_refuses_an_oversize_thread_as_a_spent_session_budget(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """On the open stream, `budget_exhausted` and not retryable — and the agent never runs.
-
-    `budget_exhausted` rather than a new code because it already means "this session was refused
-    before the turn started and has no answer with it", which is exactly this, and a surface that
-    switches on it already stops offering a retry that would fail identically.
-    """
+def _recording_client(monkeypatch: pytest.MonkeyPatch, sizes: list[int]) -> tuple[Any, list[str]]:
+    """A front door whose thread-size reads answer `sizes` in turn, and the messages it answered."""
     from tests.test_service import _client, _FakeAgent
 
     asked: list[str] = []
@@ -138,18 +145,57 @@ def test_the_front_door_refuses_an_oversize_thread_as_a_spent_session_budget(
             asked.append(message)
             yield "answered anyway"
 
-    async def _huge(thread_id: str) -> int:
-        return 10**9
+    reads = iter(sizes)
 
-    monkeypatch.setattr(checkpointer_module, "stored_thread_bytes", _huge)
-    agent = _Recording()
-    with _client(agent) as client:
+    async def _stored(thread_id: str) -> int:
+        return next(reads)
+
+    monkeypatch.setattr(checkpointer_module, "stored_thread_bytes", _stored)
+    monkeypatch.setattr(settings, "session_max_thread_bytes", 1000)
+    return _client(_Recording()), asked
+
+
+def test_a_spent_thread_is_refused_at_the_door_before_it_claims_or_queues(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A clean 429 at request entry, counted apart from the token budget, and nothing runs.
+
+    Before the entry check it took the durable claim and could wait for a permit — and be shed
+    `at_capacity`, which names the wrong limit — before the stream said anything true.
+    """
+    client, asked = _recording_client(monkeypatch, [10**9])
+    before = METRICS.value("chemclaw_turns_refused_thread_size_total")
+    budget_before = METRICS.value("chemclaw_turns_refused_budget_total")
+    with client:
+        session_id = client.post("/sessions").json()["session_id"]
+        res = client.post(f"/sessions/{session_id}/messages", json={"message": "hi"})
+    assert res.status_code == 429
+    assert "Start a new session" in res.text
+    assert asked == [], "the refused turn still ran"
+    assert METRICS.value("chemclaw_turns_refused_thread_size_total") == before + 1
+    assert METRICS.value("chemclaw_turns_refused_budget_total") == budget_before, (
+        "a thread-size refusal was booked on the token budget's counter, whose alert tells an "
+        "operator to raise a window that does not clear it"
+    )
+
+
+def test_the_check_under_the_permit_is_the_one_that_binds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A thread that crosses its ceiling while its turn queued is refused on the stream.
+
+    `budget_exhausted` and not retryable — the code already means "this session was refused before
+    the turn started and has no answer with it", so a surface stops offering a retry that would
+    fail identically — and the agent never runs, so the thread is never loaded.
+    """
+    client, asked = _recording_client(monkeypatch, [0, 10**9])
+    with client:
         session_id = client.post("/sessions").json()["session_id"]
         with client.stream(
             "POST", f"/sessions/{session_id}/messages", json={"message": "hi"}
         ) as res:
-            body = "".join(res.iter_lines())
-    assert '"code":"budget_exhausted"' in body.replace(" ", ""), body
-    assert '"retryable":false' in body.replace(" ", ""), body
-    assert "Start a new session" in body
+            body = "".join(res.iter_lines()).replace(" ", "")
+    assert '"code":"budget_exhausted"' in body, body
+    assert '"retryable":false' in body, body
+    assert "Startanewsession" in body
     assert asked == [], "the refused turn still ran"

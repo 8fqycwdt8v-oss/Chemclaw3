@@ -68,15 +68,19 @@ the warm front door (665) sat over its 640Mi request from its first busy minute.
 
 **1. A conversation is bounded in the unit that kills the pod: `session_max_thread_bytes`.** The
 raw size of the `messages` blob the thread's newest root checkpoint points at
-(`agent/checkpointer.stored_thread_bytes`), checked after the admission permit beside the session
-budget (`api/budget.check_thread_size`). At or over it the turn is refused on the open stream as
-`budget_exhausted`, not retryable, telling the chemist to start a new session — the code already
-means "this session was refused before the turn started", so no surface needs to learn a new one.
+(`agent/checkpointer.stored_thread_bytes`), checked where the session budget is checked and twice
+for the same reason (`api/budget.check_thread_size`): at request entry for a clean 429 before the
+turn claims or queues, and after the admission permit, which is the check that binds. Refused on
+the stream it is `budget_exhausted`, not retryable, telling the chemist to start a new session —
+the code already means "this session was refused before the turn started", so no surface needs to
+learn a new one. It is counted on its own `chemclaw_turns_refused_thread_size_total`, not the
+budget's counter, whose alert names a token-window remedy that does nothing here.
 
 - **Read off the stored thread**, so every replica and every restart sees the same number. That is
   the property the turn caps lack and the reason they cannot stand in for this.
 - **The newest copy, not a sum**: `checkpoint_retain_per_thread` keeps superseded copies beside it,
-  and no turn loads those.
+  and no turn loads those. The newest checkpoint is chosen before its blob is joined, so a torn
+  thread reads 0 rather than an older copy's size.
 - **`octet_length` over the `bytea`** reads the TOAST header, so the check is an index probe, not a
   detoast of the thread it is measuring — and it runs on the checkpointer's pool directly, never
   through the saver's process-wide lock.
@@ -116,9 +120,9 @@ either declaration, fails there.
   new cap. Declined for now because state is non-destructive by decision
   (`D-2026-08-11-a-policy-nobody-can-see-is-a-policy-nobody-has`) and LangGraph restores a
   checkpoint whole; a partial load is a change to what the checkpointer *is*, and wants its own
-  wave. **Revisit when:** a chemist's real thread reaches `session_max_thread_bytes` — visible as
-  `chemclaw_turns_refused_budget_total` moving on sessions whose turn count is under
-  `budget_max_turns_per_session` — or when LangGraph ships a windowed `aget_tuple`.
+  wave. **Revisit when:** `chemclaw_turns_refused_thread_size_total` moves in a real deployment
+  — a chemist's conversation reached the ceiling — or when LangGraph ships a windowed
+  `aget_tuple`.
 - **Resize for short turns only and leave the long thread as a row.** Rejected: the OOM was
   reproduced end to end, under the shipped limit, from twelve legal conversations.
 - **Lower the parse budget instead of raising the limit.** Rejected: it would refuse uploads that
@@ -135,13 +139,23 @@ either declaration, fails there.
 - **Retained high-water sits between request and limit.** A front door that has served long
   threads keeps what they cost, up to ~1 GiB, above its 768Mi request — the normal burstable
   shape, and the one that makes it an early eviction candidate under node pressure.
-- Not measured: a background worker taking turns through `template_activities.run_agent_step`,
-  which loads threads the same way. Its request and limit are four times the front door's and it
-  runs no permits, so it is not the pod this ADR re-derives.
+- **What the bound does not count, stated rather than implied.** It reads the `messages` channel
+  only. The deepagents `/scratch/` `files` channel is also turn state and is loaded with it, and
+  no measurement here wrote to it. And the check runs *before* a turn, so a permit's peak is the
+  ceiling plus that turn's own growth — one message of up to `service_max_message_chars` and
+  whatever its tool results add. The inequality carries 99 MiB of headroom and the constants are
+  rounded up; neither is a proof that covers those two.
+- **Reads outside any permit.** `GET /sessions/{id}/plan` and plan approval
+  (`agent/plan_state.py`) load the whole checkpoint without an admission permit or this check.
+  They are read-only and not concurrent per chemist the way turns are, and bounding them is a
+  separate change.
+- A template step (`durable/template_activities.run_agent_step`) runs with no checkpointer and no
+  thread, so the worker loads no conversation and needs no term.
 
 ## What keeps it true
 
 - `tests/test_deploy_chart.py::test_a_pod_that_starts_a_parse_forkserver_fits_the_memory_it_declares`
 - `tests/test_thread_size.py::test_the_stored_size_is_the_newest_blob_a_turn_would_load`
-- `tests/test_thread_size.py::test_the_front_door_refuses_an_oversize_thread_as_a_spent_session_budget`
+- `tests/test_thread_size.py::test_a_spent_thread_is_refused_at_the_door_before_it_claims_or_queues`
+- `tests/test_thread_size.py::test_the_check_under_the_permit_is_the_one_that_binds`
 - `tests/test_thread_size.py::test_it_binds_with_budgets_off_and_is_disabled_only_by_its_own_zero`

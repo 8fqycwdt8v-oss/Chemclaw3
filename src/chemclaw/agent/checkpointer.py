@@ -328,17 +328,19 @@ SELECT (SELECT count(*) FROM pruned_checkpoints),
 #: The raw size of the `messages` blob the thread's newest root checkpoint points at — the payload
 #: a turn on this thread deserializes before it does anything else. `octet_length` over a `bytea`
 #: reads the TOAST header rather than the value, so this costs an index probe, not a detoast of
-#: the thread it is measuring. It reads upstream's table shape the way `_PRUNE_SUPERSEDED` does, and
+#: the thread it is measuring. The newest checkpoint is chosen *before* the blob is joined, so a
+#: blob row missing under it reads as 0 rather than as an older copy's size. It reads upstream's
+#: table shape the way `_PRUNE_SUPERSEDED` does, and
 #: is held the same way: `tests/test_thread_size.py` measures it off real saver writes.
 _THREAD_BYTES = """
 SELECT octet_length(b.blob)
-  FROM checkpoints c
-  JOIN checkpoint_blobs b
-    ON b.thread_id = c.thread_id AND b.checkpoint_ns = c.checkpoint_ns
-   AND b.channel = 'messages' AND b.version = c.checkpoint -> 'channel_versions' ->> 'messages'
- WHERE c.thread_id = %(thread)s AND c.checkpoint_ns = ''
- ORDER BY c.checkpoint_id DESC
- LIMIT 1
+  FROM (SELECT checkpoint FROM checkpoints
+         WHERE thread_id = %(thread)s AND checkpoint_ns = ''
+         ORDER BY checkpoint_id DESC
+         LIMIT 1) AS newest
+  LEFT JOIN checkpoint_blobs b
+    ON b.thread_id = %(thread)s AND b.checkpoint_ns = ''
+   AND b.channel = 'messages' AND b.version = newest.checkpoint -> 'channel_versions' ->> 'messages'
 """
 
 
@@ -364,7 +366,7 @@ async def stored_thread_bytes(thread_id: str) -> int:
     async with pool.connection() as conn, conn.cursor(row_factory=tuple_row) as cur:
         await cur.execute(_THREAD_BYTES, {"thread": thread_id})
         row = await cur.fetchone()
-    return int(row[0]) if row else 0
+    return int(row[0] or 0) if row else 0
 
 
 def checkpoint_thread_delete_statements(match: str) -> tuple[tuple[str, str], ...]:

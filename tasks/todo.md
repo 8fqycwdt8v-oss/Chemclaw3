@@ -223,7 +223,7 @@ is 1); the memory half never has been.
       `Pss` is a system-wide proportional share that understates a cgroup's charge. Watch for
       cgroup v2, which names it `memory.peak` rather than `memory.max_usage_in_bytes`.
 
-### Row B — what measuring it found (2026-09-24, in progress)
+### Row B — what measuring it found (2026-09-24)
 
 Method: the real front door (`uvicorn chemclaw.api.app:create_app --factory`, the live lane's exact
 argv and environment) started inside its own cgroup-v1 memory cgroup; every other lane process
@@ -245,6 +245,13 @@ the mock LLM.
 - The existing inequality already fails with the short-turn terms alone: 432 + 91 + 70 (warm-up) +
   ~60 (12-permit high-water) + 448 (two parses at 160 MiB x 1.4) = ~1,100 against 1,024; and warm
   idle (~653) sits over the 640Mi request.
+
+**Decided with the user**: cap the thread durably and raise the chart. Shipped in `31ec6bd6`:
+`session_max_thread_bytes` = 1.5 MiB (newest `messages` blob, `octet_length`), refused as
+`budget_exhausted`; `resources.service` 768Mi / 1536Mi; three constants in
+`test_a_pod_that_starts_a_parse_forkserver_fits_the_memory_it_declares`
+(`POD_BYTES_PER_THREAD_BYTE = 18`, the worst astral ratio). Driven under a 1,536 MiB cgroup: refused
+at the ceiling, flat memory, `oom_kill 0`. ADR `D-2026-09-24-a-turn-costs-the-thread-it-loads`.
 
 Also found and fixed on the way (`f8e52cc7`): the background worker could not boot at all —
 `durable/memory_jobs.py` imported `regex` outside the sandbox pass-through (since #434).
@@ -300,4 +307,5 @@ repo, or an upstream fix.
 
 ## Review
 
-Pending Row B.
+Wave 13: Row A (Postgres identity), Row B (turn memory -> thread cap + resize), and the
+background-worker boot fix found while starting the lane. Pending: full `make cov`, fresh review.

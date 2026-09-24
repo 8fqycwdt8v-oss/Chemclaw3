@@ -6258,12 +6258,15 @@ def _front_door_turn_mib(config: dict[str, Any]) -> tuple[float, float]:
     """
     from chemclaw.core.config import settings
 
-    permits = int(
-        config.get("CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS") or settings.service_max_concurrent_turns
+    def resolved(key: str, default: int) -> int:
+        """The release's value where it states one — a YAML `0` included — else the code's."""
+        stated = config.get(key)
+        return default if stated in (None, "") else int(stated)
+
+    permits = resolved(
+        "CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS", settings.service_max_concurrent_turns
     )
-    thread_bytes = int(
-        config.get("CHEMCLAW_SESSION_MAX_THREAD_BYTES") or settings.session_max_thread_bytes
-    )
+    thread_bytes = resolved("CHEMCLAW_SESSION_MAX_THREAD_BYTES", settings.session_max_thread_bytes)
     assert thread_bytes, (
         "session_max_thread_bytes is 0, so a turn may load a thread of any size and the front "
         "door's peak has no bound this file can state"
