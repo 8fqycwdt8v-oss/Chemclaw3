@@ -327,6 +327,19 @@ class ServiceSettings(BaseSettings):
     budget_max_tokens_per_session: int = Field(default=2_000_000, ge=0)
     budget_max_turns_per_user: int = Field(default=1000, ge=0)
     budget_max_tokens_per_user: int = Field(default=20_000_000, ge=0)
+    # The largest conversation a turn may be admitted onto, in bytes of the stored `messages` blob
+    # (`agent/checkpointer.stored_thread_bytes`). **A memory bound, not a cost one**, so it binds
+    # whether or not `budget_enabled` is on: every turn loads its whole thread — compaction trims
+    # only what is sent — so the front door's working set per admitted turn grows with this number
+    # times the pod's bytes per stored byte, and twelve permits on long threads OOM-killed a 1Gi
+    # front door at turn 76 with nothing else in flight
+    # (`D-2026-09-24-a-turn-costs-the-thread-it-loads`). The turn caps above cannot stand in for
+    # it: they count in process, so a restart or a second replica hands a thread a fresh 100.
+    #
+    # Derived downwards from the pod rather than chosen: `tests/test_deploy_chart.py` holds
+    # `resources.service`'s limit against `service_max_concurrent_turns` permits each loading a
+    # thread of this size, and raising it fails there. 0 disables it.
+    session_max_thread_bytes: int = Field(default=1536 * 1024, ge=0)
     # Cap on distinct users the in-process budget tracker keeps counters for. The tracker lives
     # for the pod's lifetime, so without a bound its per-user map grows with every principal
     # ever seen (a slow leak); past the cap the least-recently-active user's counters are

@@ -527,25 +527,6 @@ topic).
       table that is in `retention._NOT_PRUNED` on purpose. `durable/awaiting.py`,
       `durable/pending_store.py`.
 
-- [ ] **Nothing bounds what a turn costs the front door's memory** — [M], opened 2026-09-18 by
-      `D-2026-09-18-a-second-process-in-the-pod-is-memory-the-chart-never-declared`, which sized
-      `resources.service` against a resident set with **no turn in flight**: 431.9 MiB measured on
-      the real uvicorn front door with its lifespan run and `/healthz` served, no agent graph
-      compiled, no connector session open, no checkpointer write. The memory request is now derived
-      against that floor plus the parse path, and `CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS` is 12 —
-      so the one part of the pod that scales with load is the part no number covers. The CPU half
-      *is* measured (0.581 s of CPU over 8.32 s of wall clock per turn, which is why
-      `requests.cpu` is 1); the memory half has never been. What it wants is the same shape as the
-      parse measurement: drive a turn against the mock LLM and express the peak as MiB per admitted
-      permit so `test_a_pod_that_starts_a_parse_forkserver_fits_the_memory_it_declares` can take a
-      third term. **Sample a memory cgroup's `memory.max_usage_in_bytes`, not `Pss`** — this row
-      said `Pss` until `D-2026-09-19-a-ceiling-on-the-archive-is-not-a-ceiling-on-the-parse`
-      measured what that is: a system-wide proportional share that understates a cgroup's charge —
-      driven, one unchanged process read 10.3% less `Pss` while six unrelated siblings mapped the
-      same shared objects, and got it back when they exited, where `Rss` moved 0.016%. Anchors:
-      `deploy/helm/chemclaw/values.yaml` `resources.service`,
-      `tests/test_deploy_chart.py::test_a_pod_that_starts_a_parse_forkserver_fits_the_memory_it_declares`.
-
 - [ ] **`/readyz` cannot bound a Postgres that accepts the socket and stops answering** — [S],
       found 2026-09-05, upstream in origin and recorded here because `api/routes/ops.py` claimed
       otherwise. `asyncio.wait_for` bounds acquisition; on a warm pooled connection psycopg's

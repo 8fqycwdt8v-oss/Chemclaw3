@@ -146,7 +146,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from psycopg import AsyncConnection
-from psycopg.rows import DictRow
+from psycopg.rows import DictRow, tuple_row
 from psycopg_pool import AsyncConnectionPool
 
 from chemclaw.agent.session_store import _session_dsn
@@ -323,6 +323,48 @@ SELECT (SELECT count(*) FROM pruned_checkpoints),
        (SELECT count(*) FROM pruned_writes),
        (SELECT count(*) FROM pruned_blobs)
 """
+
+
+#: The raw size of the `messages` blob the thread's newest root checkpoint points at — the payload
+#: a turn on this thread deserializes before it does anything else. `octet_length` over a `bytea`
+#: reads the TOAST header rather than the value, so this costs an index probe, not a detoast of
+#: the thread it is measuring. It reads upstream's table shape the way `_PRUNE_SUPERSEDED` does, and
+#: is held the same way: `tests/test_thread_size.py` measures it off real saver writes.
+_THREAD_BYTES = """
+SELECT octet_length(b.blob)
+  FROM checkpoints c
+  JOIN checkpoint_blobs b
+    ON b.thread_id = c.thread_id AND b.checkpoint_ns = c.checkpoint_ns
+   AND b.channel = 'messages' AND b.version = c.checkpoint -> 'channel_versions' ->> 'messages'
+ WHERE c.thread_id = %(thread)s AND c.checkpoint_ns = ''
+ ORDER BY c.checkpoint_id DESC
+ LIMIT 1
+"""
+
+
+async def stored_thread_bytes(thread_id: str) -> int:
+    """How many bytes of conversation a turn on `thread_id` would load, or 0 if it loads none.
+
+    **Every turn loads the whole thread.** Compaction trims what is *sent* and leaves state intact
+    (`agent/compaction.py`), so the front door's working set per admitted turn grows with the
+    stored thread, which nothing else bounds durably — `budget_max_turns_per_session` is counted
+    in process and reset by a restart or a second replica. This is what
+    `api/budget.check_thread_size` holds against `session_max_thread_bytes`.
+
+    Read on this module's pool directly rather than through the saver, because the saver's
+    `_cursor` takes the process-wide lock every checkpointer statement already queues behind, and
+    an admission check has no business in that queue.
+
+    0 when the deployment keeps no durable turn state (`_turn_checkpointer` returns no saver
+    there, so there is nothing to load) and when the thread has no checkpoint yet.
+    """
+    if settings.session_store != "postgres":
+        return 0
+    pool = await _checkpoint_pool()
+    async with pool.connection() as conn, conn.cursor(row_factory=tuple_row) as cur:
+        await cur.execute(_THREAD_BYTES, {"thread": thread_id})
+        row = await cur.fetchone()
+    return int(row[0]) if row else 0
 
 
 def checkpoint_thread_delete_statements(match: str) -> tuple[tuple[str, str], ...]:

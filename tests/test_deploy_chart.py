@@ -6134,6 +6134,40 @@ FORKSERVER_RSS_CEILING_MIB = 120
 #: gate saying the coefficient needs re-measuring.
 PARSE_MIB_PER_PARSE_BUDGET_MIB = 1.4
 
+#: What the front door keeps after its first turns, in MiB, over the no-turn floor
+#: `FRONT_DOOR_RESIDENT_MIB` was measured at — the compiled graph's modules, the lazy imports and
+#: the caches a turn fills once.
+#:
+#: Measured as the memory cgroup's anonymous charge (`memory.stat total_rss`, sampled at 10 ms,
+#: because cgroup v1's `max_usage_in_bytes` folds in page cache) on the real uvicorn front door
+#: against the mock LLM (`D-2026-09-24-a-turn-costs-the-thread-it-loads`): +65 to +67 MiB over the
+#: first 50-100 turns at one at a time, in five runs, and flat to within 1 MiB for the next 250.
+#: Rounded up.
+TURN_WARM_MIB = 70
+
+#: What each admitted turn permit adds to the front door, in MiB, on a short thread.
+#:
+#: Stepping concurrency 1 -> 4 -> 8 -> 12 on a warm process added 5.1-6.1 MiB per permit, retained
+#: afterwards as allocator high-water, and 16 or 24 offered turns added nothing more — the
+#: admission cap is what bounds it, which is why it is multiplied by that cap below. Six parallel
+#: tool calls and a forty-call flood per turn added nothing over it once warm. Rounded up.
+TURN_MIB_PER_PERMIT = 6
+
+#: What a turn costs the front door per byte of the thread it continues, in bytes of pod per byte
+#: of the stored `messages` blob (`agent/checkpointer.stored_thread_bytes`).
+#:
+#: **Every turn loads its whole thread** — compaction trims what is sent, not what is held — so
+#: this is a per-permit term in the size of the conversation, and before
+#: `session_max_thread_bytes` nothing bounded that size: twelve threads of 95,000-character
+#: messages drove the front door alone past 1Gi and it was OOM-killed at turn 76. The coefficient
+#: is width-dependent the way the parse one is — CPython holds a `str` at its widest code point
+#: while the blob stays UTF-8 — so it was measured at the widest, one U+1F9EA per 95,000-character
+#: message, and it is noisy: the ratio read 13.4-17.6 across one run's rounds and 11.7 at the end
+#: of another, which reached the same 847 MiB a thread later — allocator high-water moves by
+#: ~50 MiB between runs. One em dash per message read 7.2; a thread of short messages about 1.
+#: This is the largest ratio measured at or under the ceiling, rounded up.
+POD_BYTES_PER_THREAD_BYTE = 18
+
 
 def test_the_parse_coefficient_still_describes_the_largest_document_a_binding_may_declare() -> None:
     """The coefficient's second term, which nothing used to declare.
@@ -6211,6 +6245,33 @@ def _parse_peak_mib(concurrent: int, budget_mib: float) -> float:
     return concurrent * PARSE_MIB_PER_PARSE_BUDGET_MIB * budget_mib
 
 
+def _front_door_turn_mib(config: dict[str, Any]) -> tuple[float, float]:
+    """What the front door's turns hold, in MiB: warm at the admission cap, and at its peak.
+
+    The first is what a front door that has served a busy minute keeps with nothing in flight —
+    the warm-up plus every permit's high-water — and belongs under the *request*. The second adds
+    each permit loading a thread at `session_max_thread_bytes`, and belongs under the *limit*.
+
+    Both inputs resolved the way a container sees them, the lesson `_parse_budget_mib` records:
+    the release's shared `config` first, the code default second. A deployment raising the permit
+    count or the thread ceiling for the whole release has to move an inequality here.
+    """
+    from chemclaw.core.config import settings
+
+    permits = int(
+        config.get("CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS") or settings.service_max_concurrent_turns
+    )
+    thread_bytes = int(
+        config.get("CHEMCLAW_SESSION_MAX_THREAD_BYTES") or settings.session_max_thread_bytes
+    )
+    assert thread_bytes, (
+        "session_max_thread_bytes is 0, so a turn may load a thread of any size and the front "
+        "door's peak has no bound this file can state"
+    )
+    warm = TURN_WARM_MIB + permits * TURN_MIB_PER_PERMIT
+    return warm, warm + permits * POD_BYTES_PER_THREAD_BYTE * thread_bytes / 1024**2
+
+
 def test_a_pod_that_starts_a_parse_forkserver_fits_the_memory_it_declares() -> None:
     """Both components that parse documents are sized against the second process they start.
 
@@ -6258,13 +6319,21 @@ def test_a_pod_that_starts_a_parse_forkserver_fits_the_memory_it_declares() -> N
     # budget while moving no inequality here.
     fleet_wide = (values.get("config") or {}).get(_PARSE_BUDGET_KEY)
 
-    for label, key, idle, concurrent, budget_mib in (
+    # **The turns are the third term, and the one that scales with load**
+    # (`D-2026-09-24-a-turn-costs-the-thread-it-loads`). The two above were measured with no turn
+    # in flight; a front door that has served turns keeps their warm-up and high-water, and one
+    # at its admission cap holds a thread per permit on top. The worker takes no front-door turns.
+    turns_warm, turns_peak = _front_door_turn_mib(values.get("config") or {})
+
+    for label, key, idle, concurrent, budget_mib, turns_idle, turns in (
         (
             "front door",
             "service",
-            front_door,
+            front_door + turns_warm,
             settings.attachment_max_concurrent_parses,
             _parse_budget_mib(fleet_wide),
+            turns_warm,
+            turns_peak,
         ),
         # **The worker's count is its activity cap, and it used to be 1** — justified by
         # `ingest/documents/sync.py` awaiting each `_read_and_parse` in turn, which bounds one
@@ -6279,22 +6348,26 @@ def test_a_pod_that_starts_a_parse_forkserver_fits_the_memory_it_declares() -> N
             worker,
             settings.worker_max_concurrent_activities,
             _parse_budget_mib(worker_override if worker_override is not None else fleet_wide),
+            0.0,
+            0.0,
         ),
     ):
         request = _declared_mib(resources[key], "requests")
         limit = _declared_mib(resources[key], "limits")
         assert idle <= request, (
-            f"the {label} holds {idle} MiB with its parse forkserver warm and nothing in flight, "
+            f"the {label} holds {idle:.0f} MiB with its parse forkserver warm and nothing in "
+            f"flight ({turns_idle:.0f} of it kept from turns already served), "
             f"against a memory request of {request} MiB. A pod over its request while idle is "
             "scheduled onto a node that does not have the memory it uses, and is the first thing "
             "evicted when that node comes under pressure"
         )
-        needed = idle + _parse_peak_mib(concurrent, budget_mib)
+        needed = idle - turns_idle + turns + _parse_peak_mib(concurrent, budget_mib)
         assert needed <= limit, (
             f"{concurrent} concurrent parse(s) at the {budget_mib:.0f} MiB allocation ceiling this "
-            f"component declares need {needed:.0f} MiB in the {label} — the resident set and the "
-            f"warm forkserver included — against the {limit} MiB its container declares. That is "
-            "an OOMKill of the whole pod, not a refused upload"
+            f"component declares need {needed:.0f} MiB in the {label} — the resident set, the "
+            f"warm forkserver and {turns:.0f} MiB of turns at the admission cap included — against "
+            f"the {limit} MiB its container declares. That is an OOMKill of the whole pod, not a "
+            "refused upload"
         )
 
 

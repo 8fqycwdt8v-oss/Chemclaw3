@@ -866,8 +866,17 @@ resources:
     # it, because no bound here would break if it did. So the face pays the extra request for
     # memory it does not use, on one optional replica whose own resident set was tight against
     # 512Mi anyway, which is why the key is not split.
-    requests: { cpu: "1", memory: "640Mi" }
-    limits: { cpu: "2", memory: "1Gi" }
+    #
+    # **And a turn is memory too, which is what moved both sizes again**
+    # (`D-2026-09-24-a-turn-costs-the-thread-it-loads`). The sizes above were derived with no turn
+    # in flight; a front door that has served turns keeps their warm-up and each permit's
+    # high-water, so it sat over the old request after its first busy minute, and every turn loads
+    # its whole conversation, so twelve permits on long threads OOM-killed it under the old limit
+    # with no upload anywhere. `CHEMCLAW_SESSION_MAX_THREAD_BYTES` bounds the conversation a turn
+    # may load, and the same test holds the request against the warm front door and the limit
+    # against every permit at that ceiling plus the parses.
+    requests: { cpu: "1", memory: "768Mi" }
+    limits: { cpu: "2", memory: "1536Mi" }
   # The default for every worker Deployment, core's and a bundle's. A bundle that needs different
   # sizing overrides it with its own `resources:` under `connectors.<name>` rather than growing a
   # key here, which is what keeps a capability's operational shape inside its own entry.
