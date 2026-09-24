@@ -510,6 +510,17 @@ async def test_the_two_pool_ceiling_gauges_partition_this_process_by_server(
         settings.postgres_dsn, host="127.0.0.1" if host == "localhost" else "localhost"
     )
     monkeypatch.setattr(settings, "session_store_dsn", split)
+    # **And measured as two**, because the loopback pair is one server and `db.same_server` now
+    # asks it (`D-2026-09-23-the-server-says-which-server-it-is`): left to learn, the first borrow
+    # reads one `system_identifier` for both spellings and the split correctly collapses to 0 —
+    # the very case that ADR fixed. Seeding two identities before the first borrow is what makes
+    # this pair stand in for two real servers, which is the topology under test here.
+    from chemclaw.core.config import pg_endpoint
+
+    for dsn, identity in ((settings.postgres_dsn, 1), (split, 2)):
+        endpoint = pg_endpoint(dsn)
+        assert endpoint is not None
+        monkeypatch.setitem(db._SERVER_IDENTITY, endpoint, identity)
     async with db.pooling():
         async with db.connection(settings.postgres_dsn):
             pass
