@@ -68,6 +68,10 @@ _EXPECTED_SUBSYSTEMS = {
     # the behaviour `D-2026-09-15-a-budget-a-restart-resets-is-not-a-quota` removed. Counted so
     # a deployment can see it has silently gone back to it.
     "budget_window",
+    # `api/budget.check_thread_size`, whose read of a thread's stored size admits the turn when the
+    # database cannot answer — the load that follows reads the same database. Silent otherwise: the
+    # memory bound it enforces would simply stop binding.
+    "thread_size",
     "cost_ledger",
     # A retrieval source that could not be asked. Added when `fanout._sweep`'s swallow was moved
     # onto `degraded()` — it had been a bare `logger.exception` plus a private counter, so the one

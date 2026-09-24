@@ -391,6 +391,65 @@ class BudgetTracker:
         task.add_done_callback(_PENDING.discard)
 
 
+class ThreadTooLong(BudgetExceeded):
+    """A turn refused because its session's stored conversation is at `session_max_thread_bytes`.
+
+    A `BudgetExceeded` so every handler of a spent session budget answers it the same way, and its
+    own class so it is counted apart: the token budget's counter drives an alert whose remedy —
+    read `chemclaw_tokens_total`, raise the window — does nothing for a conversation that is simply
+    too long to load.
+    """
+
+
+def refused_metric(exc: BudgetExceeded) -> str:
+    """The counter a refused turn is booked on, by which budget refused it."""
+    if isinstance(exc, ThreadTooLong):
+        return "chemclaw_turns_refused_thread_size_total"
+    return "chemclaw_turns_refused_budget_total"
+
+
+async def check_thread_size(session_id: str) -> None:
+    """Raise `ThreadTooLong` if this session's stored conversation is at its size ceiling.
+
+    **A session budget in the unit that kills the pod.** Every turn loads the whole thread, so what
+    an admitted turn costs the front door grows with the conversation it continues — measured at
+    up to 18 bytes of pod per stored byte, and twelve permits on 10 MB threads OOM-killed a 1Gi
+    front door (`D-2026-09-24-a-turn-costs-the-thread-it-loads`). The turn caps cannot bound that:
+    they count in process, so a restart or another replica starts a thread's count again. This
+    reads the stored thread itself, which every replica sees.
+
+    Not behind `budget_enabled`, because it is a memory bound rather than a cost one — a deployment
+    that meters no spend still runs twelve permits in one container. Called twice, like
+    `BudgetTracker.check`: at request entry, so a spent thread gets a clean 429 before it takes a
+    claim or queues for a permit, and after the permit, which is the check that binds and the one
+    that guarantees a refused turn never loads what it was refused for.
+
+    A database that cannot answer admits the turn: the load that follows reads the same database,
+    so refusing here would add an outage rather than prevent one.
+    """
+    cap = settings.session_max_thread_bytes
+    if not cap:
+        return
+    from chemclaw.agent.checkpointer import stored_thread_bytes
+
+    try:
+        stored = await stored_thread_bytes(session_id)
+    except Exception:
+        degraded(
+            logger,
+            "thread_size",
+            "could not read the stored size of session %s; admitting its turn unbounded",
+            session_id,
+        )
+        return
+    if stored >= cap:
+        raise ThreadTooLong(
+            f"This conversation has reached its size limit ({stored / 1024**2:.1f} MiB stored, "
+            f"against {cap / 1024**2:.1f} MiB). Start a new session to continue — this one's "
+            "transcript stays readable."
+        )
+
+
 async def drain_pending(timeout: float = 5.0) -> None:
     """Wait for the in-flight durable bookings, so an orderly shutdown does not drop them.
 

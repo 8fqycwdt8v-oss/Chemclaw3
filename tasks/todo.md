@@ -75,98 +75,15 @@ it was about, and now a fixture that allocated one object and reported 51,200.
 
 ## Review
 
-Pending the gate and the subagent review.
+Wave 13 shipped three things: Row A (Postgres identity), Row B (turn memory -> a durable thread-size
+cap, `resources.service` 768Mi/1536Mi), and a background worker that could not boot at all
+(`regex` imported outside the sandbox pass-through since #434) — found only because the lane was
+started for Row B's measurement. A fresh-context review found seven issues in Row B's first cut
+(wrong counter/alert, no entry refusal, SQL reading an older copy, YAML-0 fallback, a false ADR
+claim, unstated gaps); all fixed. The full suite also caught that Row A had broken
+`test_db_pool`'s split-gauge test, whose premise was the defect Row A fixed.
 
----
+Gate: serial `make cov` 10,627 passed, 11 skipped (3 need `promtool`), 89.93% coverage.
 
-# Wave 12 — the backstop covers the gates, and a knob that starves is bounded where it starves
-
-Two rows, both actionable (several neighbours in §4 are argued non-fixes with live triggers —
-the SSH alias, the IPv4-mapped arm, `/readyz`'s re-wait, the worker probe port, the connector
-sweep — and stay as they are).
-
-## Row A — three first-party refusal gates are still outside the weekly mutation backstop [S]
-
-`agent/plan_gate.py` (671 lines), `agent/skill_backend.py` (367) and `agent/loop_cap.py` (333)
-join `agent/spend_cap.py` (309) in `[tool.mutmut].source_paths`. The row's own premise is already
-answered: the run is 87 minutes, not hours, and `spend_cap.py`'s share was ~18 s.
-
-- [x] Measured, selection-alone against selection-plus-file: `plan_gate.py` **66% -> 87%**,
-      `skill_backend.py` **51% -> 90%**, `loop_cap.py` **88% -> 100%**. Two of the three would have
-      reported a large block of mutants as survivors purely from being unpaired.
-- [x] Three source paths and their three test files added in one edit; the population pin reds
-      until the floor is re-measured, which is what it is for.
-- [x] Re-measured. **4,057 mutants, 2,555 killed — 63.0%** — 986 survived, 473 no-test (11.7%),
-      43 timed out, 0 suspicious or segfault, 82m40s at 0.76/s. Both rates improved (62.1% ->
-      63.0%, 12.3% -> 11.7%). **The floor stays at 57.0**: the rule stated in the workflow is five
-      points under the observation, which gives 58.0, and keeping 57.0 is the more conservative of
-      the two rather than a one-point ratchet on a nine-tenths-of-a-point move. The number not
-      moving is a result, not an omission — the pin made re-deriving it compulsory.
-- [x] **The row's own question answered exactly.** +417 mutants and the wall clock went *down*,
-      87 -> 82m40s. The addition is smaller than the run-to-run variance, so at this size it is
-      not the term that decides the run's length — the opposite of "the run is hours long".
-
-## Row B — `retrieval_source_weights` has no upper bound [S]
-
-The row names its own fix and the reason a ceiling is the wrong shape: measured, the damage is a
-function of `weight x legs x cut` rather than of the weight, and the validator's docstring already
-argues "a weight has no upper bound to clamp toward". So the bound belongs on the surviving *mix*
-— a per-source floor in `retrieval/hybrid.py::reciprocal_rank_fusion` — not on the number a
-deployment writes down.
-
-- [x] Reproduced exactly: `graph 8 / 0 / 0 / 0 / 0` at a cut of 8, `graph 22` against 2 each at 30.
-- [x] Floor designed, and the mix measured rather than asserted. Nine cases swept (three
-      weightings x three cuts) and **exactly one moves** — the starved one. A floor of
-      `limit // (2 x legs)` was measured too and rejected: it acts on cuts that were never starved.
-- [x] `D-2026-09-23-the-bound-belongs-on-the-mix-not-on-the-weight` amends
-      `D-2026-08-01-a-cap-that-starves-a-source` by supplying the half it did not reach — the
-      ceiling the row asked for is **declined**, because measured the damage is `weight x legs x
-      cut` rather than a property of the weight.
-
-## Review
-
-**Both rows closed and deleted from `BACKLOG.md`**; one new row opened by the review, so 42 -> 41.
-
-**The fresh-context review found ten things and every factual one was reproduced before acting.**
-Three mattered:
-
-- **The test named for the central design choice did not discriminate it.** A floor reading
-  `chunk.retriever` instead of the legs' offered lists passed all 131 retrieval tests. The fixture
-  was wrong, not the argument: on it, the naive reading reserves *nothing* for the two legs it
-  cannot see, so it is also the identity there. Rewritten around a fixture where the naive floor
-  **evicts** `n3` and `n1` from a three-slot window and substitutes the two worst-ranked notes in
-  the fusion — a worse answer than no floor at all. The `retriever`-reading mutant is now caught by
-  exactly the test named for it, and two other wrong implementations are caught by three others.
-- **The ADR dropped the reachability qualifier the row had measured.** `retrieval_mode` ships
-  `graph`, so this code is never called by default; and in `hybrid`, every leg is cut to
-  `retrieval_top_k` (8) before fusion, so five legs offer at most 40 into a cut of 40 and the count
-  cap cannot bind. The guard ships **inert**, arming only when a deployment moves off those
-  numbers. That is a fine thing to ship and a bad thing to leave unsaid — the ADR read as if a live
-  starvation had been fixed.
-- **A justification invented to reinforce a true argument contradicted the code.** Four documents
-  said the offered-list read is what makes the floor work under `corpora`, "where `_fuse_by_corpus`
-  relabels `retriever` to the corpus name". It relabels on a `model_copy` and returns the
-  originals — its own comment says that is the point. The real argument never needed the second one.
-
-And `loop_cap.py`'s lift is **88% -> 100%**, not the 97% first written: 97% is what
-`tests/test_loop_cap_floor.py` scores *alone*, missing lines `tests/test_runner.py` already covers.
-Two measurements of different things reported as one before-and-after — which is the fourth time
-this session the instrument, not the logic, was the defect.
-
-**What the wave turned on, twice, was refusing to read a count off the wrong field.** Row B's floor
-would have been wrong if it counted a leg's survivors by `chunk.retriever` — the fusion keeps the
-first finder, so a note three legs found credits one and pins two at zero, which is the error
-`fanout.record_kept_chunks` already had measured and recorded. The tests count by what each leg
-*offered* for the same reason, and one of them constructs the case where the naive reading sees two
-legs starved that are not.
-
-**And a test that asserts inertness is satisfied by a change that does nothing.** Four of the five
-new tests red when `with_no_leg_cut_out` is replaced by the identity; the fifth did not, because its
-whole content is "the floor does not move this". It was rewritten to assert the naive reading *would*
-have moved it, so it now discriminates the design choice it is named after rather than restating it.
-
-**Row A's premise was already dead and the run confirmed the second half too.** "Measure the runtime
-before adding a module" assumed the addition was the expensive term. It is not: +417 mutants, and the
-wall clock fell 87 -> 82m40s. The expensive thing was never the modules — it was the stretch of
-not pairing the test selection with them, which is what took the rate from 44.3% to 62.1% with no
-code change at all.
+Lesson worth keeping: `pkill -f <pattern>` inside a Bash call kills the calling shell when the
+pattern appears in its own command line — use `pgrep` on a pattern the shell does not contain.

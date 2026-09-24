@@ -14,7 +14,7 @@ right reading rather than how many connections happen to be live.
 """
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -418,3 +418,141 @@ def test_a_split_session_store_adds_one_pool_to_every_role(
         "pool per pooled process on postgres_dsn's server and everything else on the session "
         "store's; a different split makes both declared ceilings wrong."
     )
+
+
+# --- one server, two spellings: the measured identity ------------------------------------------
+
+
+def _one_spelling_each_way() -> tuple[str, str]:
+    """`postgres_dsn` and the same server spelled the other loopback way, or skip."""
+    from psycopg import conninfo
+
+    host = str(conninfo.conninfo_to_dict(settings.postgres_dsn).get("host") or "").lower()
+    if host not in {"localhost", "127.0.0.1"}:
+        pytest.skip(f"needs a loopback postgres_dsn to spell twice; this one dials {host!r}")
+    other = "127.0.0.1" if host == "localhost" else "localhost"
+    return settings.postgres_dsn, conninfo.make_conninfo(settings.postgres_dsn, host=other)
+
+
+@pytest.fixture
+def _forget_identities() -> Iterator[None]:
+    """Each test starts with nothing learned, because the cache is process-wide and by design."""
+    db._SERVER_IDENTITY.clear()
+    db._IDENTITY_UNREADABLE.clear()
+    yield
+    db._SERVER_IDENTITY.clear()
+    db._IDENTITY_UNREADABLE.clear()
+
+
+def test_two_spellings_of_one_server_read_as_two_until_a_borrow_says_otherwise(
+    _forget_identities: None,
+) -> None:
+    """The fallback is today's behaviour exactly, which is what makes the measurement safe to add.
+
+    `same_server` may never be *less* able to tell two DSNs apart than the string comparison it
+    replaces: before any borrow it has nothing measured, so it must answer precisely what
+    `pg_endpoint` answers. Asserted in both directions here — the loopback pair reads as two, and a
+    DSN compared with itself reads as one — so a regression in either shows up as this test rather
+    than as a connection ceiling nobody checked.
+    """
+    here, there = _one_spelling_each_way()
+    assert pg_endpoint(here) != pg_endpoint(there)
+    assert not db.same_server(here, there), "unmeasured, this must agree with the string compare"
+    assert db.same_server(here, here)
+
+
+def test_a_borrow_teaches_the_gauge_that_two_spellings_are_one_server(
+    _forget_identities: None,
+) -> None:
+    """Driven against the real server, because the whole point is that it is measured.
+
+    `localhost` and `127.0.0.1` are one box; `pg_endpoint` compares strings and calls them two, so
+    a deployment that spelled its two DSNs this way had its connections charged to two ceilings
+    with the real total checked by nothing. One borrow against each spelling is enough: the
+    identity is read once per endpoint and kept.
+    """
+    here, there = _one_spelling_each_way()
+
+    async def _run() -> bool:
+        await migrated_db_or_skip()
+        async with db.pooling():
+            for dsn in (here, there):
+                async with db.connection(dsn, operation="test_identity") as conn:
+                    await (await conn.execute("select 1")).fetchone()
+            return db.same_server(here, there)
+
+    assert asyncio.run(_run()), (
+        f"after borrowing against both spellings the identities were {db._SERVER_IDENTITY}; one "
+        "server answered two different system_identifiers, which cannot happen — or the borrow "
+        "did not learn them at all"
+    )
+    assert len(set(db._SERVER_IDENTITY.values())) == 1
+
+
+def test_a_split_the_measurement_disproves_stops_carving_the_fleet_in_two(
+    monkeypatch: pytest.MonkeyPatch, _forget_identities: None
+) -> None:
+    """The defect itself: a phantom split charges two ceilings and checks the real total nowhere.
+
+    Measured on this pair before the fix, with 32 connections held across two pools: the whole 32
+    was charged to a "second server" that does not exist. `fleet_connections_per_server` decided
+    there were two from the two DSN *strings*, at import, with no database to ask — so the
+    correction has to happen where a borrow has already answered, and the honest carve-out for a
+    disproved split is zero. That restores the single summed expression the split gauge regressed.
+    """
+    here, there = _one_spelling_each_way()
+    monkeypatch.setattr(settings, "session_store", "postgres")
+    monkeypatch.setattr(settings, "session_store_dsn", there)
+
+    async def _run() -> tuple[int, int]:
+        await migrated_db_or_skip()
+        async with db.pooling():
+            for dsn in (here, there):
+                async with db.connection(dsn, operation="test_identity") as conn:
+                    await (await conn.execute("select 1")).fetchone()
+            return db._process_max_connections(), db._session_store_max_connections()
+
+    total, carved = asyncio.run(_run())
+    assert total > 0
+    assert carved == 0, (
+        f"{carved} of {total} connections are charged to a second server, and the two DSNs name "
+        "one box — so that much is subtracted from the primary's ceiling and checked against a "
+        "ceiling for a server that does not exist"
+    )
+
+
+def test_an_unreadable_identity_is_attempted_once_and_then_left_alone(
+    _forget_identities: None,
+) -> None:
+    """A role without the grant must not pay a failing query on every borrow, for ever.
+
+    The failure path matters more than it looks: this runs on the hot borrow path, and a
+    `pg_control_system()` that raises — a fork without it, a role without the grant — would
+    otherwise add a round trip and an exception to every single connection checkout. One attempt,
+    one warning, then the string comparison for good.
+    """
+
+    class _Boom:
+        def cursor(self) -> Any:
+            raise RuntimeError("no pg_control_system() here")
+
+    here, there = _one_spelling_each_way()
+
+    async def _run() -> int:
+        calls = 0
+
+        class _Counting(_Boom):
+            def cursor(self) -> Any:
+                nonlocal calls
+                calls += 1
+                raise RuntimeError("no pg_control_system() here")
+
+        conn = _Counting()
+        for _ in range(3):
+            await db._learn_server_identity(conn, here)
+        return calls
+
+    assert asyncio.run(_run()) == 1, "the failed probe must not be retried on every borrow"
+    unreadable = pg_endpoint(here)
+    assert unreadable is not None and unreadable in db._IDENTITY_UNREADABLE
+    assert not db.same_server(here, there), "an unreadable identity falls back, it does not guess"

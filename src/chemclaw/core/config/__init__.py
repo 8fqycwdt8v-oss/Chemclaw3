@@ -257,6 +257,15 @@ def pg_endpoint(dsn: str) -> tuple[str, str] | None:
     is where a measurement could live, and `core/db._session_store_max_connections` deliberately
     reuses *this* comparison so the two halves cannot disagree about how many servers there are.
 
+    **The runtime half now has one** (`D-2026-09-23-the-server-says-which-server-it-is`).
+    `core/db.same_server` reads `system_identifier` off a borrow that has already succeeded and
+    caches it per endpoint, so the *gauge* can tell one box spelled two ways from two boxes while
+    this function keeps comparing strings — which is still the only thing it can do, for every
+    reason above. The two halves therefore *can* now disagree, deliberately and in one direction:
+    the startup check charges a phantom split to two ceilings, and the runtime half collapses it
+    back to one once a borrow has disproved it. Nothing here changes; this paragraph exists so the
+    next reader of "the two halves cannot disagree" knows where the exception is.
+
     Imported lazily for the reason `_pg_dial` gives: `chemclaw.core.config` is imported by the
     datasource manifests' offline validation, which may not have psycopg installed.
     """

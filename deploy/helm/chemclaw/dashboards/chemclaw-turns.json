@@ -223,6 +223,11 @@
           "expr": "sum(rate(chemclaw_turns_conflict_total[5m]))",
           "legendFormat": "conflict (409)",
           "refId": "E"
+        },
+        {
+          "expr": "sum(rate(chemclaw_turns_refused_thread_size_total[5m]))",
+          "legendFormat": "refused (thread size)",
+          "refId": "F"
         }
       ]
     },

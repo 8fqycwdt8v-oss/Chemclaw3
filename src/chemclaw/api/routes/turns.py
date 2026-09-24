@@ -25,7 +25,7 @@ from sse_starlette.sse import EventSourceResponse, SendTimeoutError
 from starlette.types import Receive, Scope, Send
 
 from chemclaw.api.auth import DEV_PRINCIPAL_OID
-from chemclaw.api.budget import BudgetExceeded
+from chemclaw.api.budget import BudgetExceeded, check_thread_size, refused_metric
 from chemclaw.api.deps import CurrentSession, CurrentUser
 from chemclaw.api.detach import DetachableTurn
 from chemclaw.api.events import TURN_EVENT_REF, ErrorEvent, QueuedEvent, sse_frame
@@ -351,8 +351,9 @@ async def post_message(
             # cap or the counters reset.
             try:
                 await front.budget.check(session_id, principal.oid)
+                await check_thread_size(session_id)
             except BudgetExceeded as exc:
-                METRICS.increment("chemclaw_turns_refused_budget_total")
+                METRICS.increment(refused_metric(exc))
                 refused = ErrorEvent(
                     message=str(exc),
                     code="budget_exhausted",
@@ -479,8 +480,9 @@ async def post_message(
         # inside the stream, after the permit (see there for the measurement).
         try:
             await front.budget.check(session_id, principal.oid)
+            await check_thread_size(session_id)
         except BudgetExceeded as exc:
-            METRICS.increment("chemclaw_turns_refused_budget_total")
+            METRICS.increment(refused_metric(exc))
             raise HTTPException(status_code=429, detail=str(exc)) from exc
         # Claimed here rather than inside the stream because it is a *refusal*, not a wait:
         # a turn already running elsewhere must be told 409 by a status code, which only

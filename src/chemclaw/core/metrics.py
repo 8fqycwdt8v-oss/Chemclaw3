@@ -142,6 +142,13 @@ _COUNTERS: dict[str, str] = {
         "event on an open stream, previously an HTTP 503)."
     ),
     "chemclaw_turns_refused_budget_total": "Turns refused with 429 by the turn/token budget.",
+    # Its own counter rather than the budget's, because the budget's drives an alert whose remedy
+    # is the token window: a conversation at `session_max_thread_bytes` is cleared by a new session
+    # (`D-2026-09-24-a-turn-costs-the-thread-it-loads`).
+    "chemclaw_turns_refused_thread_size_total": (
+        "Turns refused because their session's stored conversation reached "
+        "session_max_thread_bytes."
+    ),
     # Deliberately unlabelled, and `actor` is the label that must never be added: `/metrics` is
     # unauthenticated, and an `oid` is an unbounded *caller-chosen* key — minting oids is the way
     # around a per-principal limit, so the series cap would silence this counter exactly when it

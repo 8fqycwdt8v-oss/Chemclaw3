@@ -131,13 +131,16 @@ class SourcesSettings(BaseSettings):
     # those is a coefficient that a library upgrade invalidates in silence. A ceiling the kernel
     # enforces on the child needs no model of any of them, and covers the format added next year.
     #
-    # **Derived downwards from the pod rather than chosen.** `resources.service` limits the front
-    # door to 1024 MiB and it holds 523 of them idle with its parse forkserver warm, so two
-    # concurrent parses have 501 MiB between them and one parse charges the pod up to 1.4x its own
-    # budget (`tests/test_deploy_chart.py::PARSE_MIB_PER_PARSE_BUDGET_MIB`): 501 / (2 x 1.4) is
-    # 178.9 MiB. Rounded *down* to 160, which leaves the front-door inequality 53 MiB of the 1024
-    # rather than the 1 MiB that rounding alone would — and that inequality is where raising this
-    # fails, rather than in an OOMKill.
+    # **Derived downwards from the pod rather than chosen**, when the front door's limit was 1024
+    # MiB and it held 523 of them idle with its parse forkserver warm: two concurrent parses had
+    # 501 MiB between them, one parse charges the pod up to 1.4x its own budget
+    # (`tests/test_deploy_chart.py::PARSE_MIB_PER_PARSE_BUDGET_MIB`), and 501 / (2 x 1.4) is 178.9,
+    # rounded *down* to 160. That derivation left out the turns, and measuring them moved the limit
+    # rather than this (`D-2026-09-24-a-turn-costs-the-thread-it-loads`): the front door now shares
+    # its limit between these parses and every admitted turn's thread. No figure for that sum is
+    # written here — `tests/test_deploy_chart.py::test_a_pod_that_starts_a_parse_forkserver_fits_
+    # the_memory_it_declares` holds it, and that inequality is where raising this fails, rather
+    # than in an OOMKill.
     #
     # What it costs a caller, by *shape* rather than by threshold. A 50 MiB plain-text document (the
     # shipped share binding's whole `max_file_bytes`) parses, and so does a 10 MiB delimited export;

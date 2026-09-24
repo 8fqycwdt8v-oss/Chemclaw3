@@ -28,6 +28,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.ingest.eln.adapter import entry_window, fetch_was_truncated
     from chemclaw.ingest.eln.compound import compound_dependencies
     from chemclaw.ingest.eln.ord import OrdReaction
+    from chemclaw.ingest.eln.warehouse.expr import pattern_budget
     from chemclaw.ingest.sources.registry import active_ingest_sources
     from chemclaw.kg.git_writer import default_writer
     from chemclaw.kg.record import record_note
@@ -46,7 +47,6 @@ from chemclaw.durable.publish import (
     note_publish_retry,
     queue_wait_timeout,
 )
-from chemclaw.ingest.eln.warehouse.expr import pattern_budget
 
 logger = logging.getLogger(__name__)
 
