@@ -1913,15 +1913,12 @@ free number at the end of its section.
      and an allowlist meant to cost a review conversation is the wrong place to put an example, which
      is why the fix was to stop backticking them rather than to exempt them.
 
-## 2026-09-24 — two tool-use mistakes, both cheap to prevent
-
-- **`git checkout <file>` to undo a temporary edit reverts every uncommitted change in that file.**
-  Used to back out a one-line `sed` made for a red-check, it silently discarded three fixes made
-  earlier in the same file. Rule: for a temporary red-check, `git stash push <file>` *before* the
-  edit's parent changes exist, or reverse the probe edit with the inverse `sed`; never restore a
-  file that holds uncommitted work.
-- **`pkill -f <pattern>` / `for p in $(pgrep -f <pattern>)` kills the calling shell** when the
-  pattern appears anywhere in that shell's own command line — including in a heredoc or a commit
-  message in the same call. Bracketing one character (`'make co[v]'`) stops the pattern matching
-  itself and does *not* stop it matching the plain phrase written elsewhere in the script, which
-  killed the shell a third time. Rule: kill by pid in a call of its own, with nothing else in it.
+142. **`git checkout <file>` to undo a temporary edit reverts every uncommitted change in that file.**
+     Used to back out a one-line `sed` made for a red-check, it silently discarded three review fixes
+     made earlier in the same file. Rule: reverse a probe edit with the inverse edit, or stash the
+     file before making it; never restore a file that holds uncommitted work.
+143. **`pkill -f` / `pgrep -f` kills the calling shell when its pattern appears anywhere in that
+     shell's command line** — including a heredoc or a commit message in the same call. Bracketing
+     one character stops the pattern matching itself and not the plain phrase written elsewhere in
+     the script, which is how it killed the shell a third time. Rule: kill by pid in a call of its
+     own, with nothing else in it.
