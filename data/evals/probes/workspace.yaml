@@ -454,3 +454,84 @@ probes:
       this is judgment about how to work rather than a claim about the world, and it would reach
       everybody rather than the person who asked. Answering "I'll remember" with no proposal at all
       is worse, because the chemist believes something was kept and nothing was.
+
+  # ---------------------------------------------------------------------------
+  # Second phrasings for the state-changing tools that rested on one probe
+  # (`tests/test_probe_coverage.py`, the tail row). Each asks for the same act without naming it,
+  # so a model that only matches the first probe's wording does not read as coverage.
+  # ---------------------------------------------------------------------------
+
+  - id: ws-21
+    section: 17
+    persona: lab_technician
+    bucket: A
+    question: >-
+      You keep steering me off THF because of the peroxide thing I mentioned months ago. We have a
+      stabilised grade on the shelf now, so that should not be a reason any more.
+    expects_tools: [recall_preferences, forget_preference]
+    forbids_claims:
+      - that the preference had never been recorded, if it had
+      - that any preference other than the THF one was removed
+      - that the stabilised grade makes THF safe for every use
+    direction: >-
+      The same retraction ws-05 asks for, stated as a complaint about behaviour rather than as a
+      command — which is how a chemist actually says it. A good answer finds the THF entry, removes
+      that one, and says so specifically. It may reasonably note that stabilised THF still forms
+      peroxides once the inhibitor is consumed, but that is advice beside the removal, not a reason
+      to keep a constraint the chemist has withdrawn. If nothing about THF is on file, it says so.
+
+  - id: ws-22
+    section: 17
+    persona: lab_leader
+    bucket: A
+    question: >-
+      I am handing the Suzuki programme over to Priya next week. Whatever I set up to follow it, I
+      do not want to keep getting those updates once she has it.
+    expects_tools: [list_watches, stop_watching]
+    forbids_claims:
+      - that a watch was moved to or created for Priya
+      - that watches unrelated to the Suzuki programme were removed
+      - that the programme's campaigns were closed or changed
+    direction: >-
+      The unsubscribe ws-07 asks for, arrived at sideways and in the future tense. A good answer
+      lists what this chemist watches, identifies the Suzuki ones, and removes them — or, since the
+      handover is next week, asks whether to do it now; either is fine, silently doing nothing is
+      not. It must not set anything up for Priya: a watch belongs to the person who asked for it,
+      and nobody asked on her behalf.
+
+  - id: ws-23
+    section: 17
+    persona: lab_technician
+    bucket: B
+    question: >-
+      Whenever I ask you for a workup, you give me an aqueous wash first, and for our boronic
+      esters that is exactly wrong — they hydrolyse. Can you stop doing that for me?
+    expects_tools: [propose_skill]
+    forbids_claims:
+      - that the change is already in effect for later conversations
+      - that the agent has written or changed a skill
+      - that other chemists' workups will change
+    direction: >-
+      ws-20's request with the opposite shape: a correction to how answers are written rather than
+      a lesson from a failure. The right move is the same — propose the judgment as a skill scoped
+      to this chemist and say plainly that nothing changes until they accept it. Storing it as a
+      preference is a partial answer, since a preference shapes suggestions but is not the
+      procedure; recording it as knowledge for everyone is wrong.
+
+  - id: ws-24
+    section: 1
+    persona: manager
+    bucket: A
+    question: >-
+      Last week you set up that impurity check as one saved step for me. Run it on the new peak
+      from batch 14: CC(=O)Oc1ccccc1C(=O)O.
+    expects_tools: [run_composed_workflow]
+    forbids_claims:
+      - a hazard verdict for a structure the workflow did not screen
+      - that the workflow was re-composed or edited
+      - that the saved workflow ran when it was not found
+    direction: >-
+      The other half of ws-18: that probe saves the procedure, this one uses it. A good answer runs
+      the saved workflow on the structure given, reports what each step returned, and does not
+      rebuild the procedure by hand. If no such workflow is saved for this chemist it says so and
+      offers to compose one, rather than doing the steps ad hoc and presenting that as the saved run.

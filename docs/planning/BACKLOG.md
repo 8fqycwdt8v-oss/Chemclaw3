@@ -722,37 +722,6 @@ only holds defects can only ever restore the system to what it already intended 
       argument contract still reaches the right tool is a `make live-ab` question, not a reading
       question.
 
-- [ ] **The probed surface has a long thin tail: about a third of tools rest on one probe** — [S],
-      measured 2026-09-15 (it read 45, measured 2026-09-14 and stale inside its own merge range —
-      `feba79b` added 36 probes in it, 28 of them `process-chemistry.yaml`), and it replaces the concentration row rather than continuing it.
-
-      **The concentration is gone and the row's headline was stale.** `gather_evidence` is in
-      **141 of 342** probes — **41.2%** re-measured 2026-09-22, where this row said 139 of 333 and
-      41.7%, against the 50% (116/232) the headline was written from and
-      the 60% bound `tests/test_probe_coverage.py` already holds. Widened: 55% of tool-naming probes
-      touch any retrieval tool and only **14%** touch nothing but retrieval, so "the corpus mostly
-      measures one retrieval path" does not reproduce.
-
-      What the same measurement found instead: **agent-callable tools named by exactly one probe**
-      — roughly a third of the surface resting on a single phrasing, where a probe the model happens
-      to answer reads as coverage. **The number is deliberately not written here**, because two
-      careful re-measurements on 2026-09-22 disagreed: 49 of 124 with none unprobed, against 47 of
-      124 with two, depending on whether `load_profiles()` had run and how exemptions were counted.
-      A figure that moves with the measurer's setup belongs in the measurement, not in the row —
-      derive it from `tests/test_probe_coverage.py::_probes` and `::_expected_tools` with
-      `load_profiles()` called first, which is what the two runs differed on. The row's own 39 of
-      114 was from 2026-09-15 and is stale in both terms.
-
-      It is thin and it is **not hollow**: none of those single-probe tools rest on a bucket-C
-      probe, which `test_no_tools_only_coverage_is_a_question_the_surface_cannot_answer` now holds,
-      so a tool cannot arrive with coverage that never calls it.
-
-      Deliberately **not** a ratchet on the count. A bound on "how many tools have one probe" blocks
-      every new tool until somebody writes it a second question, which taxes adding capability
-      rather than bounding risk. What is open is ordinary corpus work: second questions for the
-      tools that matter most, chosen by what a deployment actually calls rather than by the list's
-      order.
-
 - [ ] **`deep-research` has no index behind it** — [M]. `agent/research_tools.py::gather_evidence`
       sweeps the knowledge graph, the ELN, the mounted document share and the fingerprint store —
       every one internal. `skills/deep-research/SKILL.md` describes a capability whose corpus is

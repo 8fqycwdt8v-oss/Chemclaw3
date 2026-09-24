@@ -299,3 +299,42 @@ probes:
       entitled, not on nobody, and should not be reported as unassigned in a way that implies it has
       been dropped.
 
+
+  - id: du-11
+    section: 9
+    persona: manager
+    bucket: A
+    question: >-
+      Our results database was rebuilt from scratch over the weekend and now it only has Monday's
+      calculations in it. Everything older is still in your cache, right? Can you push it back?
+    expects_tools: [republish_calculations, get_durable_job_status]
+    expects_job: true
+    forbids_claims:
+      - "a count of calculations republished, before the job has finished"
+      - "that the store now holds the older results"
+      - "that any calculation will be recomputed to refill it"
+    direction: >-
+      du-05's backlog from the other end: a store that lost its rows rather than one that is new.
+      The right move is the same durable republish, and the fact worth stating is that nothing is
+      recomputed — a persisted result is re-published from the cache, never re-run. A good answer
+      starts the job, gives the id it returned, and says how to check on it rather than reporting
+      a count it does not have yet.
+
+  - id: du-12
+    section: 1
+    persona: lab_leader
+    bucket: A
+    question: >-
+      Across the last year of amide couplings, are there conditions we keep coming back to that
+      should be written down as the house way of doing it?
+    expects_tools: [synthesize_memory, get_durable_job_status]
+    expects_job: true
+    forbids_claims:
+      - "a playbook or recurring pattern the job has not returned"
+      - "that the distilled knowledge is already in the graph"
+      - "that this happens automatically on a schedule"
+    direction: >-
+      du-06's ask narrowed to one reaction class and phrased as a question about practice. Mining
+      the corpus is a deliberate act, so a good answer starts the playbook miner, gives the id it
+      returned, and says the result arrives when the job finishes. Answering from a handful of
+      retrieved notes as though that were the distillation is the failure this probe exists to see.
