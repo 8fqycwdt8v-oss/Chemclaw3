@@ -33,7 +33,7 @@ skipped — the same reject-and-continue discipline the ELN sync uses.
 import asyncio
 import logging
 from collections.abc import Mapping, Sequence
-from datetime import date, timedelta
+from datetime import UTC, date, timedelta
 
 from pydantic import BaseModel, Field
 from temporalio import activity, workflow
@@ -299,9 +299,12 @@ def _is_new(note: Note, subscription: Subscription, arrived: date | None = None)
         return True
     if when is None:
         return False
-    if when > subscription.last_seen_at.date():
+    # In UTC, the zone `note_arrivals` dates in; a naive watermark is read as already UTC.
+    seen = subscription.last_seen_at
+    seen_on = (seen.astimezone(UTC) if seen.tzinfo else seen).date()
+    if when > seen_on:
         return True
-    if when < subscription.last_seen_at.date():
+    if when < seen_on:
         return False
     return note.id not in subscription.last_seen_note_ids
 

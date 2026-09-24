@@ -43,8 +43,8 @@ corpus that is not a git work tree reads as no arrivals, which is exactly the pr
 - **A stored arrival column (front-matter or a table).** Declined for now: the history already
   holds the fact, and a second copy is a second thing to keep true. **Revisit when:** the notes
   corpus stops being a git repository, or `note_arrivals`' full scan exceeds
-  `_GIT_REVISION_TIMEOUT_SECONDS` — visible as an undated note on a large corpus never reported
-  by `tests/test_note_arrivals.py`'s shape in production.
+  `_GIT_REVISION_TIMEOUT_SECONDS` — visible as `kg.note_arrivals_unreadable` in the background
+  worker's log.
 
 ## Consequences
 
@@ -52,9 +52,27 @@ corpus that is not a git work tree reads as no arrivals, which is exactly the pr
   directories is told once more. The right direction for a digest — told again, rather than never.
 - A note deleted and re-added arrives on its re-add.
 - An edit is not an arrival.
+- **Dated in UTC** (`%ct`), and the watermark is read in UTC too. `%cs` — the committer's own
+  offset — made a note committed at 23:30 -05:00 read as a day before a watermark set early the
+  next UTC day, and it was never reported.
+- **A rebased commit arrives again.** `kg/git_writer.py` replays unpushed commits with `rebase`,
+  which moves the committer date, so a note a subscriber was told about before its push can be told
+  once more on the day it lands. The same direction as a move: again, never silence.
+- **Where it answers.** Readers scan the writer's own full clone wherever
+  `CHEMCLAW_KNOWLEDGE_REPO_URL` is set (`deploy/knowledge-sync.sh`), so arrivals are read from
+  real history. Without one, the pod reads an `rsync`-published shallow replica that is not a git
+  work tree, gets no arrivals and behaves as before — and records no notes either, so there is
+  nothing undated to miss.
+- **Not changed: a dated note that arrives late.** `valid_from or arrived` still judges an
+  ELN-dated note on its experiment date, so one ingested today and dated last year is not news.
+  The argument above points at `max(valid_from, arrived)`; that is a change for dated notes, which
+  this decision did not measure, and it is left for one that does.
+- A scan that fails where `rev-parse` answered is logged as `kg.note_arrivals_unreadable`, which is
+  what makes the revisit trigger above observable.
 
 ## What keeps it true
 
 - `tests/test_note_arrivals.py::test_a_digest_reports_an_undated_note_that_arrived_after_the_watermark`
 - `tests/test_note_arrivals.py::test_a_later_call_scans_only_what_arrived_since`
 - `tests/test_note_arrivals.py::test_an_undated_note_is_new_on_the_day_it_arrived_and_once`
+- `tests/test_note_arrivals.py::test_an_arrival_is_dated_in_utc_whatever_the_committers_offset`

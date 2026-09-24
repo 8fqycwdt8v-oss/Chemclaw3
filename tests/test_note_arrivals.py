@@ -26,9 +26,9 @@ from chemclaw.kg.graph import invalidate_cache, note_arrivals
 _UNDATED = Path(__file__).resolve().parents[1] / "knowledge" / "playbook" / "playbook-degassing.md"
 
 
-def _git(repo: Path, *args: str, day: str = "2026-09-01") -> None:
+def _git(repo: Path, *args: str, day: str = "2026-09-01", at: str = "10:00:00+00:00") -> None:
     """Run git in `repo` with both dates pinned, so an arrival is a date the test chose."""
-    stamp = f"{day}T10:00:00+00:00"
+    stamp = f"{day}T{at}"
     subprocess.run(
         ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t", *args],
         check=True,
@@ -161,3 +161,17 @@ def test_a_digest_reports_an_undated_note_that_arrived_after_the_watermark(
     assert [item.note_ids for item in items] == [[_UNDATED.stem]], (
         "an undated note committed after the subscriber's watermark was not reported"
     )
+
+
+def test_an_arrival_is_dated_in_utc_whatever_the_committers_offset(repo: Path) -> None:
+    """23:30 at -05:00 on the 5th is the 6th in UTC, which is the zone the watermark is read in.
+
+    Dated in the committer's own offset it read as the 5th, a day before a watermark set early on
+    the 6th, and the note was never reported; a positive offset delivered it twice.
+    """
+    path = repo / "knowledge" / "playbook" / "playbook-late.md"
+    path.parent.mkdir(parents=True)
+    path.write_text("---\nid: x\n---\n", encoding="utf-8")
+    _git(repo, "add", "-A", day="2026-09-05", at="23:30:00-05:00")
+    _git(repo, "commit", "-qm", "late", day="2026-09-05", at="23:30:00-05:00")
+    assert note_arrivals(repo / "knowledge") == {"playbook-late": date(2026, 9, 6)}

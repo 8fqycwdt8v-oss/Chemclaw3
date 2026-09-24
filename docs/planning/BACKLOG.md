@@ -722,6 +722,18 @@ only holds defects can only ever restore the system to what it already intended 
       argument contract still reaches the right tool is a `make live-ab` question, not a reading
       question.
 
+- [ ] **About a third of tools still rest on one probe, and they are the compute and job tail**
+      — [S], narrowed 2026-09-24. Derived from `tests/test_probe_coverage.py::_probes` and
+      `::_expected_tools` with `load_profiles()` called first (two earlier measurements disagreed
+      on exactly that): 47 of 124 tools had one probe. The seven whose effect persists past the turn
+      — preferences, watches, skill proposals, plate observations, the results store, the knowledge
+      graph, a saved workflow — now have a second phrasing (ws-21..24, pt-08, du-11, du-12). What
+      remains is the semiempirical and prediction surface (`run_*`, `compute_*`, `enumerate_*`,
+      `predict_*`), where a missed call costs a re-run rather than a state change. It is **not** a
+      ratchet on the count, for the reason it never was: that taxes adding a tool rather than
+      bounding risk. Choose the next second questions by what a deployment calls —
+      `audit_events` per tool name — once one exists to read.
+
 - [ ] **`deep-research` has no index behind it** — [M]. `agent/research_tools.py::gather_evidence`
       sweeps the knowledge graph, the ELN, the mounted document share and the fingerprint store —
       every one internal. `skills/deep-research/SKILL.md` describes a capability whose corpus is

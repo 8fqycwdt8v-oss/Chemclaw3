@@ -303,22 +303,25 @@ probes:
   - id: du-11
     section: 9
     persona: manager
-    bucket: A
+    bucket: B
     question: >-
       Our results database was rebuilt from scratch over the weekend and now it only has Monday's
       calculations in it. Everything older is still in your cache, right? Can you push it back?
     expects_tools: [republish_calculations, get_durable_job_status]
     expects_job: true
     forbids_claims:
-      - "a count of calculations republished, before the job has finished"
-      - "that the store now holds the older results"
+      - "that the republish job will restore results this deployment already delivered to the store"
+      - "that the store now holds, or will hold, the older results"
       - "that any calculation will be recomputed to refill it"
     direction: >-
-      du-05's backlog from the other end: a store that lost its rows rather than one that is new.
-      The right move is the same durable republish, and the fact worth stating is that nothing is
-      recomputed — a persisted result is re-published from the cache, never re-run. A good answer
-      starts the job, gives the id it returned, and says how to check on it rather than reporting
-      a count it does not have yet.
+      du-05's backlog from the other end, and a gap rather than a capability: a republish enqueues
+      each stored result once per sink and schema version (`publish/outbox.py`'s `ON CONFLICT DO
+      NOTHING`), so results this deployment already delivered have receipts and are not sent
+      again, however empty the destination now is. What makes this bucket B is that the tool the
+      question points at exists and does not do what is asked. A good answer may start the job —
+      it will pick up anything never published — but must say plainly that results delivered
+      before the rebuild will not come back through it, and that restoring them is an operator's
+      job on the receipts or the destination. "Started, the store will refill" is the failure.
 
   - id: du-12
     section: 1
