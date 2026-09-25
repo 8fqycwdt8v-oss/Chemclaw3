@@ -488,22 +488,6 @@ topic).
       above did for the patterns. Anchors: `tests/test_prose_contract.py::_model_facing_descriptions`,
       `src/chemclaw/durable/hypothesis_tournament.py`.
 
-- [ ] **A `pending_requests` row whose run was terminated, or lost with its worker, has no
-      collector** — [M]. What is left of the `pending_requests` settle row after
-      `D-2026-09-13-a-cancellation-arriving-before-the-timer-leaves-the-row-waiting`, which closed
-      the three windows a *cancellation* could slip through and measured the "racy settle" reading
-      false: with every child past its open activity, 0 of 78 settles were lost across six runs, and
-      the real losses were the `try` starting below the activity that writes the row, a cancellation
-      arriving as `ActivityError(cause=CancelledError)`, and `notify_session_best_effort` swallowing
-      exactly that pair. Two cases remain and neither is reached by a parent dying in the ordinary
-      way: a child **terminated** rather than cancelled never resumes workflow code at all
-      (`tests/test_awaiting.py::test_a_wait_started_as_a_child_settles_when_its_parent_dies` pins
-      that for `ParentClosePolicy.TERMINATE`, and an operator can do it to a child directly), and a
-      worker lost between the row write and the settle. A `due_at` reaper is the answer and it is a
-      decision rather than an edit: a new Temporal Schedule, with its own disposal rule, against a
-      table that is in `retention._NOT_PRUNED` on purpose. `durable/awaiting.py`,
-      `durable/pending_store.py`.
-
 - [ ] **`/readyz` cannot bound a Postgres that accepts the socket and stops answering** — [S],
       found 2026-09-05, upstream in origin and recorded here because `api/routes/ops.py` claimed
       otherwise. `asyncio.wait_for` bounds acquisition; on a warm pooled connection psycopg's

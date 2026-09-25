@@ -336,6 +336,39 @@ async def settle_request(
         return cursor.rowcount == 1
 
 
+# **Guarded on the run, not only on the state.** `_OPEN` reopens a request id under a new run and
+# rewrites `run_id`, so a sweep that read an old run's row and then found that run dead must not
+# settle the *new* run's question. The run it examined is the only one it may speak for.
+_SETTLE_ORPHAN = """
+    UPDATE pending_requests
+    SET state = 'cancelled', answered_at = NULL, answered_by = '', answer = %s
+    WHERE request_id = %s AND run_id = %s AND state = 'waiting'
+"""
+
+_ORPHAN_CANDIDATES = """
+    SELECT request_id, run_id FROM pending_requests
+    WHERE state = 'waiting' AND created_at < now() - make_interval(secs => %s)
+    ORDER BY created_at
+    LIMIT %s
+"""
+
+
+async def waiting_rows(*, older_than_seconds: float, limit: int) -> list[tuple[str, str]]:
+    """`(request_id, run_id)` of the oldest waiting rows, for the orphan sweep."""
+    async with _connect() as conn:
+        cursor = await conn.execute(_ORPHAN_CANDIDATES, (older_than_seconds, limit))
+        return [(str(row[0]), str(row[1] or "")) for row in await cursor.fetchall()]
+
+
+async def settle_orphan(request_id: str, run_id: str, reason: str) -> bool:
+    """Cancel a waiting row whose run is gone, if that run still owns it (`_SETTLE_ORPHAN`)."""
+    async with _connect() as conn:
+        cursor = await conn.execute(
+            _SETTLE_ORPHAN, (json.dumps({"reason": reason}), request_id, run_id)
+        )
+        return cursor.rowcount == 1
+
+
 async def record_reminder(request_id: str, count: int) -> None:
     """Record how many escalations a still-open request has had — see `_REMIND` for why a total.
 

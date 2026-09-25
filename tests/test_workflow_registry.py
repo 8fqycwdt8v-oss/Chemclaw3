@@ -372,6 +372,9 @@ _MAY_PARK = frozenset(
         # refreshing reports its own staleness through `observed_at` and every reading leads with
         # it — so the failure is visible without the workflow having to fail.
         "CommitmentSyncWorkflow",
+        # The orphaned-wait sweep: Schedule-only, idempotent, and nothing reads the run
+        # (`durable/orphaned_waits.py`).
+        "OrphanedWaitsWorkflow",
         "RetentionWorkflow",
     }
 )

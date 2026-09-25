@@ -41,6 +41,7 @@ from chemclaw.durable.memory_jobs import (
     PlaybookDistillationWorkflow,
 )
 from chemclaw.durable.note_index import NoteReindexWorkflow
+from chemclaw.durable.orphaned_waits import OrphanedWaitsWorkflow
 from chemclaw.durable.retention import RetentionWorkflow
 from chemclaw.durable.schedules import (
     OWNED_SCHEDULE_IDS,
@@ -123,6 +124,10 @@ def test_plan_covers_all_periodic_jobs() -> None:
     A deployment may still turn it off, and `tests/test_check_in.py`'s
     `test_the_schedule_is_planned_only_when_a_deployment_asks` drives both arms.
 
+    The fifth is the orphaned-wait sweep, and it has no setting at all: any deployment can raise a
+    wait, and a row whose run was terminated sits unanswerable in an inbox whatever anybody
+    configured (`D-2026-09-25-a-wait-nobody-can-settle-is-settled-by-a-sweep`).
+
     Everything else in this file is gated on a setting or a second declaration.
     """
     plan = planned_schedules()
@@ -131,6 +136,7 @@ def test_plan_covers_all_periodic_jobs() -> None:
         ReactionLabelWorkflow,
         DigestWorkflow,
         CheckInWorkflow,
+        OrphanedWaitsWorkflow,
     }
     assert len({p.schedule_id for p in plan}) == len(plan)  # unique ids
 
@@ -274,8 +280,9 @@ def test_planned_ids_stay_inside_owned_namespace(monkeypatch: pytest.MonkeyPatch
     planned = {p.schedule_id for p in planned_schedules()}
 
     # The guard is only worth anything if the plan is actually full — an empty plan is a subset of
-    # everything. Every job in this file is conditional, and all thirteen are enabled above.
-    assert len(planned) == 13, (
+    # everything. Every conditional job in this file is enabled above, beside the one that is not
+    # conditional at all, which makes fourteen.
+    assert len(planned) == 14, (
         f"the plan is not fully enabled, so the subset below is vacuous: {sorted(planned)}"
     )
     assert planned <= OWNED_SCHEDULE_IDS, (
