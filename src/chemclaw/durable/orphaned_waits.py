@@ -71,8 +71,26 @@ async def _run_is_gone(client: Any, request_id: str, run_id: str) -> str | None:
         raise
     if described.status == WorkflowExecutionStatus.RUNNING:
         return None
+    # **And the workflow's latest run, because a reset keeps the row but not the run.** An
+    # operator's reset — the documented remedy for a nondeterminism failure on exactly this
+    # workflow — terminates the run the row names and continues the wait in a new run that replays
+    # past the activity which wrote `run_id`, so the row still names the dead one while the wait
+    # is alive and answerable. Whichever run of this id is running owns the question.
+    if run_id and await _latest_is_running(client, request_id):
+        return None
     status = described.status.name.lower() if described.status else "closed"
     return f"the wait's run ended ({status}) without settling this request"
+
+
+async def _latest_is_running(client: Any, request_id: str) -> bool:
+    """Whether the newest run under this workflow id is still running."""
+    try:
+        latest = await client.get_workflow_handle(request_id).describe()
+    except RPCError as exc:
+        if exc.status == RPCStatusCode.NOT_FOUND:
+            return False
+        raise
+    return bool(latest.status == WorkflowExecutionStatus.RUNNING)
 
 
 @durable_activity("background")

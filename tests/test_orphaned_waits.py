@@ -67,14 +67,16 @@ async def _state(request_id: str) -> str:
 def test_a_terminated_wait_is_settled_and_a_live_one_is_left_alone(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Terminated, gone from the broker, running, and reopened under a new run — four answers.
+    """Terminated, gone, running, reopened, and reset — five answers.
 
     - **terminated**: the case a `ParentClosePolicy.TERMINATE` parent leaves, which never reaches
       workflow code — settled `cancelled`, with the reason;
     - **unknown to the broker**: a history retention already removed — settled;
     - **running**: a question somebody may still answer — untouched, whatever its age;
     - **reopened**: the row now names a *live* run, while the sweep's evidence is about a dead
-      one — untouched, because the settle is guarded on the run it examined.
+      one — untouched, because the settle is guarded on the run it examined;
+    - **reset**: the row names a terminated run while a newer run of the same id carries the wait
+      on — untouched, because whichever run of the id is running owns the question.
     """
     monkeypatch.setattr(settings, "awaiting_orphan_grace_seconds", 3600.0)
 
@@ -106,6 +108,13 @@ def test_a_terminated_wait_is_settled_and_a_live_one_is_left_alone(
                 # it running — and the guard is exercised directly below against a stale run id.
                 await _open(ids["reopened"], handles["reopened"].first_execution_run_id or "")
                 await handles["terminated"].terminate(reason="a parent closed with TERMINATE")
+                # A reset, as an operator's remedy leaves it: the row names a run that was
+                # terminated, while a newer run under the same id carries the wait on.
+                reset_id = f"{_PREFIX}reset"
+                first = await client.start_workflow(_Hold.run, id=reset_id, task_queue=_QUEUE)
+                await _open(reset_id, first.first_execution_run_id or "")
+                await first.terminate(reason="reset")
+                successor = await client.start_workflow(_Hold.run, id=reset_id, task_queue=_QUEUE)
 
                 sweep = await settle_orphaned_waits()
 
@@ -113,6 +122,7 @@ def test_a_terminated_wait_is_settled_and_a_live_one_is_left_alone(
                     ids["reopened"], "an-older-run", "a sweep's evidence about a previous run"
                 )
                 states = {
+                    "reset": await _state(reset_id),
                     "terminated": await _state(ids["terminated"]),
                     "gone": await _state(f"{_PREFIX}gone"),
                     "live": await _state(ids["live"]),
@@ -122,6 +132,7 @@ def test_a_terminated_wait_is_settled_and_a_live_one_is_left_alone(
                 }
                 for name in ("live", "reopened"):
                     await handles[name].terminate(reason="test over")
+                await successor.terminate(reason="test over")
                 row = await pending_store.get_request(ids["terminated"])
                 states["reason"] = str((row.answer if row else {}).get("reason", ""))
                 return states
@@ -131,6 +142,10 @@ def test_a_terminated_wait_is_settled_and_a_live_one_is_left_alone(
     assert states["gone"] == "cancelled", states
     assert states["live"] == "waiting", "a question somebody can still answer was cancelled"
     assert states["reopened"] == "waiting", states
+    assert states["reset"] == "waiting", (
+        "a reset wait was cancelled: its row names the terminated run, and the run carrying the "
+        "question on is alive"
+    )
     assert states["stale_settle"] == "False", "a sweep settled a run it never examined"
     assert states["settled"] == f"{_PREFIX}gone,{_PREFIX}terminated", states
     assert "terminated" in states["reason"], states["reason"]

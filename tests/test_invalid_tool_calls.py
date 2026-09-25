@@ -153,11 +153,12 @@ class _StreamingModel(GenericFakeChatModel):
             )
         # How the provider says it stopped, on the last chunk the way a streamed reply carries it:
         # `length` is the output budget running out mid-emission.
-        if "finish" in reply:
+        # A list is a gateway that repeats the value on a trailing chunk, which the chunk merge
+        # concatenates.
+        finishes = reply.get("finish", [])
+        for finish in [finishes] if isinstance(finishes, str) else finishes:
             yield ChatGenerationChunk(
-                message=AIMessageChunk(
-                    content="", response_metadata={"finish_reason": reply["finish"]}
-                )
+                message=AIMessageChunk(content="", response_metadata={"finish_reason": finish})
             )
 
 
@@ -586,8 +587,10 @@ def test_a_streamed_truncation_is_completed_by_upstream_and_never_becomes_invali
     assert merged("not json at all").invalid_tool_calls, "garbage must still be surfaced"
 
 
-@pytest.mark.parametrize("finish", ["length", "max_tokens"])
-def test_a_call_cut_off_at_the_output_limit_does_not_run_on_upstreams_guess(finish: str) -> None:
+@pytest.mark.parametrize("finish", ["length", "max_tokens", ["length", "length"]])
+def test_a_call_cut_off_at_the_output_limit_does_not_run_on_upstreams_guess(
+    finish: str | list[str],
+) -> None:
     """The truncation the test above pins, refused where the response says it happened.
 
     `parse_partial_json` completes `'{"smiles": "CC'` to `{"smiles": "CC"}`, so the call is
@@ -596,6 +599,9 @@ def test_a_call_cut_off_at_the_output_limit_does_not_run_on_upstreams_guess(fini
     an `error` row, a fault on the stream carrying the model's own id, and a `ToolMessage` telling
     the model the limit is what cut it rather than that its JSON was invalid
     (`D-2026-09-25-a-call-cut-off-at-the-output-limit-does-not-run`).
+
+    The repeated case is a gateway that sends `finish_reason` on a trailing usage chunk too: the
+    merge concatenates it to `"lengthlength"`, and an equality check let that call run.
     """
     sink = _Recording()
     model = _StreamingModel(

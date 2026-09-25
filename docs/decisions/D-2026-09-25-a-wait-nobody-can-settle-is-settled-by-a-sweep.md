@@ -26,6 +26,11 @@ says the run that owns it is not running** (`durable/orphaned_waits.py`).
   it. Any other broker error stops the sweep, because an unreachable broker would otherwise read as
   "gone" and cancel live questions.
 - **A lost worker is not an orphan.** Its run is still `RUNNING` and resumes on the next worker.
+- **Whichever run of the id is running owns the question.** An operator's reset — the documented
+  remedy for a nondeterminism failure on exactly this workflow — terminates the run the row names
+  and continues the wait in a new one that replays past the activity which wrote `run_id`. So a
+  row whose own run is closed is also checked against the workflow's latest run, and left alone if
+  that one is running. Found by review before merge; the test's `reset` case is red without it.
 - **Guarded on the run it examined** (`pending_store.settle_orphan`): `_OPEN` reopens a request id
   under a new run and rewrites `run_id`, so evidence about a dead run never settles a live one.
 - **Settled, never deleted**, with the reason in `answer`; the table stays out of retention.
@@ -47,6 +52,13 @@ run guard removed (the reopened question is cancelled).
 - **`ParentClosePolicy.REQUEST_CANCEL` everywhere.** Already the policy at every call site
   (`test_every_wait_started_as_a_child_names_a_parent_close_policy`), and it does not reach an
   operator's terminate or a failed run.
+- **What stalls it.** A broker error other than `NOT_FOUND`/`INVALID_ARGUMENT` on the oldest row
+  (a permission refusal, say) stops every pass at that row, so no later row is reached until it is
+  fixed. Deliberate — the alternative settles on an unreadable answer — and visible only as the
+  activity's failure in the Schedule's `last_outcome`.
+- **A race with the detached cancel settle.** A run cancelled after the grace window can be seen
+  `CANCELED` before its own detached settle lands; both write `cancelled`, so the cost is the
+  sweep's reason text replacing the run's.
 - **Notify the requester on an orphan settle.** Declined for now: the run that knew who to tell is
   gone, and the row's `requested_by` is advisory. **Revisit when:** a chemist asks what happened to
   a question that vanished from an inbox — visible as `awaiting.orphan_settled` in the background

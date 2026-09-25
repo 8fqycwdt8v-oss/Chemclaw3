@@ -591,7 +591,13 @@ def _promote(request: ModelRequest[Any], response: Any) -> Any:
 
 
 def _finish_reason(message: AIMessage) -> str:
-    """Why the provider stopped emitting this message, as `response_metadata` names it."""
+    """Why the provider stopped emitting this message, as `response_metadata` names it.
+
+    **Read by containment, not equality, by whoever compares it.** Streamed chunks merge their
+    metadata with `merge_dicts`, which *concatenates* strings — so a gateway that repeats
+    `finish_reason` on a trailing usage chunk leaves `"lengthlength"` on the merged message, and an
+    equality test would let exactly the cut-off call this exists to stop run on upstream's guess.
+    """
     metadata = message.response_metadata or {}
     return str(metadata.get("finish_reason") or metadata.get("stop_reason") or "")
 
@@ -622,7 +628,8 @@ def _demote_cut_off_calls(response: Any) -> None:
     for message in _messages_of(response):
         if not isinstance(message, AIMessage) or not message.tool_calls:
             continue
-        if _finish_reason(message) not in _OUTPUT_LIMIT_REASONS:
+        reason = _finish_reason(message)
+        if not any(limit in reason for limit in _OUTPUT_LIMIT_REASONS):
             continue
         for call in message.tool_calls:
             message.invalid_tool_calls.append(
@@ -687,8 +694,9 @@ async def refuse_unparsed_arguments(request: Any, handler: Callable[[Any], Any])
     if arguments.get(_CUT_OFF):
         raise UnparsedArguments(
             f"Your reply stopped at the output-token limit while this call was being written, so "
-            f"its arguments may be incomplete and it did not run. What was received was "
-            f"{defang(str(document))}. Re-issue the call with its complete arguments — fewer or "
+            f"its arguments may be incomplete and it did not run. Completed by the client from the "
+            f"cut-off document, they read {defang(str(document))} — which may not be what you "
+            f"meant. Re-issue the call with its complete arguments — fewer or "
             f"shorter calls in one reply if the limit is what cut it — rather than answering as "
             f"though the tool had returned."
         )

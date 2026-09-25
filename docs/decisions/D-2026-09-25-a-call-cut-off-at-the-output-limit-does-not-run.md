@@ -49,6 +49,17 @@ failed, returns no tool result, and the front door's log carries the cut-off ref
 
 ## Consequences
 
+- **Matched by containment.** Streamed chunks merge `response_metadata` by concatenating strings,
+  so a gateway that repeats `finish_reason` on a trailing usage chunk leaves `"lengthlength"`; an
+  equality test let that call run. Found by review before merge, and the parametrised test's
+  repeated case is red on equality.
+- **The refusal shows upstream's completion, not the raw fragment** — the merged message no longer
+  carries what the model actually wrote — and says so rather than calling it "what was received".
+- **Past `agent_max_promoted_invalid_calls`** (20) calls in one cut reply, the rest are counted and
+  named in the operator's WARNING but not promoted, so the model is not told they did not run. The
+  existing bound, now reached by calls that were well-formed; a cut reply with twenty calls is
+  already far outside how this system is used.
+
 - A turn whose reply is cut off at the limit costs one more model call, which re-issues the calls.
 - A provider that never reports `finish_reason` is not covered: the call runs on the completion,
   as before.
