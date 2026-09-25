@@ -66,6 +66,7 @@ from chemclaw.durable import note_index as _note_index  # noqa: F401
 from chemclaw.durable import notify as _notify  # noqa: F401
 from chemclaw.durable import observation_jobs as _observation_jobs  # noqa: F401
 from chemclaw.durable import orchestrator as _orchestrator  # noqa: F401
+from chemclaw.durable import orphaned_waits as _orphaned_waits  # noqa: F401
 from chemclaw.durable import publish_results as _publish_results  # noqa: F401
 from chemclaw.durable import report_workflow as _report_workflow  # noqa: F401
 from chemclaw.durable import retention as _retention  # noqa: F401

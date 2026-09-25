@@ -171,6 +171,12 @@ class Behaviour:
     # refuses a grown one, which is what makes `classify_model_failure`'s `context_length` label —
     # and the compaction policy that exists to prevent it — reachable from a lane at all.
     refuse_over_input_tokens: int = 0
+    # The `finish_reason` the streamed reply ends on, when it is not the natural one. `length` is
+    # the provider running out of output budget mid-emission — with a raw argument document that
+    # stops mid-string it is a call `parse_partial_json` completes into a valid-looking one, the
+    # case `agent/model_calls._demote_cut_off_calls` exists to catch. Empty means the natural
+    # value: `tool_calls` when there are calls, `stop` otherwise.
+    finish_reason: str = ""
 
 
 def already_has_tool_results(payload: dict[str, Any]) -> bool:
@@ -680,7 +686,11 @@ async def _chat_stream(
     # meters nothing. `_openai_compatible_model`'s docstring records this exact failure having
     # shipped once already, and the mock was the reason it could not recur *visibly*.
     yield frame(
-        {"delta": {}, "finish_reason": "tool_calls" if behaviour.calls else "stop"},
+        {
+            "delta": {},
+            "finish_reason": behaviour.finish_reason
+            or ("tool_calls" if behaviour.calls else "stop"),
+        },
         **({"usage": _chat_usage(behaviour, billed_input)} if include_usage else {}),
     )
     yield "data: [DONE]\n\n"

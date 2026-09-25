@@ -290,6 +290,19 @@ class TemporalSettings(BaseSettings):
     # `activity_timeout_seconds` so tightening the general budget cannot silently make a wait's
     # bookkeeping the thing that fails, on a workflow whose entire purpose is to survive.
     awaiting_activity_timeout_seconds: float = Field(default=30.0, gt=0)
+    # The collector for a wait whose run can no longer settle its own row — a child terminated
+    # rather than cancelled, a run failed or timed out, a history the broker no longer holds
+    # (`durable/orphaned_waits.py`, `D-2026-09-25-a-wait-nobody-can-settle-is-settled-by-a-sweep`).
+    # Hourly, because the cost of an orphan is a question somebody sees in their inbox and cannot
+    # answer; an hour of that is a nuisance and a day is a support ticket.
+    awaiting_orphan_sweep_minutes: float = Field(default=60.0, gt=0)
+    # How long a row must have been open before the sweep asks about its run. The row is written by
+    # the run itself, so a row younger than this is one whose run is almost certainly still in its
+    # opening activity — and a reopen rewrites `run_id`, which the settle guards on regardless.
+    awaiting_orphan_grace_seconds: float = Field(default=300.0, ge=0)
+    # Rows examined per sweep, each one a `describe` against the broker. Bounded so one pass after
+    # a long outage cannot hold the activity past its budget; the rest are the next pass's.
+    awaiting_orphan_batch: int = Field(default=200, gt=0)
     # The check-in over a requester's own blocked work
     # (`D-2026-09-15-the-requester-hears-nothing-until-it-is-too-late`, `durable/check_in.py`).
     # The wait above already re-notifies `asked_of` on `reminder_hours`; the *requester* is

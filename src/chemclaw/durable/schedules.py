@@ -56,6 +56,7 @@ from chemclaw.durable.eval_drift import EvalDriftWorkflow
 from chemclaw.durable.label_sync import ReactionLabelWorkflow
 from chemclaw.durable.note_index import NoteReindexWorkflow
 from chemclaw.durable.observation_jobs import ObservationSynthesisWorkflow
+from chemclaw.durable.orphaned_waits import OrphanedWaitsWorkflow
 from chemclaw.durable.publish_results import PublishResultsWorkflow
 from chemclaw.durable.retention import RetentionWorkflow
 from chemclaw.ingest.sources.registry import (
@@ -117,6 +118,7 @@ OWNED_SCHEDULE_IDS = frozenset(
         # supposed to catch this enabled one conditional job and passed vacuously; it now builds
         # the full plan.
         "result-publish",
+        "orphaned-waits",
     }
 )
 
@@ -260,6 +262,12 @@ def planned_schedules() -> list[PlannedSchedule]:
         schedules.append(
             PlannedSchedule("artifact-eviction", ArtifactEvictionWorkflow, eviction_every)
         )
+    # The orphaned-wait sweep is unconditional, unlike its neighbours, because there is no setting
+    # that turns waits on: any deployment can raise one, and a row whose run was terminated is
+    # stuck in an inbox whether or not anybody configured anything. With no waits it is one empty
+    # query an hour (`D-2026-09-25-a-wait-nobody-can-settle-is-settled-by-a-sweep`).
+    orphan_every = timedelta(minutes=settings.awaiting_orphan_sweep_minutes)
+    schedules.append(PlannedSchedule("orphaned-waits", OrphanedWaitsWorkflow, orphan_every))
     # Draining the result outbox earns a Schedule only where a sink is actually enabled - the same
     # question `document-sync` and `eln-sync` ask of their own registries, and asked of the sink
     # registry rather than of a second `result_publish_enabled` flag, because

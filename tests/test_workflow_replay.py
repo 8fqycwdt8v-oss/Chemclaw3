@@ -57,6 +57,10 @@ UNCOVERED_BACKGROUND_WORKFLOWS = frozenset(
         # compatibility with, and a history recorded from it now would be the self-certifying shape
         # `recorded_workflow_histories.py` rejects. It earns a fixture at its first change.
         "HypothesisTournamentWorkflow",
+        # New in `D-2026-09-25-a-wait-nobody-can-settle-is-settled-by-a-sweep`, uncovered for
+        # `CheckInWorkflow`'s reason: it has never shipped, so no older command sequence exists for
+        # a fixture to prove compatibility with. It earns one at its first change.
+        "OrphanedWaitsWorkflow",
         "ConnectorJobWorkflow",
         "DevelopmentReportWorkflow",
         "DigestWorkflow",
