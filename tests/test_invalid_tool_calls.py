@@ -151,6 +151,14 @@ class _StreamingModel(GenericFakeChatModel):
                     ],
                 )
             )
+        # How the provider says it stopped, on the last chunk the way a streamed reply carries it:
+        # `length` is the output budget running out mid-emission.
+        if "finish" in reply:
+            yield ChatGenerationChunk(
+                message=AIMessageChunk(
+                    content="", response_metadata={"finish_reason": reply["finish"]}
+                )
+            )
 
 
 class _Recording(AuditSink):
@@ -576,3 +584,48 @@ def test_a_streamed_truncation_is_completed_by_upstream_and_never_becomes_invali
 
     # Only a non-prefix reaches the field the promotion reads.
     assert merged("not json at all").invalid_tool_calls, "garbage must still be surfaced"
+
+
+@pytest.mark.parametrize("finish", ["length", "max_tokens"])
+def test_a_call_cut_off_at_the_output_limit_does_not_run_on_upstreams_guess(finish: str) -> None:
+    """The truncation the test above pins, refused where the response says it happened.
+
+    `parse_partial_json` completes `'{"smiles": "CC'` to `{"smiles": "CC"}`, so the call is
+    *valid* and nothing on it says the molecule was cut — but the reply's `finish_reason` does.
+    Demoted and promoted, it crosses the same governance chain a malformed call does: no body,
+    an `error` row, a fault on the stream carrying the model's own id, and a `ToolMessage` telling
+    the model the limit is what cut it rather than that its JSON was invalid
+    (`D-2026-09-25-a-call-cut-off-at-the-output-limit-does-not-run`).
+    """
+    sink = _Recording()
+    model = _StreamingModel(
+        [
+            {"text": "", "calls": [("predict_pka", '{"smiles": "CC')], "finish": finish},
+            {"text": "The call was cut off; I will not guess the molecule."},
+        ]
+    )
+    results, signals, _streamed = asyncio.run(_drive(_governed_graph(model, sink)))
+
+    assert _ENTERED == [], "the tool ran on a molecule the provider cut off mid-document"
+    assert [row.outcome for row in sink.events if row.tool == "predict_pka"] == ["error"]
+    assert [(s.tool, s.call_id, s.reason) for s in signals] == [("predict_pka", "call-0-0", None)]
+    assert [m.tool_call_id for m in results] == ["call-0-0"]
+    refusal = str(results[0].content)
+    assert "output-token limit" in refusal, refusal
+    assert "not valid JSON" not in refusal, "the model would be sent to fix JSON it wrote correctly"
+
+
+def test_a_reply_that_finished_normally_still_runs_its_calls() -> None:
+    """The other direction: `stop` is a finished document, and it runs exactly as before."""
+    sink = _Recording()
+    model = _StreamingModel(
+        [
+            {"text": "", "calls": [("predict_pka", '{"smiles": "CCO"}')], "finish": "stop"},
+            {"text": f"{_ANSWER}."},
+        ]
+    )
+    results, signals, _streamed = asyncio.run(_drive(_governed_graph(model, sink)))
+
+    assert _ENTERED == ["predict_pka(CCO)"]
+    assert signals == []
+    assert _ANSWER in str(results[0].content)

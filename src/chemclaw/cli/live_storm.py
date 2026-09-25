@@ -466,6 +466,11 @@ async def family_f_adversarial() -> list[Finding]:
             _bad_call_was_reported,
         ),
         (
+            "f-cut-off",
+            "a call cut off at the output limit is refused, not run on upstream's completion",
+            _bad_call_was_reported,
+        ),
+        (
             "f-wrong-argument",
             "LOAD-1's own shape is visible rather than counted as a call",
             _bad_call_was_reported,
