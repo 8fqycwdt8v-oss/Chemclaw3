@@ -600,6 +600,26 @@ def test_every_handoff_a_mesh_binds_is_a_name_the_agent_advertises(monkeypatch: 
     )
 
 
+def test_the_handoff_names_do_not_depend_on_whether_profiles_were_discovered(
+    monkeypatch: Any,
+) -> None:
+    """A process that never ran discovery advertises the same hand-backs a real mesh binds.
+
+    `handoff_tool_names` unions every registered profile because any of them can be a turn's root,
+    and profile files register lazily. Reading the registry alone answered `{default, <roster>}`
+    in a process that had not globbed `data/profiles/` yet — the mock LLM, a validator — and so
+    refused a hand-back to a file-profile root such as `computation` that the mesh does bind.
+    Driven from a registry holding only the default, as a fresh process starts.
+    """
+    from chemclaw.agent import profiles
+    from chemclaw.agent.chemclaw_agent import handoff_tool_names
+
+    monkeypatch.setattr(profiles, "_REGISTRY", {"default": profiles.DEFAULT_PROFILE})
+    monkeypatch.setattr("chemclaw.core.config.settings.agent_peer_roster", "evidence")
+
+    assert handoff_tool_name("computation") in handoff_tool_names()
+
+
 def test_no_roster_advertises_no_handoff_and_the_mock_refuses_one() -> None:
     """The shipped default adds nothing: with no roster there is no mesh and no handoff name.
 
