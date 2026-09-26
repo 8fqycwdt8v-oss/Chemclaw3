@@ -354,6 +354,32 @@ def specialist_override(specialist: AgentProfile, bound: Iterable[str]) -> str:
     )
 
 
+def roster_names(profile: AgentProfile) -> frozenset[str]:
+    """The tool names a **rostered** profile (helper or peer) contributes to an intersection.
+
+    `tool_names is None` means "this profile does not narrow", which is the right reading for a
+    session profile and the wrong one for a roster entry: there it would hand a named helper or
+    peer the whole surface it is intersected with, under a name promising less. So on a roster,
+    naming nothing narrows to nothing. One definition because the rule is security-relevant and
+    was written three times — a copy that drifted to the session reading would widen silently.
+    """
+    return profile.tool_names if profile.tool_names is not None else frozenset()
+
+
+def bounded_tool_list(bound: Iterable[str], limit: int) -> str:
+    """`bound` sorted and joined, the first `limit` names enumerated and the rest counted.
+
+    The capability half of both roster menus — a helper's (`describe_helper`) and a peer's
+    (`handoff.describe_peer`) — derived from what the compiled graph bound. Bounded because the
+    list grows with whatever the sibling fleet serves, which no ratchet here can see; the
+    sentence around it stays each caller's own, because the two describe different acts.
+    """
+    ordered = sorted(bound)
+    shown = ", ".join(ordered[:limit])
+    rest = len(ordered) - limit
+    return f"{shown}, and {rest} more" if rest > 0 else shown
+
+
 def describe_helper(profile: AgentProfile, bound: Iterable[str]) -> str:
     """One roster entry's description: a written purpose, then the surface the graph really bound.
 
@@ -390,10 +416,7 @@ def describe_helper(profile: AgentProfile, bound: Iterable[str]) -> str:
     # 897 against a 900-token ceiling while a deployment that serves `safety` would send ~1,009.
     # A ratchet that cannot see its input is not the place for this bound; see
     # `agent_helper_menu_tools`.
-    ordered = sorted(bound)
-    shown = ", ".join(ordered[: settings.agent_helper_menu_tools])
-    rest = len(ordered) - settings.agent_helper_menu_tools
-    held = f"{shown}, and {rest} more" if rest > 0 else shown
+    held = bounded_tool_list(bound, settings.agent_helper_menu_tools)
     return f"{purpose} Reads only, and holds exactly: {held}."
 
 
@@ -502,11 +525,8 @@ def helper_profile(
                 "harness_enabled": False,
             }
         )
-    # `&` and not `|`, and a specialist naming nothing narrows to nothing rather than to everything:
-    # `tool_names is None` on a rostered profile means "this profile does not narrow", which is the
-    # right reading for a session profile and the wrong one for a roster entry, where it would hand
-    # a named helper the caller's whole reading surface under a name promising less.
-    named = specialist.tool_names if specialist.tool_names is not None else frozenset()
+    # `&` and not `|`, and a specialist naming nothing narrows to nothing — see `roster_names`.
+    named = roster_names(specialist)
     return caller.model_copy(
         update={
             "name": f"{caller.name}-{specialist.name}",
@@ -575,5 +595,5 @@ def helper_connectors(
     kept = [tool for tool in connectors if tool.name not in acting]
     if specialist is None:
         return kept
-    named = specialist.tool_names if specialist.tool_names is not None else frozenset()
+    named = roster_names(specialist)
     return [tool for tool in kept if tool.name in named]

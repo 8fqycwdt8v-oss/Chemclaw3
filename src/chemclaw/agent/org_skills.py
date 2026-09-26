@@ -68,19 +68,25 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
+from collections.abc import Callable
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from deepagents.backends import StoreBackend
-
 from chemclaw.agent.audit import bounded_repr
-from chemclaw.agent.local_skills import LOCAL_SKILL_FILENAME, SkillRefused, storable_name
+from chemclaw.agent.local_skills import SkillRefused
 from chemclaw.agent.refusal_route import routed
-from chemclaw.agent.session_store import _session_connection, _session_dsn
-from chemclaw.agent.skill_store import PermittedStoreBackend, paged_items
+from chemclaw.agent.skill_store import (
+    PermittedStoreBackend,
+    advisory_writer_lock,
+    list_skill_names,
+    paged_items,
+    read_skill_body,
+    skill_key,
+    storable_name,
+    store_writer,
+)
 from chemclaw.core.config import settings
 from chemclaw.core.ids import stable_hash
 from chemclaw.core.logging import log_event
@@ -97,9 +103,6 @@ ORG_SKILLS_ROOT = "/org/"
 
 #: The same label without its slashes, for the skills middleware's source list.
 ORG_SKILLS_LABEL = "org"
-
-#: The advisory lock one org skill's writes serialize on — see `_one_writer_per_org`.
-_WRITER_LOCK = "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))"
 
 #: What a refused *write* to this tier says.
 #:
@@ -155,17 +158,6 @@ class OrgSkillVersion:
     body: str
     activated_by: str
     activated_at: str
-
-
-def _key(name: str) -> str:
-    """The store key one org skill's active body lives under.
-
-    The personal tier's shape exactly — leading slash, trailing `SKILL.md` — because that is what
-    `StoreBackend` writes and reads, and because a skill directory holding a `SKILL.md` is how every
-    tier in this system is discovered. A model reading `/org/<name>/SKILL.md` and
-    `/mine/<name>/SKILL.md` is reading one convention, not two.
-    """
-    return f"/{name}/{LOCAL_SKILL_FILENAME}"
 
 
 def _version_key(digest: str) -> str:
@@ -225,43 +217,18 @@ def org_skills_backend(store: Any, permits: Callable[[str], bool]) -> PermittedS
     )
 
 
-def _writer(store: Any, namespace: tuple[str, ...]) -> StoreBackend:
-    """A writable backend over one of this tier's namespaces, for the routes that change it.
-
-    Upstream's writer rather than `store.aput`, for the two reasons `local_skills._writer` gives:
-    the stored shape keeps exactly one definition, and
-    `tests/test_scratchpad.py::test_no_first_party_module_writes_to_a_store_directly` holds that no
-    first-party module reaches past a backend to a store's own write verbs.
-    """
-    return StoreBackend(namespace=lambda _runtime: namespace, store=store)
-
-
-@asynccontextmanager
-async def _one_writer_per_org(name: str) -> AsyncIterator[None]:
+def _one_writer_per_org(name: str) -> AbstractAsyncContextManager[None]:
     """Serialize writes to one org skill, so the row cap is a bound rather than a suggestion.
 
-    The `local_skills._one_writer_per_chemist` shape, keyed on the skill rather than on a person —
-    measured there at a cap of 3, twelve concurrent saves all read the same pre-write count and all
-    twelve were written. Here the same race would also split an activation in half: the version row
-    written and the active pointer not, or the reverse.
+    `skill_store.advisory_writer_lock`, keyed on the skill rather than on a person. Beyond the
+    cap race that lock was measured against, here the same race would also split an activation in
+    half: the version row written and the active pointer not, or the reverse.
 
     Per name rather than per tier so two administrators publishing two different skills never
     contend; the row cap is read inside the lock anyway, so two *new* names racing at the cap is the
     one case this does not serialize, and it is bounded by the cap being re-read under each lock.
-
-    Conditioned on the backend rather than guarded by an `except`, exactly as the personal tier's
-    is: a test driving the writer over an in-memory store has no database to lock on and no
-    concurrency to lose.
     """
-    if settings.session_store != "postgres":
-        yield
-        return
-    async with _session_connection(_session_dsn()) as conn:
-        await conn.execute(_WRITER_LOCK, (f"org-skills\x1f{name}",))
-        try:
-            yield
-        finally:
-            await conn.commit()
+    return advisory_writer_lock(f"org-skills\x1f{name}")
 
 
 async def list_org_skills(store: Any) -> list[str]:
@@ -271,9 +238,7 @@ async def list_org_skills(store: Any) -> list[str]:
     share: un-paged this answers ten and reads as the whole tier, which here would mean an
     administrator unable to see or retire the eleventh skill acting on everybody's turns.
     """
-    held = await paged_items(store, org_skills_namespace())
-    suffix = f"/{LOCAL_SKILL_FILENAME}"
-    return sorted(key[1 : -len(suffix)] for key in held if key.endswith(suffix))
+    return await list_skill_names(store, org_skills_namespace())
 
 
 async def read_org_skill(store: Any, name: str) -> str | None:
@@ -283,13 +248,7 @@ async def read_org_skill(store: Any, name: str) -> str | None:
     `local_skills.storable_name` measured a 500 out of the shipped backend for a name that cannot
     exist, and this tier's read route takes a path parameter exactly as that one does.
     """
-    if not storable_name(name):
-        return None
-    item = await store.aget(org_skills_namespace(), _key(name))
-    if item is None:
-        return None
-    content = item.value.get("content")
-    return content if isinstance(content, str) else None
+    return await read_skill_body(store, org_skills_namespace(), name)
 
 
 async def list_org_versions(store: Any, name: str) -> list[OrgSkillVersion]:
@@ -348,7 +307,7 @@ async def _record_a_version(store: Any, name: str, body: str, activated_by: str)
     is `scratchpad.BoundedStoreBackend`'s tiebreak, taken for its reason: it is the only ordering
     the store carries, and the version anybody would actually revert to is a recent one.
     """
-    versions = _writer(store, org_versions_namespace(name))
+    versions = store_writer(store, org_versions_namespace(name))
     digest = content_hash(body)
     await versions.awrite(
         _version_key(digest),
@@ -413,7 +372,7 @@ async def save_org_skill(store: Any, name: str, body: str, *, activated_by: str)
                 conflict=True,
             )
         await _record_a_version(store, name, body, activated_by)
-        await _writer(store, org_skills_namespace()).awrite(_key(name), body)
+        await store_writer(store, org_skills_namespace()).awrite(skill_key(name), body)
     log_event(
         logger,
         "org_skill.published",
@@ -467,9 +426,11 @@ async def retire_org_skill(store: Any, name: str, *, retired_by: str) -> bool:
     last week's — so this deliberately leaves the version namespace alone and stays itself
     reversible: `activate_org_version` brings any held body back afterwards.
     """
-    if not storable_name(name) or (await store.aget(org_skills_namespace(), _key(name)) is None):
+    if not storable_name(name) or (
+        await store.aget(org_skills_namespace(), skill_key(name)) is None
+    ):
         return False
-    await _writer(store, org_skills_namespace()).adelete(_key(name))
+    await store_writer(store, org_skills_namespace()).adelete(skill_key(name))
     log_event(
         logger,
         "org_skill.retired",

@@ -45,12 +45,14 @@ import threading
 import time
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
-from typing import Any
+from datetime import datetime
+from typing import Annotated, Any
 
 import psycopg
 from psycopg import conninfo
 from psycopg.rows import TupleRow
 from psycopg_pool import AsyncConnectionPool, PoolClosed, PoolTimeout
+from pydantic import BeforeValidator
 
 from chemclaw.core.config import pg_endpoint, settings
 from chemclaw.core.logging import log_event
@@ -1190,3 +1192,24 @@ async def existing_tables(cur: Any, tables: Iterable[str]) -> set[str]:
         (names,),
     )
     return {str(row[0]) for row in await cur.fetchall()}
+
+
+def _iso_stamp(value: Any) -> Any:
+    """A `TIMESTAMPTZ` column as `datetime.isoformat()`'s string, NULL as `""`, else untouched.
+
+    **A validator rather than a SQL-side cast, because the string is on the wire.** `::text` would
+    convert in the server and spell the instant `2026-09-16 10:00:00+00`, where every reader of the
+    models that use this — `GET /pending`, the effect ledger, an evidence pack — has always been
+    handed `2026-09-16T10:00:00+00:00`. A row factory binds columns by name and converts nothing,
+    so the conversion lives in the model, and in one place so the spelling cannot drift per seam.
+    Anything that is neither a `datetime` nor `None` is left for pydantic to validate.
+    """
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return "" if value is None else value
+
+
+#: A `TIMESTAMPTZ` column carried as the ISO string the seams reading it have always exposed. A
+#: NULL reads as the empty string — "still waiting", "never settled", "recorded nothing" — rather
+#: than as `None`, which is what each model's own nullable field means by it.
+IsoStamp = Annotated[str, BeforeValidator(_iso_stamp)]

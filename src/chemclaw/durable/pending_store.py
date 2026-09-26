@@ -17,32 +17,15 @@ import json
 from collections.abc import Sequence
 from contextlib import AbstractAsyncContextManager
 from datetime import datetime
-from typing import Annotated, Any
+from typing import Any
 
 import psycopg
 from psycopg.rows import TupleRow, class_row
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from chemclaw.core import db
 from chemclaw.core.config import settings
-
-
-def _stamp(value: Any) -> Any:
-    """A timestamp column as this model's ISO string, leaving anything else to be validated.
-
-    **A validator rather than a SQL-side cast, because the string is on the wire.** These three
-    fields reach `GET /pending` and the agent's own inbox tool as `datetime.isoformat()` spells
-    them; `::text` in the SELECT would have converted them in the server and spelled them
-    differently, which is a change to an API response rather than to a row factory.
-    """
-    if isinstance(value, datetime):
-        return value.isoformat()
-    return "" if value is None else value
-
-
-#: A `TIMESTAMPTZ` column carried as the ISO string this seam has always exposed. `answered_at` is
-#: nullable, and NULL reads as the empty string — which is what "still waiting" looks like here.
-Stamp = Annotated[str, BeforeValidator(_stamp)]
+from chemclaw.core.db import IsoStamp
 
 
 class PendingRequest(BaseModel):
@@ -66,12 +49,12 @@ class PendingRequest(BaseModel):
     requested_by: str = ""
     session_id: str = ""
     state: str = "waiting"
-    due_at: Stamp = ""
+    due_at: IsoStamp = ""
     reminders: int = 0
-    answered_at: Stamp = ""
+    answered_at: IsoStamp = ""
     answered_by: str = ""
     answer: dict[str, Any] = Field(default_factory=dict)
-    created_at: Stamp = ""
+    created_at: IsoStamp = ""
     #: The knowledge notes the question rests on, so the answer route can ask whether they still
     #: hold (`kg/premise.py`). Read out of the row rather than recomputed from `subject`, because a
     #: re-ask may reword the question and the premise that was *validated* at ask time is the one an

@@ -434,3 +434,20 @@ def test_the_namespaces_do_not_collide(store: InMemoryStore) -> None:
     }
     assert len(firsts) == 3, firsts
     assert len(org_skills_namespace()) == 1, "an actor component would make it somebody's"
+
+
+def test_a_key_that_names_no_skill_lists_as_nothing_in_either_tier(store: InMemoryStore) -> None:
+    """Both listings go through one strict parse, so `/SKILL.md` is not a skill named `""`.
+
+    The two tiers each sliced `key[1:-len("/SKILL.md")]` off anything ending in the suffix, so a
+    body at `/SKILL.md` listed as an empty name — a row a route shows and no route can address —
+    while `stored_skill_tools` already refused the same key. One parse now answers for all three.
+    """
+    from chemclaw.agent.local_skills import list_local_skills, local_skills_namespace
+
+    for namespace in (org_skills_namespace(), local_skills_namespace("alice-oid")):
+        store.put(namespace, "/SKILL.md", {"content": "stray", "encoding": "utf-8"})
+        store.put(namespace, "/real/SKILL.md", {"content": "body", "encoding": "utf-8"})
+    assert asyncio.run(list_org_skills(store)) == ["real"]
+    assert asyncio.run(list_local_skills(store, "alice-oid")) == ["real"]
+    assert asyncio.run(read_org_skill(store, "real")) == "body"

@@ -46,10 +46,10 @@ from typing import Any
 
 import frontmatter
 
-from chemclaw.agent.local_skills import LOCAL_SKILL_FILENAME, local_skills_namespace
+from chemclaw.agent.local_skills import local_skills_namespace
 from chemclaw.agent.org_skills import org_skills_namespace
 from chemclaw.agent.skill_manifest import UNREADABLE_DECLARATION, declared_triple
-from chemclaw.agent.skill_store import paged_items
+from chemclaw.agent.skill_store import name_of_key, paged_items
 from chemclaw.core.identity_context import get_current_actor
 from chemclaw.core.metrics_bridge import degraded
 
@@ -139,27 +139,11 @@ async def stored_skill_declarations(store: Any | None) -> StoredSkillTools:
             # source — `validated_skill` compared the two before this body was written, so the key
             # is what the reader of a working body would have produced anyway, and a *missing* entry
             # is the one outcome that must not happen because it reads as "declares nothing".
-            name = _name_of(key)
+            name = name_of_key(key)
             if name is None:
                 continue
             declared[name], required[name] = _declaration(item)
     return StoredSkillTools(declared=declared, required=required)
-
-
-def _name_of(key: str) -> str | None:
-    """The skill a store key names, or `None` for a key that is not a skill body.
-
-    The shape `StoreBackend` writes is `/<name>/SKILL.md` (`local_skills._key`), and a key of any
-    other shape is not this tier's. **Stricter than either listing, deliberately**: both of those
-    test `key.endswith("/SKILL.md")` alone, which is enough when the answer is a name to show a
-    person, and not enough here — a key with no leading segment would become a declaration under a
-    nonsense name, and the entry that matters is the one that goes *missing*, because a missing
-    entry reads as "declares nothing".
-    """
-    suffix = f"/{LOCAL_SKILL_FILENAME}"
-    if not key.startswith("/") or not key.endswith(suffix) or len(key) <= len(suffix) + 1:
-        return None
-    return key[1 : -len(suffix)]
 
 
 def _declaration(item: Any) -> tuple[frozenset[str], frozenset[str]]:

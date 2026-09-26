@@ -94,6 +94,7 @@ from chemclaw.agent.profile_discovery import ProfileError, load_profiles
 from chemclaw.agent.profiles import AgentProfile, get_profile, registered_profile_names
 from chemclaw.agent.state import PEER_DEPTH_ATTR, ChemclawState
 from chemclaw.agent.stored_skill_tools import StoredSkillTools
+from chemclaw.agent.subagents import roster_names
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 
@@ -187,8 +188,7 @@ def _peer_surface(root: frozenset[str], peer: AgentProfile) -> frozenset[str]:
     Returns:
         The intersection — possibly empty, which the caller reads as "do not offer this peer".
     """
-    named = peer.tool_names if peer.tool_names is not None else frozenset()
-    return root & named
+    return root & roster_names(peer)
 
 
 #: The `AgentProfile` fields a peer is allowed to bring with it, because none of them carries

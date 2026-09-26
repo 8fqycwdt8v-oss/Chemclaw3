@@ -436,6 +436,10 @@ def test_a_dry_run_turn_is_refused_the_handoff_and_leaves_the_conversation_where
         "the handoff was not refused under dry-run: "
         f"{[getattr(m, 'content', m) for m in result['messages']]}"
     )
+    # A handoff writes nothing and starts nothing, so the refusal must say what it would have done
+    # instead — `authz.changes_the_conversation` was split out to stop exactly this mis-wording.
+    assert all("changes stored data" not in str(r) for r in refusals), refusals
+    assert all("would move this conversation" in str(r) for r in refusals), refusals
     assert not result.get("handoffs"), f"a dry-run turn counted a hop: {result.get('handoffs')}"
     assert result.get("active_agent") in (None, "", "default"), (
         f"a dry-run turn moved the conversation to {result.get('active_agent')!r}"
@@ -752,6 +756,51 @@ def test_two_handoffs_in_one_message_hand_over_once(monkeypatch: Any) -> None:
         f"a handoff that did not happen was announced: {announced}"
     )
     assert result.get("active_agent") == "evidence-peer"
+    assert result.get("handoffs") == 1
+    assert answer_text(result) == "I am the evidence agent."
+    # The losing call's answer on the thread is the first-party refusal, not deepagents'
+    # "was cancelled - another message came in" placeholder: ToolNode drops the loser's own
+    # result, so the winner has to write it.
+    losing = [
+        m
+        for m in result["messages"]
+        if type(m).__name__ == "ToolMessage" and getattr(m, "tool_call_id", None) == "c0-1"
+    ]
+    assert len(losing) == 1, [getattr(m, "content", m) for m in result["messages"]]
+    assert "Only the first handoff in one message is taken" in str(losing[0].content)
+    assert "safety-peer" in str(losing[0].content)
+
+
+def test_an_unbound_handoff_name_does_not_win_the_arbitration(monkeypatch: Any) -> None:
+    """An earlier call of the minted shape that this node does not bind cannot refuse a real one.
+
+    `transfer_to_default` is the handing agent's own name, which `handoff_tools` never binds. When
+    the arbitration asked only the *shape*, it won: it got ToolNode's unknown-tool error, the valid
+    `transfer_to_evidence_peer` after it was refused as "not the first", and no hop happened.
+    """
+    from langchain_core.messages import AIMessage
+
+    both = AIMessage(
+        content="",
+        tool_calls=[
+            {"name": handoff_tool_name("default"), "args": {"reason": "self"}, "id": "c0-0"},
+            {"name": handoff_tool_name("evidence-peer"), "args": {"reason": "a"}, "id": "c0-1"},
+        ],
+    )
+    graph = _mesh(
+        monkeypatch,
+        {
+            "default": ScriptedChatModel(messages=iter([both])),
+            "evidence-peer": ["I am the evidence agent."],
+            "safety-peer": ["I should never have been reached."],
+        },
+    )
+
+    result = asyncio.run(graph.ainvoke(turn_input("go"), turn_config("unbound-first")))
+
+    assert result.get("active_agent") == "evidence-peer", [
+        getattr(m, "content", m) for m in result["messages"]
+    ]
     assert result.get("handoffs") == 1
     assert answer_text(result) == "I am the evidence agent."
 

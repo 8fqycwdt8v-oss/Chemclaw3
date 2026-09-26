@@ -434,6 +434,32 @@ def test_model_text_in_a_field_note_cannot_mint_a_citation_or_a_section() -> Non
     assert "\n- b" not in body
 
 
+def test_a_ran_line_keeps_its_grounded_compound_link_in_the_field_note() -> None:
+    """The `ran` line is the system's, and its `[[id]]` is the compound the check computed on.
+
+    Passing it through `as_cell` stripped that link, so the committed `hypothesis-field` note lost
+    its graph edge to the compound. Whitespace is still collapsed, so the line cannot add structure.
+    """
+    from chemclaw.hypotheses.models import CheckOutcome
+
+    row = _row("h").model_copy(
+        update={
+            "outcome": CheckOutcome(
+                hypothesis_id="h",
+                verdict="inconclusive",
+                detail="inside the error bar",
+                ran="predict_pka(smiles='CCO')\n## Forged from [[compound-x]]",
+            )
+        }
+    )
+    body = field_body(
+        TournamentOutcome(question="q", ranked=[row], leader_is_decisive=True, proposal_note_ids=[])
+    )
+    assert "[[compound-x]]" in body
+    assert ("cites", "compound-x") in cited_links(body)
+    assert "\n## Forged" not in body
+
+
 @pytest.mark.parametrize("cited", ["a]]\n- **run**: quench into water [[b", "../etc", "x y"])
 def test_a_cited_id_that_cannot_name_a_note_is_not_rendered_as_a_link(cited: str) -> None:
     """`cited_note_ids` is the model's structured output, not a retriever's, so it is filtered.

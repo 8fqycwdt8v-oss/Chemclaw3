@@ -160,6 +160,47 @@ def _factor(design: ExperimentDesign, target: str) -> tuple[float, str]:
     )
 
 
+#: The dimensions `checks._plausibility_bands` can size a band from. A scale in any other dimension
+#: (an amount, with no molar mass to spend it against) silently falls back to the bench ceilings,
+#: so a rescale must never record one while a readable alternative exists.
+_BAND_DIMENSIONS = frozenset({"mass", "volume"})
+
+#: The units a derived scale is written in, largest first, so it reads "6 kg" and not "6e+06 mg".
+_READABLE_UNITS: dict[str, tuple[str, ...]] = {"mass": ("kg", "g", "mg"), "volume": ("L", "mL")}
+
+
+def _readable(quantity: Measurement) -> str:
+    """`quantity` in the largest unit of its dimension that keeps the number at or above one."""
+    units = _READABLE_UNITS[quantity.unit.dimension]
+    for symbol in units:
+        converted = quantity.to(symbol)
+        if converted.value >= 1.0:
+            return str(converted)
+    return str(quantity.to(units[-1]))
+
+
+def _recorded_scale(design: ExperimentDesign, target: str, factor: float) -> str:
+    """The request scale a rescaled design declares — always one the plausibility band can read.
+
+    The target text when it is a mass or a volume. Otherwise (a molar target) the chemist's own
+    declared scale moved by the factor, which keeps their unit; then the limiting line's scaled
+    mass or volume; and the target text only when none of those is readable. Recording "6000 mmol"
+    as the scale of a kilo batch would size the band at bench ceilings and warn a unit slip on
+    every charge the rescale itself produced.
+    """
+    wanted = parse_quantity(target)
+    if wanted is not None and wanted.unit.dimension in _BAND_DIMENSIONS:
+        return target.strip()
+    declared = parse_quantity(design.request.scale.value)
+    if declared is not None and declared.unit.dimension in _BAND_DIMENSIONS and declared.value > 0:
+        return _readable(Measurement(value=declared.value * factor, unit=declared.unit))
+    line = _limiting_line(design)
+    for value, unit in ((line.mass_mg, "mg"), (line.volume_ml, "mL")):
+        if value is not None and value > 0.0:
+            return _readable(Measurement.of(value * factor, unit))
+    return target.strip()
+
+
 def _scaled_line(line: ChargeLine, factor: float) -> ChargeLine:
     """One charge line at the new basis.
 
@@ -236,12 +277,17 @@ def rescale(design: ExperimentDesign, *, target: str) -> Rescaled:
         )
     # The request's scale moves with the charges: `checks._plausibility_bands` sizes the mass and
     # volume ceilings off it, so a kilo-scale revision still declaring the bench scale is judged
-    # as a unit slip. `inferred`, not `stated` — the chemist's text never said this value, and
+    # as a unit slip — and so the recorded scale must be one it can read (`_recorded_scale`).
+    # `inferred`, not `stated` — the chemist's text never said this value, and
     # `require_quotes_are_verbatim` would be asked to find it there.
     scaled = design.model_copy(
         update={
             "request": design.request.model_copy(
-                update={"scale": RequestField(value=basis, basis="inferred")}
+                update={
+                    "scale": RequestField(
+                        value=_recorded_scale(design, target, factor), basis="inferred"
+                    )
+                }
             ),
             "base": body.model_copy(
                 update={"charge": [_scaled_line(line, factor) for line in body.charge]}

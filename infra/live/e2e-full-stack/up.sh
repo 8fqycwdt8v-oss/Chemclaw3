@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Bring up the four-repo ChemClaw3 stack for a full end-to-end pass: this backend, the
-# Chemclaw3-mcp tool fleet (props and rxnpredict here; chem, safety and calc via processes.sh),
+# Chemclaw3-mcp tool fleet (pyexec here; calc and every fleet bundle this repo declares via processes.sh),
 # Chemclaw3_mock (the eln-json/eln-ord data sources, the mock-vendor MCP tool), and Chemclaw3_ui.
 #
 # Deliberately does not reimplement readiness polling for pieces that already have it:
@@ -147,32 +147,9 @@ assert_credential_accepted() {
 
 mcp_python_bin() { ( cd "$MCP_REPO" && uv sync --quiet && uv run python -c 'import sys; print(sys.executable)' ); }
 
-start_props() {
-  local python="$1"
-  # No --app-dir: `python` is the shared workspace venv's interpreter, which already has
-  # `chemclaw_mcp_props` on its path via uv's editable workspace install.
-  CHEMCLAW_PROPS_TOKEN="${CHEMCLAW_PROPS_TOKEN:-dev-token}" \
-    start props "$python" -m uvicorn chemclaw_mcp_props.app:app --host 127.0.0.1 --port 8850
-  wait_for props "http://127.0.0.1:8850/healthz"
-  assert_credential_accepted props "http://127.0.0.1:8850/mcp" "${CHEMCLAW_PROPS_TOKEN:-dev-token}"
-}
-
-start_rxnpredict() {
-  local python="$1"
-  # fake_a/fake_c: a deterministic tool surface with no model weights and no checkpoint download —
-  # exactly what CI-shaped hardware wants (no GPU, no HuggingFace egress). See
-  # engine/base_doubles.py::register_requested for how the env vars below reach the registry.
-  CHEMCLAW_RXNPREDICT_TOKEN="${CHEMCLAW_RXNPREDICT_TOKEN:-dev-token}" \
-    CHEMCLAW_RXNPREDICT_ENABLED_FORWARD_MODELS="${CHEMCLAW_RXNPREDICT_ENABLED_FORWARD_MODELS:-fake_a}" \
-    CHEMCLAW_RXNPREDICT_ENABLED_CONDITIONS_MODELS="${CHEMCLAW_RXNPREDICT_ENABLED_CONDITIONS_MODELS:-fake_c}" \
-    start rxnpredict "$python" -m uvicorn chemclaw_mcp_rxnpredict.app:app --host 127.0.0.1 --port 8857
-  wait_for rxnpredict "http://127.0.0.1:8857/healthz"
-  assert_credential_accepted rxnpredict "http://127.0.0.1:8857/mcp" "${CHEMCLAW_RXNPREDICT_TOKEN:-dev-token}"
-}
-
 start_pyexec() {
   local python="$1"
-  # A connector like props and rxnpredict, and it is here for the reason the front door found out
+  # A connector, and the one fleet server this lane still starts itself, for the reason the front door found out
   # the hard way: `manifests/pyexec/` is on `CHEMCLAW_CONNECTORS_DIR` (line ~268), so the bundle is
   # *discovered* whether or not anything serves it, and under `CHEMCLAW_CONNECTORS_REQUIRED=true`
   # an unreachable discovered connector is fatal at startup rather than degraded at call time.
@@ -320,17 +297,17 @@ up() {
   # answer, whatever the two shells were started with.
   export CHEMCLAW_MCP_REPO="$MCP_REPO"
 
-  # **Only the bundles this repository does *not* declare.** `processes.sh::start_fleet_bundles`
-  # derives its set from `fleet_bundle_names` — the intersection of core's endpoint-declaring
-  # bundles with the fleet's manifests — which is `chem`, `rxnpredict` and `safety`. This lane
-  # started `rxnpredict` as well, and the two scripts keep their pidfiles in different run dirs
-  # (`.live/e2e/run` here, `.live/run` there), so `running rxnpredict` was false while the port was
-  # already served and the collision guard killed the lane outright:
-  # `rxnpredict: 127.0.0.1:8857 is already served, and not by a process this lane started`.
-  # Reproduced verbatim. `start_rxnpredict` stays for `restart rxnpredict`; what goes is the call.
-  log "starting the Chemclaw3-mcp fleet (props, pyexec; chem, rxnpredict, safety, calc via processes.sh)"
+  # **Only the fleet servers this repository declares no manifest for** — today `pyexec`.
+  # Every other one is `processes.sh::start_fleet_bundles`', whose set is `fleet_bundle_names`
+  # (core's endpoint-declaring bundles that the fleet also publishes). That set is deliberately not
+  # listed here: an enumeration of it in this comment went stale twice, and each time the lane
+  # started a server processes.sh also owned. The two scripts keep pidfiles in different run dirs
+  # (`.live/e2e/run` here, `.live/run` there), so `running <name>` there is false while the port is
+  # served and its collision guard kills the lane — first
+  # `rxnpredict: 127.0.0.1:8857 is already served, and not by a process this lane started`, then
+  # the same for `props` on 8850 once core gained a `props` manifest. One owner per server.
+  log "starting the Chemclaw3-mcp fleet (pyexec; calc and the fleet bundles this repo declares via processes.sh)"
   local mcp_python; mcp_python="$(mcp_python_bin)"
-  start_props "$mcp_python"
   start_pyexec "$mcp_python"
 
   log "starting Chemclaw3_mock (ELN mock + mock-vendor MCP tool)"
@@ -426,20 +403,23 @@ status() {
 }
 
 # Stop one named external process and bring it back — the shape the chaos round needs. Only
-# covers the processes this script owns (props, rxnpredict, mock-eln, mock-vendor, ui-bff);
+# covers the processes this script owns (pyexec, mock-eln, mock-vendor, ui-bff);
 # restarting a piece of this repo's own stack is infra/live/processes.sh's `restart` verb — and
 # since D-2026-08-27-one-lane-starts-the-fleet that includes chem and safety, and since
-# D-2026-08-28-the-durable-half-has-a-backend-too the calc backend as well. They get a named arm
+# D-2026-08-28-the-durable-half-has-a-backend-too the calc backend as well, and every other fleet
+# bundle `processes.sh::fleet_bundle_names` derives (props, rxnpredict, …). They get a named arm
 # below rather than falling through to "unknown process", because they *are* known: they are
 # simply somebody else's to restart.
 restart() {
   local name="$1" pidfile="$RUN_DIR/$1.pid"
-  case "$name" in
-    chem|safety|calc)
-      die "$name is started by infra/live/processes.sh, which this lane calls — restart it there:
+  # The fleet bundles are derived rather than listed: a hand-kept `chem|safety|calc` arm is how
+  # `restart props` came to die on a pidfile this lane stopped writing once processes.sh took props
+  # over. A bundle both trees declare is processes.sh's, the same test `fleet_bundle_names` makes.
+  if [ "$name" = calc ] || { [ -e "$MCP_REPO/manifests/$name/connector.yaml" ] \
+      && [ -e "$REPO_ROOT/src/chemclaw/connectors/$name/connector.yaml" ]; }; then
+    die "$name is started by infra/live/processes.sh, which this lane calls — restart it there:
   bash infra/live/processes.sh restart $name"
-      ;;
-  esac
+  fi
   [ -e "$pidfile" ] || die "no $pidfile — is '$name' up?"
   local pid; pid="$(cat "$pidfile")"
   kill -9 "$pid" 2>/dev/null || true
@@ -447,8 +427,6 @@ restart() {
   rm -f "$pidfile"
   log "$name killed (pid $pid)"
   case "$name" in
-    props) start_props "$(mcp_python_bin)" ;;
-    rxnpredict) start_rxnpredict "$(mcp_python_bin)" ;;
     pyexec) start_pyexec "$(mcp_python_bin)" ;;
     mock-eln) start_mock_eln "$(mock_venv_bin)" ;;
     mock-vendor) start_mock_vendor "$(mock_venv_bin)" ;;

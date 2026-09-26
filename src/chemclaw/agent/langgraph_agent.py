@@ -922,35 +922,6 @@ def _compiled_on_first_use(build: Callable[[], Any]) -> Any:
     return RunnableLambda(invoke)
 
 
-def _bound_helper_names(runnable: Any) -> frozenset[str]:
-    """A compiled helper's **capability** tools, read off its own `ToolNode`.
-
-    The same read `tests/test_context_floor.py` makes, and for the same reason: a surface derived
-    from a profile is a claim about what a build *should* have produced, and this is what it did.
-    It is what makes a roster description underivable from anything stale — and it is also the only
-    honest test of "is this entry worth offering", since a profile that names ten connector tools
-    binds none of them in a deployment that has those bundles turned off.
-
-    **The scratch verbs are subtracted, and driving this is what showed why.**
-    `FilesystemMiddleware` is in `create_deep_agent`'s required set, so every helper binds `ls`,
-    `glob`, `grep`, `read_file`, `write_file` and `edit_file` whatever its profile says. Left in,
-    they appeared in
-    all four roster descriptions — making entries look alike in exactly the dimension the model
-    chooses on, which is the defect `D-2026-08-12` measured — and, worse, they made the
-    "bound nothing" test unreachable: a helper whose every capability tool was missing still bound
-    six verbs and was offered as though it could do its job. They are the helper's own notepad over
-    a backend with no store behind it, so they are not capability and do not belong in either
-    answer.
-
-    Empty rather than raising when the graph has no tool node: a helper compiled with no capability
-    is exactly the case the caller is asking about.
-    """
-    node = runnable.nodes.get("tools") if hasattr(runnable, "nodes") else None
-    bound = getattr(getattr(node, "bound", None), "tools_by_name", None)
-    scratch = set(scratchpad_tools())
-    return frozenset(bound) - scratch if bound else frozenset()
-
-
 class ReloadingSkillsState(SkillsState):
     """`SkillsState` with its cached listing moved to a channel the checkpointer cannot restore.
 

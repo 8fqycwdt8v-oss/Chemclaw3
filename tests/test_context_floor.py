@@ -918,9 +918,12 @@ SERVED_ELSEWHERE_ALLOWANCE = 11_000
 #: surface it never sends.
 #:
 #: **But one configuration in this tree does mount the whole directory.**
-#: `infra/live/e2e-full-stack/up.sh` puts `$MCP_REPO/manifests` on `CHEMCLAW_CONNECTORS_DIR`, so
-#: that lane also binds `props` and `pyexec` — and its prefix is over `PREFIX_BOUND` by roughly
-#: those two bundles' schemas, which leaves the clear trigger's thread allowance short of the
+#: `infra/live/e2e-full-stack/up.sh` puts `$MCP_REPO/manifests` on `CHEMCLAW_CONNECTORS_DIR` —
+#: *after* this tree's own directory, and discovery is first-directory-wins, so every name this
+#: tree declares resolves to this tree's manifest and its `default_enabled: false` holds there too.
+#: What that lane binds from the fleet is therefore only the bundles this tree declares nothing
+#: for — `pyexec` — and its prefix is over `PREFIX_BOUND` by roughly that bundle's schema, which
+#: leaves the clear trigger's thread allowance short of the
 #: 30,000 `core/config/agent.py` derives it to be. That is stated rather than absorbed: raising
 #: `SERVED_ELSEWHERE_ALLOWANCE` to cover it would move both defaults for every deployment on
 #: account of a lane that talks to `chemclaw.cli.mock_llm`.
@@ -940,13 +943,14 @@ SERVED_ELSEWHERE_ALLOWANCE = 11_000
 #: measurement.
 #:
 #: The cost is stated rather than absorbed, because raising a bound quietly is how one stops being
-#: one: every deployment that mounts this directory — `infra/live/e2e-full-stack/up.sh` does — now
-#: pays 3,764 more tokens on every model call. At 538 tokens a tool `thermalsafety` is in the band
-#: its siblings occupy (`safety` 544, `props` 489, `chem` 465) rather than an outlier, and the
-#: length is the fleet's own rule about a tool docstring stating what the tool is *not* — which for
-#: a server that answers "what happens if the cooling fails" is the paragraph that keeps a Semenov
-#: estimate from being quoted as an SADT. Trimming to fit would have cost ~330 tokens a tool, which
-#: is that paragraph.
+#: one: a deployment that mounts this directory and enables the bundle pays 3,764 more tokens on
+#: every model call. (`infra/live/e2e-full-stack/up.sh` mounts it and enables none: this tree's
+#: opt-in copy wins the name there, as the note above says.) At 538 tokens a tool `thermalsafety` is
+#: in the band its siblings occupy (`safety` 544, `props` 489, `chem` 465) rather than an outlier,
+#: and the length is the fleet's own rule about a tool docstring stating what the tool is *not* —
+#: which for a server that answers "what happens if the cooling fails" is the paragraph that keeps a
+#: Semenov estimate from being quoted as an SADT. Trimming to fit would have cost ~330 tokens a
+#: tool, which is that paragraph.
 #:
 #: `SERVED_ELSEWHERE_ALLOWANCE` deliberately did **not** move with it: `thermalsafety` is not a
 #: bundle this tree declares, so no chart deployment binds it, and charging `PREFIX_BOUND` for it
@@ -960,16 +964,16 @@ SERVED_ELSEWHERE_ALLOWANCE = 11_000
 #: 3,764 / 7), 2,506 over the 19,800 that stood. Raised to 24,800, the same ~11% headroom over the
 #: new measurement.
 #:
-#: The cost again stated rather than absorbed: every deployment that mounts that directory pays
-#: 4,471 more tokens on every model call. At 639 tokens a tool `suitability` is **above** the band
-#: its siblings occupy (`thermalsafety` 538, `safety` 544, `props` 489, `chem` 465) — the first
-#: entry here where that is true — and the reason is one tool rather than a verbose server. Six of
-#: its seven cost 458-614, inside the band; `system_suitability_report` costs 1,171, being the only
-#: composite in the fleet that takes a nested model (a peak table) plus nine named criteria. That
-#: server's README argues why it is kept at that price: the alternative is the model decomposing a
-#: pasted table across the single-peak tools, which means pairing widths with retention times and
-#: resolving *adjacent* pairs, and a resolution computed between the wrong two peaks looks exactly
-#: like a correct one.
+#: The cost again stated rather than absorbed: a deployment that mounts that directory and enables
+#: the bundle pays 4,471 more tokens on every model call. At 639 tokens a tool `suitability` is
+#: **above** the band its siblings occupy (`thermalsafety` 538, `safety` 544, `props` 489, `chem`
+#: 465) — the first entry here where that is true — and the reason is one tool rather than a verbose
+#: server. Six of its seven cost 458-614, inside the band; `system_suitability_report` costs 1,171,
+#: being the only composite in the fleet that takes a nested model (a peak table) plus nine named
+#: criteria. That server's README argues why it is kept at that price: the alternative is the model
+#: decomposing a pasted table across the single-peak tools, which means pairing widths with
+#: retention times and resolving *adjacent* pairs, and a resolution computed between the wrong two
+#: peaks looks exactly like a correct one.
 #:
 #: `SERVED_ELSEWHERE_ALLOWANCE` again did not move, for the reason given directly above: this tree
 #: declares no `suitability` bundle, so no chart deployment binds it.
@@ -987,10 +991,11 @@ SERVED_ELSEWHERE_ALLOWANCE = 11_000
 #: prefix on every model call is this assertion failing.
 #:
 #: The cost again stated rather than absorbed: 3,389 more tokens on every model call for a
-#: deployment that mounts that directory. At 565 tokens a tool `kinetics` is **inside** the band
-#: its siblings occupy (`thermalsafety` 538, `safety` 544, `props` 489, `chem` 465) — unlike
-#: `suitability` above, and for a reason worth keeping: its six tools are single-purpose, where
-#: `suitability`'s seventh is a composite taking a nested model plus nine named criteria.
+#: deployment that mounts that directory and enables the bundle. At 565 tokens a tool `kinetics` is
+#: **inside** the band its siblings occupy (`thermalsafety` 538, `safety` 544, `props` 489, `chem`
+#: 465) — unlike `suitability` above, and for a reason worth keeping: its six tools are
+#: single-purpose, where `suitability`'s seventh is a composite taking a nested model plus nine
+#: named criteria.
 #:
 #: `SERVED_ELSEWHERE_ALLOWANCE` did not move for the third time, and for the third time because
 #: this tree declares no such bundle.
@@ -1001,12 +1006,12 @@ SERVED_ELSEWHERE_ALLOWANCE = 11_000
 #: `rxnpredict` 2,784 / 6, `safety` 1,632 / 3, `suitability` 4,471 / 7, `thermalsafety` 3,764 / 7,
 #: `unitops` 7,353 / 7), 4,548 over the 28,500 that stood. Raised to 36,700, the same ~11% headroom.
 #:
-#: The cost stated rather than absorbed: 7,353 more tokens on every model call for a deployment
-#: that mounts that directory. At **1,050 tokens a tool** it is nearly double `suitability`'s 639,
-#: which was itself the first entry here to sit above the band — and the shape of the two is
-#: different in a way that decides whether to trim. `suitability`'s total is one composite
-#: (`system_suitability_report`, 1,171) over six tools at 458-614. `unitops` is **uniform**:
-#: measured per tool, 958 to 1,148 across all seven, with no outlier to remove.
+#: The cost stated rather than absorbed: 7,353 more tokens on every model call for a deployment that
+#: mounts that directory and enables the bundle. At **1,050 tokens a tool** it is nearly double
+#: `suitability`'s 639, which was itself the first entry here to sit above the band — and the shape
+#: of the two is different in a way that decides whether to trim. `suitability`'s total is one
+#: composite (`system_suitability_report`, 1,171) over six tools at 458-614. `unitops` is
+#: **uniform**: measured per tool, 958 to 1,148 across all seven, with no outlier to remove.
 #:
 #: **So the price is the fleet's own two rules meeting a server whose subject is measurements.**
 #: Every tool there takes several physical quantities, each required with no default — that is
@@ -1643,8 +1648,11 @@ def test_the_bundles_both_repositories_declare_are_the_ones_charged_to_the_allow
     bundles are declared here but `default_enabled: false`; no chart entry mounts the first and no
     default `enabled()` returns any of them, so charging them to `PREFIX_BOUND` would raise both
     compaction defaults for every deployment on account of bundles those deployments do not
-    bind. What they cost is bounded by `FLEET_PUBLISHED_ALLOWANCE` below instead, which is where
-    the configuration that *does* mount them — `infra/live/e2e-full-stack/up.sh` — is priced.
+    bind. What they cost is bounded by `FLEET_PUBLISHED_ALLOWANCE` below instead, which prices a
+    deployment that mounts the fleet's directory *and enables them*. The e2e lane
+    (`infra/live/e2e-full-stack/up.sh`) mounts it after this tree's own, so this tree's opt-in
+    copies win there too and it binds none of the five; `pyexec` is the one fleet-only bundle
+    that lane binds.
 
     Needs a checkout and not a built `.venv`: reading the fleet's manifests is a shallow clone's
     worth of work, which is the half of this file that could plausibly run in CI.
@@ -1861,10 +1869,11 @@ def test_the_whole_directory_the_e2e_lane_mounts_is_bounded_too() -> None:
     """`FLEET_PUBLISHED_ALLOWANCE` bounds every bundle the fleet publishes, not only the shared.
 
     The test above bounds what `PREFIX_BOUND` is built from and therefore what a chart deployment
-    pays. This one bounds what `infra/live/e2e-full-stack/up.sh` puts on
-    `CHEMCLAW_CONNECTORS_DIR` — the fleet's whole `manifests/` directory — because that lane binds
-    two bundles no `enabled()` in this suite returns, and nothing in this repository was watching
-    their schemas grow at all.
+    pays. This one bounds the fleet's whole `manifests/` directory — what a deployment that mounts
+    it and enables its bundles would pay — because nothing in this repository was watching those
+    schemas grow at all. `infra/live/e2e-full-stack/up.sh` mounts that directory but after this
+    tree's own, so of it the lane binds only what this tree declares nothing for (`pyexec`); the
+    bound is an over-estimate of that lane, not a measurement of it.
 
     It is a bound on somebody else's tree and it can only skip or fail; it can never be the thing
     that *sets* a default here, which is why it is a second constant rather than a larger first
@@ -1895,9 +1904,9 @@ def test_the_whole_directory_the_e2e_lane_mounts_is_bounded_too() -> None:
     )
     assert total <= FLEET_PUBLISHED_ALLOWANCE, (
         f"the fleet's published manifests now cost {total} tokens ({breakdown}) against an "
-        f"allowance of {FLEET_PUBLISHED_ALLOWANCE}. Every deployment that points "
-        "CHEMCLAW_CONNECTORS_DIR at that directory — `infra/live/e2e-full-stack/up.sh` does — pays "
-        "this on every model call, on top of what this file's own ceiling bounds."
+        f"allowance of {FLEET_PUBLISHED_ALLOWANCE}. A deployment that points "
+        "CHEMCLAW_CONNECTORS_DIR at that directory and enables its bundles pays this on every "
+        "model call, on top of what this file's own ceiling bounds."
     )
     # A partial total compared against the *whole* allowance is the second hazard of the old
     # all-or-nothing helper, in the direction that reassures: the assertion above still holds
@@ -1909,7 +1918,7 @@ def test_the_whole_directory_the_e2e_lane_mounts_is_bounded_too() -> None:
             + "; ".join(f"{name}: {why}" for name, why in sorted(unmeasured.items()))
             + f". The {len(measured)} that were cost {total} tokens ({breakdown or 'none'}), so "
             f"FLEET_PUBLISHED_ALLOWANCE ({FLEET_PUBLISHED_ALLOWANCE}) is unchecked in this run and "
-            "nothing here is evidence about what `infra/live/e2e-full-stack/up.sh` binds."
+            "nothing here is evidence about what the fleet's directory costs a deployment."
         )
 
 

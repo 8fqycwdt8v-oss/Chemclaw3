@@ -504,7 +504,7 @@ async def test_a_name_that_could_never_have_been_written_reads_as_absent() -> No
     and that therefore cannot exist, where 404 is the answer and is what the in-memory store already
     gave. Both stores are driven, because the defect was exactly that the two disagreed.
     """
-    from chemclaw.agent.local_skills import storable_name
+    from chemclaw.agent.skill_store import storable_name
 
     assert not storable_name("a\x00b")
     assert not storable_name("two words")

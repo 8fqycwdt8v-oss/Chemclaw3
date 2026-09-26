@@ -105,21 +105,42 @@ def dry_run_refusal(name: str, arguments: Mapping[str, Any]) -> DryRunRefusal | 
     `/scratch/` is not. See `authz.side_effecting_call`, and `authz.changes_the_conversation` for
     the handoff this gate refuses and the plan gate does not.
     """
-    if is_dry_run() and (side_effecting_call(name, arguments) or changes_the_conversation(name)):
-        return DryRunRefusal(
-            routed(
-                f"DRY RUN — {name} changes stored data or starts work, so it was not called. "
-                "Nothing was started; re-ask without dry-run to do it.",
-                code="dry_run",
-                boundary="this turn's dry-run flag",
-                who_can_act="the chemist, by asking again without dry run",
-                sanctioned_path=(
-                    "every read-only tool still runs — look up what the real call would need, and "
-                    "say what you would have done"
-                ),
-            )
+    if not is_dry_run():
+        return None
+    if side_effecting_call(name, arguments):
+        sentence = (
+            f"DRY RUN — {name} changes stored data or starts work, so it was not called. "
+            "Nothing was started; re-ask without dry-run to do it."
         )
-    return None
+        path = (
+            "every read-only tool still runs — look up what the real call would need, and "
+            "say what you would have done"
+        )
+    elif changes_the_conversation(name):
+        # Its own wording, because a handoff writes nothing and starts nothing: the harm it would
+        # do on a dry run is moving this and every later turn to another agent, and telling the
+        # chemist it "changes stored data" is the mis-description `changes_the_conversation` was
+        # split out of `side_effecting_call` to stop.
+        sentence = (
+            f"DRY RUN — {name} would move this conversation, and every later turn, to another "
+            "agent, so it was not taken. The conversation stays with you; re-ask without dry-run "
+            "to hand over."
+        )
+        path = (
+            "answer the chemist yourself with what you have, and name the agent you would have "
+            "handed to and what you wanted from it"
+        )
+    else:
+        return None
+    return DryRunRefusal(
+        routed(
+            sentence,
+            code="dry_run",
+            boundary="this turn's dry-run flag",
+            who_can_act="the chemist, by asking again without dry run",
+            sanctioned_path=path,
+        )
+    )
 
 
 def undeclared_write_refusal(name: str, held: frozenset[str]) -> UndeclaredWriteRefusal | None:

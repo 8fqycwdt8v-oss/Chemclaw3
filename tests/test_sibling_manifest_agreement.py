@@ -177,6 +177,29 @@ def _comparable_mapping(mapping: dict[str, Any]) -> tuple[tuple[str, Any], ...]:
     return tuple(sorted((key, _comparable(value)) for key, value in mapping.items()))
 
 
+#: The argument for every process-development bundle's `default_enabled` divergence, written once
+#: because it is one argument: five rows used to carry five copies of it, all five stating that
+#: `infra/live/e2e-full-stack/up.sh` lets the fleet's copy win and bind — which that script's own
+#: directory order makes false. `test_the_e2e_lane_binds_no_opt_in_bundle_by_default` derives the
+#: harmlessness claim from the script instead of restating it.
+_OPT_IN_ARGUMENT = (
+    "this tree declares `default_enabled: false` and the fleet's copy declares nothing, which "
+    "means True there — and the divergence is the decision rather than a drift "
+    "(`D-2026-09-20-declaring-a-capability-and-binding-it-are-different-decisions`). The flag "
+    "answers a question only this repository has: what an *empty* `connectors_enabled` should "
+    "bind, given that every bound tool's schema is charged to `PREFIX_BOUND` and through it to "
+    "both compaction defaults. The fleet publishes a capability and has no prefix to protect.\n"
+    "\n"
+    "What makes it harmless is that this copy wins the name in every wiring this repository "
+    "ships, so the fleet's True decides nothing anywhere. A chart deployment reads only this "
+    "tree. `infra/live/e2e-full-stack/up.sh`, the one configuration that also mounts the fleet's "
+    "`manifests/`, puts this tree's connectors directory *first* on `CHEMCLAW_CONNECTORS_DIR`, and "
+    "`registry._bundle_dirs` is first-directory-wins — so there too an empty `connectors_enabled` "
+    "binds none of these bundles, and the server `processes.sh` starts for one runs unused. "
+    "Binding one is a release naming it in `CHEMCLAW_CONNECTORS_ENABLED`, which overrides the flag."
+)
+
+
 #: Bundle-level keys that legitimately differ between the two trees, keyed `(bundle, key)`, each
 #: carrying **why** and **what makes it harmless**. A divergence is therefore either caught or
 #: written down — which is the property the comparison existed to have and did not, because it only
@@ -194,34 +217,8 @@ _ARGUED_DIVERGENCES: dict[tuple[str, str], str] = {
         "that repository's README and its integration doc publish (`manifests/` first) dropped it "
         "with no error, no warning and no log line."
     ),
-    ("props", "default_enabled"): (
-        "this tree declares `default_enabled: false` and the fleet's copy declares nothing, which "
-        "means True there — and the divergence is the decision rather than a drift "
-        "(`D-2026-09-20-declaring-a-capability-and-binding-it-are-different-decisions`). The flag "
-        "answers a question only this repository has: what an *empty* `connectors_enabled` should "
-        "bind, given that every bound tool's schema is charged to `PREFIX_BOUND` and through it to "
-        "both compaction defaults. The fleet publishes a capability and has no prefix to protect.\n"
-        "\n"
-        "What makes it harmless is that the two answers are right in the two wirings. A chart "
-        "deployment reads this copy and binds nothing it did not ask for. The one configuration "
-        "that mounts the fleet's `manifests/` directory — `infra/live/e2e-full-stack/up.sh` — is "
-        "by construction the lane that *wants* these bundles, and there the fleet's copy wins the "
-        "name and they bind, which is the behaviour that lane had before this key existed."
-    ),
-    ("thermalsafety", "default_enabled"): (
-        "this tree declares `default_enabled: false` and the fleet's copy declares nothing, which "
-        "means True there — and the divergence is the decision rather than a drift "
-        "(`D-2026-09-20-declaring-a-capability-and-binding-it-are-different-decisions`). The flag "
-        "answers a question only this repository has: what an *empty* `connectors_enabled` should "
-        "bind, given that every bound tool's schema is charged to `PREFIX_BOUND` and through it to "
-        "both compaction defaults. The fleet publishes a capability and has no prefix to protect.\n"
-        "\n"
-        "What makes it harmless is that the two answers are right in the two wirings. A chart "
-        "deployment reads this copy and binds nothing it did not ask for. The one configuration "
-        "that mounts the fleet's `manifests/` directory — `infra/live/e2e-full-stack/up.sh` — is "
-        "by construction the lane that *wants* these bundles, and there the fleet's copy wins the "
-        "name and they bind, which is the behaviour that lane had before this key existed."
-    ),
+    ("props", "default_enabled"): _OPT_IN_ARGUMENT,
+    ("thermalsafety", "default_enabled"): _OPT_IN_ARGUMENT,
     ("thermalsafety", "skills"): (
         "the same split `safety` above records, for the same reason and with the same remedy: the "
         "judgment about `thermalsafety`'s tools is architecture layer 3 and lives here, and that "
@@ -230,20 +227,7 @@ _ARGUED_DIVERGENCES: dict[tuple[str, str], str] = {
         "carrying the bundle's name, so `thermal-safety-assessment` is reachable in either wiring "
         "order."
     ),
-    ("kinetics", "default_enabled"): (
-        "this tree declares `default_enabled: false` and the fleet's copy declares nothing, which "
-        "means True there — and the divergence is the decision rather than a drift "
-        "(`D-2026-09-20-declaring-a-capability-and-binding-it-are-different-decisions`). The flag "
-        "answers a question only this repository has: what an *empty* `connectors_enabled` should "
-        "bind, given that every bound tool's schema is charged to `PREFIX_BOUND` and through it to "
-        "both compaction defaults. The fleet publishes a capability and has no prefix to protect.\n"
-        "\n"
-        "What makes it harmless is that the two answers are right in the two wirings. A chart "
-        "deployment reads this copy and binds nothing it did not ask for. The one configuration "
-        "that mounts the fleet's `manifests/` directory — `infra/live/e2e-full-stack/up.sh` — is "
-        "by construction the lane that *wants* these bundles, and there the fleet's copy wins the "
-        "name and they bind, which is the behaviour that lane had before this key existed."
-    ),
+    ("kinetics", "default_enabled"): _OPT_IN_ARGUMENT,
     ("kinetics", "skills"): (
         "the same split `safety` above records, for the same reason and with the same remedy: the "
         "judgment about `kinetics`'s tools is architecture layer 3 and lives here, and that fleet "
@@ -251,20 +235,7 @@ _ARGUED_DIVERGENCES: dict[tuple[str, str], str] = {
         "carrying the bundle's name, so `kinetics-and-reactor-choice` is reachable in either "
         "wiring order."
     ),
-    ("unitops", "default_enabled"): (
-        "this tree declares `default_enabled: false` and the fleet's copy declares nothing, which "
-        "means True there — and the divergence is the decision rather than a drift "
-        "(`D-2026-09-20-declaring-a-capability-and-binding-it-are-different-decisions`). The flag "
-        "answers a question only this repository has: what an *empty* `connectors_enabled` should "
-        "bind, given that every bound tool's schema is charged to `PREFIX_BOUND` and through it to "
-        "both compaction defaults. The fleet publishes a capability and has no prefix to protect.\n"
-        "\n"
-        "What makes it harmless is that the two answers are right in the two wirings. A chart "
-        "deployment reads this copy and binds nothing it did not ask for. The one configuration "
-        "that mounts the fleet's `manifests/` directory — `infra/live/e2e-full-stack/up.sh` — is "
-        "by construction the lane that *wants* these bundles, and there the fleet's copy wins the "
-        "name and they bind, which is the behaviour that lane had before this key existed."
-    ),
+    ("unitops", "default_enabled"): _OPT_IN_ARGUMENT,
     ("unitops", "skills"): (
         "the same split `safety` above records, for the same reason and with the same remedy: the "
         "judgment about `unitops`'s tools is architecture layer 3 and lives here, and that fleet "
@@ -272,20 +243,7 @@ _ARGUED_DIVERGENCES: dict[tuple[str, str], str] = {
         "carrying the bundle's name, so `unit-operation-sizing` is reachable in either wiring "
         "order."
     ),
-    ("suitability", "default_enabled"): (
-        "this tree declares `default_enabled: false` and the fleet's copy declares nothing, which "
-        "means True there — and the divergence is the decision rather than a drift "
-        "(`D-2026-09-20-declaring-a-capability-and-binding-it-are-different-decisions`). The flag "
-        "answers a question only this repository has: what an *empty* `connectors_enabled` should "
-        "bind, given that every bound tool's schema is charged to `PREFIX_BOUND` and through it to "
-        "both compaction defaults. The fleet publishes a capability and has no prefix to protect.\n"
-        "\n"
-        "What makes it harmless is that the two answers are right in the two wirings. A chart "
-        "deployment reads this copy and binds nothing it did not ask for. The one configuration "
-        "that mounts the fleet's `manifests/` directory — `infra/live/e2e-full-stack/up.sh` — is "
-        "by construction the lane that *wants* these bundles, and there the fleet's copy wins the "
-        "name and they bind, which is the behaviour that lane had before this key existed."
-    ),
+    ("suitability", "default_enabled"): _OPT_IN_ARGUMENT,
     ("suitability", "skills"): (
         "the same split `safety` above records, for the same reason and with the same remedy: the "
         "judgment about `suitability`'s tools is architecture layer 3 and lives here, and that "
@@ -414,6 +372,61 @@ def test_a_bundle_declared_in_both_trees_declares_the_same_surface() -> None:
             "sends the other, and /healthz is unauthenticated — so a mismatch is a connector that "
             "reports healthy while every call it makes is refused."
         )
+
+
+#: The script whose directory order `_OPT_IN_ARGUMENT` makes a claim about.
+_E2E_UP = REPO_ROOT / "infra/live/e2e-full-stack/up.sh"
+
+
+def _e2e_connectors_dir(fleet: Path) -> str:
+    """`CHEMCLAW_CONNECTORS_DIR` exactly as `up.sh` exports it, with its three variables bound.
+
+    Read off the script rather than transcribed, because the order *is* the claim: a transcription
+    would go on agreeing with itself after the script moved the fleet's `manifests/` first.
+    """
+    import chemclaw.connectors
+
+    exports = [
+        line.split("=", 1)[1].strip().strip('"')
+        for line in _E2E_UP.read_text(encoding="utf-8").splitlines()
+        if line.strip().startswith("export CHEMCLAW_CONNECTORS_DIR=")
+    ]
+    assert len(exports) == 1, f"{_E2E_UP} exports CHEMCLAW_CONNECTORS_DIR {len(exports)} times"
+    bindings = {
+        "$own_connectors": str(Path(chemclaw.connectors.__file__).resolve().parent),
+        "$MCP_REPO": str(fleet),
+        "$HARNESS_DIR": str(_E2E_UP.parent),
+    }
+    value = exports[0]
+    for variable, path in bindings.items():
+        value = value.replace(variable, path)
+    assert "$" not in value, f"{_E2E_UP} names a variable this test does not bind: {value}"
+    return value
+
+
+def test_the_e2e_lane_binds_no_opt_in_bundle_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every bundle `_OPT_IN_ARGUMENT` excuses is unbound under `up.sh`'s own wiring.
+
+    The rows used to say the opposite — that in the four-repo lane the fleet's copy wins the name
+    and these bundles bind — and nothing checked it: `up.sh` lists this tree's connectors first and
+    discovery is first-directory-wins, so this tree's `default_enabled: false` decides there too.
+    Driven through `registry.enabled()` with the exported directory order and no enable-list, which
+    is how `processes.sh` runs the front door.
+    """
+    from chemclaw.connectors import registry
+    from chemclaw.core.config import settings
+
+    fleet = _sibling_or_skip()
+    opt_in = {bundle for (bundle, _), why in _ARGUED_DIVERGENCES.items() if why is _OPT_IN_ARGUMENT}
+    monkeypatch.setattr(settings, "connectors_dir", _e2e_connectors_dir(fleet))
+    monkeypatch.setattr(settings, "connectors_enabled", "")
+    bound = {manifest.name for manifest in registry.enabled()}
+    assert opt_in, "no row carries `_OPT_IN_ARGUMENT`, so this test checks nothing"
+    assert not opt_in & bound, (
+        f"{sorted(opt_in & bound)} bind in the e2e lane's wiring with no enable-list, so "
+        "`_OPT_IN_ARGUMENT`'s harmlessness claim — this tree's copy wins the name everywhere — is "
+        f"false. {_E2E_UP} has changed its CHEMCLAW_CONNECTORS_DIR order; rewrite the argument."
+    )
 
 
 def test_the_compared_key_set_is_anchored_in_both_the_model_and_the_two_files() -> None:

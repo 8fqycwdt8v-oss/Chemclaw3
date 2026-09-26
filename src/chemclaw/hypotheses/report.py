@@ -102,7 +102,10 @@ def summarise(outcome: TournamentOutcome) -> str:
                 # The call as it was made, including what stayed at the tool's default. A number
                 # computed in the default solvent answers a different question from one computed
                 # in the solvent the hypothesis is about, and only this line can tell them apart.
-                lines.append(f"     ran: `{as_cell(row.outcome.ran)}`")
+                # Whitespace-collapsed but **not** `as_cell`ed: the system builds this line and its
+                # `[[note-id]]`s are the grounded compounds the check computed on, the edge the
+                # field note must keep. Its model-reachable parts are unlinked where it is built.
+                lines.append(f"     ran: `{' '.join(row.outcome.ran.split())}`")
         elif row.check is not None and row.check.kind == "physical":
             lines.append(f"   - to settle in the lab: {as_cell(row.check.question)}")
         elif row.check is not None:

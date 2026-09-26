@@ -49,6 +49,7 @@ from chemclaw.protocols.export import run_sheet_path
 from chemclaw.protocols.from_bo import factors_and_arms
 from chemclaw.protocols.layout import LayoutError, place, smallest_plate_for
 from chemclaw.protocols.models import (
+    DesignRevision,
     DesignStatus,
     DesignSummary,
     EvidenceRef,
@@ -329,6 +330,26 @@ async def _require_writable(store: DesignStore, design_id: str) -> DesignSummary
             "`structure_experiment_request` rather than writing to theirs."
         )
     return header
+
+
+async def _read_design_or_refuse(
+    store: DesignStore, design_id: str, revision: int = 0
+) -> DesignRevision:
+    """One revision of a design — the head for `revision=0` — or a refusal the model can act on.
+
+    One refusal for the four tools that read a design, because the copies had drifted: one of them
+    read a specific revision and answered its absence as "no design", so a chemist asking for
+    revision 5 of a design that has four was told the design did not exist. The message names the
+    revision whenever one was asked for, and always the tool that lists what does exist.
+    """
+    stored = await store.read(design_id, revision or None)
+    if stored is None:
+        raise ChemclawError(
+            f"no design {design_id!r}"
+            + (f" at revision {revision}" if revision else "")
+            + ". Use find_experiment_protocols to list what exists."
+        )
+    return stored
 
 
 async def _stored_status(store: DesignStore, design_id: str) -> DesignStatus:
@@ -760,13 +781,7 @@ async def read_experiment_protocol(design_id: str, revision: int = 0) -> str:
         ChemclawError: no design or no such revision.
     """
     store = _store()
-    stored = await store.read(design_id, revision or None)
-    if stored is None:
-        raise ChemclawError(
-            f"no design {design_id!r}"
-            + (f" at revision {revision}" if revision else "")
-            + ". Use find_experiment_protocols to list what exists."
-        )
+    stored = await _read_design_or_refuse(store, design_id, revision)
     body = ProtocolReadout(
         receipt=receipt(
             stored.design,
@@ -833,11 +848,7 @@ async def rescale_experiment_protocol(design_id: str, target_scale: str) -> str:
             amount, or a target needing a molar mass or density.
     """
     store = _store()
-    stored = await store.read(design_id, None)
-    if stored is None:
-        raise ChemclawError(
-            f"no design {design_id!r}. Use find_experiment_protocols to list what exists."
-        )
+    stored = await _read_design_or_refuse(store, design_id)
     try:
         result = rescale(stored.design, target=target_scale)
     except RescaleError as exc:
@@ -918,13 +929,7 @@ async def attach_plate_results(
     # The results table is append-only and this tool is its only writer, so an unowned write here
     # could never be taken back: the same `owner_permits` rule its two sibling writers apply.
     await _require_writable(store, design_id)
-    stored = await store.read(design_id, revision or None)
-    if stored is None:
-        raise ChemclawError(
-            f"no design {design_id!r}"
-            + (f" at revision {revision}" if revision else "")
-            + ". Use find_experiment_protocols to list what exists."
-        )
+    stored = await _read_design_or_refuse(store, design_id, revision)
     parsed = [ArmResult.model_validate(result) for result in results]
     try:
         require_arms_exist(stored.design, parsed)
@@ -974,11 +979,7 @@ async def read_plate_results(design_id: str, outcome: str = "", revision: int = 
         ChemclawError: No such design or revision.
     """
     store = _store()
-    stored = await store.read(design_id, revision or None)
-    if stored is None:
-        raise ChemclawError(
-            f"no design {design_id!r}. Use find_experiment_protocols to list what exists."
-        )
+    stored = await _read_design_or_refuse(store, design_id, revision)
     rows = await default_arm_result_store().read(design_id, stored.revision)
     return _readable(
         PlateReadout(

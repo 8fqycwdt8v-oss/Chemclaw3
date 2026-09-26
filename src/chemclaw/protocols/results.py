@@ -138,11 +138,9 @@ def summarise(
     """
     latest = latest_by_arm(results)
     measured = {arm for arm, _ in latest}
-    seen: dict[tuple[str, str], StoredArmResult] = {}
     disagreements: list[str] = []
     for result in results:
-        key = (result.arm_id, result.outcome)
-        first = seen.setdefault(key, result)
+        first = latest[(result.arm_id, result.outcome)]
         # A unit change is its own line rather than a numeric disagreement: 85 % and 0.85 fraction
         # agree, and reporting them as "85 and 0.85" would send a chemist to re-run a well that
         # was only relabelled.

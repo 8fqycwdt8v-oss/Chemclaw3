@@ -77,7 +77,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.hypotheses.report import field_body, proposal_body, summarise
     from chemclaw.hypotheses.screen import screen
     from chemclaw.kg.git_writer import default_writer
-    from chemclaw.kg.note import Note, as_cell
+    from chemclaw.kg.note import Note, as_cell, strip_links
     from chemclaw.kg.record import record_note
     from chemclaw.templates.manifest import Template
 
@@ -1157,13 +1157,16 @@ def _job_line(
             return f"[[{by_smiles[value]}]]"
         if isinstance(value, list):
             return "[" + ", ".join(_named(item) for item in value) + "]"
-        return repr(value)
+        # Every link in this line is one `by_smiles` grounded; a value that is not a grounded
+        # structure is text the model chose, so it is unlinked here rather than in the report,
+        # which keeps the grounded edges `summarise` would otherwise strip with it.
+        return strip_links(repr(value))
 
     stated = "; ".join(
         f"{name}={_named(payload[name])}" for name in sorted(payload) if name in subjects
     )
     axes = "".join(
-        f" over {name}={payload[name]!r}"
+        f" over {name}={strip_links(repr(payload[name]))}"
         for name in sorted(payload)
         if name not in subjects and name in SWEEPABLE_FIELDS
     )

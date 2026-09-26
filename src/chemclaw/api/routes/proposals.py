@@ -45,6 +45,7 @@ from chemclaw.agent.local_skills import (
     validated_skill,
 )
 from chemclaw.api.deps import CurrentUser
+from chemclaw.api.routes.skill_http import skill_refusal_http, store_or_503
 from chemclaw.api.runner import turn_store
 
 
@@ -109,9 +110,11 @@ def _rendered(proposal: Proposal) -> ProposalOut:
 async def list_proposals(principal: CurrentUser, state: str = "open") -> ProposalsOut:
     """What is waiting on this person — open by default, since that is the question they have.
 
-    `state=""` asks for everything, including what they have already decided and what a newer
+    `state=""` asks for every state, including what they have already decided and what a newer
     version superseded. That is the audit read rather than the queue read, and it is the same
-    surface because the two differ only in a predicate.
+    surface because the two differ only in a predicate. **Either read is bounded** to the newest
+    `agent_proposals_list_max` rows, so an audit read past that many is cut short rather than
+    whole — raise the setting where the full trail matters.
     """
     store = default_proposal_store()
     wanted = [state] if state else []
@@ -218,21 +221,19 @@ async def _write_what_was_accepted(
     try:
         validated_skill(proposal.content, expected_name=proposal.name)
     except SkillRefused as refusal:
-        raise HTTPException(409 if refusal.conflict else 422, str(refusal)) from refusal
-    store = await turn_store()
-    if store is None:
-        raise HTTPException(
-            503,
-            "this deployment keeps no personal skills, so accepting one would record a decision "
-            "that changes nothing (CHEMCLAW_AGENT_MEMORY_ENABLED with a Postgres session store)",
-        )
+        raise skill_refusal_http(refusal) from refusal
+    store = store_or_503(
+        await turn_store(),
+        "this deployment keeps no personal skills, so accepting one would record a decision "
+        "that changes nothing (CHEMCLAW_AGENT_MEMORY_ENABLED with a Postgres session store)",
+    )
     # The row cap rides on the writer too, so this door and the save route spend one bound under
     # one lock rather than each counting for itself.
     replaced = await read_local_skill(store, actor, proposal.name)
     try:
         await save_local_skill(store, actor, proposal.name, proposal.content)
     except SkillRefused as refusal:
-        raise HTTPException(409 if refusal.conflict else 422, str(refusal)) from refusal
+        raise skill_refusal_http(refusal) from refusal
 
     async def undo() -> None:
         """Put the tier back as it stood before this acceptance wrote to it."""

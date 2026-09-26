@@ -185,3 +185,50 @@ def test_a_rescaled_design_declares_its_new_scale_and_passes_the_plausibility_ba
     assert scaled.request.scale.value == "20 kg"
     assert scaled.request.scale.basis == "inferred"
     assert quantities_are_plausible(scaled).passed
+
+
+def test_a_molar_target_still_declares_a_scale_the_plausibility_band_can_read() -> None:
+    """A rescale by amount records a mass or volume scale, never the raw "6000 mmol".
+
+    `checks._plausibility_bands` reads only a mass or a volume, so recording the molar target
+    dropped a kilo batch back to the bench ceilings and warned a unit slip on the charges the
+    rescale itself produced. The chemist's declared unit is kept, moved by the factor.
+    """
+    from chemclaw.protocols.checks import quantities_are_plausible
+    from chemclaw.protocols.models import RequestField
+
+    design = _design(
+        charge=[
+            ChargeLine(
+                component="ArBr",
+                limiting=True,
+                mass_mg=1_000_000.0,
+                amount_mmol=5000.0,
+                equivalents=1.0,
+            ),
+            ChargeLine(component="2-MeTHF", volume_ml=10_000.0),
+        ]
+    )
+    design = design.model_copy(
+        update={
+            "request": design.request.model_copy(
+                update={"scale": RequestField(value="1 kg", basis="inferred")}
+            )
+        }
+    )
+    assert quantities_are_plausible(design).passed
+    scaled = rescale(design, target="6000 mmol").design
+    assert scaled.request.scale.value == "1.2 kg"
+    assert quantities_are_plausible(scaled).passed
+
+
+def test_a_molar_target_with_no_declared_scale_records_the_limiting_mass() -> None:
+    """With no readable declared scale, the limiting line's scaled mass is what is recorded."""
+    design = _design(
+        charge=[
+            ChargeLine(
+                component="ArBr", limiting=True, mass_mg=1000.0, amount_mmol=5.0, equivalents=1.0
+            ),
+        ]
+    )
+    assert rescale(design, target="10000 mmol").design.request.scale.value == "2 kg"

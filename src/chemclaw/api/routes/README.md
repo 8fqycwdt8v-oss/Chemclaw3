@@ -36,6 +36,11 @@ disables `app.dependency_overrides`.)
 docstring sets out. One module rather than two header literals, so the two routes cannot drift into
 disagreeing policies.
 
+`skill_http.py` holds no route either. It is the one translation the three skill-writing surfaces —
+`skills.py`, `org_skills.py` and `proposals.py` — share: a `SkillRefused` as 409 or 422, and a
+missing store as a 503 rather than an empty tier. It was four copies of the one and three of the
+other, and a status code that drifted on one surface would give a refusal two meanings.
+
 Two conventions to keep, both enforced by tests rather than asked for:
 
 - **Every route outside the three probes takes `CurrentUser`** (`chemclaw.api.deps`), directly or
