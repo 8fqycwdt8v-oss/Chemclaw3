@@ -722,6 +722,8 @@ def test_the_expansion_guard_sees_what_a_per_quantifier_scan_did_not(
         (r"(?<n>a)(?P=n){9999}", "a backreference is one atom"),
         (r"(?<=a)b{10000}(?i:c)", "lookarounds and scoped flags weigh nothing either"),
         (r"^[^,]{0,10000},", "a repeat at the per-count limit followed by a literal"),
+        (r"(?:,[^,]{0,10000}){0,1}", "`{0,1}` duplicates nothing, exactly like `?`"),
+        (r"(?:,[^,]{0,10000}){1}", "`{1}` duplicates nothing either"),
         ("a{9000}" * 3, "siblings under the whole-pattern bound, each under the per-count one"),
     ],
 )

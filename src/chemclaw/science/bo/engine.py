@@ -1214,7 +1214,8 @@ _BOUND_SNAP_FRACTION = 1e-9
 #: a value by at most 5e-11 of *itself*, which is not inside the absolute `_CONSTRAINT_TOLERANCE`
 #: at every magnitude: at ~1e6, times a constraint's coefficients, it is more — measured, a
 #: space-filling design over `7·a + 13·b <= 3.1e7` was refused after rounding. So the breach check
-#: reads the solver's values and only what is returned is cleaned (`optimal_design`).
+#: reads the solver's values, and a run whose cleaned form breaches is returned as solved
+#: (`_verified_clean_run`).
 _DESIGN_SIGNIFICANT_DIGITS = 10
 
 
@@ -1226,7 +1227,8 @@ def _clean(parameter: ContinuousParameter | CategoricalParameter, value: ParamVa
     exact-equality duplicate detection reported `duplicate_runs=0` over a design that replicated
     three corners, and the conditions read as though somebody should weigh 1e-15 equivalents.
     Done *after* `_constraint_breaches`, which checks the solver's own values: its tolerance is
-    absolute, and neither this snap nor this rounding is bounded in absolute terms.
+    absolute, and neither this snap nor this rounding is bounded in absolute terms — so
+    `_verified_clean_run` checks the cleaned run again and keeps the raw one where it breaches.
     """
     if not isinstance(parameter, ContinuousParameter) or not isinstance(value, float):
         return value
@@ -1271,6 +1273,22 @@ def _constraint_breaches(
             if slack < -_CONSTRAINT_TOLERANCE:
                 breaches.append(f"run {index} gives {total:g} against {constraint.describe()}")
     return breaches
+
+
+def _verified_clean_run(
+    problem: OptimizationProblem, run: dict[str, ParamValue]
+) -> dict[str, ParamValue]:
+    """`run` cleaned by `_clean`, unless cleaning breaks a constraint — then `run` as solved.
+
+    The breach check reads the solver's values, because cleaning is not bounded in absolute terms
+    and a solve on its limit would otherwise be refused. But what the chemist receives is the
+    cleaned run, and a check that never read it verified nothing about it: at ~1e6, rounding a
+    value onto its limit carried the total 64 tolerances over. So the cleaned run is checked too,
+    and where it breaches, the verified raw run is what is returned — every returned run is one
+    `_constraint_breaches` passed, which is what `honoured_constraints` claims.
+    """
+    cleaned = {p.name: _clean(p, run[p.name]) for p in problem.parameters}
+    return run if _constraint_breaches(problem, [cleaned]) else cleaned
 
 
 def optimal_design(
@@ -1366,7 +1384,7 @@ def optimal_design(
             f"feasible and must not be run: {'; '.join(breaches)}. Honouring a limit is the one "
             "thing this offers over a factorial screen, so it refuses rather than returning them."
         )
-    runs = [{p.name: _clean(p, run[p.name]) for p in problem.parameters} for run in solved]
+    runs = [_verified_clean_run(problem, run) for run in solved]
     seen: set[tuple[tuple[str, ParamValue], ...]] = set()
     duplicates = 0
     for run in runs:
@@ -1380,7 +1398,8 @@ def optimal_design(
         formula=None if space_filling else formula,
         n_terms=0 if space_filling else _model_terms(problem, formula),
         duplicate_runs=duplicates,
-        # Only what `_constraint_breaches` verified: exclusions are refused above, so this is
-        # every constraint the design carries, counted by the kind that was actually checked.
+        # Only what `_constraint_breaches` verified — on the returned runs themselves, via
+        # `_verified_clean_run`: exclusions are refused above, so this is every constraint the
+        # design carries, counted by the kind that was actually checked.
         honoured_constraints=sum(isinstance(c, LinearConstraint) for c in problem.constraints),
     )

@@ -119,7 +119,8 @@ async def settle_orphaned_waits(after: pending_store.WaitingRow | None = None) -
     of them older than an orphan starved it for as long as they stayed open. Restarting every pass
     at the oldest row only moved that starvation to a longer table, so where a pass stops is
     returned as `resume_after` and the next pass continues from it, wrapping to the start once the
-    table is exhausted.
+    table is exhausted — within the same pass when `after` already sits past the last row, which a
+    pass that ran out of budget exactly on the table's last full page leaves behind.
 
     Args:
         after: the keyset position the previous pass stopped at; `None` starts at the oldest row.
@@ -132,12 +133,20 @@ async def settle_orphaned_waits(after: pending_store.WaitingRow | None = None) -
     deadline = loop.time() + settings.retention_timeout_seconds * _PASS_BUDGET_FRACTION
     sweep = OrphanSweep()
     client: Any = None
+    # A cursor the previous pass left on what turned out to be the table's last full page finds
+    # nothing after it. Wrapping here, once, keeps that pass from being an interval that sweeps
+    # nothing; once, so an empty table cannot loop.
+    may_wrap = after is not None
     while True:
         rows = await pending_store.waiting_rows(
             older_than_seconds=settings.awaiting_orphan_grace_seconds,
             limit=settings.awaiting_orphan_batch,
             after=after,
         )
+        if not rows and may_wrap:
+            may_wrap, after = False, None
+            continue
+        may_wrap = False
         if not rows:
             break
         client = client or await connect()

@@ -348,7 +348,9 @@ def _principal_from_claims(claims: dict[str, Any]) -> Principal:
     if not isinstance(oid, str) or not oid.strip():
         raise AuthError("token has no 'oid' claim")
     upn = claims.get("preferred_username") or claims.get("upn") or ""
-    entitlements = list(claims.get("roles", []))
+    if not isinstance(upn, str):
+        raise AuthError("token's 'preferred_username'/'upn' claim is not a string")
+    entitlements = _string_list_claim(claims, "roles")
     if settings.entra_group_claims_as_roles:
         # Entra emits `_claim_names`/`_claim_sources` instead of `groups` for a user in more
         # groups than the token can carry (~150+). That is an *overage*, not an empty membership,
@@ -374,8 +376,27 @@ def _principal_from_claims(claims: dict[str, Any]) -> Principal:
         # `cloud_displayname` instead, at which point a group named like a privileged app role
         # silently grants it. One flag meant to hand a file share its read entitlement must not be
         # able to widen the write-tool gates.
-        entitlements += [f"{GROUP_ROLE_PREFIX}{group}" for group in claims.get("groups", [])]
+        entitlements += [
+            f"{GROUP_ROLE_PREFIX}{group}" for group in _string_list_claim(claims, "groups")
+        ]
     return Principal(oid=oid, upn=upn, roles=frozenset(entitlements))
+
+
+def _string_list_claim(claims: dict[str, Any], name: str) -> list[str]:
+    """The claim `name` as a list of strings — absent is empty, any other shape is an `AuthError`.
+
+    **Checked rather than coerced, because both coercions were wrong.** `list(...)` over a claim
+    that is a string split it into one-character entitlements — `"ab"` granted roles `a` and `b` —
+    and over `null` raised a `TypeError`, while a list carrying a non-string reached `Principal` as
+    a pydantic `ValidationError`. Neither exception is one `require_principal` answers, so a signed
+    but malformed token was a 500 rather than the 401 it is.
+    """
+    if name not in claims:
+        return []
+    value = claims[name]
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise AuthError(f"token's {name!r} claim is not a list of strings")
+    return value
 
 
 async def require_principal(request: Request) -> Principal:

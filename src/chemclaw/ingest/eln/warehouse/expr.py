@@ -411,7 +411,11 @@ def _refuse_an_unbounded_expansion(pattern: str) -> None:
                 counts = [int(part) for part in bound.groups() if part]
                 if counts:
                     repeated = last * max(counts)
-                    _refuse_past_the_expansion_bound(pattern, repeated, _MAX_REPEAT_COUNT)
+                    # `{0,1}` and `{1}` duplicate nothing: the repeat bound is about what a
+                    # quantifier *multiplies*, and the group's own total was already held to the
+                    # expansion bound at its `)` — so they read the same as a `?` would.
+                    if max(counts) > 1:
+                        _refuse_past_the_expansion_bound(pattern, repeated, _MAX_REPEAT_COUNT)
                     totals[-1] += repeated - last
                     last = repeated
                     _refuse_past_the_expansion_bound(pattern, totals[-1], _MAX_EXPANDED_ATOMS)

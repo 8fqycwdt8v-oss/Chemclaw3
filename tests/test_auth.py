@@ -168,6 +168,43 @@ def test_token_with_a_blank_or_non_string_oid_is_rejected(rsa_key: Any, oid: obj
         validate_token(token)
 
 
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"preferred_username": 5},
+        {"upn": ["alice"]},
+        {"roles": [1]},
+        {"roles": None},
+        {"roles": "ab"},
+        {"groups": "g-1"},
+        {"groups": [None]},
+    ],
+)
+def test_token_with_a_malformed_identity_claim_is_rejected(
+    monkeypatch: pytest.MonkeyPatch, rsa_key: Any, extra: dict[str, object]
+) -> None:
+    """A malformed upn/roles/groups claim is an `AuthError` (a 401), never a 500 or a coercion.
+
+    `roles: "ab"` is the one that did not fail at all: it was split into the entitlements `a` and
+    `b`. The others escaped `require_principal` as a `TypeError` or a `ValidationError`.
+    """
+    monkeypatch.setattr(settings, "entra_group_claims_as_roles", True)
+    token = _sign(rsa_key, {"oid": "u-1", **extra})
+    with pytest.raises(AuthError, match="claim is not"):
+        validate_token(token)
+
+
+def test_route_answers_401_for_a_malformed_roles_claim(
+    monkeypatch: pytest.MonkeyPatch, rsa_key: Any
+) -> None:
+    """End to end: a signed token with a non-list `roles` claim is refused as unauthenticated."""
+    monkeypatch.setattr(settings, "entra_required", True)
+    token = _sign(rsa_key, {"oid": "u-1", "roles": None})
+    with TestClient(create_app()) as client:
+        response = client.post("/sessions", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 401
+
+
 def test_route_answers_401_for_a_blank_oid(monkeypatch: pytest.MonkeyPatch, rsa_key: Any) -> None:
     """End to end: the request is refused as unauthenticated rather than failing as a 500."""
     monkeypatch.setattr(settings, "entra_required", True)

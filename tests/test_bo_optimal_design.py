@@ -288,7 +288,7 @@ def test_replicated_corners_are_counted_and_read_as_the_bound_they_are() -> None
 def test_rounding_a_feasible_solve_at_a_large_magnitude_is_not_read_as_a_breach(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The breach check reads the solver's values; only the returned runs are cleaned.
+    """The breach check reads the solver's values, and a run cleaning would break is returned raw.
 
     Ten significant digits move a value by up to 5e-11 of itself, which at ~1e6 and times a
     coefficient is past the absolute `_CONSTRAINT_TOLERANCE`. Checked after rounding, a solve
@@ -326,5 +326,12 @@ def test_rounding_a_feasible_solve_at_a_large_magnitude_is_not_read_as_a_breach(
 
     design = optimal_design(problem, n_experiments=2, criterion="space-filling", seed=0)
 
-    assert [run["a"] for run in design.runs] == [1234567.892, 1234567.892]
+    # Rounded, `a` would be 1234567.892 and the total 13·4.9e-4 ≈ 6.4e-3 over the limit — 64
+    # tolerances. The returned runs are the ones that were verified, so the raw value comes back.
+    assert [run["a"] for run in design.runs] == [on_the_limit, on_the_limit]
+    for run in design.runs:
+        total = 13.0 * float(run["a"]) + float(run["b"])
+        assert total <= 13.0 * on_the_limit + engine._CONSTRAINT_TOLERANCE
+    assert engine._constraint_breaches(problem, design.runs) == []
+    assert design.honoured_constraints == 1
     assert design.duplicate_runs == 1
