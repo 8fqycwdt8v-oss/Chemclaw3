@@ -25,10 +25,12 @@ same guard-free process. Living in `api/` is what made this unreachable, so it l
 every entrypoint already imports, and each entrypoint calls it.
 
 **What it does not guard.** `_refuse_unauthenticated_exposure` stayed behind, deliberately: its
-signal is `service_host` being non-loopback, which is a property of a *bind*, and what "exposed"
-means for a process that only makes outbound calls is an open design question rather than a move
-(`docs/planning/BACKLOG.md`). Reading that field from a worker is exactly the confusion this
-module exists to end, which is why nothing below reads it.
+signal is `service_host` being non-loopback, which is a property of a *bind*, and reading that field
+from a worker is exactly the confusion this module exists to end, which is why nothing below reads
+it. What "exposed" means for a process that only makes outbound calls was answered separately and
+in this module's shape — a stated posture rather than an inferred one
+(`durable/serve.refuse_unauthenticated_worker`,
+`D-2026-09-26-a-worker-states-its-unauthenticated-posture`).
 """
 
 import logging
