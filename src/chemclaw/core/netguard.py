@@ -288,13 +288,14 @@ _GIT_REMOTE_TIMEOUT_SECONDS = 5.0
 _A_PLAUSIBLE_HOST = re.compile(r"\A[A-Za-z0-9._:-]+\Z")
 
 
-def _push_hosts_for(repo_dir: str, remote: str) -> frozenset[str]:
+def _push_hosts_for(repo_dir: str, remote: str, ssh_timeout_seconds: float) -> frozenset[str]:
     """Resolve the checkout, then ask `_push_hosts` — which caches on what it is given.
 
     The resolution is here and not inside the cache because the *key* is the thing that has to be
     unambiguous: a relative `repo_dir` names different directories under different working
     directories, and measured, two clones both reached as `notes` returned the first one's host for
-    the second.
+    the second. `ssh_timeout_seconds` is `egress_ssh_resolve_timeout_seconds`, passed rather than
+    read so this module never reaches back into a config that is still importing it.
     """
     if not repo_dir or not remote or is_the_processes_own_checkout(repo_dir):
         return frozenset()
@@ -302,11 +303,54 @@ def _push_hosts_for(repo_dir: str, remote: str) -> frozenset[str]:
         resolved = str(Path(repo_dir).resolve())
     except OSError:
         return frozenset()
-    return _push_hosts(resolved, remote)
+    return _push_hosts(resolved, remote, ssh_timeout_seconds)
+
+
+#: The URL schemes git hands to ssh. The scp-like `user@host:path` has no scheme and is ssh too.
+_SSH_SCHEMES = frozenset({"ssh", "git+ssh", "ssh+git"})
+
+
+def _ssh_hostname(alias: str, timeout_seconds: float) -> str:
+    """The host ssh would dial for `alias`, per `ssh -G`, or `alias` itself if ssh cannot say.
+
+    **Why ssh is asked at all.** For an ssh remote, the host in the URL is what ssh *looks up*, not
+    what it dials: `Host notes-alias` / `HostName real-git.internal.example` in the ssh
+    configuration makes `git@notes-alias:o/n.git` a connection to `real-git.internal.example`.
+    Deriving `notes-alias` put a name nothing dials on the allowlist and left off the one that is
+    dialled, so the compiled layer refused the deployment's own push at `getaddrinfo`. `ssh -G`
+    prints the configuration ssh would use after every `Host`/`Match` block is applied, without
+    connecting, so its `hostname` line is the answer from the program that will act on it rather
+    than a second parser of its file format.
+
+    **Never raises, and falls back to the alias** — no `ssh` on `PATH`, a non-zero exit, the
+    timeout, output with no plausible `hostname` line. That is exactly what was derived before this
+    existed, so a failure costs nothing it did not already cost, and a deployment can still name
+    the host in `egress_allow`. `--` keeps a host spelled like an option from being read as one,
+    and stdin is closed so nothing can wait on a prompt.
+    """
+    try:
+        found = subprocess.run(
+            ["ssh", "-G", "--", alias],
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return alias
+    if found.returncode != 0:
+        return alias
+    for line in found.stdout.splitlines():
+        key, _, value = line.strip().partition(" ")
+        if key.lower() == "hostname":
+            host = value.strip().lower()
+            return host if _A_PLAUSIBLE_HOST.match(host) else alias
+    return alias
 
 
 @lru_cache(maxsize=8)
-def _push_hosts(repo_dir: str, remote: str) -> frozenset[str]:
+def _push_hosts(repo_dir: str, remote: str, ssh_timeout_seconds: float) -> frozenset[str]:
     """The hosts `kg/git_writer.py` would push notes to, or empty if it would push nowhere.
 
     `repo_dir` is already resolved (see `_push_hosts_for`). Cached because arming happens once per
@@ -343,6 +387,11 @@ def _push_hosts(repo_dir: str, remote: str) -> frozenset[str]:
     `chemclaw.core.config` import in every process, so an exception is an import-time crashloop —
     which the first version could produce, because `_host_from_url` sat outside its `try` and
     `urlsplit` raises `ValueError` on an unbalanced `[` that git accepts as a remote URL.
+
+    **An ssh remote is resolved once more, through ssh itself** (`_ssh_hostname`), because its
+    host may be an alias in the ssh configuration rather than the destination. Only for an ssh
+    transport — an `https://` host is the host dialled — so a deployment on https spawns nothing
+    beyond the `git` call it already paid for.
     """
     try:
         # A fixed argv, no shell, and `--` before the remote name so a remote called `-x` is a
@@ -371,8 +420,12 @@ def _push_hosts(repo_dir: str, remote: str) -> frozenset[str]:
             host = _host_from_url(url)
         except ValueError:
             continue  # git accepts `https://[oops/path`; `urlsplit` does not
-        if host and _A_PLAUSIBLE_HOST.match(host):
-            hosts.add(host)
+        if not host or not _A_PLAUSIBLE_HOST.match(host):
+            continue
+        scheme = url.split("://", 1)[0].lower() if "://" in url else "ssh"
+        if scheme in _SSH_SCHEMES:
+            host = _ssh_hostname(host, ssh_timeout_seconds)
+        hosts.add(host)
     return frozenset(hosts)
 
 
@@ -470,6 +523,7 @@ def derive_allowed(settings: Any) -> frozenset[str]:
     hosts |= _push_hosts_for(
         str(getattr(settings, "note_repo_dir", "") or ""),
         str(getattr(settings, "git_remote", "") or ""),
+        settings.egress_ssh_resolve_timeout_seconds,
     )
     for extra in (settings.egress_allow or "").split(","):
         host = extra.strip().lower()

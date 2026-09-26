@@ -116,26 +116,6 @@ topic).
   `core/config/temporal.py::worker_max_cached_workflows`,
   `tests/test_workers.py::test_the_workflow_cache_fits_the_memory_the_chart_asks_for`.
 
-- [ ] **An SSH host alias derives the alias, not the host ssh dials** (issue #446) — [S], opened 2026-09-22 by
-  the review of `D-2026-09-22-a-destination-that-is-a-name-is-still-a-destination`.
-  `netguard._push_hosts_for` resolves `git remote get-url --push --all` and takes the host out of
-  the URL, which is right for every form git itself resolves — `insteadOf` included, since
-  `get-url` expands it. It is wrong for an ssh alias: `git@notes-alias:o/n.git` with
-  `Host notes-alias` / `HostName real-git.internal.example` in `~/.ssh/config` derives
-  `notes-alias`, and ssh dials `real-git.internal.example`, which the compiled guard then refuses
-  at `getaddrinfo`. The git half is measured; the ssh half was not, because `ssh` is not installed
-  in this sandbox.
-
-  **Not fixed with the rest of that ADR because the fix is a second mechanism, not a flag.** The
-  others were `--push --all`, a resolved path and a character class. This one means running
-  `ssh -G <alias>` — a second subprocess, reading a config file this tree does not otherwise touch,
-  in a function that must never raise and runs at config import in every process — for a
-  configuration nothing here ships or tests. Weigh that against the workaround, which is the one a
-  deployment already had for the git remote before it was derived at all: name the real host in
-  `CHEMCLAW_EGRESS_ALLOW`. The symptom is identical, so the cost of not fixing it is a deployment
-  that must declare one host by hand rather than a refusal nobody can diagnose. Anchors:
-  `core/netguard.py::_push_hosts`, `kg/git_writer.py::_git_child_env`.
-
 - [ ] **The IPv4-mapped arm of the compiled egress guard is unmeasured here** — [S], the last of
   "the egress guard is blind to gRPC and to Temporal" after
   `D-2026-09-12-the-layer-that-binds-grpc-is-libc-not-socket-py`. The blindness
