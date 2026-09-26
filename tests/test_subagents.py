@@ -1016,7 +1016,23 @@ def test_a_helpers_file_outlives_the_turn_that_spawned_it() -> None:
     assert f"&lt;/{ENVELOPE_TAG}>" in read_back
 
 
-def test_a_helpers_scratch_file_is_bounded_on_its_way_into_its_callers_state() -> None:
+def test_a_helpers_oversized_write_is_refused_at_its_own_backend_and_crosses_nothing() -> None:
+    """At the shipped settings the cut below is not reached, because the write never happens.
+
+    `D-2026-09-26-a-helpers-unbounded-write-verbs-take-the-scratch-cap`: `write_file` is refused past
+    `agent_scratch_file_max_chars` in the backend a helper's call reaches, and the default is the
+    channel budget itself — so a helper writing four budgets' worth stores nothing and hands its
+    caller nothing, rather than storing it and being cut on the way.
+    """
+    written = "z" * (settings.agent_subagent_files_max_chars * 4)
+    assert len(written) > settings.agent_scratch_file_max_chars
+    files = _spawn_state(read=True, written=written).get("files") or {}
+    assert not files, f"a write past the per-write cap reached the caller: {sorted(files)}"
+
+
+def test_a_helpers_scratch_file_is_bounded_on_its_way_into_its_callers_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The isolation above is real and it is about the *thread*; this is the other channel.
 
     `D-2026-08-29-a-helpers-report-is-model-prose-in-its-callers-thread` measured the caller's whole
@@ -1029,8 +1045,14 @@ def test_a_helpers_scratch_file_is_bounded_on_its_way_into_its_callers_state() -
     Driven with the thread asserted alongside, because the two numbers are the finding: a test that
     only checked `files` could pass while a regression quietly put the helper's reading into the
     caller's messages as well.
+
+    **The per-write cap is raised past the write**, because at the shipped value it refuses this
+    write inside the helper (the test above) and nothing would cross to be cut. The cut still
+    matters for a deployment whose per-write cap sits above the channel budget, and for many files
+    under it that together exceed the budget.
     """
     written = "z" * (settings.agent_subagent_files_max_chars * 4)
+    monkeypatch.setattr(settings, "agent_scratch_file_max_chars", len(written))
     state = _spawn_state(read=True, written=written)
 
     files = state.get("files") or {}
@@ -1048,7 +1070,7 @@ def test_a_helpers_scratch_file_is_bounded_on_its_way_into_its_callers_state() -
     )
 
 
-def test_a_cut_file_says_it_was_cut() -> None:
+def test_a_cut_file_says_it_was_cut(monkeypatch: pytest.MonkeyPatch) -> None:
     """A silent truncation hands a chemist a document that simply stops.
 
     The caller can read a helper's file back — that crossing is what `parent_reads` exercises — so
@@ -1059,6 +1081,8 @@ def test_a_cut_file_says_it_was_cut() -> None:
     from chemclaw.agent.framing import SYSTEM_SPEECH_MARK
 
     written = "z" * (settings.agent_subagent_files_max_chars * 4)
+    # Past the per-write cap, for the reason the test above gives.
+    monkeypatch.setattr(settings, "agent_scratch_file_max_chars", len(written))
     files = _spawn_state(read=True, written=written).get("files") or {}
     content = "".join(str(data.get("content", "")) for data in files.values())
 
