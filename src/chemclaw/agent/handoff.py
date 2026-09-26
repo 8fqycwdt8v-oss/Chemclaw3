@@ -101,6 +101,7 @@ from langgraph.types import Command
 from chemclaw.agent.profiles import AgentProfile
 from chemclaw.agent.subagents import bounded_tool_list
 from chemclaw.core.errors import ChemclawError
+from chemclaw.core.model_prose import ModelProse
 from chemclaw.core.turn_signals import record_handoff
 
 logger = logging.getLogger(__name__)
@@ -121,7 +122,7 @@ HANDOFF_PREFIX = "transfer_to_"
 #: done — a reason to look for, or invent, context nobody produced. It can also be *handed back*
 #: control, so a separate brief for non-root nodes would be false the other way round; one sentence
 #: that is true of every node costs no parameter and cannot be mis-assigned.
-PEER_BRIEF = """
+PEER_BRIEF = ModelProse("""
 
 **You are one of several Chemclaw agents on this conversation.** If another agent handed control
 to you, the conversation shows the work it did and the reason it gave — you are continuing it, not
@@ -137,7 +138,7 @@ your attention, and a chain that bounces between two agents helps nobody.
 **Everything you hold, the agent that opened this turn also held.** A handoff moves the
 conversation; it does not widen what this system may do, and there is nothing you can reach by
 asking another agent for it that you could not have reached yourself. If a tool you need is absent
-from your own surface, say so — do not hand over in the hope that somebody else has it."""
+from your own surface, say so — do not hand over in the hope that somebody else has it.""")
 
 
 #: Every character a minted handoff tool name may carry, beyond which one is folded to `_`.

@@ -56,6 +56,7 @@ from pydantic import BaseModel, model_validator
 from typing_extensions import TypedDict
 
 from chemclaw.core.config import settings
+from chemclaw.core.model_prose import ModelProse
 
 # The key a step's declaration is spelled with, in the tool schema, in the state channel and in the
 # two readers below. One constant because a rename has to move all of them at once — and because
@@ -128,7 +129,7 @@ class ScopedWriteTodosInput(BaseModel):
 # its system prompt rather than replacing either: everything upstream says about when to plan and
 # how to keep the list current is as true here as there, and a fork of that text is a paragraph
 # that goes stale on the next bump with nothing to notice.
-_SCOPE_GUIDANCE = """
+_SCOPE_GUIDANCE = ModelProse("""
 ## Declaring what a step will call
 
 Every todo must carry a `tools` list naming the tools that step will call. A step that only reads,
@@ -137,7 +138,7 @@ reasons or reports declares an empty list. Name the tools exactly as they are ad
 This list is what a human approves. Once a plan is approved, a tool no step declared is refused,
 and adding it to the list afterwards does not change that — the approval carries the declaration
 the person actually read. So if you find you need a tool the approved plan does not name, rewrite
-the plan to include it and ask for the new plan to be approved."""
+the plan to include it and ask for the new plan to be approved.""")
 
 
 def _write_scoped_todos(runtime: ToolRuntime[Any, Any], todos: list[ScopedTodo]) -> Command[Any]:

@@ -126,6 +126,7 @@ from chemclaw.agent.authz import side_effecting_tools
 from chemclaw.agent.profiles import AgentProfile
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
+from chemclaw.core.model_prose import ModelProse
 
 #: Tools that change nothing and still reach the person on the other side of the conversation.
 #:
@@ -152,7 +153,7 @@ GENERAL_PURPOSE = "general-purpose"
 #: supervisor prompt and the `task` description describing two different mechanisms, and recorded
 #: that the disagreement was the real defect. `tests/test_subagents.py` asserts they still agree —
 #: on the bounds each states, not on wording, because wording that must match cannot be improved.
-HELPER_BRIEF = """
+HELPER_BRIEF = ModelProse("""
 
 You are a helper spawned by another Chemclaw agent to work one task in your own context window.
 You see nothing of the conversation that spawned you beyond the brief you were given, and nothing
@@ -174,7 +175,7 @@ You do hold file tools that write, and a file you write is **not** private to yo
 it crosses back to the agent that spawned you along with your report, and it stays there — the
 conversation you were spawned from can read it again on a later turn, long after you are gone. So
 treat anything you put in one as something you are handing over for keeps. Do not describe work as
-started, scheduled or arriving later: nothing you can reach starts anything."""
+started, scheduled or arriving later: nothing you can reach starts anything.""")
 
 
 def governed_roster(specs: list[dict[str, Any]]) -> list[dict[str, Any]]:
