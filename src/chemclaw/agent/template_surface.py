@@ -113,22 +113,18 @@ def profile_named_tools() -> frozenset[str]:
     fails at build". A profile with `tool_names` unset lists nothing — it binds the whole surface
     and cannot miss a name that is not on it.
 
-    The file profiles are registered first, for `TemplateSurface.resolve`'s reason: until
-    `load_profiles()` has run the registry holds the built-in `default` alone, and an answer that
-    depended on whether the files had been globbed yet would withhold a launcher on the first call
-    and bind it on the second.
+    **The registry, not the files.** This sits under `available_tool_names`, which the suite and
+    every validator call constantly; re-reading every profile file on each call is the likely cause
+    of a full-suite CI run slowing across unrelated files, per file against the run before it, and
+    going past its 45-minute limit. Reading only what is registered is also the right
+    answer rather than a cheaper one: `_reject_unknown_tool_names` asks about a profile that is
+    registered by then, so the launcher is bound at exactly the moment a profile that names it can
+    be built — and withholding is applied where the tool registry is *read*
+    (`chemclaw_agent._withheld_launcher_names`), so a launcher registered earlier in the process
+    cannot outlive the answer changing.
     """
-    from chemclaw.agent.profile_discovery import ProfileError, load_profiles
     from chemclaw.agent.profiles import get_profile
 
-    # A malformed profile file is not this function's to report: the build, `make skill-validate`
-    # and the profile loader's own callers each report it in their own terms, and raising here
-    # would pre-empt them from inside an unrelated question (which launchers exist). What loaded is
-    # still asked; a profile that cannot load names nothing a build could fail over.
-    try:
-        load_profiles()
-    except ProfileError:
-        pass
     return frozenset(
         name
         for profile_name in registered_profile_names()
