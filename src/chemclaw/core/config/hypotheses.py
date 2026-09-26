@@ -55,6 +55,22 @@ class HypothesisSettings(BaseSettings):
     hypothesis_call_timeout_seconds: float = Field(default=120.0, gt=0)
     # One evidence sweep across every internal source, for one hypothesis.
     hypothesis_evidence_timeout_seconds: float = Field(default=180.0, gt=0)
+    # One `computable` check (`durable/hypothesis_tournament.run_computable_check`): open this
+    # deployment's connectors, then call one single-structure tool through them. **Not a model
+    # call, so not `hypothesis_call_timeout_seconds`**, which bounded it until this existed: 120 s
+    # is sized for a structured completion, and a check naming a `calc` tool on a cache miss is a
+    # semiempirical calculation the backend is allowed `calc_server_timeout_seconds` (900 s) for.
+    # The activity runs one attempt, so a bound under the calculation's is not a retry — it is the
+    # check reported as failed while the calculation it started finishes unread.
+    #
+    # 915 = `calc_server_timeout_seconds` (900) + `connector_open_timeout_seconds` (15): the
+    # sessions open concurrently, so the open costs one bound rather than one per connector, and the
+    # call then waits at most its connector's `request_timeout` — `calc`'s 600 is the largest any
+    # shipped bundle declares, under the backend's 900. So the call is abandoned by its connector
+    # before this fires, and this stays the bound on the whole activity rather than the one that
+    # decides a calculation's fate. `tests/test_hypothesis_tournament.py` holds that ordering
+    # against the shipped manifests and these two settings. Raise it with either of them.
+    hypothesis_check_timeout_seconds: float = Field(default=915.0, gt=0)
     # A computable check's result, as text, in the outcome a chemist reads. Bounded because it
     # is a tool's own output landing in a note body and in the job envelope: a site-reactivity
     # panel over a large molecule runs to thousands of characters, and the result payload is

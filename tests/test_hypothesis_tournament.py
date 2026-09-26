@@ -7,6 +7,7 @@ rather than calling its private helpers, because the defects worth catching here
 only appear once Temporal is sequencing the activities.
 """
 
+from datetime import timedelta
 from typing import Any
 
 import pytest
@@ -951,6 +952,65 @@ async def test_a_tool_check_temporal_could_not_complete_is_reported_not_dropped(
     assert outcome["refusal_code"] == "tool-failed"
     assert outcome["verdict"] == "inconclusive"
     assert attempts == ["a"], "a governed tool call was re-invoked, writing a second audit row"
+
+
+async def test_a_tool_check_is_bounded_as_a_calculation_not_as_a_model_call() -> None:
+    """`run_computable_check` gets `hypothesis_check_timeout_seconds`, not the model-call bound.
+
+    It ran under `hypothesis_call_timeout_seconds` (120 s), which is sized for one structured
+    completion. The activity opens connectors and calls a tool that on a cache miss is a
+    semiempirical calculation, and it runs one attempt — so the model bound reported a check as
+    failed while the calculation it started was still being computed. Read off the activity's own
+    `info()`, which is the option the workflow actually scheduled rather than the setting's value.
+    """
+    seen: list[timedelta | None] = []
+
+    @activity.defn(name="run_computable_check")
+    async def run_check(
+        check: DiscriminatingCheck,
+        requested_by: str = "",
+        requested_roles: list[str] | None = None,
+        correlation_id: str = "",
+    ) -> CheckOutcome:
+        seen.append(activity.info().start_to_close_timeout)
+        return CheckOutcome(hypothesis_id=check.hypothesis_id, verdict="inconclusive")
+
+    field = [_hypothesis("a", "the first explanation")]
+    call = CheckCall(tool="predict_pka", subject_note_id="compound-x")
+    await _run_with(
+        [run_check],
+        _stubs(field=field, check_kind="computable", check_call=call),
+        _request("q-tool-bound"),
+    )
+
+    assert seen == [timedelta(seconds=settings.hypothesis_check_timeout_seconds)]
+
+
+def test_the_check_bound_outlasts_the_connector_it_waits_on() -> None:
+    """The activity's bound sits above every wait inside it, so a connector decides a call's fate.
+
+    Inside one check: the connectors open concurrently (one `connector_open_timeout_seconds`), then
+    one tool call waits at most its connector's `request_timeout`, and on a `calc` cache miss the
+    backend is allowed `calc_server_timeout_seconds` for the primitive. A bound under any of those
+    would have Temporal abandon a call its connector was still entitled to finish — with one
+    attempt, that is the calculation's result discarded. Derived from the shipped manifests rather
+    than from `calc`'s 600 written here, so a bundle that raises its own `request_timeout` fails
+    this until the setting follows.
+    """
+    from chemclaw.connectors.registry import discovered, request_timeout_seconds
+
+    open_bound = settings.connector_open_timeout_seconds
+    slowest_call = max(
+        request_timeout_seconds(manifest.endpoint)
+        for _, manifest in discovered().values()
+        if manifest.endpoint is not None
+    )
+    assert settings.hypothesis_check_timeout_seconds >= slowest_call + open_bound
+    assert (
+        settings.hypothesis_check_timeout_seconds
+        >= settings.calc_server_timeout_seconds + open_bound
+    )
+    assert settings.hypothesis_check_timeout_seconds > settings.hypothesis_call_timeout_seconds
 
 
 async def test_two_tournaments_kept_apart_do_not_share_a_proposal_note() -> None:

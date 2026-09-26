@@ -100,6 +100,10 @@ _TOUCHES = (
     re.compile(rf"^COMMENT ON COLUMN\s+({_NAME})\.", re.I),
     re.compile(rf"^INSERT INTO\s+({_NAME})", re.I),
     re.compile(rf"^UPDATE\s+({_NAME})\s", re.I),
+    # An anonymous block, credited to the table its first `ALTER TABLE` acts on — the shape `108`
+    # has, a guarded `ADD CONSTRAINT`. A block that altered no table would match nothing here and
+    # fail `test_every_migration_statement_is_one_the_rule_understands` rather than pass unread.
+    re.compile(rf"^DO\s+\$\$.*?\bALTER TABLE\s+(?:IF EXISTS\s+)?(?:ONLY\s+)?({_NAME})", re.I),
 )
 # Statements that legitimately name no table.
 #
@@ -129,14 +133,26 @@ def _split_on_statement_ends(body: str) -> list[str]:
 
     SQL escapes a quote inside a literal by doubling it, and a doubled quote is just two state
     flips in a row, so tracking a single boolean is sufficient and `''` needs no special case.
+
+    **A `DO $$ … $$` block is one statement too**, and for the same reason: its body is PL/pgSQL
+    with semicolons of its own, which the runner sends whole (`core.migrate` says so) and a split
+    here would turn into `END IF` and `END $$` fragments naming nothing. The first one is `108`, a
+    constraint added behind a `pg_constraint` guard because `ALTER TABLE … ADD CONSTRAINT` has no
+    `IF NOT EXISTS`. Only the anonymous `$$` tag is read, because it is the only one this directory
+    writes; a quote inside the body does not toggle the literal state, since the body is itself the
+    literal.
     """
     out: list[str] = []
     current: list[str] = []
     in_literal = False
-    for char in body:
-        if char == "'":
+    in_dollar = False
+    for index, char in enumerate(body):
+        # The opening `$` of a `$$` pair toggles; its second `$` is not itself the start of one.
+        if not in_literal and body.startswith("$$", index) and body[index - 1 : index] != "$":
+            in_dollar = not in_dollar
+        if char == "'" and not in_dollar:
             in_literal = not in_literal
-        if char == ";" and not in_literal:
+        if char == ";" and not in_literal and not in_dollar:
             out.append("".join(current))
             current = []
         else:
@@ -258,6 +274,24 @@ def test_a_semicolon_inside_a_comment_does_not_end_the_statement() -> None:
         "COMMENT ON COLUMN t.c IS 'one; two, and the site''s own third'",
         "CREATE INDEX t_c_idx ON t (c)",
     ]
+
+
+def test_a_do_block_is_one_statement_and_names_its_table() -> None:
+    """A PL/pgSQL body's own semicolons do not end the statement the runner sends whole.
+
+    Driven on synthetic SQL for the reason the comment test above is: the tree's one block could be
+    rewritten tomorrow without a semicolon inside it, and this would then pass for nothing.
+    """
+    body = (
+        "DO $$\nBEGIN\n    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'c') THEN\n"
+        "        ALTER TABLE ONLY public.audit_events ADD CONSTRAINT c CHECK (a <> ';');\n"
+        "    END IF;\nEND\n$$;\nCREATE INDEX IF NOT EXISTS i ON t (a);\n"
+    )
+    statements = [" ".join(raw.split()) for raw in _split_on_statement_ends(body)]
+    statements = [s for s in statements if s]
+    assert len(statements) == 2
+    assert table_named_by(statements[0]) == "audit_events"
+    assert table_named_by(statements[1]) == "t"
 
 
 def test_every_migration_statement_is_one_the_rule_understands() -> None:
