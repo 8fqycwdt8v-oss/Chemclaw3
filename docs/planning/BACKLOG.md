@@ -66,7 +66,7 @@ topic).
 ## 1 — Untrusted input reaching a privileged surface
 
 - [ ] **A template launcher is bound whatever its tools are, so an opt-in capability's template
-  costs every deployment prefix it cannot use** — [M]. The argument-checking half of this row is
+  costs every deployment prefix it cannot use** — [M] (issue #451). The argument-checking half of this row is
   **done**: `tests/test_template_args_recorded.py` reads the fleet's own recorded
   `servers/<name>/tool-surface.json` — the file `tests/test_sibling_manifest_agreement.py` already
   reads for the `calc` and `rxnlabel` seams — so a template naming `mtsr` now has its argument keys
@@ -428,7 +428,7 @@ topic).
   `deepagents.backends.state.StateBackend`.
 
 - [ ] **Prose the model is sent from modules other than `agent/chemclaw_agent.py` is outside the
-      prose guards** — [M], found 2026-09-22 reviewing
+      prose guards** — [M] (issue #452), found 2026-09-22 reviewing
       `D-2026-09-22-an-exemption-is-a-quote-not-a-file`, which widened
       `tests/test_prose_contract.py`'s universe from two classes to six and said so. The six are
       enumerable: a registry, an `ast` walk over `@server.tool()`, a manifest, a directory of
