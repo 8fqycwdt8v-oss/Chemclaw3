@@ -20,7 +20,7 @@ highest-consequence route in the module. It also breaks the rule this tier is bu
 admin never writes into a person's namespace. Promoting a body costs the admin one paste and keeps
 both properties (`D-2026-09-20-a-behaviour-change-is-gated-by-its-blast-radius`). The cost is real
 and is recorded rather than hidden: there is no in-product way for a chemist to *request* a
-promotion, and `docs/planning/BACKLOG.md` carries the row.
+promotion, and `docs/planning/DEFERRED.md` carries the row with its trigger.
 
 **Two namespaces, and the second is what replaces `git revert`.** `D-2026-09-05` grants the shared
 tree its safety from being git-resident: *"a bad shared behaviour change is a revert — the rollback
