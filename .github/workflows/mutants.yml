@@ -360,7 +360,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          OUTCOME: ${{ cancelled() && 'cancelled — the job hit its timeout or was stopped' || 'failed' }}
+          # `job.status`, not `cancelled()`: a status function is legal only in an `if:`, and one here
+          # made GitHub reject the whole file — no schedule, and a red run on every push.
+          OUTCOME: ${{ job.status == 'cancelled' && 'cancelled — the job hit its timeout or was stopped' || 'failed' }}
         run: |
           gh label create mutation-testing --force \
             --color ededed --description "the weekly mutants workflow reported something"

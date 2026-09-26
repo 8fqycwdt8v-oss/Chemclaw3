@@ -349,18 +349,6 @@ topic).
 
 ## 3 — Work that is lost, dropped or invisible
 
-- [ ] **Nothing gives the note writer's clone a committer identity, and without one every note
-  write fails** — [S], found 2026-09-26 while checking the runbook's note-repository requirements
-  against the writer. `GitNoteWriter` commits with no `-c user.*`, and neither
-  `deploy/knowledge-sync.sh::provision_note_repo` nor the chart sets `user.name`/`user.email` or a
-  `GIT_AUTHOR_*`/`GIT_COMMITTER_*` variable. Driven in the gate container (`root@<id>.(none)`): a
-  clone that is right in every other respect fails its commit with `Author identity unknown`, as the
-  non-retryable `GitWriteError`, so the note is dropped. **Unmeasured in a chart-rendered pod**,
-  whose hostname and uid decide whether git's auto-detection happens to succeed — which is the
-  argument for stating an identity rather than depending on either. Anchors:
-  `kg/git_writer.py::_write_and_commit`, `deploy/knowledge-sync.sh`, `docs/guides/runbook.md` (item
-  4 of the note-repository list).
-
 - [ ] **Three row-projecting tools defang a whole page on the event loop, and one of them is not in
   the offload test** — [M]. `commitment_tools.review_commitments`,
   `pending_tools.check_pending_requests` and `memory_tools.recall_observations` each escape every

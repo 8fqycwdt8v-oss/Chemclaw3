@@ -127,10 +127,12 @@ overridable as `CHEMCLAW_<FIELD>`); this runbook covers the four recurring admin
      enough for a dev or mock stack: `git init --bare -b main /srv/notes-origin.git`, then in the
      clone `git remote add origin /srv/notes-origin.git && git push -u origin main`. A local commit
      of its own is not required once the remote has one.
-  4. **A committer identity** (`user.name`/`user.email` in the clone or the global config, or
-     `GIT_AUTHOR_*`/`GIT_COMMITTER_*`). The writer passes none, so in a container whose hostname
-     has no domain every commit fails with `Author identity unknown … unable to auto-detect email
-     address`, as a non-retryable `GitWriteError`.
+  4. **No committer identity is needed from the clone.** The writer hands every git child
+     `CHEMCLAW_NOTE_COMMITTER_NAME`/`CHEMCLAW_NOTE_COMMITTER_EMAIL` as `GIT_AUTHOR_*` and
+     `GIT_COMMITTER_*` (defaults `ChemClaw` / `chemclaw-notes@chemclaw.invalid`), which outrank any
+     `user.*` config. Before that it passed none, and in a container whose hostname has no domain
+     every commit failed `Author identity unknown`, as a non-retryable `GitWriteError`. Set a real
+     address only if the notes remote's forge refuses the default.
   5. **The existing `knowledge/` tree.** Readers resolve `settings.knowledge_path`, which is
      `note_repo_dir` joined with `knowledge_dir` and nothing else, so this clone *is* the graph every
      reader scans: an empty clone serves an empty graph, with no error anywhere.
@@ -138,7 +140,7 @@ overridable as `CHEMCLAW_<FIELD>`); this runbook covers the four recurring admin
   A shallow clone is not refused — a note lands in a `--depth 1` clone — but the chart clones full
   history and the rebase that replays an unpushed note has not been driven on a shallow one.
 
-  The Helm chart supplies items 1, 2, 3 and 5: `deploy/knowledge-sync.sh checkout` clones
+  The Helm chart supplies items 1, 2, 3 and 5, and the writer item 4: `deploy/knowledge-sync.sh checkout` clones
   `knowledge.sync.repoUrl` on the base branch into `knowledge.noteRepoPath` (default
   `/var/lib/chemclaw/note-repo`), and the sync sidecar keeps it current with the writer's own
   `fetch` + `merge --ff-only` under the writer's lock rather than a reset, so a note whose push
