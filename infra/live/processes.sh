@@ -122,6 +122,18 @@ export CHEMCLAW_CONNECTORS_REQUIRED="${CHEMCLAW_CONNECTORS_REQUIRED:-true}"
 # enabled: the core-served bundles (`bo`, `calc`, `molfp`, `rxnfp`, `results`) come from the dev
 # connector process, so constraining `CHEMCLAW_CONNECTORS_ENABLED` here would take those off the
 # lane too.
+#
+# **What the loop cannot derive is a server's own configuration, and `rxnpredict` needs some.** A
+# fleet checkout carries none of its ML extras, so with the server's `*` default every predictor
+# reports `not_installed`, `/healthz` answers 200 and the tool surface is empty: `wait_for` passes
+# and every forward or conditions call fails. The `fake_a`/`fake_c` deterministic doubles are the
+# fleet's answer to exactly that (`engine/base_doubles.py::register_requested` — a working surface,
+# no weights, no checkpoint download). `e2e-full-stack/up.sh` used to set them in its own
+# `start_rxnpredict`; when this loop took `rxnpredict` over, the defaults were deleted with the
+# call and the lane went on starting an empty server. They are set here, once, so every lane that
+# reaches the loop gets them; a lane pointed at real weights overrides both.
+export CHEMCLAW_RXNPREDICT_ENABLED_FORWARD_MODELS="${CHEMCLAW_RXNPREDICT_ENABLED_FORWARD_MODELS:-fake_a}"
+export CHEMCLAW_RXNPREDICT_ENABLED_CONDITIONS_MODELS="${CHEMCLAW_RXNPREDICT_ENABLED_CONDITIONS_MODELS:-fake_c}"
 
 # Traces, when something is listening for them. `make phoenix-up` puts an OTLP receiver on 4317;
 # with nothing there the exporter retries in the background and the run is unaffected, which is why

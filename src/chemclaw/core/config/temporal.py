@@ -300,8 +300,9 @@ class TemporalSettings(BaseSettings):
     # the run itself, so a row younger than this is one whose run is almost certainly still in its
     # opening activity — and a reopen rewrites `run_id`, which the settle guards on regardless.
     awaiting_orphan_grace_seconds: float = Field(default=300.0, ge=0)
-    # Rows examined per sweep, each one a `describe` against the broker. Bounded so one pass after
-    # a long outage cannot hold the activity past its budget; the rest are the next pass's.
+    # Rows per keyset page of the orphan sweep, each one a `describe` against the broker. The sweep
+    # walks pages until the table is exhausted or it has spent half of `retention_timeout_seconds`
+    # (`orphaned_waits._PASS_BUDGET_FRACTION`); what is left is the next pass's.
     awaiting_orphan_batch: int = Field(default=200, gt=0)
     # The check-in over a requester's own blocked work
     # (`D-2026-09-15-the-requester-hears-nothing-until-it-is-too-late`, `durable/check_in.py`).

@@ -818,16 +818,18 @@ spec:
                labels stopped matching all produce *no series*, and `up{...} == 0` over no series is
                an empty vector. `absent()` is the only shape that alerts on nothing being there.
 
-               Scoped to the `metrics` endpoint, which every pod in this release serves. `endpoint`
-               is the port *name* the operator stamps on every sample, and `tests/test_deploy_chart.py`
+               Scoped to the `metrics` endpoint, which only worker pods declare — the background
+               worker and every connector worker, through `chemclaw.workerProbes`; the front door,
+               the connector servers and mcp-face do not include it. `endpoint` is the port *name* the operator stamps on every sample, and `tests/test_deploy_chart.py`
                holds it equal to the PodMonitor's own `port:` so the two cannot drift apart silently.
 
                **This used to say it was "pinned to the workers' scrape endpoint because they are
                the release's one guaranteed population", and that was true of the Deployment and
                false of the expression.** `deployment-connectors.yaml` says in its own comment that
-               a connector worker "serves the same `metrics` port as core's worker", and the front
-               door and mcp-face serve it too — so this `absent()` is false whenever *any* of them
-               is up, and a background worker that cannot schedule is invisible to it. What the
+               a connector worker "serves the same `metrics` port as core's worker" — so this
+               `absent()` is false whenever *any* connector worker is up, and a background worker
+               that cannot schedule is invisible to it. With every connector worker disabled it is
+               background-worker-only. What the
                sentence described is what the rule below does, by carrying the component label the
                PodMonitor already stamps. */}}
         - alert: ChemclawNoWorkerIsScraped
@@ -851,8 +853,8 @@ spec:
                one corpus clone is the defect `D-2026-08-27-what-a-second-background-worker-would-race-on`
                pins the replica count to prevent. The cost of that choice is that the old pod is
                gone *before* the new one is tried, so a background worker that cannot start leaves
-               the release with none at all, and the rule above stays green because connectors and
-               the front door are still scraped on the same endpoint. Every other Deployment here
+               the release with none at all, and the rule above stays green whenever a connector
+               worker is still scraped on the same endpoint. Every other Deployment here
                defaults to RollingUpdate, which keeps the old pod serving, so this is scoped to the
                one component that needs it rather than generalised.
 

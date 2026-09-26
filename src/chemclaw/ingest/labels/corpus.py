@@ -42,7 +42,12 @@ from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.ingest.eln.warehouse import sql
 from chemclaw.ingest.eln.warehouse.binding import CorpusBinding, FieldBinding
 from chemclaw.ingest.eln.warehouse.driver import Warehouse
-from chemclaw.ingest.eln.warehouse.expr import apply_transforms, as_text, resolve_path
+from chemclaw.ingest.eln.warehouse.expr import (
+    apply_transforms,
+    as_text,
+    pattern_budget,
+    resolve_path,
+)
 from chemclaw.science.fingerprints.rxnfp.search import record_for_reaction
 from chemclaw.science.fingerprints.store import (
     FingerprintInputError,
@@ -206,35 +211,41 @@ async def _drain_page(
     report = CorpusReport(read=len(rows), cursor=after, has_more=len(rows) == page)
     structures: set[str] = set()
     fingerprints: list[FingerprintRecord] = []
-    for row in rows:
-        bundle = {ROOT: row}
-        key = _text(row.get(binding.key))
-        # **Read from the pagination column and from nothing else, and only when it holds a
-        # value.** Both halves were wrong here and both failed silently. `as_text` is `str()` for
-        # everything, so a NULL `order_by` became the six characters `"None"` — truthy, so the
-        # `or key` fallback never fired — and the next page resumed at `> 'None'`, skipping every
-        # key that sorts below it: all digits and `A`–`M`, i.e. most of a release. And the fallback
-        # itself compared a *key* against the `order_by` column, which is a second column with its
-        # own domain; substituting one for the other resumes the drain at an arbitrary point.
-        # This is the same defect `_field` documents three functions down, on the line that decides
-        # what the next page reads.
-        #
-        # A row with no value in the pagination column therefore holds the cursor where it is. That
-        # stops the source with `ReactionCorpusWorkflow`'s "no cursor advance" warning naming
-        # `order_by` — the honest outcome, because a NULL there makes the release un-resumable and
-        # no value this side can invent changes that.
-        cursor_value = row.get(binding.cursor_column)
-        if cursor_value is not None:
-            report.cursor = as_text(cursor_value)
-        label = _record(bundle, binding, source, key, report)
-        if label is None:
-            report.skipped += 1
-            continue
-        await index.record(label)
-        report.recorded += 1
-        structures.update(s.smiles for s in label.species)
-        if reactions is not None:
-            _collect_fingerprint(fingerprints, source, label, report)
+    # **One matching budget for the page**, because the per-cell `regex` bound does not compose:
+    # `_record` runs a site's transforms on every bound field of up to `corpus_page_size` rows, so
+    # a slow-but-completing pattern is minutes of synchronous CPU the per-cell timeout never sees
+    # and the retry reads the identical page. `expr.pattern_budget` carries the arithmetic; it
+    # charges matching time only, so the awaited writes inside the loop cost it nothing.
+    with pattern_budget():
+        for row in rows:
+            bundle = {ROOT: row}
+            key = _text(row.get(binding.key))
+            # **Read from the pagination column and from nothing else, and only when it holds a
+            # value.** Both halves were wrong here and both failed silently. `as_text` is `str()`
+            # for everything, so a NULL `order_by` became the six characters `"None"` — truthy, so
+            # the `or key` fallback never fired — and the next page resumed at `> 'None'`, skipping
+            # every key that sorts below it: all digits and `A`–`M`, i.e. most of a release. And the
+            # fallback itself compared a *key* against the `order_by` column, which is a second
+            # column with its own domain; substituting one for the other resumes the drain at an
+            # arbitrary point. This is the same defect `_field` documents three functions down, on
+            # the line that decides what the next page reads.
+            #
+            # A row with no value in the pagination column therefore holds the cursor where it is.
+            # That stops the source with `ReactionCorpusWorkflow`'s "no cursor advance" warning
+            # naming `order_by` — the honest outcome, because a NULL there makes the release
+            # un-resumable and no value this side can invent changes that.
+            cursor_value = row.get(binding.cursor_column)
+            if cursor_value is not None:
+                report.cursor = as_text(cursor_value)
+            label = _record(bundle, binding, source, key, report)
+            if label is None:
+                report.skipped += 1
+                continue
+            await index.record(label)
+            report.recorded += 1
+            structures.update(s.smiles for s in label.species)
+            if reactions is not None:
+                _collect_fingerprint(fingerprints, source, label, report)
     if reactions is not None and fingerprints:
         await reactions.add_many(fingerprints)
     if molecules is not None and structures:
@@ -503,8 +514,11 @@ def _date(bundle: dict[str, Any], field: FieldBinding | None, report: CorpusRepo
         return None
     value = _resolve(bundle, field)
     # A date the transform vocabulary could not turn into one is the same loss `_number` counts: the
-    # source wrote something in that column and the record says nothing was written.
-    if value is None and resolve_path(field.path, bundle) is not None:
+    # source wrote something in that column and the record says nothing was written. A blank cell
+    # is not that — it is the source recording nothing, the rule `_number` states — so an undated
+    # row in a text-typed export does not trip a warning telling the site to fix its binding.
+    raw = resolve_path(field.path, bundle)
+    if value is None and raw is not None and not (isinstance(raw, str) and not raw.strip()):
         report.unreadable_fields += 1
     return value
 

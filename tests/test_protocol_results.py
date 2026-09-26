@@ -16,6 +16,7 @@ from typing import Any, TypeVar
 
 import pytest
 
+from chemclaw.core.errors import ChemclawError
 from chemclaw.protocols.models import (
     EvidenceRef,
     ExperimentDesign,
@@ -154,6 +155,30 @@ def test_two_outcomes_on_one_arm_are_separate_keys() -> None:
     assert latest[("A1", "purity_pct")].value == 99.1
 
 
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), "NaN", "-inf"])
+def test_a_non_finite_value_is_refused_before_it_can_land(value: object) -> None:
+    """The store is append-only, so what the model accepts is permanent.
+
+    A `NaN` read as a disagreement with itself (`nan != nan`) and reached a surrogate through
+    `observations_for` as a measured value; the tool-call strings "NaN" and "inf" parse to exactly
+    that.
+    """
+    with pytest.raises(ValueError, match="finite"):
+        ArmResult.model_validate({"arm_id": "A1", "outcome": "yield_pct", "value": value})
+
+
+def test_a_unit_change_is_reported_as_one_rather_than_as_a_numeric_disagreement() -> None:
+    """85 % and 0.85 fraction agree; a re-attach that fixes the unit is not a re-measurement."""
+    newest = StoredArmResult(
+        arm_id="A1", outcome="yield", value=0.85, unit="fraction", revision=1, result_id=2
+    )
+    oldest = StoredArmResult(
+        arm_id="A1", outcome="yield", value=85.0, unit="%", revision=1, result_id=1
+    )
+    outcomes = summarise(_design(), "design-x", 1, [newest, oldest])
+    assert outcomes.disagreements == ["A1 yield: unit 'fraction' and '%'"]
+
+
 # --- the campaign handoff -----------------------------------------------------------------------
 
 
@@ -272,3 +297,16 @@ def test_the_default_store_follows_the_session_store_setting(
     assert isinstance(default_arm_result_store(), PostgresArmResultStore)
     monkeypatch.setattr("chemclaw.core.config.settings.session_store", "memory")
     assert isinstance(default_arm_result_store(), InMemoryArmResultStore)
+
+
+def test_observations_refuse_a_column_mixing_units() -> None:
+    """A surrogate fitted to percent beside fraction is fitted to numbers that do not compare.
+
+    Which unit is right is the chemist's call, so the refusal names the arms under each.
+    """
+    rows = [
+        StoredArmResult(arm_id="A1", outcome="yield", value=85.0, unit="%", revision=1),
+        StoredArmResult(arm_id="A2", outcome="yield", value=0.9, unit="fraction", revision=1),
+    ]
+    with pytest.raises(ChemclawError, match=r"more than one unit.*'A1'.*'A2'"):
+        observations_for(_design(), "yield", rows)

@@ -753,3 +753,25 @@ def test_a_template_that_runs_no_calculation_refuses() -> None:
     assert inputs is None
     assert refusal is not None
     assert refusal.code == "template-computes-nothing"
+
+
+def test_a_job_line_links_only_grounded_structures() -> None:
+    """`summarise` keeps the `ran` line's links, so `_job_line` is where model text is unlinked.
+
+    A grounded subject becomes `[[note-id]]`; a swept axis value is the model's choice, and a
+    `[[id]]` inside it would otherwise mint an edge on the committed field note.
+    """
+    from chemclaw.durable.hypothesis_tournament import _job_line
+    from chemclaw.hypotheses.dispatch import SWEEPABLE_FIELDS
+
+    axis = sorted(SWEEPABLE_FIELDS)[0]
+    line = _job_line(
+        "job",
+        {"smiles": "CCO", axis: ["water", "[[forged-note]]"]},
+        {"smiles": ["compound-x"]},
+        {"compound-x": "CCO"},
+        {},
+    )
+    assert "[[compound-x]]" in line
+    assert "[[forged-note]]" not in line
+    assert "forged-note" in line

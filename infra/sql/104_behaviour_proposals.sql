@@ -17,8 +17,12 @@
 -- versioning**, because the two halves have different shapes and each has a table that already got
 -- its half right.
 --
--- From `plan_approvals`: the decision is a record of something a person did at a moment, so rows
--- are appended and never updated, and the read takes the latest.
+-- From `plan_approvals`: the decision is a record of something a person did at a moment, so it is
+-- written once and is final. It is recorded by a single conditional UPDATE of an *open* row
+-- (`WHERE state = 'open'`, `behaviour_proposals._DECIDE`), so a decided row cannot be decided
+-- again; supersede and revive move only undecided rows (`open` <-> `superseded`), never a decided
+-- one. The runtime role therefore needs UPDATE here (see `grants/app_privileges.sql`), and a reader
+-- takes the row's own state rather than a "latest" of several.
 --
 -- From `note_proposals`, including the defect its own successor migration had to fix: the key is
 -- the **content**, not the name. Re-proposing byte-identical content is the same proposal, so a

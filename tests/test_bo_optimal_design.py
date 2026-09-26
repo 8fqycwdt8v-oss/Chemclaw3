@@ -17,6 +17,7 @@ from chemclaw.science.bo.engine import (
 from chemclaw.science.bo.problem import (
     CategoricalParameter,
     ContinuousParameter,
+    ExcludeConstraint,
     LinearConstraint,
     Objective,
     OptimizationProblem,
@@ -242,3 +243,95 @@ def test_a_breach_inside_the_tolerance_is_not_reported() -> None:
         )
         == []
     )
+
+
+def test_an_exclusion_is_refused_by_name_rather_than_blamed_on_the_budget() -> None:
+    """BoFire's DoE solver cannot take a categorical exclusion, whatever the run count.
+
+    Measured before this: `cat x solv` gave 8 runs unconstrained, and adding "no a in x" raised
+    `SurrogateFitError` telling the chemist to "try more runs" — a remedy no budget satisfies.
+    """
+    problem = OptimizationProblem(
+        parameters=[
+            CategoricalParameter(name="cat", categories=["a", "b", "c"]),
+            CategoricalParameter(name="solv", categories=["x", "y"]),
+        ],
+        objectives=[Objective(name="yield_pct", direction="maximize")],
+        constraints=[ExcludeConstraint(parameters=["cat", "solv"], options=[["a"], ["x"]])],
+    )
+    with pytest.raises(ValueError, match="linear constraints only") as refused:
+        optimal_design(problem, n_experiments=8, seed=0)
+    assert "strike the excluded pairings" in str(refused.value)
+
+
+def test_replicated_corners_are_counted_and_read_as_the_bound_they_are() -> None:
+    """Solver noise is snapped onto the bound it meant, so a replicate compares equal.
+
+    Measured before this on seed 0: `(3, 0)` came back three times as `2.999999999999995`,
+    `1.17e-15` and friends, and the design reported `duplicate_runs=0`.
+    """
+    problem = OptimizationProblem(
+        parameters=[
+            ContinuousParameter(name="a", lower=0.0, upper=3.0),
+            ContinuousParameter(name="b", lower=0.0, upper=3.0),
+        ],
+        objectives=[Objective(name="yield_pct", direction="maximize")],
+        constraints=[LinearConstraint(parameters=["a", "b"], coefficients=[1.0, 1.0], rhs=3.0)],
+    )
+    design = optimal_design(problem, n_experiments=8, seed=0)
+
+    assert design.duplicate_runs > 0
+    values = {float(run[name]) for run in design.runs for name in ("a", "b")}
+    assert values <= {0.0, 3.0}, f"solver noise reached the chemist: {sorted(values)}"
+
+
+def test_rounding_a_feasible_solve_at_a_large_magnitude_is_not_read_as_a_breach(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The breach check reads the solver's values, and a run cleaning would break is returned raw.
+
+    Ten significant digits move a value by up to 5e-11 of itself, which at ~1e6 and times a
+    coefficient is past the absolute `_CONSTRAINT_TOLERANCE`. Checked after rounding, a solve
+    sitting exactly on its limit was refused as infeasible — measured on a space-filling design
+    over `7·a + 13·b <= 3.1e7`. The solver is replaced so the point is fixed rather than
+    depending on one scipy build's arithmetic.
+    """
+    from types import SimpleNamespace
+
+    import pandas as pd
+
+    from chemclaw.science.bo import engine
+
+    on_the_limit = 1234567.89151  # rounds *up* to 1234567.892 at ten significant digits
+
+    class _Solver:
+        def ask(self, candidate_count: int) -> pd.DataFrame:
+            return pd.DataFrame(
+                {"a": [on_the_limit] * candidate_count, "b": [0.0] * candidate_count}
+            )
+
+    monkeypatch.setattr(engine, "strategies", SimpleNamespace(map=lambda spec: _Solver()))
+    problem = OptimizationProblem(
+        parameters=[
+            ContinuousParameter(name="a", lower=0.0, upper=3e6),
+            ContinuousParameter(name="b", lower=0.0, upper=3e6),
+        ],
+        objectives=[Objective(name="yield_pct", direction="maximize")],
+        constraints=[
+            LinearConstraint(
+                parameters=["a", "b"], coefficients=[13.0, 1.0], rhs=13.0 * on_the_limit
+            )
+        ],
+    )
+
+    design = optimal_design(problem, n_experiments=2, criterion="space-filling", seed=0)
+
+    # Rounded, `a` would be 1234567.892 and the total 13·4.9e-4 ≈ 6.4e-3 over the limit — 64
+    # tolerances. The returned runs are the ones that were verified, so the raw value comes back.
+    assert [run["a"] for run in design.runs] == [on_the_limit, on_the_limit]
+    for run in design.runs:
+        total = 13.0 * float(run["a"]) + float(run["b"])
+        assert total <= 13.0 * on_the_limit + engine._CONSTRAINT_TOLERANCE
+    assert engine._constraint_breaches(problem, design.runs) == []
+    assert design.honoured_constraints == 1
+    assert design.duplicate_runs == 1

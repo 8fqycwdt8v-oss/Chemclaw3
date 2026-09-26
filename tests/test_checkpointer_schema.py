@@ -16,6 +16,7 @@ different value than the one the checkpoint was written with.
 """
 
 import asyncio
+import json
 from operator import add
 from typing import Annotated, Any, Generic, NotRequired, TypedDict, TypeVar, get_type_hints
 
@@ -28,7 +29,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
 from chemclaw.agent import checkpointer as ckpt
-from chemclaw.agent.state import ChemclawState, TurnFlag, TurnTotal
+from chemclaw.agent.state import ChemclawState, LastPeer, TurnFlag, TurnTotal
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from tests.pg import migrated_db_or_skip
@@ -622,6 +623,57 @@ def test_a_stamp_this_build_cannot_read_is_treated_as_absent() -> None:
         "q2",
         "answered",
     ]
+
+
+def test_a_resume_tolerant_channel_is_derived_off_the_annotation() -> None:
+    """`LastPeer` declares itself tolerant; a plain `LastValue` channel stays refused when missing.
+
+    Both directions, because a predicate that answered `True` for every restorable channel would
+    pass the regression below and switch the guard off for the channel it still exists for.
+    """
+
+    class _State(TypedDict):
+        active_agent: NotRequired[Annotated[str, LastPeer(str)]]
+        retrieved_notes: NotRequired[Annotated[list[str], LastValue(list)]]
+
+    assert ckpt._resume_tolerant_channels(_State) == ("active_agent",)
+    assert ckpt.RESUME_TOLERANT_CHANNELS == ("active_agent",)
+    assert set(ckpt.RESUME_TOLERANT_CHANNELS) <= set(ckpt.FIRST_PARTY_CHANNELS), (
+        "a tolerant channel must still be stamped, or a later build cannot tell it was held"
+    )
+
+
+def test_a_session_stamped_before_active_agent_existed_resumes() -> None:
+    """The upgrade case: every live session at the deploy that introduced `active_agent`.
+
+    Their stamps name only the channels of the build before it — the four spend/loop counters that
+    build still stamped — so `active_agent` is missing from every one, and the guard refused the
+    next ordinary turn of each with "Start a new session", **peer mesh off or on**. Its one reader
+    takes it with `.get()` and falls back to the root, so the `KeyError` the refusal pre-empts
+    cannot happen; the channel says so and the load now resumes.
+    """
+    thread_id = "sess-pre-active-agent"
+    stamp = ["billed_tokens", "loop_capped", "model_calls", "spend_capped"]
+
+    async def _run() -> list[str]:
+        await migrated_db_or_skip()
+        saver = await ckpt.checkpointer()
+        try:
+            await _turn(saver, thread_id, "q1")
+            async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+                await cur.execute(
+                    "UPDATE checkpoints SET metadata = jsonb_set(metadata, %s, %s::jsonb) "
+                    "WHERE thread_id = %s",
+                    ([ckpt.STATE_CHANNELS_KEY], json.dumps(stamp), thread_id),
+                )
+                assert cur.rowcount > 0, "no checkpoint row was rewritten"
+                await conn.commit()
+            final = await _turn(saver, thread_id, "q2")
+            return list(final["messages"])
+        finally:
+            await ckpt.close_checkpointer()
+
+    assert asyncio.run(_run()) == ["q1", "answered", "q2", "answered"]
 
 
 # --- the value stamp: a thread that lost half its rows must not read back as an empty one -------

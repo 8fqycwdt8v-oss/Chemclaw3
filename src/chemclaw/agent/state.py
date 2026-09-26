@@ -66,7 +66,7 @@ the wrong answer to it.
 """
 
 from collections.abc import Sequence
-from typing import Annotated, Any, NotRequired
+from typing import Annotated, Any, ClassVar, NotRequired
 
 from langchain.agents.middleware.todo import PlanningState
 from langchain_core.messages import AIMessage, HumanMessage
@@ -151,26 +151,25 @@ class TurnFlag(UntrackedValue[bool]):
 class LastPeer(LastValue[str]):
     """A checkpointed name that takes the **first** writer in a superstep instead of refusing.
 
-    `LastValue` — what a plain `str` annotation resolves to — raises `InvalidUpdateError` when one
-    superstep delivers two values, and the shape that delivers two is a model emitting two
-    `transfer_to_…` calls in one assistant message. `TurnTotal`'s docstring records the same
-    failure arriving through `task`, and the same reasoning applies: refusing kills the whole turn
-    after the work has been done, which is worse than any defensible choice between the two values.
-
-    **First rather than last, and the asymmetry is deliberate.** `LastValue` keeps `values[-1]`,
-    and there is no ordering guarantee worth relying on across a superstep's writers — but the
-    handoff tools are executed in the order the assistant message listed them, so the *first*
-    transfer a model asked for is the one it reasoned about with the most context behind it, and
-    every later one in the same message is a second thought written before the first was answered.
-    Taking the first also composes with what the turn graph does about the matching hazard on the
-    control side: two `Command(goto=…)`s in one superstep enter two peers, so `turn_graph` binds
-    the handoff tools such that a turn which has already handed over refuses the rest
-    (`handoff.refuse_a_handoff_past_the_cap`), and the channel agreeing with that refusal is what
-    keeps `active_agent` and the node that actually ran from disagreeing.
+    **A defensive fallback, not the arbiter.** Two `transfer_to_…` calls in one assistant message
+    do not reach this channel as two writers: ToolNode applies only the first
+    `Command(graph=PARENT)` and cancels the rest, and `handoff.refuse_a_later_handoff` refuses every
+    handoff after the first in its message before it can announce itself — driven on the compiled
+    mesh, one hop, `handoffs=1`, `active_agent` the first peer named
+    (`tests/test_turn_graph.py::test_two_handoffs_in_one_message_hand_over_once`). What this class
+    keeps is the behaviour if that ever changes upstream: `LastValue` — what a plain `str`
+    annotation resolves to — raises `InvalidUpdateError` when one superstep delivers two values,
+    which would kill the whole turn after the work had been done, and taking the first agrees with
+    the refusal above about which peer that is.
 
     Checkpointed, unlike every other channel this module adds — see `active_agent`'s own comment
     for why that is the point rather than an oversight.
     """
+
+    #: Read by `checkpointer._resume_tolerant_channels`: a session stamped before this channel
+    #: existed resumes rather than being refused, because its one reader
+    #: (`turn_graph.entry_peer_or_root`) takes it with `.get()` and falls back to the root.
+    resumes_when_absent: ClassVar[bool] = True
 
     def update(self, values: Sequence[str]) -> bool:
         """Store the first name written this superstep, keeping what is there when none is."""
@@ -274,17 +273,17 @@ class ChemclawState(PlanningState):
     # `D-2026-09-19-a-handoff-redistributes-the-turns-authority-it-cannot-extend-it` names.
     #
     # It carries no authority. Two things make that structural rather than asserted: the value is
-    # only ever a name the turn graph compiled a node for (`turn_graph.entry_peer` falls back to
-    # the root when it reads a name it does not know, so a hand-edited checkpoint routes to the
-    # root rather than anywhere interesting), and every peer's surface was already intersected
+    # only ever a name the turn graph compiled a node for (`turn_graph.entry_peer_or_root` falls
+    # back to the root when it reads a name it does not know, so a hand-edited checkpoint routes to
+    # the root rather than anywhere interesting), and every peer's surface was already intersected
     # against the root's before any of them was compiled. Restoring it selects which of several
     # already-bounded agents answers; it cannot select a surface.
     #
-    # **`LastPeer` rather than a plain field, for `TurnTotal`'s reason.** A plain annotation
-    # resolves to `LastValue`, which raises `InvalidUpdateError` when one superstep delivers two
-    # values — and a model that emits two `transfer_to_…` calls in one assistant message is one
-    # superstep with two writers. That is not hypothetical: the same shape is why `model_calls`
-    # is a `TurnTotal`, and a turn lost to it would be lost *after* both peers had been entered.
+    # **`LastPeer` rather than a plain field, as a fallback.** A plain annotation resolves to
+    # `LastValue`, which raises `InvalidUpdateError` when one superstep delivers two values. Two
+    # `transfer_to_…` calls in one message do not do that today — ToolNode applies the first
+    # `Command(graph=PARENT)` and `handoff.refuse_a_later_handoff` refuses the rest — and
+    # `LastPeer`'s docstring says what it keeps if that changes.
     active_agent: NotRequired[Annotated[str, LastPeer(str)]]
 
     # How many times this turn has handed between agents — the bound on a chain, and per-turn for

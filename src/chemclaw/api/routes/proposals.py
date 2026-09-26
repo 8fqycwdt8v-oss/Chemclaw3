@@ -26,6 +26,9 @@ proposed it twice.
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Awaitable, Callable
+
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
@@ -37,11 +40,16 @@ from chemclaw.agent.behaviour_proposals import (
 )
 from chemclaw.agent.local_skills import (
     SkillRefused,
+    delete_local_skill,
+    read_local_skill,
     save_local_skill,
     validated_skill,
 )
 from chemclaw.api.deps import CurrentUser
+from chemclaw.api.routes.skill_http import skill_refusal_http, store_or_503
 from chemclaw.api.runner import turn_store
+
+logger = logging.getLogger(__name__)
 
 
 class ProposalOut(BaseModel):
@@ -105,9 +113,11 @@ def _rendered(proposal: Proposal) -> ProposalOut:
 async def list_proposals(principal: CurrentUser, state: str = "open") -> ProposalsOut:
     """What is waiting on this person — open by default, since that is the question they have.
 
-    `state=""` asks for everything, including what they have already decided and what a newer
+    `state=""` asks for every state, including what they have already decided and what a newer
     version superseded. That is the audit read rather than the queue read, and it is the same
-    surface because the two differ only in a predicate.
+    surface because the two differ only in a predicate. **Either read is bounded** to the newest
+    `agent_proposals_list_max` rows, so an audit read past that many is cut short rather than
+    whole — raise the setting where the full trail matters.
     """
     store = default_proposal_store()
     wanted = [state] if state else []
@@ -150,8 +160,7 @@ async def decide_proposal(
             "a newer version of this proposal replaced it, so deciding this one would decide a "
             "document nothing would deliver. Read the open one instead",
         )
-    if body.accepted:
-        await _write_what_was_accepted(standing, principal.oid)
+    undo = await _write_what_was_accepted(standing, principal.oid) if body.accepted else None
     decided = await store.decide(
         principal.oid,
         kind,
@@ -163,11 +172,50 @@ async def decide_proposal(
     )
     if decided is None:  # pragma: no cover - `one` above found it a moment ago
         raise HTTPException(404, f"the {kind} proposal {name!r} disappeared while being decided")
+    # **The decision is conditional (`AND state = 'open'`) and the write came first, so this request
+    # can lose a race it already acted on.** A Decline in another tab, or a newer version
+    # superseding this one, that commits between `one` above and `decide` leaves the row as the
+    # other request made it — and without this check the skill just written would act on every turn
+    # while the queue said it was declined, answered with a 200.
+    wanted = "accepted" if body.accepted else "rejected"
+    if decided.state != wanted:
+        lost = f"this proposal was {decided.state} by another request while you were deciding it"
+        if undo is not None:
+            # **A failed undo is still a lost race, and it must say so rather than 500.** The skill
+            # this request wrote may still be acting on every turn while the queue records the
+            # other decision — the state this check exists to prevent — so the 409 names it and
+            # the log names who, what and why, for whoever has to remove it.
+            try:
+                await undo()
+            except Exception as exc:
+                logger.exception(
+                    "could not undo the accepted skill %r for %s after the proposal was %s by "
+                    "another request; the written body may still be live in that tier",
+                    name,
+                    principal.oid,
+                    decided.state,
+                )
+                raise HTTPException(
+                    409,
+                    f"{lost}, and that decision stands — but removing the skill this request had "
+                    "already written failed, so the accepted version may still be in your tier. "
+                    f"Check it through GET /skills/mine/{name} and correct it through the skills "
+                    "routes",
+                ) from exc
+        raise HTTPException(
+            409, f"{lost}, and that decision stands; nothing you asked for was applied"
+        )
     return _rendered(decided)
 
 
-async def _write_what_was_accepted(proposal: Proposal, actor: str) -> None:
+async def _write_what_was_accepted(
+    proposal: Proposal, actor: str
+) -> Callable[[], Awaitable[None]] | None:
     """Put an accepted proposal where it acts, or refuse the acceptance.
+
+    Returns what undoes the write — restoring the version it replaced, or removing the skill if
+    there was none — for the caller to run if the decision it was written for is then lost to a
+    concurrent one. `None` when nothing was written.
 
     **Only `skill` has a destination a route can write**, and saying so is better than a column
     pretending otherwise. A profile is a file in `data/profiles/`, git-resident and reviewed in a
@@ -181,7 +229,7 @@ async def _write_what_was_accepted(proposal: Proposal, actor: str) -> None:
             direction: a person can make room and come back.
     """
     if proposal.kind != "skill":
-        return
+        return None
     # **Every admission rule, not just the cap.** This door used to check the row cap alone, and
     # measured, all three bodies `POST /skills/mine` refuses were written here whole: a name taken
     # by a shipped skill (409 there, 200 here), a body that is not a `SKILL.md` at all, and one at
@@ -195,20 +243,28 @@ async def _write_what_was_accepted(proposal: Proposal, actor: str) -> None:
     try:
         validated_skill(proposal.content, expected_name=proposal.name)
     except SkillRefused as refusal:
-        raise HTTPException(409 if refusal.conflict else 422, str(refusal)) from refusal
-    store = await turn_store()
-    if store is None:
-        raise HTTPException(
-            503,
-            "this deployment keeps no personal skills, so accepting one would record a decision "
-            "that changes nothing (CHEMCLAW_AGENT_MEMORY_ENABLED with a Postgres session store)",
-        )
+        raise skill_refusal_http(refusal) from refusal
+    store = store_or_503(
+        await turn_store(),
+        "this deployment keeps no personal skills, so accepting one would record a decision "
+        "that changes nothing (CHEMCLAW_AGENT_MEMORY_ENABLED with a Postgres session store)",
+    )
     # The row cap rides on the writer too, so this door and the save route spend one bound under
     # one lock rather than each counting for itself.
+    replaced = await read_local_skill(store, actor, proposal.name)
     try:
         await save_local_skill(store, actor, proposal.name, proposal.content)
     except SkillRefused as refusal:
-        raise HTTPException(409 if refusal.conflict else 422, str(refusal)) from refusal
+        raise skill_refusal_http(refusal) from refusal
+
+    async def undo() -> None:
+        """Put the tier back as it stood before this acceptance wrote to it."""
+        if replaced is None:
+            await delete_local_skill(store, actor, proposal.name)
+        else:
+            await save_local_skill(store, actor, proposal.name, replaced)
+
+    return undo
 
 
 def register(app: FastAPI) -> None:

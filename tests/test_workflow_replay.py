@@ -37,29 +37,19 @@ from tests.recorded_workflow_histories import (
 # background worker is the sharp case: `deployment-workers.yaml` deploys it `Recreate`, so the new
 # generation is handed every unfinished run the old one held. The connector workers keep the
 # default rolling update for reasons their own template argues.
+#
+# `CheckInWorkflow` and `HypothesisTournamentWorkflow` left this set at their first change, as their
+# own entries here said they would: each fixture was recorded from the released code (4aa5bbc8) in
+# a worktree, with that revision's own test stubs, on the one shape the change moved a command on —
+# a check-in page longer than one batch, and a computable check that names nothing.
 UNCOVERED_BACKGROUND_WORKFLOWS = frozenset(
     {
         "ArtifactEvictionWorkflow",
         "AwaitAnswerWorkflow",
         "CampaignSynthesisWorkflow",
-        # New in `D-2026-09-15-the-requester-hears-nothing-until-it-is-too-late`, and uncovered for
-        # a reason none of the others has: this control catches today's code refusing a
-        # history the *shipped* code wrote, and `recorded_workflow_histories.py` records "from the
-        # shape this repository ships". `CheckInWorkflow` has never shipped, so there is no older
-        # command sequence it could be incompatible with, and a fixture recorded from it now would
-        # be the self-certifying shape that module's docstring rejects — "a test that runs a
-        # workflow and then replays the history it just produced compares code against a history
-        # that same code wrote". It earns a fixture at its first change, not at its first commit.
-        "CheckInWorkflow",
         "CommitmentSyncWorkflow",
-        # New in this change, and uncovered for `CheckInWorkflow`'s reason rather than a weaker
-        # one: it has never shipped, so there is no older command sequence a fixture could prove
-        # compatibility with, and a history recorded from it now would be the self-certifying shape
-        # `recorded_workflow_histories.py` rejects. It earns a fixture at its first change.
-        "HypothesisTournamentWorkflow",
-        # New in `D-2026-09-25-a-wait-nobody-can-settle-is-settled-by-a-sweep`, uncovered for
-        # `CheckInWorkflow`'s reason: it has never shipped, so no older command sequence exists for
-        # a fixture to prove compatibility with. It earns one at its first change.
+        # New in `D-2026-09-25-a-wait-nobody-can-settle-is-settled-by-a-sweep`. It earns a fixture
+        # at the first change to its command sequence, the way the two above did.
         "OrphanedWaitsWorkflow",
         "ConnectorJobWorkflow",
         "DevelopmentReportWorkflow",

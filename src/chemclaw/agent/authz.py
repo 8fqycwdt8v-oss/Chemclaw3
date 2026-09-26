@@ -509,32 +509,33 @@ def side_effecting_call(name: str, arguments: Mapping[str, Any]) -> bool:
     refused it under an unapproved plan would refuse the only call that can produce a plan to
     approve — the deadlock is the reason this is worth stating rather than leaving to inference.
 
-    **A handoff is the third case, and it is here because it changes the conversation rather than
-    the graph.** `agent/handoff.py` opens by stating that a handoff "lands in the audit trail as a
-    row, passes the authorization gate, **is refused under dry-run**, and is counted by
-    `repeat_guard`" — and three of those four were true. `transfer_to_<peer>` is in neither half
-    above: it is minted per peer by `handoff_tools` rather than declared in a registry, so
-    `side_effecting_tools()` cannot name it, and it takes only a `reason`, so the argument-driven
-    half cannot see it either. Measured with `set_dry_run(True)`: `dry_run_refusal` returned `None`
-    for every peer, and a dry-run turn whose model called one came back `handoffs=1` with
-    `active_agent='p-right'` **in the checkpoint** — so a turn the chemist asked to change nothing
-    moved every later turn onto a different agent, while the refusal text on that same turn said
-    "Nothing was started".
+    **A handoff is deliberately not a case here** — see `changes_the_conversation`, which is the
+    predicate the dry-run refusal adds beside this one and the plan gate does not.
+    """
+    return name in side_effecting_tools() or writes_durable_memory(name, arguments)
 
-    The checkpoint is what makes it side-effecting: `active_agent` is a checkpointed channel, and
-    the whole point of checkpointing it is that a later turn resumes with whoever holds it.
-    Recognised by
-    shape (`handoff.is_handoff_tool_name`) for the reason that function gives — the enumerable set
-    is cached and the roster is not. Imported lazily because `handoff` reaches LangGraph and this
-    module is on the kernel side of that.
+
+def changes_the_conversation(name: str) -> bool:
+    """Whether this call moves the conversation to another agent — what dry-run must also refuse.
+
+    **Separate from `side_effecting_call` because the two gates that read that predicate want
+    different answers here.** `transfer_to_<peer>` writes the checkpointed `active_agent`, so a
+    later turn resumes with whoever it named: a turn the chemist marked "do nothing" that made one
+    moved every later turn onto a different agent while its refusal text said "Nothing was
+    started" (measured, `tests/test_turn_graph.py`). So dry-run refuses it. The plan gate must not:
+    a handoff cannot extend the turn's authority
+    (`D-2026-09-19-a-handoff-redistributes-the-turns-authority-it-cannot-extend-it`), so gating it
+    protects nothing, and folded into `side_effecting_call` it put every handoff of an enabled mesh
+    behind a human-approved plan under the shipped harness defaults, with a refusal telling the
+    chemist the handoff "changes stored data or starts work".
+
+    Recognised by shape (`handoff.is_handoff_tool_name`) for the reason that function gives — the
+    enumerable set is cached and the roster is not. Imported lazily because `handoff` reaches
+    LangGraph and this module is on the kernel side of that.
     """
     from chemclaw.agent.handoff import is_handoff_tool_name
 
-    return (
-        name in side_effecting_tools()
-        or writes_durable_memory(name, arguments)
-        or is_handoff_tool_name(name)
-    )
+    return is_handoff_tool_name(name)
 
 
 def expensive_actions() -> frozenset[str]:

@@ -51,10 +51,12 @@ from chemclaw.agent.subagents import (
     GENERAL_PURPOSE,
     HELPER_BRIEF,
     SPEAKS_TO_THE_CHEMIST,
+    bounded_tool_list,
     describe_helper,
     general_purpose_helper,
     helper_profile,
     refuse_an_unknown_roster,
+    roster_names,
     specialist_override,
 )
 from chemclaw.core.config import settings
@@ -2472,3 +2474,20 @@ def test_the_dropped_set_notice_does_not_overwrite_a_file_that_is_already_there(
         f"the notice had nowhere to go and was dropped instead, so the files it stands for are "
         f"gone with nothing naming them: {elsewhere}"
     )
+
+
+def test_a_rostered_profile_naming_nothing_narrows_to_nothing() -> None:
+    """On a roster, `tool_names=None` is the empty set — never "does not narrow".
+
+    The rule is security-relevant and was written three times (two helper sites, one peer site);
+    `roster_names` is now the one definition all three intersect through.
+    """
+    assert roster_names(AgentProfile(name="unnamed")) == frozenset()
+    assert roster_names(AgentProfile(name="named", tool_names=frozenset({"a"}))) == {"a"}
+
+
+def test_the_menu_list_enumerates_up_to_its_limit_and_counts_the_rest() -> None:
+    """The capability half both roster menus share: sorted, bounded, the remainder counted."""
+    assert bounded_tool_list(["c", "a", "b"], 3) == "a, b, c"
+    assert bounded_tool_list(["c", "a", "b"], 2) == "a, b, and 1 more"
+    assert bounded_tool_list([], 2) == ""

@@ -519,6 +519,12 @@ class AgentSettings(BaseSettings):
     # the work produced, while a skill is judgment somebody sat down and wrote.
     agent_local_skill_max_chars: int = Field(default=16_000, ge=1)
     agent_local_skills_max: int = Field(default=20, ge=1)
+    # **How many behaviour proposals one `GET /proposals` answers**, newest first. A bound on a
+    # response rather than on storage: the table keeps every row, and the route is both the queue
+    # read (`state=open`) and the audit read (`state=`), so the audit read is the one this can cut
+    # short. 50 is the number the stores had hard-coded as a default in three places; it is a
+    # setting so a deployment that needs the whole audit trail can raise it rather than patch it.
+    agent_proposals_list_max: int = Field(default=50, ge=1)
     # **What bounds the organisation's tier, and why it is not the personal tier's number.**
     # `agent_local_skills_max` bounds one person's prefix and is usually spent on nobody: most
     # chemists keep none, so the worst case is a worst case. This tier is the opposite — whatever an

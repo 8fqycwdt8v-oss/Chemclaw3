@@ -198,7 +198,6 @@ BEGIN
         'experiment_protocol_status_events, pending_request_answers, experiment_arm_results TO %I',
         app_role
     );
-    EXECUTE format('GRANT USAGE ON SEQUENCE experiment_arm_results_result_id_seq TO %I', app_role);
 
     -- Insert, delete, and now a narrow update. The row is still written once by its creator
     -- (`ON CONFLICT DO NOTHING`, first writer wins), and offboarding removes a departed person's

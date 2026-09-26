@@ -1203,6 +1203,42 @@ def _require_design_can_estimate_its_model(
 _CONSTRAINT_TOLERANCE = 1e-4
 
 
+#: How close to a bound, as a fraction of the parameter's range, a solved value is solver noise
+#: rather than a condition. Measured on `a, b ∈ [0, 3]` with `a + b <= 3`, d-optimal, seeds 0-2:
+#: every corner the solver meant came back within 1.7e-13 of its bound (`2.99999999999984`,
+#: `1.17e-15`), so 1e-9 is four orders above that and five below anything a chemist can dial.
+_BOUND_SNAP_FRACTION = 1e-9
+
+#: Significant digits a solved interior value keeps. The same noise sits in the last few bits of an
+#: interior point, and a value nobody can set is not a difference between two runs. Ten digits moves
+#: a value by at most 5e-11 of *itself*, which is not inside the absolute `_CONSTRAINT_TOLERANCE`
+#: at every magnitude: at ~1e6, times a constraint's coefficients, it is more — measured, a
+#: space-filling design over `7·a + 13·b <= 3.1e7` was refused after rounding. So the breach check
+#: reads the solver's values, and a run whose cleaned form breaches is returned as solved
+#: (`_verified_clean_run`).
+_DESIGN_SIGNIFICANT_DIGITS = 10
+
+
+def _clean(parameter: ContinuousParameter | CategoricalParameter, value: ParamValue) -> ParamValue:
+    """A solved value with its solver noise removed: snapped onto a bound it meant, else rounded.
+
+    **Without this, replicates were invisible and the chemist was handed noise.** The DoE solver
+    returns a corner it chose twice as `(3.0, 0.0)` and `(2.999999999999995, 1.17e-15)`, so
+    exact-equality duplicate detection reported `duplicate_runs=0` over a design that replicated
+    three corners, and the conditions read as though somebody should weigh 1e-15 equivalents.
+    Done *after* `_constraint_breaches`, which checks the solver's own values: its tolerance is
+    absolute, and neither this snap nor this rounding is bounded in absolute terms — so
+    `_verified_clean_run` checks the cleaned run again and keeps the raw one where it breaches.
+    """
+    if not isinstance(parameter, ContinuousParameter) or not isinstance(value, float):
+        return value
+    snap = (parameter.upper - parameter.lower) * _BOUND_SNAP_FRACTION
+    for bound in (parameter.lower, parameter.upper):
+        if abs(value - bound) <= snap:
+            return bound
+    return float(f"{value:.{_DESIGN_SIGNIFICANT_DIGITS}g}")
+
+
 def _constraint_breaches(
     problem: OptimizationProblem, runs: list[dict[str, ParamValue]]
 ) -> list[str]:
@@ -1239,6 +1275,22 @@ def _constraint_breaches(
     return breaches
 
 
+def _verified_clean_run(
+    problem: OptimizationProblem, run: dict[str, ParamValue]
+) -> dict[str, ParamValue]:
+    """`run` cleaned by `_clean`, unless cleaning breaks a constraint — then `run` as solved.
+
+    The breach check reads the solver's values, because cleaning is not bounded in absolute terms
+    and a solve on its limit would otherwise be refused. But what the chemist receives is the
+    cleaned run, and a check that never read it verified nothing about it: at ~1e6, rounding a
+    value onto its limit carried the total 64 tolerances over. So the cleaned run is checked too,
+    and where it breaches, the verified raw run is what is returned — every returned run is one
+    `_constraint_breaches` passed, which is what `honoured_constraints` claims.
+    """
+    cleaned = {p.name: _clean(p, run[p.name]) for p in problem.parameters}
+    return run if _constraint_breaches(problem, [cleaned]) else cleaned
+
+
 def optimal_design(
     problem: OptimizationProblem,
     n_experiments: int,
@@ -1273,7 +1325,8 @@ def optimal_design(
 
     Raises:
         ValueError: An unknown criterion or formula, a non-positive budget, a budget over
-            `bo_max_design_runs`, or a budget too small to estimate the stated model.
+            `bo_max_design_runs`, a budget too small to estimate the stated model, or an
+            `ExcludeConstraint`, which the DoE solver cannot honour.
     """
     if criterion not in _CRITERIA:
         raise ValueError(
@@ -1290,6 +1343,19 @@ def optimal_design(
         raise ValueError(
             f"{n_experiments} runs is over this deployment's bo_max_design_runs "
             f"({settings.bo_max_design_runs}). Raise the setting, or ask for fewer."
+        )
+    # **Refused before the solver, by name.** BoFire's DoE strategy cannot take the categorical
+    # exclusion `_exclusion` builds — measured, it raises "Feature cat is not a input feature" —
+    # and that surfaced as `SurrogateFitError` telling the chemist to add runs, which no budget
+    # fixes. `_constraint_breaches` could not have verified an exclusion either.
+    exclusions = [c for c in problem.constraints if isinstance(c, ExcludeConstraint)]
+    if exclusions:
+        raise ValueError(
+            "optimal_design honours linear constraints only; an exclusion ("
+            + "; ".join(c.describe() for c in exclusions)
+            + ") is not supported by the DoE solver under any criterion. Remove the exclusion, "
+            "design over the full space (the factorial lists every pairing), and strike the "
+            "excluded pairings from the returned runs."
         )
     if not space_filling:
         _require_design_can_estimate_its_model(problem, n_experiments, formula)
@@ -1308,16 +1374,17 @@ def optimal_design(
             f"space: {error}. A tighter constraint set leaves less room, so try more runs, a "
             "simpler formula, or space-filling."
         ) from error
-    runs: list[dict[str, ParamValue]] = [
+    solved: list[dict[str, ParamValue]] = [
         {p.name: _cast(p, row[p.name]) for p in problem.parameters} for _, row in frame.iterrows()
     ]
-    breaches = _constraint_breaches(problem, runs)
+    breaches = _constraint_breaches(problem, solved)
     if breaches:
         raise SurrogateFitError(
             "the solver returned run(s) outside a declared constraint, so this design is not "
             f"feasible and must not be run: {'; '.join(breaches)}. Honouring a limit is the one "
             "thing this offers over a factorial screen, so it refuses rather than returning them."
         )
+    runs = [_verified_clean_run(problem, run) for run in solved]
     seen: set[tuple[tuple[str, ParamValue], ...]] = set()
     duplicates = 0
     for run in runs:
@@ -1331,5 +1398,8 @@ def optimal_design(
         formula=None if space_filling else formula,
         n_terms=0 if space_filling else _model_terms(problem, formula),
         duplicate_runs=duplicates,
-        honoured_constraints=len(problem.constraints),
+        # Only what `_constraint_breaches` verified — on the returned runs themselves, via
+        # `_verified_clean_run`: exclusions are refused above, so this is every constraint the
+        # design carries, counted by the kind that was actually checked.
+        honoured_constraints=sum(isinstance(c, LinearConstraint) for c in problem.constraints),
     )

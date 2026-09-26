@@ -356,6 +356,12 @@ extend-immutable-calls = ["fastapi.Depends", "fastapi.Security"]
 
 [tool.mypy]
 python_version = "3.11"
+# First-party code resolves from the source tree, never from the installed package. `chemclaw` ships
+# no `py.typed`, so without this a narrower invocation (`mypy tests/test_x.py`) found it in
+# site-packages as an *untyped* package, and the incremental cache it wrote made the next
+# `make type` report errors that are not in the code (`Module "chemclaw.cli" has no attribute
+# "live_probes"`) until `.mypy_cache` was deleted. One resolution for every invocation, one cache.
+mypy_path = "$MYPY_CONFIG_FILE_DIR/src"
 strict = true
 # Fail loudly on a half-configured type environment rather than silently skipping.
 warn_unused_configs = true

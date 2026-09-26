@@ -91,8 +91,10 @@ same-name *type* change (a type repr is not stable enough to hang a session's re
 upstream or middleware channel that moves; a first-party channel that is only *removed* (measured
 harmless above). Wider than the failure: an added channel is refused even when every reader of it
 uses `.get()` and the resume would have worked, because the stamp holds names and cannot see how a
-node reads one. That over-refusal lands on a change this repository is itself deploying — which it
-can drain sessions for, and which the paragraph below says it should — never on a dependency's.
+node reads one — unless the channel's type says so with `resumes_when_absent`
+(`_resume_tolerant_channels`), which `state.LastPeer` does. That over-refusal lands on a change
+this repository is itself deploying — which it can drain sessions for, and which the paragraph
+below says it should — never on a dependency's.
 
 **Refusing rather than silently starting the thread over**, which is the same call
 `agent/plan_state.py` makes for an unreadable plan and for the same reason: the two are
@@ -498,8 +500,9 @@ def _first_party_channels(state: Any) -> tuple[str, ...]:
     **all four** were, so the stamp could not have pre-empted anything at all.
 
     So the derivation now asks what a checkpoint can hold, not what the class declares.
-    `active_agent` stays — `LastPeer` is a `LastValue`, it really is checkpointed, and a session
-    from before it existed really is the case this guard is for.
+    `active_agent` stays in the *stamp* — `LastPeer` is a `LastValue` and really is checkpointed —
+    but its absence is not a refusal: the channel declares itself resume-tolerant (see
+    `_resume_tolerant_channels`), because its one reader falls back to the root when it is unset.
 
     Args:
         state: The graph state class to read — `ChemclawState` in this process, and stand-in
@@ -531,6 +534,36 @@ def _untracked_channels(state: Any) -> tuple[str, ...]:
     """
     own = _own_channels(state)
     return tuple(sorted(name for name, ann in own.items() if _is_untracked(ann)))
+
+
+def _resume_tolerant_channels(state: Any) -> tuple[str, ...]:
+    """The stamped channels whose absence from an older stamp is not a reason to refuse the resume.
+
+    **Declared on the channel, because this module cannot see how a node reads one.** The refusal
+    exists for a node that *indexes* a channel an older checkpoint never held; a channel whose every
+    reader uses `.get()` with a fallback cannot produce that `KeyError`, and refusing a session over
+    it ended every live session on the deploy that introduced `active_agent` — including
+    deployments with the peer mesh off — although such a session resumes perfectly. So a channel
+    type states it with `resumes_when_absent = True` (`state.LastPeer` does), read here off the
+    annotation the same way `_is_untracked` reads untrackedness, so nobody has to maintain a list.
+
+    Args:
+        state: The graph state class to read.
+
+    Returns:
+        The names of `_first_party_channels(state)` a resume tolerates missing, sorted.
+    """
+    own = _own_channels(state)
+    return tuple(
+        sorted(
+            name
+            for name, ann in own.items()
+            if not _is_untracked(ann)
+            and any(
+                getattr(bound, "resumes_when_absent", False) for bound in _channel_bindings(ann)
+            )
+        )
+    )
 
 
 def _own_channels(state: Any) -> dict[str, Any]:
@@ -594,21 +627,37 @@ def _is_untracked(annotation: Any) -> bool:
     Returns:
         `True` when the channel cannot appear in a checkpoint's `channel_values`.
     """
+    return any(
+        isinstance(bound, UntrackedValue)
+        or (isinstance(bound, type) and issubclass(bound, UntrackedValue))
+        for bound in _channel_bindings(annotation)
+    )
+
+
+def _channel_bindings(annotation: Any) -> tuple[Any, ...]:
+    """The `Annotated` metadata of a channel annotation, unwrapped from `NotRequired` and kin.
+
+    One unwrapping for `_is_untracked` and `_resume_tolerant_channels`, for `_is_untracked`'s
+    reason: the channel sits one `NotRequired` in, and reading the outer annotation finds nothing.
+
+    Args:
+        annotation: The channel's type hint, as `get_type_hints(..., include_extras=True)` gives it.
+
+    Returns:
+        What the annotation binds — a channel instance or class, typically — or `()` for none.
+    """
     inner = annotation
     while (origin := get_origin(inner)) is not None and origin is not Annotated:
         args = get_args(inner)
         if not args:
             break
         inner = args[0]
-    return any(
-        isinstance(bound, UntrackedValue)
-        or (isinstance(bound, type) and issubclass(bound, UntrackedValue))
-        for bound in getattr(inner, "__metadata__", ())
-    )
+    return tuple(getattr(inner, "__metadata__", ()))
 
 
 FIRST_PARTY_CHANNELS = _first_party_channels(ChemclawState)
 UNTRACKED_CHANNELS = _untracked_channels(ChemclawState)
+RESUME_TOLERANT_CHANNELS = _resume_tolerant_channels(ChemclawState)
 
 
 class CheckpointValuesMissing(RuntimeError):
@@ -962,7 +1011,11 @@ class SchemaStampedSaver(AsyncPostgresSaver):
         stamp = (stored.metadata or {}).get(STATE_CHANNELS_KEY)
         if not isinstance(stamp, list):
             return stored
-        missing = [name for name in FIRST_PARTY_CHANNELS if name not in stamp]
+        missing = [
+            name
+            for name in FIRST_PARTY_CHANNELS
+            if name not in stamp and name not in RESUME_TOLERANT_CHANNELS
+        ]
         if not missing:
             return stored
         held = ", ".join(str(name) for name in stamp) or "none"

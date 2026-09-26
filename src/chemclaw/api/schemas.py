@@ -21,6 +21,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, computed_field, field_validator
 
+from chemclaw.agent.session_store import stored_correlation_id
 from chemclaw.api.tool_results import content_address
 from chemclaw.core.config import settings
 
@@ -153,6 +154,11 @@ class TranscriptMessage(BaseModel):
     role: str
     text: str
     tool_calls: list[TranscriptToolCall] = []
+    # The turn that stored this message (`session_messages.correlation_id`), so a client whose
+    # stream detached recovers that turn's answer by identity rather than by matching its text.
+    # `None` for a row stored off the request path or before the column existed. Optional and
+    # additive: a client that does not read it sees the contract it always did.
+    correlation_id: str | None = None
 
 
 class PlanDecisionIn(BaseModel):
@@ -509,7 +515,13 @@ def _transcript(
         if role == "tool" and not calls:
             continue
         transcript.append(
-            TranscriptMessage(index=index, role=role, text=message_text(message), tool_calls=calls)
+            TranscriptMessage(
+                index=index,
+                role=role,
+                text=message_text(message),
+                tool_calls=calls,
+                correlation_id=stored_correlation_id(message),
+            )
         )
     return transcript
 

@@ -40,6 +40,7 @@ from chemclaw.agent.org_skills import (
     save_org_skill,
 )
 from chemclaw.api.deps import ORG_SKILL, CurrentUser, _is_reviewer, record_refusal
+from chemclaw.api.routes.skill_http import skill_refusal_http, store_or_503
 from chemclaw.api.runner import turn_store
 
 
@@ -100,16 +101,6 @@ class OrgSkillVersionsOut(BaseModel):
     versions: list[OrgSkillVersionOut]
 
 
-def _refused(error: SkillRefused) -> HTTPException:
-    """One refusal as this surface's status code — 409 for a taken name or a full tier, 422 else.
-
-    The admission rules live with the tier (`agent/local_skills.validated_skill`) rather than here,
-    for the reason that function's docstring measures: a rule stated at one surface is a rule the
-    other surface does not have. What is left here is the translation.
-    """
-    return HTTPException(409 if error.conflict else 422, str(error))
-
-
 def _reviewer_or_refuse(principal: CurrentUser, target: str, act: str) -> None:
     """Refuse unless this caller holds the privileged role, and record it either way it goes.
 
@@ -138,14 +129,11 @@ async def _store_or_refuse() -> object:
     would appear to succeed and vanish, so the surface would read "this organisation keeps no
     skills" when the truth is "this deployment cannot keep any".
     """
-    store = await turn_store()
-    if store is None:
-        raise HTTPException(
-            503,
-            "this deployment keeps no organisation skills: it needs the durable memory store "
-            "(CHEMCLAW_AGENT_MEMORY_ENABLED with a Postgres session store)",
-        )
-    return store
+    return store_or_503(
+        await turn_store(),
+        "this deployment keeps no organisation skills: it needs the durable memory store "
+        "(CHEMCLAW_AGENT_MEMORY_ENABLED with a Postgres session store)",
+    )
 
 
 async def list_skills(principal: CurrentUser) -> OrgSkillsOut:
@@ -185,21 +173,21 @@ async def publish_skill(body: OrgSkillIn, principal: CurrentUser) -> OrgSkillOut
     Validated before the role is checked would leak whether a name is taken to a caller with no
     role, so the gate comes first — `_reviewer_or_refuse` is the first statement, and the name it
     records is the one the *frontmatter* will declare only after validation, so the target recorded
-    is `<unnamed>` until there is a document to name.
+    is `<publish>` until there is a document to name.
     """
     _reviewer_or_refuse(principal, "<publish>", "publishing an organisation skill")
     store = await _store_or_refuse()
     try:
         name = validated_skill(body.body)
     except SkillRefused as refusal:
-        raise _refused(refusal) from refusal
+        raise skill_refusal_http(refusal) from refusal
     # The row cap rides on the writer, not on this route: it has to be counted and spent under one
     # lock, and a check here would be the second copy the personal tier's acceptance door already
     # proved goes stale.
     try:
         await save_org_skill(store, name, body.body, activated_by=principal.oid)
     except SkillRefused as refusal:
-        raise _refused(refusal) from refusal
+        raise skill_refusal_http(refusal) from refusal
     return OrgSkillOut(name=name, body=body.body)
 
 
@@ -216,7 +204,7 @@ async def revert_skill(name: str, body: OrgSkillRevertIn, principal: CurrentUser
             store, name, body.content_hash, activated_by=principal.oid
         )
     except SkillRefused as refusal:
-        raise _refused(refusal) from refusal
+        raise skill_refusal_http(refusal) from refusal
     if not reverted:
         raise HTTPException(
             404,

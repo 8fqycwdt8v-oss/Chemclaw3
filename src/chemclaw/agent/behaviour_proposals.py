@@ -195,10 +195,8 @@ class ProposalStore(Protocol):
         """One proposal by its identity, or None."""
         ...
 
-    async def list_for(
-        self, actor: str, *, states: Collection[str] = (), limit: int = 50
-    ) -> list[Proposal]:
-        """This person's proposals, newest first, optionally narrowed to some states."""
+    async def list_for(self, actor: str, *, states: Collection[str] = ()) -> list[Proposal]:
+        """This person's newest `agent_proposals_list_max` proposals, narrowed by `states`."""
         ...
 
 
@@ -418,14 +416,12 @@ class PostgresProposalStore:
                 row = await cur.fetchone()
         return _row(row) if row is not None else None
 
-    async def list_for(
-        self, actor: str, *, states: Collection[str] = (), limit: int = 50
-    ) -> list[Proposal]:
-        """This person's proposals, newest first, optionally narrowed to some states."""
+    async def list_for(self, actor: str, *, states: Collection[str] = ()) -> list[Proposal]:
+        """This person's newest `agent_proposals_list_max` proposals, narrowed by `states`."""
         wanted = sorted(states)
         async with self._connection() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(_LIST, (actor, wanted, wanted, limit))
+                await cur.execute(_LIST, (actor, wanted, wanted, settings.agent_proposals_list_max))
                 rows = await cur.fetchall()
         return [_row(row) for row in rows]
 
@@ -535,10 +531,8 @@ class InMemoryProposalStore:
         held = self._held.get(self._key(actor, kind, name, digest))
         return held.proposal if held is not None else None
 
-    async def list_for(
-        self, actor: str, *, states: Collection[str] = (), limit: int = 50
-    ) -> list[Proposal]:
-        """This person's proposals, newest first, optionally narrowed to some states."""
+    async def list_for(self, actor: str, *, states: Collection[str] = ()) -> list[Proposal]:
+        """This person's newest `agent_proposals_list_max` proposals, narrowed by `states`."""
         wanted = frozenset(states)
         mine = [
             held.proposal
@@ -552,7 +546,7 @@ class InMemoryProposalStore:
         # tiebreak arrival order descending, which is what the id does on the other backend.
         mine.reverse()
         mine.sort(key=lambda proposal: proposal.proposed_at, reverse=True)
-        return mine[: max(limit, 0)]
+        return mine[: settings.agent_proposals_list_max]
 
 
 #: The one in-process store for a `session_store="memory"` deployment.

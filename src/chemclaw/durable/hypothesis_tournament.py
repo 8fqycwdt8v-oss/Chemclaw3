@@ -48,6 +48,7 @@ from typing import Any, TypeVar, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 from temporalio import activity, workflow
+from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError
 
 with workflow.unsafe.imports_passed_through():
@@ -76,7 +77,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.hypotheses.report import field_body, proposal_body, summarise
     from chemclaw.hypotheses.screen import screen
     from chemclaw.kg.git_writer import default_writer
-    from chemclaw.kg.note import Note, as_cell
+    from chemclaw.kg.note import Note, as_cell, strip_links
     from chemclaw.kg.record import record_note
     from chemclaw.templates.manifest import Template
 
@@ -422,9 +423,7 @@ async def generate_hypotheses(request: _GenerateRequest) -> _HypothesisBatch:
         result = await _structured(_HypothesisBatch, prompt)
         return _HypothesisBatch(
             hypotheses=[
-                h.model_copy(
-                    update={"angle": request.angle, "id": h.id or f"h-{stable_hash([h.statement])}"}
-                )
+                h.model_copy(update={"angle": request.angle, "id": _bounded_id(h)})
                 for h in result.hypotheses[: request.wanted]
             ]
         )
@@ -860,12 +859,19 @@ async def ground_check_template(
     Deliberately *not* a fourth gate written here. A template is already human-authored,
     git-committed and reviewed — "the pre-approved plan", as `AgentStep` puts it — so what this
     adds is only the rule that the model supplies a pointer and nothing else.
+
+    **The launch is authorized and audited as the `run_<template>` launcher**, through
+    `audited_launch` — `ground_check_job`'s shape and `governed_launch`'s reason. Without it an
+    operator's `tool_role_gates` entry for the launcher, or `tool_authz_default=deny`, refused a
+    chemist in chat and let the same chemist start the same procedure through a tournament, with no
+    audit row. A refusal there is `tool-not-authorized`, the code `run_computable_check` uses.
     """
     from chemclaw.agent.authz import STATE_CHANGING_TOOLS
     from chemclaw.hypotheses.dispatch import defaulted_inputs, ground_template_inputs, structure_of
     from chemclaw.kg.graph import build_graph, note_in
     from chemclaw.templates.registry import _params_model as template_params_model
     from chemclaw.templates.registry import enabled as enabled_templates
+    from chemclaw.templates.registry import tool_name as template_tool_name
     from chemclaw.templates.registry import unrunnable_reason
 
     call = check.call
@@ -875,6 +881,7 @@ async def ground_check_template(
         )
 
     token = set_current_identity(requested_by, frozenset(requested_roles or ()))
+    launcher = ""
     try:
         # **`enabled()`, not `discovered()`** — the difference is a deployment's own switch.
         # `discovered()` is every YAML on disk; `enabled()` applies `templates_enabled`, and it is
@@ -927,10 +934,18 @@ async def ground_check_template(
 
         # The template's own input validation — the same call `start_template_run` makes, so a
         # tournament run and a chat run are checked by one authority rather than two.
-        resolved = (
+        validated = (
             template_params_model(template)
             .model_validate(inputs)
             .model_dump(mode="json", exclude_none=True)
+        )
+        launcher = template_tool_name(template)
+        resolved = await audited_launch(
+            launcher,
+            validated,
+            lambda: validated,
+            actor=requested_by,
+            correlation_id=correlation_id,
         )
         defaulted = ", ".join(defaulted_inputs(declared))
         return _GroundedTemplate(
@@ -940,6 +955,12 @@ async def ground_check_template(
             run_timeout_seconds=settings.template_run_timeout_seconds,
             ran=f"{template.name}(smiles=[[{call.subject_note_id}]])"
             + (f" — defaults: {defaulted}" if defaulted else ""),
+        )
+    except AuthorizationError as exc:
+        activity.logger.warning("template check refused for %s: %s", check.hypothesis_id, exc)
+        return _GroundedTemplate(
+            refusal_code="tool-not-authorized",
+            refusal_detail=f"{launcher!r} was refused: {exc}",
         )
     except Exception as exc:
         activity.logger.warning(
@@ -1136,13 +1157,16 @@ def _job_line(
             return f"[[{by_smiles[value]}]]"
         if isinstance(value, list):
             return "[" + ", ".join(_named(item) for item in value) + "]"
-        return repr(value)
+        # Every link in this line is one `by_smiles` grounded; a value that is not a grounded
+        # structure is text the model chose, so it is unlinked here rather than in the report,
+        # which keeps the grounded edges `summarise` would otherwise strip with it.
+        return strip_links(repr(value))
 
     stated = "; ".join(
         f"{name}={_named(payload[name])}" for name in sorted(payload) if name in subjects
     )
     axes = "".join(
-        f" over {name}={payload[name]!r}"
+        f" over {name}={strip_links(repr(payload[name]))}"
         for name in sorted(payload)
         if name not in subjects and name in SWEEPABLE_FIELDS
     )
@@ -1152,6 +1176,41 @@ def _job_line(
         if not required and name not in payload
     )
     return f"{job}({stated}){axes}" + (f" — defaults: {defaulted}" if defaulted else "")
+
+
+#: The longest hypothesis id a run carries. The id is model-authored and ends up inside child
+#: workflow ids (`<run>-calc-<id>`), note links and dict keys; Temporal refuses an over-long
+#: workflow id as a bad *command*, which fails the tournament's workflow task rather than the one
+#: check. Structural, not a tunable: long enough for any name a person would read, and nothing a
+#: deployment has a reason to move.
+_MAX_HYPOTHESIS_ID = 64
+
+
+def _bounded_id(hypothesis: Hypothesis) -> str:
+    """The hypothesis's id reduced to a safe charset and bounded length, at the one place ids enter.
+
+    Normalised here, in the activity, rather than at the launch sites, because the launch sites are
+    workflow code and changing the expression there would change commands already in history.
+    An id with nothing safe left in it falls back to one derived from the statement, which is the
+    fallback the old `h.id or …` expression meant and could never reach (`id` is `min_length=1`).
+    """
+    bounded = safe_id(hypothesis.id)[:_MAX_HYPOTHESIS_ID]
+    return bounded if bounded.strip("_") else f"h-{stable_hash([hypothesis.statement])}"
+
+
+def _run_scope(request: TournamentRequest) -> list[str]:
+    """What makes two tournaments distinct — the payload `durable_tools._tournament_id` keys on.
+
+    One definition for every note id a run writes, so the field note and its proposals cannot
+    drift onto different scopes: a proposal keyed narrower than its field note is overwritten by a
+    run the field note was kept apart from.
+    """
+    return [
+        request.question,
+        request.context,
+        request.requested_by,
+        *sorted(request.requested_roles),
+    ]
 
 
 def _refused(check: DiscriminatingCheck, code: str, detail: str) -> CheckOutcome:
@@ -1372,7 +1431,11 @@ class HypothesisTournamentWorkflow:
             position_bias=bias,
             leader_is_decisive=decisive,
         )
-        note_ids = await self._propose(request, outcome, limits)
+        retrieved = {
+            hypothesis_id: {*question_evidence.note_ids, *pack.note_ids}
+            for hypothesis_id, pack in evidence.items()
+        }
+        note_ids = await self._propose(request, outcome, limits, retrieved)
         recorded = outcome.model_copy(update={"proposal_note_ids": note_ids})
         await self._record_field(request, recorded)
         self._publish_metrics(recorded)
@@ -1397,13 +1460,29 @@ class HypothesisTournamentWorkflow:
     async def _evidence(
         self, query: str, hypothesis_id: str, request: TournamentRequest
     ) -> _EvidencePack:
-        return await workflow.execute_activity(
-            gather_hypothesis_evidence,
-            args=[query, hypothesis_id, request.requested_by, request.correlation_id],
-            start_to_close_timeout=timedelta(seconds=settings.hypothesis_evidence_timeout_seconds),
-            schedule_to_start_timeout=queue_wait_timeout(),
-            retry_policy=BAD_DATA_RETRY,
-        )
+        """One evidence sweep, or an empty pack when Temporal could not complete it.
+
+        The activity already turns every in-process failure into an empty pack, because "a raise
+        would lose the whole run for one unreachable source". A timeout, a lost worker or exhausted
+        retries arrive here as `ActivityError` instead, and they must cost the same thing: this
+        sweep's evidence, not the tournament — `_angles`' shape, for the same reason.
+        """
+        try:
+            return await workflow.execute_activity(
+                gather_hypothesis_evidence,
+                args=[query, hypothesis_id, request.requested_by, request.correlation_id],
+                start_to_close_timeout=timedelta(
+                    seconds=settings.hypothesis_evidence_timeout_seconds
+                ),
+                schedule_to_start_timeout=queue_wait_timeout(),
+                retry_policy=BAD_DATA_RETRY,
+            )
+        except ActivityError:
+            workflow.logger.warning(
+                "evidence sweep for %r failed; ranking it on prose alone",
+                hypothesis_id or "question",
+            )
+            return _EvidencePack(hypothesis_id=hypothesis_id)
 
     async def _evidence_per_hypothesis(
         self, field: list[Hypothesis], request: TournamentRequest
@@ -1756,7 +1835,29 @@ class HypothesisTournamentWorkflow:
                 "template are three different calculations and choosing between them is the "
                 "check's decision, not the dispatcher's",
             )
-        computable = [check for check in computable if check not in ambiguous]
+        # **So is a call naming nothing.** It cannot dispatch, so it cannot spend a calculation,
+        # and slicing the budget over it first let a `call=None` leader take a slot, refuse
+        # `no-call`, and push a check that could have run below the cut as `over-budget`.
+        #
+        # **Gated, because it removes a command.** The shipped code dispatched such a check as a
+        # `run_computable_check` activity that refused `no-call`; a history recorded on it holds
+        # that ScheduleActivityTask, and this workflow fails rather than parks on a divergence.
+        # Unpatched, the empty checks stay in `computable`, take their budget slot and dispatch,
+        # exactly as that history recorded. The id may never be reused.
+        empty = (
+            [check for check in computable if check.call is None or not check.call.named_targets]
+            if workflow.patched("tournament-empty-calls-refused-before-budget")
+            else []
+        )
+        for check in empty:
+            out[check.hypothesis_id] = _refused(
+                check,
+                "no-call",
+                "the check named no tool, job or template to run, so nothing was dispatched",
+            )
+        computable = [
+            check for check in computable if check not in ambiguous and check not in empty
+        ]
 
         affordable = computable[: limits.max_calculations]
         for check in computable[limits.max_calculations :]:
@@ -1786,7 +1887,11 @@ class HypothesisTournamentWorkflow:
                         seconds=settings.hypothesis_call_timeout_seconds
                     ),
                     schedule_to_start_timeout=queue_wait_timeout(),
-                    retry_policy=BAD_DATA_RETRY,
+                    # **One attempt.** The activity already turns every in-process failure into
+                    # a refusal, so what reaches a retry is a timeout or a lost worker — and a
+                    # retry re-opens every connector, re-invokes the governed tool and writes
+                    # another audit row for a calculation nobody asked for twice.
+                    retry_policy=RetryPolicy(maximum_attempts=1),
                 )
                 for check in computable
             ),
@@ -1796,6 +1901,17 @@ class HypothesisTournamentWorkflow:
         for check, outcome in zip(computable, settled, strict=True):
             if isinstance(outcome, BaseException):
                 workflow.logger.warning("computable check failed for %s", check.hypothesis_id)
+                # An outcome, not a gap: `_settle_jobs`' rule. Dropped, the hypothesis read as one
+                # that never had a check, and the refusal metrics never counted it. `inconclusive`
+                # because the call was dispatched; not added to `ran`, because a failure has no
+                # value for the interpreter to read.
+                tool = check.call.tool if check.call else ""
+                out[check.hypothesis_id] = CheckOutcome(
+                    hypothesis_id=check.hypothesis_id,
+                    verdict="inconclusive",
+                    detail=f"{tool} failed: {outcome}",
+                    refusal_code="tool-failed",
+                )
                 continue
             out[check.hypothesis_id] = outcome
             if outcome.verdict != "not-run":
@@ -2100,9 +2216,17 @@ class HypothesisTournamentWorkflow:
         return results
 
     async def _propose(
-        self, request: TournamentRequest, outcome: TournamentOutcome, limits: _FieldLimits
+        self,
+        request: TournamentRequest,
+        outcome: TournamentOutcome,
+        limits: _FieldLimits,
+        retrieved: dict[str, set[str]],
     ) -> list[str]:
         """Write an `experiment-proposal` note for each physical check, best effort.
+
+        `retrieved` maps a hypothesis to the note ids its evidence actually held — the question's
+        sweep, which is what the generator saw and cited from, plus its own — so a proposal cites
+        only notes a retriever returned rather than whatever ids the model wrote down.
 
         Best effort because a failed note write must not lose the ranking: the answer is the table,
         and the notes are how tomorrow's session finds it again.
@@ -2111,12 +2235,19 @@ class HypothesisTournamentWorkflow:
         for row in outcome.ranked[: limits.max_proposals]:
             if row.check is None or row.check.kind != "physical":
                 continue
-            note_id = f"proposal-{stable_hash([request.question, row.hypothesis.statement])}"
+            # The field note's own scope plus the statement: keyed on (question, statement) alone,
+            # two tournaments `_record_field` deliberately keeps apart collided here, and the
+            # second overwrote the first's proposal while the first's field note still cited it.
+            note_id = f"proposal-{stable_hash([*_run_scope(request), row.hypothesis.statement])}"
             try:
                 await publish_note(
                     record_hypothesis_proposal,
                     [
-                        proposal_body(row, question=request.question),
+                        proposal_body(
+                            row,
+                            question=request.question,
+                            retrieved=retrieved.get(row.hypothesis.id, set()),
+                        ),
                         note_id,
                         ["hypothesis", "proposal"],
                         request.requested_by,
@@ -2150,14 +2281,7 @@ class HypothesisTournamentWorkflow:
         # writes the subject with `overwrite=True`. The second run destroyed the first one's field,
         # including the alternatives the note exists to preserve, and the survivor could be the
         # less informed of the two.
-        field_note_id = "hypothesis-field-" + stable_hash(
-            [
-                request.question,
-                request.context,
-                request.requested_by,
-                *sorted(request.requested_roles),
-            ]
-        )
+        field_note_id = "hypothesis-field-" + stable_hash(_run_scope(request))
         await publish_note_best_effort(
             record_hypothesis_field,
             [

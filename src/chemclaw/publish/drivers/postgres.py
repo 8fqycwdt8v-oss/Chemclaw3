@@ -14,8 +14,8 @@ so both directions are configured the same way and a deployment moving between t
 manifest rather than a mechanism.
 """
 
-from collections.abc import AsyncIterator, Sequence
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Iterator, Sequence
+from contextlib import asynccontextmanager, contextmanager
 from typing import Any
 
 import psycopg
@@ -58,6 +58,32 @@ def _refuse_plaintext_connection(dsn: str, host: str) -> None:
         )
 
 
+def _adapted(params: Sequence[Any]) -> list[Any]:
+    """`params` with every JSON document wrapped in `Jsonb`, the one way psycopg adapts one.
+
+    Shared by `execute` and `executemany` so an adaptation added for one reaches the other: the
+    batched drain falling back to row-by-row replay because only the single form knew a type would
+    be a silent five-second pass rather than an error.
+    """
+    return [Jsonb(value) if isinstance(value, dict | list) else value for value in params]
+
+
+@contextmanager
+def _mapped_errors() -> Iterator[None]:
+    """Re-raise a server programming error as `WarehouseQueryError`; let a connection loss through.
+
+    `durable/publish.py` marks `WarehouseQueryError` non-retryable by class name, which is right for
+    an undefined column (it fails identically forever) and wrong for a server that went away — so
+    `OperationalError` passes through as itself, retryable.
+    """
+    try:
+        yield
+    except psycopg.OperationalError:
+        raise
+    except psycopg.Error as exc:
+        raise WarehouseQueryError(f"{exc.__class__.__name__}: {exc}") from exc
+
+
 class _PostgresCursor:
     """One in-flight statement, returning column-keyed dicts."""
 
@@ -81,14 +107,8 @@ class _PostgresCursor:
         is DDL rather than a wait. A *connection* failure passes through as itself, because that
         one genuinely is worth retrying.
         """
-        adapted = [Jsonb(value) if isinstance(value, dict | list) else value for value in params]
-        try:
-            await self._cursor.execute(sql, adapted)
-        except psycopg.OperationalError:
-            # The server went away. Retryable, so it must not be flattened into a query error.
-            raise
-        except psycopg.Error as exc:
-            raise WarehouseQueryError(f"{exc.__class__.__name__}: {exc}") from exc
+        with _mapped_errors():
+            await self._cursor.execute(sql, _adapted(params))
 
     async def executemany(self, sql: str, params_seq: Sequence[Sequence[Any]]) -> None:
         """Run `sql` once per parameter set in psycopg's pipeline mode — one round trip, not N.
@@ -104,7 +124,8 @@ class _PostgresCursor:
         `WarehouseCursor` would have made every site-written driver fail the check `_connect`
         already does, for what is only an optimisation. A driver without it takes the loop.
 
-        The adaptation and the error mapping are `execute`'s, unchanged and for its reasons.
+        The adaptation and the error mapping are `execute`'s — one `_adapted` and one
+        `_mapped_errors` — for its reasons.
 
         **One property moved, and it is narrower than the seam's docstrings have promised.**
         psycopg wraps the whole parameter set in a single implicit transaction *even here, where the
@@ -114,17 +135,8 @@ class _PostgresCursor:
         than a row. `SqlResultSink` relies on exactly that when it replays a refused group singly to
         recover which row the server objected to.
         """
-        adapted = [
-            [Jsonb(value) if isinstance(value, dict | list) else value for value in params]
-            for params in params_seq
-        ]
-        try:
-            await self._cursor.executemany(sql, adapted)
-        except psycopg.OperationalError:
-            # The server went away. Retryable, so it must not be flattened into a query error.
-            raise
-        except psycopg.Error as exc:
-            raise WarehouseQueryError(f"{exc.__class__.__name__}: {exc}") from exc
+        with _mapped_errors():
+            await self._cursor.executemany(sql, [_adapted(params) for params in params_seq])
 
     async def fetchall(self) -> list[dict[str, Any]]:
         """Every remaining row, keyed by column name."""

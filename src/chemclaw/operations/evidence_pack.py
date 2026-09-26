@@ -51,7 +51,6 @@ Three limits are carried **on the object**, in `limits`, rather than left for a 
   `Coverage` exists to make one module over.
 """
 
-from datetime import datetime
 from typing import Annotated, Any, TypeVar
 
 from psycopg.rows import class_row
@@ -59,6 +58,7 @@ from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
 from chemclaw.core import db
 from chemclaw.core.config import settings
+from chemclaw.core.db import IsoStamp
 from chemclaw.operations.activity import safe_tool_name
 
 #: The sentences the pack refuses to let a reader supply for themselves. Carried on every pack.
@@ -82,24 +82,6 @@ LIMITS: tuple[str, ...] = (
 )
 
 
-def _stamp(value: Any) -> Any:
-    """A timestamp column as this pack's ISO string, leaving anything else to be validated.
-
-    **A validator rather than a SQL-side cast, because the string is on the wire.** A pack is read
-    by `agent/evidence_tools.py` and served as JSON; `recorded_at::text` would have spelled the
-    same instant `2026-09-16 10:00:00+00` where every pack ever assembled carries
-    `2026-09-16T10:00:00+00:00`. A row factory binds by name and converts nothing, so the
-    conversion moves here — the one place it can move without changing what a reader is handed.
-    """
-    if isinstance(value, datetime):
-        return value.isoformat()
-    return "" if value is None else value
-
-
-#: A `TIMESTAMPTZ` column carried as the ISO string a pack has always exposed. Empty for a NULL,
-#: which is the reading `LIMITS` already gives a gap: recorded nothing, not "happened at no time".
-Stamp = Annotated[str, BeforeValidator(_stamp)]
-
 #: `audit_events.tool` is the model's own string rather than a registered name, so it is bounded
 #: **on the field** rather than at one of its two readers. That placement is the point: the note on
 #: `assemble` used to record that the sanitisation "went into one reader of this column and not its
@@ -121,7 +103,7 @@ class ToolCall(BaseModel):
     tool: SafeToolName
     outcome: str
     actor: str
-    at: Stamp
+    at: IsoStamp
     latency_ms: float = 0.0
     #: Why the call did not run, for a refusal. The gates working are part of the record.
     #: Restricted to refusals in the SELECT rather than after it — see `assemble`.
@@ -155,7 +137,7 @@ class PackJob(BaseModel):
     state: str = ""
     failure_reason: str = ""
     note_id: str = ""
-    completed_at: Stamp = ""
+    completed_at: IsoStamp = ""
 
 
 class PackEffect(BaseModel):
@@ -174,7 +156,7 @@ class PackEffect(BaseModel):
     state: str
     approved_by: str = ""
     external_ref: str = ""
-    attempted_at: Stamp = ""
+    attempted_at: IsoStamp = ""
 
 
 class PackTurn(BaseModel):
@@ -207,7 +189,7 @@ class PackTurn(BaseModel):
     correlation_id: str
     outcome: str
     completed: bool = True
-    at: Stamp = ""
+    at: IsoStamp = ""
     compacted: bool = False
     context_unreducible: bool = False
     answer_confidence: float | None = None
@@ -242,7 +224,7 @@ class PackApproval(BaseModel):
     plan_hash: str
     approved: bool
     actor: str
-    at: Stamp = ""
+    at: IsoStamp = ""
 
 
 class EvidencePack(BaseModel):

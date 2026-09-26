@@ -231,3 +231,26 @@ def test_the_listing_route_answers_for_a_tier_larger_than_one_page(
 
     assert client.get("/skills/mine").json()["skills"] == names
     assert client.delete(f"/skills/mine/{names[11]}").status_code == 200
+
+
+def test_a_padded_oid_saves_where_the_turn_reads(app: FastAPI, store: InMemoryStore) -> None:
+    """The route keys on `principal.oid` and the turn on the stripped actor: they must be one key.
+
+    A dev or configured principal `' u-alice '` saved under the padded namespace while her turns
+    mounted `'u-alice'`, so the skill never acted. `Principal` strips at construction.
+    """
+    from chemclaw.agent.local_skills import list_local_skills
+
+    padded = Principal(oid=" u-alice ", upn="alice@example.com", roles=frozenset())
+    saved = _as(app, padded).post("/skills/mine", json={"body": _body()})
+    assert saved.status_code == 200, saved.text
+
+    assert asyncio.run(list_local_skills(store, "u-alice")) == ["my-workup"]
+
+
+def test_a_blank_oid_is_not_an_identity() -> None:
+    """Stripped to nothing is refused, not admitted as the empty principal."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        Principal(oid="   ")

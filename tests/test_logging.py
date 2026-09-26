@@ -1129,18 +1129,24 @@ def test_the_escaped_quote_framing_is_not_quadratic(unit: str) -> None:
     possessive form is ~10% cheaper and is what ships; this guard is here for the next rule that
     widens the framing into something ambiguous, not as evidence that the current one had to be
     possessive. `_KEY_FRAMING`'s own comment says the same thing, so the two cannot drift.
+
+    **Each size is the fastest of several runs, not one.** A single-shot ratio fails on one
+    scheduler stall: measured ~3 ms for 10 KB against ~25 ms for 80 KB, so a ~50 ms pause during
+    the large call alone crosses the threshold on linear code — plausible under
+    `PYTEST_WORKERS=4` or a loaded runner. The minimum discards a one-off stall and keeps the
+    threshold exactly as strict, because a quadratic cost is paid on every repeat.
     """
-    import time
+    import timeit
 
     small = unit * (10_240 // len(unit))
     large = unit * (81_920 // len(unit))  # 8x
 
-    start = time.monotonic()
-    redact_secrets(small)
-    small_seconds = time.monotonic() - start
-    start = time.monotonic()
-    redact_secrets(large)
-    large_seconds = time.monotonic() - start
+    def fastest(text: str) -> float:
+        """The least wall time of several single calls — `timeit`'s own `perf_counter`."""
+        return min(timeit.repeat(lambda: redact_secrets(text), number=1, repeat=5))
+
+    small_seconds = fastest(small)
+    large_seconds = fastest(large)
 
     assert large_seconds < 2.0, f"80 KB of adversarial {unit!r} took {large_seconds:.2f}s"
     assert large_seconds / max(small_seconds, 1e-4) < 24, (

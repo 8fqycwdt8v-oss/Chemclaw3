@@ -879,9 +879,11 @@ def handoff_tool_names() -> frozenset[str]:
     peer can hand back to it, and the root is whichever profile the session runs under — any
     registered one. So across the turns this process can serve, a handoff can target any rostered
     name or any profile a session may open on. The roster is unioned in explicitly rather than
-    trusted to be registered, because profile files are discovered lazily and a set that depended
-    on whether the files had been globbed yet would answer differently on the first call than on
-    the second.
+    trusted to be registered, and discovery is run first (it is idempotent), because profile files
+    are discovered lazily and a set that depended on whether the files had been globbed yet would
+    answer differently on the first call than on the second — which is exactly what reading the
+    registry alone did: a process that never ran discovery (the mock LLM, a validator) refused a
+    hand-back to a file-profile root the real mesh binds.
 
     **Why this is a name space at all.** `cli/mock_llm._validate` resolves every scripted call
     against `available_tool_names`, and without this set a behaviour calling a real handoff was
@@ -892,6 +894,10 @@ def handoff_tool_names() -> frozenset[str]:
     roster = settings.peer_roster
     if not roster:
         return frozenset()
+    # Imported here: profile_discovery imports connectors.registry, which imports this module.
+    from chemclaw.agent.profile_discovery import load_profiles
+
+    load_profiles()
     return frozenset(handoff_tool_name(name) for name in {*roster, *registered_profile_names()})
 
 

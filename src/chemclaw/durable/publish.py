@@ -211,6 +211,9 @@ _BAD_DATA_TYPES = [
     # sense: the arm id is wrong, so every attempt fails identically and a retry only delays the
     # message that names the arms which do exist.
     "UnknownArm",
+    # The latest values for one outcome in more than one unit. The stored rows decide it, so a
+    # retry reads the same rows and refuses identically.
+    "MixedUnits",
     "TemplateError",
     # A composed workflow that names a write, a job, or a step that does not resolve. Bad data in
     # exactly this list's sense: the document is what is wrong, so every attempt fails identically.

@@ -39,14 +39,21 @@ latency and not the same fix.
 """
 
 import dataclasses
-from collections.abc import Callable
-from pathlib import PurePosixPath
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from typing import Any, TypeVar, cast
 
 from deepagents.backends import StoreBackend
 from deepagents.backends.protocol import GlobResult, GrepResult, LsResult
 
-from chemclaw.agent.skill_backend import SkillsReadOnlyRefusal
+from chemclaw.agent.session_store import _session_connection, _session_dsn
+from chemclaw.agent.skill_backend import (
+    SkillsReadOnlyRefusal,
+    is_a_skill_body,
+    path_of,
+    skill_of,
+)
+from chemclaw.core.config import settings
 
 #: What a mounted tier answers for a path outside what this turn may reach.
 #:
@@ -101,29 +108,124 @@ async def paged_items(store: Any, namespace: tuple[str, ...]) -> dict[str, Any]:
     return held
 
 
-def skill_of(path: str) -> str:
-    """The skill a mounted path belongs to — its first segment, which is what the gate asks about.
+#: The document inside a skill directory that makes it a skill, mirroring the reviewed tree's
+#: shape so both stored tiers are discovered by the same rule as `skills/` and read the same to a
+#: model: `/org/<name>/SKILL.md` and `/mine/<name>/SKILL.md` are one convention, not two.
+SKILL_FILENAME = "SKILL.md"
 
-    Empty for the mount root, which belongs to no skill: listing it is how discovery starts, and
-    `ls` filters what comes back rather than refusing the walk.
+#: The transaction-scoped advisory lock a stored tier's writes serialize on — see
+#: `advisory_writer_lock`.
+_WRITER_LOCK = "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))"
 
-    Paths here are relative to the *mount* — `/my-workup/SKILL.md` rather than
-    `/mine/my-workup/SKILL.md` — so the reviewed tree's pair of helpers would read the first segment
-    of a different string. That is why this is stated here rather than imported.
+
+def storable_name(name: str) -> bool:
+    r"""Whether this name could ever have been written, which is what a read of it may assume.
+
+    **The writer's rule, asked by the readers, because the readers are reachable with anything.**
+    `GET /skills/mine/{name}` and its `DELETE` take a path parameter: any byte a URL can carry
+    reaches the store. Measured against the shipped Postgres store, `a\x00b` raised
+    `psycopg.DataError: PostgreSQL text fields cannot contain NUL (0x00) bytes` out of both — a
+    **500** on a name that cannot exist, where the honest answer is 404 and is what the in-memory
+    store already gave. A 500 on caller input is an availability question dressed as a bug report.
+
+    It is a predicate rather than a second copy of the check for the reason the whole tier is
+    arranged around: a rule stated at one surface is a rule the other surface does not have, which
+    is exactly the hole `local_skills.validated_skill`'s docstring measures for the two write doors.
     """
-    parts = PurePosixPath(path.strip("/")).parts
-    return parts[0] if parts else ""
+    return all(not character.isspace() and character.isprintable() for character in name)
 
 
-def is_a_skill_body(path: str) -> bool:
-    """Whether `path` names a document *inside* a skill rather than one at the mount root.
+def skill_key(name: str) -> str:
+    """The store key one stored skill's body lives under, in either tier.
 
-    A second predicate beside `skill_of` rather than a tightening of it, because the two questions
-    differ — `agent/skill_backend._is_a_skill_body` carries the argument and the measurement behind
-    it: a root-level document resolves, and counting it books a load against a "skill" that is not
-    one.
+    Leading slash and trailing `SKILL.md`, because that is the shape `StoreBackend` writes and reads
+    — measured rather than assumed, since a key this module invented would be a second definition
+    that upstream could walk away from on a bump.
     """
-    return len(PurePosixPath(path.strip("/")).parts) > 1
+    return f"/{name}/{SKILL_FILENAME}"
+
+
+def name_of_key(key: str) -> str | None:
+    """The skill a store key names, or `None` for a key that is not a skill body.
+
+    The inverse of `skill_key`, and strict: a key with no leading segment (`/SKILL.md`) or no
+    leading slash is not a skill. A suffix test alone listed `/SKILL.md` as a skill named `""` —
+    a row a route shows and cannot address — and, in the capability narrowing, would have made a
+    declaration under a nonsense name, where the entry that matters is the one that goes *missing*.
+    """
+    suffix = f"/{SKILL_FILENAME}"
+    if not key.startswith("/") or not key.endswith(suffix) or len(key) <= len(suffix) + 1:
+        return None
+    return key[1 : -len(suffix)]
+
+
+def store_writer(store: Any, namespace: tuple[str, ...]) -> StoreBackend:
+    """A writable backend over one stored tier's namespace, for the routes that change it.
+
+    **Plain `StoreBackend`, deliberately.** The turn's backend is a `PermittedStoreBackend` over the
+    same namespace; this is the other side of the tier, reached from an HTTP route a person calls
+    rather than from anything a model holds. Upstream's writer rather than `store.aput` keeps the
+    stored shape — the key, the `content`/`encoding` pair, the two timestamps — with exactly one
+    definition, and
+    `tests/test_scratchpad.py::test_no_first_party_module_writes_to_a_store_directly` holds
+    that no first-party module reaches past a backend to a store's own write verbs.
+    """
+    return StoreBackend(namespace=lambda _runtime: namespace, store=store)
+
+
+@asynccontextmanager
+async def advisory_writer_lock(lock_key: str) -> AsyncIterator[None]:
+    """Serialize a stored tier's writes under `lock_key`, so a row cap is a bound, not a suggestion.
+
+    **The caps were check-then-write with nothing between the two.** Measured against a real
+    `AsyncPostgresStore` at a cap of 3: twelve concurrent `POST /skills/mine` calls all read the
+    same pre-write count, all passed, and all twelve were written. Each tier keys the lock on what
+    its cap is per (a chemist, an org skill), so writers that cannot race never contend.
+
+    A transaction-scoped advisory lock on the session-store database rather than through the
+    `store` backend, because the count and the write are two calls through somebody else's object
+    and cannot be one transaction; it releases on commit.
+
+    **Conditioned on the backend rather than guarded by an `except`.** A stored tier is only
+    reachable when `turn_store()` answers, which needs `session_store="postgres"`; a test driving a
+    writer over an in-memory store has no database to lock on and no concurrency to lose, so the
+    lock is skipped explicitly rather than attempted and swallowed.
+    """
+    if settings.session_store != "postgres":
+        yield
+        return
+    async with _session_connection(_session_dsn()) as conn:
+        await conn.execute(_WRITER_LOCK, (lock_key,))
+        try:
+            yield
+        finally:
+            await conn.commit()
+
+
+async def list_skill_names(store: Any, namespace: tuple[str, ...]) -> list[str]:
+    """The names of every skill one stored tier holds, sorted — **all** of them.
+
+    Paged through `paged_items` for the reason it gives (un-paged, a listing answers ten and reads
+    as the whole tier), and parsed through `name_of_key`, so a key that is not a skill body lists as
+    nothing rather than as an empty name.
+    """
+    held = await paged_items(store, namespace)
+    return sorted(name for key in held if (name := name_of_key(key)) is not None)
+
+
+async def read_skill_body(store: Any, namespace: tuple[str, ...], name: str) -> str | None:
+    """One stored skill's body, verbatim, or `None` if the tier has no skill by that name.
+
+    A name the writer would have refused is answered as absent rather than passed to the store —
+    see `storable_name`, which measured a 500 on the shipped backend for a name that cannot exist.
+    """
+    if not storable_name(name):
+        return None
+    item = await store.aget(namespace, skill_key(name))
+    if item is None:
+        return None
+    content = item.value.get("content")
+    return content if isinstance(content, str) else None
 
 
 class PermittedStoreBackend(StoreBackend):
@@ -169,7 +271,7 @@ class PermittedStoreBackend(StoreBackend):
 
     def _permitted(self, hits: list[Any]) -> list[Any]:
         """The hits naming a path this turn may reach."""
-        return [hit for hit in hits if self._allows(_path_of(hit))]
+        return [hit for hit in hits if self._allows(path_of(hit))]
 
     def _delivered(self, result: Any, path: str) -> None:
         """Book one delivered body, or nothing.
@@ -374,12 +476,3 @@ def _first_argument(args: tuple[Any, ...], kwargs: dict[str, Any]) -> str:
     if args:
         return str(args[0])
     return str(kwargs.get("file_path", ""))
-
-
-def _path_of(hit: Any) -> str:
-    """The path a glob or grep hit names — a `FileInfo` mapping, a `GrepMatch`, or a bare string."""
-    if isinstance(hit, str):
-        return hit
-    if isinstance(hit, dict):
-        return str(hit.get("path", ""))
-    return str(getattr(hit, "path", ""))

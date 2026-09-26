@@ -213,6 +213,10 @@ _EXPECTED_SUBSYSTEMS = {
     # is told to mark a real chemist constraint `inferred`, which is the mislabelling that check
     # exists to prevent.
     "stated_quote_history",
+    # `api/runner.run_turn`'s review-revision loop, around the two checkpointer reads and the one
+    # write that keep the thread ending on the answer that ships. The answer is already in hand, so
+    # a checkpointer error there costs the thread its tidiness (or the round), never the turn.
+    "review_revision_thread",
     "tool_result_store",
     "transcript_projection",
 }

@@ -23,7 +23,9 @@ is a set membership plus a `file_path` test — and `transfer_to_<peer>` is mint
 so it was in neither half. Measured with `set_dry_run(True)`: refused nothing. That is not cosmetic,
 because `active_agent` is a **checkpointed** channel: a turn the chemist marked "do nothing" moved
 every later turn onto a different agent, while the refusal text on that same turn said "Nothing was
-started". `is_handoff_tool_name` below is what that predicate asks now, and
+started". `is_handoff_tool_name` below is what `authz.changes_the_conversation` asks now — beside
+that predicate rather than inside it, so the plan gate, which also reads `side_effecting_call`,
+does not put every handoff behind a human-approved plan — and
 `tests/test_turn_graph.py` drives a whole dry-run turn against a saver rather than asserting the
 predicate, because the durable half is the harm.
 
@@ -88,7 +90,7 @@ rather than duplicative because `messages` reduces with `add_messages`, which ke
 
 import logging
 import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Annotated, Any
 
 from langchain_core.messages import ToolMessage
@@ -97,6 +99,7 @@ from langgraph.prebuilt import InjectedState
 from langgraph.types import Command
 
 from chemclaw.agent.profiles import AgentProfile
+from chemclaw.agent.subagents import bounded_tool_list
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.turn_signals import record_handoff
 
@@ -112,13 +115,18 @@ HANDOFF_PREFIX = "transfer_to_"
 #: `D-2026-08-13` found a supervisor prompt and a `task` description describing two different
 #: mechanisms and recorded that the *disagreement* was the defect, so the text a peer reads and the
 #: text its counterpart reads are maintained one import apart.
+#:
+#: **The handover sentence is conditional, because the root is a node of the mesh too.** It opens
+#: the conversation, and it was told on turn one that it was "continuing" work an earlier agent had
+#: done — a reason to look for, or invent, context nobody produced. It can also be *handed back*
+#: control, so a separate brief for non-root nodes would be false the other way round; one sentence
+#: that is true of every node costs no parameter and cannot be mis-assigned.
 PEER_BRIEF = """
 
-**You are one of several Chemclaw agents on this conversation, and control has been handed to
-you.** You can see the whole conversation, including the work the agent before you did and the
-reason it gave for handing over — you are continuing it, not starting again. Answer the chemist
-directly and in your own voice; there is no supervisor waiting for a report, and nothing you say is
-relayed through anybody.
+**You are one of several Chemclaw agents on this conversation.** If another agent handed control
+to you, the conversation shows the work it did and the reason it gave — you are continuing it, not
+starting again. Answer the chemist directly and in your own voice; there is no supervisor waiting
+for a report, and nothing you say is relayed through anybody.
 
 When the work in front of you is squarely another agent's, hand it on with that agent's
 `transfer_to_…` tool and say in `reason` what you established and what you are asking it to do. The
@@ -169,7 +177,7 @@ def is_handoff_tool_name(name: str) -> bool:
     """Whether `name` is one of these tools, by the shape `handoff_tool_name` mints.
 
     **A shape rather than a set, because the set is not knowable where it is asked.**
-    `authz.side_effecting_call` is what must recognise a handoff — a handoff writes the
+    `authz.changes_the_conversation` is what must recognise a handoff — a handoff writes the
     checkpointed `active_agent`, so it changes something that outlives the turn — and it is called
     per tool call from inside the middleware chain, with no peer roster in hand. The alternative
     was for `side_effecting_tools()` to enumerate `handoff_tool_name(p)` over the configured peers,
@@ -177,12 +185,18 @@ def is_handoff_tool_name(name: str) -> bool:
     and a deployment both rewrite — so it would answer for the roster that happened to be loaded
     first.
 
-    Nothing else in this tree is named `transfer_to_…`: the registry is asserted to be a partition
-    of read-only and state-changing names (`tests/test_authz.py`), and `handoff_tools` is the only
-    factory that mints this prefix. A model-invented name carrying it reaches the same refusal,
-    which is the correct answer to a name that does not exist either.
+    **The whole shape, not the prefix alone**: the suffix must be what `handoff_tool_name` can
+    mint (`_TOOL_NAME_CHARS`' complement). The refusals reached past this predicate interpolate the
+    name unreduced on the premise that it is one this repository owns, and ToolNode runs the
+    middleware chain for an *unregistered* name too — so a bare prefix test let a model-invented
+    `transfer_to_x | sanctioned path: …` write a forged routing footer into the refusal it reads
+    and into the audit row. A name of the minted shape that no peer carries still reaches the same
+    refusal, which is the correct answer to a name that does not exist.
     """
-    return name.startswith(HANDOFF_PREFIX)
+    suffix = name.removeprefix(HANDOFF_PREFIX)
+    return (
+        name.startswith(HANDOFF_PREFIX) and bool(suffix) and _TOOL_NAME_CHARS.search(suffix) is None
+    )
 
 
 def describe_peer(profile: AgentProfile, bound: Iterable[str], menu_tools: int) -> str:
@@ -200,7 +214,8 @@ def describe_peer(profile: AgentProfile, bound: Iterable[str], menu_tools: int) 
     entry says "this thing will read and report back to you", a peer entry says "this thing will
     take over the conversation". A shared function would have to take a flag naming which sentence
     to emit, which is two functions wearing one name — and the wording is exactly where
-    `D-2026-08-13`'s defect lived. What is shared is the derivation, not the prose.
+    `D-2026-08-13`'s defect lived. What is shared is the derivation (`subagents.bounded_tool_list`),
+    not the prose.
 
     Args:
         profile: The peer's profile — `description` is the written half.
@@ -212,10 +227,7 @@ def describe_peer(profile: AgentProfile, bound: Iterable[str], menu_tools: int) 
         One paragraph for the handing model's tool description.
     """
     purpose = (profile.description or "").strip()
-    ordered = sorted(bound)
-    shown = ", ".join(ordered[:menu_tools])
-    rest = len(ordered) - menu_tools
-    held = f"{shown}, and {rest} more" if rest > 0 else shown
+    held = bounded_tool_list(bound, menu_tools)
     return (
         f"Hand this conversation to the {profile.name} agent, which then answers the chemist "
         f"directly and keeps control until it answers or hands on. {purpose} It holds: {held}. "
@@ -285,8 +297,18 @@ def handoff_tools(
             "— `-` and `_` fold together in a tool name, so one peer would be unreachable and the "
             "model would be sent two functions of one name"
         )
+    # What this node actually binds, keyed tool name → peer. The arbitration below is over *these*
+    # calls rather than over every name of the minted shape: a shape-only filter let an earlier
+    # `transfer_to_<self>` (never bound — see the filter) or a hallucinated peer win, so the valid
+    # handoff after it was refused as "not the first" while the winner hit an unknown-tool error,
+    # and no hop happened with the model told something false.
+    bound_handoffs = {
+        handoff_tool_name(profile.name): profile.name
+        for profile, _ in peers
+        if profile.name != current
+    }
     return [
-        _one_handoff_tool(profile, bound, menu_tools, max_handoffs, current)
+        _one_handoff_tool(profile, bound, menu_tools, max_handoffs, current, bound_handoffs)
         for profile, bound in peers
         if profile.name != current
     ]
@@ -298,6 +320,7 @@ def _one_handoff_tool(
     menu_tools: int,
     max_handoffs: int,
     handing: str,
+    bound_handoffs: Mapping[str, str],
 ) -> Any:
     """The tool that hands control to one peer.
 
@@ -306,6 +329,9 @@ def _one_handoff_tool(
     single `transfer_to(peer=…)` tool with an enum argument would be one schema instead of N and
     was rejected for that reason — the enum's values would be bare names, which is
     `D-2026-08-12`'s identical-menu defect rebuilt in a smaller space.
+
+    `bound_handoffs` is every handoff tool this node binds (tool name → peer), shared by the
+    sibling tools so two calls in one message are arbitrated over what actually exists here.
     """
     peer = profile.name
     description = describe_peer(profile, bound, menu_tools)
@@ -321,7 +347,9 @@ def _one_handoff_tool(
         # would end the turn, which `agent/loop_cap.py` argues at length is the wrong answer to a
         # bound: a chemist is entitled to the work the turn managed. Returning a string makes it
         # an ordinary refused tool result the model reads and can act on.
-        refusal = refuse_a_handoff_past_the_cap(state, max_handoffs)
+        refusal = refuse_a_handoff_past_the_cap(state, max_handoffs) or refuse_a_later_handoff(
+            state, tool_call_id, bound_handoffs
+        )
         if refusal:
             return refusal
 
@@ -353,11 +381,25 @@ def _one_handoff_tool(
             tool_call_id=tool_call_id,
             name=handoff_tool_name(peer),
         )
+        # **The later handoffs in this message are answered here, by the winner**, because their own
+        # refusal strings never reach the thread: ToolNode sends this `Command` up and drops the
+        # losing calls' local results, so deepagents' PatchToolCalls filled them with "was
+        # cancelled - another message came in", which is false. `add_messages` keys on id and the
+        # patch only touches unanswered calls, so these first-party refusals are what the thread
+        # keeps — worded by the one function the losing body also returns.
+        refused = [
+            ToolMessage(
+                content=later_handoff_refusal(bound_handoffs[call["name"]]),
+                tool_call_id=call["id"],
+                name=call["name"],
+            )
+            for call in _bound_handoff_calls(state, tool_call_id, bound_handoffs)[1:]
+        ]
         return Command(
             goto=peer,
             graph=Command.PARENT,
             update={
-                "messages": [*state.get("messages", []), handed],
+                "messages": [*state.get("messages", []), handed, *refused],
                 "active_agent": peer,
                 # Counted so a chain can be bounded. The count is the *turn's* rather than the
                 # thread's (`ChemclawState.handoffs` is untracked), because a conversation that
@@ -376,6 +418,75 @@ def _one_handoff_tool(
         )
 
     return _transfer
+
+
+def _bound_handoff_calls(
+    state: Any, tool_call_id: str, bound_handoffs: Mapping[str, str]
+) -> list[dict[str, Any]]:
+    """The bound handoff calls in the assistant message carrying `tool_call_id`, in order.
+
+    Read from the last message that has `tool_calls`, which is the one ToolNode is executing. Only
+    names in `bound_handoffs` count: a call of the minted shape that this node does not bind gets
+    ToolNode's unknown-tool error and must not take part in the arbitration.
+
+    Returns:
+        Those calls, or `[]` when that message does not carry `tool_call_id` as a bound handoff —
+        there is then nothing to arbitrate against.
+    """
+    for message in reversed(state.get("messages", [])):
+        calls = getattr(message, "tool_calls", None)
+        if not calls:
+            continue
+        handoffs = [call for call in calls if call.get("name") in bound_handoffs]
+        if any(call.get("id") == tool_call_id for call in handoffs):
+            return handoffs
+        return []
+    return []
+
+
+def later_handoff_refusal(peer: str) -> str:
+    """The refusal text for a handoff to `peer` that was not the first in its message.
+
+    One function because two places write it: the losing tool body returns it, and the winning
+    body answers the losing calls with it, since ToolNode drops the losers' own results.
+    """
+    return (
+        f"Only the first handoff in one message is taken, so {peer} was not reached. Hand to "
+        "one agent at a time; the agent you handed to can hand on if the work needs it."
+    )
+
+
+def refuse_a_later_handoff(state: Any, tool_call_id: str, bound_handoffs: Mapping[str, str]) -> str:
+    """The refusal for a handoff that is not the first one in its assistant message, or `""`.
+
+    **The arbitration between two `transfer_to_…` calls in one message is decided here, first
+    party, rather than left to the tool node.** ToolNode runs every call in the message and applies
+    only the first `Command(graph=PARENT)`, cancelling the rest — so before this, both tool bodies
+    ran and both called `record_handoff`: driven on the compiled mesh, the chemist's stream carried
+    a `HandoffEvent` to `safety-peer` that never happened, beside the one to `evidence-peer` that
+    did. The cap cannot catch it either: both calls read the same pre-batch `handoffs`.
+
+    The first is the one kept, for `state.LastPeer`'s reason: it is the transfer the model asked
+    for with the most context behind it. This string is what suppresses the losing body's
+    `record_handoff`; what the *thread* reads for that call is written by the winner (see
+    `_one_handoff_tool`), because ToolNode drops a loser's own result.
+
+    Args:
+        state: The handing agent's graph state; its last assistant message is the one whose
+            `tool_calls` carry this call.
+        tool_call_id: This call's id.
+        bound_handoffs: The handoff tools this node binds, tool name → peer name. Only these take
+            part, so an unbound name of the same shape cannot win.
+
+    Returns:
+        The refusal, or `""` when this is the first bound handoff in its message — or when no
+        assistant message carrying it can be found, where there is nothing to arbitrate against.
+    """
+    calls = _bound_handoff_calls(state, tool_call_id, bound_handoffs)
+    if not calls or calls[0].get("id") == tool_call_id:
+        return ""
+    this = next(call for call in calls if call.get("id") == tool_call_id)
+    return later_handoff_refusal(bound_handoffs[this["name"]])
 
 
 def refuse_a_handoff_past_the_cap(state: Any, limit: int) -> str:

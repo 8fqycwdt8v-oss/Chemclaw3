@@ -114,6 +114,30 @@ def is_degraded_render(message: BaseMessage) -> bool:
     return DEGRADED_RENDER in message.additional_kwargs
 
 
+#: Where a stored message carries the correlation id of the turn that stored it: stamped on read
+#: by the durable provider, from the column `026_audit_provenance.sql` added, and on save by the
+#: in-memory one. On the message rather than beside it, so both providers keep answering one call.
+STORED_CORRELATION_ID = "chemclaw_correlation_id"
+
+
+def stored_correlation_id(message: BaseMessage) -> str | None:
+    """The correlation id of the turn that stored `message`, or `None` when none was recorded.
+
+    Public for the transcript route: a client whose stream detached recovers that turn's answer by
+    this id rather than by guessing from text. `None` rather than `""` for a row written off the
+    request path (the CLI, tests) or before the column existed, which is "unknown", not a turn.
+    """
+    value = message.additional_kwargs.get(STORED_CORRELATION_ID)
+    return str(value) if value else None
+
+
+def _stamped(message: BaseMessage, correlation_id: str) -> BaseMessage:
+    """`message` carrying its turn's correlation id, or unchanged when there is none."""
+    if correlation_id:
+        message.additional_kwargs[STORED_CORRELATION_ID] = correlation_id
+    return message
+
+
 def chemist_words(messages: Iterable[BaseMessage]) -> list[str]:
     """Only the messages a *person* typed, as plain text, in the order they were said.
 
@@ -303,7 +327,8 @@ _INSERT = (
 # written twice, byte-identically, and the destructive copy was the one living furthest from this
 # rule.
 SELECT_SESSION_ROWS = (
-    "SELECT id, message, message_shape FROM session_messages WHERE session_id = %s ORDER BY id"
+    "SELECT id, message, message_shape, correlation_id FROM session_messages "
+    "WHERE session_id = %s ORDER BY id"
 )
 
 # The chemist's own words in one thread, newest first — the bounded read behind `core/turn_text`'s
@@ -808,7 +833,7 @@ class PostgresHistoryProvider:
             async with conn.cursor() as cur:
                 await cur.execute(SELECT_SESSION_ROWS, (session_id,))
                 rows = await cur.fetchall()
-        return [message_from_row(row[1], row[2]) for row in rows]
+        return [_stamped(message_from_row(row[1], row[2]), str(row[3] or "")) for row in rows]
 
     async def recent_user_texts(
         self,
@@ -1313,4 +1338,14 @@ class InMemoryHistoryProvider:
         """Append this turn's exchange to the session's state (no-op without one)."""
         if state is None or not messages:
             return
-        state.setdefault(self._KEY, []).extend(messages)
+        # Copies, stamped as the durable provider stamps them on read, so the transcript route
+        # reports a turn's correlation id under either store. Copies because these are the turn's
+        # own message objects, and the stamp belongs to the stored transcript, not to them.
+        correlation_id = get_current_correlation_id() or ""
+        state.setdefault(self._KEY, []).extend(
+            _stamped(
+                message.model_copy(update={"additional_kwargs": dict(message.additional_kwargs)}),
+                correlation_id,
+            )
+            for message in messages
+        )

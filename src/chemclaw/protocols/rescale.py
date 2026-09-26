@@ -22,8 +22,8 @@ reject like any other.
 
 from dataclasses import dataclass
 
-from chemclaw.core.units import Measurement, UnitError, parse_quantity
-from chemclaw.protocols.models import ChargeLine, ExperimentDesign, ProtocolStep
+from chemclaw.core.units import Measurement, UnitError, has_ambiguous_comma, parse_quantity
+from chemclaw.protocols.models import ChargeLine, ExperimentDesign, ProtocolStep, RequestField
 
 #: Step kinds whose *duration* does not follow the charge, with the reason each one does not.
 #:
@@ -109,45 +109,101 @@ def _limiting_line(design: ExperimentDesign) -> ChargeLine:
     return limiting[0]
 
 
-def _current_basis(line: ChargeLine) -> Measurement:
-    """The limiting line's amount, as a quantity a target can be divided by."""
-    if line.mass_mg is not None and line.mass_mg > 0.0:
-        return Measurement.of(line.mass_mg, "mg")
-    if line.amount_mmol is not None and line.amount_mmol > 0.0:
-        return Measurement.of(line.amount_mmol, "mmol")
-    if line.volume_ml is not None and line.volume_ml > 0.0:
-        return Measurement.of(line.volume_ml, "mL")
-    raise RescaleError(
-        f"the limiting line {line.component!r} states no mass, amount or volume, so there is "
-        "nothing to scale from"
-    )
+def _stated_bases(line: ChargeLine) -> list[Measurement]:
+    """Every positive amount the limiting line states — mass, amount and volume, in that order."""
+    stated = [
+        Measurement.of(value, unit)
+        for value, unit in (
+            (line.mass_mg, "mg"),
+            (line.amount_mmol, "mmol"),
+            (line.volume_ml, "mL"),
+        )
+        if value is not None and value > 0.0
+    ]
+    if not stated:
+        raise RescaleError(
+            f"the limiting line {line.component!r} states no mass, amount or volume, so there is "
+            "nothing to scale from"
+        )
+    return stated
 
 
 def _factor(design: ExperimentDesign, target: str) -> tuple[float, str]:
     """How much bigger the new basis is, and the basis as it will be recorded.
 
-    Refuses a target in a dimension the limiting line does not state rather than assuming a
-    density or a molar mass. Assuming either is how a scaled protocol acquires a number nobody
-    measured, and the caller can restate the target in the dimension the protocol already uses.
+    The basis is whichever of the limiting line's stated amounts the target converts to, so a line
+    carrying both a mass and an amount scales by either. Refuses only a target in a dimension the
+    line states none of, rather than assuming a density or a molar mass. Assuming either is how a
+    scaled protocol acquires a number nobody measured, and the caller can restate the target in a
+    dimension the protocol already uses.
     """
     wanted = parse_quantity(target)
+    if wanted is None and has_ambiguous_comma(target):
+        raise RescaleError(
+            f"{target!r} has a comma that may be a thousands separator or a decimal mark — "
+            "write it without one, for example '1.5 kg' or '1500 kg'"
+        )
     if wanted is None:
         raise RescaleError(
             f"{target!r} is not a quantity this can scale to — write it as a number and a unit, "
             "for example '2 kg' or '500 mL'"
         )
-    current = _current_basis(_limiting_line(design))
-    try:
-        converted = wanted.to(current.unit.symbol)
-    except UnitError as error:
-        raise RescaleError(
-            f"the limiting charge is stated in {current.unit.symbol} and the target in "
-            f"{wanted.unit.symbol}; converting between them needs a molar mass or a density this "
-            f"protocol does not carry, so restate the target in {current.unit.symbol}. ({error})"
-        ) from error
-    if converted.value <= 0.0:
-        raise RescaleError(f"{target!r} is not a positive quantity")
-    return converted.value / current.value, target.strip()
+    stated = _stated_bases(_limiting_line(design))
+    for current in stated:
+        try:
+            converted = wanted.to(current.unit.symbol)
+        except UnitError:
+            continue
+        if converted.value <= 0.0:
+            raise RescaleError(f"{target!r} is not a positive quantity")
+        return converted.value / current.value, target.strip()
+    units = " or ".join(current.unit.symbol for current in stated)
+    raise RescaleError(
+        f"the limiting charge is stated in {units} and the target in {wanted.unit.symbol}; "
+        "converting between them needs a molar mass or a density this protocol does not carry, "
+        f"so restate the target in {units}"
+    )
+
+
+#: The dimensions `checks._plausibility_bands` can size a band from. A scale in any other dimension
+#: (an amount, with no molar mass to spend it against) silently falls back to the bench ceilings,
+#: so a rescale must never record one while a readable alternative exists.
+_BAND_DIMENSIONS = frozenset({"mass", "volume"})
+
+#: The units a derived scale is written in, largest first, so it reads "6 kg" and not "6e+06 mg".
+_READABLE_UNITS: dict[str, tuple[str, ...]] = {"mass": ("kg", "g", "mg"), "volume": ("L", "mL")}
+
+
+def _readable(quantity: Measurement) -> str:
+    """`quantity` in the largest unit of its dimension that keeps the number at or above one."""
+    units = _READABLE_UNITS[quantity.unit.dimension]
+    for symbol in units:
+        converted = quantity.to(symbol)
+        if converted.value >= 1.0:
+            return str(converted)
+    return str(quantity.to(units[-1]))
+
+
+def _recorded_scale(design: ExperimentDesign, target: str, factor: float) -> str:
+    """The request scale a rescaled design declares — always one the plausibility band can read.
+
+    The target text when it is a mass or a volume. Otherwise (a molar target) the chemist's own
+    declared scale moved by the factor, which keeps their unit; then the limiting line's scaled
+    mass or volume; and the target text only when none of those is readable. Recording "6000 mmol"
+    as the scale of a kilo batch would size the band at bench ceilings and warn a unit slip on
+    every charge the rescale itself produced.
+    """
+    wanted = parse_quantity(target)
+    if wanted is not None and wanted.unit.dimension in _BAND_DIMENSIONS:
+        return target.strip()
+    declared = parse_quantity(design.request.scale.value)
+    if declared is not None and declared.unit.dimension in _BAND_DIMENSIONS and declared.value > 0:
+        return _readable(Measurement(value=declared.value * factor, unit=declared.unit))
+    line = _limiting_line(design)
+    for value, unit in ((line.mass_mg, "mg"), (line.volume_ml, "mL")):
+        if value is not None and value > 0.0:
+            return _readable(Measurement.of(value * factor, unit))
+    return target.strip()
 
 
 def _scaled_line(line: ChargeLine, factor: float) -> ChargeLine:
@@ -224,11 +280,23 @@ def rescale(design: ExperimentDesign, *, target: str) -> Rescaled:
                 ),
             )
         )
+    # The request's scale moves with the charges: `checks._plausibility_bands` sizes the mass and
+    # volume ceilings off it, so a kilo-scale revision still declaring the bench scale is judged
+    # as a unit slip — and so the recorded scale must be one it can read (`_recorded_scale`).
+    # `inferred`, not `stated` — the chemist's text never said this value, and
+    # `require_quotes_are_verbatim` would be asked to find it there.
     scaled = design.model_copy(
         update={
+            "request": design.request.model_copy(
+                update={
+                    "scale": RequestField(
+                        value=_recorded_scale(design, target, factor), basis="inferred"
+                    )
+                }
+            ),
             "base": body.model_copy(
                 update={"charge": [_scaled_line(line, factor) for line in body.charge]}
-            )
+            ),
         }
     )
     return Rescaled(design=scaled, factor=factor, basis=basis, caveats=tuple(caveats))

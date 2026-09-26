@@ -60,10 +60,10 @@ logger = logging.getLogger(__name__)
 
 #: How many distinct sessions a trajectory must recur in before it is worth proposing.
 #:
-#: Not a new threshold: `trajectory_census.census` already only reports a class that appears in two
-#: or more sessions, and this is the *independent* count after the guard has removed the sessions a
-#: candidate skill was already acting in. Two is the census's own bar restated on the surviving
-#: evidence, so the guard can only ever make a proposal harder to justify, never easier.
+#: Not a new threshold: `trajectory_census.census` reports a recurring class only at this many
+#: sessions, and imports this constant to do it, so the two bars are one number. Here it is applied
+#: to the *independent* count after the guard has removed the sessions a candidate skill was
+#: already acting in, so the guard can only ever make a proposal harder to justify, never easier.
 MIN_INDEPENDENT_SESSIONS = 2
 
 #: What a tool name may contribute to a skill name. Everything else becomes a hyphen, because the

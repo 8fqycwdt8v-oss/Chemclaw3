@@ -171,6 +171,49 @@ async def test_a_field_the_source_supplied_and_the_drain_cannot_read_is_counted(
     assert "could not be read" in caplog.text
 
 
+async def test_a_blank_date_is_the_source_recording_nothing_and_is_not_counted() -> None:
+    """`_date` holds `_number`'s blank-is-absent rule rather than counting an undated row.
+
+    `iso_date` turns `''` into None, and the raw `''` is not None, so an undated row in a text-typed
+    export was counted as a value the drain failed to read — every such row a WARNING telling the
+    site to declare a transform it already had. A garbled date is still counted.
+    """
+    rows = _rows()[:2]
+    rows[0]["PUBLICATION_DATE"] = "   "
+    rows[1]["PUBLICATION_DATE"] = ""
+    warehouse = KeysetWarehouse({_RELATION: rows}, _RELATION, "REACTION_ID")
+
+    report = await drain_corpus(warehouse, _binding(), InMemoryLabelIndex(), "pistachio", limit=5)
+
+    assert (report.recorded, report.unreadable_fields) == (2, 0)
+
+
+async def test_the_corpus_page_runs_its_patterns_under_one_page_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The per-cell `regex` bound does not compose, so the drain has to open the page's own.
+
+    `_record` runs a site's transforms on every bound field of up to `corpus_page_size` rows, and
+    with no `pattern_budget()` open `_cell_budget` handed every cell the whole per-cell timeout:
+    a slow-but-completing pattern was minutes of synchronous CPU the activity could only time out
+    on, with the retry reading the identical page. A page budget too small for even an honest
+    pattern is what shows the bound is in force — before the fix this page drained cleanly.
+    """
+    from chemclaw.ingest.eln.warehouse.expr import PatternBudgetError
+
+    monkeypatch.setattr(settings, "eln_regex_page_budget_seconds", 1e-9)
+    binding = dict(_BINDING)
+    binding["citation"] = {
+        "path": "root.PATENT_NUMBER",
+        "transform": [{"regex": {"pattern": r"US(\d+)", "group": 0}}],
+    }
+
+    with pytest.raises(PatternBudgetError):
+        await drain_corpus(
+            _fake(), CorpusBinding.model_validate(binding), InMemoryLabelIndex(), "pistachio"
+        )
+
+
 async def test_a_readable_corpus_counts_no_unreadable_fields() -> None:
     """The counter's zero, so that a rise in it means something.
 

@@ -2076,3 +2076,19 @@ def test_a_composed_run_says_so_on_the_sessions_started_jobs_list() -> None:
         {},
         "alice:fp",
     ).startswith("composed-")
+
+
+@pytest.mark.parametrize("actor", ["", " ", "\t\n"])
+def test_a_step_identity_refuses_a_blank_actor(actor: str) -> None:
+    """A whitespace actor is a principal nobody is, and every step would stamp it ambient."""
+    from chemclaw.durable.template_activities import StepIdentity
+
+    with pytest.raises(ValidationError):
+        StepIdentity(actor=actor, correlation_id="run-1")
+
+
+def test_a_step_identity_strips_the_actor_it_keeps() -> None:
+    """Padding is not part of the principal: the stamped actor is the stripped one."""
+    from chemclaw.durable.template_activities import StepIdentity
+
+    assert StepIdentity(actor="  alice  ", correlation_id="run-1").actor == "alice"

@@ -91,16 +91,16 @@ async def test_a_window_that_has_rolled_starts_the_principal_again(_durable: Non
     tracker = BudgetTracker()
     tracker.record("s1", "window-rolls", tokens=900)
     await _drain()
-    assert await budget_store.usage("window-rolls") == (1, 900)
+    assert (await budget_store.usage("window-rolls"))[:2] == (1, 900)
 
     await _age_window("window-rolls", settings.budget_window_hours + 1)
-    assert await budget_store.usage("window-rolls") == (0, 0), (
+    assert (await budget_store.usage("window-rolls"))[:2] == (0, 0), (
         "a window that has expired must read as zero without anything having rewritten it"
     )
 
     tracker.record("s2", "window-rolls", tokens=10)
     await _drain()
-    assert await budget_store.usage("window-rolls") == (1, 10), (
+    assert (await budget_store.usage("window-rolls"))[:2] == (1, 10), (
         "the first booking after an expiry resets the counter rather than adding to it"
     )
 
@@ -119,7 +119,7 @@ async def test_a_window_that_has_not_rolled_accumulates(_durable: None) -> None:
         tracker.record("s1", "window-adds", tokens=100)
     await _drain()
 
-    assert await budget_store.usage("window-adds") == (3, 300)
+    assert (await budget_store.usage("window-adds"))[:2] == (3, 300)
 
 
 async def test_an_unreachable_meter_admits_the_turn_rather_than_refusing_it(
@@ -133,7 +133,7 @@ async def test_an_unreachable_meter_admits_the_turn_rather_than_refusing_it(
     version with no error handling at all.
     """
 
-    async def _boom(actor: str) -> tuple[int, int]:
+    async def _boom(actor: str) -> budget_store.Window:
         raise RuntimeError("no database")
 
     monkeypatch.setattr(budget_store, "usage", _boom)
@@ -160,8 +160,8 @@ async def test_the_in_process_counter_still_binds_before_the_durable_write_lands
     `PYTEST_WORKERS`. Forcing the read to zero makes the refusal attributable to one source.
     """
 
-    async def _silent(actor: str) -> tuple[int, int]:
-        return 0, 0
+    async def _silent(actor: str) -> budget_store.Window:
+        return budget_store.Window(0, 0)
 
     monkeypatch.setattr(budget_store, "usage", _silent)
 
@@ -217,6 +217,60 @@ async def test_a_rolled_window_stops_binding_on_the_pod_that_spent_it(_durable: 
     await tracker.check("s3", "window-both-halves")
 
 
+async def test_a_pod_that_joined_late_rolls_with_the_durable_window(_durable: None) -> None:
+    """The in-process window is anchored to the durable row's, not to this pod's first booking.
+
+    The review of 2026-09-26 scenario: the durable row opened at 00:00, this pod first booked the
+    user at 20:00 (a restart, an eviction, a second replica) and the user hit the cap here. At
+    24:00 the row expires; the pod's own counter, anchored at 20:00, would have kept refusing
+    until 20:00 the next day while a sibling pod admitted. Modelled by building the late pod's
+    counter by hand and backdating only the durable row — the pod's counter is 4 hours old, the row
+    past its window — which is exactly the state `_rolled` alone cannot see.
+    """
+    await migrated_db_or_skip()
+    actor = "window-late-pod"
+    await _clean(actor)
+    await budget_store.book(actor, 900)  # another pod opened the window and spent
+
+    late = BudgetTracker()
+    late.record("s1", actor, tokens=1000)
+    await _drain()
+    settings.budget_max_tokens_per_user = 1000
+    with pytest.raises(BudgetExceeded, match="user token budget"):
+        await late.check("s2", actor)
+
+    # 24:00 for the row, 04:00 into this pod's own counter.
+    await _age_window(actor, settings.budget_window_hours + 0.1)
+    _age_counter(late, actor, 4.0)
+    await late.check("s3", actor)
+
+
+async def test_an_unwritten_turn_inside_the_window_still_binds_after_reconciling(
+    monkeypatch: pytest.MonkeyPatch, _durable: None
+) -> None:
+    """Re-anchoring must not throw away what `max()` is for: this pod's turn not yet written.
+
+    The counter lies inside the live durable window, so reconciling it adopts the window's start
+    and keeps its counts — the durable row, which has not seen the turn, must not replace them.
+    """
+    await migrated_db_or_skip()
+    actor = "window-inside"
+    await _clean(actor)
+    tracker = BudgetTracker()
+    tracker.record("s1", actor, tokens=10)
+    await _drain()
+
+    async def _no_write(user: str, tokens: int) -> budget_store.Window:
+        raise RuntimeError("not landed yet")
+
+    monkeypatch.setattr(budget_store, "book", _no_write)
+    tracker.record("s2", actor, tokens=900)
+    await _drain()
+    settings.budget_max_tokens_per_user = 500
+    with pytest.raises(BudgetExceeded, match="user token budget"):
+        await tracker.check("s3", actor)
+
+
 async def _drain() -> None:
     """Let the fire-and-forget durable write finish before reading it back.
 
@@ -262,7 +316,7 @@ async def test_two_concurrent_bookings_neither_lose_an_update_nor_reset_twice(
 
         await asyncio.gather(*(budget_store.book(actor, 10) for _ in range(32)))
 
-        turns, tokens = await budget_store.usage(actor)
+        turns, tokens, _, _ = await budget_store.usage(actor)
         if age_hours is None:
             assert (turns, tokens) == (33, 330), (
                 "a booking inside a live window was lost — the arms read a stale pre-image"

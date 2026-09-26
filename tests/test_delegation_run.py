@@ -482,3 +482,50 @@ def test_a_refused_task_is_not_a_delegation() -> None:
         "a call a gate refused never reached the tool body, so no helper was spawned — counting it "
         "would report a held gate as compliance, and on the baseline arm as contamination"
     )
+
+
+def test_the_audit_read_and_the_ledger_read_each_use_their_own_database(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`audit_events` is on `postgres_dsn`; `turn_costs` is on the session store's DSN.
+
+    `tools_that_ran` read the audit trail off `session_store_dsn or postgres_dsn`, so a deployment
+    that split the two found no audit rows and reported every repeat as undelegated. Driven with
+    the DSNs set apart and the connection recorded rather than opened.
+    """
+    from contextlib import asynccontextmanager
+    from typing import Any
+
+    from chemclaw.core import db
+    from chemclaw.core.config import settings
+
+    monkeypatch.setattr(settings, "postgres_dsn", "postgresql://audit")
+    monkeypatch.setattr(settings, "session_store_dsn", "postgresql://sessions")
+    opened: list[str] = []
+
+    class _Cursor:
+        async def __aenter__(self) -> "_Cursor":
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+        async def execute(self, *_: object) -> None:
+            return None
+
+        async def fetchall(self) -> list[Any]:
+            return []
+
+    class _Conn:
+        def cursor(self) -> _Cursor:
+            return _Cursor()
+
+    @asynccontextmanager
+    async def fake_connection(dsn: str, *_: object, **__: object) -> Any:
+        opened.append(dsn)
+        yield _Conn()
+
+    monkeypatch.setattr(db, "connection", fake_connection)
+    asyncio.run(delegation_run.tools_that_ran(["s"]))
+    asyncio.run(delegation_run.billed_by_session(["s"]))
+    assert opened == ["postgresql://audit", "postgresql://sessions"]

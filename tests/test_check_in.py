@@ -1000,6 +1000,51 @@ def test_a_run_that_spends_its_budget_defers_the_rest_instead_of_overrunning(
     )
 
 
+def test_a_run_deferred_mid_page_keeps_the_notices_of_the_requesters_it_did_not_reach(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The supersede is scoped to the batch about to be written, not to the whole page.
+
+    Issued once per page, it dropped every requester's unread notice up front and the budget then
+    deferred partway through — so everybody after the break lost last night's check-in and got
+    nothing in its place, the outcome `_SUPERSEDE` names as worse than the duplicate.
+    """
+    monkeypatch.setattr(settings, "check_in_schedule_minutes", 0.002)
+    owners = [f"check-in-midpage-{index:02d}" for index in range(_CONCURRENT_REQUESTERS * 3)]
+    superseded: list[str] = []
+    told: list[str] = []
+
+    @activity.defn(name="supersede_unread_check_ins")
+    async def _supersede(owners: list[str]) -> int:
+        superseded.extend(owners)
+        return 0
+
+    @activity.defn(name="record_session_event_activity")
+    async def _notify(event: SessionEventInput) -> None:
+        told.append(event.session_id)
+        await asyncio.sleep(0.15)
+
+    staged = [
+        one
+        for one in _staged_activities({"": _page(owners)}, _Concurrency(), dwell=0.0)
+        if one.__temporal_activity_definition.name  # type: ignore[attr-defined]
+        not in {"supersede_unread_check_ins", "record_session_event_activity"}
+    ]
+
+    async def _run() -> int:
+        async with await start_env_or_skip() as env:
+            client = pydantic_client(env)
+            async with _sweep_worker(client, [*staged, _supersede, _notify]):
+                return await _sweep(client, "mid-page")
+
+    delivered = asyncio.run(_run())
+
+    assert delivered < len(owners), "the budget was meant to defer part of the page"
+    assert sorted(digest_channel(owner) for owner in superseded) == sorted(told), (
+        "a requester's unread notice was dropped although this run never wrote them a new one"
+    )
+
+
 def test_the_supersede_leaves_alone_a_requester_this_run_is_not_writing_to() -> None:
     """The narrowing that keeps a deferred requester's only notice, and its stated cost.
 

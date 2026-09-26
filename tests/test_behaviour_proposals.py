@@ -400,3 +400,25 @@ async def test_the_counter_distinguishes_the_four_arrivals_it_declares(
     assert moved.get("superseded") == 2.0, (
         "a revive that arrives must sweep the sibling it replaces"
     )
+
+
+def test_a_listing_is_bounded_by_the_setting_and_keeps_the_newest(
+    store: ProposalStore, actor: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`list_for` stops at `agent_proposals_list_max`, newest first, on both backends.
+
+    The bound was a literal `50` default written three times and passed by no caller, so
+    `GET /proposals?state=` — documented as the audit read — stopped at fifty with nothing saying
+    so. It is a setting now, and this holds both stores to reading it.
+    """
+    monkeypatch.setattr(settings, "agent_proposals_list_max", 2)
+    names = ["first", "second", "third"]
+    for name in names:
+        asyncio.run(
+            store.propose(_proposal(_BODY.replace("cold-quench", name), actor=actor, name=name))
+        )
+
+    listed = asyncio.run(store.list_for(actor))
+    assert len(listed) == 2
+    assert {one.name for one in listed} <= set(names)
+    assert "first" not in {one.name for one in listed}, "the bound dropped a newer row"

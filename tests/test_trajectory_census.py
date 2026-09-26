@@ -8,6 +8,7 @@ would-have-helped ordering — are held here against constructed messages rather
 
 from datetime import UTC, datetime
 
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from chemclaw.cli.trajectory_census import (
@@ -72,6 +73,27 @@ def test_recurrence_needs_two_sessions_not_two_turns() -> None:
     classes = census(two_sessions)["recurring_classes"]
     assert len(classes) == 1
     assert classes[0]["sessions"] == 2
+
+
+def test_the_recurrence_bar_is_the_distillers_constant_not_a_second_literal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The census and the distiller compare against one number, so moving it moves both.
+
+    `agent/distiller.MIN_INDEPENDENT_SESSIONS` documents itself as "the census's own bar restated";
+    when the census compared against its own literal `2`, raising the distiller's bar left the
+    census reporting classes the distiller would then refuse. Driven by raising the bar to three:
+    a class in two sessions stops recurring here too.
+    """
+    from chemclaw.cli import trajectory_census
+
+    turns = [
+        Turn("s1", _at(1), ("gather_evidence", "predict_pka")),
+        Turn("s2", _at(2), ("gather_evidence", "predict_pka")),
+    ]
+    assert len(census(turns)["recurring_classes"]) == 1
+    monkeypatch.setattr(trajectory_census, "MIN_INDEPENDENT_SESSIONS", 3)
+    assert census(turns)["recurring_classes"] == []
 
 
 def test_would_have_helped_orders_sessions_by_their_timestamps() -> None:

@@ -43,6 +43,7 @@ from chemclaw.agent.local_skills import (
     validated_skill,
 )
 from chemclaw.api.deps import CurrentUser
+from chemclaw.api.routes.skill_http import skill_refusal_http, store_or_503
 from chemclaw.api.runner import turn_store
 
 
@@ -81,17 +82,6 @@ class LocalSkillsOut(BaseModel):
     skills: list[str]
 
 
-def _refused(error: SkillRefused) -> HTTPException:
-    """One refusal as this surface's status code — 409 for a taken name, 422 for a bad document.
-
-    The admission rules live with the tier (`agent/local_skills.validated_skill`) rather than here,
-    because a rule stated at one surface is a rule the *other* surface does not have: measured, a
-    body this route refused with a 422 was written whole by `POST /proposals/skill/{name}`. What is
-    left here is the translation, which is genuinely this surface's.
-    """
-    return HTTPException(409 if error.conflict else 422, str(error))
-
-
 async def _store_or_refuse() -> object:
     """This deployment's store, or a 503 saying the tier is unavailable rather than empty.
 
@@ -100,14 +90,11 @@ async def _store_or_refuse() -> object:
     the truth is "this deployment cannot keep any". A confident empty answer about a mechanism that
     is not running is the failure `Chemclaw3_ui`'s review queue has had to delete twice.
     """
-    store = await turn_store()
-    if store is None:
-        raise HTTPException(
-            503,
-            "this deployment keeps no personal skills: it needs the durable memory store "
-            "(CHEMCLAW_AGENT_MEMORY_ENABLED with a Postgres session store)",
-        )
-    return store
+    return store_or_503(
+        await turn_store(),
+        "this deployment keeps no personal skills: it needs the durable memory store "
+        "(CHEMCLAW_AGENT_MEMORY_ENABLED with a Postgres session store)",
+    )
 
 
 async def list_skills(principal: CurrentUser) -> LocalSkillsOut:
@@ -137,13 +124,13 @@ async def save_skill(body: LocalSkillIn, principal: CurrentUser) -> LocalSkillOu
     try:
         name = validated_skill(body.body)
     except SkillRefused as refusal:
-        raise _refused(refusal) from refusal
+        raise skill_refusal_http(refusal) from refusal
     # The cap is the writer's, not this route's: it has to be counted and spent under one lock, and
     # a check here would be the second copy that the acceptance door already proved goes stale.
     try:
         await save_local_skill(store, principal.oid, name, body.body)
     except SkillRefused as refusal:
-        raise _refused(refusal) from refusal
+        raise skill_refusal_http(refusal) from refusal
     return LocalSkillOut(name=name, body=body.body)
 
 

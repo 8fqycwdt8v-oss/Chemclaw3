@@ -28,8 +28,7 @@ from chemclaw.agent.langgraph_agent import (
 )
 from chemclaw.agent.local_skills import (
     LOCAL_SKILLS_ROOT,
-    _key,
-    _writer,
+    local_skills_namespace,
     save_local_skill,
 )
 from chemclaw.agent.org_skills import ORG_SKILLS_ROOT, save_org_skill
@@ -37,12 +36,18 @@ from chemclaw.agent.profiles import AgentProfile
 from chemclaw.agent.scratchpad import scratchpad_backend
 from chemclaw.agent.skill_access import skill_permits
 from chemclaw.agent.skill_manifest import UNREADABLE_DECLARATION, declared_tools
-from chemclaw.agent.skill_store import LISTING_PAGE
+from chemclaw.agent.skill_store import LISTING_PAGE, skill_key, store_writer
 from chemclaw.agent.stored_skill_tools import StoredSkillTools, stored_skill_declarations
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 
 _ACTOR = "alice-oid"
+
+
+def _writer(store: Any) -> Any:
+    """A writer over `_ACTOR`'s own tier, bypassing admission to plant a body as-is."""
+    return store_writer(store, local_skills_namespace(_ACTOR))
+
 
 #: A personal skill that declares two tools, so it has something for the capability gate to read.
 _DECLARING = (
@@ -266,7 +271,7 @@ def test_a_stored_skill_under_a_shipped_name_is_never_served(store: InMemoryStor
         f"{contested} is not shipped, so this asserts nothing"
     )
     body = f"---\nname: {contested}\ndescription: my own digging\n---\n\nMine, not theirs.\n"
-    asyncio.run(_writer(store, _ACTOR).awrite(_key(contested), body))
+    asyncio.run(_writer(store).awrite(skill_key(contested), body))
     every_tool = set().union(
         *declared_tools([d for _label, d in _labelled(_skill_dirs())]).values()
     ) | {"compute_thermochemistry"}
@@ -307,7 +312,7 @@ def test_a_role_gate_alone_does_not_reach_the_reserved_name_case(store: InMemory
     """
     contested = "deep-research"
     body = f"---\nname: {contested}\ndescription: my own digging\n---\n\nMine.\n"
-    asyncio.run(_writer(store, _ACTOR).awrite(_key(contested), body))
+    asyncio.run(_writer(store).awrite(skill_key(contested), body))
     every_tool = set().union(
         *declared_tools([d for _label, d in _labelled(_skill_dirs())]).values()
     ) | {"compute_thermochemistry"}
@@ -368,7 +373,7 @@ def test_a_stored_declaration_cannot_hide_the_reviewed_skill_of_that_name(
     filed = declared_tools([d for _label, d in _labelled(_skill_dirs())])
     assert filed[contested], f"{contested} declares nothing, so this asserts nothing"
     body = f"---\nname: {contested}\ndescription: mine\ntools: [a_tool_nothing_binds]\n---\nMine.\n"
-    asyncio.run(_writer(store, _ACTOR).awrite(_key(contested), body))
+    asyncio.run(_writer(store).awrite(skill_key(contested), body))
 
     offered = _paths_offered(_mounted(store, available=set(filed[contested])))
 
@@ -446,8 +451,8 @@ def test_an_unreadable_stored_body_is_scoped_to_nothing(store: InMemoryStore) ->
     door. Both write doors run `validated_skill`, so what makes this reachable is a body stored
     before a rule tightened; the writer is used directly to produce exactly that row.
     """
-    asyncio.run(_writer(store, _ACTOR).awrite(_key("broken"), "---\ntools: {not: a list}\n---\nx"))
-    asyncio.run(_writer(store, _ACTOR).awrite(_key("nameless"), "no frontmatter at all"))
+    asyncio.run(_writer(store).awrite(skill_key("broken"), "---\ntools: {not: a list}\n---\nx"))
+    asyncio.run(_writer(store).awrite(skill_key("nameless"), "no frontmatter at all"))
 
     read = _read(store, _ACTOR)
 
@@ -560,7 +565,7 @@ def test_a_name_both_tiers_hold_is_scoped_by_the_body_the_turn_reads(store: InMe
     shared = "house-workup"
     asyncio.run(save_org_skill(store, shared, _ORG, activated_by="admin-oid"))
     mine = f"---\nname: {shared}\ndescription: my version\ntools: [sample_conformers]\n---\nMine.\n"
-    asyncio.run(_writer(store, _ACTOR).awrite(_key(shared), mine))
+    asyncio.run(_writer(store).awrite(skill_key(shared), mine))
 
     read = _read(store, _ACTOR)
     offered = _paths_offered(_mounted(store, available={"compute_thermochemistry"}))
@@ -586,10 +591,10 @@ def test_the_reader_pages_like_the_listing_it_shares_a_walk_with(store: InMemory
     page would silently leave every skill past it unscoped — which is the fail-*open* direction.
     """
     rows = LISTING_PAGE + 7
-    writer = _writer(store, _ACTOR)
+    writer = _writer(store)
     for index in range(rows):
         body = f"---\nname: s{index}\ndescription: d\ntools: [absent_tool]\n---\nbody"
-        asyncio.run(writer.awrite(_key(f"s{index}"), body))
+        asyncio.run(writer.awrite(skill_key(f"s{index}"), body))
 
     read = _read(store, _ACTOR)
 

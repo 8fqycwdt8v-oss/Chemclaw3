@@ -258,14 +258,15 @@ async def supersede_unread_check_ins(owners: list[str]) -> int:
     question. Replacing it bounds the population at one row per requester without the sweep having
     to remember anything between runs.
 
-    Once per *page*, immediately before that page's requesters are written to, rather than once per
-    run or once per requester. Once per run would have to be a delete over the whole table, which
-    takes a deferred requester's notice away and puts nothing in its place (see `_SUPERSEDE`); once
-    per requester would put a third light write on the queue `_CONCURRENT_REQUESTERS` exists to keep
-    room on.
+    Once per *batch*, immediately before that batch's requesters are written to, rather than once
+    per run, per page or per requester. Once per run would have to be a delete over the whole
+    table, and once per page was the same defect one level down: the run budget can defer partway
+    through a page, so either took a deferred requester's notice away and put nothing in its place
+    (see `_SUPERSEDE`). Once per requester would put a third light write on the queue
+    `_CONCURRENT_REQUESTERS` exists to keep room on; a batch is the unit already delivered whole.
 
     Args:
-        owners: the requesters whose stale notices this drops — the page about to be delivered.
+        owners: the requesters whose stale notices this drops — the batch about to be delivered.
 
     Returns:
         How many stale notices were dropped, for the run's own log line.
@@ -457,11 +458,14 @@ class CheckInWorkflow:
                 schedule_to_start_timeout=queue_wait_timeout(),
                 retry_policy=BAD_DATA_RETRY,
             )
-            if page.check_ins:
-                # Before the page is written and scoped to it: a check-in is a statement about
-                # *now*, so last night's unread copy is a stale answer to the same question rather
-                # than history. See `supersede_unread_check_ins`. Skipped on an empty page, which is
-                # the shape of every quiet night — the common case costs no activity at all.
+            # **Gated, because it moves a command.** The shipped code superseded once per page,
+            # before the first batch; per batch schedules a supersede where a recorded history of
+            # a page longer than `_CONCURRENT_REQUESTERS` holds the second batch's deliveries, and
+            # this workflow fails rather than parks, so the unguarded change turned a redeploy
+            # mid-sweep into that night's failed run. Asked only for a non-empty page, the one
+            # shape the two versions differ on. The id may never be reused.
+            per_batch = bool(page.check_ins) and workflow.patched("check-in-supersede-per-batch")
+            if page.check_ins and not per_batch:
                 dropped += await workflow.execute_activity(
                     supersede_unread_check_ins,
                     [item.owner for item in page.check_ins],
@@ -471,6 +475,20 @@ class CheckInWorkflow:
                 )
             for start in range(0, len(page.check_ins), _CONCURRENT_REQUESTERS):
                 batch = page.check_ins[start : start + _CONCURRENT_REQUESTERS]
+                # Immediately before this batch is written and scoped to it: a check-in is a
+                # statement about *now*, so last night's unread copy is a stale answer to the same
+                # question rather than history. See `supersede_unread_check_ins`. Per batch rather
+                # than per page because the budget check below can defer mid-page, and a page-wide
+                # delete took every later requester's notice and replaced it with nothing. An empty
+                # page has no batch, so a quiet night still costs no activity at all.
+                if per_batch:
+                    dropped += await workflow.execute_activity(
+                        supersede_unread_check_ins,
+                        [item.owner for item in batch],
+                        start_to_close_timeout=timeout,
+                        schedule_to_start_timeout=queue_wait_timeout(),
+                        retry_policy=BAD_DATA_RETRY,
+                    )
                 # Concurrently across requesters, serially within one — see `_tell`. Best-effort per
                 # requester, the same reject-and-continue the digest uses: one broken mailbox must
                 # not stop everybody else hearing that their work is stuck.

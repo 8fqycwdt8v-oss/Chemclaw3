@@ -70,19 +70,25 @@ namespace closes over one actor, so another chemist's turn cannot reach it at al
 """
 
 import logging
-from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
+from collections.abc import Callable
+from contextlib import AbstractAsyncContextManager
 from typing import Any
 
 import frontmatter
-from deepagents.backends import StoreBackend
 from pydantic import ValidationError
 
 from chemclaw.agent.audit import bounded_repr
 from chemclaw.agent.refusal_route import routed
-from chemclaw.agent.session_store import _session_connection, _session_dsn
 from chemclaw.agent.skill_manifest import SkillManifest
-from chemclaw.agent.skill_store import PermittedStoreBackend, paged_items
+from chemclaw.agent.skill_store import (
+    PermittedStoreBackend,
+    advisory_writer_lock,
+    list_skill_names,
+    read_skill_body,
+    skill_key,
+    storable_name,
+    store_writer,
+)
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.ids import stable_hash
@@ -99,9 +105,6 @@ logger = logging.getLogger(__name__)
 #: that quotes one. The route is per-actor by construction — the namespace closes over the turn's
 #: own actor — so the path needs to carry no identity at all.
 LOCAL_SKILLS_ROOT = "/mine/"
-
-#: The advisory lock one chemist's writes serialize on — see `_one_writer_per_chemist`.
-_WRITER_LOCK = "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))"
 
 #: The same label without its slashes, for the skills middleware's source list.
 LOCAL_SKILLS_LABEL = "mine"
@@ -131,23 +134,6 @@ class SkillRefused(ChemclawError):
         """Refuse, saying whether the name is taken (`conflict`) or the document is malformed."""
         super().__init__(message)
         self.conflict = conflict
-
-
-def storable_name(name: str) -> bool:
-    r"""Whether this name could ever have been written, which is what a read of it may assume.
-
-    **The writer's rule, asked by the readers, because the readers are reachable with anything.**
-    `GET /skills/mine/{name}` and its `DELETE` take a path parameter: any byte a URL can carry
-    reaches the store. Measured against the shipped Postgres store, `a\x00b` raised
-    `psycopg.DataError: PostgreSQL text fields cannot contain NUL (0x00) bytes` out of both — a
-    **500** on a name that cannot exist, where the honest answer is 404 and is what the in-memory
-    store already gave. A 500 on caller input is an availability question dressed as a bug report.
-
-    It is a predicate rather than a second copy of the check for the reason the whole tier is
-    arranged around: a rule stated at one surface is a rule the other surface does not have, which
-    is exactly the hole `validated_skill`'s docstring measures for the two write doors.
-    """
-    return all(not character.isspace() and character.isprintable() for character in name)
 
 
 def validated_skill(body: str, *, expected_name: str | None = None) -> str:
@@ -346,67 +332,15 @@ def local_skills_backend(
     )
 
 
-#: The document inside a skill directory that makes it a skill, mirroring the shared tree's shape so
-#: one chemist's own tier is discovered by the same rule as `skills/` and reads the same to a model.
-LOCAL_SKILL_FILENAME = "SKILL.md"
-
-
-def _key(name: str) -> str:
-    """The store key one local skill's body lives under.
-
-    Leading slash and trailing `SKILL.md`, because that is the shape `StoreBackend` writes and reads
-    — measured rather than assumed, since a key this module invented would be a second definition
-    that upstream could walk away from on a bump.
-    """
-    return f"/{name}/{LOCAL_SKILL_FILENAME}"
-
-
-def _writer(store: Any, actor: str) -> StoreBackend:
-    """A writable backend over one person's own skills, for the route that saves them.
-
-    **Plain `StoreBackend`, deliberately, and this is the only place one is built.** The turn's
-    backend is a `PermittedStoreBackend` over the same namespace; this is the other side of the same
-    tier, reached from an HTTP route a person calls rather than from anything a model holds. Using
-    upstream's writer rather than putting rows in directly is what keeps the stored shape — the
-    key, the `content`/`encoding` pair, the two timestamps — with exactly one definition, so a
-    bump that changes it changes both halves together.
-    """
-    namespace = local_skills_namespace(actor)
-    return StoreBackend(namespace=lambda _runtime: namespace, store=store)
-
-
-@asynccontextmanager
-async def _one_writer_per_chemist(actor: str) -> AsyncIterator[None]:
+def _one_writer_per_chemist(actor: str) -> AbstractAsyncContextManager[None]:
     """Serialize this chemist's saves, so the row cap is a bound rather than a suggestion.
 
-    **The cap was check-then-write with nothing between the two.** Measured against a real
-    `AsyncPostgresStore` at a cap of 3: twelve concurrent `POST /skills/mine` calls all read the
-    same pre-write count, all passed, and all twelve were written. The acceptance door had the same
-    shape at a cap of 2 and wrote eight. The bound's stated purpose is prompt-prefix spend — every
-    personal skill is in the prompt of every turn its owner takes — so a cap that concurrency lifts
-    is not bounding the thing it exists to bound.
-
-    A transaction-scoped advisory lock keyed on the actor, which is the shape
-    `agent/behaviour_proposals.py` uses one table over and releases on commit. It is per chemist, so
-    two people never contend, and it is taken on the session-store database rather than through the
-    `store` backend because the count and the write are two calls through somebody else's object and
-    cannot be one transaction — `tests/test_scratchpad.py` is what forbids reaching past the backend
-    to do it the other way.
-
-    **Conditioned on the backend rather than guarded by an `except`.** The tier is only reachable
-    when `turn_store()` answers, which needs `session_store="postgres"`; a test driving the writer
-    directly over an in-memory store has no database to lock on and no concurrency to lose, so the
-    lock is skipped explicitly rather than attempted and swallowed.
+    Per chemist, so two people never contend. The mechanism, and the measurement that made it
+    necessary (twelve concurrent saves at a cap of 3, all twelve written), are
+    `skill_store.advisory_writer_lock`'s; `agent/behaviour_proposals.py` uses the same shape one
+    table over.
     """
-    if settings.session_store != "postgres":
-        yield
-        return
-    async with _session_connection(_session_dsn()) as conn:
-        await conn.execute(_WRITER_LOCK, (f"local-skills\x1f{actor}",))
-        try:
-            yield
-        finally:
-            await conn.commit()
+    return advisory_writer_lock(f"local-skills\x1f{actor}")
 
 
 async def save_local_skill(store: Any, actor: str, name: str, body: str) -> None:
@@ -467,7 +401,7 @@ async def save_local_skill(store: Any, actor: str, name: str, body: str) -> None
                 "personal one by that name would never act — give yours a different name",
                 conflict=True,
             )
-        await _writer(store, actor).awrite(_key(name), body)
+        await store_writer(store, local_skills_namespace(actor)).awrite(skill_key(name), body)
     log_event(
         logger,
         "local_skill.saved",
@@ -494,13 +428,10 @@ async def list_local_skills(store: Any, actor: str) -> list[str]:
     is acting on their turns and withdraw it. A listing that is confidently short is worse than no
     listing, because it answers the question wrongly rather than not at all.
 
-    The paging itself is `skill_store.paged_items`, shared with the organisation's tier and with the
-    capability narrowing that reads the bodies — one walk, because it was two copies of the same
-    loop before a third caller arrived.
+    The walk and the key parsing are `skill_store.list_skill_names`, shared with the organisation's
+    tier — the two listings were copies of each other down to the suffix slice.
     """
-    held = await paged_items(store, local_skills_namespace(actor))
-    suffix = f"/{LOCAL_SKILL_FILENAME}"
-    return sorted(key[1 : -len(suffix)] for key in held if key.endswith(suffix))
+    return await list_skill_names(store, local_skills_namespace(actor))
 
 
 async def read_local_skill(store: Any, actor: str, name: str) -> str | None:
@@ -509,13 +440,7 @@ async def read_local_skill(store: Any, actor: str, name: str) -> str | None:
     A name the writer would have refused is answered as absent rather than passed to the store —
     see `storable_name`, which measured a 500 on the shipped backend for a name that cannot exist.
     """
-    if not storable_name(name):
-        return None
-    item = await store.aget(local_skills_namespace(actor), _key(name))
-    if item is None:
-        return None
-    content = item.value.get("content")
-    return content if isinstance(content, str) else None
+    return await read_skill_body(store, local_skills_namespace(actor), name)
 
 
 async def delete_local_skill(store: Any, actor: str, name: str) -> bool:
@@ -526,14 +451,14 @@ async def delete_local_skill(store: Any, actor: str, name: str) -> bool:
     person has learned there is something acting on them and still cannot stop it.
     """
     if not storable_name(name) or (
-        await store.aget(local_skills_namespace(actor), _key(name)) is None
+        await store.aget(local_skills_namespace(actor), skill_key(name)) is None
     ):
         return False
     # Through the same backend the write uses rather than `store.adelete`, so both halves of this
     # tier's lifecycle go through upstream's own code and the stored shape keeps one definition.
     # It is also what `tests/test_scratchpad.py` asks for structurally — no first-party module
     # reaches past the backend to the store's write verbs.
-    await _writer(store, actor).adelete(_key(name))
+    await store_writer(store, local_skills_namespace(actor)).adelete(skill_key(name))
     log_event(
         logger,
         "local_skill.removed",
