@@ -116,7 +116,7 @@ topic).
   `core/config/temporal.py::worker_max_cached_workflows`,
   `tests/test_workers.py::test_the_workflow_cache_fits_the_memory_the_chart_asks_for`.
 
-- [ ] **An SSH host alias derives the alias, not the host ssh dials** — [S], opened 2026-09-22 by
+- [ ] **An SSH host alias derives the alias, not the host ssh dials** (issue #446) — [S], opened 2026-09-22 by
   the review of `D-2026-09-22-a-destination-that-is-a-name-is-still-a-destination`.
   `netguard._push_hosts_for` resolves `git remote get-url --push --all` and takes the host out of
   the URL, which is right for every form git itself resolves — `insteadOf` included, since
