@@ -33,7 +33,7 @@ import threading
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
-from typing import Any
+from typing import Any, Literal
 
 from mcp import ClientSession
 from pydantic import BaseModel, ConfigDict
@@ -424,7 +424,22 @@ async def remote_call(tool: str, arguments: dict[str, Any]) -> ResultPayload:
         return await remote_compute(session, tool, arguments)
 
 
-async def remote_version(tool: str, arguments: dict[str, Any]) -> str:
+#: The fleet tools whose current version this repository asks for — the calibrated calculators, and
+#: the only names `remote_version` accepts.
+#:
+#: **A type rather than a `str`, because the caller never passes a literal.**
+#: `connectors/calc/server/tools.py::_CALIBRATED` maps a property to its tool and `_calibrated`
+#: hands the looked-up value on, so the name reaches the wire out of a dict value that
+#: `tests/test_sibling_manifest_agreement.py`'s call-site walker cannot read — and a third
+#: calibrated row naming a tool the fleet does not serve would have been checked by nothing. Here
+#: the names are part of the dispatcher's own signature: `mypy --strict` refuses a table row naming
+#: anything else, and the seam walker reads this `Literal` as the resolution of every
+#: `remote_version` call site, so each member is checked against the fleet's recorded surface.
+#: Adding a calibrated calculator is therefore two edits, and the second is the one that checks it.
+CalibratedTool = Literal["predict_solubility", "predict_pka"]
+
+
+async def remote_version(tool: CalibratedTool, arguments: dict[str, Any]) -> str:
     """The `calc_version` this tool would stamp on a result, without computing one.
 
     The one way this repository is allowed to learn a calculator's current version, and the reason

@@ -103,33 +103,59 @@ overridable as `CHEMCLAW_<FIELD>`); this runbook covers the four recurring admin
   matching no field is never seen, let alone rejected — and a ConfigMap is exactly how config
   arrives in-cluster, which is the case this entry exists for. `deploy/README.md` carries the same
   correction with the mechanism spelled out.
-- **`CHEMCLAW_NOTE_REPO_DIR` must be set on any host that submits notes — the default is always
+- **`CHEMCLAW_NOTE_REPO_DIR` must be set on any host that records notes — the default is always
   wrong in a deployment.** It ships as `.` (a dev convenience), which resolves to the process CWD.
-  Every submission creates `note/<id>` in that clone and force-pushes it to the clone's origin, so
-  pointing it at the checkout the service itself runs from would publish agent-authored notes into
-  the source repository — `_require_dedicated_checkout` refuses before any git command runs, with
-  `note_repo_dir '.' resolves to <path> — the checkout this process is running from`. That error is
-  the guard doing its job, not a broken deployment: point the variable at a **dedicated, writable,
-  non-shallow clone** of the knowledge repo, used by nothing else (`--force-with-lease` needs real
-  history, and so does the worktree each submission branches from). The Helm chart already supplies one —
-  `knowledge.noteRepoPath`, default `/var/lib/chemclaw/note-repo`, provisioned by
-  `deploy/knowledge-sync.sh`. It is also the tree the retriever serves from, because it has to be:
-  `settings.knowledge_path` is `note_repo_dir` joined with `knowledge_dir` and there is no second
-  resolution, so the sync publishes into that subdirectory (taking the submitter's checkout lock
-  while it does) rather than to a path of its own. Since D-2026-08-05 that working tree is a
-  *reader* surface only: a submission happens in a private worktree under `.git/` and never
-  switches it, and the sync is the one thing that writes it. The *shallow* replica at
-  `knowledge.sync.checkoutPath` is what it publishes from, never what anything reads.
-  Leaving it unset outside Helm is the quieter failure: `knowledge-sync.sh` logs
-  `CHEMCLAW_NOTE_REPO_DIR unset — no submitter clone provisioned` and skips the clone, so the
-  first note submission is the thing that discovers it.
+  A note write commits **straight onto the base branch** of the clone it is handed and pushes that
+  branch to the clone's remote (`kg/git_writer.py`) — there is no `note/<id>` branch, no force-push
+  and no review step since `D-2026-09-05-the-gate-follows-behaviour-not-knowledge`. Pointed at the
+  checkout the service itself runs from, that would commit into the running application's source
+  tree and push to the source repository, so `_require_dedicated_checkout` refuses before any git
+  command runs, with `note_repo_dir '.' resolves to <path> — the checkout this process is running
+  from`. That error is the guard doing its job, not a broken deployment. What the directory has to
+  be, each item driven against `GitNoteWriter` rather than recalled:
+  1. **A clone with a real `.git` directory, used by nothing else.** A linked worktree (`.git` is a
+     file) is refused by name, because the cross-process write lock is a file under `.git/`.
+  2. **Checked out on `CHEMCLAW_NOTE_BASE_BRANCH`** (default `main`). Notes are committed onto
+     that branch, and a checkout on any other is refused by name (`the notes checkout at … is on
+     'master', not the base branch 'main'`) — `git init` still names the branch `master` on many
+     installs.
+  3. **A remote named `CHEMCLAW_GIT_REMOTE`** (default `origin`) **that already carries the base
+     branch.** Every write opens with `git fetch <remote> <base>` and `merge --ff-only`, and ends
+     with `git push <remote> HEAD:refs/heads/<base>`. A bare `git init` fails here twice over — no
+     remote, and an empty remote has no `main` to fetch — and both surface as a *retryable*
+     `GitRemoteError`, so the write is retried before it is dropped. A local bare repository is
+     enough for a dev or mock stack: `git init --bare -b main /srv/notes-origin.git`, then in the
+     clone `git remote add origin /srv/notes-origin.git && git push -u origin main`. A local commit
+     of its own is not required once the remote has one.
+  4. **A committer identity** (`user.name`/`user.email` in the clone or the global config, or
+     `GIT_AUTHOR_*`/`GIT_COMMITTER_*`). The writer passes none, so in a container whose hostname
+     has no domain every commit fails with `Author identity unknown … unable to auto-detect email
+     address`, as a non-retryable `GitWriteError`.
+  5. **The existing `knowledge/` tree.** Readers resolve `settings.knowledge_path`, which is
+     `note_repo_dir` joined with `knowledge_dir` and nothing else, so this clone *is* the graph every
+     reader scans: an empty clone serves an empty graph, with no error anywhere.
+
+  A shallow clone is not refused — a note lands in a `--depth 1` clone — but the chart clones full
+  history and the rebase that replays an unpushed note has not been driven on a shallow one.
+
+  The Helm chart supplies items 1, 2, 3 and 5: `deploy/knowledge-sync.sh checkout` clones
+  `knowledge.sync.repoUrl` on the base branch into `knowledge.noteRepoPath` (default
+  `/var/lib/chemclaw/note-repo`), and the sync sidecar keeps it current with the writer's own
+  `fetch` + `merge --ff-only` under the writer's lock rather than a reset, so a note whose push
+  failed stays committed, stays readable, and is replayed by the next write. The *shallow* replica
+  at `knowledge.sync.checkoutPath` is what a pod that records nothing publishes from, never what
+  the writer commits into. Leaving the variable unset outside Helm is the quieter failure:
+  `knowledge-sync.sh` logs `CHEMCLAW_NOTE_REPO_DIR unset — no writer clone provisioned` and skips
+  the clone, so the first note write is the thing that discovers it. **Nothing reports a broken
+  notes clone before that write does** — `/readyz` gates on Postgres and counts connectors, and
+  does not look at the note repository at all.
 - **Note writing is serialized per host.** Keep the background worker at one replica (see
   `deploy/helm/chemclaw/values.yaml`); the writer's checkout lock is host-local, and the
   cross-pod half is the Postgres advisory lock, which is taken only under
   `CHEMCLAW_SESSION_STORE=postgres` (the chart sets it). Two writers on one `note_repo_dir` share
   one working tree and one index, so the second stages its files into the first's in-flight commit. On a filesystem where
-  `flock` is not honoured (some NFS/ReadWriteMany setups) that assumption fails, and the blast
-  radius is a live worktree deleted mid-submission rather than two interleaved branches.
+  `flock` is not honoured (some NFS/ReadWriteMany setups) that assumption fails, and nothing
+  serialises two writes on that one index at all.
 
 ## Talk to the agent from a terminal (testing)
 
@@ -209,8 +235,8 @@ reindex` fills `note_index`; the fingerprint tables are filled only as a side ef
 sync, so start `ElnSyncWorkflow` on `background-jobs` once. The note writer needs a *dedicated*
 clone — `bootstrap.sh` creates `.live/knowledge-repo` and `processes.sh` points
 `CHEMCLAW_NOTE_REPO_DIR` at it, because `note_repo_dir` defaults to the working checkout and a write
-commits into the tree it is handed and pushes it to that clone's origin, so the writer refuses it
-(G4) and the whole knowledge-contribution half of a run silently disappears.
+commits onto the base branch of the tree it is handed and pushes that branch to its origin, so the
+writer refuses it (G4) and the whole knowledge-contribution half of a run silently disappears.
 
 **`make live-storm` is the third stage, and it needs no model at all.** The shipped default already
 points the lane at the mock (`CHEMCLAW_LLM_BASE_URL=http://127.0.0.1:8820/v1`,

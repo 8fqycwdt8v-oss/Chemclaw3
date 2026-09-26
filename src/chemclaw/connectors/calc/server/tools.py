@@ -42,7 +42,7 @@ from pydantic import BaseModel, Field, computed_field
 from rdkit import Chem
 
 from chemclaw.connectors.calc import compose
-from chemclaw.connectors.calc.remote import cached_remote, remote_version
+from chemclaw.connectors.calc.remote import CalibratedTool, cached_remote, remote_version
 from chemclaw.core.chem import canonical_smiles, require_canonical_smiles, substructure_pattern
 from chemclaw.core.config import settings
 from chemclaw.core.ids import stable_hash
@@ -124,8 +124,10 @@ def _version_of(payload: ResultPayload, tool: str) -> str:
 # Which properties this ledger scores, and the unit each is stored in. Above its readers
 # rather than beside `_calibrated()` because `report_measurement` needs the unit to check
 # a chemist's reported value against it, and a constant used at line 174 and defined at
-# line 515 resolves fine and reads as an accident.
-_CALIBRATED: dict[str, tuple[str, str]] = {
+# line 515 resolves fine and reads as an accident. The tool half is typed `CalibratedTool`, so a
+# row naming a tool `remote_version` does not declare is a type error rather than a name put on
+# the wire unchecked — see that type for why the declaration lives on the dispatcher.
+_CALIBRATED: dict[str, tuple[CalibratedTool, str]] = {
     "solubility": ("predict_solubility", "log S"),
     "pka": ("predict_pka", "pKa"),
 }
@@ -233,7 +235,8 @@ async def report_measurement(
     # passed one — so every measurement this system has ever stored carried an empty unit and a
     # chemist reporting 0.5 mg/mL was indistinguishable from one reporting log S = 0.5
     # (D-2026-08-29-a-quantity-without-a-unit-is-a-number).
-    _tool, ledger_unit = _CALIBRATED.get(ledger_property, ("", ""))
+    calibrated = _CALIBRATED.get(ledger_property)
+    ledger_unit = calibrated[1] if calibrated else ""
     if ledger_unit and not unit.strip():
         # Refuse rather than assume. The assumption is invisible in the data afterwards, and it is
         # wrong exactly when a chemist reports in the unit they measure in rather than the one this

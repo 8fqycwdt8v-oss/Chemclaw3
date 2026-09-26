@@ -108,12 +108,14 @@ DELEGATION_BEHAVIOURS: list[Behaviour] = [
     # ------------------------------------------------------------------ the peer arm
     #
     # It calls nothing. A `transfer_to_<peer>` tool is minted per peer by `agent/handoff.py` from a
-    # profile name the *deployment* chooses, so this catalogue cannot name one — and `_validate`
-    # resolves every behaviour's tools against `available_tool_names()`, which does not carry the
-    # handoff name space at all. So against this double the peer arm takes no treatment and is
-    # reported as `undelegated`, which is the honest intention-to-treat reading of an arm whose
-    # posture the front door was not started with. Driving a real handoff needs
-    # `CHEMCLAW_AGENT_PEER_ROSTER` and a behaviour naming that deployment's own tool.
+    # profile name the *deployment* chooses, so this catalogue cannot name one. `_validate` would
+    # accept one: `available_tool_names()` carries the handoff name space
+    # (`chemclaw_agent.handoff_tool_names`) whenever the process serving the mock is started with
+    # `CHEMCLAW_AGENT_PEER_ROSTER`, and is empty of it otherwise. So against this double the peer
+    # arm takes no treatment and is reported as `undelegated`, which is the honest
+    # intention-to-treat reading of an arm whose posture the front door was not started with.
+    # Driving a real handoff needs that roster on both processes and a behaviour naming that
+    # deployment's own tool.
     Behaviour(
         name="d-hands-off",
         text=_verdict("the peer arm answered without handing the conversation on"),
