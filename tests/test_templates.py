@@ -534,6 +534,11 @@ def test_a_shipped_template_whose_arguments_cannot_be_checked_says_so() -> None:
         "degradant-triage": ["enumerate_degradants", "screen_hazards"],
         "hazard-briefing": ["screen_hazards"],
         "microspecies-profile": ["enumerate_protonation_states"],
+        "scale-up-thermal-envelope": [
+            "adiabatic_temperature_rise",
+            "mtsr",
+            "stoessel_criticality_class",
+        ],
         "stereoisomer-ranking": ["enumerate_stereoisomers"],
         "tautomer-resolution": ["enumerate_tautomers"],
     }

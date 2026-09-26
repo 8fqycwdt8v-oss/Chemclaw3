@@ -147,10 +147,9 @@ def forget_discovered() -> None:
 def enabled() -> list[Template]:
     """The templates this deployment turns on; empty enable-list means every discovered one.
 
-    **`templates_enabled` is the only filter here, and deliberately still is.** Whether a
-    template's steps resolve against the connectors this deployment actually runs is a separate
-    question, asked at launch by `unrunnable_reason` rather than here — withdrawing the launcher
-    would break every profile that names it, which is measured in that docstring.
+    **`templates_enabled` is the only filter here, and deliberately still is.** This is the set a
+    validator and the prose contract read — every launcher this tree can bind — and which of them
+    a turn actually binds is `bound()`'s narrower question.
     """
     found = discovered()
     names = settings.templates_enabled_list
@@ -162,6 +161,58 @@ def enabled() -> list[Template]:
             f"templates_enabled names unknown template(s) {unknown}; discovered: {sorted(found)}"
         )
     return [found[name] for name in names]
+
+
+def withheld_reason(template: Template) -> list[str]:
+    """The opt-in capabilities whose absence withholds `template`'s launcher, or `[]` to bind it.
+
+    **A launcher is withheld when both halves hold, and only then**
+    (`D-2026-09-26-a-launcher-no-profile-names-is-withheld-when-its-capability-is-off`):
+
+    1. Its steps name a tool or job that a bundle here *declares* and this deployment does not
+       bind (`agent/template_surface.unbound_opt_in_references`) — the template belongs to an
+       opt-in capability that is off.
+    2. No profile lists the launcher (`agent/template_surface.profile_named_tools`).
+
+    The first is why it is worth doing: a launcher is ~560 tokens of prefix on every model call
+    (`scale-up-thermal-envelope`, measured), and binding one that `unrunnable_reason` refuses at
+    launch is paying that for a capability the deployment cannot use. The second is why it is not
+    done more widely: `unrunnable_reason`'s docstring measured that withdrawing a launcher a
+    profile *names* turns "one procedure is unavailable" into "every turn on this profile fails at
+    build", and that measurement still stands for every launcher it was about.
+
+    Everything else keeps its launcher and its refusal-at-launch, including a template that names
+    a tool *nothing* declares — that is a broken template, not an opt-in one, and a refusal naming
+    the missing tool is the more useful answer to it.
+
+    Imported lazily, as `unrunnable_reason` does it: `chemclaw.agent.chemclaw_agent` imports this
+    module at import time, so a module-scope `templates -> agent` import would be a cycle.
+
+    Args:
+        template: An enabled template.
+
+    Returns:
+        The declared-but-unbound tool and job names that withhold it, sorted; `[]` when it is bound.
+    """
+    from chemclaw.agent.template_surface import profile_named_tools, unbound_opt_in_references
+
+    missing = unbound_opt_in_references(template)
+    # The profile half is asked only when the first half fires, which is rare: it reads every
+    # profile file, and nearly every template is decided without needing to.
+    if not missing or tool_name(template) in profile_named_tools():
+        return []
+    return missing
+
+
+def bound() -> list[Template]:
+    """The enabled templates whose launchers this deployment binds — `enabled()` minus the withheld.
+
+    Recomputed on every call rather than cached: the connector enable-list and the profile files
+    are both configuration a test (or a reloaded process) can change, and the one caller that runs
+    per turn (`chemclaw_agent._register_generated_tools`) is already bounded by its own
+    once-per-process registry.
+    """
+    return [template for template in enabled() if not withheld_reason(template)]
 
 
 def tool_name(template: Template) -> str:
@@ -316,8 +367,10 @@ def unrunnable_reason(template: Template) -> str:
     `authorize_job_step` fails it non-retryably — a wasted launch and a named failure some minutes
     later rather than a promise that never resolves. Neither is worth starting.
 
-    **This refuses the launch; it does not withdraw the tool.** Not registering an unrunnable
-    launcher is the obvious answer and it is measurably worse: `data/profiles/computation.yaml`
+    **This refuses the launch; it does not withdraw the tool** — except in the one case
+    `withheld_reason` decides, a launcher no profile names for a capability that is off, which was
+    never what the measurement below was about. Not registering an unrunnable launcher in general
+    is the obvious answer and it is measurably worse: `data/profiles/computation.yaml`
     names eight of them and `safety.yaml` names the ninth, and `chemclaw_agent`'s
     `_reject_unknown_tool_names` *raises* when a profile lists a tool the surface does not provide.
     Measured with only the `results` bundle enabled, withdrawing them takes two shipped profiles
@@ -522,15 +575,21 @@ def build_template_tool(template: Template) -> CapabilityTool:
     return launch
 
 
-def template_tools() -> list[CapabilityTool]:
-    """One generated launcher per enabled template, each refusing what it cannot run.
+def template_tools(*, declared: bool = False) -> list[CapabilityTool]:
+    """One generated launcher per bound template, each refusing what it cannot run.
 
-    Every enabled template gets a launcher whatever the connector set — see `enabled` — and the
-    launcher checks `unrunnable_reason` before it queues anything.
+    A launcher is bound unless `withheld_reason` withholds it, and a bound one still checks
+    `unrunnable_reason` before it queues anything.
+
+    Args:
+        declared: Build every *enabled* template's launcher, withheld or not. For a reader whose
+            question is about the tree rather than this deployment — the prose contract checks a
+            launcher's docstring whether or not this checkout binds it, the way
+            `chemclaw_agent.declared_tool_names` checks a reference to an opt-in tool.
     """
-    return [build_template_tool(template) for template in enabled()]
+    return [build_template_tool(template) for template in (enabled() if declared else bound())]
 
 
-def template_tool_names() -> list[str]:
-    """The advertised name of every enabled template's tool, for the validators to check."""
-    return sorted(tool_name(template) for template in enabled())
+def template_tool_names(*, declared: bool = False) -> list[str]:
+    """The advertised name of every bound template's tool, or every enabled one's if `declared`."""
+    return sorted(tool_name(template) for template in (enabled() if declared else bound()))

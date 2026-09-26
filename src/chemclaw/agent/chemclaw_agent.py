@@ -940,14 +940,19 @@ def declared_tool_names() -> set[str]:
     so checking a skill or a prompt clause against the runtime set would reject a correct reference
     to a tool this repository ships a manifest for.
 
-    Only the connector half differs — the in-process registry, the template launchers, the skills,
-    the harness and the spawner are all bound unconditionally — so this is the union with
-    `declared_connector_tool_names` in place of `connector_tool_names`, and a deletion is still
-    caught because a tool no manifest declares is in neither.
+    Two halves differ. The connector half is `declared_connector_tool_names` in place of
+    `connector_tool_names`, and the template half is every *enabled* launcher rather than the bound
+    ones, because a launcher for an opt-in capability that is off is withheld
+    (`templates.registry.withheld_reason`) for exactly the reason that bundle's tools are absent.
+    A deletion is still caught because a tool nothing declares is in neither.
     """
     from chemclaw.connectors.registry import declared_connector_tool_names
 
-    return available_tool_names() | set(declared_connector_tool_names())
+    return (
+        available_tool_names()
+        | set(declared_connector_tool_names())
+        | set(template_tool_names(declared=True))
+    )
 
 
 def capability_tool_names() -> set[str]:

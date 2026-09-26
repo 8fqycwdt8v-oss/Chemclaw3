@@ -130,6 +130,13 @@ Each template becomes a generated agent tool named `run_<name>`, so the model ca
 as it starts any durable job — and it is gated, audited and attributed exactly the same way. It
 returns a job id; poll it with `get_durable_job_status`.
 
+**A launcher is withheld in one case**: no profile names it and its steps call a tool or job that a
+bundle here declares and this deployment does not bind — an opt-in capability that is off
+(`registry.withheld_reason`,
+`D-2026-09-26-a-launcher-no-profile-names-is-withheld-when-its-capability-is-off`). It is then
+never bound, so it costs no prefix, and enabling the bundle binds it. Every other launcher is bound
+whatever the connector set, and refuses at launch what it cannot run.
+
 `make template-validate` checks every template before it ships: unique step ids, references that
 resolve, tools that exist, profiles that exist, declared write tools that exist and actually write,
 and no forward references. It also checks that the **run** can finish the steps the file declares —
