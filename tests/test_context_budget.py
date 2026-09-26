@@ -18,6 +18,7 @@ handed, which is where the defects were:
 
 import asyncio
 import logging
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -758,21 +759,26 @@ class _NamedTool:
 
 
 def _costly_conversion(
-    per_tool_seconds: float, converted: list[str]
+    per_tool_seconds: float, converted: list[str], on_threads: list[int] | None = None
 ) -> Callable[[Any], dict[str, Any]]:
     """`convert_to_openai_tool` with its real cost made explicit and its real shape kept.
 
-    A busy-wait rather than a `sleep`, because what the two tests below measure is a *CPU* block on
-    the event loop and a sleeping stand-in would release the loop exactly where the real one does
-    not. Every call is recorded, so "how often was the surface swept" is a count rather than a
-    timing inference.
+    Every call is recorded, so "how often was the surface swept" is a count rather than a timing
+    inference — and, given `on_threads`, so is *where* it ran.
+
+    **A synchronous `time.sleep`, not a busy-wait, and the difference is only the GIL.** Either one
+    holds the thread that calls it, so on the event loop's thread both stop the loop for the whole
+    conversion — which is the block the burst test below exists to keep out. They differ off the
+    loop: a busy-wait keeps the GIL, so the loop turns only when CPython's switch interval hands it
+    back, and the burst test's heartbeat then counted that arbitration instead of anything this
+    module decides (see its docstring for the measurement).
     """
 
     def convert(tool: Any) -> dict[str, Any]:
         converted.append(getattr(tool, "name", repr(tool)))
-        deadline = time.perf_counter() + per_tool_seconds
-        while time.perf_counter() < deadline:
-            pass
+        if on_threads is not None:
+            on_threads.append(threading.get_ident())
+        time.sleep(per_tool_seconds)
         return {"type": "function", "function": {"name": tool.name, "description": "x" * 400}}
 
     return convert
@@ -839,82 +845,58 @@ def test_a_burst_of_cold_prefix_measurements_leaves_the_loop_schedulable() -> No
     One uvicorn worker carries every SSE stream, both kubelet probes and the submission side of
     every token validation, and `service_max_concurrent_turns` turns may take their first model
     call together — a pod rollout, a UI reconnect storm, several chemists hitting send. On a cold
-    process every one of those misses the memo, so what is asserted here is the *gap*: with the
-    measurement on the loop the 12 sweeps ran back to back in one iteration and the 1 ms heartbeat
-    was not serviced once for the whole of it (measured: worst gap equal to the total work).
+    process every one of those misses the memo, so the sweep has to run somewhere other than the
+    loop: with it on the loop the burst ran back to back in one iteration and nothing else was
+    serviced for the whole of it.
 
-    A ratio rather than a wall clock, and a generous one: offloading buys no parallelism — the GIL
-    is held between switch intervals — so what it buys is the loop being *scheduled* during the
-    work, which `api/runner.py` measured at 3.1x for the graph build. Anything at or near 1.0 is
-    the block this test exists to keep out.
+    **Two properties, and this test used to measure a third.** What `awrap_model_call` decides is
+    *which thread* runs `_measured`, and so whether the loop is free while it runs. Both are
+    asserted: every conversion is recorded with the thread that ran it and must not be the loop's,
+    and a heartbeat counting loop turns must be scheduled while the burst runs. The neutered arm
+    (`asyncio.to_thread` replaced by an inline await — the mutation this test exists to fail) is
+    run as the control for both, so each assertion is shown to separate the two outcomes in this
+    process.
 
-    **The control is run rather than assumed, and that is a correction.** This assertion used to
-    divide a *nominal* constant — `turns * len(tools) * per_tool`, the work if every conversion ran
-    end to end — and compare the worst gap against a third of it. But the twelve bursts overlap, so
-    that denominator is a duration the burst never takes: measured over ten runs here, the real wall
-    was 54–166 ms against a nominal 384 ms, and `worst` tracked `wall` to within a few ms *every
-    time*. So what the old form actually measured was how much the twelve busy-waits happened to
-    overlap — thread-pool scheduling luck against core count and machine load — and it failed about
-    one run in five, on CI at 129 ms against a 128 ms line, a 0.8% miss.
+    The third property was how often **CPython** hands the GIL back to the loop while four threads
+    hold it busy-waiting. That is what the offloaded arm's heartbeat counted while the stand-in
+    was a busy-wait: the loop can only turn when it wins the GIL, which it contends for at the
+    interpreter's switch interval against every busy worker. Measured with the same shape outside
+    this tree: 18-23 beats at a 20 ms switch interval, 27-43 at the default 5 ms, 59-100 at 1 ms —
+    the count moved with `sys.setswitchinterval` and nothing in `context_budget` changes it. On the
+    CI runner it read 6 beats in 665 ms against the control's 3 in 1284 ms, 3.86x against a floor
+    of 5 (run 36096044005), after four earlier corrections to that same instrument recorded in
+    `git log -- tests/test_context_budget.py`. Every one of them tuned a bar against the
+    scheduler's arbitration of one lock; none could make it this code's property.
 
-    The docstring above already named the right basis and never ran it. It does now: the same burst
-    runs with `asyncio.to_thread` neutered, which does the identical work on the loop, and the
-    async path must leave the loop schedulable by a clear factor against *that* measurement. Both
-    numbers then come from this process, this core count and this load.
+    So the stand-in sleeps (`_costly_conversion`). A synchronous `time.sleep` holds the thread that
+    calls it exactly as the real CPU-bound conversion does — on the loop it stops the loop cold,
+    which is the control's 3 beats — and releases the GIL, so an offloaded one leaves the loop's
+    turns to the operating system. How much of the GIL a *real* CPU-bound sweep leaves the loop is
+    CPython's to decide and `api/runner.py` records it for the graph build; what this code owes is
+    that the sweep is not on the loop, and that is now what reds.
 
-    **In-process was not enough, and the fix is to stop measuring a duration.** On 2026-09-20 this
-    measured **1.289x** against a fixed `/ 1.3` margin — a 0.9% miss — inside a 46-minute run
-    competing with three subagents, and reddened `check` on a pull request containing zero files
-    under `src/`. `D-2026-09-13-a-stable-failure-set-is-not-two-green-runs` tabulates it as failing
-    2 of 5 parallel runs with the serial column reading an unqualified "passes"; it passes serially
-    *on an unloaded machine*, and a merged ADR is never edited, so that table still tells a reader
-    the serial gate is safe from this. It is not. **Parallelism was never the mechanism — load
-    is**, and `-n 4` is one way to produce it.
-
-    Raising the control's size was tried first and is not enough either, for a reason worth writing
-    down: `_costly_conversion` busy-waits to a `perf_counter` deadline, so the control's duration is
-    pinned by the wall clock and does not move with the machine. A ratio against it is therefore an
-    *absolute* bound wearing a ratio's clothes — the numerator grows under load and the denominator
-    does not. Measured under six CPU spinners on four cores, that form fell to **1.16x** against a
-    bar of 4.
-
-    **So the quantity is a count: how many times the loop was scheduled while the work ran.** That
-    is the property the test is named for, and it is what the two outcomes actually differ in — a
-    coroutine that never awaits inside `_measured` holds the loop for the whole gather, so the
-    un-offloaded arm is scheduled essentially never, however fast or slow the box is. Measured,
-    four runs quiet: **18-28 beats offloaded against 0-1**. Under six spinners on four cores:
-    **13-26 against 1**. The bar at 4 sits 3.2x below the worst honest run *under load* and 4x
-    above the block, where every duration-shaped form of this assertion has had the defect and the
-    passing case within 30% of each other on a busy machine.
-
-    `turns` is 4 rather than 12, which narrows the regime: the premise above is
-    `service_max_concurrent_turns` turns arriving together, and what is asserted is schedulability
-    at four of them. The trade buys a control large enough to be unambiguous, and the sibling test
-    below covers that the sweep runs once per process rather than once per turn at any width.
-
-    **The defect *is* the control here**, which is why there is no third arm: neutering
-    `asyncio.to_thread` is the mutation this test exists to fail, and running it as the basis makes
-    the comparison a driven defect rather than a stand-in for one
-    (`D-2026-09-18-a-mutation-watched-failing-is-half-a-guard`).
+    **What each assertion binds, and where it stops.** Thread identity catches the sweep, or any
+    part of it, running on the loop's thread. The rate catches a sweep moved to another thread and
+    then *waited on* from the loop — `executor.submit(...).result()` passes the first assertion and
+    holds the loop for the whole burst, driven at the control's rate. Neither catches the loop held
+    for part of the burst by something that is not the sweep: a `time.sleep` on the loop beside a
+    correct offload was driven and passes, because the loop is free for the rest of the burst and a
+    rate does not see when. That is not a decision this module makes.
     """
     _SCHEMA_TOKENS.clear()
     converted: list[str] = []
-    # 0.04 s and four turns rather than 0.004 and twelve — see the docstring: the control has to be
-    # large next to machine noise, and the offloaded arm's gap grows with the *concurrency*, so
-    # fewer and heavier turns move the two outcomes apart on both axes at once. Costs about 2 s.
+    on_threads: list[int] = []
     per_tool = 0.04
     turns = 4
-    # **Distinct tools per turn, so the memo cannot confound the comparison.** With twelve turns
-    # sharing eight tools, how many conversions actually run depends on how the turns interleave:
-    # started together they all miss, run serially the first warms `_SCHEMA_TOKENS` for the rest.
-    # That made two earlier drafts of this test wrong in opposite directions — a control that did
-    # 8 conversions against the burst's 96 and read as faster than the thing it bounds, and then a
-    # version that passed with the offload deleted, because the mutated path serialised and went
-    # warm while the control stayed cold. Giving every turn its own tool names makes both arms do
-    # the same 96 conversions whatever the scheduling, which is the only way the ratio means
-    # anything.
+    # **Distinct tools per turn, so the memo cannot confound the comparison.** With turns sharing
+    # tools, how many conversions actually run depends on how the turns interleave: started
+    # together they all miss, run serially the first warms `_SCHEMA_TOKENS` for the rest. An
+    # earlier draft passed with the offload deleted for exactly that reason — the mutated path
+    # serialised and went warm while the control stayed cold. Distinct names make both arms do
+    # the same 32 conversions whatever the scheduling.
     tools_per_turn = [[_NamedTool(f"turn{n}_tool{i}") for i in range(8)] for n in range(turns)]
-    work = turns * len(tools_per_turn[0]) * per_tool
+    conversions = turns * len(tools_per_turn[0])
+    work = conversions * per_tool
 
     async def handler(_request: Any) -> str:
         return "done"
@@ -928,16 +910,12 @@ def test_a_burst_of_cold_prefix_measurements_leaves_the_loop_schedulable() -> No
             await asyncio.sleep(0)
             beats.append(time.perf_counter())
 
-    async def burst() -> tuple[int, float]:
-        """The same four measurements under the same heartbeat, offloaded or not.
+    async def burst() -> tuple[int, float, int]:
+        """The four measurements under the heartbeat; returns (loop turns, wall, the loop's thread).
 
-        Which of the two it is depends on whether `asyncio.to_thread` is patched out around the
-        call, so both arms go through the identical code path and differ by exactly the line under
-        test.
-
-        Returns **how many times the loop was scheduled while the work ran**, not how long the
-        worst stall was. Beats after the gather returns are dropped, so the count is about the
-        burst rather than about the teardown.
+        Offloaded or not depends only on whether `asyncio.to_thread` is patched out around the
+        call, so both arms go through the identical code path. Beats after the gather returns are
+        dropped, so the count is about the burst rather than about the teardown.
         """
         beats: list[float] = []
         stop = asyncio.Event()
@@ -954,76 +932,56 @@ def test_a_burst_of_cold_prefix_measurements_leaves_the_loop_schedulable() -> No
         wall = time.perf_counter() - started
         stop.set()
         await beat
-        return sum(1 for at in beats if at <= started + wall), wall
+        return sum(1 for at in beats if at <= started + wall), wall, threading.get_ident()
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(
             "langchain_core.utils.function_calling.convert_to_openai_tool",
-            _costly_conversion(per_tool, converted),
+            _costly_conversion(per_tool, converted, on_threads),
         )
-        beats, wall = asyncio.run(burst())
+        beats, wall, loop_thread = asyncio.run(burst())
+        offloaded_threads = list(on_threads)
+        on_threads.clear()
         _SCHEMA_TOKENS.clear()
         with pytest.MonkeyPatch.context() as mutated:
             # Patched on `asyncio` itself, which is what `context_budget` resolves the name
             # through, and undone by the context manager before anything else runs.
             mutated.setattr(asyncio, "to_thread", _inline)
-            blocked_beats, blocked_wall = asyncio.run(burst())
+            blocked_beats, blocked_wall, blocked_loop_thread = asyncio.run(burst())
+        blocked_threads = list(on_threads)
 
-    assert converted, "nothing was measured, so this run says nothing about the loop"
-    assert blocked_wall > work / 3, (
-        f"the un-offloaded control ran in {blocked_wall * 1000:.0f} ms against "
-        f"{work * 1000:.0f} ms of nominal work, so it is not doing the work this assertion is "
-        "about — the control has stopped being a control"
+    assert len(offloaded_threads) == len(blocked_threads) == conversions, (
+        f"expected {conversions} conversions per arm, got {len(offloaded_threads)} offloaded and "
+        f"{len(blocked_threads)} on the loop, so the two arms did not do the same work"
     )
-    # **A rate, against the control measured in the same process, on a heartbeat that counts loop
-    # turns.** Both halves were needed, and the count this replaces was the fourth duration-shaped
-    # form of this assertion to fail.
-    #
-    # *Why a rate.* The two arms run for different lengths — on the CI runner ~660 ms offloaded
-    # against ~1285 ms blocked, because offloading is a halving — so a raw count penalises the arm
-    # for being *faster*, and compares it against a bar calibrated where the offloaded window was
-    # 430-565 ms on a quicker box. The absolute bar of 4 failed 3 of 4 CI runs (2, 3, pass, 3 beats)
-    # while every local configuration gave 22-38: isolated, under `--cov`, on two cores via
-    # `taskset`, and in the full `make cov` run.
-    #
-    # *Why `sleep(0)` and not `sleep(0.001)`.* A rate alone was not enough, and a review measured
-    # why: with a 1 ms heartbeat the control scored 0-1 beats over a wall pinned at 1283-1306 ms by
-    # `_costly_conversion`'s `perf_counter` deadlines — 38 runs, four machine configurations — so
-    # the denominator was a *constant* and the "ratio" was an absolute rate bound wearing a
-    # ratio's clothes: the exact defect the docstring above records fixing once already. It also
-    # left the margin at one tick: CI's `beats=2` cleared the bar by 1.5x, and `beats=1` would not.
-    #
-    # Counting loop turns instead fixes both ends, because *both* arms gain the resolution. Measured
-    # here, four runs: offloaded 215-3533 beats against a control that now reads a stable **3**
-    # rather than 0-1, giving 215x to 3140x. And the block is 1.0x by construction in a way it was
-    # not before — driven three times with `asyncio.to_thread` replaced by an inline await, both
-    # arms
-    # score 3 beats over the same 1285 ms wall, where `max(blocked_beats, 1)` previously let a
-    # mutant with two beats score 2.0x.
-    #
-    # **What is not measured is CI.** The bar is 5 — 43x below the worst honest local run and 5x
-    # above the block — but nobody has run this instrument on that runner, and its old regime (three
-    # 1 ms firings in 660 ms) has an unexplained cause that `taskset`, spinners and coverage could
-    # not reproduce. If it reds there, the ratio is telling us the loop genuinely does not turn
-    # during the burst on two cores, which is a finding about what the offload buys rather than a
-    # flaky test — and the next move is to read it, not to lower this number.
-    #
-    # `max(blocked_beats, 1)` stays as a division guard only; with this heartbeat the control has
-    # not
-    # been observed below 3.
+    assert blocked_wall > work / 2, (
+        f"the un-offloaded control ran in {blocked_wall * 1000:.0f} ms against "
+        f"{work * 1000:.0f} ms of serial work, so it is not doing the work this assertion is about"
+    )
+    assert loop_thread not in offloaded_threads, (
+        f"{offloaded_threads.count(loop_thread)} of {conversions} tool-schema conversions ran on "
+        "the event loop's own thread: the sweep is running on the loop that serves every other "
+        "turn's stream and both kubelet probes"
+    )
+    # Loop turns per second, against the control in the same process. The control is pinned near
+    # zero by construction — a sleep on the loop's thread stops it, leaving only the turns between
+    # the four inline measurements — and the offloaded arm has nothing holding the loop at all, so
+    # the two rates differ by orders of magnitude rather than by a factor a busy box can erase.
     offloaded_rate = beats / wall
     blocked_rate = max(blocked_beats, 1) / blocked_wall
-    assert offloaded_rate > 5 * blocked_rate, (
+    assert offloaded_rate > 20 * blocked_rate, (
         f"the event loop was scheduled {beats} time(s) in a {wall * 1000:.0f} ms burst "
         f"({offloaded_rate:.1f}/s), against {blocked_beats} in {blocked_wall * 1000:.0f} ms "
-        f"({blocked_rate:.1f}/s) when the same measurement runs on the loop — a ratio of "
-        f"{offloaded_rate / blocked_rate:.2f}x against a floor of 5x, where deleting the offload "
-        "gives 1.0x: the sweep is running on the loop that serves every other turn's stream and "
-        "both kubelet probes"
+        f"({blocked_rate:.1f}/s) with the measurement on the loop — "
+        f"{offloaded_rate / blocked_rate:.1f}x against a floor of 20x, although no conversion ran "
+        "on the loop's thread: the loop is waiting on the sweep instead of running it, which "
+        "holds it just the same"
     )
-    assert blocked_beats < beats, (
-        f"the un-offloaded control was scheduled {blocked_beats} time(s) against the offloaded "
-        f"arm's {beats}, so this run cannot tell the two apart and the bar above is vacuous"
+    # Last, and it is not optional: the control must have *been* the defect, or neither assertion
+    # above was shown to separate anything in this run.
+    assert set(blocked_threads) == {blocked_loop_thread}, (
+        "with the offload neutered the conversions still ran off the loop's thread, so thread "
+        "identity cannot tell the defect from the fix here"
     )
 
 
