@@ -86,7 +86,7 @@ _RECORD_TRAILER = "Chemclaw-Note: recorded"
 
 
 def _git_child_env() -> dict[str, str]:
-    """This process's environment with its own secret values scrubbed, for a git child.
+    """This process's environment with its own secret values scrubbed, plus the commit identity.
 
     Least privilege: git needs `PATH`, `HOME`, `SSH_*`, `GIT_*`, any proxy and the notes-remote
     credential — all of which stay — but never this process's LLM key, database DSNs, Temporal key
@@ -95,9 +95,21 @@ def _git_child_env() -> dict[str, str]:
     not control. The scrubbed names come from `secret_env_names()`, which reads the same inventory
     the log redaction does, so the set cannot drift from it; the notes-remote token is not in that
     inventory and so survives, which is what keeps `push` working.
+
+    **The identity is stated here, not found.** Both the commit and the rebase that replays an
+    unpushed note need one, and without these four variables git falls back to `user.*` config
+    nothing provisions and then to a guess from the hostname — which in a container is
+    `root@<id>.(none)`, refused, so every note write failed `Author identity unknown` as a
+    non-retryable `GitWriteError`. Set in the environment rather than as `-c user.*`, because the
+    environment outranks every config file, so an identity left in the clone by hand cannot change
+    who the system's notes are by.
     """
     scrub = secret_env_names()
-    return {name: value for name, value in os.environ.items() if name not in scrub}
+    env = {name: value for name, value in os.environ.items() if name not in scrub}
+    for role in ("AUTHOR", "COMMITTER"):
+        env[f"GIT_{role}_NAME"] = settings.note_committer_name
+        env[f"GIT_{role}_EMAIL"] = settings.note_committer_email
+    return env
 
 
 def _replace_atomically(path: Path, content: bytes) -> None:

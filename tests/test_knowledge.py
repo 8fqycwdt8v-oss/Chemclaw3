@@ -1163,6 +1163,86 @@ def test_a_failed_push_does_not_wedge_every_later_write_on_this_pod(tmp_path: Pa
         assert f"knowledge/job-result/{note}.md" in on_remote, f"{note} never reached the remote"
 
 
+def test_a_clone_with_no_identity_of_its_own_still_records_and_replays_notes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The writer states who its commits are by; it never depends on git finding someone.
+
+    **Every note write failed in a container, and every other test in this file hid it**: their
+    clones are made by `_clone`, which writes `user.*` into the clone, and the developer's or
+    runner's own global config filled in anything else. A deployed clone has neither — nothing in
+    the chart or `deploy/knowledge-sync.sh` sets one — and git's last resort is a guess from the
+    hostname, `root@<id>.(none)` in a container, which it refuses. So the commit failed
+    `Author identity unknown` as the non-retryable `GitWriteError` and the note was dropped.
+
+    The environment here has none of the three sources: an empty `HOME`/XDG, no system config, a
+    clone without `user.*`, and `user.useConfigOnly` so git's hostname guess cannot rescue the run
+    on a box whose hostname happens to carry a domain — the arm first proves a plain commit fails,
+    or the assertions after it would be about the box. Both identity-taking paths are driven: the
+    commit, and the rebase that replays a note whose push failed (which sets a committer too).
+    Non-default settings are used so the author is shown to come from config, not from a literal.
+    """
+    remote, _ = _make_remote_and_clone(tmp_path)
+    work = tmp_path / "bare-identity"
+    subprocess.run(["git", "clone", "-q", str(remote), str(work)], check=True)
+
+    empty_home = tmp_path / "home"
+    empty_home.mkdir()
+    for name in (
+        "GIT_AUTHOR_NAME",
+        "GIT_AUTHOR_EMAIL",
+        "GIT_COMMITTER_NAME",
+        "GIT_COMMITTER_EMAIL",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.delenv("EMAIL", raising=False)
+    monkeypatch.setenv("HOME", str(empty_home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(empty_home))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "user.useConfigOnly")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "true")
+
+    control = subprocess.run(
+        ["git", "-C", str(work), "commit", "--allow-empty", "-qm", "who am I"],
+        capture_output=True,
+        text=True,
+    )
+    assert control.returncode != 0 and "identity" in control.stderr.lower(), (
+        "a plain commit succeeded in this environment, so it still supplies an identity from "
+        f"somewhere and the writer's arm below proves nothing: {control.stderr!r}"
+    )
+
+    monkeypatch.setattr(settings, "note_committer_name", "Notes Service")
+    monkeypatch.setattr(settings, "note_committer_email", "notes@site.invalid")
+    writer = GitNoteWriter(repo_dir=str(work), base_branch="main", remote="origin")
+
+    first = asyncio.run(writer.write(_note_write("job-no-identity", content="first\n")))
+    assert first.written is True
+
+    # Strand the next note locally, move the remote, and let the write after it replay the note.
+    hook = remote / "hooks" / "pre-receive"
+    hook.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    hook.chmod(0o755)
+    with pytest.raises(GitWriteError, match="push"):
+        asyncio.run(writer.write(_note_write("job-stranded", content="stranded\n")))
+    hook.unlink()
+    _diverge(remote, tmp_path, "job-elsewhere")
+    assert asyncio.run(writer.write(_note_write("job-after", content="after\n"))).written is True
+
+    idents = subprocess.run(
+        ["git", "-C", str(remote), "log", "main", "--format=%s|%an <%ae>|%cn <%ce>"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.splitlines()
+    ours = [line for line in idents if line.startswith("Add job-result note:")]
+    assert len(ours) == 3, idents
+    for line in ours:
+        _subject, author, committer = line.split("|")
+        assert author == committer == "Notes Service <notes@site.invalid>", line
+
+
 def test_a_persons_local_commit_is_never_replayed(tmp_path: Path) -> None:
     """The refusal the fast-forward was really protecting, kept and made precise.
 
