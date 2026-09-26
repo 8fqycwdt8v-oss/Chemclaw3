@@ -8,7 +8,7 @@ same audit+authz middleware. See `docs/archive/audit/10-config-extensibility.md`
 
 import pytest
 
-from chemclaw.agent.chemclaw_agent import _capability_tools
+from chemclaw.agent.chemclaw_agent import _capability_tools, _withheld_launcher_names
 from chemclaw.connectors.registry import enabled
 from chemclaw.core.tool_registry import (
     _REGISTRY,
@@ -143,10 +143,12 @@ def test_capability_tools_are_exactly_the_registry() -> None:
     """`_capability_tools()` is the registry, whole and in order — connectors are not in it.
 
     A connector's MCP tools are per-turn (`connector_tools`), not per-process, so the agent's own
-    tool list is the registry and nothing more.
+    tool list is the registry and nothing more — less any template launcher this deployment
+    withholds, which an earlier build in the same process may have registered.
     """
     tools = _capability_tools()
-    assert tools == registered_tools()
+    withheld = _withheld_launcher_names()
+    assert tools == [tool for tool in registered_tools() if tool.__name__ not in withheld]
 
 
 def test_agent_advertises_the_registered_inprocess_tools() -> None:
