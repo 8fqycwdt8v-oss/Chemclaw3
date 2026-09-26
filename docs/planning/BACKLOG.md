@@ -569,7 +569,7 @@ topic).
       model, so it belongs with the delegation row below rather than ahead of it.
 
 - [ ] **The delegation experiment: run it against a gateway** — [M]
-      (issue #359), opened by `D-2026-08-29-a-helper-is-cheaper-and-narrower-than-its-caller` and
+      (issue #359; code half #447), opened by `D-2026-08-29-a-helper-is-cheaper-and-narrower-than-its-caller` and
       the gate on Wave 3's roster. **It is one row because it was four**, and four statements of a
       single blocked experiment made the queue read four times more blocked than it is: "the
       delegation A/B has a comparator and no runner", "measure whether delegation pays", "run the
@@ -1048,7 +1048,7 @@ those belong in.
 ## A calibrated calculator names a fleet tool through a caller the seam walker cannot resolve
 
 - [ ] **`_CALIBRATED` puts a `calc` tool name on the wire outside every check that watches the
-  seam.** Found on 2026-09-18 while closing a `Chemclaw3-mcp` row whose own stated fix —
+  seam** (issue #448). Found on 2026-09-18 while closing a `Chemclaw3-mcp` row whose own stated fix —
   "that repository's `_CALLERS` tuple" — described work `D-2026-09-14-a-tripwire-over-two-named-modules-covers-the-modules-it-names`
   had already done, which is worth knowing before implementing any cross-repository row's
   prescription: re-measure it against the other tree first.
