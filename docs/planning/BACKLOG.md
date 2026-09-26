@@ -275,34 +275,6 @@ topic).
       alone costs an hour and a half for ~4 points on one module. Anchors: `pyproject.toml`
       `[tool.mutmut].pytest_add_cli_args_test_selection`, `tests/test_mutation_workflow.py`.
 
-- [ ] **`Chemclaw3_ui` has no surface for the four `/skills/mine` routes, the six `/skills/org`
-      ones, or the proposal queue** — [M], opened by
-      `D-2026-09-18-a-skill-a-chemist-keeps-is-behaviour-they-approved` and widened by
-      `D-2026-09-20-a-behaviour-change-is-gated-by-its-blast-radius`. That ADR grants the
-      personal tier its exemption from review *on the condition* that a chemist can see what is
-      acting on their turns and remove it — and the only thing that can currently exercise the
-      condition is `curl`. The routes are there, driven and tested
-      (`tests/test_api_local_skills.py`, `tests/test_api_org_skills.py`,
-      `tests/test_api_proposals.py`); what is missing is the half a person can reach.
-
-      **The organisation's tier owes the condition more, not less**, because it is in the prompt of
-      every turn every chemist takes rather than one person's. Its reads are open to every
-      authenticated caller for exactly that reason, so the surface is two: a reader anybody gets
-      (the names, one body verbatim, and the version list that is the only place "what changed and
-      who" exists for a tier with no commit log) and an administrator's half behind the privileged
-      role (publish, revert to a listed hash, retire). The revert is the one worth designing rather
-      than generating: it is what somebody reaches for when a published skill is making every
-      answer worse, and it has to show the bodies it can put back.
-
-      It is a row in this repository rather than only in the frontend's because the condition is
-      this repository's claim: `SECURITY.md` and `ARCHITECTURE.md` now say a personal skill is
-      inspectable and removable, and until the UI ships that is true of an API rather than of a
-      person. The shape is the smallest one that discharges it — a list of names, the body of one
-      verbatim, a delete, and the save the agent's draft is posted through — and the two refusals
-      worth rendering rather than swallowing are the 409s: a name this deployment already ships,
-      and the row cap, which says in its detail why it exists (every personal skill is in the
-      prompt of every turn its owner takes).
-
 - [ ] **Both published tool-utility results were measured against a control arm that also swaps
       the prompt** — [M], `data/evals/profiles/no-tools.yaml` (`instructions:`),
       `D-2026-09-14-tools-were-never-the-variable`. The benchmark half is corrected: the arms differ
