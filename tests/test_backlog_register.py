@@ -159,8 +159,13 @@ def _resolve(anchor: str) -> str:
 
 
 def test_the_anchor_parse_finds_anchors() -> None:
-    """Guard the guard: a regex matching nothing would pass every row below."""
-    assert len(_anchors()) > 20, (
+    """Guard the guard: a regex matching nothing would pass every row below.
+
+    The floor rejects the degenerate parse, not a small register: it was `> 20` until seven
+    trigger-gated rows moved to `DEFERRED.md` took their anchors with them and left exactly 20. Rows
+    leaving is the register working, so the floor sits well under the count rather than at it.
+    """
+    assert len(_anchors()) > 10, (
         "no `path::symbol` anchors parsed from BACKLOG.md; the citation shape moved and the "
         "resolution guard below is now checking nothing"
     )
