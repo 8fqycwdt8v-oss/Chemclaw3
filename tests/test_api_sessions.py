@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
 
 from chemclaw.agent.session_store import (
     PostgresHistoryProvider,
@@ -291,3 +291,48 @@ def test_a_session_with_a_turn_in_flight_refuses_the_fork() -> None:
     # The claim is given back, not held: a fork that leaked the session's slot would lock the
     # parent out of its own next turn for a whole lease.
     assert client.post(f"/sessions/{session_id}/fork").status_code == 200
+
+
+def test_each_transcript_message_names_the_turn_that_stored_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`correlation_id` comes back from `session_messages`, so a detached turn is found by identity.
+
+    A client whose stream dropped used to find its answer by matching text, which cannot tell two
+    turns that said the same thing apart. Two turns under two ids, and one row stored off the
+    request path, which has no turn and so reads back as `None` rather than as `""`.
+    """
+    import uuid
+
+    from chemclaw.core.identity_context import (
+        reset_current_correlation_id,
+        set_current_correlation_id,
+    )
+
+    asyncio.run(migrated_db_or_skip())
+    session_id = f"sess-api-correlation-{uuid.uuid4().hex[:8]}"
+
+    async def seed() -> None:
+        await SessionOwnerStore().record(session_id, _ALICE.oid)
+        history = PostgresHistoryProvider()
+        await history.save_messages(session_id, [HumanMessage(content="off the request path")])
+        for turn in ("turn-one-0001", "turn-two-0002"):
+            token = set_current_correlation_id(turn)
+            try:
+                await history.save_messages(
+                    session_id, [HumanMessage(content=turn), AIMessage(content=f"answer {turn}")]
+                )
+            finally:
+                reset_current_correlation_id(token)
+
+    asyncio.run(seed())
+    # The durable provider is what the route reads through here; the default is the in-memory one.
+    monkeypatch.setattr(settings, "session_store", "postgres")
+    transcript = _client(_durable_app()).get(f"/sessions/{session_id}/messages").json()
+    assert [(row["text"], row["correlation_id"]) for row in transcript] == [
+        ("off the request path", None),
+        ("turn-one-0001", "turn-one-0001"),
+        ("answer turn-one-0001", "turn-one-0001"),
+        ("turn-two-0002", "turn-two-0002"),
+        ("answer turn-two-0002", "turn-two-0002"),
+    ]

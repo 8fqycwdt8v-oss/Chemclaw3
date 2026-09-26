@@ -17,14 +17,14 @@ apply here — this is a user-scoped resource access, so it is fully Entra-scope
 import asyncio
 import logging
 import time
-from typing import Any
+from typing import Annotated, Any
 
 import httpx
 import jwt
 from fastapi import HTTPException, Request
 from jwt import PyJWKClient
 from jwt.exceptions import PyJWKClientError
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, StringConstraints
 
 from chemclaw.api.middleware import (
     AT_CAPACITY,
@@ -58,9 +58,16 @@ _DEV_PRINCIPAL_OID = DEV_PRINCIPAL_OID
 
 
 class Principal(BaseModel):
-    """An authenticated Entra user: the identity every backend action is attributed to."""
+    """An authenticated Entra user: the identity every backend action is attributed to.
 
-    oid: str = Field(min_length=1)
+    **`oid` is stripped at construction**, because the turn reads the actor stripped
+    (`core/identity_context.get_current_actor`) and the skills and proposals routes key on this
+    field raw: a whitespace-bearing oid (a dev or configured principal) saved a skill under
+    `' alice '` that turns mounting `'alice'` never read. Normalising at the source is what makes
+    the two spellings one; a blank one is refused rather than stripped to an empty identity.
+    """
+
+    oid: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
     upn: str = ""
     roles: frozenset[str] = frozenset()
 

@@ -808,6 +808,14 @@ async def reindex_notes(
     """
     directory = Path(notes_dir) if notes_dir is not None else settings.knowledge_path
     await asyncio.to_thread(partial(invalidate_cache, directory, reparse=True))
+    # **Hashed before parsed, and the order is the fix for a race rather than a style choice.**
+    # The two reads are separate passes over the tree, so a note rewritten between them pairs one
+    # moment's body with another's digest. Parsed first, that pair is *old body, new digest* — the
+    # same stuck row the paragraph above closes, because every later pass sees the digest match.
+    # Hashed first, it is *new body, old digest*, which the next pass reads as changed and heals.
+    current_fingerprints = (
+        await asyncio.to_thread(note_file_fingerprints, directory) if directory.exists() else {}
+    )
     notes = await asyncio.to_thread(load_notes, directory) if directory.exists() else []
     if not notes:
         # **A silent 0 here is what a mis-mounted knowledge volume looks like**, and it is also
@@ -827,7 +835,6 @@ async def reindex_notes(
         else:
             log.debug("note re-index found no notes under %s; nothing to do", directory)
         return 0
-    current_fingerprints = await asyncio.to_thread(note_file_fingerprints, directory)
     # Guarded three times over against wiping the index: `notes` is non-empty by the return above,
     # `retire_absent` itself does nothing for an empty `keep`, and `keep` is the union below rather
     # than the parsed set. A mis-pointed directory costs one embedding call per note to recover

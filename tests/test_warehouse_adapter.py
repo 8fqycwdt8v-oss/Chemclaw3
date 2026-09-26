@@ -8,6 +8,7 @@ schema change is a change to YAML and to nothing else.
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -197,6 +198,11 @@ def test_an_unparseable_amendment_stamp_is_refused_rather_than_read_as_absent(
 
     assert entries == [], "a row whose amendment stamp cannot be read is refused, not ingested"
     assert "LAST_MODIFIED_TS" in filed["RX-1"] and "01/09/2026" in filed["RX-1"]
+    assert "declare a `transform:`" not in filed["RX-1"], (
+        "the refusal named a `transform:` beside an entry column as the remedy, which the "
+        "binding's `extra='forbid'` refuses — a fix the site cannot apply"
+    )
+    assert "NULLIF" in filed["RX-1"] and "where:" in filed["RX-1"]
 
 
 def test_an_unparseable_withdrawal_stamp_is_refused_rather_than_read_as_absent(
@@ -318,6 +324,34 @@ def test_a_warehouse_impurity_known_only_by_its_rrt_is_named_rather_than_dropped
     reaction = _one_reaction(binding, tables)
 
     assert [impurity.name for impurity in reaction.impurities] == ["des-bromo", "RRT 0.94 peak"]
+
+
+@pytest.mark.parametrize("rrt", [Decimal("0.94"), "0.94"], ids=["numeric-column", "text-column"])
+def test_an_rrt_only_peak_is_named_whatever_type_the_driver_hands_back(rrt: object) -> None:
+    """A NUMERIC RRT is a `Decimal` and a text one a `str`, and neither passed `isinstance(float)`.
+
+    With no `number` transform on the column, the value arrives as the driver typed it, so an
+    RRT-only peak on a NUMERIC(4,2) column was dropped here while `json_adapter`'s `float()` named
+    the same peak. Named from the coerced value, and carried as a float.
+    """
+    binding = _binding()
+    binding["ingest"]["impurities"] = [
+        {"from": "peaks", "name": {"path": "PEAK_NAME"}, "rrt": {"path": "RRT"}}
+    ]
+    binding["ingest"]["related"].append(
+        {
+            "name": "peaks",
+            "relation": "V_PEAK",
+            "foreign_key": "REACTION_ID",
+            "order_by": "PEAK_SEQ",
+        }
+    )
+    tables = _rows()
+    tables["V_PEAK"] = [{"REACTION_ID": "RX-1", "PEAK_SEQ": 1, "PEAK_NAME": None, "RRT": rrt}]
+
+    (impurity,) = _one_reaction(binding, tables).impurities
+
+    assert (impurity.name, impurity.rrt) == ("RRT 0.94 peak", 0.94)
 
 
 def test_the_cursor_filters_on_the_later_of_created_and_modified() -> None:

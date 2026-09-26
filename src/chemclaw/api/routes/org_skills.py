@@ -185,7 +185,7 @@ async def publish_skill(body: OrgSkillIn, principal: CurrentUser) -> OrgSkillOut
     Validated before the role is checked would leak whether a name is taken to a caller with no
     role, so the gate comes first — `_reviewer_or_refuse` is the first statement, and the name it
     records is the one the *frontmatter* will declare only after validation, so the target recorded
-    is `<unnamed>` until there is a document to name.
+    is `<publish>` until there is a document to name.
     """
     _reviewer_or_refuse(principal, "<publish>", "publishing an organisation skill")
     store = await _store_or_refuse()

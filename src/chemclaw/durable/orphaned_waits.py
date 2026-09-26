@@ -24,6 +24,7 @@ orphan either: the run is still `RUNNING` and resumes on the next worker, so it 
 (`pending_store.settle_orphan`) — a reopen under a new run is that run's question, not this one's.
 """
 
+import asyncio
 import logging
 from datetime import timedelta
 from typing import Any
@@ -93,28 +94,53 @@ async def _latest_is_running(client: Any, request_id: str) -> bool:
     return bool(latest.status == WorkflowExecutionStatus.RUNNING)
 
 
+#: The share of the activity's `start_to_close` a pass may spend walking pages before it stops.
+#: Below one so the pass returns what it settled rather than being cancelled mid-page, which would
+#: lose the report and retry the whole walk; the rest are the next pass's.
+_PASS_BUDGET_FRACTION = 0.5
+
+
 @durable_activity("background")
 @activity.defn
 async def settle_orphaned_waits() -> OrphanSweep:
     """Settle every examined `waiting` row whose run the broker says is gone.
 
+    **Walks the table page by page**, `awaiting_orphan_batch` rows at a time, until it is exhausted
+    or the pass has spent `_PASS_BUDGET_FRACTION` of its timeout. One page per pass with no cursor
+    re-examined the same oldest rows every hour: live waits are left `waiting`, so a batch of them
+    older than an orphan starved it for as long as they stayed open.
+
     A broker error on one row stops the sweep rather than skipping the row: an unreachable broker
     reads the same as "not found" to a loop that swallowed it, and settling a live question because
     Temporal was briefly down is the one outcome this must never produce.
     """
-    rows = await pending_store.waiting_rows(
-        older_than_seconds=settings.awaiting_orphan_grace_seconds,
-        limit=settings.awaiting_orphan_batch,
-    )
-    sweep = OrphanSweep(examined=len(rows))
-    if not rows:
-        return sweep
-    client = await connect()
-    for request_id, run_id in rows:
-        reason = await _run_is_gone(client, request_id, run_id)
-        if reason is not None and await pending_store.settle_orphan(request_id, run_id, reason):
-            logger.warning("awaiting.orphan_settled: request %s cancelled — %s", request_id, reason)
-            sweep.settled.append(request_id)
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + settings.retention_timeout_seconds * _PASS_BUDGET_FRACTION
+    sweep = OrphanSweep()
+    client: Any = None
+    after: pending_store.WaitingRow | None = None
+    while loop.time() < deadline:
+        rows = await pending_store.waiting_rows(
+            older_than_seconds=settings.awaiting_orphan_grace_seconds,
+            limit=settings.awaiting_orphan_batch,
+            after=after,
+        )
+        if not rows:
+            break
+        client = client or await connect()
+        for row in rows:
+            sweep.examined += 1
+            reason = await _run_is_gone(client, row.request_id, row.run_id)
+            if reason is not None and await pending_store.settle_orphan(
+                row.request_id, row.run_id, reason
+            ):
+                logger.warning(
+                    "awaiting.orphan_settled: request %s cancelled — %s", row.request_id, reason
+                )
+                sweep.settled.append(row.request_id)
+        if len(rows) < settings.awaiting_orphan_batch:
+            break
+        after = rows[-1]
     return sweep
 
 

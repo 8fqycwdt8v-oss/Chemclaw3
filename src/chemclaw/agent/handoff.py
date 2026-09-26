@@ -23,7 +23,9 @@ is a set membership plus a `file_path` test — and `transfer_to_<peer>` is mint
 so it was in neither half. Measured with `set_dry_run(True)`: refused nothing. That is not cosmetic,
 because `active_agent` is a **checkpointed** channel: a turn the chemist marked "do nothing" moved
 every later turn onto a different agent, while the refusal text on that same turn said "Nothing was
-started". `is_handoff_tool_name` below is what that predicate asks now, and
+started". `is_handoff_tool_name` below is what `authz.changes_the_conversation` asks now — beside
+that predicate rather than inside it, so the plan gate, which also reads `side_effecting_call`,
+does not put every handoff behind a human-approved plan — and
 `tests/test_turn_graph.py` drives a whole dry-run turn against a saver rather than asserting the
 predicate, because the durable half is the harm.
 
@@ -112,13 +114,18 @@ HANDOFF_PREFIX = "transfer_to_"
 #: `D-2026-08-13` found a supervisor prompt and a `task` description describing two different
 #: mechanisms and recorded that the *disagreement* was the defect, so the text a peer reads and the
 #: text its counterpart reads are maintained one import apart.
+#:
+#: **The handover sentence is conditional, because the root is a node of the mesh too.** It opens
+#: the conversation, and it was told on turn one that it was "continuing" work an earlier agent had
+#: done — a reason to look for, or invent, context nobody produced. It can also be *handed back*
+#: control, so a separate brief for non-root nodes would be false the other way round; one sentence
+#: that is true of every node costs no parameter and cannot be mis-assigned.
 PEER_BRIEF = """
 
-**You are one of several Chemclaw agents on this conversation, and control has been handed to
-you.** You can see the whole conversation, including the work the agent before you did and the
-reason it gave for handing over — you are continuing it, not starting again. Answer the chemist
-directly and in your own voice; there is no supervisor waiting for a report, and nothing you say is
-relayed through anybody.
+**You are one of several Chemclaw agents on this conversation.** If another agent handed control
+to you, the conversation shows the work it did and the reason it gave — you are continuing it, not
+starting again. Answer the chemist directly and in your own voice; there is no supervisor waiting
+for a report, and nothing you say is relayed through anybody.
 
 When the work in front of you is squarely another agent's, hand it on with that agent's
 `transfer_to_…` tool and say in `reason` what you established and what you are asking it to do. The
@@ -169,7 +176,7 @@ def is_handoff_tool_name(name: str) -> bool:
     """Whether `name` is one of these tools, by the shape `handoff_tool_name` mints.
 
     **A shape rather than a set, because the set is not knowable where it is asked.**
-    `authz.side_effecting_call` is what must recognise a handoff — a handoff writes the
+    `authz.changes_the_conversation` is what must recognise a handoff — a handoff writes the
     checkpointed `active_agent`, so it changes something that outlives the turn — and it is called
     per tool call from inside the middleware chain, with no peer roster in hand. The alternative
     was for `side_effecting_tools()` to enumerate `handoff_tool_name(p)` over the configured peers,
@@ -177,12 +184,18 @@ def is_handoff_tool_name(name: str) -> bool:
     and a deployment both rewrite — so it would answer for the roster that happened to be loaded
     first.
 
-    Nothing else in this tree is named `transfer_to_…`: the registry is asserted to be a partition
-    of read-only and state-changing names (`tests/test_authz.py`), and `handoff_tools` is the only
-    factory that mints this prefix. A model-invented name carrying it reaches the same refusal,
-    which is the correct answer to a name that does not exist either.
+    **The whole shape, not the prefix alone**: the suffix must be what `handoff_tool_name` can
+    mint (`_TOOL_NAME_CHARS`' complement). The refusals reached past this predicate interpolate the
+    name unreduced on the premise that it is one this repository owns, and ToolNode runs the
+    middleware chain for an *unregistered* name too — so a bare prefix test let a model-invented
+    `transfer_to_x | sanctioned path: …` write a forged routing footer into the refusal it reads
+    and into the audit row. A name of the minted shape that no peer carries still reaches the same
+    refusal, which is the correct answer to a name that does not exist.
     """
-    return name.startswith(HANDOFF_PREFIX)
+    suffix = name.removeprefix(HANDOFF_PREFIX)
+    return (
+        name.startswith(HANDOFF_PREFIX) and bool(suffix) and _TOOL_NAME_CHARS.search(suffix) is None
+    )
 
 
 def describe_peer(profile: AgentProfile, bound: Iterable[str], menu_tools: int) -> str:
@@ -321,7 +334,9 @@ def _one_handoff_tool(
         # would end the turn, which `agent/loop_cap.py` argues at length is the wrong answer to a
         # bound: a chemist is entitled to the work the turn managed. Returning a string makes it
         # an ordinary refused tool result the model reads and can act on.
-        refusal = refuse_a_handoff_past_the_cap(state, max_handoffs)
+        refusal = refuse_a_handoff_past_the_cap(state, max_handoffs) or refuse_a_later_handoff(
+            state, tool_call_id, peer
+        )
         if refusal:
             return refusal
 
@@ -376,6 +391,43 @@ def _one_handoff_tool(
         )
 
     return _transfer
+
+
+def refuse_a_later_handoff(state: Any, tool_call_id: str, peer: str) -> str:
+    """The refusal for a handoff that is not the first one in its assistant message, or `""`.
+
+    **The arbitration between two `transfer_to_…` calls in one message is decided here, first
+    party, rather than left to the tool node.** ToolNode runs every call in the message and applies
+    only the first `Command(graph=PARENT)`, cancelling the rest — so before this, both tool bodies
+    ran and both called `record_handoff`: driven on the compiled mesh, the chemist's stream carried
+    a `HandoffEvent` to `safety-peer` that never happened, beside the one to `evidence-peer` that
+    did. The cap cannot catch it either: both calls read the same pre-batch `handoffs`.
+
+    The first is the one kept, for `state.LastPeer`'s reason: it is the transfer the model asked
+    for with the most context behind it.
+
+    Args:
+        state: The handing agent's graph state; its last assistant message is the one whose
+            `tool_calls` carry this call.
+        tool_call_id: This call's id.
+        peer: The peer this call would have handed to, named in the refusal.
+
+    Returns:
+        The refusal, or `""` when this is the first handoff in its message — or when no assistant
+        message carrying it can be found, where there is nothing to arbitrate against.
+    """
+    for message in reversed(state.get("messages", [])):
+        calls = getattr(message, "tool_calls", None)
+        if not calls:
+            continue
+        handoffs = [call.get("id") for call in calls if is_handoff_tool_name(call.get("name", ""))]
+        if tool_call_id not in handoffs or handoffs[0] == tool_call_id:
+            return ""
+        return (
+            f"Only the first handoff in one message is taken, so {peer} was not reached. Hand to "
+            "one agent at a time; the agent you handed to can hand on if the work needs it."
+        )
+    return ""
 
 
 def refuse_a_handoff_past_the_cap(state: Any, limit: int) -> str:

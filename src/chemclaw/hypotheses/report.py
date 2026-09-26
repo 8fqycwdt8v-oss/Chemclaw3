@@ -23,8 +23,10 @@ reading `knowledge/experiment-proposal/` expects, and a second shape would be a 
 
 from __future__ import annotations
 
+from collections.abc import Collection
+
 from chemclaw.hypotheses.models import RankedHypothesis, TournamentOutcome
-from chemclaw.kg.note import as_cell
+from chemclaw.kg.note import as_cell, is_note_slug
 
 #: Rows the prose summary renders in full. The rest of the field is still returned — in the result
 #: envelope's `data` and in the `hypothesis-field` note — but it is not re-rendered as prose.
@@ -67,11 +69,14 @@ def summarise(outcome: TournamentOutcome) -> str:
         # That is precisely the failure the whole feature undertakes to avoid, inverted.
         ran = leader.outcome is not None and leader.outcome.verdict != "not-run"
         verb = "ran" if ran else "to run"
-        lines.append(f"**Next: {leader.check.question}** ({verb}; {leader.check.expectation})")
+        lines.append(
+            f"**Next: {as_cell(leader.check.question)}** "
+            f"({verb}; {as_cell(leader.check.expectation)})"
+        )
     lines.append("")
 
     if outcome.leader_is_decisive:
-        lines.append(f"The field separates: **{leader.hypothesis.statement}** leads.")
+        lines.append(f"The field separates: **{as_cell(leader.hypothesis.statement)}** leads.")
     else:
         lines.append(
             "**The field does not separate.** The leading hypotheses sit inside their own "
@@ -81,28 +86,32 @@ def summarise(outcome: TournamentOutcome) -> str:
     lines.append("")
 
     for position, row in enumerate(outcome.ranked[:_SUMMARY_ROWS], start=1):
-        lines.append(f"{position}. **{row.hypothesis.statement}** — {_interval(row)}")
-        lines.append(f"   - refuted if: {row.hypothesis.refuted_if}")
+        lines.append(f"{position}. **{as_cell(row.hypothesis.statement)}** — {_interval(row)}")
+        lines.append(f"   - refuted if: {as_cell(row.hypothesis.refuted_if)}")
         if row.hypothesis.mechanism:
-            lines.append(f"   - mechanism: {row.hypothesis.mechanism}")
+            lines.append(f"   - mechanism: {as_cell(row.hypothesis.mechanism)}")
         for objection in row.objections:
-            lines.append(f"   - objection: {objection.concern} — {objection.rationale}")
+            lines.append(
+                f"   - objection: {as_cell(objection.concern)} — {as_cell(objection.rationale)}"
+            )
         if row.outcome is not None and row.outcome.verdict != "not-run":
-            lines.append(f"   - check ran: **{row.outcome.verdict}** — {row.outcome.detail}")
+            lines.append(
+                f"   - check ran: **{row.outcome.verdict}** — {as_cell(row.outcome.detail)}"
+            )
             if row.outcome.ran:
                 # The call as it was made, including what stayed at the tool's default. A number
                 # computed in the default solvent answers a different question from one computed
                 # in the solvent the hypothesis is about, and only this line can tell them apart.
-                lines.append(f"     ran: `{row.outcome.ran}`")
+                lines.append(f"     ran: `{as_cell(row.outcome.ran)}`")
         elif row.check is not None and row.check.kind == "physical":
-            lines.append(f"   - to settle in the lab: {row.check.question}")
+            lines.append(f"   - to settle in the lab: {as_cell(row.check.question)}")
         elif row.check is not None:
             # A computable check that did not run, with the reason. Saying so beats saying nothing:
             # a `computable` check used to fall through every branch, so the chemist saw a
             # hypothesis with no check at all while the reason sat in a Python docstring.
-            reason = row.outcome.detail if row.outcome is not None else ""
+            reason = as_cell(row.outcome.detail) if row.outcome is not None else ""
             lines.append(
-                f"   - answerable with this system's tools, not run: {row.check.question}"
+                f"   - answerable with this system's tools, not run: {as_cell(row.check.question)}"
                 + (f" — {reason}" if reason else "")
             )
 
@@ -133,20 +142,31 @@ def summarise(outcome: TournamentOutcome) -> str:
     return "\n".join(lines)
 
 
-def proposal_body(row: RankedHypothesis, *, question: str) -> str:
+def proposal_body(row: RankedHypothesis, *, question: str, retrieved: Collection[str]) -> str:
     """An `experiment-proposal` note body for a hypothesis whose check needs a laboratory.
 
     Written in `skills/experiment-progression` §5's order so it reads like every other proposal in
     `knowledge/experiment-proposal/`, and carries the rating *with its interval* so a reader cannot
     mistake a tournament placing for a measurement.
+
+    `retrieved` is every note id the evidence sweeps behind this hypothesis actually returned, and
+    only a cited id inside it is rendered as a wikilink.
     """
     if row.check is None:  # pragma: no cover - callers filter on `check` first
         raise ValueError(f"{row.hypothesis.id} has no discriminating check to propose")
 
     # Every span below is model-authored, so each is placed as a cell: it may fill a bullet, never
     # add one, and never mint a citation. `cited_note_ids` is the one channel allowed to produce a
-    # wikilink, because those ids came from a retriever rather than from the model's prose.
-    citations = " ".join(f"[[{note_id}]]" for note_id in row.hypothesis.cited_note_ids)
+    # wikilink — and it is model-authored too: the generator's structured output names them. So an
+    # id is rendered only if a sweep for this hypothesis returned it (`retrieved`), which is what
+    # stops a well-formed id for a note nobody retrieved being filed as its evidence, and only if it
+    # could name a note at all (`is_note_slug`), which is what stops `a]]\n- **run**: … [[b` from
+    # closing the link and forging a bullet even if a retriever ever returned one.
+    citations = " ".join(
+        f"[[{note_id}]]"
+        for note_id in row.hypothesis.cited_note_ids
+        if note_id in retrieved and is_note_slug(note_id)
+    )
     mechanism = as_cell(row.hypothesis.mechanism)
     objections = (
         "\n".join(f"  - {as_cell(o.concern)} — {as_cell(o.rationale)}" for o in row.objections)

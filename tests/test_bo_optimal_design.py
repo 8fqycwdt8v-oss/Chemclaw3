@@ -17,6 +17,7 @@ from chemclaw.science.bo.engine import (
 from chemclaw.science.bo.problem import (
     CategoricalParameter,
     ContinuousParameter,
+    ExcludeConstraint,
     LinearConstraint,
     Objective,
     OptimizationProblem,
@@ -242,3 +243,43 @@ def test_a_breach_inside_the_tolerance_is_not_reported() -> None:
         )
         == []
     )
+
+
+def test_an_exclusion_is_refused_by_name_rather_than_blamed_on_the_budget() -> None:
+    """BoFire's DoE solver cannot take a categorical exclusion, whatever the run count.
+
+    Measured before this: `cat x solv` gave 8 runs unconstrained, and adding "no a in x" raised
+    `SurrogateFitError` telling the chemist to "try more runs" — a remedy no budget satisfies.
+    """
+    problem = OptimizationProblem(
+        parameters=[
+            CategoricalParameter(name="cat", categories=["a", "b", "c"]),
+            CategoricalParameter(name="solv", categories=["x", "y"]),
+        ],
+        objectives=[Objective(name="yield_pct", direction="maximize")],
+        constraints=[ExcludeConstraint(parameters=["cat", "solv"], options=[["a"], ["x"]])],
+    )
+    with pytest.raises(ValueError, match="linear constraints only") as refused:
+        optimal_design(problem, n_experiments=8, seed=0)
+    assert "strike the excluded pairings" in str(refused.value)
+
+
+def test_replicated_corners_are_counted_and_read_as_the_bound_they_are() -> None:
+    """Solver noise is snapped onto the bound it meant, so a replicate compares equal.
+
+    Measured before this on seed 0: `(3, 0)` came back three times as `2.999999999999995`,
+    `1.17e-15` and friends, and the design reported `duplicate_runs=0`.
+    """
+    problem = OptimizationProblem(
+        parameters=[
+            ContinuousParameter(name="a", lower=0.0, upper=3.0),
+            ContinuousParameter(name="b", lower=0.0, upper=3.0),
+        ],
+        objectives=[Objective(name="yield_pct", direction="maximize")],
+        constraints=[LinearConstraint(parameters=["a", "b"], coefficients=[1.0, 1.0], rhs=3.0)],
+    )
+    design = optimal_design(problem, n_experiments=8, seed=0)
+
+    assert design.duplicate_runs > 0
+    values = {float(run[name]) for run in design.runs for name in ("a", "b")}
+    assert values <= {0.0, 3.0}, f"solver noise reached the chemist: {sorted(values)}"

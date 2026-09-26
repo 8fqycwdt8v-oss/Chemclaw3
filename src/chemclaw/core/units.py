@@ -641,6 +641,11 @@ def reconcile(value: float, reported: str, expected: str) -> float:
 #: the other job, and conflating them would make "run it at 20 °C in 500 mL" parse as a scale.
 _QUANTITY = re.compile(r"^\s*([+-]?\d+(?:[.,]\d+)?(?:[eE][+-]?\d+)?)\s*([^\s\d].*?)\s*$")
 
+#: A comma followed by exactly three digits: "1,500" is 1500 to one reader and 1.5 to another.
+#: Refused rather than guessed, because either guess is a factor of 1000 in a rescaled protocol and
+#: the recorded basis string would still read "1,500" — the error would be invisible where it lands.
+_AMBIGUOUS_COMMA = re.compile(r"[+-]?\d+,\d{3}")
+
 
 def parse_quantity(text: str) -> Measurement | None:
     """A free-text quantity a person typed, or `None` when it is not one.
@@ -660,6 +665,8 @@ def parse_quantity(text: str) -> Measurement | None:
     if match is None:
         return None
     number, unit = match.groups()
+    if _AMBIGUOUS_COMMA.fullmatch(number):
+        return None
     try:
         return Measurement.of(float(number.replace(",", ".")), unit)
     except (UnitError, ValueError):

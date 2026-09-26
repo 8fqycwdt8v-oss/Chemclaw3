@@ -25,6 +25,7 @@ from chemclaw.agent.audit import refusal_reason, returned_failure
 from chemclaw.agent.authz import (
     AuthorizationError,
     authorize_tool,
+    changes_the_conversation,
     side_effecting_call,
     side_effecting_tools,
 )
@@ -101,9 +102,10 @@ def dry_run_refusal(name: str, arguments: Mapping[str, Any]) -> DryRunRefusal | 
 
     Takes the arguments as well as the name because one of the calls it must refuse cannot be
     recognised from the name — `write_file` under `/memories/` is durable and the same verb under
-    `/scratch/` is not. See `authz.side_effecting_call`.
+    `/scratch/` is not. See `authz.side_effecting_call`, and `authz.changes_the_conversation` for
+    the handoff this gate refuses and the plan gate does not.
     """
-    if is_dry_run() and side_effecting_call(name, arguments):
+    if is_dry_run() and (side_effecting_call(name, arguments) or changes_the_conversation(name)):
         return DryRunRefusal(
             routed(
                 f"DRY RUN — {name} changes stored data or starts work, so it was not called. "

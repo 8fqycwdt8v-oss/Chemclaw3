@@ -1062,3 +1062,48 @@ def test_every_way_an_escalation_can_end_books_its_own_series(
     assert set(after) <= runner.ESCALATION_OUTCOMES, (
         f"an outcome outside the declared set reached the counter: {sorted(after)}"
     )
+
+
+def test_a_checkpointer_that_fails_before_the_round_ships_the_graded_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The thread read that marks where a round starts must not sink a turn that already answered.
+
+    It ran outside the round's `try`, so a checkpointer error there reached `run_turn`'s generic
+    handler: an internal error in place of a complete, graded answer. Revising without the mark is
+    not the fallback either — the round's `human` prompt would stay on the thread — so the loop
+    stops and the flagged answer ships.
+    """
+
+    async def _broken(*_: Any, **__: Any) -> str | None:
+        raise RuntimeError("statement timeout")
+
+    _grades_by_text(monkeypatch)
+    monkeypatch.setattr(settings, "answer_review_max_rounds", 2)
+    monkeypatch.setattr(runner, "_thread_tip", _broken)
+    agent = _RevisingAgent()
+
+    events = _drive(agent)
+
+    assert not [e for e in events if isinstance(e, ErrorEvent)], "a failed read sank the turn"
+    assert _answer(events).text == _FLAGGED
+    assert agent.runs == 1, "a round was revised with nothing to withdraw its prompt by"
+
+
+def test_a_checkpointer_that_fails_after_the_round_still_ships_the_revision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Failing to tidy the thread costs the thread its tidiness, never the chemist the answer."""
+
+    async def _broken(*_: Any, **__: Any) -> None:
+        raise RuntimeError("statement timeout")
+
+    _grades_by_text(monkeypatch)
+    monkeypatch.setattr(settings, "answer_review_max_rounds", 2)
+    monkeypatch.setattr(runner, "_settle_revision_thread", _broken)
+    agent = _RevisingAgent()
+
+    events = _drive(agent)
+
+    assert not [e for e in events if isinstance(e, ErrorEvent)], "a failed withdrawal sank the turn"
+    assert _answer(events).text == _GROUNDED

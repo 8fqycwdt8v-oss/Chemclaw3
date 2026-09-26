@@ -801,3 +801,232 @@ async def test_a_template_a_deployment_turned_off_is_not_reachable(
     assert plan.refused
     assert plan.refusal_code == "template-unavailable"
     assert "tautomer-resolution" in plan.refusal_detail
+
+
+def _grounding_corpus(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> DiscriminatingCheck:
+    """A corpus holding one resolvable compound, and a template check pointing at it."""
+    from chemclaw.templates import registry
+
+    monkeypatch.setattr(settings, "note_repo_dir", tmp_path)
+    settings.knowledge_path.mkdir(parents=True)
+    (settings.knowledge_path / "compound-x.md").write_text(
+        "---\nid: compound-x\ntype: compound\ncompound_smiles: CCO\n---\nEthanol.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(settings, "templates_enabled", "tautomer-resolution")
+    # This deployment's connector set is not what is under test; the launcher's gate is.
+    monkeypatch.setattr(registry, "unrunnable_reason", lambda _template: None)
+    return DiscriminatingCheck(
+        hypothesis_id="a",
+        question="which tautomer dominates?",
+        kind="computable",
+        expectation="the 1H form",
+        call=CheckCall(template="tautomer-resolution", subject_note_id="compound-x"),
+    )
+
+
+async def test_a_template_check_is_authorized_as_the_launcher_a_chat_turn_would_call(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """An operator's gate on `run_<template>` binds a tournament exactly as it binds chat.
+
+    Before this, grounding resolved the template and started the child with no authorization and
+    no audit row, so a chemist refused `run_tautomer_resolution` in a conversation reached the
+    same procedure by asking for a ranking.
+    """
+    check = _grounding_corpus(monkeypatch, tmp_path)
+    monkeypatch.setattr(settings, "entra_required", True)
+    monkeypatch.setattr(settings, "tool_role_gates", {"run_tautomer_resolution": ["calc-users"]})
+
+    refused = await ht.ground_check_template(check, "chemist@example.com", [], "corr")
+    assert refused.refused
+    assert refused.refusal_code == "tool-not-authorized"
+    assert refused.template is None, "a refused launcher must leave nothing to start"
+
+    allowed = await ht.ground_check_template(check, "chemist@example.com", ["calc-users"], "corr")
+    assert not allowed.refused, allowed.refusal_detail
+    assert allowed.template is not None
+    assert allowed.template.name == "tautomer-resolution"
+
+
+async def test_a_failed_evidence_sweep_costs_its_evidence_and_not_the_run() -> None:
+    """A Temporal-level sweep failure (timeout, lost worker) ranks on prose, as the docstring says.
+
+    `gather_hypothesis_evidence` swallows in-process failures itself; a timeout arrives as an
+    `ActivityError` instead, and before this it failed a tournament whose angles and generation
+    were already paid for.
+    """
+    from temporalio.exceptions import ApplicationError
+
+    @activity.defn(name="gather_hypothesis_evidence")
+    async def gather(
+        query: str, hypothesis_id: str = "", requested_by: str = "", correlation_id: str = ""
+    ) -> ht._EvidencePack:
+        raise ApplicationError("the share hung", non_retryable=True)
+
+    field = [
+        _hypothesis("thermal", "the impurity is thermal in origin"),
+        _hypothesis("wet", "the solvent was wet"),
+    ]
+    result = await _run_with([gather], _stubs(field=field, prefer="wet"), _request("q-no-evidence"))
+
+    assert [row["hypothesis"]["id"] for row in result.data["ranked"]][0] == "wet"
+
+
+def _per_hypothesis_checks(calls: dict[str, CheckCall | None]) -> Any:
+    """A `derive_check` stand-in that gives each hypothesis its own call."""
+
+    @activity.defn(name="derive_check")
+    async def derive_check(request: ht._CritiqueRequest) -> DiscriminatingCheck:
+        return DiscriminatingCheck(
+            hypothesis_id=request.hypothesis.id,
+            question=f"run the control for {request.hypothesis.id}",
+            kind="computable",
+            call=calls[request.hypothesis.id],
+            expectation="the effect disappears if the hypothesis holds",
+        )
+
+    return derive_check
+
+
+async def test_a_check_that_names_nothing_does_not_spend_the_calculation_budget() -> None:
+    """A `call=None` leader refuses `no-call` without taking a slot a runnable check needed."""
+    ran_for: list[str] = []
+
+    @activity.defn(name="run_computable_check")
+    async def run_check(
+        check: DiscriminatingCheck,
+        requested_by: str = "",
+        requested_roles: list[str] | None = None,
+        correlation_id: str = "",
+    ) -> CheckOutcome:
+        ran_for.append(check.hypothesis_id)
+        return CheckOutcome(hypothesis_id=check.hypothesis_id, verdict="inconclusive", detail="1")
+
+    tool = CheckCall(tool="predict_pka", subject_note_id="compound-x")
+    field = [
+        _hypothesis("wet", "the solvent was wet"),
+        _hypothesis("thermal", "the impurity is thermal in origin"),
+        _hypothesis("base", "the base decomposed"),
+    ]
+    result = await _run_with(
+        [run_check, _per_hypothesis_checks({"wet": None, "thermal": tool, "base": tool})],
+        _stubs(field=field, prefer="wet", max_calculations=2),
+        _request("q-no-call-budget"),
+    )
+
+    assert sorted(ran_for) == ["base", "thermal"]
+    codes = {
+        row["hypothesis"]["id"]: row["outcome"]["refusal_code"] for row in result.data["ranked"]
+    }
+    assert codes["wet"] == "no-call"
+    assert "over-budget" not in codes.values()
+
+
+async def test_a_tool_check_temporal_could_not_complete_is_reported_not_dropped() -> None:
+    """Mirrors `_settle_jobs`: a dispatched check that failed has an outcome and a code."""
+    from temporalio.exceptions import ApplicationError
+
+    attempts: list[str] = []
+
+    @activity.defn(name="run_computable_check")
+    async def run_check(
+        check: DiscriminatingCheck,
+        requested_by: str = "",
+        requested_roles: list[str] | None = None,
+        correlation_id: str = "",
+    ) -> CheckOutcome:
+        attempts.append(check.hypothesis_id)
+        raise ApplicationError("worker lost")  # retryable: the policy is what bounds it
+
+    field = [_hypothesis("a", "the first explanation")]
+    call = CheckCall(tool="predict_pka", subject_note_id="compound-x")
+    result = await _run_with(
+        [run_check],
+        _stubs(field=field, check_kind="computable", check_call=call),
+        _request("q-tool-lost"),
+    )
+
+    outcome = result.data["ranked"][0]["outcome"]
+    assert outcome["refusal_code"] == "tool-failed"
+    assert outcome["verdict"] == "inconclusive"
+    assert attempts == ["a"], "a governed tool call was re-invoked, writing a second audit row"
+
+
+async def test_two_tournaments_kept_apart_do_not_share_a_proposal_note() -> None:
+    """The proposal id carries the field note's scope, so run B cannot overwrite run A's note."""
+    written: list[str] = []
+
+    @activity.defn(name="record_hypothesis_proposal")
+    async def record(
+        body: str, note_id: str, tags: list[str], requested_by: str = "", correlation_id: str = ""
+    ) -> str:
+        written.append(note_id)
+        return note_id
+
+    field = [_hypothesis("a", "the first explanation")]
+    for actor in ("alice@example.com", "bob@example.com"):
+        await _run_with(
+            [record],
+            _stubs(field=field),
+            TournamentRequest(question="q-shared-proposal", requested_by=actor),
+        )
+
+    assert len(written) == 2
+    assert written[0] != written[1]
+
+
+async def test_a_proposal_cites_only_notes_the_hypothesis_evidence_returned() -> None:
+    """A cited id nobody retrieved is the model's recollection, and is not filed as an edge.
+
+    The generator cites from the question's sweep and the hypothesis has its own; an id in
+    either is evidence, and a well-formed id in neither must not become a `[[link]]` on the note.
+    """
+    bodies: list[str] = []
+
+    @activity.defn(name="gather_hypothesis_evidence")
+    async def gather(
+        query: str, hypothesis_id: str = "", requested_by: str = "", correlation_id: str = ""
+    ) -> ht._EvidencePack:
+        seen = "playbook-own" if hypothesis_id else "playbook-question"
+        return ht._EvidencePack(hypothesis_id=hypothesis_id, framed=[], note_ids=[seen])
+
+    @activity.defn(name="record_hypothesis_proposal")
+    async def record(
+        body: str, note_id: str, tags: list[str], requested_by: str = "", correlation_id: str = ""
+    ) -> str:
+        bodies.append(body)
+        return note_id
+
+    cited = _hypothesis("a", "the first explanation").model_copy(
+        update={"cited_note_ids": ["playbook-question", "playbook-own", "playbook-invented"]}
+    )
+    await _run_with([gather, record], _stubs(field=[cited]), _request("q-retrieved-cites"))
+
+    assert len(bodies) == 1
+    assert "[[playbook-question]]" in bodies[0]
+    assert "[[playbook-own]]" in bodies[0]
+    assert "playbook-invented" not in bodies[0]
+
+
+async def test_a_model_authored_hypothesis_id_is_bounded_where_it_enters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The id reaches child workflow ids, so its length and charset are bounded at generation."""
+
+    async def structured(model: type[Any], prompt: str) -> Any:
+        return ht._HypothesisBatch(
+            hypotheses=[
+                Hypothesis(id="x" * 5000, statement="a long one", refuted_if="it is not"),
+                Hypothesis(id="///", statement="an unsafe one", refuted_if="it is not"),
+            ]
+        )
+
+    monkeypatch.setattr(ht, "_structured", structured)
+    batch = await ht.generate_hypotheses(
+        ht._GenerateRequest(question="q", angle="a", wanted=2, requested_by="c@example.com")
+    )
+
+    ids = [h.id for h in batch.hypotheses]
+    assert ids[0] == "x" * ht._MAX_HYPOTHESIS_ID
+    assert ids[1] == f"h-{stable_hash(['an unsafe one'])}"

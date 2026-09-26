@@ -515,6 +515,23 @@ async def run_turn(
                     and review.unsupported
                     and rounds < settings.answer_review_max_rounds
                 ):
+                    # The message the thread ends on right now: the answer this round is out to
+                    # replace, and the mark everything the round adds sits after. Read before the
+                    # round is counted, and a checkpointer that cannot answer ends the loop rather
+                    # than the turn: the graded answer is already in hand, and revising without
+                    # the mark would leave the round's fabricated `human` prompt on the thread with
+                    # nothing to withdraw it by.
+                    try:
+                        retracted = await _thread_tip(graph, graph_config)
+                    except Exception:
+                        degraded(
+                            logger,
+                            "review_revision_thread",
+                            "could not read session %s's thread before a review revision; the "
+                            "flagged answer ships unrevised",
+                            session.session_id,
+                        )
+                        break
                     rounds += 1
                     # **What the turn already has in hand, held across the round.** A revision
                     # *replaces* an answer, so `_revise_answer` clears `answer_parts` before it
@@ -525,9 +542,6 @@ async def run_turn(
                     # `chemclaw_turn_empty_answers_total` flat because the emptiness guard had
                     # already run against the *flagged* text one screen above.
                     kept = list(ledger.answer_parts)
-                    # The message the thread ends on right now: the answer this round is out to
-                    # replace, and the mark everything the round adds sits after.
-                    retracted = await _thread_tip(graph, graph_config)
                     try:
                         async for event in _revise_answer(
                             graph,
@@ -572,9 +586,23 @@ async def run_turn(
                             ledger.answer_parts[:] = kept
                     # After the outcome is known, because what the thread must end on is the answer
                     # that ships — which is this round's only when the round produced one.
-                    await _settle_revision_thread(
-                        graph, graph_config, retracted=retracted, replaced=replaced
-                    )
+                    try:
+                        await _settle_revision_thread(
+                            graph, graph_config, retracted=retracted, replaced=replaced
+                        )
+                    except Exception:
+                        # The thread is left untidied, not the answer lost: the chemist still gets
+                        # the answer in the ledger, and the next turn opens on a thread carrying
+                        # the round's messages — counted, because that is the divergence
+                        # `_settle_revision_thread` exists to prevent.
+                        degraded(
+                            logger,
+                            "review_revision_thread",
+                            "could not withdraw revision %d's messages from session %s's thread; "
+                            "the answer ships, and the thread keeps what the round added",
+                            rounds,
+                            session.session_id,
+                        )
                     if not replaced:
                         break
                     answer, review = await build_answer_event(

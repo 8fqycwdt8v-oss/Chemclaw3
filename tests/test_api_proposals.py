@@ -296,3 +296,43 @@ def test_a_deployment_that_keeps_no_store_refuses_the_acceptance_rather_than_rec
 
     assert refused.status_code == 503
     assert [row["state"] for row in client.get("/proposals").json()["proposals"]] == ["open"]
+
+
+@pytest.mark.parametrize("held_before", [None, _BODY.replace("Quench cold.", "Quench warm.")])
+def test_an_acceptance_that_loses_the_race_to_a_decline_undoes_its_write(
+    app: FastAPI,
+    skills_store: InMemoryStore,
+    monkeypatch: pytest.MonkeyPatch,
+    held_before: str | None,
+) -> None:
+    """A Decline that commits between the read and the decision wins, and the skill is not left.
+
+    The acceptance writes before its conditional `decide`, so a concurrent Decline (a second tab, a
+    double submit) can take the row in between. Driven by committing the decline from inside the
+    write: without the check, the skill acted on every turn while the queue said "rejected", and
+    the route answered 200. What the tier held before — nothing, or an earlier version — is what it
+    holds after.
+    """
+    from chemclaw.agent.local_skills import read_local_skill, save_local_skill
+
+    if held_before is not None:
+        asyncio.run(save_local_skill(skills_store, _ALICE.oid, "cold-quench", held_before))
+    digest = _propose()
+
+    async def _write_then_lose(store: Any, actor: str, name: str, body: str) -> None:
+        await save_local_skill(store, actor, name, body)
+        if body == _BODY:  # the acceptance's own write, not the undo restoring the old version
+            await default_proposal_store().decide(
+                actor, "skill", name, digest, accepted=False, decided_by=actor, reason="other tab"
+            )
+
+    monkeypatch.setattr(proposal_routes, "save_local_skill", _write_then_lose)
+    client = _as(app, _ALICE)
+
+    lost = client.post(
+        "/proposals/skill/cold-quench", json={"content_hash": digest, "accepted": True}
+    )
+
+    assert lost.status_code == 409
+    assert "rejected by another request" in lost.json()["detail"]
+    assert asyncio.run(read_local_skill(skills_store, _ALICE.oid, "cold-quench")) == held_before

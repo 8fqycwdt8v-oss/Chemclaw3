@@ -1641,6 +1641,8 @@ def test_transcript_reads_back_the_stored_thread() -> None:
     assert [row["role"] for row in transcript] == ["user", "assistant"]
     assert transcript[0]["text"] == "hello"
     assert transcript[1]["text"] == "hi there"
+    # Seeded off the request path, so no turn stored it: unknown, not a turn named "".
+    assert [row["correlation_id"] for row in transcript] == [None, None]
 
 
 def test_a_turn_writes_itself_into_the_transcript() -> None:
@@ -1681,6 +1683,38 @@ def test_a_turn_writes_itself_into_the_transcript() -> None:
     # `_FakeAgent` streams "hi " then "there"; the transcript stores the assembled answer, not the
     # fragments, because that is what a chemist reading back is owed.
     assert transcript[1]["text"] == "hi there"
+
+
+def test_a_turns_transcript_rows_carry_its_correlation_id() -> None:
+    """A detached client finds its turn's answer by the id it sent, not by the answer's text.
+
+    Driven through a real turn on the in-memory store, which must answer the field as the durable
+    one does; `tests/test_api_sessions.py` holds the Postgres half.
+    """
+    from chemclaw.api.auth import Principal, require_principal
+
+    app = _app()
+    app.dependency_overrides[require_principal] = lambda: Principal(
+        oid="alice", upn="a@corp", roles=frozenset()
+    )
+    client = TestClient(app)
+    session_id = client.post("/sessions").json()["session_id"]
+
+    with client.stream(
+        "POST",
+        f"/sessions/{session_id}/messages",
+        json={"message": "what is the pKa?"},
+        headers={"X-Chemclaw-Correlation-Id": "ui-turn-0001"},
+    ) as res:
+        assert res.status_code == 200
+        for _line in res.iter_lines():
+            pass
+
+    transcript = client.get(f"/sessions/{session_id}/messages").json()
+    assert [(row["role"], row["correlation_id"]) for row in transcript] == [
+        ("user", "ui-turn-0001"),
+        ("assistant", "ui-turn-0001"),
+    ], transcript
 
 
 def test_transcript_of_an_unknown_session_is_404() -> None:

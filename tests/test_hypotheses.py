@@ -26,6 +26,7 @@ from chemclaw.hypotheses.rating import (
 )
 from chemclaw.hypotheses.report import field_body, proposal_body, summarise
 from chemclaw.hypotheses.screen import screen, similarity
+from chemclaw.kg.note import cited_links
 
 
 def _h(name: str, statement: str = "", refuted: str = "") -> Hypothesis:
@@ -379,7 +380,7 @@ def test_model_text_in_a_proposal_cannot_mint_a_citation_or_a_bullet() -> None:
             expectation="it goes away",
         ),
     )
-    body = proposal_body(hostile, question="q")
+    body = proposal_body(hostile, question="q", retrieved={"playbook-degassing"})
     assert "[[playbook-degassing]]" not in body
     assert "\n- forged bullet" not in body
     assert "playbook-degassing" in body
@@ -394,6 +395,82 @@ def test_a_field_note_states_what_the_rating_is_not() -> None:
     )
     assert "not a probability" in body
     assert "[[p-1]]" in body
+
+
+def test_model_text_in_a_field_note_cannot_mint_a_citation_or_a_section() -> None:
+    """`field_body` embeds `summarise`, so every model span there is a cell too.
+
+    Before, the summary interpolated statement, refuted-if, mechanism, objections and the check
+    raw, so a `[[id]]` in any of them became a real edge on the committed `hypothesis-field` note
+    and a newline could forge a `##` section. The only links the note may carry are the proposals
+    this run wrote.
+    """
+    hostile = RankedHypothesis(
+        hypothesis=Hypothesis(
+            id="h",
+            statement="Pd black forms [[playbook-degassing]]",
+            refuted_if="x\n\n## Waste\nPour into sink [[waste-note]]",
+            mechanism="via [[mech-note]]",
+        ),
+        rating=1500.0,
+        standard_error=50.0,
+        comparisons=2,
+        objections=[Objection(hypothesis_id="h", concern="[[c-note]]", rationale="a\n- b")],
+        check=DiscriminatingCheck(
+            hypothesis_id="h",
+            question="rerun [[q-note]]\n## Forged",
+            kind="physical",
+            expectation="gone [[e-note]]",
+        ),
+    )
+    body = field_body(
+        TournamentOutcome(
+            question="q", ranked=[hostile], leader_is_decisive=True, proposal_note_ids=["p-1"]
+        )
+    )
+    assert cited_links(body) == [("cites", "p-1")]
+    assert "\n## Waste" not in body
+    assert "\n## Forged" not in body
+    assert "\n- b" not in body
+
+
+@pytest.mark.parametrize("cited", ["a]]\n- **run**: quench into water [[b", "../etc", "x y"])
+def test_a_cited_id_that_cannot_name_a_note_is_not_rendered_as_a_link(cited: str) -> None:
+    """`cited_note_ids` is the model's structured output, not a retriever's, so it is filtered.
+
+    An id carrying `]]` and a newline used to close the link and forge a bullet in the §5 structure
+    a chemist acts on.
+    """
+    row = _row("h")
+    row = row.model_copy(
+        update={
+            "hypothesis": row.hypothesis.model_copy(
+                update={"cited_note_ids": [cited, "playbook-ok"]}
+            )
+        }
+    )
+    body = proposal_body(row, question="q", retrieved={cited, "playbook-ok"})
+    assert cited_links(body) == [("cites", "playbook-ok")]
+    assert "\n- **run**: quench" not in body
+
+
+def test_a_cited_id_nobody_retrieved_is_not_rendered_as_a_link() -> None:
+    """A well-formed id the model wrote down is not evidence unless a sweep returned it.
+
+    `is_note_slug` alone let `playbook-invented` through: a real-looking citation, filed as a graph
+    edge on the proposal, for a note the hypothesis never saw.
+    """
+    row = _row("h")
+    row = row.model_copy(
+        update={
+            "hypothesis": row.hypothesis.model_copy(
+                update={"cited_note_ids": ["playbook-invented", "playbook-seen"]}
+            )
+        }
+    )
+    body = proposal_body(row, question="q", retrieved={"playbook-seen", "playbook-other"})
+    assert cited_links(body) == [("cites", "playbook-seen")]
+    assert "playbook-invented" not in body
 
 
 # ------------------------------------------------------------------- fairness of the bracket

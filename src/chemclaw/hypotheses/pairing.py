@@ -21,8 +21,9 @@ a systematically easier path, and because a Bradley-Terry fit is opponent-streng
 converted identical records into different ratings. Measured through the shipped path with a
 *coin-flip* judge — zero information, so every hypothesis is genuinely equal — a field of ten came
 out with a **143-point monotone spread ordered by id**, wider than the standard errors printed
-beside it. Production ids are `h-<stable_hash(statement)>`, so rephrasing a hypothesis moved it up
-the chemist's table.
+beside it. Production ids are the generator's own strings, reduced to a safe charset by
+`durable/hypothesis_tournament._bounded_id` — model-authored, so the name a model happened to give a
+hypothesis moved it up the chemist's table.
 
 So the tiebreak is the caller's `hypothesis_ids` order, not the name. That keeps this function
 deterministic — the property replay needs — and moves the choice of ordering to the one place that

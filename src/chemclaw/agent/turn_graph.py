@@ -88,9 +88,8 @@ from typing import Any
 
 from langgraph.graph import END, START, StateGraph
 
-from chemclaw.agent.chemclaw_agent import _capability_tools
 from chemclaw.agent.handoff import handoff_tools, log_the_roster
-from chemclaw.agent.langgraph_agent import build_langgraph_agent
+from chemclaw.agent.langgraph_agent import bindable_capability_tools, build_langgraph_agent
 from chemclaw.agent.profile_discovery import ProfileError, load_profiles
 from chemclaw.agent.profiles import AgentProfile, get_profile, registered_profile_names
 from chemclaw.agent.state import PEER_DEPTH_ATTR, ChemclawState
@@ -148,9 +147,13 @@ def root_surface(profile: AgentProfile, connectors: list[Any] | None) -> frozens
     `helper_connectors` exists for, and getting it wrong fails in the safe direction (a peer with
     no connectors) which is exactly why it would not have been noticed.
 
-    The in-process names come from `_capability_tools(profile)` rather than from the registry,
-    because only that call has seen `_register_generated_tools()` run — read the registry directly
-    and a deployment's `run_*` launchers and template launchers are simply absent.
+    The in-process names come from `bindable_capability_tools(profile)` rather than from the
+    registry, because only `_capability_tools` under it has seen `_register_generated_tools()` run —
+    read the registry directly and a deployment's `run_*` launchers and template launchers are
+    simply absent. And through the builder's own filter rather than `_capability_tools` alone,
+    because this is a *prediction* of what the root binds that every peer's `transfer_to_<root>`
+    description publishes: without the personal-tier filter it advertised `propose_skill` on a
+    deployment whose root never bound it.
 
     Args:
         profile: The root profile — the agent a chemist talks to when a turn opens.
@@ -159,7 +162,7 @@ def root_surface(profile: AgentProfile, connectors: list[Any] | None) -> frozens
     Returns:
         The union of the two halves.
     """
-    in_process = frozenset(fn.__name__ for fn in _capability_tools(profile))
+    in_process = frozenset(fn.__name__ for fn in bindable_capability_tools(profile))
     reachable = frozenset(tool.name for tool in (connectors or []))
     return in_process | reachable
 
@@ -492,10 +495,10 @@ def build_turn_graph(
 
 
 def entry_peer_or_root(state: Any, peers: list[str]) -> str:
-    """`_entry_peer` with the fallback resolved — the form the conditional edge actually needs.
+    """The peer a turn enters on: whoever holds the conversation, else the root.
 
-    Separate from `_entry_peer` because a conditional edge's function must return a node name that
-    exists, and "the root" is knowable only from the peer list. Kept as a named function rather
+    A conditional edge's function must return a node name that exists, and "the root" is knowable
+    only from the peer list, so the fallback is resolved here. Kept as a named function rather
     than a lambda so `tests/test_turn_graph.py` can drive the fallback directly: an unknown name is
     the case that must not raise, and a lambda inside a builder is a branch no test can reach
     without compiling a whole graph.

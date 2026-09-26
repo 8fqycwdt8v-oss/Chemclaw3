@@ -162,6 +162,38 @@ from chemclaw.core.logging import log_event
 logger = logging.getLogger(__name__)
 
 
+def bindable_capability_tools(prof: AgentProfile) -> list[Any]:
+    """The in-process tools a graph built for `prof` binds — its capability tools, less the dead.
+
+    One function for the graph builder and for `turn_graph.root_surface`, because the latter
+    *predicts* what the root binds so every peer's `transfer_to_<root>` description can say what
+    the root holds. Predicting from `_capability_tools` alone advertised `propose_skill` on a
+    deployment whose root never bound it — the over-promising menu `D-2026-08-12` exists to
+    prevent — and two copies of the filter are how the prediction and the graph drift.
+
+    Args:
+        prof: The resolved profile.
+
+    Returns:
+        The tool functions, in `_capability_tools`' order.
+    """
+    tools = _capability_tools(prof)
+    # **A tool whose only outcome is unreachable is not a capability, so it is not bound.**
+    # `propose_skill` writes a `behaviour_proposals` row for a person to accept through
+    # `POST /proposals/...`, and both the durable row and that route need the personal tier. That
+    # tier is on by default since `D-2026-09-20-a-behaviour-change-is-gated-by-its-blast-radius`,
+    # so this filter no longer fires on the shipped configuration — it fires on a deployment that
+    # sets `CHEMCLAW_AGENT_MEMORY_ENABLED=false`, or on an in-memory session store, and it is kept
+    # for exactly that case. When the predicate was false and this filter did not exist, the model
+    # spent the schema on every request and told the chemist to go accept something the route
+    # answers 503 to. Filtered here rather than gated inside the tool because a refusal the model
+    # can only discover by calling is still paid for in the prefix, every call, forever — and
+    # `tests/test_context_floor.py` charges its 462 tokens now that it is bound.
+    if not personal_skills_available():
+        tools = [fn for fn in tools if fn.__name__ not in PERSONAL_TIER_TOOLS]
+    return tools
+
+
 def build_langgraph_agent(
     model: Any | None = None,
     *,
@@ -279,20 +311,7 @@ def build_langgraph_agent(
     # offering (`_skills_middleware`). A helper's skills therefore narrow with its tools, at no
     # extra cost and by the mechanism that already existed — which is D-2026-08-10's fourth
     # invariant ("skills do not inherit") arriving as a consequence rather than as a second gate.
-    tools = _capability_tools(prof)
-    # **A tool whose only outcome is unreachable is not a capability, so it is not bound.**
-    # `propose_skill` writes a `behaviour_proposals` row for a person to accept through
-    # `POST /proposals/...`, and both the durable row and that route need the personal tier. That
-    # tier is on by default since `D-2026-09-20-a-behaviour-change-is-gated-by-its-blast-radius`,
-    # so this filter no longer fires on the shipped configuration — it fires on a deployment that
-    # sets `CHEMCLAW_AGENT_MEMORY_ENABLED=false`, or on an in-memory session store, and it is kept
-    # for exactly that case. When the predicate was false and this filter did not exist, the model
-    # spent the schema on every request and told the chemist to go accept something the route
-    # answers 503 to. Filtered here rather than gated inside the tool because a refusal the model
-    # can only discover by calling is still paid for in the prefix, every call, forever — and
-    # `tests/test_context_floor.py` charges its 462 tokens now that it is bound.
-    if not personal_skills_available():
-        tools = [fn for fn in tools if fn.__name__ not in PERSONAL_TIER_TOOLS]
+    tools = bindable_capability_tools(prof)
     # **The helper's narrowing is applied here rather than in `_subagents`, and both the position
     # and the second call are the point.** `helper=True` is the one switch that says "this graph is
     # behind the `task` tool", so everything a helper is — no side-effecting tool, no tool that
@@ -423,13 +442,13 @@ def build_langgraph_agent(
             durable_trail=not isinstance(sink, NullAuditSink),
         )
         + (HELPER_BRIEF if helper else "")
-        # A peer is told the one thing its own profile cannot be right about: that it did not
-        # start this conversation, that the chemist reads it directly with nobody relaying, and
-        # that handing on reaches nothing it could not reach itself. Appended for `HELPER_BRIEF`'s
-        # reason — the domain guidance above is exactly as true of a peer as of the agent that
-        # opened the turn, and a peer that had to be told what a knowledge note is would need the
-        # whole prompt rewritten. Mutually exclusive with the helper brief in practice: a helper is
-        # spawned through `task` and `_subagents` passes no `peer`.
+        # A peer is told the one thing its own profile cannot be right about: that it may not
+        # have started this conversation, that the chemist reads it directly with nobody
+        # relaying, and that handing on reaches nothing it could not reach itself. Appended for
+        # `HELPER_BRIEF`'s reason — the domain guidance above is exactly as true of a peer as of
+        # the agent that opened the turn, and a peer that had to be told what a knowledge note is
+        # would need the whole prompt rewritten. Mutually exclusive with the helper brief in
+        # practice: a helper is spawned through `task` and `_subagents` passes no `peer`.
         + (PEER_BRIEF if peer else "")
         + (
             specialist_override(

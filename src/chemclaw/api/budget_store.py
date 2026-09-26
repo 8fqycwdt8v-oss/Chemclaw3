@@ -31,6 +31,7 @@ property of a principal.
 """
 
 from datetime import timedelta
+from typing import Any, NamedTuple
 
 from chemclaw.core import db
 from chemclaw.core.config import settings
@@ -67,19 +68,58 @@ _BOOK = """
             WHEN budget_usage.window_start <= now() - %(window)s::interval
             THEN %(tokens)s ELSE budget_usage.tokens + %(tokens)s END,
         updated_at = now()
-    RETURNING turns, tokens
+    RETURNING turns, tokens,
+        EXTRACT(EPOCH FROM window_start), EXTRACT(EPOCH FROM now() - window_start)
 """
 
-#: What a principal has spent inside the *current* window.
+#: A principal's row, live or expired, with where its window started and how old it is.
 #:
-#: The `window_start >` predicate is what makes a stale row read as zero without anything having to
-#: rewrite it: an expired window is simply not selected, and the next `_BOOK` resets it. So a reader
-#: and a writer agree about when a window ended with no clock passed between them — both ask
-#: Postgres's `now()`, which is the one clock a fleet of pods shares.
+#: Selected whether or not the window has expired, because the in-process half of `api/budget.py`
+#: has to tell "this window ended" apart from "nothing was ever booked" to re-anchor itself
+#: (`BudgetTracker._reconcile`). The expiry decision is still one clock: the age is Postgres's
+#: `now()` minus `window_start`, the same subtraction `_BOOK`'s `CASE` arms make, so a reader and a
+#: writer agree about when a window ended with no pod clock passed between them.
 _USAGE = """
-    SELECT turns, tokens FROM budget_usage
-    WHERE actor = %(actor)s AND window_start > now() - %(window)s::interval
+    SELECT turns, tokens,
+        EXTRACT(EPOCH FROM window_start), EXTRACT(EPOCH FROM now() - window_start)
+    FROM budget_usage WHERE actor = %(actor)s
 """
+
+
+class Window(NamedTuple):
+    """What a principal has spent in the current durable window, and which window that is.
+
+    `start` is the window's identity (`window_start` as epoch seconds, a stable value every pod
+    reads identically) and `age` its elapsed seconds by Postgres's clock. The in-process counter
+    needs both: the identity to tell whether it has already been reconciled with this window, and
+    the age to place the window on its own monotonic clock so both halves roll together.
+    """
+
+    turns: int
+    tokens: int
+    #: `None` when the principal has no row at all — nothing has ever been booked durably.
+    start: float | None = None
+    age: float = 0.0
+
+    @property
+    def expired(self) -> bool:
+        """Whether a row exists and its window has run out, so the next booking opens a new one."""
+        return self.start is not None and self.age >= _window().total_seconds()
+
+
+def _from_row(row: tuple[Any, ...] | None) -> Window:
+    """A `Window` from `(turns, tokens, start, age)`, with an expired window's counts read as zero.
+
+    `Any` because that is the row psycopg hands back; `EXTRACT` arrives as a `Decimal`.
+
+    Zero rather than the stale totals because they are the same fact as an unknown principal's:
+    nothing is booked against the current window.
+    """
+    if row is None:
+        return Window(0, 0)
+    turns, tokens, start, age = row
+    window = Window(int(turns), int(tokens), float(start), float(age))
+    return window._replace(turns=0, tokens=0) if window.expired else window
 
 
 def _dsn() -> str:
@@ -92,22 +132,20 @@ def _window() -> timedelta:
     return timedelta(hours=settings.budget_window_hours)
 
 
-async def usage(actor: str) -> tuple[int, int]:
-    """`(turns, tokens)` this principal has spent in the current window; zeros if it has rolled.
+async def usage(actor: str) -> Window:
+    """What this principal has spent in the current window; zero counts if it has rolled.
 
-    Zeros for an unknown principal and for one whose window expired are deliberately the same
-    answer, because they are the same fact: nothing is booked against this window. Distinguishing
-    them would need the caller to care about a difference that cannot change its decision.
+    The counts are zero for an unknown principal and for one whose window expired, because for the
+    cap they are the same fact. `start` is what tells them apart, for the one reader that needs
+    to: the in-process counter, which must drop counts from a window the durable row has closed.
     """
     async with db.connection(_dsn()) as conn:
-        cursor = await conn.execute(_USAGE, {"actor": actor, "window": _window()})
+        cursor = await conn.execute(_USAGE, {"actor": actor})
         row = await cursor.fetchone()
-    if row is None:
-        return 0, 0
-    return int(row[0]), int(row[1])
+    return _from_row(row)
 
 
-async def book(actor: str, tokens: int) -> tuple[int, int]:
+async def book(actor: str, tokens: int) -> Window:
     """Add one turn and its tokens to this principal's window; return the window's new totals.
 
     `tokens` is clamped at zero here as well as by `api/budget.py::_book` for the in-process map; a
@@ -124,6 +162,4 @@ async def book(actor: str, tokens: int) -> tuple[int, int]:
             _BOOK, {"actor": actor, "tokens": max(tokens, 0), "window": _window()}
         )
         row = await cursor.fetchone()
-    if row is None:  # pragma: no cover - an upsert with RETURNING always yields its row
-        return 0, 0
-    return int(row[0]), int(row[1])
+    return _from_row(row)

@@ -279,27 +279,60 @@ _MAX_REPEAT_COUNT = 10_000
 # neither escaped nor inside a character class, so this never has to decide that itself.
 _REPEAT_BOUND = re.compile(r"\{(\d*)(?:,(\d*))?\}")
 
+# The flag run of an inline flag group — `(?x)`, `(?i-s:` — read from just after its `(?`. Only
+# the positions `regex` reads as flags: `(?P<`, `(?:`, `(?=` and the rest fail the terminator.
+_INLINE_FLAGS = re.compile(r"([A-Za-z0-9-]*)[):]")
+
+
+def _refuse_past_the_expansion_bound(pattern: str, expanded: int) -> None:
+    """Raise `PathSyntaxError` if `expanded` atoms is more than `regex` should build at load."""
+    if expanded > _MAX_REPEAT_COUNT:
+        raise PathSyntaxError(
+            f"transform 'regex' expands to {expanded} atoms in {pattern!r}, over the "
+            f"{_MAX_REPEAT_COUNT} this engine will expand. A bounded repeat is expanded at "
+            "compile time, and nested repeats multiply, so a count this size is memory rather "
+            "than a pattern — write the repeat unbounded (`+`, `*`) or bound it at the width of "
+            "the field being read"
+        )
+
 
 def _refuse_an_unbounded_expansion(pattern: str) -> None:
-    """Raise `PathSyntaxError` if `pattern` names a repeat `regex` would expand into the heap.
+    r"""Raise `PathSyntaxError` if `pattern` names a repeat `regex` would expand into the heap.
 
     **Scanned rather than parsed, and rather than compiled.** Compiling is the thing being
     guarded, so it cannot be the guard; and `re.compile` first — which is cheap and does not
-    expand — only establishes that the pattern is *valid*, not what it costs the other engine.
-    Walking the text is the one order that works.
+    expand — only establishes that the pattern is *valid*, not what it costs the other engine
+    (and `re` refuses legal `regex` syntax such as `\p{L}`, so it cannot be the parser either).
 
-    The walk tracks exactly two things, because they are the two ways a `{` is not a quantifier: a
-    backslash escape, and a character class, where `{` is an ordinary member. Both are the cases a
-    bare `finditer` over the whole pattern would refuse a legal pattern for — `[{]{1}` is a literal
-    brace repeated once — which is the shape `tasks/lessons.md` rule 96 is about, so the scan pays
-    for them rather than the deployment.
+    **What is bounded is the expanded size, not each count.** `regex` expands nested bounded
+    repeats multiplicatively, so `(?:a{1000}){1000}` is a million atoms although neither count is
+    over the limit. The walk keeps one running total per open group: an atom adds its weight, a
+    `{n,m}` multiplies the atom (or group) before it by `max(n, m)`, and a closing `)` hands the
+    group's total up as one atom's weight. Siblings are summed, so what is bounded is the whole
+    pattern's expansion — `a{9000}` written a hundred times over is refused too — and an
+    alternation's branches are summed rather than maxed, an over-estimate, which is the safe
+    direction for a guard.
+
+    Besides that, it tracks the ways a `{` or `[` is not what it looks like: a backslash escape; a
+    character class, where `{` is an ordinary member (`[{]{1}` is a literal brace repeated once,
+    the shape `tasks/lessons.md` rule 96 is about); and an inline comment `(?#...)`, skipped to
+    its first `)` — a `[` there opens nothing, and ending at the *first* `)` can only make the
+    scan see more of the pattern, never less. **Verbose mode is refused outright**: under `x` a
+    `#` comments out the rest of the line and whitespace is insignificant, so a scanner that does
+    not model both is blind to a quantifier behind `#[` — and a binding that needs verbose mode
+    to read a column is not one this has seen.
     """
+    totals = [0]  # the expanded size of each open group, outermost first
+    last = 0  # the weight of the atom a following quantifier would repeat
     index = 0
     in_class = False
     while index < len(pattern):
         char = pattern[index]
         if char == "\\":
             index += 2
+            if not in_class:
+                last = 1
+                totals[-1] += last
             continue
         if in_class:
             in_class = char != "]"
@@ -307,6 +340,32 @@ def _refuse_an_unbounded_expansion(pattern: str) -> None:
             continue
         if char == "[":
             in_class = True
+            last = 1
+            totals[-1] += last
+            index += 1
+            continue
+        if char == "(":
+            if pattern.startswith("(?#", index):
+                close = pattern.find(")", index)
+                index = len(pattern) if close < 0 else close + 1
+                continue
+            flags = (
+                _INLINE_FLAGS.match(pattern, index + 2) if pattern.startswith("(?", index) else None
+            )
+            # Only a flag *set*: `(?-x:` turns verbose mode off, which hides nothing.
+            if flags is not None and "x" in flags.group(1).partition("-")[0]:
+                raise PathSyntaxError(
+                    f"transform 'regex' turns on verbose mode in {pattern!r}. Under `x` a `#` "
+                    "comments out the rest of the line, which hides what the pattern would "
+                    "expand to from the check that bounds it — write the pattern without `x`"
+                )
+            totals.append(0)
+            index += 1
+            continue
+        if char == ")":
+            last = totals.pop() if len(totals) > 1 else 0
+            totals[-1] += last
+            _refuse_past_the_expansion_bound(pattern, totals[-1])
             index += 1
             continue
         if char == "{":
@@ -316,16 +375,16 @@ def _refuse_an_unbounded_expansion(pattern: str) -> None:
             # nothing to compile.
             if bound is not None:
                 counts = [int(part) for part in bound.groups() if part]
-                if counts and max(counts) > _MAX_REPEAT_COUNT:
-                    raise PathSyntaxError(
-                        f"transform 'regex' repeats up to {max(counts)} times in "
-                        f"{pattern!r}, over the {_MAX_REPEAT_COUNT} this engine will expand. A "
-                        "bounded repeat is expanded at compile time, so a count this size is "
-                        "memory rather than a pattern — write the repeat unbounded (`+`, `*`) or "
-                        "bound it at the width of the field being read"
-                    )
+                if counts:
+                    repeated = last * max(counts)
+                    totals[-1] += repeated - last
+                    last = repeated
+                    _refuse_past_the_expansion_bound(pattern, totals[-1])
                 index = bound.end()
                 continue
+        if char not in "*+?|":
+            last = 1
+            totals[-1] += last
         index += 1
 
 

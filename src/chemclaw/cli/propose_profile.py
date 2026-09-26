@@ -28,7 +28,10 @@ import asyncio
 import json
 from collections import Counter, defaultdict
 
+import yaml
+
 from chemclaw.agent.behaviour_proposals import Proposal, content_hash, default_proposal_store
+from chemclaw.operations.activity import safe_tool_name
 
 #: How many of one chemist's turns a pair of tools must share before it is a cluster rather than a
 #: coincidence. Low, because the thing being proposed is a *record for a person to read* rather
@@ -87,19 +90,25 @@ def document(actor: str, cluster: list[tuple[str, int]]) -> str:
     sorted so two runs over one corpus produce one proposal rather than a family of them.
     """
     tools = sorted(tool for tool, _ in cluster)
-    listed = "\n".join(f"  - {tool}" for tool in tools)
-    return (
-        f"# Proposed from observed co-occurrence across one chemist's turns.\n"
-        f"# This names a pattern in how somebody works. It is NOT evidence that a narrower\n"
-        f"# surface answers better — that question is measured in `evals/`, and both existing\n"
-        f"# arms are on record in D-2026-08-12 and D-2026-08-13.\n"
-        f"name: {_name(tools)}\n"
-        f"description: >-\n"
-        f"  Observed working set: {', '.join(tools)}. Written by the profile proposer from\n"
-        f"  co-occurrence alone; the instructions below are a gap for a person to fill.\n"
-        f"instructions: ''\n"
-        f"tool_names:\n{listed}\n"
+    header = (
+        "# Proposed from observed co-occurrence across one chemist's turns.\n"
+        "# This names a pattern in how somebody works. It is NOT evidence that a narrower\n"
+        "# surface answers better — that question is measured in `evals/`, and both existing\n"
+        "# arms are on record in D-2026-08-12 and D-2026-08-13.\n"
     )
+    # Dumped rather than interpolated, so the document is YAML whatever the strings hold — the
+    # tool names are filtered in `_turns`, and this is what keeps a filter's gap from becoming a
+    # document that parses to keys nobody wrote.
+    body = {
+        "name": _name(tools),
+        "description": (
+            f"Observed working set: {', '.join(tools)}. Written by the profile proposer from "
+            "co-occurrence alone; the instructions below are a gap for a person to fill."
+        ),
+        "instructions": "",
+        "tool_names": tools,
+    }
+    return header + yaml.safe_dump(body, sort_keys=False, allow_unicode=True, width=100)
 
 
 def _name(tools: list[str]) -> str:
@@ -112,6 +121,12 @@ async def _turns() -> list[tuple[str, frozenset[str]]]:
 
     `audit_events` rather than `session_messages`, because the question is which *tools ran* and the
     trail is the one place every call is recorded — including the ones a transcript does not carry.
+
+    **Only calls that ran, under names this system could serve.** The column holds the model's raw
+    string, hallucinated names included, and refused and failed calls beside successful ones — none
+    of which is a working set. `outcome = 'ok'` keeps the calls that ran, and
+    `operations.activity.safe_tool_name` is the bound this column's other readers already apply, so
+    a name that is not identifier-shaped never reaches a proposed profile.
     """
     from chemclaw.core import db
     from chemclaw.core.config import settings
@@ -120,10 +135,12 @@ async def _turns() -> list[tuple[str, frozenset[str]]]:
     async with db.connection(settings.postgres_dsn) as conn:
         cursor = await conn.execute(
             "SELECT actor, correlation_id, tool FROM audit_events "
-            "WHERE actor <> '' AND correlation_id <> '' AND tool <> ''"
+            "WHERE actor <> '' AND correlation_id <> '' AND tool <> '' AND outcome = 'ok'"
         )
         for actor, correlation_id, tool in await cursor.fetchall():
-            by_turn[(str(actor), str(correlation_id))].add(str(tool))
+            name = safe_tool_name(str(tool))
+            if name == str(tool):
+                by_turn[(str(actor), str(correlation_id))].add(name)
     return [(actor, frozenset(tools)) for (actor, _), tools in by_turn.items()]
 
 

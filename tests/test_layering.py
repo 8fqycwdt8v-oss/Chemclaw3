@@ -338,6 +338,10 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
     ("chemclaw.cli", "chemclaw.evals"),
     ("chemclaw.cli", "chemclaw.ingest"),
     ("chemclaw.cli", "chemclaw.kg"),
+    # `cli/propose_profile.py` mines `audit_events.tool`, the same model-written column
+    # `operations.activity.safe_tool_name` bounds for its own readers — and a bound applied to one
+    # reader of a column is not a bound, which that function's docstring argues.
+    ("chemclaw.cli", "chemclaw.operations"),
     # `cli/verifier_margin.py` measures the judge's roll-to-roll margin
     # (D-2026-08-27-a-verdict-at-the-margin-is-a-coin-toss), and the judge's input type is
     # `retrieval.evidence.EvidenceChunk` — building the pairs from anything else would measure a

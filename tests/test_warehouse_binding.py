@@ -10,6 +10,7 @@ binding parses, every path in it resolves against a realistic row, and it is dis
 being enabled.
 """
 
+import ast
 import os
 import sqlite3
 import time
@@ -598,7 +599,6 @@ def test_no_handler_on_the_ingest_path_catches_a_pattern_that_cannot_finish() ->
     `PatternBudgetError`. A handler added or widened later reds this, which naming a single module
     never could.
     """
-    import ast
     import importlib
 
     package = Path(__file__).resolve().parents[1] / "src" / "chemclaw" / "ingest" / "eln"
@@ -676,12 +676,46 @@ def test_a_repeat_count_too_large_to_expand_is_refused_before_it_is_compiled() -
 @pytest.mark.parametrize(
     ("pattern", "because"),
     [
+        ("(?#[)a{200000}", "a `[` inside an inline comment opens no class"),
+        ("(?x)#[\na{200000}", "verbose mode can comment a `[` out of the scan's sight"),
+        ("(?:a{1000}){1000}", "nested repeats multiply: a million atoms, each count legal"),
+        ("(?:(?:(?:a{100}){100}){100}){100}", "the case that never finishes, every count 100"),
+        ("a{9000}" * 3, "siblings add up: the bound is the pattern's expansion, not one count"),
+    ],
+)
+def test_the_expansion_guard_sees_what_a_per_quantifier_scan_did_not(
+    pattern: str, because: str
+) -> None:
+    """Each shape was accepted by the first scan and each reaches `regex.compile` unbounded.
+
+    The first scan checked one `{n,m}` at a time and treated every `[` as opening a class, so a
+    `[` in a comment hid everything after it and nested bounded repeats — which `regex` expands
+    multiplicatively — passed with every individual count under the limit. Timed, because a
+    refusal that compiled first is not a guard.
+    """
+    binding = _ingest()
+    binding["ingest"]["reaction"]["reaction_id"]["transform"] = [{"regex": {"pattern": pattern}}]
+
+    started = time.perf_counter()
+    with pytest.raises(BindingError, match="this engine will expand|verbose mode"):
+        load_binding(binding)
+
+    assert time.perf_counter() - started < 1.0, because
+
+
+@pytest.mark.parametrize(
+    ("pattern", "because"),
+    [
         (r"\d{3,6}", "a field width, which is what a real binding writes"),
         (r"[A-Z]{2,4}-\d+", "a bounded class repeat"),
         (r"a{2,}", "unbounded: the other remedy's subject, and free to compile"),
         (r"\{100000\}", "an escaped brace is a literal, not a quantifier"),
         (r"[{]{1}", "a brace inside a character class, repeated once"),
         (r"x{not a number}", "a brace group that is not a quantifier at all"),
+        (r"(?:\d{3}){2}", "a nested bounded repeat whose product is small"),
+        (r"\p{L}+", "`regex` syntax `re` would refuse, which is why this is a scan"),
+        (r"(?i-x:ab)", "a flag group turning verbose mode off hides nothing"),
+        (r"(?#note)L-(\d+)", "an inline comment is skipped, not refused"),
     ],
 )
 def test_the_expansion_guard_does_not_refuse_a_pattern_a_binding_would_write(
@@ -1091,8 +1125,25 @@ def test_no_budget_open_leaves_the_per_cell_bound_exactly_as_it_was() -> None:
     assert apply_transforms("batch 4471 of 12", [_HONEST]) == "4471"
 
 
+# The two entry points a site's transforms run through: a whole ELN entry, and one bound field.
+_MAPPERS = frozenset({"map_to_ord", "apply_transforms"})
+
+
+def _called_names(node: ast.AST) -> set[str]:
+    """Every name a call under `node` reaches, as `f(...)` or `obj.f(...)`."""
+    names = set()
+    for inner in ast.walk(node):
+        if isinstance(inner, ast.Call):
+            func = inner.func
+            if isinstance(func, ast.Name):
+                names.add(func.id)
+            elif isinstance(func, ast.Attribute):
+                names.add(func.attr)
+    return names
+
+
 def _modules_mapping_entries_in_a_loop() -> list[str]:
-    """Every first-party module with a `map_to_ord` call **lexically inside** a loop.
+    """Every first-party module with a loop that **reaches a mapper**, directly or via a helper.
 
     "Inside" matters, and the first version of this guard got it wrong: pairing any `map_to_ord`
     call
@@ -1106,21 +1157,39 @@ def _modules_mapping_entries_in_a_loop() -> list[str]:
     guard's live set names it. The sentence outlived the fix, so for a while this file said
     `validate.py` "needs no page bound at all" two functions away from an assertion requiring four
     callers including it.
-    """
-    import ast
 
+    **Lexical-only was blind to `ingest/labels/corpus.py`**, whose page loop calls `_record`, which
+    reaches `apply_transforms` two helpers down — so the reaction-corpus drain ran up to a thousand
+    rows of site patterns with no page bound while this guard was green. So a loop now counts when
+    it calls a module-local function that reaches a mapper (closed to a fixpoint), and
+    `apply_transforms` is a mapper beside `map_to_ord`. A module that *defines* a mapper is where
+    the per-entry work lives, not a page caller, and is skipped.
+    """
     source_root = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
     found = []
     for path in sorted(source_root.rglob("*.py")):
         text = path.read_text(encoding="utf-8")
-        if "map_to_ord" not in text:
+        if not any(mapper in text for mapper in _MAPPERS):
             continue
-        for node in ast.walk(ast.parse(text)):
-            if not isinstance(node, ast.For | ast.While):
-                continue
-            if any(
-                isinstance(inner, ast.Attribute) and inner.attr == "map_to_ord"
-                for inner in ast.walk(node)
+        tree = ast.parse(text)
+        functions = {
+            node.name: node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+        }
+        if _MAPPERS & functions.keys():
+            continue
+        reaching = set(_MAPPERS)
+        while True:
+            grown = reaching | {
+                name for name, node in functions.items() if _called_names(node) & reaching
+            }
+            if grown == reaching:
+                break
+            reaching = grown
+        for node in ast.walk(tree):
+            if isinstance(node, ast.For | ast.AsyncFor | ast.While) and (
+                _called_names(node) & reaching
             ):
                 found.append(str(path.relative_to(source_root)))
                 break
@@ -1158,14 +1227,18 @@ def test_that_guard_is_measuring_the_callers_and_not_the_definitions() -> None:
     """The guard above would pass vacuously on an empty set, so this pins what it found.
 
     A `def map_to_ord` is not a caller, and the adapters that define it must not need a budget — the
-    budget belongs to whoever maps a *page* of entries. Requiring the four measured callers is what
-    makes the assertion above a measurement rather than a tautology — "three" here was the same
-    stale count the docstring above carried.
+    budget belongs to whoever maps a *page* of entries. Requiring the five measured callers is what
+    makes the assertion above a measurement rather than a tautology — "three", then "four", here
+    was the same stale count the docstring above carried.
     """
     callers = _modules_mapping_entries_in_a_loop()
 
-    assert len(callers) >= 4, (
-        "fewer page-mapping callers than the four measured (ingest/eln/sync.py, "
-        "durable/memory_jobs.py, cli/live_data.py, ingest/eln/validate.py), so the guard above "
-        f"asserts little: {callers}"
+    assert len(callers) >= 5, (
+        "fewer page-mapping callers than the five measured (ingest/eln/sync.py, "
+        "durable/memory_jobs.py, cli/live_data.py, ingest/eln/validate.py, "
+        f"ingest/labels/corpus.py), so the guard above asserts little: {callers}"
+    )
+    assert "ingest/labels/corpus.py" in callers, (
+        "the reaction-corpus drain reaches `apply_transforms` through its own helpers, and the "
+        f"guard no longer sees it: {callers}"
     )

@@ -246,7 +246,10 @@ async def tools_that_ran(session_ids: Sequence[str]) -> dict[str, frozenset[str]
     if not session_ids:
         return {}
     ran: dict[str, set[str]] = {}
-    async with db.connection(settings.session_store_dsn or settings.postgres_dsn) as conn:
+    # `audit_events` lives where `PostgresAuditSink` writes it — `postgres_dsn`, never the session
+    # store's DSN. Reading it off `session_store_dsn` (as `turn_costs` rightly is, below) finds no
+    # rows the moment a deployment splits the two, and every repeat then reads as undelegated.
+    async with db.connection(settings.postgres_dsn) as conn:
         async with conn.cursor() as cur:
             await cur.execute(_RAN_TOOLS, (list(session_ids), REFUSED))
             for session_id, tool in await cur.fetchall():

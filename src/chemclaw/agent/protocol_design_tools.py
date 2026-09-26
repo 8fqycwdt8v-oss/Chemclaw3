@@ -890,7 +890,6 @@ async def attach_plate_results(
     design_id: str,
     results: list[ArmResult],
     revision: int = 0,
-    note: str = "",
 ) -> str:
     """Attach measured outcomes to the arms of a stored design.
 
@@ -905,7 +904,6 @@ async def attach_plate_results(
             `measured_at`, `note`.
         revision: The revision the plate was **run from**, or 0 for the head. Pass the printed
             revision when it is not the head; a later edit must not re-point these numbers.
-        note: Why these are being attached, if it is not obvious.
 
     Returns:
         JSON with `attached`, `arms_without_results` (named, not counted) and `disagreements`.
@@ -913,9 +911,13 @@ async def attach_plate_results(
         finished.
 
     Raises:
-        ChemclawError: No such design or revision, or an `arm_id` that revision does not have.
+        ChemclawError: No such design or revision, an `arm_id` that revision does not have, or a
+            design belonging to another chemist.
     """
     store = _store()
+    # The results table is append-only and this tool is its only writer, so an unowned write here
+    # could never be taken back: the same `owner_permits` rule its two sibling writers apply.
+    await _require_writable(store, design_id)
     stored = await store.read(design_id, revision or None)
     if stored is None:
         raise ChemclawError(

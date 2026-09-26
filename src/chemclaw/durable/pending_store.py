@@ -345,19 +345,44 @@ _SETTLE_ORPHAN = """
     WHERE request_id = %s AND run_id = %s AND state = 'waiting'
 """
 
+#: One keyset page of waiting rows past the grace window, oldest first.
+#:
+#: **A cursor, not only a limit.** Without one every pass selected the same oldest rows, and a
+#: healthy wait is left `waiting` — so a batch's worth of live questions older than an orphan held
+#: the front of the queue for up to `awaiting_max_days` and the orphan was never examined.
+#: `request_id` breaks `created_at` ties so the order is total and no row is skipped or repeated.
 _ORPHAN_CANDIDATES = """
-    SELECT request_id, run_id FROM pending_requests
+    SELECT request_id, run_id, created_at FROM pending_requests
     WHERE state = 'waiting' AND created_at < now() - make_interval(secs => %s)
-    ORDER BY created_at
+      AND (%s::timestamptz IS NULL OR (created_at, request_id) > (%s::timestamptz, %s))
+    ORDER BY created_at, request_id
     LIMIT %s
 """
 
 
-async def waiting_rows(*, older_than_seconds: float, limit: int) -> list[tuple[str, str]]:
-    """`(request_id, run_id)` of the oldest waiting rows, for the orphan sweep."""
+class WaitingRow(BaseModel):
+    """One candidate for the orphan sweep, and the keyset position after it."""
+
+    request_id: str
+    run_id: str = ""
+    created_at: datetime
+
+
+async def waiting_rows(
+    *, older_than_seconds: float, limit: int, after: WaitingRow | None = None
+) -> list[WaitingRow]:
+    """One page of waiting rows past the grace window, continuing after `after`.
+
+    See `_ORPHAN_CANDIDATES` for why the sweep pages rather than re-reading one fixed batch.
+    """
+    at = after.created_at if after else None
+    key = after.request_id if after else ""
     async with _connect() as conn:
-        cursor = await conn.execute(_ORPHAN_CANDIDATES, (older_than_seconds, limit))
-        return [(str(row[0]), str(row[1] or "")) for row in await cursor.fetchall()]
+        cursor = await conn.execute(_ORPHAN_CANDIDATES, (older_than_seconds, at, at, key, limit))
+        return [
+            WaitingRow(request_id=str(row[0]), run_id=str(row[1] or ""), created_at=row[2])
+            for row in await cursor.fetchall()
+        ]
 
 
 async def settle_orphan(request_id: str, run_id: str, reason: str) -> bool:

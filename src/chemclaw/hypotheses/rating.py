@@ -70,12 +70,12 @@ _S = math.log(10.0) / SCALE
 # hypothesis lands near 1900 instead of at infinity.
 PRIOR_SD = 400.0
 
-# Newton is quadratically convergent on this objective (it is strictly concave), so the iteration
-# count is a safety net rather than a schedule; measured, a 30-candidate fit converges in 4-5.
 # The posterior probability at which the report is willing to say one hypothesis outranks another.
 # 0.95 is the conventional line; below it the table shows the pair as tied rather than ordered.
 DECISIVE_PROBABILITY = 0.95
 
+# Newton is quadratically convergent on this objective (it is strictly concave), so the iteration
+# count is a safety net rather than a schedule; measured, a 30-candidate fit converges in 4-5.
 _MAX_ITERATIONS = 100
 _TOLERANCE = 1e-9
 

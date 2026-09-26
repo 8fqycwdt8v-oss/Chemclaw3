@@ -46,6 +46,8 @@ from chemclaw.protocols.models import (
     Setpoints,
     design_id_for,
 )
+from chemclaw.protocols.result_store import InMemoryArmResultStore
+from chemclaw.protocols.results import ArmResult
 from chemclaw.protocols.store import InMemoryDesignStore
 
 ALICE = "alice-oid"
@@ -162,6 +164,43 @@ def test_the_owner_can_still_draft_onto_their_own_design(
     )
     header = asyncio.run(store.summary(DESIGN_ID))
     assert header is not None and header.head_revision == 2
+
+
+def test_a_turn_cannot_attach_results_to_another_chemists_design(
+    monkeypatch: pytest.MonkeyPatch, enforced: None
+) -> None:
+    """The results table is append-only and this tool is its only writer.
+
+    `draft_experiment_protocol` and the HTTP routes refused this actor while
+    `attach_plate_results` did not, so a stranger's numbers landed on a plate for good and
+    `suggest_next_experiment` then fitted on them.
+    """
+    store = InMemoryDesignStore()
+    results = InMemoryArmResultStore()
+    monkeypatch.setattr(tools, "_store", lambda: store)
+    monkeypatch.setattr(tools, "default_arm_result_store", lambda: results)
+    design = _design()
+    asyncio.run(
+        store.append(
+            DESIGN_ID,
+            design,
+            run_checks(design),
+            author_kind="agent",
+            author=ALICE,
+            parent_revision=0,
+            change_note="drafted",
+        )
+    )
+    measured = [ArmResult(arm_id="A1", outcome="conversion", value=88.0)]
+
+    monkeypatch.setattr(tools, "require_actor", lambda: BOB)
+    with pytest.raises(ChemclawError, match="belongs to another chemist"):
+        asyncio.run(tools.attach_plate_results(design_id=DESIGN_ID, results=measured))
+    assert asyncio.run(results.read(DESIGN_ID, 1)) == []
+
+    monkeypatch.setattr(tools, "require_actor", lambda: ALICE)
+    asyncio.run(tools.attach_plate_results(design_id=DESIGN_ID, results=measured))
+    assert len(asyncio.run(results.read(DESIGN_ID, 1))) == 1
 
 
 # --- the HTTP write path --------------------------------------------------------------------

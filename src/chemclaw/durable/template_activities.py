@@ -27,11 +27,11 @@ import logging
 import time
 from collections.abc import Iterator, Sequence
 from contextlib import AsyncExitStack, contextmanager
-from typing import Any
+from typing import Annotated, Any
 
 from langchain_core.callbacks import AsyncCallbackHandler
 from langchain_core.outputs import LLMResult
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from temporalio import activity
 
 from chemclaw.agent.context_budget import current_context
@@ -87,7 +87,10 @@ class StepIdentity(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    actor: str = Field(min_length=1)
+    # Stripped, then refused blank: `Field(min_length=1)` accepted `" "`, and a whitespace actor is
+    # stamped ambient by every step as a principal nobody is — the same rule `api/auth.py` holds on
+    # the token's `oid`.
+    actor: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
     roles: list[str] = Field(default_factory=list)
     # Ties this run's audit events together, exactly as a conversation's correlation id does, so a
     # template's steps are one traceable unit in the trail rather than N unrelated tool calls.

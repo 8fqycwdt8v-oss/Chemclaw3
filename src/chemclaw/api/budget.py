@@ -50,10 +50,14 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from chemclaw.core.bounded import BoundedLru
 from chemclaw.core.config import settings
 from chemclaw.core.metrics_bridge import degraded, record_metric
+
+if TYPE_CHECKING:
+    from chemclaw.api import budget_store
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +84,9 @@ class _Counter:
     #: Monotonic start of the window these counts belong to, for the *user* scope only — a session
     #: counter carries one too and nothing reads it, because `_book` only rolls what it is told to.
     started: float = field(default_factory=time.monotonic)
+    #: The durable window (`budget_store.Window.start`) this counter has been reconciled with, or
+    #: `None` while it has only ever been booked in process. User scope only.
+    window: float | None = None
 
 
 def _rolled(counter: _Counter) -> bool:
@@ -96,6 +103,17 @@ def _rolled(counter: _Counter) -> bool:
     same request was a 429 on one pod and a 200 on the next.
     """
     return time.monotonic() - counter.started >= settings.budget_window_hours * 3600.0
+
+
+def _live_counts(counter: _Counter | None) -> tuple[int, int]:
+    """A user counter's `(turns, tokens)`, or zeros once its own window has expired.
+
+    Zeros rather than the stale counts, so an expired counter is no floor under the durable row —
+    which is what `_rolled` exists to stop.
+    """
+    if counter is None or _rolled(counter):
+        return 0, 0
+    return counter.turns, counter.tokens
 
 
 def _over(cap: int, used: int) -> bool:
@@ -275,13 +293,12 @@ class BudgetTracker:
         )
         if user is None:
             return
-        # A counter whose own window has expired reads as zero rather than as a floor under the
-        # durable row, which is what `_rolled` exists to stop.
-        live = local is not None and not _rolled(local)
-        turns, tokens = (local.turns, local.tokens) if live and local is not None else (0, 0)
+        turns, tokens = _live_counts(local)
         if _durable():
-            stored_turns, stored_tokens = await self._stored(user)
-            turns, tokens = max(turns, stored_turns), max(tokens, stored_tokens)
+            stored = await self._stored(user)
+            if stored is not None:
+                turns, tokens = _live_counts(self._reconcile(user, stored))
+                turns, tokens = max(turns, stored.turns), max(tokens, stored.tokens)
         self._check_scope(
             _Counter(turns=turns, tokens=tokens),
             "user",
@@ -290,8 +307,12 @@ class BudgetTracker:
         )
 
     @staticmethod
-    async def _stored(user: str) -> tuple[int, int]:
-        """This principal's durable window, or zeros if the database cannot answer."""
+    async def _stored(user: str) -> "budget_store.Window | None":
+        """This principal's durable window, or `None` if the database cannot answer.
+
+        `None` rather than zeros so a failed read cannot re-anchor the in-process counter: an
+        unreachable meter must leave this pod's own count exactly as it was.
+        """
         from chemclaw.api import budget_store
 
         try:
@@ -304,7 +325,55 @@ class BudgetTracker:
                 "alone, which a restart or an eviction has reset",
                 user,
             )
-            return 0, 0
+            return None
+
+    def _reconcile(self, user: str, stored: "budget_store.Window") -> _Counter | None:
+        """Re-anchor this pod's counter for `user` to the durable window; return the counter.
+
+        **The in-process window must open and close with the durable one, or `max()` is a ratchet
+        again.** A pod's counter starts when *this pod* first books the user, which after a
+        restart, an eviction or on a second replica is hours after the durable row's
+        `window_start`. `_rolled` alone then keeps the local counts binding long after the durable
+        row has rolled to zero: measured by the review of 2026-09-26, a pod that booked the user at
+        20:00 against a row opened at 00:00 went on refusing after midnight while a sibling pod
+        admitted. So a counter is compared with the durable window it is read against:
+
+        - the durable window has **expired**: counts this pod booked before it ended belong to it,
+          so they are dropped and the counter restarts now;
+        - it is a **newer** window than the one the counter was reconciled with, or opened after
+          the counter started: the counter's counts straddle a boundary this pod cannot split, so
+          it takes the durable counts, which already hold every turn written to the new window;
+        - otherwise the counter lies inside the window and keeps its counts — the unwritten turns
+          `max()` exists for — and only adopts the window's start, so both halves roll together.
+
+        No durable row at all (`start is None`) leaves the counter alone: that is the state
+        between a first `record` and its write landing, where this pod's count is all there is.
+        Comparing the window's *identity*, not its start on this pod's clock, is what makes the
+        decision once per window; the placement on the monotonic clock jitters by the round trip.
+        """
+        if stored.start is None:
+            with self._lock:
+                return self._users.get(user)
+        now = time.monotonic()
+        span = settings.budget_window_hours * 3600.0
+        with self._lock:
+            local = self._users.get(user)
+            if local is None:
+                return None
+            if stored.expired:
+                if local.window == stored.start or local.started < now - (stored.age - span):
+                    local = _Counter(started=now)
+                    self._users.put(user, local)
+                return local
+            if local.window == stored.start:
+                return local
+            opened = now - stored.age
+            if local.window is not None or local.started < opened:
+                local = _Counter(stored.turns, stored.tokens, opened, stored.start)
+            else:
+                local.started, local.window = opened, stored.start
+            self._users.put(user, local)
+            return local
 
     @staticmethod
     def _check_scope(counter: _Counter | None, scope: str, max_turns: int, max_tokens: int) -> None:
@@ -341,8 +410,7 @@ class BudgetTracker:
             return
         self._schedule(user, tokens)
 
-    @staticmethod
-    def _schedule(user: str, tokens: int) -> None:
+    def _schedule(self, user: str, tokens: int) -> None:
         """Book the durable window off the hot path, warning off the totals it returns.
 
         A window that cannot be written is logged and lost, which is the same trade
@@ -354,7 +422,7 @@ class BudgetTracker:
 
         async def _write() -> None:
             try:
-                turns, tokens_spent = await budget_store.book(user, tokens)
+                stored = await budget_store.book(user, tokens)
             except asyncio.CancelledError:
                 # **Separately, and before the `Exception` arm, because it is not one.** A
                 # fire-and-forget task's dominant loss mode is cancellation — an ASGI shutdown, a
@@ -380,7 +448,8 @@ class BudgetTracker:
                     user,
                 )
                 return
-            _warn("user", user, turns, tokens_spent, max(tokens, 0))
+            self._reconcile(user, stored)
+            _warn("user", user, stored.turns, stored.tokens, max(tokens, 0))
 
         try:
             task = asyncio.get_running_loop().create_task(_write())

@@ -469,6 +469,8 @@ def test_the_three_physical_constants_are_pinned_against_the_codata_release_scip
         ("  500 mg  ", 500.0, "mg"),
         ("1.5 L", 1.5, "L"),
         ("2,5 kg", 2.5, "kg"),
+        ("2,5 mmol", 2.5, "mmol"),
+        ("1,25 L", 1.25, "L"),
         ("1e3 g", 1000.0, "g"),
         ("0.5 mol", 0.5, "mol"),
     ],
@@ -503,3 +505,13 @@ def test_parse_quantity_refuses_a_number_inside_a_sentence() -> None:
     `quantities.labelled_values` is the tool for the other job.
     """
     assert parse_quantity("run it at 20 C in 500 mL") is None
+
+
+@pytest.mark.parametrize("text", ["1,000 g", "1,500 mL", "12,345 mg", "-1,000 g"])
+def test_parse_quantity_refuses_a_comma_that_may_be_a_thousands_separator(text: str) -> None:
+    """A comma and exactly three digits is refused, not read as a decimal.
+
+    "1,500 g" read as 1.5 g scales a protocol a thousand times too small while its recorded basis
+    still says "1,500 g", so the caller's "write it as a number and a unit" refusal is the answer.
+    """
+    assert parse_quantity(text) is None

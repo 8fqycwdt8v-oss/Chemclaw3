@@ -175,3 +175,28 @@ def test_an_arrival_is_dated_in_utc_whatever_the_committers_offset(repo: Path) -
     _git(repo, "add", "-A", day="2026-09-05", at="23:30:00-05:00")
     _git(repo, "commit", "-qm", "late", day="2026-09-05", at="23:30:00-05:00")
     assert note_arrivals(repo / "knowledge") == {"playbook-late": date(2026, 9, 6)}
+
+
+@pytest.mark.parametrize("warm", [False, True], ids=["full-scan", "since-range"])
+def test_a_note_merged_from_a_back_dated_branch_arrives_on_the_merge(
+    repo: Path, warm: bool
+) -> None:
+    """A `--no-ff` merge is the day the note reached this branch, not the day it was written.
+
+    Without `--first-parent -m` the file is attributed to its side-branch commit, so a note merged
+    on 02-01 from a branch committed on 01-02 read as 01-02 — older than a subscriber's 01-15
+    watermark, and so never reported. The `since..HEAD` range has the same defect, because the
+    side-branch commits are in it with their old dates; both paths are driven.
+    """
+    _add(repo, "playbook/playbook-a.md", "2026-01-01")
+    notes = repo / "knowledge"
+    if warm:
+        assert note_arrivals(notes) == {"playbook-a": date(2026, 1, 1)}
+    _git(repo, "checkout", "-qb", "side", day="2026-01-02")
+    _add(repo, "playbook/playbook-b.md", "2026-01-02")
+    _git(repo, "checkout", "-q", "-", day="2026-01-10")
+    _add(repo, "playbook/playbook-c.md", "2026-01-10")
+    _git(repo, "merge", "--no-ff", "-qm", "merge side", "side", day="2026-02-01")
+    invalidate_cache(notes)
+
+    assert note_arrivals(notes)["playbook-b"] == date(2026, 2, 1)

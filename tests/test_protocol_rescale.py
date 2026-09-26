@@ -149,3 +149,39 @@ def test_scaling_down_is_the_same_operation() -> None:
     result = rescale(_design(), target="100 mg")
     assert result.factor == pytest.approx(0.1)
     assert result.design.base.charge[0].mass_mg == pytest.approx(100.0)
+
+
+def test_a_line_stating_mass_and_amount_scales_by_either() -> None:
+    """The basis is whichever stated dimension the target converts to, not always the mass.
+
+    A limiting line with `mass_mg` and `amount_mmol` used to refuse a target in mmol, telling the
+    caller to restate it in mg — naming as missing a dimension the protocol carries.
+    """
+    design = _design(
+        charge=[
+            ChargeLine(
+                component="ArBr", limiting=True, mass_mg=1000.0, amount_mmol=5.0, equivalents=1.0
+            ),
+            ChargeLine(component="2-MeTHF", volume_ml=10.0),
+        ]
+    )
+    result = rescale(design, target="50 mmol")
+    assert result.factor == pytest.approx(10.0)
+    assert {line.component: line for line in result.design.base.charge}[
+        "ArBr"
+    ].mass_mg == pytest.approx(10_000.0)
+
+
+def test_a_rescaled_design_declares_its_new_scale_and_passes_the_plausibility_band() -> None:
+    """`quantities_are_plausible` sizes its ceilings off `request.scale`, so it has to move too.
+
+    Before, a 1 g protocol taken to 20 kg kept the old (here: empty) scale, and the kilo charges
+    tripped the default ceilings — the false unit-slip warning the scale-aware band exists to
+    remove. The new value is `inferred`: the chemist's text never said it.
+    """
+    from chemclaw.protocols.checks import quantities_are_plausible
+
+    scaled = rescale(_design(), target="20 kg").design
+    assert scaled.request.scale.value == "20 kg"
+    assert scaled.request.scale.basis == "inferred"
+    assert quantities_are_plausible(scaled).passed

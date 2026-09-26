@@ -53,7 +53,10 @@ class ArmResult(BaseModel):
 
     arm_id: str = Field(min_length=1)
     outcome: str = Field(min_length=1)
-    value: float
+    # Finite, because the store is append-only: a `NaN` accepted here (pydantic takes the strings
+    # "NaN" and "inf" too) lands permanently, reads as a disagreement with itself (`nan != nan`),
+    # and reaches a surrogate through `observations_for` as a measured value.
+    value: float = Field(allow_inf_nan=False)
     # As `core/units` spells it. Carried rather than assumed: a yield in percent and an assay in
     # mg/mL are both numbers, and only one of them is comparable to a specification limit.
     unit: str = ""
@@ -135,15 +138,22 @@ def summarise(
     """
     latest = latest_by_arm(results)
     measured = {arm for arm, _ in latest}
-    seen: dict[tuple[str, str], float] = {}
+    seen: dict[tuple[str, str], StoredArmResult] = {}
     disagreements: list[str] = []
     for result in results:
         key = (result.arm_id, result.outcome)
-        if key in seen and seen[key] != result.value:
+        first = seen.setdefault(key, result)
+        # A unit change is its own line rather than a numeric disagreement: 85 % and 0.85 fraction
+        # agree, and reporting them as "85 and 0.85" would send a chemist to re-run a well that
+        # was only relabelled.
+        if first.unit != result.unit:
             disagreements.append(
-                f"{result.arm_id} {result.outcome}: {seen[key]} and {result.value}"
+                f"{result.arm_id} {result.outcome}: unit {first.unit!r} and {result.unit!r}"
             )
-        seen.setdefault(key, result.value)
+        elif first.value != result.value:
+            disagreements.append(
+                f"{result.arm_id} {result.outcome}: {first.value} and {result.value}"
+            )
     return PlateOutcomes(
         design_id=design_id,
         revision=revision,
@@ -168,14 +178,30 @@ def observations_for(
     Returns one row per arm that has a value for `outcome`, with the arm's declared factor levels
     beside it. Arms with no measurement are omitted rather than defaulted — a missing well is not a
     zero, and a surrogate fitted to invented zeros is worse than one fitted to fewer points.
+
+    Raises:
+        ChemclawError: the latest values for `outcome` carry more than one unit, naming the arms
+            under each. A column mixing percent and fraction fits a surrogate to numbers that are
+            not comparable, and which unit is right is the chemist's call, not a conversion here.
     """
     latest = latest_by_arm(results)
+    measured = [
+        (arm, found)
+        for arm in design.arms
+        if (found := latest.get((arm.arm_id, outcome))) is not None
+    ]
+    by_unit: dict[str, list[str]] = {}
+    for arm, found in measured:
+        by_unit.setdefault(found.unit, []).append(arm.arm_id)
+    if len(by_unit) > 1:
+        raise ChemclawError(
+            f"the latest {outcome!r} values are in more than one unit: "
+            + "; ".join(f"{unit or '(no unit)'}: {sorted(arms)}" for unit, arms in by_unit.items())
+            + ". Re-attach them in one unit before seeding a campaign"
+        )
     rows: list[dict[str, float | str]] = []
-    for arm in design.arms:
-        measured = latest.get((arm.arm_id, outcome))
-        if measured is None:
-            continue
+    for arm, found in measured:
         row: dict[str, float | str] = dict(arm.levels)
-        row[outcome] = measured.value
+        row[outcome] = found.value
         rows.append(row)
     return rows

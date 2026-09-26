@@ -35,8 +35,8 @@ class _Hold:
         await workflow.wait_condition(lambda: False)
 
 
-async def _open(request_id: str, run_id: str) -> None:
-    """A waiting row owned by `run_id`, backdated past the sweep's grace window."""
+async def _open(request_id: str, run_id: str, *, age: str = "2 hours") -> None:
+    """A waiting row owned by `run_id`, backdated past the sweep's grace window by `age`."""
     await pending_store.open_request(
         request_id=request_id,
         kind="measurement",
@@ -51,9 +51,8 @@ async def _open(request_id: str, run_id: str) -> None:
     )
     async with await connect(settings.postgres_dsn) as conn:
         await conn.execute(
-            "UPDATE pending_requests SET created_at = now() - interval '2 hours' "
-            "WHERE request_id = %s",
-            (request_id,),
+            "UPDATE pending_requests SET created_at = now() - %s::interval WHERE request_id = %s",
+            (age, request_id),
         )
         await conn.commit()
 
@@ -149,6 +148,55 @@ def test_a_terminated_wait_is_settled_and_a_live_one_is_left_alone(
     assert states["stale_settle"] == "False", "a sweep settled a run it never examined"
     assert states["settled"] == f"{_PREFIX}gone,{_PREFIX}terminated", states
     assert "terminated" in states["reason"], states["reason"]
+
+
+def test_live_waits_older_than_an_orphan_do_not_starve_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """More live waits than one page, all older than the orphan, and the orphan is still reached.
+
+    Before the cursor every pass selected the same `awaiting_orphan_batch` oldest rows, found them
+    running, and stopped — so an orphan newer than a page of healthy waits was never examined.
+    """
+    monkeypatch.setattr(settings, "awaiting_orphan_grace_seconds", 3600.0)
+    monkeypatch.setattr(settings, "awaiting_orphan_batch", 2)
+
+    async def _run() -> tuple[str, list[str], int]:
+        await migrated_db_or_skip()
+        async with await connect(settings.postgres_dsn) as conn:
+            await conn.execute(
+                "DELETE FROM pending_requests WHERE request_id LIKE %s", (f"{_PREFIX}%",)
+            )
+            await conn.commit()
+        async with await start_local_env_or_skip() as env:
+            client = pydantic_client(env)
+            monkeypatch.setattr(orphaned_waits, "connect", _returning(client))
+            async with Worker(
+                client,
+                task_queue=_QUEUE,
+                workflows=[_Hold],
+                workflow_runner=UnsandboxedWorkflowRunner(),
+            ):
+                live = []
+                for index in range(3):
+                    wid = f"{_PREFIX}starve-live-{index}"
+                    handle = await client.start_workflow(_Hold.run, id=wid, task_queue=_QUEUE)
+                    await _open(wid, handle.first_execution_run_id or "", age="3 hours")
+                    live.append(handle)
+                orphan = f"{_PREFIX}starve-orphan"
+                await _open(orphan, "5b7c1c0e-0000-4000-8000-000000000001")
+
+                sweep = await settle_orphaned_waits()
+
+                for handle in live:
+                    await handle.terminate(reason="test over")
+                return await _state(orphan), sweep.settled, sweep.examined
+
+    # Other rows in a shared table may sit in the same pages, so the counts are lower bounds.
+    state, settled, examined = asyncio.run(_run())
+    assert state == "cancelled", "an orphan behind a page of live waits was never examined"
+    assert f"{_PREFIX}starve-orphan" in settled
+    assert examined >= 4
 
 
 def _returning(client: Any) -> Any:

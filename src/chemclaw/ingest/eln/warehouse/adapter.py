@@ -454,8 +454,14 @@ class WarehouseElnAdapter:
                 # dropped — the remedy `Impurity._identifiable` prescribes, and the identical hole
                 # `json_adapter._impurities` had. The unresolved peaks in a site's analytics table
                 # are routinely its largest.
-                if not name and not smiles and isinstance(rrt, (int, float)) and rrt > 0:
-                    name = unresolved_peak_name(float(rrt))
+                #
+                # Coerced before it is tested, because a NUMERIC column arrives as a `Decimal` and a
+                # text column as `str` — neither an `int | float` — and the JSON adapter already
+                # names both. The coerced value is what the `Impurity` carries, too; a value that
+                # will not coerce goes on as read, for `Impurity` to refuse by name.
+                retention = _rrt(rrt)
+                if not name and not smiles and retention is not None and retention > 0:
+                    name = unresolved_peak_name(retention)
                 if not name and not smiles:
                     continue
                 try:
@@ -464,7 +470,7 @@ class WarehouseElnAdapter:
                             name=str(name) if name else None,
                             smiles=str(smiles) if smiles else None,
                             area_percent=area,
-                            rrt=rrt,
+                            rrt=rrt if retention is None else retention,
                         )
                     )
                 except ValidationError as exc:
@@ -628,6 +634,24 @@ def _timestamp(value: Any, column: str, entry_id: str) -> datetime:
     return parsed
 
 
+def _rrt(value: Any) -> float | None:
+    """A relative retention time as a float, or `None` when the cell holds nothing readable.
+
+    `float()` rather than an `isinstance` test, because a driver hands a NUMERIC column back as a
+    `Decimal` — not an `int | float`, nor registered as `numbers.Real` — and a text-typed RRT as
+    `str`; either way an RRT-only peak was dropped here while `json_adapter` named it. A `bool` is
+    refused rather than read as 1.0. `None` for an unreadable value only decides the naming; the
+    caller hands the raw value on, so `Impurity`'s own validation still refuses it rather than
+    the row losing its RRT in silence.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _stated_timestamp(value: Any, column: str, entry_id: str) -> datetime | None:
     """An amendment or withdrawal stamp: `None` only when the column is genuinely empty.
 
@@ -664,8 +688,10 @@ def _stated_timestamp(value: Any, column: str, entry_id: str) -> datetime | None
         raise ElnMappingError(
             f"entry {entry_id!r} carries {str(value)[:60]!r} in {column!r}, which is not a "
             "timestamp this ingest can read. The column is bound as an amendment or withdrawal "
-            "stamp, and reading an unparseable one as absent would drop the amendment silently — "
-            "bind a column with a parseable value, or declare a `transform:` for this one"
+            "stamp, and reading an unparseable one as absent would drop the amendment silently. "
+            "An entry column takes no `transform:`, so the remedy is at the source: bind a view "
+            "column that is NULL where no stamp was made (e.g. `NULLIF(col, '0000-00-00 "
+            "00:00:00')` for a MySQL zero-date), or exclude such rows with the entry's `where:`"
         )
     return parsed
 

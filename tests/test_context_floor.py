@@ -569,8 +569,10 @@ load_profiles()
 #: allowance drops by the same amount again — `tests/test_compaction.py`'s two allowances carry it,
 #: for the reason the entry there gives about the window being the input.
 #: **And to 73,100 for the plate-results loop — the third raise on this branch, and the one with
-#: the best case.** `attach_plate_results` costs **606** (a nested `list[ArmResult]` argument) and
-#: `read_plate_results` **257**. Measured on this commit: **72,641**.
+#: the best case.** `attach_plate_results` cost **606** (a nested `list[ArmResult]` argument) and
+#: `read_plate_results` **257**. Measured on this commit: **72,641**. Re-measured after the
+#: tool's own top-level `note` argument was removed (each arm keeps `ArmResult.note`):
+#: `attach_plate_results` **592**, `read_plate_results` unchanged, prefix **72,384**.
 #:
 #: The case is better than the two above it for one reason worth stating rather than assuming: both
 #: tools work in **every** deployment. They touch only core's design store, so unlike the six

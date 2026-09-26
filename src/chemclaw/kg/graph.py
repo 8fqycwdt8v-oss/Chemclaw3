@@ -375,11 +375,20 @@ def _added_since(notes_dir: Path, since: str | None) -> dict[str, date] | None:
     `--no-renames`, so a file's arrival is the commit that put *that path* there: a note moved
     between type directories reads as arriving on the day it moved. That is the one false positive
     this has, and it is the right direction for a digest — told once more, rather than never.
+
+    `--first-parent -m`, so a note is dated by the commit that brought it onto *this* branch. A
+    note arriving through a `--no-ff` merge (a merge-commit pull request into the knowledge repo)
+    was otherwise dated by its side-branch commit — measured, a note committed on a branch on
+    01-02 and merged on 02-01 read as 01-02 — so a subscriber told of everything up to 01-15
+    was never told of it at all. Walking first parents only, the merge commit's diff against the
+    branch it joined is where the file appears, with the merge's own date.
     """
     revisions = [f"{since}..HEAD"] if since else []
     out = _git_stdout(
         notes_dir,
         "log",
+        "--first-parent",
+        "-m",
         "--no-renames",
         "--diff-filter=A",
         "--name-only",
