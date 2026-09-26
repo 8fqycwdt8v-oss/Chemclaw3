@@ -82,16 +82,6 @@ topic).
   `docs/archive/proposed-templates/scale-up-thermal-envelope.yaml` with its arguments verified;
   move it back when this closes.
 
-- [ ] **A chemist has no in-product way to ask for a skill of theirs to be published** — [S].
-  `D-2026-09-20-a-behaviour-change-is-gated-by-its-blast-radius` makes the promotion unit a
-  *document* rather than a queue entry, which is what keeps `api/routes/proposals.py` owner-scoped
-  by construction and keeps an administrator out of anybody's personal namespace. The accepted cost
-  is this: a chemist who thinks their skill should act on everyone reads it back from
-  `GET /skills/mine/{name}` and sends an admin the body out of band. A second queue is the shape
-  that ADR refuses on `D-2026-09-05`'s own measurement, so the cheap fix is a *flag* rather than a
-  queue — one boolean on the personal row and an admin listing that reads it — and it is worth
-  building only once somebody actually wants a promotion and cannot get one.
-
 - [ ] **Nobody has measured what this system's own workflows carry, so the worker's cache bound is
   asserted at a placeholder** — [S], opened 2026-09-22 by
   `D-2026-09-22-the-ceiling-that-holds-memory-is-the-cache-not-the-task-slot`, which closed the
@@ -157,36 +147,6 @@ topic).
   is called from `create_app`, `api/mcp_face.main`, `durable/background_worker.main` and
   `cli/chat.main`, the two connector components are shown unable to reach the gateway, and
   `tests/test_llm_gateway_guard.py` drives the processes. Do not read that as covering this one.
-
-- [ ] **The unauthenticated `X-Chemclaw-Actor` header becomes durable attribution** — [M], and
-      **narrower than this row used to claim**. It does not reach `job_records` or the audit trail:
-      the durable path takes the actor as an argument sourced from core's validated front-door
-      principal (`ConnectorJobInput.requested_by`, `durable/connector_job.py:184` — the row named a
-      field called `actor`, which does not exist, and an anchor that has since drifted four lines),
-      and never reads the header. Re-driven 2026-09-12: a forged `X-Chemclaw-Actor` reaches the tool
-      body verbatim and lands as `unverified:<id>` in exactly two columns on the synchronous MCP
-      path — `bo_campaigns.opened_by` and `bo_suggestions.actor`, via
-      `connectors/bo/server/tools.py::_recorded_provenance` — and in neither `audit_events` (which
-      reads `agent/audit.py::get_current_actor`) nor `job_records` (`require_actor()`).
-      The `unverified:<id>` marking is in place (D-2026-08-13), so what is open is that a caller
-      still chooses the string.
-      **Narrower again 2026-09-12, and one docstring asserted the opposite.**
-      `_recorded_provenance` said this bundle "declares `auth: mode: none`, so the pod does not even
-      authenticate *core*: anything that can open a socket to it can name any chemist it likes" —
-      over a manifest that has declared `mode: bearer` with `token_env: CHEMCLAW_BO_MCP_TOKEN` since
-      `D-2026-08-20-a-networkpolicy-selects-peers-not-paths`. Driven against the real app, `/mcp`
-      answers 401 with no token and 401 with a wrong one. So the forgery is a **token-holder's**.
-      The docstring is corrected and
-      `tests/test_bo_provenance.py::test_the_threat_model_this_module_states_is_the_one_its_manifest_declares`
-      fails whenever the two disagree, in either direction. The prefix stays on its own argument: a
-      bearer proves *core called*, not *which chemist*, so full closure still needs an actor
-      assertion bound to the call (OBO or a signed memo) — which is the `DEFERRED.md` warehouse
-      row's blocker too.
-      **Narrowed 2026-08-27** (`D-2026-08-27-a-bound-that-multiplies-…`): the claim no longer
-      travels back out as provenance — `CampaignThread` dropped `opened_by`, because a reader of a
-      resumed campaign cannot tell a marked actor from a verified one. Both columns keep the value
-      for the audit trail, where that question can be answered. What stays open is unchanged: the
-      string is still the caller's to choose.
 
 ## 2 — Answers that are wrong without saying so
 
@@ -361,24 +321,6 @@ topic).
   `kg/git_writer.py::_write_and_commit`, `deploy/knowledge-sync.sh`, `docs/guides/runbook.md` (item
   4 of the note-repository list).
 
-- [ ] **Three row-projecting tools defang a whole page on the event loop, and one of them is not in
-  the offload test** — [M]. `commitment_tools.review_commitments`,
-  `pending_tools.check_pending_requests` and `memory_tools.recall_observations` each escape every
-  string in every row of their page synchronously, which is correct (the field-level carve-outs each
-  let five to eight unvalidated fields through — see
-  `tests/test_tool_framing.py::test_every_row_projecting_tool_escapes_its_whole_row`) and is not
-  free. Measured on a realistic `Commitment` on a loaded box: **6.9 to 39.2 us/row, 5.7x** the
-  two-field form, so **7.8 ms** of synchronous loop time per `review_commitments` at `_MAX_PAGE` of
-  200 against ~1.4 ms before. A post-merge audit measured the same comparison at 19.3x and 18.9 ms;
-  the ratio moves with the row's string lengths and with machine load, and neither figure is small
-  next to the **2.6 ms** that `skill_manifest.declared_tools`' own docstring calls "the hazard
-  `tests/test_event_loop_offload.py` exists for". None of the three is in that file.
-  **Not fixed here because the cheap fix is the wrong one**: wrapping the comprehension in
-  `asyncio.to_thread` moves 7.8 ms off the loop and buys a thread hop per call on the page sizes that
-  do not need it, and the real question is whether the *page* is the right unit — a 200-row page is
-  already more than a model reads. Trigger to revisit: any of the three appears in a turn-latency
-  profile, or `_MAX_PAGE`/`observation_max_results` is raised.
-
 - [ ] **A chemist's own `/scratch/` writes are unbounded and, by default, permanent** — [M].
   `agent_subagent_files_max_chars` bounds only what a *helper* hands back: it is applied in
   `rewritten_command_files`, which rewrites a `task` return's `Command`. A caller's own
@@ -452,81 +394,7 @@ topic).
       above did for the patterns. Anchors: `tests/test_prose_contract.py::_model_facing_descriptions`,
       `src/chemclaw/durable/hypothesis_tournament.py`.
 
-- [ ] **`/readyz` cannot bound a Postgres that accepts the socket and stops answering** — [S],
-      found 2026-09-05, upstream in origin and recorded here because `api/routes/ops.py` claimed
-      otherwise. `asyncio.wait_for` bounds acquisition; on a warm pooled connection psycopg's
-      `AsyncConnection.wait()` catches the cancellation, calls `_try_cancel` against the same
-      frozen server, then re-waits on the socket with no timeout. Driven with `docker pause`: one
-      run answered `200 ready` after 7.6 s for an unreachable database, another never returned.
-      Bounded in a deployment by the kubelet — the chart derives `readinessProbe.timeoutSeconds`
-      from this budget and ships 5 s with `failureThreshold: 3`, so the pod goes not-ready either
-      way — which is why this is a row and not a fix: the correct outcome is reached by the wrong
-      route, and a second in-process timeout cannot cancel what the first one could not.
-
-      **The trigger reads as fired and is not, which is why it is rewritten here.** It used to say
-      "worth revisiting if psycopg gains a cancel that respects a deadline". psycopg 3.3.4 ships
-      `AsyncConnection.cancel_safe(timeout=...)` and `_try_cancel` now delegates to it with
-      `timeout=5.0` — that cancel, in as many words. Driven 2026-09-22 on that version against a
-      `docker pause`d Postgres: an in-flight `SELECT 1` on an already-checked-out connection under
-      `asyncio.wait_for(..., 2.0)` **did not return within 120 s**. The bounded cancel is not the
-      bound — `wait()`'s except arm re-waits on the socket after it with no timeout of its own — so
-      upstream gained the capability the trigger named without closing the leg this row is about.
-
-      **And the obvious re-measurement measures the wrong leg.** The same drive through
-      `core/db.py::connection` (a pool, as the probe uses) returned at exactly its budget, 4 of 4,
-      with a `TimeoutError`, because the hang there is the *connect* leg that `asyncio.wait_for` has
-      always bounded; `AsyncConnection.wait` was never entered. Whoever re-runs this must hold the
-      connection before pausing, or they will confirm a fix that is not there.
-
-      **No libpq knob reaches it either.** `tcp_user_timeout` and the keepalives bound a peer that
-      stops ACKing, and a paused container's kernel keeps ACKing — the freeze is at the application
-      layer, which is also why a server-side `statement_timeout` cannot fire.
-
-      New trigger: psycopg bounds the **re-wait** in `AsyncConnection.wait`'s cancellation arm, or
-      exposes a deadline on it. Today that arm calls `_try_cancel(timeout=5.0)` and then a bare
-      `waiting.wait_async(gen, self.pgconn.socket, interval=interval)`; the file that would show it
-      is psycopg's own `connection_async.py`. Anchors:
-      `api/routes/ops.py::_probe_database`, `core/db.py::connection`.
-
 ## 4 — Operating it
-
-- [ ] **A worker whose broker is down never opens its probe port, so "Temporal is down" and "the
-  image is broken" are the same picture to everything but the container log** — [M].
-  `durable/background_worker.py:99` calls `connect()` before `Worker(...)` is built and therefore
-  before `durable/serve.py::serve_worker` opens the probe surface, so the process exits 1 at
-  `core/temporal_client.py:215` and `:9000/healthz` and `/readyz` never answer at all. Driven
-  2026-09-19 against a dead address: exit 1, a clear `SubsystemUnavailableError` in the log, and both
-  probe routes unanswered (`curl` → no connection). The PodMonitor target simply disappears, so
-  `ChemclawTargetDown` fires for this exactly as it fires for a broken image.
-  **Not fixed here, and the reason is that the obvious fix may be worse than the gap.** Opening the
-  probe surface before connecting means every worker entrypoint changes shape, and it turns a
-  crash-loop that Kubernetes retries with its own backoff — and that self-heals the moment the broker
-  returns — into a pod that sits up and unready indefinitely, which is the state `serve.py`'s
-  `worker_ready` argument would then have to cover for a worker that has no client at all. The log
-  does distinguish the two causes today; what nothing distinguishes them by is a *probe* or a series.
-  Trigger to revisit: a second dependency joins `connect()` ahead of the probe surface (so the log
-  line stops being decisive), or an operator reports diagnosing a broker outage as a bad image.
-
-- [ ] **The readiness sweep cannot see a connector that is up and broken, so nothing notices it
-  until a turn does** — [M]. `connectors/health.py::_probe` asks `GET <base>/healthz` and nothing
-  else, so a pod answering 200 there and 500 (or an ingress error page) on `/mcp` is reported
-  `healthy`: driven 2026-09-19, `/readyz` said `{"status":"ready","connectors_unhealthy":0}` and
-  `chemclaw_connectors_unhealthy` held 0 while every call failed. The *turn* now reports it —
-  `chemclaw_connectors_unreachable_total{connector}` and `ChemclawConnectorsDegradingTurns` at
-  `for: 0m` — so the case is covered wherever there is traffic, which is why this is a row and not a
-  fix. **A `tools/list` probe was measured and declined**: against the four connector apps this
-  repository serves, on loopback with no TLS, `GET /healthz` is 3.6–4.2 ms and a full MCP
-  handshake + `tools/list` + teardown is 50–71 ms — 12–19x — on a route the kubelet runs every 10 s
-  with `timeoutSeconds: 5` derived from a 2 s per-endpoint budget; it needs the front door to hold
-  every connector's bearer token to *probe* rather than only to *call*; and it mints an MCP session
-  per sweep, which the serving side bounds as memory. For that it would move detection from a rule
-  that fires on the first degraded turn to a gauge behind `for: 10m`. What is left unbought is
-  detection on an **idle** deployment. Trigger to revisit: a deployment reports a connector that was
-  broken for longer than its traffic gap — or `connectors_required` is used as a *runtime* gate
-  rather than a boot gate, at which point the sweep's verdict has to be as strong as a turn's.
-  Guarded by `tests/test_connector_health.py::test_a_connector_healthy_on_healthz_and_broken_on_mcp_is_reported_by_the_turn`,
-  which asserts the sweep's `healthy` verdict, so changing this decision turns that test red rather
-  than leaving two documents disagreeing.
 
 - [ ] **A peer that is genuinely restorable still drains every live session on the deploy that adds
   it** — [M]. `agent/checkpointer._first_party_channels` no longer stamps `UntrackedValue` channels,
@@ -997,39 +865,3 @@ those belong in.
       Both change what a `Component` is, so this wants its own ADR and its own measurement of what a
       partially-structured reaction does to retrieval — not a patch to `_smiles`. Measured and declared
       by `make live-data`; see `D-2026-08-18-a-corpus-is-not-reachable-because-it-is-on-disk`.
-
-## Template step roles cross the durable boundary on an unsigned payload
-
-- [ ] **A template step's roles cross the durable boundary on an unsigned payload** — [L].
-      `durable/template_activities.py::_acting_as` binds `StepIdentity.roles` — the requester's real role
-      set, lifted out of a workflow argument. Every other reader of that payload binds
-      `frozenset()` on purpose (`durable/interceptor.py::activity_context`, `D-2026-08-28`): a relayed
-      argument is data, not a verified claim, so a role taken from it is a role anyone who can enqueue an
-      activity could forge.
-
-      The template path is the exception and the exception is argued, not an oversight.
-      `authorize_job_step` is the **first** authorization a template step gets — a step launched by
-      another step has no front-door pre-check behind it — so binding empty there would refuse every
-      entitled template job rather than fail closed on a forgery. Measured: neutering only the role bind
-      leaves `test_an_expensive_job_step_is_refused_for_an_unentitled_requester` still refusing and fails
-      `test_an_entitled_requester_passes_the_same_gate` outright.
-
-      **What it rests on today is broker write access being restricted** — Temporal mTLS, enforced under
-      `entra_required` — which is a deployment property rather than a check this code makes. Closing it
-      properly means a **signed payload**: a Temporal codec (or payload converter) that signs
-      `StepIdentity` on the way out and verifies on the way in, after which `_acting_as` binds a verified
-      claim and the exception disappears. That is a new piece of work with its own release story (a codec
-      is cluster-wide and both sides must be deployed before either relies on it), not an edit.
-
-      **Trigger.** A deployment that runs `TemplateWorkflow` on a broker whose write access is not
-      restricted to this system's own workers — a shared cluster without mTLS, or a namespace other
-      teams can enqueue into.
-
-      Anchors: `durable/template_activities.py::_acting_as` (the bind and its eleven-line comment),
-      `durable/interceptor.py::activity_context` (the fail-closed reader beside it),
-      `tests/test_template_job_step.py` (the pair that fails in opposite directions).
-
-      Replaces "two producers bind a template step's ambient identity, and only one of them is needed",
-      whose title was its premise: the two producers disagree about `roles`, on purpose, and collapsing
-      them would refuse entitled work rather than weaken a refusal
-      (`D-2026-09-12-two-producers-of-one-identity-are-not-redundant-when-they-disagree`).
