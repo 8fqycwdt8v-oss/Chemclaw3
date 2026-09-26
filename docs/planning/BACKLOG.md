@@ -110,7 +110,7 @@ topic).
   new code. Anchors: `core/netguard_preload.c`, `core/netguard_preload.py`, `deploy/entrypoint.sh`,
   `kg/git_writer.py`.
 
-- [ ] **What "network-exposed" means for a process that only makes outbound calls** — [M],
+- [ ] **What "network-exposed" means for a process that only makes outbound calls** (issue #461) — [M],
   opened by `D-2026-09-04-a-gateway-is-the-only-provider`, narrowed to this half by
   `D-2026-09-12-a-gateway-guard-in-the-front-door-is-not-a-deployment-guard`.
   `_refuse_unauthenticated_exposure` is still called only from `api/app.py`, so no worker runs it,
@@ -259,7 +259,7 @@ topic).
 
 ## 3 — Work that is lost, dropped or invisible
 
-- [ ] **A chemist's own `/scratch/` writes are unbounded and, by default, permanent** — [M].
+- [ ] **A chemist's own `/scratch/` writes are unbounded and, by default, permanent** (issue #462) — [M].
   `agent_subagent_files_max_chars` bounds only what a *helper* hands back: it is applied in
   `rewritten_command_files`, which rewrites a `task` return's `Command`. A caller's own
   `write_file` goes through `StateBackend`, which writes the `files` channel directly as a channel
@@ -281,7 +281,7 @@ topic).
   `agent/scratchpad.py`, `deepagents.backends.state.StateBackend`, `agent/tool_result_size.py::_bounded_file`.
 
 - [ ] **The helper file budget is charged to siblings that wrote nothing, and two write verbs are
-  charged to nobody** — [M], opened by
+  charged to nobody** (issue #463) — [M], opened by
   `D-2026-09-18-a-pre-batch-snapshot-cannot-see-its-own-superstep`, which closed the fan-out's
   fail-open and states both of these as what it did not do. Two halves of one resource, the
   caller's `files` channel.
@@ -672,6 +672,8 @@ re-proposal a future session can settle in an afternoon and a fabricated number 
       Wants its own ADR and a measurement of what the extra column costs on a real corpus.
 
 ## No substitution-product enumerator, so one class of "which molecule" question stays a proposal
+
+(issue #464)
 
 `D-2026-09-20-the-chain-already-existed-and-it-is-called-a-template` lets a discriminating check
 name a reviewed procedure, so a question about a molecule's *derived* forms — tautomers,
