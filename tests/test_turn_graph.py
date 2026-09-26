@@ -533,6 +533,81 @@ def test_the_second_hop_is_bounded_by_the_root_not_by_the_first(monkeypatch: Any
 
 
 # --------------------------------------------------------------------------------------------
+# The name space: what a mesh binds is what every validator resolves against
+# --------------------------------------------------------------------------------------------
+
+
+def _bound_handoffs(graph: Any) -> set[str]:
+    """Every `transfer_to_…` name any peer of a compiled mesh actually binds."""
+    return {
+        name
+        for node in graph.nodes.values()
+        if hasattr(node.bound, "nodes")
+        for name in node.bound.nodes["tools"].bound.tools_by_name
+        if name.startswith(HANDOFF_PREFIX)
+    }
+
+
+def test_every_handoff_a_mesh_binds_is_a_name_the_agent_advertises(monkeypatch: Any) -> None:
+    """`available_tool_names()` carries every handoff a compiled mesh binds — read off the graph.
+
+    **The subject is the names the mesh really bound, not the names a function says it mints.**
+    `handoff_tool_names` is compared against the tool node of every peer `build_turn_graph`
+    compiled, so the root's hand-back tool (minted by the *other* peers, for a profile the roster
+    never names) is inside the set being checked. A version that unioned only the roster would
+    pass a roster-only fixture and miss exactly that name.
+
+    Why it matters: `cli/mock_llm._validate` refused any scripted call outside this union, so the
+    delegation suite's peer arm could not record the one act it exists to observe. The second half
+    drives that validator with every bound name.
+    """
+    from chemclaw.agent.chemclaw_agent import available_tool_names
+    from chemclaw.cli.mock_llm import Behaviour, MockLlm, ToolCall
+
+    graph = _mesh(
+        monkeypatch,
+        {"default": ["done"], "evidence-peer": ["done"], "safety-peer": ["done"]},
+    )
+    bound = _bound_handoffs(graph)
+    assert handoff_tool_name("default") in bound, (
+        "the fixture no longer binds a hand-back to the root, so the name only the non-root peers "
+        "mint is outside what this test checks"
+    )
+
+    missing = sorted(bound - available_tool_names())
+    assert not missing, (
+        f"the mesh binds {missing}, which `available_tool_names()` does not carry — every "
+        "validator reading that union would refuse a correct reference to a tool the turn holds"
+    )
+
+    MockLlm(
+        [
+            Behaviour(
+                name=f"hands-to-{name}", calls=[ToolCall(tool=name, arguments={"reason": "x"})]
+            )
+            for name in sorted(bound)
+        ]
+    )
+
+
+def test_no_roster_advertises_no_handoff_and_the_mock_refuses_one() -> None:
+    """The shipped default adds nothing: with no roster there is no mesh and no handoff name.
+
+    The other direction of the test above, and the one that says the widening is inert by default
+    — a skill or a scripted call naming `transfer_to_…` on a deployment that never turned handoff
+    on is still refused, because no turn it serves could bind one.
+    """
+    from chemclaw.agent.chemclaw_agent import available_tool_names, handoff_tool_names
+    from chemclaw.cli.mock_llm import Behaviour, MockLlm, ToolCall
+
+    name = handoff_tool_name("default")
+    assert handoff_tool_names() == frozenset()
+    assert name not in available_tool_names()
+    with pytest.raises(ValueError, match="does not advertise"):
+        MockLlm([Behaviour(name="hands-off", calls=[ToolCall(tool=name, arguments={})])])
+
+
+# --------------------------------------------------------------------------------------------
 # The stream: a peer is the agent the chemist is talking to, not a subagent
 # --------------------------------------------------------------------------------------------
 

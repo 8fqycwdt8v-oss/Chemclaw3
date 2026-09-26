@@ -81,11 +81,12 @@ a pass, and how many it was is what the run says rather than what this paragraph
 from __future__ import annotations
 
 import ast
+import importlib
 import importlib.util
 import json
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, Literal, NamedTuple, get_args, get_origin, get_type_hints
 
 import pytest
 import yaml
@@ -595,15 +596,52 @@ def _bindings(tree: ast.Module) -> _Bindings:
     return bound
 
 
-def _hardcoded_calls(seam: _Seam) -> list[tuple[str, ast.expr, frozenset[str], _Bindings]]:
-    """Each `(module, tool expression, argument keys, name bindings)` written literally there.
+def _typed_tools(seam: _Seam) -> dict[str, frozenset[str]]:
+    """Each module-level dispatcher whose `tool` parameter is a `Literal`, with its members.
+
+    **The resolution for a call site whose tool expression is not a literal, and the reason it is
+    sound is the type checker rather than this file.** `remote_version` is reached from
+    `connectors/calc/server/tools.py::_calibrated` with a value looked up in `_CALIBRATED`, which no
+    AST walk can resolve without learning that one module's private table — the
+    allowlist-of-its-own-exceptions shape. Typing the parameter moves the declaration onto the
+    dispatcher instead: `mypy --strict` proves every value passed is a member, so the members *are*
+    what that site can put on the wire, and every one of them is checked against the fleet below.
+
+    A dispatcher that is a method (`rxnlabel`'s `_call`) or whose `tool` is a plain `str` has no
+    entry, so its sites resolve as before or fail loudly as before.
+    """
+    module = importlib.import_module(seam.module)
+    typed: dict[str, frozenset[str]] = {}
+    for name in sorted(seam.dispatchers):
+        dispatcher = getattr(module, name, None)
+        if dispatcher is None:
+            continue
+        annotation = get_type_hints(dispatcher).get("tool")
+        if get_origin(annotation) is Literal:
+            typed[name] = frozenset(get_args(annotation))
+    return typed
+
+
+def _site_tools(
+    typed: Mapping[str, frozenset[str]], dispatcher: str, expression: ast.expr, bound: _Bindings
+) -> frozenset[str] | None:
+    """The tool names one call site can send: its literals, else its dispatcher's `Literal` type."""
+    literal = _literal_strings(expression, bound)
+    return literal if literal is not None else typed.get(dispatcher)
+
+
+_Site = tuple[str, str, ast.expr, frozenset[str], _Bindings]
+
+
+def _hardcoded_calls(seam: _Seam) -> list[_Site]:
+    """Each `(module, dispatcher, tool expression, argument keys, name bindings)` written there.
 
     A site counts when its *arguments* are a dict literal, because that is what a hardcoded
     contract looks like: the keys are typed into this repository and nothing checks them. A
     dispatcher handed a caller's `arguments` parameter — `remote_compute`'s single `_call`, and
     `cached_remote`'s own body — is a pass-through and declares nothing, so it is not a site.
     """
-    sites: list[tuple[str, ast.expr, frozenset[str], _Bindings]] = []
+    sites: list[_Site] = []
     for relative in _callers(seam):
         tree = ast.parse((REPO_ROOT / relative).read_text(encoding="utf-8"))
         bound = _bindings(tree)
@@ -623,7 +661,7 @@ def _hardcoded_calls(seam: _Seam) -> list[tuple[str, ast.expr, frozenset[str], _
                     for key in following.keys
                     if isinstance(key, ast.Constant) and isinstance(key.value, str)
                 )
-                sites.append((relative, argument, keys, bound))
+                sites.append((relative, name, argument, keys, bound))
     return sites
 
 
@@ -656,12 +694,14 @@ def _assert_every_call_names_a_served_tool(seam: _Seam) -> None:
         f"no hardcoded {seam.name} call site was found, so this check is now vacuous. Either the "
         f"dispatchers moved out of {seam.module} or they stopped taking a literal tool name."
     )
-    for relative, expression, keys, bound in sites:
-        tools = _literal_strings(expression, bound)
+    typed = _typed_tools(seam)
+    for relative, dispatcher, expression, keys, bound in sites:
+        tools = _site_tools(typed, dispatcher, expression, bound)
         assert tools is not None, (
             f"{relative}:{expression.lineno} passes a tool expression this check cannot resolve to "
-            "string literals. Either name the tool literally or teach `_literal_strings` the "
-            "shape — passing over it would leave the call unchecked while the file reported green."
+            "string literals. Either name the tool literally, type the dispatcher's `tool` "
+            "parameter as a `Literal`, or teach `_literal_strings` the shape — passing over it "
+            "would leave the call unchecked while the file reported green."
         )
         for tool in sorted(tools):
             assert tool in surface, (
@@ -751,7 +791,11 @@ _RXNLABEL_DECLINED: dict[str, str] = {
 _CALC_SEAM = _Seam(
     name="calc",
     module="chemclaw.connectors.calc.remote",
-    dispatchers=frozenset({"cached_remote", "remote_call", "remote_compute", "_call"}),
+    # `remote_version` puts a tool name on the wire too — inside `calculation_key`'s arguments —
+    # and was outside this set, so the calibration table's names reached the server unchecked.
+    dispatchers=frozenset(
+        {"cached_remote", "remote_call", "remote_compute", "remote_version", "_call"}
+    ),
     surface=("servers", "calc", "tool-surface.json"),
     declined=_CALC_DECLINED,
 )
@@ -777,9 +821,10 @@ def _tools_named(seam: _Seam) -> set[str]:
     *not* reported here either: the check above fails on exactly that, and a second assertion about
     it would be one cause reported twice.
     """
+    typed = _typed_tools(seam)
     named: set[str] = set()
-    for _relative, expression, _keys, bound in _hardcoded_calls(seam):
-        named |= _literal_strings(expression, bound) or frozenset()
+    for _relative, dispatcher, expression, _keys, bound in _hardcoded_calls(seam):
+        named |= _site_tools(typed, dispatcher, expression, bound) or frozenset()
     return named
 
 
@@ -818,6 +863,44 @@ def test_the_calc_seam_calls_only_tools_the_fleet_records_serving() -> None:
     on the other end until the fleet's `servers/calc/tool-surface.json` gained a reader.
     """
     _assert_every_call_names_a_served_tool(_CALC_SEAM)
+
+
+def test_every_tool_the_calibration_table_names_is_one_the_calc_seam_checks() -> None:
+    """`_CALIBRATED`'s tool names are exactly what the seam walker reads at `remote_version`.
+
+    Needs no fleet checkout, which is the point: the two tests above skip without one, and this is
+    the half that says they would have *seen* a calibrated tool had they run. The table used to put
+    its names on the wire through `remote_version`, which was not a dispatcher here, with a
+    tuple-unpacked local no walker could resolve — so a third calibrated row naming a tool the fleet
+    does not serve was checked by nothing. Measured when that was found: both names the table held
+    were also named literally at other sites, so nothing was unchecked yet and a new row would be.
+
+    Equality rather than a subset, in both directions and for two different failures: a table row
+    naming a tool outside `CalibratedTool` puts a name on the wire the walker does not attribute to
+    any site, and a `CalibratedTool` member no row uses is a name the walker counts as *called* —
+    which would quietly satisfy the declined-table accounting for a tool nothing reaches.
+    """
+    from chemclaw.connectors.calc.server.tools import _CALIBRATED
+
+    typed = _typed_tools(_CALC_SEAM)
+    resolved = {
+        tool
+        for _relative, dispatcher, expression, _keys, bound in _hardcoded_calls(_CALC_SEAM)
+        if dispatcher == "remote_version"
+        for tool in _site_tools(typed, dispatcher, expression, bound) or ()
+    }
+    table = {tool for tool, _unit in _CALIBRATED.values()}
+
+    assert resolved, (
+        "no `remote_version` call site resolved to a tool name, so the calibration table's names "
+        "reach the fleet through a call this file does not check — `remote_version` left "
+        "`_CALC_SEAM.dispatchers`, or its `tool` parameter stopped being a `Literal`"
+    )
+    assert table == resolved, (
+        f"`_CALIBRATED` names {sorted(table - resolved)} that the seam walker does not attribute "
+        f"to `remote_version`, and the walker attributes {sorted(resolved - table)} that no table "
+        "row names. Keep `remote.CalibratedTool` and the table's tool column the same set."
+    )
 
 
 def test_every_calc_tool_the_fleet_serves_is_called_here_or_declined_with_a_reason() -> None:

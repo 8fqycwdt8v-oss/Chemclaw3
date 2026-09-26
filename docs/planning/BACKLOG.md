@@ -569,7 +569,7 @@ topic).
       model, so it belongs with the delegation row below rather than ahead of it.
 
 - [ ] **The delegation experiment: run it against a gateway** — [M]
-      (issue #359), opened by `D-2026-08-29-a-helper-is-cheaper-and-narrower-than-its-caller` and
+      (issue #359; code half #447), opened by `D-2026-08-29-a-helper-is-cheaper-and-narrower-than-its-caller` and
       the gate on Wave 3's roster. **It is one row because it was four**, and four statements of a
       single blocked experiment made the queue read four times more blocked than it is: "the
       delegation A/B has a comparator and no runner", "measure whether delegation pays", "run the
@@ -592,16 +592,13 @@ topic).
       intention-to-treat reading and not a pass — so a run that forgets either posture produces a
       report saying so rather than a quiet zero.
 
-      **The handoff act itself has never been observed, and that is the one gap that is not a
-      credential.** `treatment_tools("handoff", …)` is unit-tested against a name
-      `agent/handoff.handoff_tool_name` mints, and no run has yet recorded a real
-      `transfer_to_<peer>` row, because a `transfer_to_…` tool is absent from
-      `available_tool_names()` — the six name spaces that function documents do not include the
-      handoff one — so `cli/mock_llm._validate` refuses a behaviour that calls one and the scripted
-      peer arm answers directly instead. Either widen that function (it is also what the skill,
-      template and prose validators read, and `agent_peer_roster` ships empty, so the addition is
-      inert by default) or drive the peer arm against a gateway with the roster set. The second is
-      the gateway run anyway.
+      **The handoff act itself has never been observed.** `treatment_tools("handoff", …)` is
+      unit-tested against a name `agent/handoff.handoff_tool_name` mints, and no run has yet
+      recorded a real `transfer_to_<peer>` row. The name is resolvable now —
+      `chemclaw_agent.handoff_tool_names` is in `available_tool_names()` whenever a roster is set,
+      so `cli/mock_llm._validate` accepts a behaviour that hands off — but the delegation catalogue's
+      `d-hands-off` still calls nothing, because the peer's name is the deployment's choice. So the
+      first observed handoff is the gateway run with the roster set.
 
       **What the instrument must not be.** The deleted corpus
       (`data/evals/probes/m12/routing.yaml`, removed with the specialist team) measured
@@ -1044,29 +1041,3 @@ those belong in.
       whose title was its premise: the two producers disagree about `roles`, on purpose, and collapsing
       them would refuse entitled work rather than weaken a refusal
       (`D-2026-09-12-two-producers-of-one-identity-are-not-redundant-when-they-disagree`).
-
-## A calibrated calculator names a fleet tool through a caller the seam walker cannot resolve
-
-- [ ] **`_CALIBRATED` puts a `calc` tool name on the wire outside every check that watches the
-  seam.** Found on 2026-09-18 while closing a `Chemclaw3-mcp` row whose own stated fix —
-  "that repository's `_CALLERS` tuple" — described work `D-2026-09-14-a-tripwire-over-two-named-modules-covers-the-modules-it-names`
-  had already done, which is worth knowing before implementing any cross-repository row's
-  prescription: re-measure it against the other tree first.
-  `connectors/calc/server/tools.py::_CALIBRATED` maps a property name to a fleet tool name
-  and `_calibrated` hands it to `remote_version`, which asks the server `calculation_key` for that
-  tool. Three things make it invisible to
-  `tests/test_sibling_manifest_agreement.py::test_the_calc_seam_calls_only_tools_the_fleet_records_serving`:
-  `remote_version` is not in `_CALC_SEAM.dispatchers`, its tool argument is a tuple-unpacked local rather
-  than a literal, and the names live in a dict value rather than at a call site. Measured on
-  2026-09-18: both names it currently holds — `predict_solubility` and `predict_pka` — are covered
-  by other sites, so nothing is unchecked today and a *third* calibrated row would be. The obvious
-  fix is not available: teaching `_literal_strings` to resolve a value out of a named module-level
-  table would put one module's private data structure inside a generic walker, which is the
-  allowlist-of-its-own-exceptions shape `ARCHITECTURE.md` already refuses for the layering rule. So
-  the question is whether the table should declare its tool names somewhere the walker already
-  reads, or whether `remote_version` should take a literal. Wants a measurement of which calibrated
-  calculators are actually planned before either is built.
-  Anchors: `src/chemclaw/connectors/calc/server/tools.py::_CALIBRATED`,
-  `src/chemclaw/connectors/calc/remote.py::remote_version`,
-  `tests/test_sibling_manifest_agreement.py::_CALC_SEAM`,
-  `docs/decisions/D-2026-09-18-a-seam-read-in-one-direction-cannot-see-a-surface-grow.md`.
