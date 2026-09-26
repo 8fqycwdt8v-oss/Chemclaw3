@@ -72,6 +72,66 @@ def available_jobs() -> set[str]:
     return {job.name for manifest in enabled_connectors() for job in manifest.jobs}
 
 
+def unbound_opt_in_references(template: Template) -> list[str]:
+    """The tools and jobs `template` names that a bundle declares and this deployment leaves off.
+
+    **The one precise reading of "an opt-in capability's template".** A name some discovered
+    bundle declares but no enabled one binds is exactly the fork `ConnectorManifest.default_enabled`
+    opened: a real capability, correctly named, that this deployment has not turned on. A name no
+    bundle declares at all is not that — it is a typo or a deletion, `make template-validate`'s
+    business, and it is deliberately *not* counted here, so a broken template keeps its launcher
+    and keeps being refused at launch with the problem named rather than disappearing.
+
+    Asked against the connector registry alone rather than through `available_tool_names`, and
+    that is structural: the launcher names are one of the seven name spaces that union assembles,
+    so deciding which launchers exist by reading it would be a question that contains its answer.
+
+    Args:
+        template: The template whose launcher is being decided.
+
+    Returns:
+        The declared-but-unbound tool and job names it steps through, sorted; `[]` when every one
+        of them is either bound here or declared by nothing.
+    """
+    from chemclaw.connectors.registry import connector_tool_names, declared_connector_tool_names
+
+    unbound = set(declared_connector_tool_names()) - set(connector_tool_names())
+    named = {
+        step.tool if isinstance(step, ToolStep) else step.job
+        for step in template.steps
+        if isinstance(step, ToolStep | JobStep)
+    }
+    return sorted(named & unbound)
+
+
+def profile_named_tools() -> frozenset[str]:
+    """Every tool name any profile lists explicitly — the names a build would refuse to lose.
+
+    `chemclaw_agent._reject_unknown_tool_names` *raises* when a profile lists a name the surface
+    does not provide, so a launcher some profile names must stay bound whatever its steps resolve
+    to: withdrawing it takes that profile from "one procedure is unavailable" to "every turn on it
+    fails at build". A profile with `tool_names` unset lists nothing — it binds the whole surface
+    and cannot miss a name that is not on it.
+
+    **The registry, not the files.** This sits under `available_tool_names`, which the suite and
+    every validator call constantly; re-reading every profile file on each call is the likely cause
+    of a full-suite CI run slowing across unrelated files, per file against the run before it, and
+    going past its 45-minute limit. Reading only what is registered is also the right
+    answer rather than a cheaper one: `_reject_unknown_tool_names` asks about a profile that is
+    registered by then, so the launcher is bound at exactly the moment a profile that names it can
+    be built — and withholding is applied where the tool registry is *read*
+    (`chemclaw_agent._withheld_launcher_names`), so a launcher registered earlier in the process
+    cannot outlive the answer changing.
+    """
+    from chemclaw.agent.profiles import get_profile
+
+    return frozenset(
+        name
+        for profile_name in registered_profile_names()
+        for name in get_profile(profile_name).tool_names or ()
+    )
+
+
 def resolvable_signatures() -> dict[str, inspect.Signature]:
     """Every tool name whose parameters this tree can answer for, mapped to its signature.
 

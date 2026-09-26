@@ -158,6 +158,7 @@ from chemclaw.agent.tool_schema import as_structured_tool
 from chemclaw.connectors.registry import ConnectorError, skills_dirs
 from chemclaw.core.config import settings
 from chemclaw.core.logging import log_event
+from chemclaw.core.model_prose import ModelProse
 
 logger = logging.getLogger(__name__)
 
@@ -1004,7 +1005,7 @@ class ReloadingSkillsMiddleware(SkillsMiddleware):
 #: deployment ships no skills at all, or the three predicates narrowed them all away for this
 #: caller (`agent/skill_access.py`). The model cannot distinguish them and must not guess, so it is
 #: told what is true of both and what to do about it — answer without a procedure, and say so.
-NO_SKILLS = (
+NO_SKILLS = ModelProse(
     "(None are available to you in this session. This is either a deployment that ships no "
     "skills or a caller whose role reaches none of them; you cannot tell which, and you cannot "
     "create one — the skills tree is read-only to every turn. Answer from the instructions and "

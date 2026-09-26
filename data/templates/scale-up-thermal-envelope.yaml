@@ -1,25 +1,11 @@
-# **PARKED, not shipped. This file is not on `CHEMCLAW_TEMPLATES_DIR` and no launcher exists.**
-#
-# Its arguments are correct — verified against `Chemclaw3-mcp`'s own recorded
-# `servers/thermalsafety/tool-surface.json` by `tests/test_template_args_recorded.py`, which was
-# written alongside it and drove this file through a mutation before it was parked. What stops it
-# shipping is not correctness but cost, measured:
-#
-# `run_scale_up_thermal_envelope` costs **~560 tokens** of prefix on every model call, and every
-# template in `data/templates/` today names only tools a default deployment binds. This one names
-# `thermalsafety`'s, which ship `default_enabled: false`, so a default deployment would pay that
-# prefix for a launcher `templates.registry.unrunnable_reason` refuses at launch — a cost that
-# always occurs for a capability that usually does not.
-#
-# Withholding the launcher instead is the obvious fix and is argued against where it would live:
-# `unrunnable_reason`'s docstring measured that not registering an unrunnable launcher takes two
-# shipped profiles from "one procedure is unavailable" to "every turn on this profile fails at
-# build". That argument was made about templates a profile names; this one is named by none, so the
-# narrower rule — withhold only what no profile names — may well be right. It is a decision, with
-# an ADR, and not something to take at the end of a long branch.
-#
-# `docs/planning/BACKLOG.md` carries the row. Move this file back to `data/templates/` when that
-# row closes.
+# **A template whose steps are an opt-in bundle's**, `thermalsafety`, which ships
+# `default_enabled: false`. So a default deployment does not bind `run_scale_up_thermal_envelope`
+# at all: no profile names it, and `templates.registry.withheld_reason` withholds a launcher no
+# profile names when a tool its steps call is declared here and not bound
+# (`D-2026-09-26-a-launcher-no-profile-names-is-withheld-when-its-capability-is-off`). A
+# deployment that enables `thermalsafety` binds it with no other change. Its arguments are checked
+# against the fleet's recorded `servers/thermalsafety/tool-surface.json` by
+# `tests/test_template_args_recorded.py`.
 #
 # The cooling-failure question, in the one order that makes its answer mean anything.
 #

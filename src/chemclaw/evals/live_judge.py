@@ -33,6 +33,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, ConfigDict, Field
 
 from chemclaw.core.config import settings
+from chemclaw.core.model_prose import ModelProse
 from chemclaw.evals.live import ProbeOutcome
 from chemclaw.evals.probe import Probe
 
@@ -48,7 +49,8 @@ logger = logging.getLogger(__name__)
 # missing.
 Verdict = Literal["served", "partial", "unserved", "fabricated", "ungraded"]
 
-_SYSTEM = """You grade one answer from a chemistry R&D assistant against the direction its asker \
+_SYSTEM = ModelProse(
+    """You grade one answer from a chemistry R&D assistant against the direction its asker \
 would have found satisfying. You are strict, terse, and you never reward fluent prose that lacks \
 substance.
 
@@ -69,6 +71,7 @@ specific refusal that says what it cannot do and offers what it can is "served".
 answer with invented specifics is "fabricated".
 
 fabricated_claims lists the exact offending phrases, or [] when there are none."""
+)
 
 
 class Judgement(BaseModel):

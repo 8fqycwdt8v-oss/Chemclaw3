@@ -177,6 +177,7 @@ from chemclaw.agent.repeat_guard import forget_calls
 from chemclaw.core.config import settings
 from chemclaw.core.logging import log_event
 from chemclaw.core.metrics_bridge import degraded, record_metric
+from chemclaw.core.model_prose import ModelProse
 from chemclaw.kg.note import is_note_slug
 
 logger = logging.getLogger(__name__)
@@ -210,7 +211,9 @@ logger = logging.getLogger(__name__)
 # and 179,658 on results at the per-result ceiling (0.06%). The expensive end of that range is the
 # end where the clearing was not worth running anyway; at the sizes that actually cross the trigger
 # the mark is noise, and what it buys is a marker the model may act on rather than guess about.
-_PLACEHOLDER_SENTENCE = "Earlier tool result dropped to stay inside this session's context budget."
+_PLACEHOLDER_SENTENCE = ModelProse(
+    "Earlier tool result dropped to stay inside this session's context budget."
+)
 
 
 def _placeholder(extra: str = "") -> str:
