@@ -66,7 +66,7 @@ the wrong answer to it.
 """
 
 from collections.abc import Sequence
-from typing import Annotated, Any, ClassVar, NotRequired
+from typing import Annotated, Any, NotRequired
 
 from langchain.agents.middleware.todo import PlanningState
 from langchain_core.messages import AIMessage, HumanMessage
@@ -165,11 +165,6 @@ class LastPeer(LastValue[str]):
     Checkpointed, unlike every other channel this module adds — see `active_agent`'s own comment
     for why that is the point rather than an oversight.
     """
-
-    #: Read by `checkpointer._resume_tolerant_channels`: a session stamped before this channel
-    #: existed resumes rather than being refused, because its one reader
-    #: (`turn_graph.entry_peer_or_root`) takes it with `.get()` and falls back to the root.
-    resumes_when_absent: ClassVar[bool] = True
 
     def update(self, values: Sequence[str]) -> bool:
         """Store the first name written this superstep, keeping what is there when none is."""
