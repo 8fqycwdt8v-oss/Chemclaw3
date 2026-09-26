@@ -16,10 +16,7 @@ Closes the gap `tasks/todo.md` used to name: *"the cross-repo sequence `Chemclaw
 | --- | --- | --- | --- |
 | Postgres/pgvector + Temporal | this repo | 5432, 7233 | `infra/live/bootstrap.sh` |
 | note-writer repo | this repo | — | `infra/live/bootstrap.sh` |
-| `props` (solvent/pure-component properties) | Chemclaw3-mcp | 8850 | this script |
-| `rxnpredict` (forward/condition prediction, `fake_a`/`fake_c` doubles) | Chemclaw3-mcp | 8857 | this script |
-| `chem` (RDKit: resolve, stoichiometry, green metrics, render) | Chemclaw3-mcp | 8858 | `infra/live/processes.sh` |
-| `safety` (structural hazard / genotoxicity screen, ICH limits) | Chemclaw3-mcp | 8859 | `infra/live/processes.sh` |
+| every fleet bundle this repo declares an endpoint for — `props`, `rxnpredict` (`fake_a`/`fake_c` doubles), `chem`, `safety`, … | Chemclaw3-mcp | each from its fleet manifest | `infra/live/processes.sh` |
 | `pyexec` (bounded offline Python analysis sandbox) | Chemclaw3-mcp | 8899 | this script |
 | `calc` (the physics behind this repo's calculator tools — *not* a connector) | Chemclaw3-mcp | 8860 | `infra/live/processes.sh` |
 | `mock-eln` (ELN/ORD data) | Chemclaw3_mock | 8090 | this script |
@@ -27,8 +24,12 @@ Closes the gap `tasks/todo.md` used to name: *"the cross-repo sequence `Chemclaw
 | connectors, 4 Temporal workers, front door | this repo | 8810, 8000, workers per `.live/run/<name>.port` | `infra/live/processes.sh` |
 | BFF + SPA | Chemclaw3_ui | 8787, 5173 | this script |
 
-**`chem`, `safety` and the `calc` backend are started by `infra/live/processes.sh`, which this
-script calls** — one lane starts them, and it is the one that cannot do its work without them
+**Every fleet bundle this repository declares an endpoint for, and the `calc` backend, are started
+by `infra/live/processes.sh`, which this script calls.** The set is not listed here:
+`processes.sh::fleet_bundle_names` derives it (core's endpoint-declaring bundles that the fleet also
+publishes), and every enumeration of it in this lane has gone stale. The only fleet server this
+script starts itself is `pyexec`, which this repository declares no manifest for. One lane starts
+them, and it is the one that cannot do its work without them
 (`docs/decisions/D-2026-08-27-one-lane-starts-the-fleet.md`, extended to `calc` by
 `docs/decisions/D-2026-08-28-the-durable-half-has-a-backend-too.md`: that lane's durable jobs are
 what `calc` is a run-time dependency of, and `make live-jobs` could not pass a single check
@@ -41,7 +42,9 @@ directly above `chem up`. This script still *checks* their credential after `pro
 
 `rxnpredict` runs with no predictor extras installed and the `fake_a`/`fake_c` deterministic
 doubles requested — a real tool surface with no GPU, no checkpoint download and no model-weight
-egress. See `chemclaw_mcp_rxnpredict.engine.base_doubles.register_requested`.
+egress. `processes.sh` sets them as defaults (`CHEMCLAW_RXNPREDICT_ENABLED_FORWARD_MODELS`,
+`..._CONDITIONS_MODELS`), so export either to run real predictors instead. See
+`chemclaw_mcp_rxnpredict.engine.base_doubles.register_requested`.
 
 ## Prerequisites
 
@@ -74,11 +77,11 @@ make live-e2e-full-stack-down
 ```
 
 Or drive it directly: `infra/live/e2e-full-stack/up.sh [up|down|status|restart <name>]`.
-`restart <name>` (`props`, `rxnpredict`, `pyexec`, `mock-eln`, `mock-vendor`, or `ui-bff`) kills and
+`restart <name>` (`pyexec`, `mock-eln`, `mock-vendor`, or `ui-bff`) kills and
 restarts one external process in place — the primitive the chaos round uses. Restarting a piece of
-this repo's own stack (a connector, a worker, and `chem`, `safety` or `calc`) is
-`infra/live/processes.sh restart <name>` instead; asking this script for one of those three says so
-rather than reporting an unknown process.
+this repo's own stack (a connector, a worker, `calc`, or any fleet bundle `processes.sh` starts —
+`props`, `rxnpredict`, `chem`, `safety`, …) is `infra/live/processes.sh restart <name>` instead;
+asking this script for one of those says so rather than reporting an unknown process.
 
 ## The corpus is backfilled on bring-up, and it takes hours
 
