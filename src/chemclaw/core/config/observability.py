@@ -185,12 +185,20 @@ class ObservabilitySettings(BaseSettings):
     # is a real limit of "derived from the settings the process dials", written down because
     # `netguard`'s docstring reads as though nothing needs naming by hand.
     #
-    # **And one destination that only became a destination when enforcement did: a *remote* git
-    # note repository.** `kg/git_writer.py` shells out to `git`, a child process inherits
-    # `LD_PRELOAD`, and `git_remote` is the string `"origin"` — so the host is not on this object
-    # and cannot be derived without a subprocess at every process start. A deployment that pushes
-    # notes off-box names it here or the push is refused.
+    # **A *remote* git note repository needs no entry, although its host is not on this object
+    # either.** `kg/git_writer.py` shells out to `git`, a child inherits `LD_PRELOAD`, and
+    # `git_remote` is the string `"origin"` — so `netguard._push_hosts` derives the host with
+    # `git remote get-url` inside the checkout, and resolves an ssh alias to the host ssh dials
+    # with `ssh -G`. What it cannot follow is an ssh invocation git is told to use instead
+    # (`core.sshCommand`, or `GIT_SSH_COMMAND` with its own `-F`); such a deployment names the real
+    # host here.
     egress_allow: str = ""
+    # How long `ssh -G <alias>` may take when the note remote is an ssh URL
+    # (`netguard._ssh_hostname`). It reads the ssh configuration and opens no socket, so this bounds
+    # a wedged filesystem or a slow `Match exec` in that configuration, not the network. It runs at
+    # config import in every process, so it is a bound on start-up; on timeout the alias itself is
+    # kept, which is what was derived before ssh was asked at all.
+    egress_ssh_resolve_timeout_seconds: float = Field(default=5.0, gt=0)
     # The OTLP collector endpoint (plan F6-T5). Bridged into `OTEL_EXPORTER_OTLP_ENDPOINT` when
     # set, so the exporter's own precedence still applies; empty in dev (no collector). Config, so
     # the in-cluster collector address is one value like every other endpoint.
