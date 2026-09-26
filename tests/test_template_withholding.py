@@ -18,6 +18,7 @@ from chemclaw.agent.chemclaw_agent import available_tool_names, declared_tool_na
 from chemclaw.agent.profiles import _REGISTRY as PROFILE_REGISTRY
 from chemclaw.agent.profiles import AgentProfile
 from chemclaw.connectors.registry import enabled as enabled_connectors
+from chemclaw.core import tool_registry
 from chemclaw.core.config import settings
 from chemclaw.templates import registry
 from chemclaw.templates.manifest import Template
@@ -121,3 +122,20 @@ def test_a_template_naming_a_tool_nothing_declares_keeps_its_launcher() -> None:
     )
     assert registry.withheld_reason(broken) == []
     assert "stoessel_criticality_clas" in registry.unrunnable_reason(broken)
+
+
+def test_a_launcher_registered_under_another_configuration_is_still_withheld(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The registry only grows; the surface is the rule, not the history.
+
+    Found in CI: the full suite bound this launcher on `default` while this file alone did not,
+    because an earlier build in the same process had registered it. Registered here directly, the
+    way that build left it, and every reader of the surface must still leave it out.
+    """
+    (launcher,) = [
+        tool for tool in registry.template_tools(declared=True) if tool.__name__ == _LAUNCHER
+    ]
+    monkeypatch.setitem(tool_registry._REGISTRY, _LAUNCHER, launcher)
+    assert _LAUNCHER not in available_tool_names()
+    assert _LAUNCHER not in surface(None).tool_names

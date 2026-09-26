@@ -971,7 +971,7 @@ def capability_tool_names() -> set[str]:
     asserts the property that makes a bare-token match safe over this set and unsafe over that one.
     """
     return {
-        *registered_tool_names(),
+        *(name for name in registered_tool_names() if name not in _withheld_launcher_names()),
         *connector_tool_names(),
         *template_tool_names(),
     }
@@ -1078,7 +1078,24 @@ def _register_generated_tools() -> list[CapabilityTool]:
         for tool_fn in [*job_tools(), *template_tools()]:
             if tool_fn.__name__ not in known:
                 register_tool(tool_fn)
-        return registered_tools()
+        withheld = _withheld_launcher_names()
+        return [tool for tool in registered_tools() if tool.__name__ not in withheld]
+
+
+def _withheld_launcher_names() -> set[str]:
+    """Template launchers this deployment declares and does not bind, read at the moment of asking.
+
+    **The registry only grows, so what it holds is not the surface.** A launcher registered by an
+    earlier build under a different configuration stays registered for the life of the process.
+    Measured in CI: the full serial suite bound `run_scale_up_thermal_envelope` on `default`
+    (73,181 tokens against the 72,850 ceiling) while the same files run alone withheld it, because
+    some earlier build in that process had registered it. So
+    the withholding `templates.registry.withheld_reason` decides is applied where the registry is
+    *read*, not only where it is filled. A production process never changes its configuration, so
+    there this subtracts nothing that was registered; in a process that does, it is the difference
+    between the rule and the history.
+    """
+    return set(template_tool_names(declared=True)) - set(template_tool_names())
 
 
 def _narrow(

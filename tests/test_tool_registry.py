@@ -131,7 +131,12 @@ def test_registry_holds_the_inprocess_tools_and_only_generated_launchers_besides
     surface(None)
     extra = set(registered_tool_names()) - _EXPECTED_INPROCESS_TOOLS
     jobs = {job.name for manifest in enabled() for job in manifest.jobs}
-    assert extra == jobs | set(template_tool_names())
+    # Bounded on both sides rather than equal: the registry only grows, so a launcher an earlier
+    # build in this process registered under another configuration can still be held while this
+    # deployment withholds it (`chemclaw_agent._withheld_launcher_names` subtracts it on read).
+    assert (
+        jobs | set(template_tool_names()) <= extra <= jobs | set(template_tool_names(declared=True))
+    )
 
 
 def test_capability_tools_are_exactly_the_registry() -> None:

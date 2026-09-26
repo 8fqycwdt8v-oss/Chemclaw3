@@ -118,10 +118,17 @@ def profile_named_tools() -> frozenset[str]:
     depended on whether the files had been globbed yet would withhold a launcher on the first call
     and bind it on the second.
     """
-    from chemclaw.agent.profile_discovery import load_profiles
+    from chemclaw.agent.profile_discovery import ProfileError, load_profiles
     from chemclaw.agent.profiles import get_profile
 
-    load_profiles()
+    # A malformed profile file is not this function's to report: the build, `make skill-validate`
+    # and the profile loader's own callers each report it in their own terms, and raising here
+    # would pre-empt them from inside an unrelated question (which launchers exist). What loaded is
+    # still asked; a profile that cannot load names nothing a build could fail over.
+    try:
+        load_profiles()
+    except ProfileError:
+        pass
     return frozenset(
         name
         for profile_name in registered_profile_names()
