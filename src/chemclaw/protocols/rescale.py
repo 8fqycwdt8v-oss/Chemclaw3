@@ -22,7 +22,7 @@ reject like any other.
 
 from dataclasses import dataclass
 
-from chemclaw.core.units import Measurement, UnitError, parse_quantity
+from chemclaw.core.units import Measurement, UnitError, has_ambiguous_comma, parse_quantity
 from chemclaw.protocols.models import ChargeLine, ExperimentDesign, ProtocolStep, RequestField
 
 #: Step kinds whose *duration* does not follow the charge, with the reason each one does not.
@@ -138,6 +138,11 @@ def _factor(design: ExperimentDesign, target: str) -> tuple[float, str]:
     dimension the protocol already uses.
     """
     wanted = parse_quantity(target)
+    if wanted is None and has_ambiguous_comma(target):
+        raise RescaleError(
+            f"{target!r} has a comma that may be a thousands separator or a decimal mark — "
+            "write it without one, for example '1.5 kg' or '1500 kg'"
+        )
     if wanted is None:
         raise RescaleError(
             f"{target!r} is not a quantity this can scale to — write it as a number and a unit, "

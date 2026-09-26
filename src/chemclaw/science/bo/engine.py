@@ -1211,8 +1211,10 @@ _BOUND_SNAP_FRACTION = 1e-9
 
 #: Significant digits a solved interior value keeps. The same noise sits in the last few bits of an
 #: interior point, and a value nobody can set is not a difference between two runs. Ten digits moves
-#: a value by at most 5e-11 of itself — far inside `_CONSTRAINT_TOLERANCE` for any quantity a
-#: chemist declares — so rounding cannot turn a feasible run into a breach.
+#: a value by at most 5e-11 of *itself*, which is not inside the absolute `_CONSTRAINT_TOLERANCE`
+#: at every magnitude: at ~1e6, times a constraint's coefficients, it is more — measured, a
+#: space-filling design over `7·a + 13·b <= 3.1e7` was refused after rounding. So the breach check
+#: reads the solver's values and only what is returned is cleaned (`optimal_design`).
 _DESIGN_SIGNIFICANT_DIGITS = 10
 
 
@@ -1223,7 +1225,8 @@ def _clean(parameter: ContinuousParameter | CategoricalParameter, value: ParamVa
     returns a corner it chose twice as `(3.0, 0.0)` and `(2.999999999999995, 1.17e-15)`, so
     exact-equality duplicate detection reported `duplicate_runs=0` over a design that replicated
     three corners, and the conditions read as though somebody should weigh 1e-15 equivalents.
-    Done before `_constraint_breaches`, which therefore checks the values the chemist receives.
+    Done *after* `_constraint_breaches`, which checks the solver's own values: its tolerance is
+    absolute, and neither this snap nor this rounding is bounded in absolute terms.
     """
     if not isinstance(parameter, ContinuousParameter) or not isinstance(value, float):
         return value
@@ -1353,17 +1356,17 @@ def optimal_design(
             f"space: {error}. A tighter constraint set leaves less room, so try more runs, a "
             "simpler formula, or space-filling."
         ) from error
-    runs: list[dict[str, ParamValue]] = [
-        {p.name: _clean(p, _cast(p, row[p.name])) for p in problem.parameters}
-        for _, row in frame.iterrows()
+    solved: list[dict[str, ParamValue]] = [
+        {p.name: _cast(p, row[p.name]) for p in problem.parameters} for _, row in frame.iterrows()
     ]
-    breaches = _constraint_breaches(problem, runs)
+    breaches = _constraint_breaches(problem, solved)
     if breaches:
         raise SurrogateFitError(
             "the solver returned run(s) outside a declared constraint, so this design is not "
             f"feasible and must not be run: {'; '.join(breaches)}. Honouring a limit is the one "
             "thing this offers over a factorial screen, so it refuses rather than returning them."
         )
+    runs = [{p.name: _clean(p, run[p.name]) for p in problem.parameters} for run in solved]
     seen: set[tuple[tuple[str, ParamValue], ...]] = set()
     duplicates = 0
     for run in runs:

@@ -72,6 +72,7 @@ from chemclaw.protocols.rescale import RescaleError, rescale
 from chemclaw.protocols.result_store import default_arm_result_store
 from chemclaw.protocols.results import (
     ArmResult,
+    MixedUnits,
     PlateOutcomes,
     UnknownArm,
     observations_for,
@@ -877,6 +878,10 @@ class PlateReadout(BaseModel):
     # Each measured arm's factor levels beside its value — the shape a campaign fits. Empty unless
     # an outcome was named, because "every outcome at once" is not a table a surrogate can take.
     observations: list[dict[str, float | str]] = Field(default_factory=list)
+    # Why `observations` is empty although an outcome was named: its latest values are in more
+    # than one unit. Beside the readout rather than instead of it, because the results, the
+    # disagreements and the unmeasured arms are exactly what a chemist needs to fix that.
+    observations_refused: str = ""
 
 
 class AttachedResults(BaseModel):
@@ -973,7 +978,8 @@ async def read_plate_results(design_id: str, outcome: str = "", revision: int = 
     Returns:
         JSON with `results`, `arms_without_results`, `disagreements`, and `observations` when an
         outcome was named. An arm with no measurement is **omitted** from observations rather than
-        defaulted: a missing well is not a zero.
+        defaulted: a missing well is not a zero. Values in mixed units give no observations and
+        an `observations_refused` naming the arms under each unit.
 
     Raises:
         ChemclawError: No such design or revision.
@@ -981,10 +987,18 @@ async def read_plate_results(design_id: str, outcome: str = "", revision: int = 
     store = _store()
     stored = await _read_design_or_refuse(store, design_id, revision)
     rows = await default_arm_result_store().read(design_id, stored.revision)
+    observations: list[dict[str, float | str]] = []
+    refused = ""
+    if outcome:
+        try:
+            observations = observations_for(stored.design, outcome, rows)
+        except MixedUnits as exc:
+            refused = str(exc)
     return _readable(
         PlateReadout(
             outcomes=summarise(stored.design, design_id, stored.revision, rows),
-            observations=observations_for(stored.design, outcome, rows) if outcome else [],
+            observations=observations,
+            observations_refused=refused,
         )
     )
 

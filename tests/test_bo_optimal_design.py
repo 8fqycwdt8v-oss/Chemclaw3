@@ -283,3 +283,48 @@ def test_replicated_corners_are_counted_and_read_as_the_bound_they_are() -> None
     assert design.duplicate_runs > 0
     values = {float(run[name]) for run in design.runs for name in ("a", "b")}
     assert values <= {0.0, 3.0}, f"solver noise reached the chemist: {sorted(values)}"
+
+
+def test_rounding_a_feasible_solve_at_a_large_magnitude_is_not_read_as_a_breach(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The breach check reads the solver's values; only the returned runs are cleaned.
+
+    Ten significant digits move a value by up to 5e-11 of itself, which at ~1e6 and times a
+    coefficient is past the absolute `_CONSTRAINT_TOLERANCE`. Checked after rounding, a solve
+    sitting exactly on its limit was refused as infeasible — measured on a space-filling design
+    over `7·a + 13·b <= 3.1e7`. The solver is replaced so the point is fixed rather than
+    depending on one scipy build's arithmetic.
+    """
+    from types import SimpleNamespace
+
+    import pandas as pd
+
+    from chemclaw.science.bo import engine
+
+    on_the_limit = 1234567.89151  # rounds *up* to 1234567.892 at ten significant digits
+
+    class _Solver:
+        def ask(self, candidate_count: int) -> pd.DataFrame:
+            return pd.DataFrame(
+                {"a": [on_the_limit] * candidate_count, "b": [0.0] * candidate_count}
+            )
+
+    monkeypatch.setattr(engine, "strategies", SimpleNamespace(map=lambda spec: _Solver()))
+    problem = OptimizationProblem(
+        parameters=[
+            ContinuousParameter(name="a", lower=0.0, upper=3e6),
+            ContinuousParameter(name="b", lower=0.0, upper=3e6),
+        ],
+        objectives=[Objective(name="yield_pct", direction="maximize")],
+        constraints=[
+            LinearConstraint(
+                parameters=["a", "b"], coefficients=[13.0, 1.0], rhs=13.0 * on_the_limit
+            )
+        ],
+    )
+
+    design = optimal_design(problem, n_experiments=2, criterion="space-filling", seed=0)
+
+    assert [run["a"] for run in design.runs] == [1234567.892, 1234567.892]
+    assert design.duplicate_runs == 1

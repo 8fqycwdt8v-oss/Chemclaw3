@@ -343,7 +343,9 @@ def _principal_from_claims(claims: dict[str, Any]) -> Principal:
     the places it was written.
     """
     oid = claims.get("oid")
-    if not oid:
+    # Checked as `Principal` will check it (a string, non-empty once stripped), so a malformed
+    # claim is a 401 here rather than a pydantic `ValidationError` escaping as a 500.
+    if not isinstance(oid, str) or not oid.strip():
         raise AuthError("token has no 'oid' claim")
     upn = claims.get("preferred_username") or claims.get("upn") or ""
     entitlements = list(claims.get("roles", []))

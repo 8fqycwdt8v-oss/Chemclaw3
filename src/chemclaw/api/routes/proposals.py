@@ -26,6 +26,7 @@ proposed it twice.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Awaitable, Callable
 
 from fastapi import FastAPI, HTTPException
@@ -47,6 +48,8 @@ from chemclaw.agent.local_skills import (
 from chemclaw.api.deps import CurrentUser
 from chemclaw.api.routes.skill_http import skill_refusal_http, store_or_503
 from chemclaw.api.runner import turn_store
+
+logger = logging.getLogger(__name__)
 
 
 class ProposalOut(BaseModel):
@@ -176,12 +179,31 @@ async def decide_proposal(
     # while the queue said it was declined, answered with a 200.
     wanted = "accepted" if body.accepted else "rejected"
     if decided.state != wanted:
+        lost = f"this proposal was {decided.state} by another request while you were deciding it"
         if undo is not None:
-            await undo()
+            # **A failed undo is still a lost race, and it must say so rather than 500.** The skill
+            # this request wrote may still be acting on every turn while the queue records the
+            # other decision — the state this check exists to prevent — so the 409 names it and
+            # the log names who, what and why, for whoever has to remove it.
+            try:
+                await undo()
+            except Exception as exc:
+                logger.exception(
+                    "could not undo the accepted skill %r for %s after the proposal was %s by "
+                    "another request; the written body may still be live in that tier",
+                    name,
+                    principal.oid,
+                    decided.state,
+                )
+                raise HTTPException(
+                    409,
+                    f"{lost}, and that decision stands — but removing the skill this request had "
+                    "already written failed, so the accepted version may still be in your tier. "
+                    f"Check it through GET /skills/mine/{name} and correct it through the skills "
+                    "routes",
+                ) from exc
         raise HTTPException(
-            409,
-            f"this proposal was {decided.state} by another request while you were deciding it, "
-            "and that decision stands; nothing you asked for was applied",
+            409, f"{lost}, and that decision stands; nothing you asked for was applied"
         )
     return _rendered(decided)
 

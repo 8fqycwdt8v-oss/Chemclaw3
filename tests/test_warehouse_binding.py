@@ -680,7 +680,8 @@ def test_a_repeat_count_too_large_to_expand_is_refused_before_it_is_compiled() -
         ("(?x)#[\na{200000}", "verbose mode can comment a `[` out of the scan's sight"),
         ("(?:a{1000}){1000}", "nested repeats multiply: a million atoms, each count legal"),
         ("(?:(?:(?:a{100}){100}){100}){100}", "the case that never finishes, every count 100"),
-        ("a{9000}" * 3, "siblings add up: the bound is the pattern's expansion, not one count"),
+        ("a{9000}" * 12, "siblings add up: the whole pattern's expansion is bounded too"),
+        ("(?P<n>ab){5001}", "a named group's body is what a repeat multiplies"),
     ],
 )
 def test_the_expansion_guard_sees_what_a_per_quantifier_scan_did_not(
@@ -716,6 +717,12 @@ def test_the_expansion_guard_sees_what_a_per_quantifier_scan_did_not(
         (r"\p{L}+", "`regex` syntax `re` would refuse, which is why this is a scan"),
         (r"(?i-x:ab)", "a flag group turning verbose mode off hides nothing"),
         (r"(?#note)L-(\d+)", "an inline comment is skipped, not refused"),
+        (r"(?P<name>a){2000}", "a group's name is syntax, not atoms the repeat multiplies"),
+        (r"(?P<abcdefgh>a){9999}", "however long the name, under the old per-count limit"),
+        (r"(?<n>a)(?P=n){9999}", "a backreference is one atom"),
+        (r"(?<=a)b{10000}(?i:c)", "lookarounds and scoped flags weigh nothing either"),
+        (r"^[^,]{0,10000},", "a repeat at the per-count limit followed by a literal"),
+        ("a{9000}" * 3, "siblings under the whole-pattern bound, each under the per-count one"),
     ],
 )
 def test_the_expansion_guard_does_not_refuse_a_pattern_a_binding_would_write(

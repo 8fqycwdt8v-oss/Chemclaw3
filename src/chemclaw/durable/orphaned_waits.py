@@ -47,10 +47,16 @@ logger = logging.getLogger(__name__)
 
 
 class OrphanSweep(BaseModel):
-    """What one sweep did: how many rows it asked about, and which it settled."""
+    """What one sweep did: how many rows it asked about, which it settled, and where it stopped.
+
+    `resume_after` is the keyset position the next pass starts from, carried between the
+    Schedule's runs as the previous run's completion result: `None` when this pass reached the end
+    of the table, so the next one wraps around to the oldest rows.
+    """
 
     examined: int = 0
     settled: list[str] = []
+    resume_after: pending_store.WaitingRow | None = None
 
 
 async def _run_is_gone(client: Any, request_id: str, run_id: str) -> str | None:
@@ -96,19 +102,27 @@ async def _latest_is_running(client: Any, request_id: str) -> bool:
 
 #: The share of the activity's `start_to_close` a pass may spend walking pages before it stops.
 #: Below one so the pass returns what it settled rather than being cancelled mid-page, which would
-#: lose the report and retry the whole walk; the rest are the next pass's.
+#: lose the report and retry the whole walk. Where it stopped is the next pass's starting point
+#: (`OrphanSweep.resume_after`), so a table longer than one pass is walked across passes.
 _PASS_BUDGET_FRACTION = 0.5
 
 
 @durable_activity("background")
 @activity.defn
-async def settle_orphaned_waits() -> OrphanSweep:
+async def settle_orphaned_waits(after: pending_store.WaitingRow | None = None) -> OrphanSweep:
     """Settle every examined `waiting` row whose run the broker says is gone.
 
-    **Walks the table page by page**, `awaiting_orphan_batch` rows at a time, until it is exhausted
-    or the pass has spent `_PASS_BUDGET_FRACTION` of its timeout. One page per pass with no cursor
-    re-examined the same oldest rows every hour: live waits are left `waiting`, so a batch of them
-    older than an orphan starved it for as long as they stayed open.
+    **Walks the table page by page from `after`**, `awaiting_orphan_batch` rows at a time, until
+    it is exhausted or the pass has spent `_PASS_BUDGET_FRACTION` of its timeout — and always at
+    least one page, so a pass makes progress however small the budget. One page per pass with no
+    cursor re-examined the same oldest rows every hour: live waits are left `waiting`, so a batch
+    of them older than an orphan starved it for as long as they stayed open. Restarting every pass
+    at the oldest row only moved that starvation to a longer table, so where a pass stops is
+    returned as `resume_after` and the next pass continues from it, wrapping to the start once the
+    table is exhausted.
+
+    Args:
+        after: the keyset position the previous pass stopped at; `None` starts at the oldest row.
 
     A broker error on one row stops the sweep rather than skipping the row: an unreachable broker
     reads the same as "not found" to a loop that swallowed it, and settling a live question because
@@ -118,8 +132,7 @@ async def settle_orphaned_waits() -> OrphanSweep:
     deadline = loop.time() + settings.retention_timeout_seconds * _PASS_BUDGET_FRACTION
     sweep = OrphanSweep()
     client: Any = None
-    after: pending_store.WaitingRow | None = None
-    while loop.time() < deadline:
+    while True:
         rows = await pending_store.waiting_rows(
             older_than_seconds=settings.awaiting_orphan_grace_seconds,
             limit=settings.awaiting_orphan_batch,
@@ -141,6 +154,9 @@ async def settle_orphaned_waits() -> OrphanSweep:
         if len(rows) < settings.awaiting_orphan_batch:
             break
         after = rows[-1]
+        if loop.time() >= deadline:
+            sweep.resume_after = after
+            break
     return sweep
 
 
@@ -154,9 +170,20 @@ class OrphanedWaitsWorkflow:
 
     @workflow.run
     async def run(self) -> OrphanSweep:
-        """Run one sweep and return what it settled."""
+        """Run one sweep from where the previous run stopped, and return what it settled.
+
+        The cursor rides on the Schedule's last completion result rather than on an input or a
+        table: it is read from the run's start event, so it issues no command, and a previous run
+        with no `resume_after` (or none at all) starts this one at the oldest row.
+        """
+        previous = (
+            workflow.get_last_completion_result(OrphanSweep)
+            if workflow.has_last_completion_result()
+            else None
+        )
         return await workflow.execute_activity(
             settle_orphaned_waits,
+            previous.resume_after if previous else None,
             start_to_close_timeout=timedelta(seconds=settings.retention_timeout_seconds),
             schedule_to_start_timeout=queue_wait_timeout(),
             retry_policy=BAD_DATA_RETRY,

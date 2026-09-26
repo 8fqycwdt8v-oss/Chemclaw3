@@ -336,3 +336,45 @@ def test_an_acceptance_that_loses_the_race_to_a_decline_undoes_its_write(
     assert lost.status_code == 409
     assert "rejected by another request" in lost.json()["detail"]
     assert asyncio.run(read_local_skill(skills_store, _ALICE.oid, "cold-quench")) == held_before
+
+
+def test_a_lost_race_whose_undo_fails_is_still_a_409_that_names_the_live_skill(
+    app: FastAPI,
+    skills_store: InMemoryStore,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A store fault in the undo does not turn the lost race into a 500 that says nothing.
+
+    The accepted body is then still in the chemist's tier while the queue records the other
+    decision, so the answer is the 409 the race earned, telling the person the skill may still be
+    there, and an ERROR naming who and which skill for whoever removes it.
+    """
+    from chemclaw.agent.local_skills import read_local_skill, save_local_skill
+
+    digest = _propose()
+
+    async def _write_then_lose(store: Any, actor: str, name: str, body: str) -> None:
+        await save_local_skill(store, actor, name, body)
+        await default_proposal_store().decide(
+            actor, "skill", name, digest, accepted=False, decided_by=actor, reason="other tab"
+        )
+
+    async def _store_down(*_: Any) -> None:
+        raise ConnectionError("the store went away")
+
+    monkeypatch.setattr(proposal_routes, "save_local_skill", _write_then_lose)
+    monkeypatch.setattr(proposal_routes, "delete_local_skill", _store_down)
+    client = _as(app, _ALICE)
+
+    with caplog.at_level("ERROR", logger=proposal_routes.__name__):
+        lost = client.post(
+            "/proposals/skill/cold-quench", json={"content_hash": digest, "accepted": True}
+        )
+
+    assert lost.status_code == 409
+    assert "may still be in your tier" in lost.json()["detail"]
+    assert any(
+        _ALICE.oid in r.getMessage() and "cold-quench" in r.getMessage() for r in caplog.records
+    )
+    assert asyncio.run(read_local_skill(skills_store, _ALICE.oid, "cold-quench")) == _BODY

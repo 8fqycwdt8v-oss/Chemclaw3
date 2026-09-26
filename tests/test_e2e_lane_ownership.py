@@ -15,6 +15,8 @@ import json
 import os
 import re
 import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 import yaml
@@ -55,6 +57,64 @@ def test_up_starts_no_bundle_processes_sh_derives() -> None:
         "`processes.sh::start_fleet_bundles` starts it too and dies on the served port. Remove the "
         "call; processes.sh is the one owner."
     )
+
+
+def _function(name: str) -> str:
+    """The body of shell function `name` in `up.sh`, as source that defines it."""
+    match = re.search(rf"^{name}\(\) \{{\n.*?^\}}\n", _UP.read_text(encoding="utf-8"), re.M | re.S)
+    assert match is not None, f"{_UP} has no `{name}()` function"
+    return match.group(0)
+
+
+def test_up_checks_no_derived_bundle_s_credential_by_a_hardcoded_name() -> None:
+    """A fleet bundle's credential check is derived, like its start, never a literal in `up()`.
+
+    `start_props` moving to `processes.sh` took its credential check with it, and the literal list
+    left behind (`chem`, `safety`) silently skipped `props`, `rxnpredict` and every later bundle.
+    `calc` is exempt by name: the literal check is of the *backend* on `calc_server_url`, which is
+    not a connector, while core's `calc` bundle is served by this repository's own process.
+    """
+    body = _function("up")
+    assert "check_fleet_bundle_credentials" in body, f"{_UP}'s `up()` checks no fleet credential"
+    literal = set(re.findall(r"^\s*assert_credential_accepted ([a-z_]+)\b", body, re.M))
+    endpoint_bundles = {
+        name
+        for name, manifest in bundles_declared_here().items()
+        if (yaml.safe_load(manifest.read_text(encoding="utf-8")) or {}).get("endpoint")
+    }
+    clash = sorted((literal - {"calc"}) & endpoint_bundles)
+    assert not clash, f"{_UP}'s `up()` names {clash}; `check_fleet_bundle_credentials` owns them"
+
+
+def test_the_credential_check_covers_every_fleet_bundle_in_the_persisted_map(
+    tmp_path: Path,
+) -> None:
+    """Driven: every URL-map entry the fleet publishes is checked, with the lane's own token."""
+    live, fleet = tmp_path / "live", tmp_path / "fleet"
+    (live / "run").mkdir(parents=True)
+    for name in ("chem", "props"):
+        (fleet / "manifests" / name).mkdir(parents=True)
+        (fleet / "manifests" / name / "connector.yaml").write_text("name: x\n")
+    urls = {name: f"http://127.0.0.1:1/{name}" for name in ("bo", "chem", "props")}
+    (live / "run" / "connector-env.sh").write_text(
+        f"export CHEMCLAW_CONNECTOR_URLS='{json.dumps(urls)}'\nexport CHEMCLAW_PROPS_TOKEN=file\n"
+    )
+    script = (
+        "set -euo pipefail\n"
+        'die() { echo "DIE $*"; exit 1; }\n'
+        'assert_credential_accepted() { echo "CHECK $*"; }\n'
+        f"{_function('check_fleet_bundle_credentials')}"
+        f"LIVE_DIR={live} MCP_REPO={fleet} CHEMCLAW_PROPS_TOKEN=lane\n"
+        f"check_fleet_bundle_credentials {sys.executable}\n"
+    )
+    env = {k: v for k, v in os.environ.items() if not k.startswith("CHEMCLAW_")}
+    out = subprocess.run(
+        ["bash", "-c", script], capture_output=True, text=True, env=env, check=True
+    ).stdout.splitlines()
+    assert out == [
+        "CHECK chem http://127.0.0.1:1/chem dev-token",
+        "CHECK props http://127.0.0.1:1/props lane",
+    ]
 
 
 def _rxnpredict_lane_defaults() -> dict[str, str]:

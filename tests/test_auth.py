@@ -160,6 +160,23 @@ def test_token_without_oid_is_rejected(rsa_key: Any) -> None:
         validate_token(token)
 
 
+@pytest.mark.parametrize("oid", ["  ", 42])
+def test_token_with_a_blank_or_non_string_oid_is_rejected(rsa_key: Any, oid: object) -> None:
+    """A malformed `oid` is an `AuthError` (a 401), not a `Principal` validation error (a 500)."""
+    token = _sign(rsa_key, {"oid": oid})
+    with pytest.raises(AuthError, match="no 'oid' claim"):
+        validate_token(token)
+
+
+def test_route_answers_401_for_a_blank_oid(monkeypatch: pytest.MonkeyPatch, rsa_key: Any) -> None:
+    """End to end: the request is refused as unauthenticated rather than failing as a 500."""
+    monkeypatch.setattr(settings, "entra_required", True)
+    token = _sign(rsa_key, {"oid": "  "})
+    with TestClient(create_app()) as client:
+        response = client.post("/sessions", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 401
+
+
 def test_expired_token_is_rejected(rsa_key: Any) -> None:
     """An expired token is rejected."""
     token = _sign(rsa_key, {"oid": "u-1", "exp": int(time.time()) - 10})

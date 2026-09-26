@@ -275,6 +275,14 @@ def _iso_datetime(value: Any, options: Mapping[str, Any]) -> Any:
 # more can say so; what it cannot do is say a number that never finishes.
 _MAX_REPEAT_COUNT = 10_000
 
+# The whole pattern's expansion, summed over siblings — looser than one repeat's, because it is a
+# second, different bound: one repeat at `_MAX_REPEAT_COUNT` followed by a literal is the pattern a
+# binding bounded at a field width writes, and refusing it was refusing correct input. Ten times
+# over is ~34 ms to compile (`regex.compile("a{100000}")`, measured beside the figures above), paid
+# once per pattern behind `_compiled`'s cache; what it exists to stop is the unbounded sum, a
+# hundred legal repeats side by side.
+_MAX_EXPANDED_ATOMS = 10 * _MAX_REPEAT_COUNT
+
 # One `{n}` or `{n,m}` quantifier. Anchored on a `{` the scan below has already established is
 # neither escaped nor inside a character class, so this never has to decide that itself.
 _REPEAT_BOUND = re.compile(r"\{(\d*)(?:,(\d*))?\}")
@@ -284,12 +292,22 @@ _REPEAT_BOUND = re.compile(r"\{(\d*)(?:,(\d*))?\}")
 _INLINE_FLAGS = re.compile(r"([A-Za-z0-9-]*)[):]")
 
 
-def _refuse_past_the_expansion_bound(pattern: str, expanded: int) -> None:
+# What follows `(?` when it opens a group whose body starts after it: a named group (`P<n>`,
+# `<n>`), a lookaround, an atomic group or a branch reset. Matched rather than counted, because
+# the prefix is syntax — counting `P<name>` as seven atoms refused `(?P<name>a){2000}`.
+_GROUP_PREFIX = re.compile(r"P?<(?![=!])[^>]*>|<[=!]|[:=!>|]")
+
+# What follows `(?` when the whole parenthesis is one atom rather than a group: a backreference
+# or call by name (`P=n`, `P>n`, `&n`) or a recursion (`R`, `1`, `+1`, `-1`).
+_GROUP_ATOM = re.compile(r"(?:P[=>]|&)[^)]*\)|R\)|[+-]?\d+\)")
+
+
+def _refuse_past_the_expansion_bound(pattern: str, expanded: int, bound: int) -> None:
     """Raise `PathSyntaxError` if `expanded` atoms is more than `regex` should build at load."""
-    if expanded > _MAX_REPEAT_COUNT:
+    if expanded > bound:
         raise PathSyntaxError(
             f"transform 'regex' expands to {expanded} atoms in {pattern!r}, over the "
-            f"{_MAX_REPEAT_COUNT} this engine will expand. A bounded repeat is expanded at "
+            f"{bound} this engine will expand. A bounded repeat is expanded at "
             "compile time, and nested repeats multiply, so a count this size is memory rather "
             "than a pattern — write the repeat unbounded (`+`, `*`) or bound it at the width of "
             "the field being read"
@@ -304,14 +322,17 @@ def _refuse_an_unbounded_expansion(pattern: str) -> None:
     expand — only establishes that the pattern is *valid*, not what it costs the other engine
     (and `re` refuses legal `regex` syntax such as `\p{L}`, so it cannot be the parser either).
 
-    **What is bounded is the expanded size, not each count.** `regex` expands nested bounded
-    repeats multiplicatively, so `(?:a{1000}){1000}` is a million atoms although neither count is
-    over the limit. The walk keeps one running total per open group: an atom adds its weight, a
-    `{n,m}` multiplies the atom (or group) before it by `max(n, m)`, and a closing `)` hands the
-    group's total up as one atom's weight. Siblings are summed, so what is bounded is the whole
-    pattern's expansion — `a{9000}` written a hundred times over is refused too — and an
-    alternation's branches are summed rather than maxed, an over-estimate, which is the safe
-    direction for a guard.
+    **What is bounded is the expanded size, twice.** `regex` expands nested bounded repeats
+    multiplicatively, so `(?:a{1000}){1000}` is a million atoms although neither count is over the
+    limit. The walk keeps one running total per open group: an atom adds its weight, a `{n,m}`
+    multiplies the atom (or group) before it by `max(n, m)`, and a closing `)` hands the group's
+    total up as one atom's weight. One repeat's product is held to `_MAX_REPEAT_COUNT` — the old
+    per-count limit, now seeing through nesting — and the whole pattern's sum to the looser
+    `_MAX_EXPANDED_ATOMS`, so `a{9000}` written a dozen times over is refused while `[^,]{0,10000},`
+    is not. An alternation's branches are summed rather than maxed, an over-estimate, which is the
+    safe direction for a guard. A group's prefix (`?:`, `?P<name>`, a lookaround) is syntax and
+    weighs nothing; a backreference or recursion is one atom; an inline flag set such as `(?i)`
+    is neither.
 
     Besides that, it tracks the ways a `{` or `[` is not what it looks like: a backslash escape; a
     character class, where `{` is an ordinary member (`[{]{1}` is a literal brace repeated once,
@@ -359,13 +380,26 @@ def _refuse_an_unbounded_expansion(pattern: str) -> None:
                     "comments out the rest of the line, which hides what the pattern would "
                     "expand to from the check that bounds it — write the pattern without `x`"
                 )
+            if pattern.startswith("(?", index):
+                atom = _GROUP_ATOM.match(pattern, index + 2)
+                if atom is not None:
+                    last = 1
+                    totals[-1] += last
+                    index = atom.end()
+                    continue
+                if flags is not None and flags.group(0).endswith(")"):
+                    index = flags.end()  # `(?i)`: a flag set, which opens nothing
+                    continue
+                prefix = _GROUP_PREFIX.match(pattern, index + 2) or flags
+                index = prefix.end() if prefix is not None else index + 1
+            else:
+                index += 1
             totals.append(0)
-            index += 1
             continue
         if char == ")":
             last = totals.pop() if len(totals) > 1 else 0
             totals[-1] += last
-            _refuse_past_the_expansion_bound(pattern, totals[-1])
+            _refuse_past_the_expansion_bound(pattern, totals[-1], _MAX_EXPANDED_ATOMS)
             index += 1
             continue
         if char == "{":
@@ -377,9 +411,10 @@ def _refuse_an_unbounded_expansion(pattern: str) -> None:
                 counts = [int(part) for part in bound.groups() if part]
                 if counts:
                     repeated = last * max(counts)
+                    _refuse_past_the_expansion_bound(pattern, repeated, _MAX_REPEAT_COUNT)
                     totals[-1] += repeated - last
                     last = repeated
-                    _refuse_past_the_expansion_bound(pattern, totals[-1])
+                    _refuse_past_the_expansion_bound(pattern, totals[-1], _MAX_EXPANDED_ATOMS)
                 index = bound.end()
                 continue
         if char not in "*+?|":

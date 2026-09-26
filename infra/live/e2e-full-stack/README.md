@@ -38,7 +38,9 @@ because a pidfile is a per-lane record of a machine-wide port the duplication wa
 second uvicorn died on the bound address while readiness was answered by the first, so every
 four-repo bring-up left two dead pidfiles and `make live-e2e-full-stack-status` printed `chem DOWN`
 directly above `chem up`. This script still *checks* their credential after `processes.sh` returns
-— D-2026-08-17's lesson — because a check is not a start.
+— D-2026-08-17's lesson — because a check is not a start. The set it checks is derived the same way
+(`check_fleet_bundle_credentials`: the bundles in the URL map `processes.sh` persisted that the fleet
+publishes a manifest for), plus `calc`, which is a backend rather than a connector.
 
 `rxnpredict` runs with no predictor extras installed and the `fake_a`/`fake_c` deterministic
 doubles requested — a real tool surface with no GPU, no checkpoint download and no model-weight

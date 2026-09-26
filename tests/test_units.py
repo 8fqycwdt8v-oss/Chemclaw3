@@ -19,6 +19,7 @@ from chemclaw.core.units import (
     JOULE_PER_CALORIE,
     Measurement,
     UnitError,
+    has_ambiguous_comma,
     parse_quantity,
     parse_unit,
     reconcile,
@@ -507,11 +508,30 @@ def test_parse_quantity_refuses_a_number_inside_a_sentence() -> None:
     assert parse_quantity("run it at 20 C in 500 mL") is None
 
 
-@pytest.mark.parametrize("text", ["1,000 g", "1,500 mL", "12,345 mg", "-1,000 g"])
+@pytest.mark.parametrize(
+    "text", ["1,000 g", "1,500 mL", "12,345 mg", "-1,000 g", "1,500e3 g", "+1,500E-3 mol"]
+)
 def test_parse_quantity_refuses_a_comma_that_may_be_a_thousands_separator(text: str) -> None:
     """A comma and exactly three digits is refused, not read as a decimal.
 
     "1,500 g" read as 1.5 g scales a protocol a thousand times too small while its recorded basis
     still says "1,500 g", so the caller's "write it as a number and a unit" refusal is the answer.
+    An exponent does not hide the group: "1,500e3" is 1.5e3 or 1.5e6.
     """
     assert parse_quantity(text) is None
+    assert has_ambiguous_comma(text)
+
+
+@pytest.mark.parametrize(
+    ("text", "value", "unit"),
+    [("0,500 g", 0.5, "g"), ("-0,250 mol", -0.25, "mol"), ("1,5 g", 1.5, "g")],
+)
+def test_parse_quantity_reads_a_comma_that_cannot_be_a_thousands_separator(
+    text: str, value: float, unit: str
+) -> None:
+    """No thousands group starts with 0 or has fewer than three digits: those are decimals."""
+    parsed = parse_quantity(text)
+    assert parsed is not None
+    assert parsed.value == pytest.approx(value)
+    assert parsed.unit.symbol == unit
+    assert not has_ambiguous_comma(text)

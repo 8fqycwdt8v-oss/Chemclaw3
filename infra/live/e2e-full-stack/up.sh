@@ -113,6 +113,33 @@ assert_credential_accepted() {
   esac
 }
 
+# `assert_credential_accepted` over every fleet bundle `processes.sh` started, **derived, never
+# listed**. When `start_props` moved to `processes.sh` its check went with it and the list here kept
+# only `chem` and `safety`, so `props`, `rxnpredict` and every later bundle went unchecked while the
+# README said they were. The set is `processes.sh::fleet_bundle_names`' own test, read back from
+# what it persisted: the URL map's keys are core's endpoint-declaring bundles, and a fleet manifest
+# for the same name is what makes one the fleet's. The token is the variable `start_fleet_bundles`
+# exports — same name, same `dev-token` default — which is the half the front door sends.
+check_fleet_bundle_credentials() {
+  local python="$1" env_file="$LIVE_DIR/run/connector-env.sh"
+  [ -f "$env_file" ] || die "processes.sh returned without writing $env_file"
+  local pairs name url var checked=0
+  # Assigned rather than iterated, so a failure in either step stops the lane (see
+  # `start_fleet_bundles` for what `for x in $(cmd)` does to a traceback under `set -e`).
+  pairs="$( # shellcheck source=/dev/null
+    . "$env_file" && "$python" -c 'import json, sys
+for name, url in sorted(json.loads(sys.argv[1] or "{}").items()):
+    print(name, url)' "${CHEMCLAW_CONNECTOR_URLS:-}")" \
+    || die "could not read the connector URL map from $env_file"
+  while read -r name url; do
+    [ -n "$name" ] && [ -f "$MCP_REPO/manifests/$name/connector.yaml" ] || continue
+    var="CHEMCLAW_$(printf '%s' "$name" | tr '[:lower:]' '[:upper:]')_TOKEN"
+    assert_credential_accepted "$name" "$url" "${!var:-dev-token}"
+    checked=$((checked + 1))
+  done <<< "$pairs"
+  [ "$checked" -gt 0 ] || die "no fleet bundle in $env_file's URL map to check a credential against"
+}
+
 # ---------------------------------------------------------------------------- Chemclaw3-mcp
 # The servers this harness runs share one uv workspace at the repo root, so one resolved
 # interpreter serves them all (same reasoning as processes.sh's python_bin()).
@@ -323,8 +350,7 @@ up() {
   # D-2026-08-17 left behind still has to run. It runs here rather than inside the start, because
   # the start is no longer this lane's and a check is not a start: `/healthz` is unauthenticated,
   # so without it a mismatch shows up only as a degraded turn with nothing naming a credential.
-  assert_credential_accepted chem "http://127.0.0.1:8858/mcp" "$CHEMCLAW_CHEM_TOKEN"
-  assert_credential_accepted safety "http://127.0.0.1:8859/mcp" "$CHEMCLAW_SAFETY_TOKEN"
+  check_fleet_bundle_credentials "$mcp_python"
   # The calc backend is checked on exactly the same terms even though it is not a connector: the
   # credential has the same two halves, and a mismatch here is worse than a degraded turn — it is a
   # `CalcServerError` from a server whose `/healthz` is green, which is how this lane once

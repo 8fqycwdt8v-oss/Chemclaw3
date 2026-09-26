@@ -40,6 +40,14 @@ class UnknownArm(ChemclawError):
     """
 
 
+class MixedUnits(ChemclawError):
+    """The latest values for one outcome carry more than one unit, so they make no one column.
+
+    Its own type so a reader that can still answer without observations — `read_plate_results`
+    returns the rest of the plate — catches this refusal and nothing else.
+    """
+
+
 class ArmResult(BaseModel):
     """One measured outcome for one arm of one revision.
 
@@ -178,7 +186,7 @@ def observations_for(
     zero, and a surrogate fitted to invented zeros is worse than one fitted to fewer points.
 
     Raises:
-        ChemclawError: the latest values for `outcome` carry more than one unit, naming the arms
+        MixedUnits: the latest values for `outcome` carry more than one unit, naming the arms
             under each. A column mixing percent and fraction fits a surrogate to numbers that are
             not comparable, and which unit is right is the chemist's call, not a conversion here.
     """
@@ -192,7 +200,7 @@ def observations_for(
     for arm, found in measured:
         by_unit.setdefault(found.unit, []).append(arm.arm_id)
     if len(by_unit) > 1:
-        raise ChemclawError(
+        raise MixedUnits(
             f"the latest {outcome!r} values are in more than one unit: "
             + "; ".join(f"{unit or '(no unit)'}: {sorted(arms)}" for unit, arms in by_unit.items())
             + ". Re-attach them in one unit before seeding a campaign"

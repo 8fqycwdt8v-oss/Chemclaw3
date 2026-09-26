@@ -458,6 +458,21 @@ class CheckInWorkflow:
                 schedule_to_start_timeout=queue_wait_timeout(),
                 retry_policy=BAD_DATA_RETRY,
             )
+            # **Gated, because it moves a command.** The shipped code superseded once per page,
+            # before the first batch; per batch schedules a supersede where a recorded history of
+            # a page longer than `_CONCURRENT_REQUESTERS` holds the second batch's deliveries, and
+            # this workflow fails rather than parks, so the unguarded change turned a redeploy
+            # mid-sweep into that night's failed run. Asked only for a non-empty page, the one
+            # shape the two versions differ on. The id may never be reused.
+            per_batch = bool(page.check_ins) and workflow.patched("check-in-supersede-per-batch")
+            if page.check_ins and not per_batch:
+                dropped += await workflow.execute_activity(
+                    supersede_unread_check_ins,
+                    [item.owner for item in page.check_ins],
+                    start_to_close_timeout=timeout,
+                    schedule_to_start_timeout=queue_wait_timeout(),
+                    retry_policy=BAD_DATA_RETRY,
+                )
             for start in range(0, len(page.check_ins), _CONCURRENT_REQUESTERS):
                 batch = page.check_ins[start : start + _CONCURRENT_REQUESTERS]
                 # Immediately before this batch is written and scoped to it: a check-in is a
@@ -466,13 +481,14 @@ class CheckInWorkflow:
                 # than per page because the budget check below can defer mid-page, and a page-wide
                 # delete took every later requester's notice and replaced it with nothing. An empty
                 # page has no batch, so a quiet night still costs no activity at all.
-                dropped += await workflow.execute_activity(
-                    supersede_unread_check_ins,
-                    [item.owner for item in batch],
-                    start_to_close_timeout=timeout,
-                    schedule_to_start_timeout=queue_wait_timeout(),
-                    retry_policy=BAD_DATA_RETRY,
-                )
+                if per_batch:
+                    dropped += await workflow.execute_activity(
+                        supersede_unread_check_ins,
+                        [item.owner for item in batch],
+                        start_to_close_timeout=timeout,
+                        schedule_to_start_timeout=queue_wait_timeout(),
+                        retry_policy=BAD_DATA_RETRY,
+                    )
                 # Concurrently across requesters, serially within one — see `_tell`. Best-effort per
                 # requester, the same reject-and-continue the digest uses: one broken mailbox must
                 # not stop everybody else hearing that their work is stuck.

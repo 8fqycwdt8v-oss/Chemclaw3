@@ -1838,9 +1838,17 @@ class HypothesisTournamentWorkflow:
         # **So is a call naming nothing.** It cannot dispatch, so it cannot spend a calculation,
         # and slicing the budget over it first let a `call=None` leader take a slot, refuse
         # `no-call`, and push a check that could have run below the cut as `over-budget`.
-        empty = [
-            check for check in computable if check.call is None or not check.call.named_targets
-        ]
+        #
+        # **Gated, because it removes a command.** The shipped code dispatched such a check as a
+        # `run_computable_check` activity that refused `no-call`; a history recorded on it holds
+        # that ScheduleActivityTask, and this workflow fails rather than parks on a divergence.
+        # Unpatched, the empty checks stay in `computable`, take their budget slot and dispatch,
+        # exactly as that history recorded. The id may never be reused.
+        empty = (
+            [check for check in computable if check.call is None or not check.call.named_targets]
+            if workflow.patched("tournament-empty-calls-refused-before-budget")
+            else []
+        )
         for check in empty:
             out[check.hypothesis_id] = _refused(
                 check,

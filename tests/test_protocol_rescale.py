@@ -126,6 +126,12 @@ def test_a_target_that_is_not_a_quantity_is_refused_with_an_example() -> None:
         rescale(_design(), target="kilo lab")
 
 
+def test_a_target_with_an_ambiguous_comma_is_refused_naming_the_comma() -> None:
+    """An ambiguous comma is a quantity; the refusal names the comma, not "not a quantity"."""
+    with pytest.raises(RescaleError, match="thousands separator"):
+        rescale(_design(), target="1,500 g")
+
+
 def test_two_limiting_lines_are_refused_rather_than_resolved_here() -> None:
     """`charge_is_consistent` already reports this; a second opinion would be a second answer."""
     design = _design(

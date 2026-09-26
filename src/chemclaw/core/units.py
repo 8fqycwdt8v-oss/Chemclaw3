@@ -641,10 +641,29 @@ def reconcile(value: float, reported: str, expected: str) -> float:
 #: the other job, and conflating them would make "run it at 20 °C in 500 mL" parse as a scale.
 _QUANTITY = re.compile(r"^\s*([+-]?\d+(?:[.,]\d+)?(?:[eE][+-]?\d+)?)\s*([^\s\d].*?)\s*$")
 
-#: A comma followed by exactly three digits: "1,500" is 1500 to one reader and 1.5 to another.
-#: Refused rather than guessed, because either guess is a factor of 1000 in a rescaled protocol and
-#: the recorded basis string would still read "1,500" — the error would be invisible where it lands.
-_AMBIGUOUS_COMMA = re.compile(r"[+-]?\d+,\d{3}")
+#: A comma that could be a thousands separator: one to three digits not starting with 0, then a
+#: comma and exactly three digits. "1,500" is 1500 to one reader and 1.5 to another. Refused rather
+#: than guessed, because either guess is a factor of 1000 in a rescaled protocol and the recorded
+#: basis string would still read "1,500" — the error would be invisible where it lands. "0,500"
+#: is not ambiguous (no thousands group starts with 0), so it reads as a decimal. Matched against
+#: the mantissa only, so "1,500e3" is refused too.
+_AMBIGUOUS_COMMA = re.compile(r"[+-]?[1-9]\d{0,2},\d{3}")
+
+
+def has_ambiguous_comma(text: str) -> bool:
+    """Whether a typed quantity's number uses a comma that may be a thousands separator.
+
+    `parse_quantity` refuses such a number, and a caller turning that refusal into a message
+    should name the comma rather than say "not a quantity" about something that plainly is one.
+    """
+    match = _QUANTITY.match(text)
+    return match is not None and _number_has_ambiguous_comma(match.group(1))
+
+
+def _number_has_ambiguous_comma(number: str) -> bool:
+    """`_AMBIGUOUS_COMMA` over the mantissa, so an exponent cannot hide a thousands group."""
+    mantissa = re.split(r"[eE]", number, maxsplit=1)[0]
+    return _AMBIGUOUS_COMMA.fullmatch(mantissa) is not None
 
 
 def parse_quantity(text: str) -> Measurement | None:
@@ -665,7 +684,7 @@ def parse_quantity(text: str) -> Measurement | None:
     if match is None:
         return None
     number, unit = match.groups()
-    if _AMBIGUOUS_COMMA.fullmatch(number):
+    if _number_has_ambiguous_comma(number):
         return None
     try:
         return Measurement.of(float(number.replace(",", ".")), unit)

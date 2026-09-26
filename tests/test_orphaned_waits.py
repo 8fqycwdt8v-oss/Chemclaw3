@@ -199,6 +199,66 @@ def test_live_waits_older_than_an_orphan_do_not_starve_it(
     assert examined >= 4
 
 
+def test_a_pass_that_spends_its_budget_resumes_where_it_stopped_rather_than_at_the_oldest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pass out of budget hands its position to the next, and the walk wraps at the end.
+
+    Before the cursor survived a pass, every pass restarted at the oldest row, so an orphan behind
+    more live waits than one pass could describe was never reached — the starvation the in-pass
+    cursor fixed, moved to a longer table. A zero budget makes every pass exactly one page.
+    """
+    monkeypatch.setattr(settings, "awaiting_orphan_grace_seconds", 3600.0)
+    monkeypatch.setattr(settings, "awaiting_orphan_batch", 2)
+    monkeypatch.setattr(orphaned_waits, "_PASS_BUDGET_FRACTION", 0.0)
+
+    async def _run() -> tuple[str, list[int], bool]:
+        await migrated_db_or_skip()
+        async with await connect(settings.postgres_dsn) as conn:
+            await conn.execute(
+                "DELETE FROM pending_requests WHERE request_id LIKE %s", (f"{_PREFIX}%",)
+            )
+            await conn.commit()
+        async with await start_local_env_or_skip() as env:
+            client = pydantic_client(env)
+            monkeypatch.setattr(orphaned_waits, "connect", _returning(client))
+            async with Worker(
+                client,
+                task_queue=_QUEUE,
+                workflows=[_Hold],
+                workflow_runner=UnsandboxedWorkflowRunner(),
+            ):
+                live = []
+                for index in range(3):
+                    wid = f"{_PREFIX}resume-live-{index}"
+                    handle = await client.start_workflow(_Hold.run, id=wid, task_queue=_QUEUE)
+                    await _open(wid, handle.first_execution_run_id or "", age="3 hours")
+                    live.append(handle)
+                orphan = f"{_PREFIX}resume-orphan"
+                await _open(orphan, "5b7c1c0e-0000-4000-8000-000000000002")
+
+                examined: list[int] = []
+                sweep = await settle_orphaned_waits()
+                examined.append(sweep.examined)
+                # Bounded: other rows in a shared table may sit in the same pages.
+                for _ in range(200):
+                    if sweep.resume_after is None:
+                        break
+                    sweep = await settle_orphaned_waits(sweep.resume_after)
+                    examined.append(sweep.examined)
+                wrapped = sweep.resume_after is None
+
+                for handle in live:
+                    await handle.terminate(reason="test over")
+                return await _state(orphan), examined, wrapped
+
+    state, examined, wrapped = asyncio.run(_run())
+    assert max(examined) <= 2, f"a zero-budget pass described more than one page: {examined}"
+    assert len(examined) >= 2, "one pass reached everything, so nothing here resumed"
+    assert state == "cancelled", "an orphan behind more live waits than one pass was never reached"
+    assert wrapped, "the walk never reached the end of the table to wrap around"
+
+
 def _returning(client: Any) -> Any:
     """`connect` replaced by one that hands back the test environment's client."""
 
