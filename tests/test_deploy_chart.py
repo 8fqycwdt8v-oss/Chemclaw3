@@ -6652,6 +6652,7 @@ def test_no_rendered_setting_reaches_a_pod_in_scientific_notation(
     )
 
 
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
 @pytest.mark.parametrize(
     ("overrides", "named"),
     [
@@ -6707,6 +6708,7 @@ def test_a_release_with_no_front_door_refuses_to_render(
     )
 
 
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
 def test_the_front_door_count_the_chart_refuses_is_the_one_settings_refuses() -> None:
     """The chart's bound and `Settings`' bound are one decision, asserted against each other.
 
@@ -6728,6 +6730,7 @@ def test_the_front_door_count_the_chart_refuses_is_the_one_settings_refuses() ->
     assert _render("--set", "service.autoscaling.maxReplicas=1").returncode == 0
 
 
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
 def test_the_fixed_replica_count_renders_nowhere_while_the_hpa_is_on() -> None:
     """`service.replicas` is dead config on the shipped defaults, and that is now written down.
 
