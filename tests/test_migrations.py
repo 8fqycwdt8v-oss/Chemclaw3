@@ -19,6 +19,7 @@ breaks the path rather than on the first job that needs the schema.
 import asyncio
 import logging
 import re
+from collections.abc import Callable
 from pathlib import Path
 
 import psycopg
@@ -31,6 +32,7 @@ from chemclaw.core.migrate import (
     MigrationError,
     _checksum,
     _legacy_checksum,
+    _log_server_warning,
     _read_sql_files,
     _statements,
     migrate,
@@ -274,6 +276,9 @@ class _RecordingConnection:
     async def commit(self) -> None:
         """The single commit that ends the one transaction the whole run happens in."""
         self.committed = True
+
+    def add_notice_handler(self, callback: Callable[[psycopg.errors.Diagnostic], None]) -> None:
+        """Accept the server-warning handler; this double never emits a notice."""
 
     async def __aenter__(self) -> "_RecordingConnection":
         return self
@@ -592,3 +597,34 @@ async def test_a_peer_holding_the_lock_is_named_rather_than_raised_as_a_tracebac
     finally:
         await peer.rollback()
         await peer.close()
+
+
+async def test_a_migration_s_raise_warning_reaches_the_log_and_a_notice_does_not(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A notice nobody handles is dropped by psycopg, so a migration's WARNING used to reach no one.
+
+    `108` leaves its finiteness check `NOT VALID` on a database already holding a non-finite value
+    and says so with `RAISE WARNING`; the handler `migrate` registers is what turns that into a
+    log line. Driven against the server, so the `Diagnostic` is the real object rather than a
+    stand-in, and a NOTICE — what every `IF NOT EXISTS` replay emits — stays out of the log.
+    """
+    await migrated_db_or_skip()
+    conn = await psycopg.AsyncConnection.connect(migration_dsn())
+    try:
+        conn.add_notice_handler(_log_server_warning)
+        with caplog.at_level(logging.DEBUG, logger="chemclaw.core.migrate"):
+            await conn.execute(
+                "DO $$ BEGIN RAISE NOTICE 'routine skip'; RAISE WARNING 'ask a person'; END $$"
+            )
+    finally:
+        await conn.close()
+    reported = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", "") == "migrate.server_warning"
+    ]
+    assert [record.getMessage() for record in reported] == [
+        "migrate.server_warning: the database reported: ask a person"
+    ]
+    assert reported[0].levelno == logging.WARNING

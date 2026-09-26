@@ -184,6 +184,29 @@ def migration_dsn() -> str:
     return settings.postgres_migration_dsn or settings.postgres_dsn
 
 
+def _log_server_warning(diagnostic: psycopg.errors.Diagnostic) -> None:
+    """Log a `RAISE WARNING` a migration emitted; ignore the lower-severity notices.
+
+    **psycopg drops a notice no handler was registered for**, so before this a migration had no way
+    to tell its operator anything short of failing. `108` needs exactly that channel: on a database
+    already holding a non-finite value it leaves its constraint `NOT VALID` on purpose, and that
+    outcome was visible only to someone already querying `pg_constraint.convalidated`.
+
+    WARNING and above only, because `CREATE … IF NOT EXISTS` replays emit a NOTICE per skipped
+    object and a hook Job log full of those would bury the one line that asks for a person.
+    """
+    if diagnostic.severity_nonlocalized not in {"WARNING", "ERROR", "FATAL", "PANIC"}:
+        return
+    log_event(
+        logger,
+        "migrate.server_warning",
+        "the database reported: %s",
+        diagnostic.message_primary,
+        level=logging.WARNING,
+        severity=diagnostic.severity_nonlocalized,
+    )
+
+
 async def _warn_if_the_database_is_ahead(
     conn: psycopg.AsyncConnection[TupleRow], sources: dict[str, str]
 ) -> list[str]:
@@ -265,6 +288,7 @@ async def migrate(dsn: str | None = None) -> list[str]:
         # order matters: taking the advisory lock under the 5 s DDL budget would make an ordinary
         # concurrent deploy fail, and doing the DDL under the 300 s budget would let one ALTER
         # TABLE queue in front of live traffic for five minutes.
+        conn.add_notice_handler(_log_server_warning)
         await conn.execute(_SET_LOCAL_TIMEOUT, (_ms(settings.pg_migration_lock_wait_seconds),))
         # Announced *before* the wait, which is the whole point: this runs as a
         # `pre-install,pre-upgrade` hook Job, and a deploy blocked on a peer migrator for the full

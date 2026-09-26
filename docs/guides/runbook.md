@@ -338,6 +338,16 @@ Applied migrations are recorded in the `schema_migrations` ledger with a checksu
 re-running is safe and an edited already-applied file is flagged as drift rather than silently
 skipped.
 
+**A `migrate.server_warning` line is a migration asking for a person.** The one that emits it
+today is `108`: on a database an older image wrote a `NaN` or `±inf` into, it adds its finiteness
+check `NOT VALID` rather than abort the run. New writes are refused either way, but the old rows
+still reach a surrogate through `observations_for`. Confirm with `SELECT convalidated FROM
+pg_constraint WHERE conname = 'experiment_arm_results_value_finite'` (`false` means the rows are
+still there). Inspect them with `SELECT * FROM experiment_arm_results WHERE value IN
+('NaN'::float8, 'Infinity'::float8, '-Infinity'::float8)` and, once they are dealt with, run
+`ALTER TABLE experiment_arm_results VALIDATE CONSTRAINT experiment_arm_results_value_finite` by
+hand.
+
 **Always follow `make db-migrate` with `make db-grants`** (the Helm hook Job runs both, in that
 order, so this only concerns migrating by hand). The grants are *not* in the tracked migration set
 and are re-applied on every deploy on purpose: a table added by a new migration ships with no grant

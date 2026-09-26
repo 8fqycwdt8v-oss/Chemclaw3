@@ -1883,8 +1883,9 @@ class HypothesisTournamentWorkflow:
                         list(request.requested_roles),
                         request.correlation_id,
                     ],
+                    # A tool call, not a model call: see `hypothesis_check_timeout_seconds`.
                     start_to_close_timeout=timedelta(
-                        seconds=settings.hypothesis_call_timeout_seconds
+                        seconds=settings.hypothesis_check_timeout_seconds
                     ),
                     schedule_to_start_timeout=queue_wait_timeout(),
                     # **One attempt.** The activity already turns every in-process failure into

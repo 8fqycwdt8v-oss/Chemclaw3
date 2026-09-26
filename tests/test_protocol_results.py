@@ -12,10 +12,14 @@ campaign's observations rather than defaulted to zero.
 import asyncio
 from collections.abc import Callable, Coroutine
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, TypeVar
 
+import psycopg
 import pytest
 
+from chemclaw.core import db
+from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.protocols.models import (
     EvidenceRef,
@@ -274,6 +278,98 @@ def test_a_revision_narrows_the_read(backend: str) -> None:
         assert [row.arm_id for row in await store.read(design_id, 1)] == ["A1"]
         assert [row.arm_id for row in await store.read(design_id, 2)] == ["A2"]
         assert len(await store.read(design_id)) == 2
+
+    _run(body)
+
+
+# The migration that puts the model's finiteness rule into the table, read from the configured
+# directory so the test drives the file the runner applies rather than a copy of its statement.
+_FINITE_MIGRATION = Path(settings.sql_migrations_dir) / "108_experiment_arm_result_value_finite.sql"
+_INSERT_RAW = (
+    "INSERT INTO experiment_arm_results (design_id, revision, arm_id, outcome, value) "
+    "VALUES (%s, 1, 'A1', 'yield_pct', %s::float8)"
+)
+_FINITE_VALIDATED = (
+    "SELECT convalidated FROM pg_constraint WHERE conrelid = 'experiment_arm_results'::regclass "
+    "AND conname = 'experiment_arm_results_value_finite'"
+)
+
+
+async def _stored_design(prefix: str) -> str:
+    """A design row the results table's foreign key can point at."""
+    design_id = f"{prefix}-{datetime.now(UTC).timestamp()}"
+    await PostgresDesignStore().append(design_id, _design(), [], author_kind="agent", author="t")
+    return design_id
+
+
+@pytest.mark.parametrize("value", ["NaN", "Infinity", "-Infinity"])
+def test_the_table_refuses_a_non_finite_value_the_model_would_have(value: str) -> None:
+    """The database refuses what `ArmResult` refuses, for a writer that is not `ArmResult`.
+
+    A manual `INSERT`, a restore from another system, or a second writer added later.
+
+    Written as raw SQL on purpose: through the store the model refuses first, and this would pass
+    without the constraint existing at all.
+    """
+
+    async def body() -> None:
+        await migrated_db_or_skip()
+        design_id = await _stored_design("design-finite")
+        async with db.connection(settings.postgres_dsn) as conn:
+            with pytest.raises(psycopg.errors.CheckViolation):
+                await conn.execute(_INSERT_RAW, (design_id, value))
+
+    _run(body)
+
+
+def test_the_finite_check_replays_and_validates_only_rows_that_satisfy_it() -> None:
+    """Both arms of 108, and its replay — inside one transaction that is rolled back.
+
+    A database written by an image from before `ArmResult` refused `NaN` may hold one: there the
+    constraint must still land (refusing new writes) and stay `NOT VALID` rather than abort the
+    whole migration run. Once the row is gone a replay validates it, and a replay over a validated
+    constraint leaves it validated — the property a drop-then-add would lose.
+    """
+
+    async def body() -> None:
+        await migrated_db_or_skip()
+        design_id = await _stored_design("design-finite-arms")
+        migration = _FINITE_MIGRATION.read_text(encoding="utf-8")
+        warnings: list[str] = []
+
+        def collect(diagnostic: psycopg.errors.Diagnostic) -> None:
+            if diagnostic.severity_nonlocalized == "WARNING":
+                warnings.append(diagnostic.message_primary or "")
+
+        async with db.connection(settings.postgres_dsn) as conn:
+            conn.add_notice_handler(collect)
+            try:
+                await conn.execute(
+                    "ALTER TABLE experiment_arm_results "
+                    "DROP CONSTRAINT experiment_arm_results_value_finite"
+                )
+                await conn.execute(_INSERT_RAW, (design_id, "NaN"))
+                await conn.execute(migration)
+                assert await (await conn.execute(_FINITE_VALIDATED)).fetchall() == [(False,)]
+                # The NOT VALID arm says so, naming the count — it used to be silent.
+                assert len(warnings) == 1
+                assert "left NOT VALID" in warnings[0]
+                assert "1 non-finite row(s)" in warnings[0]
+                await conn.execute("SAVEPOINT refused")
+                with pytest.raises(psycopg.errors.CheckViolation):
+                    await conn.execute(_INSERT_RAW, (design_id, "Infinity"))
+                await conn.execute("ROLLBACK TO SAVEPOINT refused")
+                await conn.execute(
+                    "DELETE FROM experiment_arm_results WHERE design_id = %s", (design_id,)
+                )
+                await conn.execute(migration)
+                assert await (await conn.execute(_FINITE_VALIDATED)).fetchall() == [(True,)]
+                await conn.execute(migration)
+                assert await (await conn.execute(_FINITE_VALIDATED)).fetchall() == [(True,)]
+                assert len(warnings) == 1, "the validating arms must not warn"
+            finally:
+                conn.remove_notice_handler(collect)
+                await conn.rollback()
 
     _run(body)
 

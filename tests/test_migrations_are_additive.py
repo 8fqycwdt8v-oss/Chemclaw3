@@ -131,7 +131,13 @@ _BREAKS_PREVIOUS_IMAGE = re.compile(
 # A constraint is added by name, and a name is unique per table — so an `ADD CONSTRAINT` is the one
 # additive-looking statement that is **not** re-runnable on its own. `CREATE … IF NOT EXISTS` covers
 # every other object in this directory; `ALTER TABLE … ADD CONSTRAINT` has no `IF NOT EXISTS`
-# spelling in Postgres at all, so the only re-runnable way to write one is to drop it first.
+# spelling in Postgres at all, so a re-runnable one is written in one of two ways: dropped `IF
+# EXISTS` first, or added inside a `DO` block behind an `IF NOT EXISTS (SELECT … FROM pg_constraint
+# …)` probe naming the same table and constraint. This comment used to call the first "the only
+# re-runnable way", and it is the worse of the two wherever the constraint is `NOT VALID`: a replay
+# of a drop-then-add silently re-creates it unvalidated, discarding a `VALIDATE CONSTRAINT` an
+# operator ran on purpose, and its `DROP CONSTRAINT` is a statement `_BREAKS_PREVIOUS_IMAGE` has to
+# flag. `108` is the first file written the second way.
 #
 # Measured, because the scan above enumerates `CREATE` and therefore covers exactly what it
 # enumerated: on a database carrying the whole schema with its `schema_migrations` ledger emptied —
@@ -151,6 +157,18 @@ _DROP_CONSTRAINT_IF_EXISTS = re.compile(
     rf"^\s*ALTER\s+TABLE\s+({_TABLE})\s+DROP\s+CONSTRAINT\s+IF\s+EXISTS\s+({_NAME})",
     re.IGNORECASE | re.MULTILINE,
 )
+# The guarded form: `IF NOT EXISTS (<probe>) THEN … END IF`, where the probe reads `pg_constraint`
+# for one table and one name. Both are required, because a constraint name is unique per *table*
+# rather than per schema — a probe on the name alone answers "yes" for another table's constraint
+# and skips this one's add. The body is captured so an add is covered only if it sits *inside* the
+# guard, not merely after it.
+_GUARDED_BY_PG_CONSTRAINT = re.compile(
+    r"IF\s+NOT\s+EXISTS\s*\((?P<probe>[^;]*?\bpg_constraint\b[^;]*?)\)\s*THEN\b"
+    r"(?P<body>.*?)\bEND\s+IF\b",
+    re.IGNORECASE | re.DOTALL,
+)
+_PROBE_TABLE = re.compile(rf"\bconrelid\s*=\s*'({_NAME})'::regclass", re.IGNORECASE)
+_PROBE_NAME = re.compile(r"\bconname\s*=\s*'(\w+)'", re.IGNORECASE)
 
 
 def _bare(identifier: str) -> str:
@@ -158,22 +176,42 @@ def _bare(identifier: str) -> str:
     return identifier.strip().rsplit(None, 1)[-1].replace('"', "").rsplit(".", 1)[-1].lower()
 
 
+def _guarded_spans(sql: str) -> dict[tuple[str, str], list[tuple[int, int]]]:
+    """`(table, constraint)` -> the character spans a `pg_constraint` probe for exactly it guards.
+
+    A probe that does not name both the table and the constraint guards nothing, for the reason
+    `_GUARDED_BY_PG_CONSTRAINT` gives.
+    """
+    spans: dict[tuple[str, str], list[tuple[int, int]]] = {}
+    for match in _GUARDED_BY_PG_CONSTRAINT.finditer(sql):
+        table = _PROBE_TABLE.search(match.group("probe"))
+        name = _PROBE_NAME.search(match.group("probe"))
+        if table is None or name is None:
+            continue
+        key = (_bare(table.group(1)), _bare(name.group(1)))
+        spans.setdefault(key, []).append((match.start("body"), match.end("body")))
+    return spans
+
+
 def _constraints_re_added_without_a_drop(sql: str) -> tuple[str, ...]:
-    """`table.constraint` for every `ADD CONSTRAINT` the file does not first drop `IF EXISTS`.
+    """`table.constraint` for every `ADD CONSTRAINT` neither dropped `IF EXISTS` first nor guarded.
 
     Position-aware rather than set-based: a drop that comes *after* the add makes the file worse,
-    not better, so "the file mentions both" is not the property. Compared on the bare table and
-    constraint names, so the four spellings Postgres accepts resolve to one object.
+    not better, so "the file mentions both" is not the property — and a guard covers only the add
+    inside its own `THEN … END IF`. Compared on the bare table and constraint names, so the four
+    spellings Postgres accepts resolve to one object.
     """
     dropped: dict[tuple[str, str], int] = {}
     for match in _DROP_CONSTRAINT_IF_EXISTS.finditer(sql):
         dropped.setdefault((_bare(match.group(1)), _bare(match.group(2))), match.start())
+    guarded = _guarded_spans(sql)
     return tuple(
         f"{table}.{constraint}"
         for table, constraint, at in (
             (_bare(m.group(1)), _bare(m.group(2)), m.start()) for m in _ADD_CONSTRAINT.finditer(sql)
         )
         if dropped.get((table, constraint), at + 1) > at
+        and not any(start <= at < end for start, end in guarded.get((table, constraint), []))
     )
 
 
@@ -649,6 +687,35 @@ def test_a_judged_break_is_one_no_pattern_could_have_found() -> None:
         # A constraint declared inline in a `CREATE TABLE` is created with the table, so it is
         # covered by `IF NOT EXISTS` and is not an `ADD`.
         ("CREATE TABLE IF NOT EXISTS t (a TEXT, CONSTRAINT c CHECK (a <> ''));", ()),
+        # The guarded form `108` uses: the add sits inside a probe naming this table and this name.
+        (
+            "DO $$\nBEGIN\n    IF NOT EXISTS (\n        SELECT 1 FROM pg_constraint\n"
+            "         WHERE conrelid = 'public.t'::regclass AND conname = 'c'\n    ) THEN\n"
+            "        ALTER TABLE ONLY t\n            ADD CONSTRAINT c CHECK (x) NOT VALID;\n"
+            "    END IF;\nEND\n$$;",
+            (),
+        ),
+        # A probe on the name alone guards nothing: names are unique per table, not per schema, so
+        # another table's `c` would make it skip this add.
+        (
+            "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'c') THEN\n"
+            "ALTER TABLE t ADD CONSTRAINT c CHECK (x);\nEND IF; END $$;",
+            ("t.c",),
+        ),
+        # A probe for another table's constraint of the same name does not cover this one.
+        (
+            "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint\n"
+            "WHERE conrelid = 'u'::regclass AND conname = 'c') THEN\n"
+            "ALTER TABLE t ADD CONSTRAINT c CHECK (x);\nEND IF; END $$;",
+            ("t.c",),
+        ),
+        # A guard covers the add inside it, not one that follows its `END IF`.
+        (
+            "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint\n"
+            "WHERE conrelid = 't'::regclass AND conname = 'c') THEN NULL; END IF; END $$;\n"
+            "ALTER TABLE t ADD CONSTRAINT c CHECK (x);",
+            ("t.c",),
+        ),
     ],
 )
 def test_the_replay_rule_reads_the_object_not_the_spelling(
