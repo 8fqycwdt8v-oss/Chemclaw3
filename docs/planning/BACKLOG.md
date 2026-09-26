@@ -65,23 +65,6 @@ topic).
 
 ## 1 — Untrusted input reaching a privileged surface
 
-- [ ] **A template launcher is bound whatever its tools are, so an opt-in capability's template
-  costs every deployment prefix it cannot use** — [M] (issue #451). The argument-checking half of this row is
-  **done**: `tests/test_template_args_recorded.py` reads the fleet's own recorded
-  `servers/<name>/tool-surface.json` — the file `tests/test_sibling_manifest_agreement.py` already
-  reads for the `calc` and `rxnlabel` seams — so a template naming `mtsr` now has its argument keys
-  checked offline, where `make template-validate` prints `arguments unchecked` and the only other
-  gate needs a running connector no CI lane has. What is left is the shipping half. Measured:
-  `run_scale_up_thermal_envelope` costs ~560 tokens of prefix on every model call, and it would be
-  the **only** template in `data/templates/` naming tools a default deployment does not bind —
-  every existing one is runnable out of the box. So a default deployment pays for a launcher
-  `unrunnable_reason` refuses at launch. Withholding the launcher is argued against in that
-  function's own docstring, on a measurement about templates a **profile names**; this one is named
-  by none, so the narrower rule — withhold only what no profile names — is probably right and is an
-  ADR rather than an edit. The finished template is parked at
-  `docs/archive/proposed-templates/scale-up-thermal-envelope.yaml` with its arguments verified;
-  move it back when this closes.
-
 - [ ] **A chemist has no in-product way to ask for a skill of theirs to be published** — [S].
   `D-2026-09-20-a-behaviour-change-is-gated-by-its-blast-radius` makes the promotion unit a
   *document* rather than a queue entry, which is what keeps `api/routes/proposals.py` owner-scoped
@@ -426,31 +409,6 @@ topic).
   the arm nobody measures. Anchors: `agent/tool_result_size.py::batch_siblings`,
   `_bounded_file`, `agent/tool_result_shape.py::rewritten_command_files`,
   `deepagents.backends.state.StateBackend`.
-
-- [ ] **Prose the model is sent from modules other than `agent/chemclaw_agent.py` is outside the
-      prose guards** — [M] (issue #452), found 2026-09-22 reviewing
-      `D-2026-09-22-an-exemption-is-a-quote-not-a-file`, which widened
-      `tests/test_prose_contract.py`'s universe from two classes to six and said so. The six are
-      enumerable: a registry, an `ast` walk over `@server.tool()`, a manifest, a directory of
-      `SKILL.md`, two prompt-block tuples, `data/profiles/` and the template launchers. Prompt text
-      written as a string constant in an ordinary module is not — there is no decorator, no
-      manifest and no directory that says "this string is sent to a model".
-
-      **A live instance, driven**: `src/chemclaw/durable/hypothesis_tournament.py:546-557` builds a
-      prompt containing *"There is no DFT and no cluster here: if it needs one, it is 'physical'"* —
-      correct text of exactly the exempted kind, which is why widening to it needs a fourth
-      `_TRUE_ABOUT_WHAT_IS_GONE` entry and not just a loader. The same module's `_TEMPLATE_HINTS` is
-      a second. Fifteen modules under `src/chemclaw` hold prompt text (`verifier.py`, `condense.py`,
-      `plan_scope.py`, `compaction.py`, `skill_backend.py`, `api/runner.py` among them).
-
-      **The first question is how to find them, not how to scan them**, and it is the same question
-      `D-2026-09-15-a-capability-in-the-fleet-cannot-refute-a-denial-this-tree-declares-no-bundle-for`
-      answered for a different surface by making the declaration explicit. Candidates: a marker the
-      prompt constants carry (cheap, and only as good as whoever remembers it), or a derived rule
-      over what reaches a model call — which is what the arms of this guard would have to become.
-      Measure the false-positive rate over the found set before building either, the way the ADR
-      above did for the patterns. Anchors: `tests/test_prose_contract.py::_model_facing_descriptions`,
-      `src/chemclaw/durable/hypothesis_tournament.py`.
 
 - [ ] **`/readyz` cannot bound a Postgres that accepts the socket and stops answering** — [S],
       found 2026-09-05, upstream in origin and recorded here because `api/routes/ops.py` claimed

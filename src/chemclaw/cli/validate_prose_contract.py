@@ -110,14 +110,25 @@ repository has twice discovered the right answer for those and written it down: 
 and let a test assert it. A regex cannot count, and teaching one to try would produce a rule that is
 wrong more often than the prose.
 
+**Rule 11 is about a marker rather than a text.** Prompt prose written as a constant outside
+`agent/chemclaw_agent.py` carries `core/model_prose.ModelProse`, and `marked_prose` is the loader
+the prose guards in `tests/test_prose_contract.py` read it through. The rule here is only that a
+marker sits where that loader can read it. Rules 1-4 are deliberately *not* run over it: these are
+templates that name a job's argument fields in `snake_case` (`subject_note_id`, `sweep_values`),
+which rule 2 would read as unknown tools — the corpus split the paragraph above argues, one class
+over.
+
 Run via `make prose-validate`; gated in CI beside `kg-validate` and `skill-validate`.
 """
 
 import argparse
+import ast
+import importlib
 import re
 import sys
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from pathlib import Path
+from typing import TypeGuard
 
 from chemclaw.agent.chemclaw_agent import (
     _INSTRUCTION_BLOCKS,
@@ -131,6 +142,7 @@ from chemclaw.agent.chemclaw_agent import (
 from chemclaw.connectors.registry import skills_dirs as connector_skills_dirs
 from chemclaw.core.config import Settings, settings
 from chemclaw.core.metrics import declared_histogram_names, declared_metric_names
+from chemclaw.core.model_prose import ModelProse
 from chemclaw.kg.note import known_note_types
 
 # Symbols a skill may legitimately name in call form that are not agent tools: library/graph
@@ -387,6 +399,115 @@ def _prose_sources() -> dict[str, str]:
         for path in sorted(Path(skills_dir).glob("*/SKILL.md")):
             sources[str(path)] = path.read_text()
     return sources
+
+
+#: The package every marked constant lives under, which is also the tree `marked_prose` walks.
+_PACKAGE = Path(__file__).resolve().parents[1]
+
+
+def _is_marker_call(node: ast.AST) -> TypeGuard[ast.Call]:
+    """Whether `node` is a `ModelProse(...)` call, the one spelling a marker takes."""
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == ModelProse.__name__
+    )
+
+
+def _marked_sites(path: Path) -> tuple[list[str], list[int]]:
+    """The module-level names `path` marks, and the lines of any marker a loader cannot reach.
+
+    A marker is reachable when it is the value of a module-level assignment or sits inside one —
+    a mapping's value, a tuple's member. Anywhere else (inside a function, a class, a default
+    argument) it is evaluated when code runs, so no loader reads it without running that code, and
+    it would look applied while guarding nothing.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    names: list[str] = []
+    reachable: set[int] = set()
+    for statement in tree.body:
+        if isinstance(statement, ast.Assign):
+            targets, value = statement.targets, statement.value
+        elif isinstance(statement, ast.AnnAssign) and statement.value is not None:
+            targets, value = [statement.target], statement.value
+        else:
+            continue
+        calls = [node for node in ast.walk(value) if _is_marker_call(node)]
+        if not calls:
+            continue
+        reachable.update(id(call) for call in calls)
+        names.extend(target.id for target in targets if isinstance(target, ast.Name))
+    stray = [
+        node.lineno
+        for node in ast.walk(tree)
+        if _is_marker_call(node) and id(node) not in reachable
+    ]
+    return names, stray
+
+
+def _marked_files() -> list[Path]:
+    """Every module under the package that spells the marker at all — a cheap text prefilter."""
+    marker = f"{ModelProse.__name__}("
+    return [
+        path
+        for path in sorted(_PACKAGE.rglob("*.py"))
+        if marker in path.read_text(encoding="utf-8")
+    ]
+
+
+def marked_prose() -> dict[str, str]:
+    """Every string a module marks as model-facing, by `prose:<module>:<name>[<key>]`.
+
+    **The loader the prose guards read the marked class through**
+    (`tests/test_prose_contract.py::_marked_prose`). The names are found by parsing each module
+    and the values read by importing it, so a template assembled with `+` or `str.format` at module
+    scope is read as the string it evaluates to — which is the text a model is sent, placeholders
+    and all — rather than as the literal pieces in the source.
+
+    A mapping or tuple of markers contributes one entry per member, keyed by its key or index, so a
+    finding names the one hint that carried it rather than the whole table.
+    """
+    found: dict[str, str] = {}
+    for path in _marked_files():
+        names, _stray = _marked_sites(path)
+        if not names:
+            continue
+        dotted = ".".join(path.relative_to(_PACKAGE.parent).with_suffix("").parts)
+        module = importlib.import_module(dotted)
+        for name in names:
+            value = getattr(module, name)
+            members: Iterable[tuple[object, object]]
+            if isinstance(value, ModelProse):
+                found[f"prose:{dotted}:{name}"] = str(value)
+                continue
+            if isinstance(value, Mapping):
+                members = value.items()
+            elif isinstance(value, tuple | list):
+                members = enumerate(value)
+            else:
+                continue
+            for key, member in members:
+                if isinstance(member, ModelProse):
+                    found[f"prose:{dotted}:{name}[{key}]"] = str(member)
+    return found
+
+
+def check_marked_prose_is_reachable() -> list[str]:
+    """Rule 11: a `ModelProse` marker sits where `marked_prose` can read it, or it is refused.
+
+    The marker is only a guard if the loader sees it, and the loader reads module-level constants.
+    One written inside a function body is evaluated per call and read by nobody, so it would be the
+    shape this whole module exists to catch: a control that reads as applied and checks nothing.
+    """
+    problems: list[str] = []
+    for path in _marked_files():
+        _names, stray = _marked_sites(path)
+        problems.extend(
+            f"{path.relative_to(_ROOT)}:{line}: `{ModelProse.__name__}` is not a module-level "
+            "constant, so no prose guard reads it — hoist it to module scope"
+            for line in stray
+        )
+    return problems
 
 
 def check_instruction_blocks() -> list[str]:
@@ -795,6 +916,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         check_corpus_is_assembled()
         + check_prose_contract()
         + check_instruction_blocks()
+        + check_marked_prose_is_reachable()
         + check_operator_prose()
         + check_metric_citations()
     )

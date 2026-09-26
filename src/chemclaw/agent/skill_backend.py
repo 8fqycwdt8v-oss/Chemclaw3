@@ -71,6 +71,7 @@ from chemclaw.agent.authz import AuthorizationError
 from chemclaw.agent.refusal_route import routed
 from chemclaw.core.logging import log_event
 from chemclaw.core.metrics_bridge import record_metric
+from chemclaw.core.model_prose import ModelProse
 from chemclaw.core.turn_signals import record_skill_loaded
 
 logger = logging.getLogger(__name__)
@@ -80,7 +81,7 @@ logger = logging.getLogger(__name__)
 # a tool failure it may retry. It deliberately does not say whether the skill *exists* — "not
 # available to you" is the same answer for a gated skill and for a typo, and distinguishing them
 # would turn the gate into an enumeration oracle.
-REFUSED = "This path is not part of the skills available to you."
+REFUSED = ModelProse("This path is not part of the skills available to you.")
 
 # What a refused *write* says, once, because four verbs raise it. Worded for the model rather than
 # for a log: it says nothing was changed (so there is nothing to undo or retry) and names the root a

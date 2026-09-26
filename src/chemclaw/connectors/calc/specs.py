@@ -25,6 +25,8 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+from chemclaw.core.model_prose import ModelProse
+
 # What a caller has to be told about `symmetry_numbers` to supply it correctly, written once
 # because the two reaction-shaped specs advertise the identical contract. It is the *only* field
 # here carrying a description, and deliberately so: every other one is self-evident from its name
@@ -35,7 +37,7 @@ from pydantic import BaseModel, Field, model_validator
 # (D-2026-08-21-a-geometry-is-an-address-not-a-payload). Every field here that carries a description
 # does so because a model cannot infer it from the name and the type, and this is the clearest case:
 # the argument is a string, and *which* strings are valid is the whole of what has to be said.
-_STRUCTURE_ID_DESCRIPTION = (
+_STRUCTURE_ID_DESCRIPTION = ModelProse(
     "A specific 3D geometry to start from, as `structure_id` — the `st_...` address reported by "
     "optimize_geometry, sample_conformers, scan_coordinate and compute_thermochemistry. Use it to "
     "carry a chosen conformer from one calculation into the next: without it the calculation is "
@@ -43,7 +45,7 @@ _STRUCTURE_ID_DESCRIPTION = (
     "settled on. Leave it unset to start from the SMILES."
 )
 
-_SYMMETRY_NUMBERS_DESCRIPTION = (
+_SYMMETRY_NUMBERS_DESCRIPTION = ModelProse(
     "Rotational symmetry number per species, keyed by the exact SMILES string given in "
     "reactants/products: 1 for a molecule with no rotational symmetry, 2 for H2/N2/O2/CO2/water, "
     "3 for ammonia, 6 for ethane, 12 for benzene. Above level='quick', a species left out of "

@@ -72,11 +72,18 @@ def _model_facing_descriptions() -> dict[str, str]:
     the universe held none of the system prompt at all; and it left the profiles' own prose out,
     which `agent/profiles.py` says **is** the system prompt.
 
-    **What is still outside, so this docstring does not repeat that error a third time**: prose
-    assembled as string constants in modules other than `agent/chemclaw_agent.py`. Fifteen modules
-    under `src/chemclaw` hold some, and `durable/hypothesis_tournament.py` holds a live instance of
-    exactly the exempted kind ("There is no DFT and no cluster here"). It is not enumerable the way
-    the six classes above are, and `docs/planning/BACKLOG.md` carries the row.
+    **The seventh class is prompt text outside `agent/chemclaw_agent.py`**, which was not
+    enumerable until it was declared: it carries `core/model_prose.ModelProse` and `_marked_prose`
+    reads it. `durable/hypothesis_tournament.py` was the live instance that forced it — a prompt
+    saying "There is no DFT and no cluster here", correct text of exactly the exempted kind.
+
+    **What is still outside, so this docstring does not repeat that error a third time**: a marker
+    is only as good as whoever remembers it, and nothing refuses an unmarked prompt constant. A
+    derived rule was measured first and does not work here: following module-level strings into a
+    function that calls a model found six, one of them prompt text, and missed the helper and peer
+    briefs entirely, because those reach the model through middleware arguments rather than a
+    message built beside the call. Prose written inline in a function body — refusal and tool-result
+    sentences, mostly — is outside too, until it is hoisted into a marked constant.
 
     No count is written here. The one that was said 31 registered tools against a surface of 114,
     and both had moved; `test_the_universe_reaches_every_class_the_model_reads` asserts that each
@@ -126,6 +133,7 @@ def _model_facing_descriptions() -> dict[str, str]:
     described.update(_instruction_block_texts())
     described.update(_profile_prose())
     described.update(_template_launcher_docstrings())
+    described.update(_marked_prose())
     return described
 
 
@@ -219,13 +227,32 @@ def _template_launcher_docstrings() -> dict[str, str]:
     The same shape as the durable jobs one class up — a docstring built from a `data/templates/`
     manifest and bound onto the agent — and outside the universe for the same reason: nothing here
     is a Python function anybody wrote.
+
+    **Every enabled launcher, bound or withheld** (`templates.registry.withheld_reason`): a launcher
+    withheld because its capability is off here is bound the day a deployment turns it on, and its
+    docstring is what that deployment's model is sent.
     """
     import inspect
 
     from chemclaw.templates.registry import template_tools
 
-    found = {f"template:{fn.__name__}": inspect.getdoc(fn) or "" for fn in template_tools()}
+    found = {
+        f"template:{fn.__name__}": inspect.getdoc(fn) or "" for fn in template_tools(declared=True)
+    }
     assert found, "no template launchers found; this test is reading the wrong tree"
+    return found
+
+
+def _marked_prose() -> dict[str, str]:
+    """Every module-level constant marked `ModelProse` — the prompt text outside the agent module.
+
+    The class this universe could not enumerate until it was declared: a prompt written as a string
+    constant in an ordinary module has no decorator, manifest or directory saying a model reads it.
+    `core/model_prose.py` is the declaration and `validate_prose_contract.marked_prose` the one
+    loader, shared with `make prose-validate`, which also refuses a marker the loader cannot reach.
+    """
+    found = prose.marked_prose()
+    assert found, "no marked prose found; this test is reading the wrong tree"
     return found
 
 
@@ -318,6 +345,15 @@ _TRUE_ABOUT_WHAT_IS_GONE: dict[tuple[str, str], str] = {
         "`connectors/safety/skills/safety-screening` explaining why the screen is a tool and not "
         "a gate — the reader needs the removed control named to follow it."
     ),
+    (
+        "prose:chemclaw.durable.hypothesis_tournament:_DERIVE_CHECK",
+        "There is no DFT and no cluster here",
+    ): (
+        "The discriminating-check prompt deciding `kind`: a check that would need a tier this "
+        "system does not have is `physical`, which is the routing "
+        "`D-2026-08-26-semiempirical-is-the-whole-tier` asks for rather than a tier described "
+        "as reachable."
+    ),
 }
 
 #: What may **not** follow an exempted quote: another word. A quote that runs straight on into one
@@ -368,6 +404,7 @@ _THE_CLASSES_THAT_WERE_OUTSIDE = (
     "_instruction_block_texts",
     "_profile_prose",
     "_template_launcher_docstrings",
+    "_marked_prose",
 )
 
 
@@ -378,7 +415,16 @@ def test_the_universe_reaches_every_class_the_model_reads() -> None:
     assembled docstring is its *entire* model-facing surface and the old universe held none of it.
     """
     names = set(_model_facing_descriptions())
-    for prefix in ("job:", "bundleskill:", "skill:", "block:", "safety:", "profile:", "template:"):
+    for prefix in (
+        "job:",
+        "bundleskill:",
+        "skill:",
+        "block:",
+        "safety:",
+        "profile:",
+        "template:",
+        "prose:",
+    ):
         assert any(name.startswith(prefix) for name in names), f"no {prefix} text in the universe"
     assert any(name.startswith("job:results:") for name in names), (
         "the `results` bundle serves no tool module, so its job descriptions are the only "
@@ -443,6 +489,48 @@ def test_a_forbidden_sentence_in_any_of_them_is_caught(
     assert str(caught.value).startswith("{'poisoned':"), (
         f"the guard failed, but not solely on the poison: {caught.value}"
     )
+
+
+def test_the_marked_class_reaches_its_first_carriers() -> None:
+    """The two constants the row that opened this class named, read through the one loader.
+
+    A prompt template is read as the string it evaluates to, and a mapping of markers contributes
+    one text per member, so a finding names the hint that carried it.
+    """
+    found = _marked_prose()
+    assert "prose:chemclaw.durable.hypothesis_tournament:_DERIVE_CHECK" in found
+    assert (
+        found["prose:chemclaw.durable.hypothesis_tournament:_TEMPLATE_HINTS[bond-strength-survey]"]
+        == "which bond breaks first"
+    )
+
+
+def test_the_shipped_markers_are_all_where_the_loader_reads_them() -> None:
+    """Rule 11 over the tree: every `ModelProse` is a module-level constant `marked_prose` sees."""
+    assert prose.check_marked_prose_is_reachable() == []
+
+
+def test_a_marker_inside_a_function_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A marker the loader cannot read looks applied and guards nothing, so the gate refuses it.
+
+    The control is the same text at module scope, which the loader reads and the rule accepts.
+    """
+    package = tmp_path / "chemclaw"
+    package.mkdir()
+    (package / "stray.py").write_text(
+        "from chemclaw.core.model_prose import ModelProse\n\n"
+        "READ = ModelProse('Escalate to the DFT tier.')\n\n"
+        "def prompt() -> str:\n"
+        "    return ModelProse('Escalate to the DFT tier.')\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(prose, "_PACKAGE", package)
+    monkeypatch.setattr(prose, "_ROOT", tmp_path)
+    problems = prose.check_marked_prose_is_reachable()
+    assert len(problems) == 1, problems
+    assert problems[0].startswith("chemclaw/stray.py:6:"), problems
 
 
 def test_every_exemption_still_quotes_shipped_prose() -> None:

@@ -72,6 +72,7 @@ from chemclaw.agent.tool_result_shape import rewritten_command_files, rewritten_
 from chemclaw.core.config import settings
 from chemclaw.core.logging import log_event
 from chemclaw.core.metrics_bridge import record_metric
+from chemclaw.core.model_prose import ModelProse
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +83,7 @@ _HEAD_SHARE = 3 / 5
 
 #: What a model can do about a cut *it caused by asking*, which is every tool result and a `task`
 #: report: it chose the call, so it can choose a narrower one.
-TOOL_REMEDY = (
+TOOL_REMEDY = ModelProse(
     "narrow the question (a filter, a smaller limit, one identifier) to see the part you need"
 )
 
@@ -91,7 +92,7 @@ TOOL_REMEDY = (
 #: and did not write, so there is no question to narrow — telling it to narrow one would send it
 #: to re-fetch data the step was handed. The only correct act is to say so in the answer, which is
 #: also what the chemist reading that answer needs to know.
-STEP_REMEDY = (
+STEP_REMEDY = ModelProse(
     "this step's template interpolated it, so there is no question to narrow — answer from what "
     "is here and say in your answer that part of the input was not shown"
 )
