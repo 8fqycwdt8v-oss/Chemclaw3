@@ -778,7 +778,7 @@ def test_a_connector_healthy_on_healthz_and_broken_on_mcp_is_reported_by_the_tur
     every 10 s with a 5 s timeout derived from a 2 s per-endpoint budget. And it would buy *less*
     speed, not more: `ChemclawConnectorsDegradingTurns` fires at `for: 0m` on the first degraded
     turn, where a sweep-based gauge sits behind `for: 10m`. What a `tools/list` probe would buy is
-    detection with **no traffic**, which is a real gap and is a `docs/planning/BACKLOG.md` row with
+    detection with **no traffic**, which is a real gap and is a `docs/planning/DEFERRED.md` row with
     its own trigger rather than a change made here.
 
     So what had to change is the *turn's* report, and the three things asserted here are the three
@@ -807,7 +807,7 @@ def test_a_connector_healthy_on_healthz_and_broken_on_mcp_is_reported_by_the_tur
 
     assert _states(sweep) == {"probe": "healthy"}, (
         f"the readiness sweep no longer calls this connector healthy ({_states(sweep)}); if that "
-        "was deliberate, the decision recorded in this docstring and in BACKLOG.md has changed and "
+        "was deliberate, the decision recorded in this docstring and in DEFERRED.md changed, and "
         "the alert pair needs revisiting"
     )
     assert sum(1 for item in sweep if item.unhealthy) == 0, (

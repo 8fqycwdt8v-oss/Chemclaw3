@@ -184,7 +184,7 @@ async def _probe_database(front: FrontDoorState) -> bool:
     already-checked-out connection, under a 2 s `asyncio.wait_for`, did not return within 120 s.
     The same drive through `core/db.py::connection` returns at its budget, 4 of 4, because a pool
     checkout that has to open a connection hangs in the *connect* leg instead — which this wrapper
-    has always bounded, and which is the measurement that would wrongly close the `BACKLOG.md` row.
+    has always bounded, and which is the measurement that would wrongly close the `DEFERRED.md` row.
 
     What bounds it in a deployment is the kubelet, not this function: the chart derives
     `readinessProbe.timeoutSeconds` from this setting plus the connector budget plus a margin — 5 s
