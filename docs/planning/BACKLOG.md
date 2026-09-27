@@ -635,7 +635,7 @@ those belong in.
 
 ## Recover the flow-Suzuki screen, or decide it stays out
 
-- [ ] **5,760 ORD records — 57% of the seeded corpus — cannot be ingested at all** — [L].
+- [ ] **5,760 ORD records — 57% of the seeded corpus — cannot be ingested at all** — [L] (issue #477).
       `Chemclaw3_mock` seeds 10,011 ORD records and **5,760 of them — 57% — cannot be ingested at all**.
       Every refusal is the Perera flow-Suzuki set (*Science* 2018, 359, 429), whose second coupling
       partner the source spreadsheet publishes only as its own shorthand (`2a, Boronic Acid`).
