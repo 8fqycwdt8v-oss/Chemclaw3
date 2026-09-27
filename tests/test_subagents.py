@@ -1019,9 +1019,9 @@ def test_a_helpers_file_outlives_the_turn_that_spawned_it() -> None:
 def test_a_helpers_oversized_write_is_refused_at_its_own_backend_and_crosses_nothing() -> None:
     """At the shipped settings the cut below is not reached, because the write never happens.
 
-    `D-2026-09-26-a-helpers-unbounded-write-verbs-take-the-scratch-cap`: `write_file` is refused past
-    `agent_scratch_file_max_chars` in the backend a helper's call reaches, and the default is the
-    channel budget itself — so a helper writing four budgets' worth stores nothing and hands its
+    `D-2026-09-26-a-helpers-unbounded-write-verbs-take-the-scratch-cap`: `write_file` is refused
+    past `agent_scratch_file_max_chars` in the backend a helper's call reaches, and the default is
+    the channel budget itself — so a helper writing four budgets' worth stores nothing and hands its
     caller nothing, rather than storing it and being cut on the way.
     """
     written = "z" * (settings.agent_subagent_files_max_chars * 4)

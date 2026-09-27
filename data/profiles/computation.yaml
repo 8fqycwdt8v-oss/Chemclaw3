@@ -74,6 +74,7 @@ tool_names:
   - enumerate_protonation_states
   - enumerate_stereoisomers
   - enumerate_bond_cleavages
+  - enumerate_substitutions
   - describe_topology
   # The named protocols. `tool_names` is an allow-list, so a template that is *enabled* is still
   # invisible to a profile that does not name it — and this profile named none of them, which made
@@ -86,6 +87,7 @@ tool_names:
   - run_regioselectivity_in_conformer
   - run_bond_strength_survey
   - run_stereoisomer_ranking
+  - run_substitution_series
   - run_degradant_triage
   - run_conformer_refinement
   - calculator_trust
