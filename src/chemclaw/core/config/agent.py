@@ -1134,9 +1134,9 @@ class AgentSettings(BaseSettings):
         died with the error this backstop exists to prevent instead of answering.
 
         At the shipped defaults this is `26 * 6 + 8 = 164` against the 137 a capped 25-iteration
-        harness turn actually needs — so the cap fires first, which is the intent. The ceiling should never
-        be what stops a turn at all; it is the backstop under the cap, sized so the cap always
-        fires first.
+        harness turn actually needs — so the cap fires first, which is the intent. The ceiling
+        should never be what stops a turn at all; it is the backstop under the cap, sized so the
+        cap always fires first.
 
         **This said "it is what stops a turn that has no cap, because the loop cap is attached only
         when the harness is on", and that was the opposite of the code.** `_harness_middleware`
