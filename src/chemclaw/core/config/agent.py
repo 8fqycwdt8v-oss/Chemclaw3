@@ -1127,8 +1127,14 @@ class AgentSettings(BaseSettings):
         a graph gaining a node nobody re-measured for. The setting stays the knob a deployment can
         raise; this constant is the floor under it.
 
-        At the shipped defaults this is `25 * 6 + 8 = 158` against the 132 a 25-iteration harness
-        turn actually needs — so the cap fires first, which is the intent. The ceiling should never
+        **`cap + 1` calls, not `cap`, because the cap now ends a graph with one more call.**
+        `agent/loop_cap.enforce_loop_cap` authorises a tool-less wrap-up past the cap so a capped
+        turn still answers; sized for `cap` calls, the ceiling fired first at a cap of 1 or 2 —
+        CI raised "Recursion limit of 14" and "of 20" on three capped-turn tests — and the turn
+        died with the error this backstop exists to prevent instead of answering.
+
+        At the shipped defaults this is `26 * 6 + 8 = 164` against the 137 a capped 25-iteration
+        harness turn actually needs — so the cap fires first, which is the intent. The ceiling should never
         be what stops a turn at all; it is the backstop under the cap, sized so the cap always
         fires first.
 
@@ -1141,4 +1147,4 @@ class AgentSettings(BaseSettings):
         with no cap, so a reader sizing this margin was being told to leave room for a case that
         cannot arise.
         """
-        return self.harness_max_loop_iterations * self.agent_supersteps_per_model_call + 8
+        return (self.harness_max_loop_iterations + 1) * self.agent_supersteps_per_model_call + 8
