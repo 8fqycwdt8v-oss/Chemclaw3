@@ -13,12 +13,15 @@ from chemclaw.agent.graph_tools import (
     record_failure,
     record_knowledge_note,
 )
+from chemclaw.core.chem import standard_smiles
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 from chemclaw.kg.conflicts import find_conflicts
 from chemclaw.kg.note import Note, parse_note
 from chemclaw.kg.record import NoteWrite
+from chemclaw.science.fingerprints.molfp.search import find_similar_molecules, record_for
+from chemclaw.science.fingerprints.store import InMemoryFingerprintStore
 from tests.conftest import FakeWriter
 
 
@@ -715,3 +718,89 @@ def test_no_docstring_on_the_write_path_still_promises_a_human_reviewer() -> Non
         source = (root / relative).read_text(encoding="utf-8")
         for phrase in phrases:
             assert phrase not in source, f"{relative} still claims a reviewer: {phrase!r}"
+
+
+# --- a `similar_molecules` hit's compound id resolves whether or not a note was written ---------
+
+
+def _index_holding(*structures: str) -> InMemoryFingerprintStore:
+    """An in-memory molecule index holding `structures`, keyed as `ingest.eln.ingest` keys it."""
+    store = InMemoryFingerprintStore()
+    for smiles in structures:
+        standard = standard_smiles(smiles)
+        asyncio.run(store.add(record_for(standard, standard)))
+    return store
+
+
+def _hit_id(store: InMemoryFingerprintStore, query: str) -> str:
+    """The `compound_note_id` `similar_molecules` itself hands the model for `query`'s own row."""
+    found = asyncio.run(find_similar_molecules(store, query, top_k=1, threshold=1.0))
+    (hit,) = found.hits
+    assert hit.compound_note_id is not None
+    return hit.compound_note_id
+
+
+def test_a_molecule_indexed_from_an_eln_run_expands_although_no_note_was_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Found live: thirteen `expand_note` calls on `similar_molecules` ids, thirteen "no note".
+
+    The id comes from the search itself rather than from `compound_id` here, so the test is about
+    the ids the tool really returns. The view is the compound note the ingest would have written,
+    and it says, outside the framed body, that nobody wrote it.
+    """
+    _seed(tmp_path)
+    monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
+    store = _index_holding("COc1ccc(Cl)cc1", "CCO")
+    monkeypatch.setattr(graph_tools, "_molecule_store", lambda: store)
+    note_id = _hit_id(store, "COc1ccc(Cl)cc1")
+
+    view = asyncio.run(expand_note(note_id))
+
+    assert view.note.id == note_id and view.note.type == "compound"
+    assert view.note.compound_smiles == "COc1ccc(Cl)cc1"
+    assert view.body.startswith("No note has been written about this compound")
+    assert "COc1ccc(Cl)cc1" in view.body
+
+
+def test_a_seed_note_filed_under_a_slug_answers_for_its_structure_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The seed corpus files `compound-4-bromoanisole`; a hit on that structure cites the hash.
+
+    The written note is the answer — expanded as itself, with its own neighbourhood — and the
+    index is never consulted for it.
+    """
+    (tmp_path / "b.md").write_text(
+        "---\nid: compound-4-bromoanisole\ntype: compound\ncompound_smiles: COc1ccc(Br)cc1\n---\n"
+        "Starting material for [[rxn-suzuki]].\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "s.md").write_text(
+        "---\nid: rxn-suzuki\ntype: reaction\n---\nUses [[compound-4-bromoanisole]].\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
+
+    def _unused() -> InMemoryFingerprintStore:
+        raise AssertionError("a structure a note already carries must not scan the index")
+
+    monkeypatch.setattr(graph_tools, "_molecule_store", _unused)
+    note_id = _hit_id(_index_holding("COc1ccc(Br)cc1"), "COc1ccc(Br)cc1")
+
+    view = asyncio.run(expand_note(note_id))
+
+    assert view.note.id == "compound-4-bromoanisole"
+    assert [n.id for n in view.neighbors] == ["rxn-suzuki"]
+
+
+def test_a_structure_id_nothing_holds_is_still_an_unknown_note(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fallback is a lookup, not a licence: an id no note and no indexed structure has fails."""
+    _seed(tmp_path)
+    monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
+    store = _index_holding("CCO")
+    monkeypatch.setattr(graph_tools, "_molecule_store", lambda: store)
+    with pytest.raises(ChemclawError, match="no note with id"):
+        asyncio.run(expand_note("compound-000000000000"))

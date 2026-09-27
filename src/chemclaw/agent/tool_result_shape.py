@@ -36,6 +36,9 @@ from deepagents.backends.utils import create_file_data
 from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 
+from chemclaw.agent.framing import SYSTEM_SPEECH_MARK
+from chemclaw.core.model_prose import ModelProse
+
 logger = logging.getLogger(__name__)
 
 
@@ -378,3 +381,55 @@ def rewritten_command_files(
     if not changed:
         return result
     return dataclasses.replace(result, update={**result.update, "files": rewritten})
+
+
+#: The turn limits that can stop a helper before it finishes, by the state flag its `Command`
+#: carries back and the name the caller's model is told. `loop_capped` and `spend_capped` are the
+#: two `TurnFlag` channels that cross the subagent boundary *on purpose* (`agent/state.py`), which
+#: is what makes them readable here without a second channel saying the same thing.
+_HELPER_STOPS: tuple[tuple[str, str], ...] = (
+    ("loop_capped", "step limit"),
+    ("spend_capped", "token budget"),
+)
+
+#: What a caller is told about a helper a turn limit stopped. `{limit}` is from `_HELPER_STOPS`.
+HELPER_CUT_SHORT = ModelProse(
+    "The helper was stopped by this turn's {limit} before it finished, so this is not a completed "
+    "report. Partial findings — what it had written when it stopped, which may describe a next "
+    "step it never took rather than a result — follow. Treat anything it did not report as "
+    "unexamined, not as absent, and do not send another helper to repeat the same sweep: the "
+    "limit that stopped this one is the turn's, and it is spent."
+)
+
+
+def helper_stopped_by(result: Any) -> str | None:
+    """Which turn limit stopped the helper whose `task` result this is, or `None` if it finished.
+
+    **The report alone cannot say, and that is the defect.** deepagents builds a helper's report
+    from its *last non-empty assistant text* (`_return_command_with_state_update`), so a helper the
+    cap stopped mid-sweep reports its last sentence of narration as though it were its findings.
+    Driven live against a real model (dl-01, 2026-09-27): three reports read "Let me look at the
+    aryl chloride compounds found…", "Let me also check one more thing…" and the start of a
+    report, and nothing told the caller which of the three had finished. The flags the helper's
+    final state carries back do say it, and they are already on the `Command` this seam handles.
+    """
+    if not isinstance(result, Command) or not isinstance(result.update, dict):
+        return None
+    for flag, limit in _HELPER_STOPS:
+        if result.update.get(flag):
+            return limit
+    return None
+
+
+def cut_short_report(report: str, limit: str) -> str:
+    """A stopped helper's report, led by this system's marked statement that it is partial.
+
+    Led rather than trailed, because the head is what a bounded cut keeps and what a reader reads
+    first: a caller that stops at "Let me also check…" must already know the check never happened.
+    Marked with `SYSTEM_SPEECH_MARK` because it is this system's sentence inside a result that is
+    otherwise a model's prose — the caller has to be able to tell the two apart, and the mark is
+    the one anchor the report itself cannot forge (`agent/tool_framing.py` defangs it out of the
+    helper's text before this is added).
+    """
+    findings = report.strip() or "(it had written nothing)"
+    return f"[{HELPER_CUT_SHORT.format(limit=limit)}] {SYSTEM_SPEECH_MARK}\n\n{findings}"

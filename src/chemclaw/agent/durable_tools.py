@@ -61,7 +61,7 @@ from chemclaw.core.identity_context import get_current_correlation_id, get_curre
 from chemclaw.core.ids import canonical_text, stable_hash
 from chemclaw.core.session_context import get_current_session_id
 from chemclaw.core.temporal_client import connect
-from chemclaw.core.tool_registry import tool
+from chemclaw.core.tool_registry import polls_moving_state, tool
 from chemclaw.core.turn_signals import record_job_started
 from chemclaw.durable.connector_job import envelope_from_result
 from chemclaw.durable.hypothesis_tournament import (
@@ -367,6 +367,7 @@ def _memory_job_id(kind: MemoryJobKind, *, fresh: bool = False, discriminator: s
 
 
 @tool
+@polls_moving_state
 async def get_durable_job_status(job_id: str) -> DurableJobStatus:
     """Collect a durable job: its status, and its result once it has completed.
 

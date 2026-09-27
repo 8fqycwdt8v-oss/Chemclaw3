@@ -1034,7 +1034,9 @@ def test_a_loop_capped_step_answers_with_prose_and_is_booked_as_capped(
     assert "No files found" not in step.answer, (
         "the step answered with the tool's own output; a ToolMessage is not an assistant answer"
     )
-    assert step.answer == "partial 2"
+    # The fourth call is the tool-less wrap-up the cap owes the step (`loop_cap.AnswerAtTheCap`);
+    # its text is the answer, and its tool call is dropped rather than run.
+    assert step.answer == "partial 3"
     assert [row.outcome for row in step.costs] == ["loop_capped"]
 
 
@@ -1131,7 +1133,7 @@ def test_a_capped_step_hands_on_a_marked_partial_rather_than_a_bare_one(
     assert step.result.outcome == "loop_capped"
     assert step.result.degraded is True
     assert step.result.step_value().startswith("[INCOMPLETE")
-    assert step.result.step_value().endswith("partial 2")
+    assert step.result.step_value().endswith("partial 3")  # the wrap-up call's text
 
 
 def test_the_runs_record_states_which_step_ran_degraded(monkeypatch: pytest.MonkeyPatch) -> None:

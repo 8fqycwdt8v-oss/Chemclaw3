@@ -47,6 +47,7 @@ from chemclaw.connectors.registry import (
     endpoint_tool_names,
     job_tools,
     mcp_connections,
+    withheld_job_names,
 )
 from chemclaw.connectors.transport import ConnectorSpec
 from chemclaw.core.config import settings
@@ -970,9 +971,12 @@ def capability_tool_names() -> set[str]:
     `tests/test_verifier.py::test_no_capability_tool_is_short_enough_to_collide_with_english`
     asserts the property that makes a bare-token match safe over this set and unsafe over that one.
     """
+    withheld = _withheld_launcher_names()
     return {
-        *(name for name in registered_tool_names() if name not in _withheld_launcher_names()),
-        *connector_tool_names(),
+        *(name for name in registered_tool_names() if name not in withheld),
+        # A withheld *job* is still a declared connector name (`connector_tool_names` reports the
+        # declaration), so it is subtracted here too or the surface names a tool no graph binds.
+        *(name for name in connector_tool_names() if name not in withheld),
         *template_tool_names(),
     }
 
@@ -986,7 +990,9 @@ def _reject_unknown_tool_names(profile: AgentProfile) -> None:
     """
     assert profile.tool_names is not None  # only called when the profile narrows
     available = available_tool_names()
-    unknown = profile.tool_names - available
+    # A withheld launcher is a known name this deployment cannot run, not a typo: a profile naming
+    # it builds, and the launcher is simply absent from what the build binds.
+    unknown = profile.tool_names - available - _withheld_launcher_names()
     if unknown:
         raise ValueError(
             f"agent profile {profile.name!r} lists unknown tool(s) {sorted(unknown)}; "
@@ -1083,7 +1089,11 @@ def _register_generated_tools() -> list[CapabilityTool]:
 
 
 def _withheld_launcher_names() -> set[str]:
-    """Template launchers this deployment declares and does not bind, read at the moment of asking.
+    """Launchers this deployment declares and does not bind, read at the moment of asking.
+
+    Two kinds: a template launcher whose opt-in capability is off
+    (`templates.registry.withheld_reason`), and a job launcher whose manifest says the deployment
+    cannot run it (`connectors.registry.withheld_job_names`).
 
     **The registry only grows, so what it holds is not the surface.** A launcher registered by an
     earlier build under a different configuration stays registered for the life of the process.
@@ -1095,7 +1105,9 @@ def _withheld_launcher_names() -> set[str]:
     there this subtracts nothing that was registered; in a process that does, it is the difference
     between the rule and the history.
     """
-    return set(template_tool_names(declared=True)) - set(template_tool_names())
+    return (set(template_tool_names(declared=True)) - set(template_tool_names())) | set(
+        withheld_job_names()
+    )
 
 
 def _narrow(

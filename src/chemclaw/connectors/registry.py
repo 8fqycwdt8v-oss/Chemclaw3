@@ -41,7 +41,7 @@ from langchain_mcp_adapters.sessions import StdioConnection, StreamableHttpConne
 from pydantic import ValidationError
 
 from chemclaw.connectors.identity import auth_for
-from chemclaw.connectors.jobs import build_job_tool
+from chemclaw.connectors.jobs import build_job_tool, unavailable_reason
 from chemclaw.connectors.manifest import (
     ConnectorManifest,
     Endpoint,
@@ -888,7 +888,31 @@ def job_tools() -> list[CapabilityTool]:
     there for the rule and for the collision that was live when it was written.
     """
     _declared_tool_names()
-    return [build_job_tool(manifest.name, job) for manifest in enabled() for job in manifest.jobs]
+    withheld = set(withheld_job_names())
+    return [
+        build_job_tool(manifest.name, job)
+        for manifest in enabled()
+        for job in manifest.jobs
+        if job.name not in withheld
+    ]
+
+
+def withheld_job_names() -> list[str]:
+    """The enabled jobs this deployment declares and cannot run, so binds no launcher for, sorted.
+
+    A job says so through its manifest's `unavailable_reason` (`jobs.unavailable_reason`), asked
+    now rather than at startup. Still *declared* — `job_names`, `connector_tool_names` and the
+    validators keep it, since a skill or a template naming it names something this tree ships — and
+    subtracted from the bound surface by `chemclaw_agent._withheld_launcher_names` as well as here,
+    because the tool registry only grows and a launcher some earlier build registered would
+    otherwise stay bound.
+    """
+    return sorted(
+        job.name
+        for manifest in enabled()
+        for job in manifest.jobs
+        if unavailable_reason(job) is not None
+    )
 
 
 def job_names() -> list[str]:

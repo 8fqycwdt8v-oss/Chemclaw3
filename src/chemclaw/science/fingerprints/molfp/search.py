@@ -15,7 +15,12 @@ from typing import NamedTuple
 from pydantic import BaseModel
 from rdkit import Chem
 
-from chemclaw.core.chem import InvalidSmilesError, compound_id, substructure_pattern
+from chemclaw.core.chem import (
+    InvalidSmilesError,
+    compound_id,
+    compound_id_of_standard,
+    substructure_pattern,
+)
 from chemclaw.core.config import settings
 from chemclaw.science.fingerprints.molfp.fingerprint import ecfp_bitstring, molecule_definition
 from chemclaw.science.fingerprints.molfp.substructure_index import (
@@ -49,13 +54,12 @@ class MoleculeHit(BaseModel):
     `find_notes` on each SMILES — the literal substring path KM-4 flags as fragile. Compound
     notes now exist with structure-derived ids, so the citation is simply computed here.
 
-    `compound_note_id` names the note an ingest produces. A structure indexed before its note has
-    been written has no note for the citation to resolve to yet — a smaller window than under the
-    PR-gate this replaces, where it lasted until a human merged, but not a closed one: the ingest
-    indexes and writes in separate steps. It is the same latency `reaction_note_id` has always had,
-    and the reason
-    `eln.compound.compound_dependencies` makes a note land together with the compound notes
-    it depends on (STO-7). It is `None` when the stored structure does not parse: ingestion
+    `compound_note_id` is the structure's id, and **it resolves whether or not a note was ever
+    written under it**: `expand_note` reads a written note first, then a note filed under another
+    id that carries this structure, and otherwise the structure itself back out of this index
+    (`indexed_structure`). It used to name "the note an ingest produces", and since an ELN run
+    became a record rather than a note no ingest produces one, so most hits cited nothing. It is
+    `None` when the stored structure does not parse: ingestion
     canonicalizes leniently, so a junk label can reach the index, and one unciteable row must
     not raise out of a search that has real hits to return.
     """
@@ -73,6 +77,30 @@ class MoleculeHit(BaseModel):
             log.warning("indexed molecule %r does not parse; hit cites no compound note", smiles)
             note_id = None
         return cls(compound_note_id=note_id, smiles=smiles, similarity=similarity)
+
+
+async def indexed_structure(store: FingerprintStore, note_id: str) -> str | None:
+    """The indexed structure whose `compound_note_id` is `note_id`, or `None` if none is.
+
+    The inverse of `MoleculeHit.for_molecule`, for a reader handed only the id — `expand_note`,
+    when no note of that id was ever written. That is most of them: a hit's id names the note an
+    ingest *would* produce, and since `D-2026-08-25-a-corpus-is-evidence-not-an-eln` an ELN run is a
+    record rather than a note, so a molecule indexed from one has a structure-derived id and no
+    note behind it. Found live: one turn called `expand_note` on thirteen such ids and got "no note
+    with id" thirteen times.
+
+    A scan, because the id is a hash and the index is keyed by structure. Over the slice
+    `substructure_matches` already scans (`substructure_scan_max_records`, same order), hashing each
+    stored label with `compound_id_of_standard`: labels are standardized at ingest, so re-running
+    RDKit over each — ~6.6 ms apiece — would be the whole cost for no change in the answer. What the
+    scan does cost is the store's own row fetch, which `PostgresFingerprintStore.all_records`
+    records (~2 s at the shipped cap, most of it the unused `bits` column); it runs only when the
+    id names no note, which is the path that used to fail outright.
+    """
+    for record in await store.all_records(limit=settings.substructure_scan_max_records):
+        if compound_id_of_standard(record.label) == note_id:
+            return record.label
+    return None
 
 
 def record_for(record_id: str, smiles: str) -> FingerprintRecord:

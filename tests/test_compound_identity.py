@@ -22,6 +22,7 @@ from chemclaw.core.chem import (
     _is_organic,
     canonical_smiles,
     compound_id,
+    compound_id_of_standard,
     standard_smiles,
 )
 from chemclaw.core.reagents import _TABLE, display_name, resolve_compound_name, synonyms_of
@@ -55,6 +56,25 @@ def test_the_derivation_is_pinned_to_a_literal() -> None:
     """
     assert compound_id("CCO") == "compound-f29e20f49d41"
     assert compound_id("OCC") == "compound-f29e20f49d41"  # same molecule, other spelling
+
+
+@pytest.mark.parametrize(
+    "written",
+    ["CCO", "CN(C)C=O", "CC[NH3+].[Br-]", "[Na+].[O-]C(=O)c1ccccc1", "Oc1ccccn1", "F/C=C/F"],
+)
+def test_an_already_standard_structure_hashes_to_its_compound_id_without_standardizing(
+    written: str,
+) -> None:
+    """`compound_id_of_standard` is `compound_id` minus a pass that is idempotent on its output.
+
+    The lookup that turns a `similar_molecules` hit back into a structure hashes stored labels
+    directly (they are `standard_smiles` output), so if standardizing a standard SMILES ever moved
+    it — a salt, a tautomer, a stereo bond with its backslash-free spelling — every such hit would
+    stop resolving while the hash itself looked fine.
+    """
+    standard = standard_smiles(written)
+    assert standard_smiles(standard) == standard
+    assert compound_id_of_standard(standard) == compound_id(written)
 
 
 def test_an_unparseable_structure_is_rejected_rather_than_hashed() -> None:

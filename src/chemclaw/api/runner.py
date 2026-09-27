@@ -42,6 +42,7 @@ from chemclaw.agent.chemclaw_agent import connector_specs
 from chemclaw.agent.context_budget import current_context
 from chemclaw.agent.framing import frame_untrusted
 from chemclaw.agent.job_results import await_job_results
+from chemclaw.agent.llm_provider import classify_model_failure
 from chemclaw.agent.local_skills import personal_skills_available
 from chemclaw.agent.loop_cap import loop_hit_cap
 from chemclaw.agent.plan_gate import (
@@ -100,6 +101,7 @@ from chemclaw.core.identity_context import (
 from chemclaw.core.logging import log_event
 from chemclaw.core.metrics import METRICS
 from chemclaw.core.metrics_bridge import degraded
+from chemclaw.core.model_prose import ModelProse
 from chemclaw.core.session_context import (
     reset_current_session_id,
     set_current_session_id,
@@ -162,7 +164,17 @@ def _classify(error: BaseException) -> tuple[ErrorCode, bool]:
     it retryable here. `ChemclawError` is the bad-data contract — a malformed SMILES, an
     unbalanced equation — so retrying it unchanged cannot work, and saying so saves the user a
     wasted turn.
+
+    **A context-length refusal is asked about first, through the one classifier that already knew
+    it.** `agent/llm_provider.classify_model_failure` has labelled it `context_length` on the model
+    call's own metric and log line since it existed, while this mapping — the one the chemist reads
+    — fell through to `internal`: driven on the live lane, `model.call_failed … (context_length:
+    OpenAIContextOverflowError)` sat two lines above `turn errored` reporting `internal`. Asking
+    the same function keeps the two readings of one failure from disagreeing again. Not retryable:
+    the same thread overflows the same window.
     """
+    if classify_model_failure(error) == "context_length":
+        return "context_length", False
     if isinstance(error, ConnectionError):
         return "storage_unavailable", True
     if isinstance(error, TimeoutError):
@@ -1385,13 +1397,27 @@ def _revision_message(claims: Sequence[str]) -> str:
     an empty block.
     """
     named = "\n".join(f"- {claim}" for claim in claims)
-    return (
-        "Your previous answer was checked against the evidence this turn actually retrieved, and "
-        "the claims below are not supported by it. Answer again: drop or correct each one, cite "
-        "the evidence for what you keep, and say plainly what the evidence does not settle rather "
-        "than filling the gap. Do not restate the previous answer.\n"
-        + frame_untrusted(named, note_id="unsupported-claims")
-    )
+    return _REVISION_NOTE + "\n" + frame_untrusted(named, note_id="unsupported-claims")
+
+
+#: The revision round's instruction, addressed so that the answer it produces is addressed to the
+#: chemist. **The note arrives in the `user` position and the chemist never sees it**, and the first
+#: wording read as a person pushing back: driven live against a real model (2026-09-27, 31 probes),
+#: 5 answers opened "You're right —", "Understood. I am dropping both claims…" or "Good catch —",
+#: and more announced themselves as "the corrected answer" — each one replying, in the chemist's
+#: transcript, to a critique the chemist never made. The position stays (`_settle_revision_thread`
+#: withdraws exactly this `human` message, and a provider needs a user turn after an assistant
+#: one); what changes is who the note says is speaking and who the reply is for.
+_REVISION_NOTE = ModelProse(
+    "[System note, not from the chemist — the chemist never sees it, so do not reply to it, thank "
+    "anyone for it or mention it.] An automated check compared your previous answer with the "
+    "evidence this turn actually retrieved, and the claims below are not supported by it. Write "
+    "the answer to the chemist's question again, from the beginning and addressed to the chemist, "
+    "as if it were your first reply: drop or correct each claim, cite the evidence for what you "
+    "keep, and say plainly what the evidence does not settle rather than filling the gap. Do not "
+    "open by agreeing with, acknowledging or apologising for anything, and do not call the answer "
+    "corrected or revised — to the chemist there is no earlier answer to correct."
+)
 
 
 #: The five things that can become of a request to have a person read a flagged answer. A frozen
@@ -1918,10 +1944,16 @@ def failure_event(exc: Exception, session_id: str, correlation_id: str) -> Error
     keyed on, so a bug report is findable without leaking internals.
     """
     code, retryable = _classify(exc)
+    # The one code whose remedy is the chemist's rather than an operator's, so it says what to do
+    # instead of calling a full context window an internal error.
+    reason = (
+        "The conversation has grown too long for the model to read in one request; start a new "
+        "session or ask a narrower question"
+        if code == "context_length"
+        else "The turn could not be completed due to an internal error"
+    )
     return ErrorEvent(
-        message=(
-            f"The turn could not be completed due to an internal error (session {session_id})."
-        ),
+        message=f"{reason} (session {session_id}).",
         code=code,
         retryable=retryable,
         correlation_id=correlation_id,
