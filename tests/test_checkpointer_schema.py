@@ -675,6 +675,7 @@ def test_each_read_is_classified_and_anything_unrecognised_counts_as_an_index() 
         "a name held in a tuple": 'names = ("c",)',
         "a name bound to a variable": 'key = "c"',
         "a comparison": 'if name == "c": pass',
+        "an augmented assignment": 'state["c"] += 1',
     }
     for label, line in safe.items():
         tree = _reader_tree(f"def node(state, name=None):\n    {line}\n")

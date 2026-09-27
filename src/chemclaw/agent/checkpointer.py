@@ -628,32 +628,42 @@ def _indexed(wanted: frozenset[str], root: Path) -> frozenset[str]:
                 ", ".join(sorted(wanted)),
             )
             return wanted
+        # `state["x"] += 1` stores through a Subscript whose ctx is Store, exactly like a write,
+        # but reads the channel first — only the AugAssign above it says so, and the classifier
+        # sees one level. So those targets are collected here and never count as a write.
+        augmented = {id(node.target) for node in ast.walk(tree) if isinstance(node, ast.AugAssign)}
         for parent in ast.walk(tree):
             for child in ast.iter_child_nodes(parent):
                 if (
                     isinstance(child, ast.Constant)
                     and isinstance(child.value, str)
                     and child.value in wanted
-                    and not _is_a_safe_use(parent, child)
+                    and not _is_a_safe_use(parent, child, augmented)
                 ):
                     indexed.add(child.value)
     return frozenset(indexed)
 
 
-def _is_a_safe_use(parent: ast.AST, name: ast.Constant) -> bool:
+def _is_a_safe_use(parent: ast.AST, name: ast.Constant, augmented: set[int]) -> bool:
     """Whether this occurrence of a channel name provably cannot raise for an absent channel.
 
     A closed list of the shapes that cannot, and nothing else — see `channels_read_without_default`
     for why anything unrecognised is an index:
 
     - `state.get("x", …)` / `state.setdefault("x", …)`: a defaulted read.
-    - `state["x"] = …` / `del state["x"]`: a write, not a read.
+    - `state["x"] = …` / `del state["x"]`: a write, not a read — unless the subscript is an
+      augmented assignment's target (`state["x"] += 1`), which reads first; `augmented` holds
+      those targets' ids, because only their parent node says so.
     - `{"x": …}`: a key in a literal — an update a node returns, which writes the channel.
     - `"x" in state` / `"x" not in state`: a membership test, which is how one guards an index.
     - a bare expression statement: a docstring or a no-op, which reads nothing.
     """
     if isinstance(parent, ast.Subscript):
-        return parent.slice is name and isinstance(parent.ctx, (ast.Store, ast.Del))
+        return (
+            parent.slice is name
+            and isinstance(parent.ctx, (ast.Store, ast.Del))
+            and id(parent) not in augmented
+        )
     if isinstance(parent, ast.Call):
         return (
             isinstance(parent.func, ast.Attribute)
