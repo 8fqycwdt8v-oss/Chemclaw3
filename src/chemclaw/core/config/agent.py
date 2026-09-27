@@ -858,7 +858,9 @@ class AgentSettings(BaseSettings):
     # held and speaks to the chemist in its own voice, so a mesh that mis-routes is a worse
     # product than the single agent it replaced. `D-2026-08-10-a-subagent-is-an-attenuation-not-a-
     # new-actor` requires exactly this — measured hand-off accuracy before a team is turned on —
-    # and that measurement does not exist: `evals/delegation.py` has never run against a model.
+    # and the one run there is
+    # (`D-2026-09-27-delegation-does-not-pay-on-the-measured-gateway-model`) recorded no hand-off
+    # at all, in 24 peer-arm repeats.
     # Turning this on is also a prefix cost a deployment should choose knowingly, because each
     # peer binds one handoff tool per other peer and a first-party schema is charged against
     # `tests/test_context_floor.py`'s ceiling with no allowance to absorb it.
@@ -1127,10 +1129,16 @@ class AgentSettings(BaseSettings):
         a graph gaining a node nobody re-measured for. The setting stays the knob a deployment can
         raise; this constant is the floor under it.
 
-        At the shipped defaults this is `25 * 6 + 8 = 158` against the 132 a 25-iteration harness
-        turn actually needs — so the cap fires first, which is the intent. The ceiling should never
-        be what stops a turn at all; it is the backstop under the cap, sized so the cap always
-        fires first.
+        **`cap + 1` calls, not `cap`, because the cap now ends a graph with one more call.**
+        `agent/loop_cap.enforce_loop_cap` authorises a tool-less wrap-up past the cap so a capped
+        turn still answers; sized for `cap` calls, the ceiling fired first at a cap of 1 or 2 —
+        CI raised "Recursion limit of 14" and "of 20" on three capped-turn tests — and the turn
+        died with the error this backstop exists to prevent instead of answering.
+
+        At the shipped defaults this is `26 * 6 + 8 = 164` against the 137 a capped 25-iteration
+        harness turn actually needs — so the cap fires first, which is the intent. The ceiling
+        should never be what stops a turn at all; it is the backstop under the cap, sized so the
+        cap always fires first.
 
         **This said "it is what stops a turn that has no cap, because the loop cap is attached only
         when the harness is on", and that was the opposite of the code.** `_harness_middleware`
@@ -1141,4 +1149,4 @@ class AgentSettings(BaseSettings):
         with no cap, so a reader sizing this margin was being told to leave room for a case that
         cannot arise.
         """
-        return self.harness_max_loop_iterations * self.agent_supersteps_per_model_call + 8
+        return (self.harness_max_loop_iterations + 1) * self.agent_supersteps_per_model_call + 8

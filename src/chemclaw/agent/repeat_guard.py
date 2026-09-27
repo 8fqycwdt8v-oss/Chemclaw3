@@ -16,6 +16,18 @@ wrong: `get_durable_job_status` is read-only and legitimately changes *within* o
 answer would pin a job at "running" for a model that was correctly re-checking it. Refusing never
 fabricates and never goes stale — it says what happened and hands the decision back.
 
+**A poll is exempt by declaration, and that paragraph used to be the whole of its protection.**
+Refusing rather than caching kept a status read from being served stale; it did nothing to stop
+the status read being *refused*. Driven live against a real model (du-01, 2026-09-27): the turn
+launched `compute_reaction_energy`, polled `get_durable_job_status` with the one job id it had, and
+the third through seventh polls were refused as repeats — while Temporal says the job COMPLETED
+inside the turn. The model never saw the result, and its answer then claimed it had "polled across
+several turns". The premise this guard rests on, "it will not answer differently", is false for a
+read of something that moves, so a tool declares that at its definition site
+(`core/tool_registry.polls_moving_state`) and is never counted here. Its bound is elsewhere, and
+already stronger: every poll long-polls `job_status_wait_seconds` inside Temporal, and the loop cap
+bounds how many there can be.
+
 **Why the third call and not the second.** One re-check is a real pattern (a job polled after a
 wait, a note re-read after a write). Seven is a loop. `max_identical_tool_calls` is the boundary
 and defaults to 2, so a legitimate re-check still goes through and the measured shape does not.
@@ -40,6 +52,7 @@ from chemclaw.agent.audit import metric_tool_name
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.metrics_bridge import record_metric
+from chemclaw.core.tool_registry import is_a_poll
 
 logger = logging.getLogger(__name__)
 
@@ -233,6 +246,10 @@ async def refuse_repeated_calls(request: Any, handler: Callable[[Any], Any]) -> 
     only: the refusal sentence still names what the model asked for, which is the same split that
     function draws for the audit row.
     """
+    # A declared poll is not counted at all, rather than counted and let through: its identical
+    # calls are the tool working, and a count of them would be a number about nothing.
+    if is_a_poll(request.tool_call["name"]):
+        return await handler(request)
     refusal = count_call(request.tool_call["name"], request.tool_call.get("args"))
     if refusal is None:
         return await handler(request)

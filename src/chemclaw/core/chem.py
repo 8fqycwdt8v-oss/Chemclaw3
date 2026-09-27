@@ -843,7 +843,20 @@ def compound_id(smiles: str) -> str:
     must not import the knowledge graph (D-115), and the id is a pure function of the structure — no
     graph needed to derive it, only to confirm the note exists.
     """
-    return f"compound-{stable_hash(require_standard_smiles(smiles), chars=12)}"
+    return compound_id_of_standard(require_standard_smiles(smiles))
+
+
+def compound_id_of_standard(standard: str) -> str:
+    """`compound_id` for a SMILES that is *already* standardized — the hash without the RDKit pass.
+
+    For a scan over stored structures, which the molecule index keys by their standardized SMILES
+    (`ingest.eln.ingest`): standardizing each one again costs ~6.6 ms cold (measured, 3,000
+    structures in 19.9 s), which a lookup over a few thousand rows cannot afford, and standardizing
+    is idempotent on its own output (3,000 of 3,000 in the same measurement;
+    `tests/test_compound_identity.py` pins it). Anything not known to be standard goes through
+    `compound_id`.
+    """
+    return f"compound-{stable_hash(standard, chars=12)}"
 
 
 def torsion_handle(mol: Chem.Mol, bond: tuple[int, int]) -> str:

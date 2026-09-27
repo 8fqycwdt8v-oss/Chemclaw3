@@ -27,6 +27,11 @@
 # `compare_arms` records whether each run delegated and reports the non-compliant pairs as
 # contaminated rather than averaging them in.
 #
+# **Every many-entity probe names its entities in the question.** dl-02, dl-05 and dl-08 said "these
+# twenty", "these eight" and "these twelve" and listed none, so on the first run against a real
+# model every arm could only ask which ones — three of eight tasks measured nothing
+# (`D-2026-09-27-delegation-does-not-pay-on-the-measured-gateway-model`).
+#
 # Buckets: A = capability exists · B = partial · C = absent.
 # `expects_tools` is ANY-OF. Every tool name is from the agent-callable surface.
 
@@ -59,9 +64,29 @@ probes:
     section: 6
     persona: lab_technician
     bucket: A
-    question: >-
+    question: |-
       For these twenty intermediates, give me a table of predicted pKa, logD and aqueous
       solubility, and flag any where the ionisation state would change between pH 4 and pH 8.
+        CC(=O)Nc1ccc(O)cc1
+        OC(=O)c1ccccc1Cl
+        CN1CCN(CC1)c1ccc(N)cc1
+        Nc1ccc(cc1)C(=O)O
+        OC(=O)CCc1ccc(Br)cc1
+        c1ccc2[nH]ccc2c1
+        Cc1ccc(N)nc1
+        OC(=O)c1ccc(Cl)nc1
+        OCC1CCN(CC1)C(=O)OC(C)(C)C
+        NC1CCN(CC1)C(=O)OC(C)(C)C
+        COc1ccc(cc1)B(O)O
+        OC(=O)C1CCCN1C(=O)OC(C)(C)C
+        Oc1ccc(cc1)[N+](=O)[O-]
+        CC(C)(C)OC(=O)NC(Cc1ccccc1)C(=O)O
+        Nc1nc(Cl)cc(Cl)n1
+        Nc1cc(F)c(F)cc1C(=O)O
+        CN(C)CCOc1ccc(cc1)C=O
+        c1ccc(cc1)-c1ccncc1
+        OC(=O)c1ccc2[nH]cnc2c1
+        CS(=O)(=O)Nc1ccc(cc1)C(=O)O
     expects_tools:
       - predict_pka
       - predict_logd
@@ -123,9 +148,17 @@ probes:
     section: 6
     persona: lab_technician
     bucket: A
-    question: >-
+    question: |-
       Take these eight candidate substrates and tell me, for each, whether we have run anything
       close and what happened.
+        COc1ccc(Cl)cc1
+        Clc1ccc(cc1)C#N
+        Cc1cc(Cl)ccc1N
+        Brc1cccnc1
+        COc1ccc(Br)cc1
+        Clc1ccc2ccccc2n1
+        FC(F)(F)c1ccc(I)cc1
+        OB(O)c1ccccc1
     expects_tools:
       - substrate_precedent
       - similar_molecules
@@ -188,9 +221,21 @@ probes:
     section: 10
     persona: lab_technician
     bucket: A
-    question: >-
+    question: |-
       Screen these twelve intermediates for structural hazards and genotoxic alerts, and give me
       just the ones that flag anything, with the alert and its citation.
+        [N-]=[N+]=NCc1ccccc1
+        O=[N+]([O-])c1ccc(Cl)c([N+](=O)[O-])c1
+        BrCCc1ccccc1
+        CC1CO1
+        NNc1ccccc1
+        CN(C)N=O
+        CC(C)(C)OO
+        COc1ccc(cc1)C(=O)O
+        CC(=O)Nc1ccc(O)cc1
+        OC(=O)c1ccncc1
+        COS(C)(=O)=O
+        O=C(Cl)c1ccc(Cl)cc1
     expects_tools:
       - screen_hazards
       - screen_genotoxic_alerts

@@ -33,6 +33,10 @@ Two rules that decide whether the answer means anything:
   theory. Prefer an equation where charge is *carried across* (an acid and its conjugate
   base on opposite sides) over one where an ion is created or destroyed. If you cannot,
   say the number is indicative only.
+- **Any ion needs a solvent.** With `solvent` unset every species is a bare molecule in
+  vacuum, and there an ion carries hundreds of kcal/mol of unscreened charge — so the tool
+  refuses a gas-phase equation containing one (a salt written as ions counts). Pass an
+  implicit solvent, or rewrite over neutral species.
 
 ## What ΔG answers, and the question it does not
 

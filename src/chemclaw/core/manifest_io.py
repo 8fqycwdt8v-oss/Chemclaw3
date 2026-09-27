@@ -204,11 +204,11 @@ def check_driver_module(reference: str, error: type[_E], field: str) -> None:
     **A manifest is data** — the sentence `connectors/registry.py` already uses to refuse
     `transport: stdio` and `core/config/connectors.py` uses to refuse an unfunded wall-clock
     ceiling. This is the same rule applied to the other field family that executes: `params_model`,
-    `precondition`, `ingest`, `retrieve`, `commitments` and `driver` are imported, and the sink and
-    channel seams then *call* what they resolve, with the manifest's own `config:` as keyword
-    arguments. Measured, a manifest naming a module wrote a file at import time inside
-    `job_tools()` — the per-turn agent-build path — with `connector-validate`, `sink-validate` and
-    `datasource-validate` all exiting 0.
+    `precondition`, `unavailable_reason`, `ingest`, `retrieve`, `commitments` and `driver` are
+    imported, and the sink and channel seams then *call* what they resolve, with the manifest's own
+    `config:` as keyword arguments. Measured, a manifest naming a module wrote a file at import
+    time inside `job_tools()` — the per-turn agent-build path — with `connector-validate`,
+    `sink-validate` and `datasource-validate` all exiting 0.
 
     **Why a package allow-list is the proportionate control, and what it does not claim.** The
     threat this seam actually has is a manifest arriving on a discovery path that is *not* the

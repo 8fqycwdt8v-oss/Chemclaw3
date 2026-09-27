@@ -119,7 +119,11 @@ from chemclaw.agent.framing import (
     frame_untrusted,
     neutralise_marks,
 )
-from chemclaw.agent.tool_result_shape import rewritten_tool_messages
+from chemclaw.agent.tool_result_shape import (
+    cut_short_report,
+    helper_stopped_by,
+    rewritten_tool_messages,
+)
 from chemclaw.agent.tool_result_size import (
     bounded_for_batch,
     full_text,
@@ -473,6 +477,12 @@ async def frame_connector_results(request: Any, handler: Callable[[Any], Any]) -
         if bounded is not offered and not was_cut(message):
             originals[message.tool_call_id] = full_text(message.content)
 
+    # A helper a turn limit stopped says so before anything it wrote. Read off the `Command`
+    # before the per-message rewrite, which sees only the `ToolMessage` — see
+    # `tool_result_shape.helper_stopped_by`. `None` for every other tool and for a helper that
+    # finished.
+    stopped = helper_stopped_by(result)
+
     def _defanged(message: ToolMessage) -> ToolMessage:
         # **Re-bounded after escaping, because escaping is what makes the text longer.**
         # `bound_tool_results` is nested *inside* this middleware, so it cuts the raw payload and
@@ -502,6 +512,12 @@ async def frame_connector_results(request: Any, handler: Callable[[Any], Any]) -
         # expansion factor. See `bounded_content`.
         in_hand = text_chars(message.content)
         escaped = _rewritten(message.content, defang)
+        if stopped is not None and isinstance(escaped, str):
+            # After the defang, so the mark this adds is live and anything the helper wrote that
+            # imitates it is not; before the bound, so the bound charges it and the head-and-tail
+            # cut keeps it. `_kept` below still records `message.content` — what the helper
+            # returned — so the full text kept for the chemist never carries this system mark.
+            escaped = cut_short_report(escaped, stopped)
         bounded = bounded_for_batch(
             request,
             escaped,

@@ -141,10 +141,31 @@ def test_the_cap_itself_reads_the_floor_and_not_only_the_channel() -> None:
         try:
             how = "with a watch open" if watching else "with no watch"
             decision = enforce_loop_cap.before_model(cast(Any, dict(resumed)), cast(Any, None))
-            assert decision == {"jump_to": "end", "loop_capped": True}, (
+            # At the cap a graph is owed exactly one tool-less call to write its answer
+            # (`loop_cap.AnswerAtTheCap`), so "did not start again from zero" reads as: the one
+            # call authorised is that wrap-up, counted past the budget the thread already spent.
+            assert decision == {
+                "loop_capped": True,
+                "loop_wrap_up": True,
+                "model_calls": cap + 1,
+            }, (
                 f"{how}, a resumed turn that already spent the whole budget did not stop: "
                 f"{decision}. It started again from the channel's zero"
             )
+            ended = enforce_loop_cap.before_model(
+                cast(Any, {**resumed, "loop_wrap_up": True}), cast(Any, None)
+            )
+            assert ended == {"jump_to": "end", "loop_capped": True}, (
+                f"{how}, a resumed turn past its wrap-up was allowed another call: {ended}"
+            )
+        finally:
+            if token is not None:
+                end_loop_watch(token)
+        # The healthy turn is a *different* turn, so it gets its own watch: the wrap-up above is
+        # an authorised call and advances the watch past the cap, which is right for every other
+        # branch of that turn and would be a cross-turn leak here.
+        token = begin_loop_watch() if watching else None
+        try:
             allowed = enforce_loop_cap.before_model(cast(Any, dict(fresh)), cast(Any, None))
             assert allowed == {"model_calls": 1}, (
                 f"{how}, a turn with nothing behind it was affected ({allowed}) — the floor must "
@@ -251,9 +272,13 @@ def test_a_fan_out_shares_one_iteration_budget_rather_than_getting_one_each(
 
     fanning = _FanOut(messages=iter([]))
     final = _drive(fanning)
-    assert fanning.calls <= cap, (
-        f"a {helpers}-way fan-out made {fanning.calls} model calls against a cap of {cap}: every "
-        "branch is spending the whole allowance instead of sharing one"
+    # One tool-less wrap-up per graph that reaches the cap (`loop_cap.AnswerAtTheCap`) — the
+    # supervisor and each helper — is the whole of what the bound pays for an answer. The defect
+    # this holds closed is still far outside it: `1 + W*(cap - 1)` is 25 here, against 13.
+    graphs = helpers + 1
+    assert fanning.calls <= cap + graphs, (
+        f"a {helpers}-way fan-out made {fanning.calls} model calls against a cap of {cap} plus "
+        f"{graphs} wrap-ups: every branch is spending the whole allowance instead of sharing one"
     )
     assert final.get("model_calls") == fanning.calls, (
         f"the channel reports {final.get('model_calls')} for {fanning.calls} real calls — the cap "
@@ -285,11 +310,12 @@ def test_a_fan_out_shares_one_iteration_budget_rather_than_getting_one_each(
 
     plain = _Plain(messages=iter([]))
     ordinary = _drive(plain)
-    assert plain.calls == cap, (
-        f"an ordinary turn made {plain.calls} calls against a cap of {cap} — the turn-wide "
-        "floor is capping a turn that has no siblings"
+    # The cap's calls, then the one wrap-up the one graph is owed.
+    assert plain.calls == cap + 1, (
+        f"an ordinary turn made {plain.calls} calls against a cap of {cap} and one wrap-up — the "
+        "turn-wide floor is capping a turn that has no siblings"
     )
-    assert ordinary.get("model_calls") == cap
+    assert ordinary.get("model_calls") == cap + 1
 
 
 def test_every_driver_of_a_turn_binds_a_fan_out_and_not_only_the_front_door(
@@ -376,9 +402,12 @@ def test_every_driver_of_a_turn_binds_a_fan_out_and_not_only_the_front_door(
         )
         asyncio.run(cli_chat.converse(graph, "split this several ways", session_id=thread))
 
+    # The shared allowance plus the one tool-less wrap-up each graph that reaches the cap is owed
+    # (`loop_cap.AnswerAtTheCap`): the supervisor and every helper.
+    bound = cap + helpers + 1
     wired = _FanOut(messages=iter([]))
     _cli_fan_out(wired, thread="cli-fan-out-wired")
-    assert wired.calls <= cap, (
+    assert wired.calls <= bound, (
         f"a {helpers}-way fan-out through `cli.converse` made {wired.calls} model calls against a "
         f"cap of {cap}: this driver opens no loop watch, so every branch spends the whole allowance"
     )
@@ -386,10 +415,10 @@ def test_every_driver_of_a_turn_binds_a_fan_out_and_not_only_the_front_door(
     unwired = _FanOut(messages=iter([]))
     monkeypatch.setattr(cli_chat, "turn_caps", lambda *a, **k: nullcontext())
     _cli_fan_out(unwired, thread="cli-fan-out-unwired")
-    assert unwired.calls > cap, (
+    assert unwired.calls > bound, (
         f"with `turn_caps` neutered the same fan-out made {unwired.calls} calls, which is not over "
-        f"the cap of {cap} — so this test is not measuring the wiring and would pass with every "
-        "driver's watch removed, which is exactly the hole it was written to close"
+        f"the bound of {bound} — so this test is not measuring the wiring and would pass with "
+        "every driver's watch removed, which is exactly the hole it was written to close"
     )
 
 

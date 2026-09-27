@@ -250,6 +250,43 @@ def test_the_revision_names_the_claims_rather_than_saying_try_again(
     )
 
 
+def test_the_revision_note_says_the_chemist_never_saw_it_and_asks_for_an_answer_to_them(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The note arrives in the user position, so its wording decides who the reply is written to.
+
+    Driven live against a real model (2026-09-27): 5 of 31 answers opened "You're right —",
+    "Understood. I am dropping both claims…" or "Good catch —", and three more called themselves
+    "the corrected answer" — each replying, in the chemist's transcript, to a critique the chemist
+    never made. The first wording ("Your previous answer was checked… Answer again") read as a
+    person pushing back. Asserted on the message the graph is actually driven with, because the
+    text is the whole mechanism; whether the model then *obeys* is what the live eval's
+    `acknowledged_critique` counts (`evals/live.opens_by_acknowledging_a_critique`).
+    """
+    _grades_by_text(monkeypatch)
+    monkeypatch.setattr(settings, "answer_review_max_rounds", 1)
+    seen: list[str] = []
+
+    class _CapturingAgent(ScriptedTurn):
+        """Records every message it is driven with."""
+
+        async def stream(self, message: str) -> AsyncIterator[Piece]:
+            seen.append(message)
+            yield _GROUNDED if _SENT_BACK in message else _FLAGGED
+
+    _drive(_CapturingAgent())
+
+    assert len(seen) == 2, "the revision did not run"
+    note = seen[1].lower()
+    assert "not from the chemist" in note and "never sees it" in note, (
+        "the note must say who is speaking — otherwise the model answers it as the chemist"
+    )
+    assert "addressed to the chemist" in note, "the rewrite must be addressed to the chemist"
+    assert "do not open by agreeing with, acknowledging or apologising" in note
+    assert "do not call the answer corrected" in note
+    assert "previous answer was checked" not in note, "the wording that leaked is back"
+
+
 class _EmptyRevisionAgent(ScriptedTurn):
     """Answers, is flagged, and then produces nothing at all when it is sent back."""
 

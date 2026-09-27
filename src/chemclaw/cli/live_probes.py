@@ -165,6 +165,10 @@ def _summary(
             "…and clarified in prose instead (the tool existed)",
             str(sum(1 for o in outcomes if o.asked_clarifying_in_prose)),
         ],
+        [
+            "**answers opening on a critique the chemist never made**",
+            f"**{sum(1 for o in outcomes if o.acknowledged_critique)}**",
+        ],
         ["turns that surfaced a failure", str(sum(1 for o in outcomes if o.failed_loudly))],
         ["durable jobs started", str(sum(len(o.jobs_started) for o in outcomes))],
     ]

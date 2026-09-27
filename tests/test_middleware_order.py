@@ -89,6 +89,10 @@ _EXPECTED_ORDER = (
     "ScopedTodoListMiddleware",
     "enforce_loop_cap",
     "enforce_spend_cap",
+    # The other half of `enforce_loop_cap`: that hook authorises one call per graph past the cap
+    # and marks it, and this turns the marked call into an answer (tools off, a system note, any
+    # tool call dropped). Adjacent for readability only — it reads a state mark, not a neighbour.
+    "AnswerAtTheCap",
     "MeterTurnSpend",
     # A `before_agent` hook, so its position carries no nesting argument: it runs once, before the
     # first model call, and removes the `files` entries past `agent_scratch_retention_days`

@@ -95,28 +95,28 @@ def test_the_measured_loop_is_stopped_and_the_tool_stops_running(watching: None)
 
 
 def test_a_single_re_check_still_goes_through(watching: None) -> None:
-    """One repeat is a real pattern — a job polled after a wait, a note re-read after a write.
+    """One repeat is a real pattern — a note re-read after a write.
 
     The boundary is deliberately not "never repeat": a guard that refused the second call would
     break correct behaviour to fix incorrect behaviour.
     """
     tool = _Tool()
-    _drive(_ctx("get_durable_job_status", job_id="calc-1"), tool)
-    _drive(_ctx("get_durable_job_status", job_id="calc-1"), tool)
+    _drive(_ctx("expand_note", note_id="rxn-1"), tool)
+    _drive(_ctx("expand_note", note_id="rxn-1"), tool)
     assert tool.runs == 2
 
 
 def test_a_refusal_is_never_a_cached_answer(watching: None) -> None:
     """The reason this refuses instead of replaying the first result.
 
-    `get_durable_job_status` is read-only and legitimately changes *within* a turn, so serving the
-    first call's answer would pin a job at "running" for a model that was correctly re-checking.
-    A refusal cannot go stale: it reports what happened and hands the decision back.
+    A replayed answer is a stale answer the moment what it read has moved; a refusal cannot go
+    stale — it reports what happened and hands the decision back. (A read that *is* expected to
+    move is not refused at all: see the poll tests below.)
     """
     tool = _Tool()
     for _ in range(settings.max_identical_tool_calls):
-        _drive(_ctx("get_durable_job_status", job_id="calc-1"), tool)
-    ctx = _ctx("get_durable_job_status", job_id="calc-1")
+        _drive(_ctx("find_notes", query="aryl chloride"), tool)
+    ctx = _ctx("find_notes", query="aryl chloride")
     with pytest.raises(RepeatedCallRefusal):
         _drive(ctx, tool)
     assert getattr(ctx, "result", None) is None, "no answer is invented for a call that never ran"
@@ -356,3 +356,38 @@ def test_forgetting_is_a_no_op_off_the_request_path() -> None:
     from chemclaw.agent.repeat_guard import forget_calls
 
     forget_calls([("call-c", "find_notes", {"q": "anything"})])
+
+
+def test_a_status_poll_is_never_refused_however_often_it_asks(watching: None) -> None:
+    """A job's status is the one read whose purpose is to be asked the same question again.
+
+    Driven live against a real model (du-01, 2026-09-27): the turn launched a calculation and
+    polled `get_durable_job_status` with its one job id; polls three to seven were refused as
+    repeats while Temporal says the job completed inside the turn, and the answer then claimed to
+    have "polled across several turns". The real tool is imported so its own declaration is what
+    is read — deleting `@polls_moving_state` from it turns this red.
+    """
+    import chemclaw.agent.durable_tools  # noqa: F401 — registers the tool and its declaration
+
+    tool = _Tool()
+    polls = settings.max_identical_tool_calls + 5
+    for _ in range(polls):
+        _drive(_ctx("get_durable_job_status", job_id="calc-compute_reaction_energy-4cf2"), tool)
+    assert tool.runs == polls, "a status poll was refused as a repeat; the job's result is lost"
+
+
+def test_the_poll_exemption_is_declared_not_granted_to_every_read(watching: None) -> None:
+    """The control: the exemption belongs to the declaring tool, not to reads in general.
+
+    The same number of identical calls to an undeclared read is still refused — so what makes a
+    poll pass is its declaration, and the measured `find_past_jobs` loop stays closed.
+    """
+    import chemclaw.agent.durable_tools  # noqa: F401
+    from chemclaw.core.tool_registry import is_a_poll
+
+    assert is_a_poll("get_durable_job_status")
+    assert not is_a_poll("find_past_jobs")
+    tool = _Tool()
+    with pytest.raises(RepeatedCallRefusal):
+        for _ in range(settings.max_identical_tool_calls + 1):
+            _drive(_ctx("find_past_jobs", kind="reaction"), tool)

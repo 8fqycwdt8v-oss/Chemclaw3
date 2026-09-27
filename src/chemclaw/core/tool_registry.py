@@ -70,3 +70,34 @@ def registered_tools() -> list[CapabilityTool]:
 def registered_tool_names() -> list[str]:
     """The names of all registered capability tools, sorted (for tests and validation)."""
     return sorted(_REGISTRY)
+
+
+# Names of tools whose answer to *identical* arguments legitimately changes within one turn. Kept
+# beside the registry rather than in any consumer, so the property is declared where the tool is
+# defined (`@polls_moving_state`) and a consumer asks — never keeps its own list of other people's
+# tools.
+_POLLS: set[str] = set()
+
+
+def polls_moving_state(fn: _ToolT) -> _ToolT:
+    """Declare that this tool *reads something that moves*, so asking again is not a repeat.
+
+    A status poll is the one read whose whole purpose is to be asked the same question twice: a
+    durable job answers `running`, then `completed`, to byte-identical arguments. Declared at the
+    definition site, like `@tool`, because it is a fact about the tool; `agent/repeat_guard.py` is
+    the reader, and its premise — "it will not answer differently" — is exactly what this
+    declaration says is false for the tool.
+
+    Identity, like `tool`, so it composes in either order with it.
+    """
+    _POLLS.add(fn.__name__)
+    return fn
+
+
+def is_a_poll(name: str) -> bool:
+    """Whether the tool registered under `name` declared `@polls_moving_state`.
+
+    Keyed by the name a call carries. A name nothing registered — a hallucinated or injected call —
+    is never in the set, so it cannot claim the exemption by spelling.
+    """
+    return name in _POLLS

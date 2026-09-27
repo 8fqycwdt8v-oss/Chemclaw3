@@ -42,10 +42,12 @@ applies through the channel's own reducer — and `tests/test_spend_cap.py` driv
 same way, because a hook returning the right dict proves nothing about whether the channel exists
 (`tests/test_state_channels.py` is that lesson as a file).
 
-**Ending the run rather than raising**, for the reason `agent/loop_cap.py` gives and this module
-inherits without restating it: the answer the last iteration managed still goes out, and a surface
-marks it partial. A raised error would discard work a chemist is entitled to see, and would discard
-it *after* the tokens were already spent, which is the worst of both.
+**Ending the run rather than raising**, for the reason `agent/loop_cap.py` gives: the answer the
+last iteration managed still goes out, and a surface marks it partial. A raised error would discard
+work a chemist is entitled to see, and would discard it *after* the tokens were already spent,
+which is the worst of both. **The loop cap's tool-less wrap-up call is deliberately not inherited**:
+that cap bounds iterations, so one more call to write an answer is a bounded price; this one bounds
+spend, and past it there is no call left to buy.
 """
 
 import logging
