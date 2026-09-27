@@ -462,7 +462,7 @@ only holds defects can only ever restore the system to what it already intended 
       once, with the date it was measured.
 
 - [ ] **A cut tool result is unrecoverable, and the store that would hold it is downstream of the
-      cut** — [M], the last open Wave 1 item ("make a cleared tool result retrievable by address").
+      cut** (issue #471) — [M], the last open Wave 1 item ("make a cleared tool result retrievable by address").
       Measured 2026-09-14, and the two halves are not the same problem.
       `D-2026-09-14-the-lossy-step-is-the-cut-and-upstream-already-offloads` already established
       that the *clear* loses nothing — it runs over a deep copy inside `wrap_model_call` and the
