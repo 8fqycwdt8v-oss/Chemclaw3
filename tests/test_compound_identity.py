@@ -777,6 +777,30 @@ _STANDARDIZATION_AT_THIS_VERSION = (
     ("CCN.OO", "CCN.OO"),
     ("CCN.O", "CCN"),
     ("CN(C)C(=[N+](C)C)On1nnc2ccccc21.F[B-](F)(F)F", "CN(C)C(On1nnc2ccccc21)=[N+](C)C"),
+    # `std12`: a salt of an acid the catalogue omits, both spellings, one per acid in
+    # `_IONISABLE_NEUTRAL_ACIDS`. Under `std11` every neutral spelling here kept its acid.
+    ("CCN.OCl(=O)(=O)=O", "CCN"),
+    ("CC[NH3+].[O-]Cl(=O)(=O)=O", "CCN"),
+    ("CCN.F[B-](F)(F)[FH+]", "CCN"),
+    ("CC[NH3+].F[B-](F)(F)F", "CCN"),
+    ("CCN.NS(=O)(=O)O", "CCN"),
+    ("CC[NH3+].NS(=O)(=O)[O-]", "CCN"),
+    ("CCN.SC#N", "CCN"),
+    ("CCN.N=C=S", "CCN"),
+    ("CC[NH3+].[S-]C#N", "CCN"),
+    ("CCN.OC(=O)O", "CCN"),
+    ("CC[NH3+].OC(=O)[O-]", "CCN"),
+    ("CCN.O[PH2]=O", "CCN"),
+    ("CC[NH3+].[O-][PH2]=O", "CCN"),
+    ("CCN.OB(O)O", "CCN"),
+    ("CC[NH3+].[O-]B(O)O", "CCN"),
+    # and the neutrals that cannot ionise stay, which is the line the table draws
+    ("CCN.FB(F)F", "CCN.FB(F)F"),
+    # and beside a partner with no basic site the acid is a second component, not a counterion
+    ("OB(O)c1ccccc1.OB(O)O", "OB(O)O.OB(O)c1ccccc1"),
+    ("O=C(O)c1ccccc1.OC(=O)O", "O=C(O)O.O=C(O)c1ccccc1"),
+    ("O=[N+]([O-])c1ccccc1.OCl(=O)(=O)=O", "O=[N+]([O-])c1ccccc1.[O-][Cl+3]([O-])([O-])O"),
+    ("CCN.O=C=O", "CCN.O=C=O"),
 )
 
 
@@ -975,6 +999,115 @@ def test_a_neutral_co_former_is_not_a_counterion() -> None:
     )
 
 
+#: Every acid in `_IONISABLE_NEUTRAL_ACIDS`, as written neutral and as its anion.
+_IONISABLE_ACIDS = {
+    "perchloric acid": ("OCl(=O)(=O)=O", "[O-]Cl(=O)(=O)=O"),
+    "tetrafluoroboric acid": ("F[B-](F)(F)[FH+]", "F[B-](F)(F)F"),
+    "sulfamic acid": ("NS(=O)(=O)O", "NS(=O)(=O)[O-]"),
+    "thiocyanic acid": ("SC#N", "[S-]C#N"),
+    "isothiocyanic acid": ("N=C=S", "[S-]C#N"),
+    "carbonic acid": ("OC(=O)O", "OC(=O)[O-]"),
+    "hypophosphorous acid": ("O[PH2]=O", "[O-][PH2]=O"),
+    "boric acid": ("OB(O)O", "[O-]B(O)O"),
+}
+
+#: Partners with a site that could take the proton, free and protonated.
+_BASES = {
+    "primary amine": ("CCN", "CC[NH3+]"),
+    "tertiary amine": ("CCN(CC)CC", "CC[NH+](CC)CC"),
+    "pyridine": ("c1ccncc1", "c1cc[nH+]cc1"),
+    "imidazole": ("c1c[nH]cn1", "c1c[nH]c[nH+]1"),
+    "amidine": ("CC(=N)N", "CC(=[NH2+])N"),
+    "guanidine": ("NC(=N)N", "NC(=[NH2+])N"),
+    # no basic site at all, only the charge: the gate's fourth arm, and the only row that reaches it
+    "quaternary ammonium": ("C[N+](C)(C)C", "C[N+](C)(C)C"),
+}
+
+#: Partners with no such site: beside one of the acids they make a mixture, not a salt.
+_NOT_BASES = {
+    "boronic acid": "OB(O)c1ccccc1",
+    "phenol": "Oc1ccccc1",
+    "carboxylic acid": "OC(=O)c1ccccc1",
+    "amide": "CC(N)=O",
+    "carbamate": "CCOC(N)=O",
+    "sulfonamide": "CS(N)(=O)=O",
+    "aniline": "Nc1ccccc1",
+    "nitroarene": "O=[N+]([O-])c1ccccc1",
+    "pyrrole": "c1cc[nH]c1",
+    "ester": "CCOC(C)=O",
+}
+
+
+@pytest.mark.parametrize("base", sorted(_BASES))
+@pytest.mark.parametrize("acid", sorted(_IONISABLE_ACIDS))
+def test_a_salt_written_neutral_or_ionic_is_one_compound(
+    acid: str, base: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`D-2026-09-27-a-compound-id-a-bump-moves-is-superseded-not-orphaned`: one substance, one id.
+
+    Beside a partner that could take the proton, the neutral spelling is the salt, and it and the
+    ionic spelling both reach the free base. **The table is what does it**, driven: emptied —
+    which is `std11` — the neutral spelling keeps its acid and the ids part.
+    """
+    from chemclaw.core import chem
+
+    neutral_acid, anion = _IONISABLE_ACIDS[acid]
+    free, protonated = _BASES[base]
+    neutral, ionic = f"{free}.{neutral_acid}", f"{protonated}.{anion}"
+    assert compound_id(neutral) == compound_id(ionic) == compound_id(free)
+    chem._standardized.cache_clear()
+    monkeypatch.setattr(chem, "_IONISABLE_NEUTRAL_SPECTATORS", frozenset())
+    try:
+        assert compound_id(neutral) != compound_id(ionic), f"{acid} agreed without the table"
+    finally:
+        chem._standardized.cache_clear()
+
+
+@pytest.mark.parametrize("partner", sorted(_NOT_BASES))
+@pytest.mark.parametrize("acid", sorted(_IONISABLE_ACIDS))
+def test_an_acid_beside_a_partner_that_cannot_take_its_proton_is_a_mixture(
+    acid: str, partner: str
+) -> None:
+    """A boronic acid with boric acid, or a compound with its carbonate buffer, is not a salt.
+
+    Stripping the acid regardless of the partner merged the mixture into its parent — the false
+    merge `D-2026-08-27-a-solvate-is-not-its-solvent` prevents for two organic fragments, and
+    these acids have no organic fragment to trip it. So the mixture keeps its own id.
+    """
+    neutral_acid, _ = _IONISABLE_ACIDS[acid]
+    parent = _NOT_BASES[partner]
+    assert compound_id(f"{parent}.{neutral_acid}") != compound_id(parent)
+
+
+@pytest.mark.parametrize("acid", sorted(_IONISABLE_ACIDS))
+def test_an_acid_registered_alone_is_untouched(acid: str) -> None:
+    """With no organic fragment there is nothing to be the salt of: the acid is its own compound."""
+    from rdkit.Chem.MolStandardize import rdMolStandardize
+
+    neutral_acid, _ = _IONISABLE_ACIDS[acid]
+    cleaned = Chem.MolToSmiles(rdMolStandardize.Cleanup(Chem.MolFromSmiles(neutral_acid)))
+    assert standard_smiles(neutral_acid) == cleaned
+
+
+def test_the_table_is_exactly_the_acids_the_catalogue_omits() -> None:
+    """Every acid on it is one RDKit's catalogue does not strip, so no row is redundant.
+
+    The day upstream adds one, this reds and the row is deleted rather than kept as a second
+    answer to a question the catalogue already answers — which is how a table and a list drift.
+    """
+    from rdkit.Chem.MolStandardize import rdMolStandardize
+
+    from chemclaw.core import chem
+
+    remover = rdMolStandardize.FragmentRemover()
+    for acid, spellings in chem._IONISABLE_NEUTRAL_ACIDS.items():
+        for spelling in spellings:
+            pair = rdMolStandardize.Cleanup(Chem.MolFromSmiles(f"CCN.{spelling}"))
+            left = Chem.GetMolFrags(remover.remove(pair), asMols=True)
+            assert len(left) == 2, f"RDKit's catalogue now strips {acid} ({spelling})"
+    assert len(chem._IONISABLE_NEUTRAL_ACIDS) == 7
+
+
 def test_the_standardization_version_is_pinned_to_the_behaviour_it_names() -> None:
     """A bump is the only thing that retires a stale row, and nothing held the number to the rules.
 
@@ -997,10 +1130,11 @@ def test_the_standardization_version_is_pinned_to_the_behaviour_it_names() -> No
     **The table is what a bump has to be weighed against, and the cost is in `durable/retention.py`:
     a bump is a permanent doubling of `molecule_fingerprints` and `reaction_fingerprints`, because
     the runtime role holds no `DELETE` and superseded rows are never reclaimed.** The recovery is
-    the runbook's — delete the corpus's `corpus_cursors` row and re-run the ELN sync. Read that
-    before adding a row here with a new number.
+    `make rekey-compounds`, which re-fingerprints the shelved rows and supersedes every compound
+    note whose id moved (`tests/test_compound_rekey.py`). Read that before adding a row here with a
+    new number.
     """
-    assert STANDARDIZATION_VERSION == "std11", (
+    assert STANDARDIZATION_VERSION == "std12", (
         "the standardization version changed. That is a decision with a cost — see this test's "
         "docstring — so update the literal and the table below together, and say in the commit "
         "message which rows moved"

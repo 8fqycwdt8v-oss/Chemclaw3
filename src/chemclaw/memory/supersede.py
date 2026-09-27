@@ -121,7 +121,16 @@ def _successors_of(note: Note, members: dict[str, set[str]]) -> list[str]:
     return sorted(new_id for new_id, new_members in members.items() if cited & new_members)
 
 
-def retire_note(note: Note, successors: list[str], as_of: date) -> Note:
+#: Why a synthesis run retires a note — the default, because that job is the original caller.
+_CLUSTER_CHANGED = (
+    "this cluster's membership changed (merge or shrink), so the note above is no longer the "
+    "current account of its experiments"
+)
+
+
+def retire_note(
+    note: Note, successors: list[str], as_of: date, reason: str = _CLUSTER_CHANGED
+) -> Note:
     """Copy `note` with `valid_to` closed, a `superseded-by` edge, and prose naming the rest.
 
     The first successor gets the typed edge — it is the note whose write carries this retirement,
@@ -131,8 +140,11 @@ def retire_note(note: Note, successors: list[str], as_of: date) -> Note:
     whose validity has not begun is closed at its own start date instead of today.
 
     Public because the observations tier retires a promoted playbook the same way when a superset
-    finding replaces it (`durable.observation_jobs`), and two spellings of "how a note is retired"
-    is how the two would come to disagree.
+    finding replaces it (`durable.observation_jobs`), and a compound note a standardization bump
+    re-keyed is retired the same way again (`memory.compound_rekey`) — two spellings of "how a note
+    is retired" is how they would come to disagree. `reason` is the one part that differs: it is
+    the sentence the retired body gives for its retirement, and a cluster that changed shape and a
+    structure whose id moved are different reasons.
     """
     valid_to = as_of
     if note.valid_from is not None and note.valid_from > as_of:
@@ -140,9 +152,8 @@ def retire_note(note: Note, successors: list[str], as_of: date) -> Note:
     replaced = ", ".join(successors)
     body = (
         f"{note.body.rstrip()}\n\n"
-        f"{_SUPERSEDED_MARKER} {replaced} on {as_of.isoformat()}: this cluster's membership "
-        "changed (merge or shrink), so the note above is no longer the current account of its "
-        "experiments. Kept for the record; excluded from current-evidence retrieval.\n"
+        f"{_SUPERSEDED_MARKER} {replaced} on {as_of.isoformat()}: {reason}. "
+        "Kept for the record; excluded from current-evidence retrieval.\n"
     )
     relations = [
         *note.relations,

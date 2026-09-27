@@ -979,6 +979,56 @@ def related(graph: nx.DiGraph, note_id: str, rel: str, as_of: date | None = None
     return sorted(found)
 
 
+def _replaced_by(graph: nx.DiGraph, node_id: str) -> set[str]:
+    """The ids a supersede link names as `node_id`'s replacement, from either end of the link.
+
+    Both ends, because the two halves land separately and either can be the only one there: the
+    replacement's `supersedes` is written with it, while the retired note's `superseded-by` is an
+    amendment the writer refuses for a note a person wrote — and a replacement may name an old id
+    no note in this tree defines at all.
+    """
+    forward = {
+        target
+        for _, target, data in graph.out_edges(node_id, data=True)
+        if any(relation.rel == "superseded-by" for relation in data.get("relations", ()))
+    }
+    backward = {
+        source
+        for source, _, data in graph.in_edges(node_id, data=True)
+        if any(relation.rel == "supersedes" for relation in data.get("relations", ()))
+    }
+    return forward | backward
+
+
+def current_successor(graph: nx.DiGraph, node_id: str, as_of: date) -> Note | None:
+    """The first current note a chain of supersede links leads to from `node_id`, or `None`.
+
+    What a reader asks of an id whose own note is retired or was never written: *what replaced
+    it?* A standardization bump that moves a compound's id makes this a chain rather than a pair —
+    `std11`'s id is superseded by `std12`'s, which a later bump may supersede again — so the walk
+    follows links until it reaches a note current on `as_of`, breadth-first and in id order so two
+    readers asking the same question get the same answer. A cycle ends the walk rather than looping.
+
+    The caller decides whether to ask. `node_id` itself is never the answer, so asking about a
+    current note returns whatever replaced it, if anything claims to have.
+    """
+    if node_id not in graph:
+        return None
+    seen = {node_id}
+    frontier = [node_id]
+    while frontier:
+        following: list[str] = []
+        for current in frontier:
+            for candidate in sorted(_replaced_by(graph, current) - seen):
+                seen.add(candidate)
+                note = note_in(graph, candidate)
+                if note is not None and note.is_current(as_of):
+                    return note
+                following.append(candidate)
+        frontier = following
+    return None
+
+
 def neighborhood(graph: nx.DiGraph, note_id: str, hops: int = 1) -> set[str]:
     """Return graph node ids within `hops` of `note_id`, following links both ways.
 
