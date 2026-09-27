@@ -257,39 +257,6 @@ topic).
       measurement from scratch, and the baseline itself moved 4.38 → 4.69 between 2026-09-14 and
       2026-09-15 with no retrieval code changed, because the corpus grew.
 
-- [ ] **What `graph` means as a retrieval source: a lexical rule of its own, or the leg that reads
-      the index** — [M], measured 2026-09-16 by the dependency audit that proposed deleting one of
-      the two lexical rankers and had to withdraw it. Anchors: `agent/graph_tools.py::_scan_notes`
-      and its `_relevance`, `retrieval/retrievers.py::LexicalRetriever`,
-      `core/config/__init__.py::note_reindex_effective`, `CHEMCLAW_DATA_SOURCES`.
-
-      Two lexical rankers run over one corpus, and `_scan_notes` justified its 151 ms event-loop
-      stall (836 ms at eight concurrent, 10k-note corpus) by saying there is no database to push the
-      scan into — which is false: `note_index` exists with a GIN `tsvector` and `search_lexical`
-      reads it. **The removable leg is the opposite of the obvious one.** Ablated at a *matched slot
-      budget* — three legs at k=8 deliver 24 slots against one leg's 8, so comparing them unmatched
-      measures the budget rather than the ranker — the Postgres `ts_rank` leg strictly dominates the
-      in-process BM25-lite: 42 gold notes found to 40, 24 in the top 3 to 19, and the graph leg
-      contributes **zero** gold notes the Postgres leg misses.
-
-      **It is still not removable, for a reason that is not about ranking.**
-      `note_reindex_effective` schedules the reindex only when `lexical` or `vector` is in
-      `CHEMCLAW_DATA_SOURCES`, and the shipped default is `graph,eln-json` — so in the default
-      deployment the index nothing maintains is the one the survivor would read, and deleting the
-      graph leg's own ranking retrieves nothing from the knowledge graph. The narrower removal that
-      fits inside one file is a measured regression on its own: dropping just `_relevance` moves
-      graph-alone mean gold rank 4.72 → 5.67 and loses a gold note from the shipped three-leg arm,
-      39 → 38, which `retrieval_recall` gates on. The two rules are also not one rule in two
-      spellings — driven against live Postgres, `couplings`, `coupled`, `dry` and `films` hit
-      `ts_rank` and miss the substring rule, while `ester` matches `polyester` for `term_coverage`
-      and produces no lexeme at all for the server; `tests/test_note_search.py` pins both directions.
-
-      What closes this is a decision and a default, not a retriever edit: either `graph` keeps
-      meaning a lexical rule of its own, or it becomes the leg that reads the index and the reindex
-      stops being conditional on a source nobody enables. Re-run `make retrieval-arms` on both sides
-      of it, and read the `hybrid` row above first — the audit quoted its 3.69 headline as a reason
-      to cut a leg, and that configuration finds three fewer gold notes.
-
 ## 3 — Work that is lost, dropped or invisible
 
 - [ ] **A chemist's own `/scratch/` writes are unbounded and, by default, permanent** — [M].
@@ -341,18 +308,6 @@ topic).
   `deepagents.backends.state.StateBackend`.
 
 ## 4 — Operating it
-
-- [ ] **A peer that is genuinely restorable still drains every live session on the deploy that adds
-  it** — [M]. `agent/checkpointer._first_party_channels` no longer stamps `UntrackedValue` channels,
-  which was the systemic half: a routine per-turn counter refused the next ordinary turn of every
-  Postgres-backed session while pre-empting nothing, because no build's checkpoint holds such a
-  channel. What is left is the *restorable* case, and `active_agent` is the live instance — a
-  session from before it existed is refused on its next turn even though every reader of that
-  channel uses `state.get(...)` with a default and the feature ships off. The guard's stated failure
-  is "a node indexes that channel and raises a bare `KeyError`", which is a property of how the
-  channel is *read*, not of whether the name is new. Deciding whether to narrow the stamp to
-  channels that are read without a default — and deriving that rather than asserting it — is an ADR,
-  because `D-2026-08-13` chose the name comparison deliberately.
 
 - [ ] **A caller cannot tell that a helper's report is derived from untrusted reading**
       — [M], opened by `D-2026-08-29-a-helpers-report-is-model-prose-in-its-callers-thread`, which

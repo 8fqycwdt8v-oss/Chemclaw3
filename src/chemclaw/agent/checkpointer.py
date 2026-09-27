@@ -89,12 +89,19 @@ this module cannot see them without importing the agent builder that imports it.
 **What is not caught, and where the refusal is deliberately wider than the failure.** Not caught: a
 same-name *type* change (a type repr is not stable enough to hang a session's resumability on); an
 upstream or middleware channel that moves; a first-party channel that is only *removed* (measured
-harmless above). Wider than the failure: an added channel is refused even when every reader of it
-uses `.get()` and the resume would have worked, because the stamp holds names and cannot see how a
-node reads one — unless the channel's type says so with `resumes_when_absent`
-(`_resume_tolerant_channels`), which `state.LastPeer` does. That over-refusal lands on a change
-this repository is itself deploying — which it can drain sessions for, and which the paragraph
-below says it should — never on a dependency's.
+harmless above).
+
+**Only a missing channel that something *indexes* is refused, and which ones do is derived from the
+source** (`D-2026-09-26-a-checkpoint-refuses-only-what-a-node-would-index`, superseding
+`D-2026-08-13-a-checkpoint-says-which-schema-wrote-it`'s name comparison). The stamp still records
+every restorable channel the writing build declared; what changed is which absences the reading
+build refuses. The failure is "a node indexes that channel", which is a property of how the channel
+is *read*, so `channels_read_without_default` reads it: every string constant naming a missing
+channel in this package's own modules, classified by where it sits. `state.get("x")`, a dict key
+and an `in` test cannot raise; `state["x"]` can, and so can **anything the classifier does not
+recognise** — the derivation fails closed, so getting it wrong costs today's over-refusal (a
+drained session, named) and never the bare `KeyError` the guard exists to pre-empt. Adding a channel
+that is read with a default therefore no longer ends every live session on the deploy that adds it.
 
 **Refusing rather than silently starting the thread over**, which is the same call
 `agent/plan_state.py` makes for an unreadable plan and for the same reason: the two are
@@ -128,11 +135,14 @@ because the stamp lives under its own metadata key
 `test_a_stamp_this_build_cannot_read_is_treated_as_absent`).
 """
 
+import ast
 import asyncio
+import functools
 import logging
 import time
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Iterable, Sequence
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Annotated, Any, cast, get_args, get_origin, get_type_hints
 
 import psycopg
@@ -501,8 +511,9 @@ def _first_party_channels(state: Any) -> tuple[str, ...]:
 
     So the derivation now asks what a checkpoint can hold, not what the class declares.
     `active_agent` stays in the *stamp* — `LastPeer` is a `LastValue` and really is checkpointed —
-    but its absence is not a refusal: the channel declares itself resume-tolerant (see
-    `_resume_tolerant_channels`), because its one reader falls back to the root when it is unset.
+    but its absence is not a refusal, because nothing indexes it: its one reader takes it with
+    `.get()` and falls back to the root, and `channels_read_without_default` reads that off the
+    source rather than off a declaration somebody has to keep true.
 
     Args:
         state: The graph state class to read — `ChemclawState` in this process, and stand-in
@@ -536,34 +547,135 @@ def _untracked_channels(state: Any) -> tuple[str, ...]:
     return tuple(sorted(name for name, ann in own.items() if _is_untracked(ann)))
 
 
-def _resume_tolerant_channels(state: Any) -> tuple[str, ...]:
-    """The stamped channels whose absence from an older stamp is not a reason to refuse the resume.
+#: Where `channels_read_without_default` reads how a channel is consumed: this package's own
+#: modules, which is every place that can name a first-party channel — upstream and middleware code
+#: cannot index a channel it has never heard of. A module-level name so a test can point the
+#: derivation at a fixture tree the way a deploy points it at a new build.
+SOURCE_ROOT = Path(__file__).resolve().parents[1]
 
-    **Declared on the channel, because this module cannot see how a node reads one.** The refusal
-    exists for a node that *indexes* a channel an older checkpoint never held; a channel whose every
-    reader uses `.get()` with a fallback cannot produce that `KeyError`, and refusing a session over
-    it ended every live session on the deploy that introduced `active_agent` — including
-    deployments with the peer mesh off — although such a session resumes perfectly. So a channel
-    type states it with `resumes_when_absent = True` (`state.LastPeer` does), read here off the
-    annotation the same way `_is_untracked` reads untrackedness, so nobody has to maintain a list.
+# The method calls on a state mapping that cannot raise `KeyError` for an absent key, whatever
+# arguments follow the name. `pop` is not here: with one argument it raises as indexing does.
+_DEFAULTED_READS = frozenset({"get", "setdefault"})
+
+
+def channels_read_without_default(names: Iterable[str], root: Path | None = None) -> frozenset[str]:
+    """Which of `names` some module under `root` reads in a way that raises when it is absent.
+
+    **The question the refusal has always been about, asked of the code instead of of a
+    declaration.** A checkpoint from before a channel existed restores with that channel empty, and
+    the damage is a node that *indexes* it — `state["x"]` raising a bare `KeyError` mid-turn. A
+    channel every reader takes with `.get()` cannot do that, and refusing a session over one drained
+    every live session on the deploy that added `active_agent`, peer mesh on or off. The earlier fix
+    was a `resumes_when_absent` flag on the channel's type, which is a hand declaration of a fact
+    about *other* modules: true when written, and silently false the day someone adds an indexing
+    reader three files away.
+
+    So every string constant equal to one of `names`, in every module under `root`, is classified by
+    what it sits in (`_is_a_safe_use`), and a name with any unsafe occurrence is returned.
+
+    **Fails closed, in three places, because the two ways to be wrong are not symmetric.** Calling a
+    channel indexed when it is not refuses a session that would have resumed — the named,
+    actionable refusal this guard always gave. Calling it safe when it is not is the bare `KeyError`
+    mid-turn the guard exists to pre-empt. So an occurrence the classifier does not recognise counts
+    as an index (a name passed to `itemgetter`, held in a tuple, bound to a variable that is then
+    used as a key); a module that cannot be read or parsed makes every name count; and a root with
+    no modules at all — an install that shipped bytecode only — makes every name count. The residue
+    it cannot see is a name *spelled* at run time (`"active" + "_agent"`), which no reader in this
+    tree does and which a review would ask about anyway.
 
     Args:
-        state: The graph state class to read.
+        names: The channel names to classify — in practice the ones a stored stamp is missing, so
+            the scan runs on a deploy transition and never on an ordinary turn.
+        root: The source tree to read; `SOURCE_ROOT` (this package) when omitted.
 
     Returns:
-        The names of `_first_party_channels(state)` a resume tolerates missing, sorted.
+        The subset of `names` some reader indexes, or could, as far as this can tell.
     """
-    own = _own_channels(state)
-    return tuple(
-        sorted(
-            name
-            for name, ann in own.items()
-            if not _is_untracked(ann)
-            and any(
-                getattr(bound, "resumes_when_absent", False) for bound in _channel_bindings(ann)
-            )
+    return _indexed(frozenset(names), root if root is not None else SOURCE_ROOT)
+
+
+@functools.cache
+def _indexed(wanted: frozenset[str], root: Path) -> frozenset[str]:
+    """`channels_read_without_default`'s body, cached per (names, tree).
+
+    Cached because the source cannot change under a running build, and a deploy transition asks the
+    same question of every old thread it loads.
+    """
+    if not wanted:
+        return frozenset()
+    modules = sorted(root.rglob("*.py"))
+    if not modules:
+        logger.warning(
+            "no Python source under %s to derive how state channels are read; treating %s as "
+            "indexed, so an older session missing one is refused rather than resumed",
+            root,
+            ", ".join(sorted(wanted)),
         )
-    )
+        return wanted
+    indexed: set[str] = set()
+    for module in modules:
+        try:
+            text = module.read_text(encoding="utf-8")
+            # A substring pre-filter: parsing only the modules that spell a name at all is what
+            # keeps this a few files rather than the whole package.
+            if not any(name in text for name in wanted):
+                continue
+            tree = ast.parse(text, filename=str(module))
+        except (OSError, SyntaxError, UnicodeDecodeError, ValueError):
+            logger.warning(
+                "could not read %s to derive how state channels are read; treating %s as indexed",
+                module,
+                ", ".join(sorted(wanted)),
+            )
+            return wanted
+        # `state["x"] += 1` stores through a Subscript whose ctx is Store, exactly like a write,
+        # but reads the channel first — only the AugAssign above it says so, and the classifier
+        # sees one level. So those targets are collected here and never count as a write.
+        augmented = {id(node.target) for node in ast.walk(tree) if isinstance(node, ast.AugAssign)}
+        for parent in ast.walk(tree):
+            for child in ast.iter_child_nodes(parent):
+                if (
+                    isinstance(child, ast.Constant)
+                    and isinstance(child.value, str)
+                    and child.value in wanted
+                    and not _is_a_safe_use(parent, child, augmented)
+                ):
+                    indexed.add(child.value)
+    return frozenset(indexed)
+
+
+def _is_a_safe_use(parent: ast.AST, name: ast.Constant, augmented: set[int]) -> bool:
+    """Whether this occurrence of a channel name provably cannot raise for an absent channel.
+
+    A closed list of the shapes that cannot, and nothing else — see `channels_read_without_default`
+    for why anything unrecognised is an index:
+
+    - `state.get("x", …)` / `state.setdefault("x", …)`: a defaulted read.
+    - `state["x"] = …` / `del state["x"]`: a write, not a read — unless the subscript is an
+      augmented assignment's target (`state["x"] += 1`), which reads first; `augmented` holds
+      those targets' ids, because only their parent node says so.
+    - `{"x": …}`: a key in a literal — an update a node returns, which writes the channel.
+    - `"x" in state` / `"x" not in state`: a membership test, which is how one guards an index.
+    - a bare expression statement: a docstring or a no-op, which reads nothing.
+    """
+    if isinstance(parent, ast.Subscript):
+        return (
+            parent.slice is name
+            and isinstance(parent.ctx, (ast.Store, ast.Del))
+            and id(parent) not in augmented
+        )
+    if isinstance(parent, ast.Call):
+        return (
+            isinstance(parent.func, ast.Attribute)
+            and parent.func.attr in _DEFAULTED_READS
+            and bool(parent.args)
+            and parent.args[0] is name
+        )
+    if isinstance(parent, ast.Dict):
+        return any(key is name for key in parent.keys)
+    if isinstance(parent, ast.Compare):
+        return parent.left is name and all(isinstance(op, (ast.In, ast.NotIn)) for op in parent.ops)
+    return isinstance(parent, ast.Expr)
 
 
 def _own_channels(state: Any) -> dict[str, Any]:
@@ -637,8 +749,8 @@ def _is_untracked(annotation: Any) -> bool:
 def _channel_bindings(annotation: Any) -> tuple[Any, ...]:
     """The `Annotated` metadata of a channel annotation, unwrapped from `NotRequired` and kin.
 
-    One unwrapping for `_is_untracked` and `_resume_tolerant_channels`, for `_is_untracked`'s
-    reason: the channel sits one `NotRequired` in, and reading the outer annotation finds nothing.
+    Its own function for `_is_untracked`'s reason: the channel sits one `NotRequired` in, and
+    reading the outer annotation finds nothing.
 
     Args:
         annotation: The channel's type hint, as `get_type_hints(..., include_extras=True)` gives it.
@@ -657,7 +769,6 @@ def _channel_bindings(annotation: Any) -> tuple[Any, ...]:
 
 FIRST_PARTY_CHANNELS = _first_party_channels(ChemclawState)
 UNTRACKED_CHANNELS = _untracked_channels(ChemclawState)
-RESUME_TOLERANT_CHANNELS = _resume_tolerant_channels(ChemclawState)
 
 
 class CheckpointValuesMissing(RuntimeError):
@@ -1011,11 +1122,13 @@ class SchemaStampedSaver(AsyncPostgresSaver):
         stamp = (stored.metadata or {}).get(STATE_CHANNELS_KEY)
         if not isinstance(stamp, list):
             return stored
-        missing = [
-            name
-            for name in FIRST_PARTY_CHANNELS
-            if name not in stamp and name not in RESUME_TOLERANT_CHANNELS
-        ]
+        absent = [name for name in FIRST_PARTY_CHANNELS if name not in stamp]
+        if not absent:
+            return stored
+        # Only now, on a thread an older build wrote, is it worth asking how the absent channels are
+        # read — the answer is cached, and an ordinary turn never reaches this line.
+        indexed = channels_read_without_default(absent)
+        missing = [name for name in absent if name in indexed]
         if not missing:
             return stored
         held = ", ".join(str(name) for name in stamp) or "none"

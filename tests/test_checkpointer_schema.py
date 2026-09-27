@@ -16,8 +16,11 @@ different value than the one the checkpoint was written with.
 """
 
 import asyncio
+import inspect
 import json
-from operator import add
+import tempfile
+from operator import add, itemgetter
+from pathlib import Path
 from typing import Annotated, Any, Generic, NotRequired, TypedDict, TypeVar, get_type_hints
 
 import pytest
@@ -29,7 +32,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
 from chemclaw.agent import checkpointer as ckpt
-from chemclaw.agent.state import ChemclawState, LastPeer, TurnFlag, TurnTotal
+from chemclaw.agent.state import ChemclawState, TurnFlag, TurnTotal
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from tests.pg import migrated_db_or_skip
@@ -190,9 +193,10 @@ def test_notrequired_does_not_make_an_added_channel_safe() -> None:
 
     `NotRequired` says how the graph's input may be spelled; it says nothing about whether a node
     indexes the channel. Both halves are measured here: the same added optional channel raises when
-    a resumed node indexes it and resumes when the node reads it with `.get()`. Since the stamp
-    holds names and cannot see which of the two a node does, it covers optional channels too — and
-    the module docstring says plainly that this refuses some resumes that would have worked.
+    a resumed node indexes it and resumes when the node reads it with `.get()`. So what decides a
+    refusal is how the channel is *read*, never how it is declared — the measurement
+    `checkpointer.channels_read_without_default` is built on, and the reason it reads the source
+    rather than the annotation.
     """
 
     class _Optional(TypedDict):
@@ -439,6 +443,30 @@ def test_the_stamp_moves_when_this_repository_s_own_channels_do() -> None:
 # --- the guard, over a real saver -----------------------------------------------------------------
 
 
+def _reader_tree(source: str) -> Path:
+    """A one-module source tree for `checkpointer.channels_read_without_default` to read.
+
+    What a deploy changes is two things at once — the channels the build declares and the modules
+    that read them — so a staged "new build" patches both: `FIRST_PARTY_CHANNELS` for the first and
+    `SOURCE_ROOT` for the second.
+    """
+    root = Path(tempfile.mkdtemp(prefix="chemclaw-reader-"))
+    (root / "reader.py").write_text(source, encoding="utf-8")
+    return root
+
+
+#: A build whose one reader of the added channel indexes it — the case the refusal exists for.
+_INDEXES_IT = 'def node(state):\n    return state["retrieved_notes"]\n'
+#: The same build, reading it with a default — the case that must no longer drain a session.
+_DEFAULTS_IT = 'def node(state):\n    return state.get("retrieved_notes", [])\n'
+
+
+def _reading_build(patch: pytest.MonkeyPatch, reader: str) -> None:
+    """Stage the build that declares `retrieved_notes` and reads it as `reader` does."""
+    patch.setattr(ckpt, "FIRST_PARTY_CHANNELS", (*ckpt.FIRST_PARTY_CHANNELS, "retrieved_notes"))
+    patch.setattr(ckpt, "SOURCE_ROOT", _reader_tree(reader))
+
+
 def _turn(saver: Any, thread_id: str, message: str) -> Any:
     """Run one turn of the old-schema graph on `thread_id`, returning its final state."""
     return _graph(_OldState, _old_node, saver).ainvoke(
@@ -462,9 +490,7 @@ def test_a_thread_that_never_held_a_channel_this_build_declares_is_refused_by_na
         try:
             await _turn(saver, "sess-channel-added", "q1")
             patch = pytest.MonkeyPatch()
-            patch.setattr(
-                ckpt, "FIRST_PARTY_CHANNELS", (*ckpt.FIRST_PARTY_CHANNELS, "retrieved_notes")
-            )
+            _reading_build(patch, _INDEXES_IT)
             try:
                 with pytest.raises(ckpt.CheckpointSchemaMismatch) as raised:
                     await _turn(saver, "sess-channel-added", "q2")
@@ -586,9 +612,7 @@ def _resume_with_stamp(thread_id: str, stamp: str | None) -> list[str]:
             await _turn(saver, thread_id, "q1")
             assert await _rewrite_stamp(thread_id, stamp) > 0, "no checkpoint row was rewritten"
             patch = pytest.MonkeyPatch()
-            patch.setattr(
-                ckpt, "FIRST_PARTY_CHANNELS", (*ckpt.FIRST_PARTY_CHANNELS, "retrieved_notes")
-            )
+            _reading_build(patch, _INDEXES_IT)
             try:
                 final = await _turn(saver, thread_id, "q2")
             finally:
@@ -625,21 +649,184 @@ def test_a_stamp_this_build_cannot_read_is_treated_as_absent() -> None:
     ]
 
 
-def test_a_resume_tolerant_channel_is_derived_off_the_annotation() -> None:
-    """`LastPeer` declares itself tolerant; a plain `LastValue` channel stays refused when missing.
+def test_each_read_is_classified_and_anything_unrecognised_counts_as_an_index() -> None:
+    """The derivation, shape by shape — and the fail-closed arm is the half that matters.
 
-    Both directions, because a predicate that answered `True` for every restorable channel would
-    pass the regression below and switch the guard off for the channel it still exists for.
+    Each safe shape is paired with the unsafe one next to it, because a classifier that answered
+    "safe" for everything would pass every safe row and switch the guard off. The unrecognised
+    shapes are the reason this is a derivation rather than a grep for `state["`: a name held in a
+    tuple, handed to `itemgetter` or bound to a variable that is then used as a key reads the
+    channel as surely as an index does, and a classifier that let those through is the bare
+    `KeyError` the refusal exists to pre-empt.
     """
+    safe = {
+        "get": 'state.get("c")',
+        "get with a default": 'state.get("c", [])',
+        "setdefault": 'state.setdefault("c", [])',
+        "a write": 'state["c"] = 1',
+        "a delete": 'del state["c"]',
+        "a returned update": 'return {"c": 1}',
+        "a membership test": 'if "c" in state: pass',
+    }
+    unsafe = {
+        "an index": 'return state["c"]',
+        "a one-argument pop": 'state.pop("c")',
+        "itemgetter": 'return operator.itemgetter("c")(state)',
+        "a name held in a tuple": 'names = ("c",)',
+        "a name bound to a variable": 'key = "c"',
+        "a comparison": 'if name == "c": pass',
+        "an augmented assignment": 'state["c"] += 1',
+    }
+    for label, line in safe.items():
+        tree = _reader_tree(f"def node(state, name=None):\n    {line}\n")
+        assert ckpt.channels_read_without_default({"c"}, tree) == frozenset(), (
+            f"{label} cannot raise for an absent channel, but it was classified as an index, so a "
+            "deploy adding a channel read that way drains every live session again"
+        )
+    for label, line in unsafe.items():
+        tree = _reader_tree(f"import operator\ndef node(state, name=None):\n    {line}\n")
+        assert ckpt.channels_read_without_default({"c"}, tree) == frozenset({"c"}), (
+            f"{label} was classified as safe, so a session missing that channel resumes into a "
+            "node that raises a bare KeyError mid-turn"
+        )
+    assert ckpt.channels_read_without_default({"c", "d"}, _reader_tree('state.get("c")\n')) == (
+        frozenset()
+    ), "a channel no module names at all has no reader to raise, so it must not be refused"
 
-    class _State(TypedDict):
-        active_agent: NotRequired[Annotated[str, LastPeer(str)]]
-        retrieved_notes: NotRequired[Annotated[list[str], LastValue(list)]]
 
-    assert ckpt._resume_tolerant_channels(_State) == ("active_agent",)
-    assert ckpt.RESUME_TOLERANT_CHANNELS == ("active_agent",)
-    assert set(ckpt.RESUME_TOLERANT_CHANNELS) <= set(ckpt.FIRST_PARTY_CHANNELS), (
-        "a tolerant channel must still be stamped, or a later build cannot tell it was held"
+def test_a_tree_the_derivation_cannot_read_refuses_rather_than_resumes() -> None:
+    """The other two fail-closed arms: a module that does not parse, and a tree with no source."""
+    broken = _reader_tree('def node(state):\n    return state.get("c"\n')
+    assert ckpt.channels_read_without_default({"c"}, broken) == frozenset({"c"}), (
+        "an unparseable reader was skipped, so whatever it does with the channel was assumed safe"
+    )
+    empty = Path(tempfile.mkdtemp(prefix="chemclaw-no-source-"))
+    assert ckpt.channels_read_without_default({"c"}, empty) == frozenset({"c"}), (
+        "a bytecode-only install read as 'nothing indexes anything', which resumes every session "
+        "into whatever its nodes do"
+    )
+
+
+def test_the_shipped_tree_reads_every_restorable_channel_with_a_default() -> None:
+    """`active_agent`, the live instance the row was about, is derived tolerant — not declared so.
+
+    If a reader starts indexing it this fails, and that is the right outcome to *look at*, not to
+    fix by editing this assertion: the channel would then be refused on a stamp that lacks it,
+    which is correct, and this sentence is what should change.
+    """
+    assert ckpt.FIRST_PARTY_CHANNELS == ("active_agent",)
+    assert ckpt.channels_read_without_default(ckpt.FIRST_PARTY_CHANNELS) == frozenset()
+
+
+@pytest.mark.parametrize(
+    ("reader", "refused"),
+    [(_DEFAULTS_IT, False), (_INDEXES_IT, True)],
+    ids=["read-with-a-default-resumes", "indexed-is-refused"],
+)
+def test_adding_a_channel_drains_live_sessions_only_when_something_indexes_it(
+    reader: str, refused: bool
+) -> None:
+    """The row's two cases, on a real Postgres thread: one deploy, two ways of reading the addition.
+
+    Turn one runs under today's build; turn two under a build that declares `retrieved_notes` and
+    reads it as `reader` does. Read with a default, the session's next turn is an ordinary turn —
+    asserted on the accumulated `messages`, because that is what proves the checkpoint was restored
+    rather than skipped. Indexed, it is refused by name, which is the behaviour the guard keeps.
+    """
+    thread_id = f"sess-added-{'indexed' if refused else 'defaulted'}"
+
+    async def _run() -> list[str] | Exception:
+        await migrated_db_or_skip()
+        saver = await ckpt.checkpointer()
+        try:
+            await _turn(saver, thread_id, "q1")
+            patch = pytest.MonkeyPatch()
+            _reading_build(patch, reader)
+            try:
+                final = await _turn(saver, thread_id, "q2")
+            except ckpt.CheckpointSchemaMismatch as refusal:
+                return refusal
+            finally:
+                patch.undo()
+            return list(final["messages"])
+        finally:
+            await ckpt.close_checkpointer()
+
+    outcome = asyncio.run(_run())
+    if refused:
+        assert isinstance(outcome, ckpt.CheckpointSchemaMismatch), outcome
+        assert "retrieved_notes" in str(outcome)
+    else:
+        assert outcome == ["q1", "answered", "q2", "answered"], (
+            "a channel every reader takes with a default still ended the live session"
+        )
+
+
+class _Widened(TypedDict):
+    """The build after `retrieved_notes` was added, for the mid-turn resume below."""
+
+    messages: Annotated[list[str], add]
+    plan: list[str]
+    retrieved_notes: NotRequired[list[str]]
+
+
+async def _widened_writer(state: _Widened) -> dict[str, Any]:
+    """The writer a resumed turn does not re-run — so the channel it would write stays absent."""
+    return {"plan": ["p"], "retrieved_notes": ["n"]}
+
+
+async def _gate_that_reads_by_itemgetter(state: _Widened) -> dict[str, Any]:
+    """The node a resumed turn re-enters, reading the new channel in a shape no grep would find."""
+    approved = interrupt({"ask": "approve?"})
+    return {"messages": [f"{approved} {len(itemgetter('retrieved_notes')(state))}"]}
+
+
+def test_a_read_the_classifier_does_not_know_is_refused_rather_than_a_key_error() -> None:
+    """The failure the derivation must never produce: a bare `KeyError` from inside a resumed node.
+
+    A turn suspended by `interrupt()` under the old build is resumed under one whose re-entered node
+    reads the new channel through `itemgetter` — not an index, and not a `.get`, so a classifier
+    that only looked for `state["…"]` would call it safe. The derivation reads that node's *own
+    source*, and the resume is refused by name at the load, before any node runs.
+
+    The control is the same resume with the derivation pointed at a reader that uses a default —
+    what a mis-derivation would conclude — and it is the bare `KeyError`. That arm is what makes the
+    first evidence: it proves the resume really reaches a node that indexes the absent channel.
+    """
+    node_source = inspect.getsource(_gate_that_reads_by_itemgetter)
+
+    def _resume(reader: str, thread_id: str) -> None:
+        async def _run() -> None:
+            await migrated_db_or_skip()
+            saver = await ckpt.checkpointer()
+            config = {"configurable": {"thread_id": thread_id}}
+            try:
+                await _suspending_graph(_OldState, _old_writer, _old_gate, saver).ainvoke(
+                    {"messages": ["q1"]}, config
+                )
+                patch = pytest.MonkeyPatch()
+                _reading_build(patch, reader)
+                try:
+                    graph = _suspending_graph(
+                        _Widened, _widened_writer, _gate_that_reads_by_itemgetter, saver
+                    )
+                    await graph.ainvoke(Command(resume="yes"), config)
+                finally:
+                    patch.undo()
+            finally:
+                await ckpt.close_checkpointer()
+
+        asyncio.run(_run())
+
+    with pytest.raises(ckpt.CheckpointSchemaMismatch) as refused:
+        _resume("from operator import itemgetter\n" + node_source, "sess-itemgetter-derived")
+    assert "retrieved_notes" in str(refused.value)
+
+    with pytest.raises(KeyError) as raised:
+        _resume(_DEFAULTS_IT, "sess-itemgetter-misderived")
+    assert raised.value.args == ("retrieved_notes",), (
+        "the control did not reach a node indexing the absent channel, so the refusal above is not "
+        "evidence that the derivation is what stopped a KeyError"
     )
 
 
@@ -650,7 +837,7 @@ def test_a_session_stamped_before_active_agent_existed_resumes() -> None:
     build still stamped — so `active_agent` is missing from every one, and the guard refused the
     next ordinary turn of each with "Start a new session", **peer mesh off or on**. Its one reader
     takes it with `.get()` and falls back to the root, so the `KeyError` the refusal pre-empts
-    cannot happen; the channel says so and the load now resumes.
+    cannot happen; the derivation reads that off the source and the load now resumes.
     """
     thread_id = "sess-pre-active-agent"
     stamp = ["billed_tokens", "loop_capped", "model_calls", "spend_capped"]

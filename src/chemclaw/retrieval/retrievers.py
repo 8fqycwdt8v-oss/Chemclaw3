@@ -18,7 +18,10 @@ no gold note the Postgres one misses**. It is kept anyway, for two reasons neith
 ranking quality: it is the only note leg that needs no derived index, and the index the others read
 is rebuilt only where `lexical` or `vector` is in `CHEMCLAW_DATA_SOURCES`
 (`settings.note_reindex_effective`) while the shipped default is `graph,eln-json`; and the two are
-not one rule — see `_relevance` for what removing its half of the duplication measured.
+not one rule — see `_relevance` for what removing its half of the duplication measured. Making this
+leg read the index instead was declined in
+`D-2026-09-26-the-graph-leg-keeps-its-own-rule-because-the-index-is-not-fresh`: the index is rebuilt
+hourly and never on a write, so a note just recorded would vanish from this leg until the next pass.
 """
 
 import asyncio
