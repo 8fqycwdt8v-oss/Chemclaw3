@@ -831,7 +831,9 @@ class AgentSettings(BaseSettings):
     # held and speaks to the chemist in its own voice, so a mesh that mis-routes is a worse
     # product than the single agent it replaced. `D-2026-08-10-a-subagent-is-an-attenuation-not-a-
     # new-actor` requires exactly this — measured hand-off accuracy before a team is turned on —
-    # and that measurement does not exist: `evals/delegation.py` has never run against a model.
+    # and the one run there is
+    # (`D-2026-09-27-delegation-does-not-pay-on-the-measured-gateway-model`) recorded no hand-off
+    # at all, in 24 peer-arm repeats.
     # Turning this on is also a prefix cost a deployment should choose knowingly, because each
     # peer binds one handoff tool per other peer and a first-party schema is charged against
     # `tests/test_context_floor.py`'s ceiling with no allowance to absorb it.

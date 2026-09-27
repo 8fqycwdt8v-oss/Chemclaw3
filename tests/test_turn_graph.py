@@ -10,6 +10,7 @@ The multi-hop test is the centre of it. Everything else here is a bound on a way
 """
 
 import asyncio
+import logging
 import os
 from typing import Any, cast
 
@@ -1264,3 +1265,32 @@ def test_only_a_name_of_the_minted_shape_is_recognised_as_a_handoff() -> None:
         "transfer_to_évidence",
     ):
         assert not is_handoff_tool_name(forged), forged
+
+
+def test_the_log_says_which_handoffs_each_peer_bound(
+    monkeypatch: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Whether the model never chose to hand off has to be checkable against its surface.
+
+    The 2026-09-27 run's peer arm handed off in none of its repeats, and no line in the process
+    said whether a `transfer_to_<peer>` tool had been bound, so a model declining and a roster that
+    never compiled were one observation. Read off the graphs `build_turn_graph` really compiled,
+    then required in the INFO line each peer's build writes.
+    """
+    with caplog.at_level(logging.INFO, logger="chemclaw.agent.langgraph_agent"):
+        graph = _mesh(
+            monkeypatch,
+            {"default": ["done"], "evidence-peer": ["done"], "safety-peer": ["done"]},
+        )
+    lines = [r.getMessage() for r in caplog.records if "tools.delegation_bound" in r.getMessage()]
+    for peer in ("evidence-peer", "safety-peer"):
+        (line,) = [text for text in lines if f"(peer {peer})" in text]
+        others = sorted(
+            handoff_tool_name(name)
+            for name in ("default", "evidence-peer", "safety-peer")
+            if name != peer
+        )
+        assert f"handoffs: {', '.join(others)}" in line, line
+    assert _bound_handoffs(graph) <= {
+        name for text in lines for name in text.split("handoffs: ")[1].split(";")[0].split(", ")
+    }
