@@ -103,6 +103,8 @@ class _Recorder(ScriptedTurn):
 class _Stoppable:
     """Stands in for a running turn: records whether the stop route reached it."""
 
+    running = True
+
     def __init__(self) -> None:
         self.stopped = False
 
@@ -203,7 +205,8 @@ def test_a_member_stops_only_their_own_turn_and_the_owner_any() -> None:
     app = _app()
     session_id = _shared(app)
     turn = _Stoppable()
-    app.state.running_turns.register(session_id, turn)
+    # Straight into the registry: `register` wires a pump task this stand-in does not have.
+    app.state.running_turns._turns[session_id] = turn
     app.state.active_turns[session_id] = TurnLease(
         token="t", deadline=math.inf, actor=_ANA.oid, claimed_at=0.0
     )
