@@ -23,6 +23,7 @@ from chemclaw.agent.plan_gate import EMPTY_PLAN_HASH, gate_applies, may_decide, 
 from chemclaw.agent.plan_scope import declared_scope
 from chemclaw.agent.plan_state import session_plan
 from chemclaw.agent.profiles import get_profile
+from chemclaw.agent.session_members import session_member_store
 from chemclaw.agent.session_store import SessionOwnerStore, encode_session_cursor
 from chemclaw.api.deps import CurrentSession, CurrentUser, record_refusal
 from chemclaw.api.schemas import PendingPlan, PendingPlansOut, PlanDecisionIn, PlanStatusOut
@@ -33,8 +34,24 @@ logger = logging.getLogger(__name__)
 
 # One row of the ownership listing, as `SessionOwners.list_for_owner` returns it:
 # `(session_id, created_at, updated_at, title, profile)`. Named here rather than repeated at
-# each signature — it is the shape `_owned_sessions` pages over and `pending_plans` unpacks.
+# each signature — it is the shape `_owned_sessions` pages over.
 _OwnedSession = tuple[str, datetime, datetime, str | None, str | None]
+
+
+@dataclass(frozen=True)
+class _Candidate:
+    """A plan-gated session the inbox may read: the caller's own, or one they are a member of.
+
+    `owned` decides whose plans in it are the caller's to decide. In their own session that is
+    `plan_gate.may_decide` with the caller as owner — their plans, and an unattributed one, which
+    the owner decides. In a session they are only a member of it is **only the plans they
+    authored**: a member is never the owner, so the unattributed fallback is never theirs.
+    """
+
+    session_id: str
+    updated_at: datetime
+    title: str | None
+    owned: bool
 
 
 @dataclass(frozen=True)
@@ -186,6 +203,35 @@ async def _owned_sessions(
     return considered, gated, True
 
 
+async def _shared_sessions(oid: str | None) -> list[_Candidate]:
+    """The plan-gated sessions somebody else owns that the caller is a member of.
+
+    `D-2026-09-27-a-queued-message-waits-in-its-senders-request`, the inbox half: a member's turn in
+    somebody else's session can write a plan only that member may decide, and until this the only
+    place it surfaced was the in-turn card — the inbox paged the caller's *owned* sessions. The list
+    comes from the same registry `GET /sessions/shared` reads, so the inbox can never name a session
+    the caller would then be refused.
+
+    Not paged: a membership is an owner's deliberate act, so the list is bounded by how many
+    conversations people have let this caller into, and the plan reads it feeds are held to the same
+    `service_max_plan_scans` budget as the owned ones.
+    """
+    if not oid:
+        return []
+    return [
+        _Candidate(
+            session_id=shared.session_id,
+            # A session with no turn yet has no `updated_at` and no plan; the admission time keeps
+            # it orderable without claiming activity it has not had.
+            updated_at=shared.updated_at or shared.added_at,
+            title=shared.title,
+            owned=False,
+        )
+        for shared in await session_member_store().shared_with(oid)
+        if _plan_gated(shared.profile)
+    ]
+
+
 async def get_plan(
     request: Request,
     session_id: str,
@@ -266,7 +312,12 @@ async def pending_plans(request: Request, principal: CurrentUser) -> PendingPlan
 
     **Ownership comes from the same registry `GET /sessions` reads**, so this can never name a
     session the caller would then be refused — the property `list_sessions` relies on, for the same
-    reason.
+    reason. **Membership comes from the one `GET /sessions/shared` reads**, and a member's sessions
+    are scanned beside the caller's own, newest activity first across both
+    (`D-2026-09-27-a-queued-message-waits-in-its-senders-request`). In either kind of session a plan
+    is listed only for the person who may decide it — its author, or the owner where no author was
+    recorded — because an inbox row whose decision answers 403 is the failure an inbox exists to
+    prevent. So a member sees only the plans their own turns wrote.
 
     Bounded twice, and the response says so rather than truncating quietly. Sessions that cannot be
     holding a decision are skipped for free (`_plan_gated`); of what remains, at most
@@ -306,25 +357,41 @@ async def pending_plans(request: Request, principal: CurrentUser) -> PendingPlan
         # is a property of the deployment rather than of the caller's work.
         return PendingPlansOut(plans=[], considered=0, gated=0, unread=0)
     budget = settings.service_max_plan_scans
-    considered, gated, truncated = await _owned_sessions(owners, principal.oid, budget)
+    considered, owned, truncated = await _owned_sessions(owners, principal.oid, budget)
+    shared = await _shared_sessions(principal.oid)
+    gated = sorted(
+        [
+            _Candidate(session_id, updated_at, title, owned=True)
+            for session_id, _created_at, updated_at, title, _profile in owned
+        ]
+        + shared,
+        key=lambda candidate: candidate.updated_at,
+        reverse=True,
+    )
     unread = len(gated) - min(len(gated), budget)
     approvals = state(request).plan_approvals
     plans: list[PendingPlan] = []
-    for session_id, _created_at, updated_at, title, _profile in gated[:budget]:
-        read = await _read_plan(session_id, approvals)
+    for candidate in gated[:budget]:
+        read = await _read_plan(candidate.session_id, approvals)
         if read.todos is None:
             unread += 1
             continue
         # A plan somebody else's turn wrote is not waiting on the caller — only its author may
-        # decide it — so an owner's inbox does not list a member's plan it would then refuse.
-        if not may_decide(read.author, principal.oid, principal.oid):
+        # decide it — so an owner's inbox does not list a member's plan it would then refuse, and a
+        # member's does not list the owner's (or an unattributed one, which the owner decides).
+        decides = (
+            may_decide(read.author, principal.oid, principal.oid)
+            if candidate.owned
+            else bool(principal.oid) and read.author == principal.oid
+        )
+        if not decides:
             continue
         if read.approvable is not None and read.decision is None:
             plans.append(
                 PendingPlan(
-                    session_id=session_id,
-                    title=title,
-                    updated_at=updated_at,
+                    session_id=candidate.session_id,
+                    title=candidate.title,
+                    updated_at=candidate.updated_at,
                     plan_hash=read.approvable,
                     plan=read.todos,
                     scope=read.scope,
@@ -332,7 +399,7 @@ async def pending_plans(request: Request, principal: CurrentUser) -> PendingPlan
             )
     return PendingPlansOut(
         plans=plans,
-        considered=considered,
+        considered=considered + len(shared),
         gated=len(gated),
         unread=unread,
         truncated=truncated,

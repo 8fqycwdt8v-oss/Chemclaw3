@@ -287,7 +287,7 @@ async def test_a_client_gone_before_the_stream_starts_does_not_wedge_the_session
     proving the window is real) and then *expires*, so the session's next turn is admitted.
 
     Counterfactual: revert `active_turns` to a latch (claim without a deadline, or a membership
-    test that ignores the deadline) and the final POST answers 409, not 200.
+    test that ignores the deadline) and the waiting message never leaves the line.
     """
     from chemclaw.core.config import settings
 
@@ -306,21 +306,27 @@ async def test_a_client_gone_before_the_stream_starts_does_not_wedge_the_session
         # the reproduction no longer reproduces the window and the test proves nothing.)
         assert session_id in app.state.active_turns, "the generator ran a finally after all"
 
+        leaked = app.state.active_turns[session_id].token
+
         # Within the lease the guard still guards: the entry is indistinguishable from a
-        # live turn, so a duplicate submit is refused.
+        # live turn, so a duplicate submit does not run — it waits in the session's line
+        # (`D-2026-09-27-a-queued-message-waits-in-its-senders-request`).
         status, _ = await _request(
             app, "POST", f"/sessions/{session_id}/messages", {"message": "again"}
         )
-        assert status == 409
+        assert status == 200
+        assert await app.state.turn_queue.waiting(session_id), "the duplicate did not wait"
+        assert app.state.active_turns[session_id].token == leaked, "it ran beside the leak"
 
         # Past the lease (turn timeout + admission timeout), the entry is dead weight and
-        # must not refuse the session's owner.
-        await asyncio.sleep(0.5)
-        status, _ = await _request(
-            app, "POST", f"/sessions/{session_id}/messages", {"message": "recovered"}
+        # must not hold the session's owner: the waiting message takes the turn itself.
+        async with asyncio.timeout(10):
+            while await app.state.turn_queue.waiting(session_id):
+                await asyncio.sleep(0.05)
+        lease = app.state.active_turns.get(session_id)
+        assert lease is None or lease.token != leaked, (
+            "the leaked in-process turn entry never expired (A3)"
         )
-        assert status != 409, "the leaked in-process turn entry never expired (A3)"
-        assert status == 200
 
 
 # --- the push-back event stream's per-user slot (same window, different resource) --------------

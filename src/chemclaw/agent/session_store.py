@@ -687,6 +687,7 @@ _SESSION_DELETE: dict[str, str] = {
     # delete says what it removed.
     "session_members": "DELETE FROM session_members WHERE session_id = %(session_id)s",
     "plan_authors": "DELETE FROM plan_authors WHERE session_id = %(session_id)s",
+    "session_turn_queue": "DELETE FROM session_turn_queue WHERE session_id = %(session_id)s",
     "session_owners": "DELETE FROM session_owners WHERE session_id = %(session_id)s",
 }
 

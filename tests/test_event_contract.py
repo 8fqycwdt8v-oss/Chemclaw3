@@ -143,9 +143,10 @@ def test_both_streaming_routes_point_at_the_union_they_stream() -> None:
 
     Merging the union into `components.schemas` makes it *present*; the `$ref` on each streaming
     route's `text/event-stream` response is what makes a client generator bind it to the route.
-    Both routes, because they stream the same union and only one of them carries a turn — a
-    push-back stream a client renders with a different type is the same hand-mirroring this whole
-    contract exists to end.
+    Every such route, because they stream the same union — the turn itself, a participant following
+    it (`GET /sessions/{id}/turn/stream`, `D-2026-09-27-a-queued-message-waits-in-its-senders-
+    request`), and the push-back stream — and a stream a client renders with a different type is the
+    same hand-mirroring this whole contract exists to end.
     """
     document = _published_document()
     streams = {
@@ -154,9 +155,11 @@ def test_both_streaming_routes_point_at_the_union_they_stream() -> None:
         for method, operation in methods.items()
         if "text/event-stream" in (operation.get("responses", {}).get("200", {}).get("content", {}))
     }
-    assert len(streams) == 2, (
-        f"expected the two SSE routes to declare an event-stream response; found {sorted(streams)}"
-    )
+    assert sorted(streams) == [
+        "get /sessions/{session_id}/events",
+        "get /sessions/{session_id}/turn/stream",
+        "post /sessions/{session_id}/messages",
+    ], f"expected the three SSE routes to declare an event-stream response; found {sorted(streams)}"
     for name, operation in streams.items():
         schema = operation["responses"]["200"]["content"]["text/event-stream"]["schema"]
         assert schema.get("$ref") == TURN_EVENT_REF, (

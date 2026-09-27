@@ -733,14 +733,24 @@ class Settings(
         # failure is silent until it is an outage. Turns and streams are added rather than maxed:
         # they are different sockets and a chemist mid-turn with a push-back stream open holds one
         # of each.
-        occupied = self.service_max_event_streams_total + self.service_max_concurrent_turns
+        #
+        # **A turn is more than one socket once a session is shared**
+        # (`D-2026-09-27-a-queued-message-waits-in-its-senders-request`): besides its sender's own
+        # stream, up to `service_turn_max_watchers` participants may follow it and up to
+        # `service_turn_queue_max` messages may wait behind it, each on an open stream of its own.
+        per_turn = 1 + self.service_turn_max_watchers + self.service_turn_queue_max
+        occupied = (
+            self.service_max_event_streams_total + self.service_max_concurrent_turns * per_turn
+        )
         if self.service_max_connections < occupied + self.service_connection_headroom:
             raise ValueError(
                 f"service_max_connections ({self.service_max_connections}) is below what this "
                 f"process's own caps can occupy plus its headroom: "
                 f"{self.service_max_event_streams_total} push-back streams "
                 f"(service_max_event_streams_total) + {self.service_max_concurrent_turns} turns "
-                f"(service_max_concurrent_turns) + {self.service_connection_headroom} reserved "
+                f"(service_max_concurrent_turns) x {per_turn} sockets each (the sender, "
+                "service_turn_max_watchers and service_turn_queue_max) + "
+                f"{self.service_connection_headroom} reserved "
                 f"(service_connection_headroom) = "
                 f"{occupied + self.service_connection_headroom}. uvicorn's --limit-concurrency "
                 "counts sockets (idle keep-alives included) and answers 503 above the ASGI app, so "

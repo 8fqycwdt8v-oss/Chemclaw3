@@ -715,6 +715,9 @@ async def test_the_erase_statements_are_valid_sql() -> None:
         # (`D-2026-09-27-in-a-shared-session-the-sender-governs`).
         "session_members",
         "plan_authors",
+        # A place in a session's line, by sender
+        # (`D-2026-09-27-a-queued-message-waits-in-its-senders-request`).
+        "session_turn_queue",
         "session_owners",
     }
 

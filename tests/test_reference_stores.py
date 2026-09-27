@@ -54,6 +54,9 @@ SELECTABLE = {
     # Same switch, for `InMemoryPlanApprovalStore`'s reason: a membership admits somebody to a
     # session, and under `session_store="memory"` the session is a process.
     "InMemorySessionMemberStore": "session_store",
+    # And a session's wait line (`D-2026-09-27-a-queued-message-waits-in-its-senders-request`):
+    # two replicas share one order only where they share one session store.
+    "InMemoryTurnQueue": "session_store",
     "InMemoryVectorStore": "vector_store_provider",
 }
 

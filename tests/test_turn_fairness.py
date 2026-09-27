@@ -64,7 +64,7 @@ async def _hold_turns(
 ) -> list[asyncio.Task[httpx.Response]]:
     """Start `count` turns for `principal`, each on its own session, and wait until all are live.
 
-    One turn per session because the per-session 409 already forbids two, so a per-actor cap can
+    One turn per session because the session's line already forbids two, so a per-actor cap can
     only ever be reached across sessions — which is also why this helper exists rather than a loop
     over one session id.
     """
@@ -203,12 +203,14 @@ def test_a_finished_turn_frees_the_actors_slot(monkeypatch: Any) -> None:
     asyncio.run(_run())
 
 
-def test_a_double_submit_to_one_session_is_still_409_not_429(monkeypatch: Any) -> None:
-    """A second POST to a *running* session answers the conflict that names what happened.
+def test_a_double_submit_to_one_session_joins_its_line_not_429(monkeypatch: Any) -> None:
+    """A second POST to a *running* session waits in its line; the per-actor cap does not refuse it.
 
-    This pins `besides=session_id`. Without it the status code a UI sees for a double-submit would
-    be a function of how many other sessions the chemist has open — 409 below the cap, 429 at it —
-    for one unchanged user action.
+    This pins `besides=session_id`. Without it the answer a UI sees for a double-submit would be a
+    function of how many other sessions the chemist has open — a place in line below the cap, a 429
+    at it — for one unchanged user action. The line itself
+    (`D-2026-09-27-a-queued-message-waits-in-its-senders-request`) is what replaced the 409 this
+    test used to pin; it holds one place per sender, so the retry is bounded there instead.
     """
     monkeypatch.setattr(settings, "service_max_concurrent_turns_per_actor", 2)
     agent = _ParkedTurn()
@@ -220,12 +222,16 @@ def test_a_double_submit_to_one_session_is_still_409_not_429(monkeypatch: Any) -
             running = next(iter(app.state.active_turns))
 
             _as(app, ALICE)
-            again = await _expect_refused(client, running)
-            assert again.status_code == 409, "the per-actor cap swallowed the session conflict"
-            assert "already running" in again.json()["detail"]
+            again = asyncio.create_task(
+                client.post(f"/sessions/{running}/messages", json={"message": "hi"})
+            )
+            async with asyncio.timeout(10):
+                while not await app.state.turn_queue.waiting(running):
+                    assert not again.done(), (await again).text
+                    await asyncio.sleep(0.01)
 
             agent.release.set()
-            await _drain(held)
+            await _drain([*held, again])
 
     asyncio.run(_run())
 

@@ -153,9 +153,9 @@ _COUNTERS: dict[str, str] = {
     # unauthenticated, and an `oid` is an unbounded *caller-chosen* key — minting oids is the way
     # around a per-principal limit, so the series cap would silence this counter exactly when it
     # matters. The identity is in the WARNING beside the increment. Not folded into
-    # `chemclaw_turns_conflict_total{scope=…}` either: that counter's population is 409 conflicts
-    # on one session, whose remedy is to wait for your own turn, and this one's is a 429 across
-    # sessions — two populations under one denominator nobody can interpret.
+    # `chemclaw_turns_conflict_total{scope=…}` either: that counter's population is turns that
+    # found one session busy and wait in its line, and this one's is a 429 across sessions — two
+    # populations under one denominator nobody can interpret.
     "chemclaw_turns_refused_actor_cap_total": (
         "Turns refused with 429 because the actor already held "
         "`service_max_concurrent_turns_per_actor` concurrent turns on this process."
@@ -225,7 +225,26 @@ _COUNTERS: dict[str, str] = {
     "chemclaw_budget_warnings_total": (
         "Times a session or user crossed `budget_warn_fraction` of a turn or token cap."
     ),
-    "chemclaw_turns_conflict_total": "Turns rejected with 409 (a turn was already running).",
+    # **No longer a refusal** (`D-2026-09-27-a-queued-message-waits-in-its-senders-request`): a
+    # message that finds its session busy joins the session's line and waits its turn. `scope` says
+    # what it found busy — this process's slot, another replica's durable claim, or a line already
+    # holding somebody — so the population is unchanged (a turn that could not start at once) and
+    # only its outcome moved; the refusals that remain are the two below.
+    "chemclaw_turns_conflict_total": (
+        "Turns that found their session busy and joined its line (previously refused 409)."
+    ),
+    "chemclaw_turn_queue_refused_total": (
+        "Messages refused with 409 because the session's line was full or the sender already "
+        "had a message waiting in it."
+    ),
+    "chemclaw_turn_queue_withdrawn_total": (
+        "Waiting messages that never ran: withdrawn, their sender removed, or the session deleted."
+    ),
+    # Fan-out's one failure mode, counted so a rising rate is visible: a participant's view of a
+    # running turn filled its own buffer and was cut off rather than allowed to slow anybody else.
+    "chemclaw_turn_readers_lagged_total": (
+        "Views of a running turn cut off because their reader fell a full buffer behind."
+    ),
     "chemclaw_turn_timeouts_total": "Turns cancelled by the wall-clock turn timeout.",
     # A separate series from the one above, and deliberately so: this counts turns cut because the
     # *client* stopped reading (`service_sse_send_timeout_seconds`), not because the turn ran long.

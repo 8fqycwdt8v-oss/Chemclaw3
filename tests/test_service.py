@@ -1375,8 +1375,8 @@ class _SharedTurnClaims:
             del self.holders[session_id]
 
 
-def test_a_turn_running_on_another_worker_is_a_409_not_a_second_turn() -> None:
-    """A turn already claimed by another process is refused here, not admitted a second time.
+async def test_a_turn_running_on_another_worker_is_waited_for_not_run_beside() -> None:
+    """A turn already claimed by another process is waited for here, not admitted a second time.
 
     The 409 guard was a `set` in one process's memory while the shipped chart runs the front door
     at `minReplicas: 2`, so a double-submit that landed on the other replica was admitted and the
@@ -1385,19 +1385,30 @@ def test_a_turn_running_on_another_worker_is_a_409_not_a_second_turn() -> None:
     see, so seeding it *is* the other worker, faithfully: nothing else about that turn is
     observable from here.
 
+    Since `D-2026-09-27-a-queued-message-waits-in-its-senders-request` the message is not refused:
+    it waits in the session's line, keeps asking the durable claim, and runs once the other
+    worker's turn lets go — never before, and without disturbing that worker's claim meanwhile.
+
     Counterfactual: with only the per-process set this process has no record of the session's
-    running turn and answers 200.
+    running turn and answers at once.
     """
     claims = _SharedTurnClaims()
     app = _app(owner_store=_FakeOwnerStore(), turn_claims=claims)
-    with TestClient(app) as client:
-        session_id = client.post("/sessions").json()["session_id"]
+    async with asgi_client(app) as client:
+        session_id = (await client.post("/sessions")).json()["session_id"]
         claims.holders[session_id] = "another-worker"  # a turn is in flight over there
-        conflict = client.post(f"/sessions/{session_id}/messages", json={"message": "second"})
+        waiting = asyncio.create_task(
+            client.post(f"/sessions/{session_id}/messages", json={"message": "second"})
+        )
+        await asyncio.sleep(0.3)
+        assert not waiting.done(), "a second turn ran beside the other worker's"
+        assert claims.holders == {session_id: "another-worker"}  # waiting did not steal the slot
+        del claims.holders[session_id]  # the other worker's turn ends
+        answered = await asyncio.wait_for(waiting, timeout=10)
 
-    assert conflict.status_code == 409
-    assert conflict.json()["detail"] == "a turn is already running for this session"
-    assert claims.holders == {session_id: "another-worker"}  # the refusal did not steal the slot
+    assert answered.status_code == 200
+    assert '"type":"queued"' in answered.text and '"type":"answer"' in answered.text
+    assert claims.holders == {}, "the turn that waited did not give its claim back"
 
 
 def test_a_finished_turn_hands_its_cross_process_claim_back() -> None:
@@ -1966,13 +1977,15 @@ def _gated_agent(gate: asyncio.Event, started: asyncio.Event, blocked_message: s
     return _GatedAgent()
 
 
-async def test_concurrent_turn_on_same_session_is_409() -> None:
-    """While one turn runs, a second POST to the same session is rejected with 409.
+async def test_concurrent_turn_on_same_session_waits_in_line() -> None:
+    """While one turn runs, a second POST to the same session waits for it instead of running.
 
     Two concurrent turns would drive `agent.run` against the same TurnSession at once,
-    interleaving two turns' messages into one conversation thread — so the second is shed
-    (matching the admission semaphore's shed-don't-queue semantics), and the slot frees when
-    the running turn's stream ends.
+    interleaving two turns' messages into one conversation thread — so the second must not run
+    beside the first. It used to be shed with 409; since
+    `D-2026-09-27-a-queued-message-waits-in-its-senders-request` it joins the session's line and
+    runs when the first ends. A *third* message from the same sender while the second still waits is
+    the one that is refused: one place per sender per session.
     """
     gate = asyncio.Event()
     started = asyncio.Event()
@@ -1983,13 +1996,23 @@ async def test_concurrent_turn_on_same_session_is_409() -> None:
             client.post(f"/sessions/{session_id}/messages", json={"message": "first"})
         )
         await asyncio.wait_for(started.wait(), timeout=5)  # the first turn is mid-run
-        dup = await client.post(f"/sessions/{session_id}/messages", json={"message": "second"})
-        assert dup.status_code == 409
+        second = asyncio.create_task(
+            client.post(f"/sessions/{session_id}/messages", json={"message": "second"})
+        )
+        async with asyncio.timeout(5):
+            while not (await client.get(f"/sessions/{session_id}/queue")).json()["waiting"]:
+                await asyncio.sleep(0.01)
+        assert not second.done(), "the second message ran beside the first"
+        third = await client.post(f"/sessions/{session_id}/messages", json={"message": "third"})
+        assert third.status_code == 409 and "already have a message waiting" in third.text
         gate.set()
         assert (await first).status_code == 200
-        # The slot is released with the stream — the next turn is admitted again.
-        ok = await client.post(f"/sessions/{session_id}/messages", json={"message": "third"})
-        assert ok.status_code == 200
+        waited = await second
+        assert waited.status_code == 200
+        assert '"type":"queued"' in waited.text and '"type":"answer"' in waited.text
+        # The line is empty and the slot free again — the next message runs at once.
+        ok = await client.post(f"/sessions/{session_id}/messages", json={"message": "fourth"})
+        assert ok.status_code == 200 and '"type":"queued"' not in ok.text
 
 
 async def test_concurrent_turns_on_different_sessions_are_admitted() -> None:
@@ -2619,10 +2642,13 @@ def test_the_socket_budget_cannot_be_reached_by_the_caps_it_is_meant_to_cover() 
     """
     from chemclaw.core.config import Settings
 
+    # A turn is its sender's stream plus the participants following it and the messages waiting
+    # behind it (`D-2026-09-27-a-queued-message-waits-in-its-senders-request`).
+    per_turn = 1 + settings.service_turn_max_watchers + settings.service_turn_queue_max
     assert (
         settings.service_max_connections
         >= settings.service_max_event_streams_total
-        + settings.service_max_concurrent_turns
+        + settings.service_max_concurrent_turns * per_turn
         + settings.service_connection_headroom
     )
     with pytest.raises(ValueError) as excinfo:

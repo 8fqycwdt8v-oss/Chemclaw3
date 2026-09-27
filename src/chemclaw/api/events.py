@@ -24,11 +24,21 @@ class QueuedEvent(BaseModel):
     This is the first event of a turn that had to wait, and only of such a turn: the common case
     takes its permit without blocking and never emits it.
 
-    No fields. The client is already connected and has nothing to decide — the event's entire job
-    is to say "accepted, waiting", and the next event says which way it went.
+    **It also reports the other wait a turn can have: its place in the session's line**
+    (`D-2026-09-27-a-queued-message-waits-in-its-senders-request`). A message sent while another
+    participant's turn runs no longer answers 409; it waits for that turn to end, and this event
+    says so each time its place changes. The two waits are told apart by `ticket`:
+
+    - `ticket` and `position` are `None` for the admission wait — the process is busy, the client
+      has nothing to decide, and the next event says which way it went;
+    - `ticket` is set for a place in the session's line, and `position` is how many messages are
+      ahead of it (0 = next, waiting only for the running turn to end). `ticket` is what
+      `DELETE /sessions/{id}/queue/{ticket}` takes to withdraw the message before it runs.
     """
 
     type: Literal["queued"] = "queued"
+    ticket: int | None = None
+    position: int | None = None
 
 
 class PlanEvent(BaseModel):
@@ -552,6 +562,17 @@ ErrorCode = Literal[
     # a narrower question. Reported as `internal` until 2026-09-27, which told a chemist "internal
     # error" about the one failure a shorter thread fixes.
     "context_length",
+    # A message that waited in the session's line and never ran: its sender withdrew it, the owner
+    # did, the sender was removed from the session while it waited, or the session was deleted
+    # (`D-2026-09-27-a-queued-message-waits-in-its-senders-request`). Its own code because nothing
+    # failed and nothing was spent — the stream ends having done nothing, which is the one thing a
+    # surface must not render as an error in the turn.
+    "queue_cancelled",
+    # A *view* of a turn fell a full buffer behind and was cut off; the turn itself runs on. Only
+    # ever on the stream that lagged — every other participant's view is untouched, which is the
+    # point of cutting one rather than slowing all. Retryable: reopen the view, or read the answer
+    # from the transcript when it lands.
+    "stream_lagged",
     # The turn ran to completion and wrote nothing. Its own code rather than `internal`, because
     # nothing broke: the model simply never produced prose, and a surface should offer "ask
     # something narrower" rather than "an internal error occurred". Added after a live turn made
