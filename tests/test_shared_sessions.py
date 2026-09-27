@@ -183,21 +183,24 @@ def test_removing_a_member_takes_effect_on_their_next_request() -> None:
 
 
 def test_the_owners_acts_refuse_a_member_and_a_member_may_leave() -> None:
-    """Admitting, removing another, deleting and forking are the owner's; leaving is a member's."""
+    """Admitting, removing another, deleting and forking are the owner's; leaving is a member's.
+
+    The principal is re-bound per request (`_as`), because the override is the app's and a client
+    held across a switch would silently send as whoever was bound last.
+    """
     app = _app()
     session_id = _shared(app)
-    ben = _as(app, _BEN)
 
-    assert ben.put(f"/sessions/{session_id}/members/{_CAT.oid}").status_code == 403
+    assert _as(app, _BEN).put(f"/sessions/{session_id}/members/{_CAT.oid}").status_code == 403
     assert _as(app, _CAT).get(f"/sessions/{session_id}/messages").status_code == 404
-    assert ben.delete(f"/sessions/{session_id}/members/{_ANA.oid}").status_code == 403
-    assert ben.delete(f"/sessions/{session_id}").status_code == 403
-    assert ben.post(f"/sessions/{session_id}/fork").status_code == 403
+    assert _as(app, _BEN).delete(f"/sessions/{session_id}/members/{_ANA.oid}").status_code == 403
+    assert _as(app, _BEN).delete(f"/sessions/{session_id}").status_code == 403
+    assert _as(app, _BEN).post(f"/sessions/{session_id}/fork").status_code == 403
     # The owner is not a member of their own session, and cannot be made one.
     assert _as(app, _ANA).put(f"/sessions/{session_id}/members/{_ANA.oid}").status_code == 409
 
-    assert ben.delete(f"/sessions/{session_id}/members/{_BEN.oid}").status_code == 204
-    assert ben.get(f"/sessions/{session_id}/messages").status_code == 404
+    assert _as(app, _BEN).delete(f"/sessions/{session_id}/members/{_BEN.oid}").status_code == 204
+    assert _as(app, _BEN).get(f"/sessions/{session_id}/messages").status_code == 404
 
 
 def test_a_member_stops_only_their_own_turn_and_the_owner_any() -> None:
