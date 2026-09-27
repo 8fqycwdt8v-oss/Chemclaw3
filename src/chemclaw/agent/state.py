@@ -69,6 +69,7 @@ from collections.abc import Sequence
 from typing import Annotated, Any, NotRequired
 
 from langchain.agents.middleware.todo import PlanningState
+from langchain.agents.middleware.types import PrivateStateAttr
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.channels.last_value import LastValue
 from langgraph.channels.untracked_value import UntrackedValue
@@ -252,6 +253,20 @@ class ChemclawState(PlanningState):
     # does not bill, so a capped turn and a turn that spent its last allowed token and then
     # finished both end at the same number.
     spend_capped: NotRequired[Annotated[bool, TurnFlag(bool)]]
+
+    # Whether *this graph* has spent its one tool-less call at the loop cap
+    # (`loop_cap.enforce_loop_cap`) — the per-branch half of the cap, where `loop_capped` above is
+    # the per-turn half. **Private, and that is the whole reason it is a second field.**
+    # `loop_capped` crosses the subagent boundary on purpose, so a helper that hit the cap hands
+    # its caller `loop_capped=True`; had the wrap-up keyed on that, the caller would read its
+    # helper's cap as its own and end without writing anything — which is the live dl-01 shape this
+    # exists to close (three helpers capped, the chemist got no answer). `PrivateStateAttr` is what
+    # `SubAgentMiddleware` strips in both directions, so every graph gets exactly one wrap-up.
+    # Untracked for `loop_capped`'s reason, and so outside the checkpoint's channel stamp; a
+    # `TurnFlag` rather than a bare `UntrackedValue` only so a second writer in one superstep folds
+    # instead of raising, which no writer here produces and `tests/test_state_channels.py` holds
+    # every channel to anyway.
+    loop_wrap_up: NotRequired[Annotated[bool, TurnFlag(bool), PrivateStateAttr]]
 
     # Which peer agent holds the conversation — the one field on this state that is deliberately
     # **per-thread** rather than per-turn, and the only reason `agent/turn_graph.py` needs a state

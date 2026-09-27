@@ -23,6 +23,24 @@ predicate was never consulted at all and a capped turn reported no cap.
 nothing here can be forgotten. Those two classes exist because the same fields cross the subagent
 boundary (regression 3 below), which is what puts two writes for one key in a single superstep.
 
+**The cap ends a graph with one last call that has no tools, not with silence.** Stopping the loop
+the instant the count reached the cap let "the answer the last iteration managed" out — and the
+last iteration of a capped loop is, by construction, one that wanted a tool, so what it managed is
+narration ("Let me also check…") or nothing. Driven live against a real model (dl-01, 2026-09-27):
+three helpers spent the turn's allowance between them, each handed back its mid-stream sentence as
+its report, the supervisor was stopped before it could read them, and the chemist got **no answer
+at all** — `loop_cap_reached` over an empty turn, in both delegation arms. So each graph that
+reaches the cap gets exactly one further call, with tools switched off and a system note asking
+for the answer from what it has (`answer_at_the_cap`), and only a second arrival ends it. That is
+the same thing `ModelCallLimitMiddleware`'s `exit_behavior="end"` got wrong from the other side:
+it *wrote* the final assistant message itself; this asks the model to, and marks nothing it did not
+say. The bound this costs is stated where it is enforced: one call per graph that reaches the cap,
+over `harness_max_loop_iterations` — the root plus each helper still running when the allowance
+ran out. "Per graph" is per *run* of one: `loop_wrap_up` is untracked, so a verifier revision round
+or a job-result resume that starts past the cap gets its own tool-less call, which is what lets it
+write anything at all, and each of those is bounded by its own setting
+(`answer_review_max_rounds`, one resume).
+
 **Two readers, because they ask from different places.** `loop_capped(state)` reads the flag off
 the state a finished run *returns* — the untracked channel is absent from `get_state()`, by
 design — which is what a test or a template step holds. `loop_hit_cap()` reads a contextvar the
@@ -35,15 +53,16 @@ task of its own.
 """
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
-from langchain.agents.middleware import before_model
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse, before_model
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
 from chemclaw.core.config import settings
+from chemclaw.core.model_prose import ModelProse
 
 logger = logging.getLogger(__name__)
 
@@ -180,9 +199,11 @@ def enforce_loop_cap(state: Mapping[str, Any], runtime: Any) -> dict[str, Any] |
     consulted the predicate there. Here the count is a declared state field, so a cap of 1 leaves
     a count of 1.
 
-    Ending the run rather than raising: the answer the last iteration managed still goes out, and
-    a surface marks it partial (`chemclaw.api.runner` does this off `loop_hit_cap`). A raised error
-    would discard work a chemist is entitled to see.
+    Ending the run rather than raising, and ending it with one tool-less call rather than at the
+    cap itself: the answer that call writes goes out, and a surface marks it partial
+    (`chemclaw.api.runner` does this off `loop_hit_cap`). A raised error would discard work a
+    chemist is entitled to see — and so, measured, did ending at the cap, because the last
+    iteration of a capped loop is one that wanted a tool (see the module docstring).
     """
     # **The channel is `UntrackedValue`, so a resumed turn reads 0 here and gets a fresh cap.**
     # `agent/state.py` says the channel "starts empty on every run of the graph", which was the
@@ -217,15 +238,28 @@ def enforce_loop_cap(state: Mapping[str, Any], runtime: Any) -> dict[str, Any] |
     turn = max(own, watch.calls if watch is not None else 0)
     calls = turn
     if calls >= settings.harness_max_loop_iterations:
-        logger.warning("the model loop hit its %d-iteration cap", calls)
         record_loop_cap()
         # `loop_capped` is written here and nowhere else, because **the count cannot answer the
-        # question**. This branch stops the loop without incrementing, so a capped turn and a turn
-        # that used its last allowed call and then finished normally both end at exactly `cap` —
-        # measured at a cap of 1, where a one-call turn that answered was reported as capped and its
-        # complete answer was marked partial. A comparison on the count is a guess either way round;
-        # a flag set by the branch that fires is the fact.
-        return {"jump_to": "end", "loop_capped": True}
+        # question**. A capped turn and a turn that used its last allowed call and then finished
+        # normally both reach exactly `cap` — measured at a cap of 1, where a one-call turn that
+        # answered was reported as capped and its complete answer was marked partial. A comparison
+        # on the count is a guess either way round; a flag set by the branch that fires is the fact.
+        if state.get("loop_wrap_up"):
+            # The second arrival: this graph already had its tool-less call, so nothing further
+            # can be authorised. Reached only when the wrap-up's reply still carried tool calls
+            # that `answer_at_the_cap` could not strip, or on a resumed turn whose wrap-up ran.
+            logger.warning("the model loop hit its %d-iteration cap after its wrap-up", calls)
+            return {"jump_to": "end", "loop_capped": True}
+        logger.warning(
+            "the model loop hit its %d-iteration cap; one last call, without tools, writes the "
+            "answer from what it has",
+            calls,
+        )
+        # Counted like any authorised call — in the channel and on the watch — so the number that
+        # records the turn is still the number of calls it made, one past the cap per graph.
+        if watch is not None:
+            watch.calls = turn + 1
+        return {"loop_capped": True, "loop_wrap_up": True, "model_calls": own + 1}
     # Advanced here rather than where the channel is written, because this is the hook that
     # *authorises* the call — and mutated rather than rebound, so every branch sharing this object
     # sees it. `max` rather than `+= 1`: two branches that both read `base` must not each add one to
@@ -234,6 +268,97 @@ def enforce_loop_cap(state: Mapping[str, Any], runtime: Any) -> dict[str, Any] |
     if watch is not None:
         watch.calls = turn + 1
     return {"model_calls": own + 1}
+
+
+#: What a graph at the cap is told on its one tool-less call. Sent as the request's last message
+#: and never stored — `answer_at_the_cap` adds it to the *request*, so the checkpointed thread holds
+#: the model's answer and not this. Written to be obeyed rather than answered: a note that reads
+#: like a message to reply to gets "Understood — here is…" at the top of the chemist's answer,
+#: which is the leak `api/runner._REVISION_NOTE` records for the verifier's note.
+WRAP_UP_NOTE = ModelProse(
+    "[System note, not from the person you are working for — do not reply to it or mention it.] "
+    "This turn has reached its step limit, so no further tools can run. Write your final response "
+    "now, from what you have already found: lead with what the evidence gathered so far supports, "
+    "with its citations, then say plainly that the work was cut short at the step limit and name "
+    "what was left unexamined, so it is not read as absent. Do not describe what you would check "
+    "next as if you were about to do it."
+)
+
+
+class AnswerAtTheCap(AgentMiddleware[Any, Any, Any]):
+    """Turn the call `enforce_loop_cap` authorises past the cap into an answer, not another step.
+
+    `enforce_loop_cap` marks the graph's state `loop_wrap_up` and lets one call through; this is
+    what makes that call a *final* one. Three things, all on the request or the response and none
+    on the thread:
+
+    - **`tool_choice="none"`, with the tools still bound.** Unbinding them was the obvious move and
+      is refused by the providers that matter: a thread carrying `tool_use` blocks must declare
+      tools, so an empty tool list turns the wrap-up into a 400.
+    - **`WRAP_UP_NOTE` appended to the request's messages**, so the model knows why it has no tools
+      and what the answer must say about the gap.
+    - **Any tool call the reply still carries is dropped**, with a warning. `ToolNode` runs whatever
+      the last `AIMessage` asks for, so a provider that ignored `tool_choice` would otherwise buy a
+      further round of tools past the cap. Dropping them does not put words in the model's mouth —
+      the text it wrote is kept exactly — and it is what keeps the thread legal: an `AIMessage`
+      carrying `tool_calls` with no `ToolMessage` after it is a thread no provider accepts.
+
+    **Both hooks**, for `MeterTurnSpend`'s reason: `create_agent` puts a middleware declaring either
+    into both chains, and an async-only one fails every synchronous `graph.invoke()`.
+    """
+
+    @staticmethod
+    def _request(request: ModelRequest[Any]) -> ModelRequest[Any]:
+        """The wrap-up request, or `request` unchanged off the wrap-up."""
+        if not request.state.get("loop_wrap_up"):
+            return request
+        return request.override(
+            tool_choice="none" if request.tools else None,
+            messages=[*request.messages, HumanMessage(WRAP_UP_NOTE)],
+        )
+
+    @staticmethod
+    def _response(request: ModelRequest[Any], response: Any) -> Any:
+        """The wrap-up's reply with any tool call removed, or `response` unchanged."""
+        if not request.state.get("loop_wrap_up") or not isinstance(response, ModelResponse):
+            return response
+        kept: list[BaseMessage] = []
+        for message in response.result:
+            calls = isinstance(message, AIMessage) and (
+                message.tool_calls
+                or message.invalid_tool_calls
+                or "tool_calls" in message.additional_kwargs
+            )
+            if not calls:
+                kept.append(message)
+                continue
+            logger.warning(
+                "the wrap-up call at the loop cap asked for tools despite tool_choice='none'; "
+                "the calls are dropped and its text is kept"
+            )
+            extra = {k: v for k, v in message.additional_kwargs.items() if k != "tool_calls"}
+            kept.append(
+                message.model_copy(
+                    update={"tool_calls": [], "invalid_tool_calls": [], "additional_kwargs": extra}
+                )
+            )
+        return ModelResponse(result=kept, structured_response=response.structured_response)
+
+    def wrap_model_call(
+        self, request: ModelRequest[Any], handler: Callable[[ModelRequest[Any]], Any]
+    ) -> Any:
+        """The wrap-up on the synchronous path."""
+        wrapped = self._request(request)
+        return self._response(wrapped, handler(wrapped))
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest[Any],
+        handler: Callable[[ModelRequest[Any]], Awaitable[Any]],
+    ) -> Any:
+        """The wrap-up on the path a turn actually takes."""
+        wrapped = self._request(request)
+        return self._response(wrapped, await handler(wrapped))
 
 
 def record_loop_cap() -> None:

@@ -324,8 +324,11 @@ def test_the_cap_stops_the_loop_at_exactly_its_limit(
         final = graph.invoke(
             cast(Any, {"messages": [("user", "go")]}), cast(Any, {"recursion_limit": 200})
         )
-        assert calls["n"] == cap, (
-            f"the loop ran {calls['n']} model calls against a cap of {cap}"
+        # The cap's calls, then the one tool-less call a graph at the cap is owed to write its
+        # answer (`loop_cap.AnswerAtTheCap`, not attached here, so the tools stay on and the next
+        # arrival is what ends it) — an after_model jump must not buy a second.
+        assert calls["n"] == cap + 1, (
+            f"the loop ran {calls['n']} model calls against a cap of {cap} plus one wrap-up"
             + (" — an after_model jump skipped the count" if jumping_after_model else "")
         )
         assert loop_capped(final), "the state record missed the cap"

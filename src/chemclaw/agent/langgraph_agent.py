@@ -115,7 +115,7 @@ from chemclaw.agent.local_skills import (
     PERSONAL_TIER_TOOLS,
     personal_skills_available,
 )
-from chemclaw.agent.loop_cap import enforce_loop_cap
+from chemclaw.agent.loop_cap import AnswerAtTheCap, enforce_loop_cap
 from chemclaw.agent.model_calls import model_call_middleware, refuse_unparsed_arguments
 from chemclaw.agent.org_skills import ORG_SKILLS_LABEL, ORG_SKILLS_ROOT
 from chemclaw.agent.plan_gate import enforce_plan_approval, gate_applies, harness_enabled_for
@@ -1176,7 +1176,9 @@ def _harness_middleware(profile: AgentProfile) -> list[Any]:
     attached unconditionally when it did — costing an unconfigured turn nothing — and that
     unconditional attachment is now what actually enforces the ceiling.
     """
-    caps = [enforce_loop_cap, enforce_spend_cap, MeterTurnSpend()]
+    # `AnswerAtTheCap` sits with the hook whose mark it reads: `enforce_loop_cap` authorises one
+    # tool-less call per graph past the cap, and this is what makes that call an answer.
+    caps = [enforce_loop_cap, enforce_spend_cap, AnswerAtTheCap(), MeterTurnSpend()]
     if not harness_enabled_for(profile):
         return caps
     return [ScopedTodoListMiddleware(), *caps]
