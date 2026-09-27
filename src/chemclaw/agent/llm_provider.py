@@ -29,6 +29,7 @@ from functools import cache
 from typing import Any
 
 from langchain_core.callbacks import BaseCallbackHandler
+from langchain_core.exceptions import ContextOverflowError
 
 from chemclaw.core.config import settings
 from chemclaw.core.http import gateway_client_kwargs
@@ -260,7 +261,16 @@ def _is_context_length(exc: BaseException) -> bool:
     asking about context windows, echoed back in some other error — cannot be classified by its
     words alone. `code` is read where it is set (OpenAI's `context_length_exceeded`); a gateway
     relaying a vendor that sets none leaves the message as all there is.
+
+    **`ContextOverflowError` is the type-level form of the same fact, and it is read first.**
+    `langchain_openai` re-raises a recognised overflow as `OpenAIContextOverflowError` (a
+    `BadRequestError`, so the message test below would also see it) *or*, on the streamed path, as
+    `OpenAIAPIContextOverflowError` — an `APIError` that is **not** a `BadRequestError`, so the
+    guard below refused it and a streamed overflow was classified `error`. The client library
+    having already decided is the stronger signal, and it carries no chemist text to misread.
     """
+    if isinstance(exc, ContextOverflowError):
+        return True
     if not isinstance(exc, _openai_exceptions("BadRequestError")):
         return False
     text = f"{getattr(exc, 'code', '') or ''} {exc}".lower()

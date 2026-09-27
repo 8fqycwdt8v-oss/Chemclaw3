@@ -535,6 +535,12 @@ ErrorCode = Literal[
     # mid-flight and its partial answer still arrives.
     "spend_cap_reached",
     "bad_tool_arguments",
+    # The model endpoint refused the request because the conversation no longer fits its context
+    # window (`agent/llm_provider.classify_model_failure`'s `context_length`). Its own code rather
+    # than `internal`, because nothing is broken and the remedy is the chemist's: a new session or
+    # a narrower question. Reported as `internal` until 2026-09-27, which told a chemist "internal
+    # error" about the one failure a shorter thread fixes.
+    "context_length",
     # The turn ran to completion and wrote nothing. Its own code rather than `internal`, because
     # nothing broke: the model simply never produced prose, and a surface should offer "ask
     # something narrower" rather than "an internal error occurred". Added after a live turn made

@@ -185,6 +185,78 @@ def test_an_unclassified_failure_stays_internal_rather_than_guessing() -> None:
     assert _classify(RuntimeError("something odd")) == ("internal", False)
 
 
+def _gateway_400(message: str) -> Any:
+    """A 400 exactly as an OpenAI-compatible gateway returns it, body and all."""
+    import httpx2
+    import openai
+
+    request = httpx2.Request("POST", "https://gateway.example/v1/chat/completions")
+    body = {"code": "invalid_request_error", "message": message, "type": "invalid_request_error"}
+    response = httpx2.Response(400, request=request, json={"error": body})
+    return openai.BadRequestError(
+        f"Error code: 400 - {{'error': {body}}}", response=response, body=body
+    )
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        # The live lane's own refusal, verbatim from `api.log` on 2026-09-27 — the turn that
+        # reported `internal` two lines below a model-call log line saying `context_length`.
+        "prompt is too long: 84578 tokens > 2000 maximum",
+        # DeepSeek's own wording, and OpenRouter's when it refuses before forwarding.
+        "This model's maximum context length is 131072 tokens. However, you requested 140211 "
+        "tokens (136115 in the messages, 4096 in the completion). Please reduce the length of "
+        "the messages or completion.",
+        "This endpoint's maximum context length is 163840 tokens. However, you requested about "
+        "170000 tokens (165904 of text input, 4096 in the output).",
+    ],
+)
+def test_an_oversize_request_is_a_context_length_failure_not_an_internal_one(message: str) -> None:
+    """The one failure whose remedy is the chemist's was reported as `internal, do not retry`.
+
+    Driven through the shapes the turn actually receives: the SDK's `BadRequestError`, and
+    `langchain_openai`'s re-raise of it as `OpenAIContextOverflowError` — which is the exception
+    the live lane's traceback ends on, and which is what `_classify` is really handed.
+    """
+    from langchain_openai.chat_models.base import OpenAIContextOverflowError
+
+    from chemclaw.api.runner import failure_event
+
+    raw = _gateway_400(message)
+    rewrapped = OpenAIContextOverflowError(
+        message=raw.message, response=raw.response, body=raw.body
+    )
+    for exc in (raw, rewrapped):
+        assert _classify(exc) == ("context_length", False), type(exc).__name__
+    event = failure_event(rewrapped, "s-1", "c-1")
+    assert event.code == "context_length"
+    assert "internal error" not in event.message
+    assert "too long" in event.message
+
+
+def test_a_streamed_overflow_the_client_library_recognised_is_context_length_too() -> None:
+    """`OpenAIAPIContextOverflowError` is an `APIError` and **not** a `BadRequestError`.
+
+    The message test is gated on `BadRequestError`, so the streamed half of the same failure fell
+    through to `internal` even after the non-streamed half was classified. The client library's
+    own `ContextOverflowError` type is the signal both share.
+    """
+    import httpx2
+    from langchain_openai.chat_models.base import OpenAIAPIContextOverflowError
+
+    request = httpx2.Request("POST", "https://gateway.example/v1/chat/completions")
+    streamed = OpenAIAPIContextOverflowError(
+        message="context window exceeded mid-stream", request=request, body=None
+    )
+    assert _classify(streamed) == ("context_length", False)
+
+
+def test_a_bad_request_that_is_not_about_length_stays_internal() -> None:
+    """The control: a 400 alone is not an overflow, so the new arm must not swallow every 400."""
+    assert _classify(_gateway_400("tools[0].function.name is invalid")) == ("internal", False)
+
+
 def test_the_error_carries_the_key_the_audit_trail_is_keyed_on() -> None:
     """The old message named the session — the id the user already has.
 
