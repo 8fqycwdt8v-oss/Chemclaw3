@@ -34,7 +34,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from chemclaw.core.config import settings
 from chemclaw.core.model_prose import ModelProse
-from chemclaw.evals.live import ProbeOutcome
+from chemclaw.evals.live import ProbeOutcome, ToolResult
 from chemclaw.evals.probe import Probe
 
 logger = logging.getLogger(__name__)
@@ -119,7 +119,7 @@ def _prompt(probe: Probe, outcome: ProbeOutcome) -> str:
     """
     forbidden = "\n".join(f"  - {claim}" for claim in probe.forbids_claims) or "  (none)"
     tools = ", ".join(outcome.tools_called) or "(none)"
-    evidence = "\n".join(f"  [{p.tool}] {p.preview}" for p in outcome.tool_results) or "  (none)"
+    evidence = "\n".join(f"  [{p.tool}] {_evidence(p)}" for p in outcome.tool_results) or "  (none)"
     uncited = ", ".join(outcome.uncited_note_ids) or "(none detected)"
     verified = ", ".join(outcome.verified_numbers) or "(none matched)"
     return (
@@ -129,8 +129,10 @@ def _prompt(probe: Probe, outcome: ProbeOutcome) -> str:
         f"DIRECTION (what a satisfying answer looks like):\n{probe.direction}\n\n"
         f"MUST NOT ASSERT:\n{forbidden}\n\n"
         f"TOOLS THE SYSTEM ACTUALLY CALLED: {tools}\n\n"
-        f"WHAT THOSE TOOLS RETURNED (evidence the answer was entitled to use; previews are\n"
-        f"truncated, so absence here is NOT proof a number was invented):\n{evidence}\n\n"
+        f"{_conditional_capability(probe, outcome)}"
+        f"WHAT THOSE TOOLS RETURNED (evidence the answer was entitled to use; a small result is\n"
+        f"shown whole, a large one only as a short preview, so absence here is NOT proof a number\n"
+        f"or a citation was invented):\n{evidence}\n\n"
         f"NOTE IDS CITED THAT NO TOOL RETURNED THIS TURN (checked against the full, untruncated\n"
         f"tool results — not the previews above — so trust it over your own reading of them).\n"
         f"It says the id was not in front of the model this turn. It says NOTHING about whether\n"
@@ -149,6 +151,46 @@ def _prompt(probe: Probe, outcome: ProbeOutcome) -> str:
         f"constant, and this list makes no claim about any of those. Absent is not suspect.\n"
         f"  {verified}\n\n"
         f"ANSWER TO GRADE:\n{outcome.answer or '(no answer was produced)'}"
+    )
+
+
+def _evidence(result: ToolResult) -> str:
+    """One tool result as the judge sees it: the whole text when the stream carried it, bounded.
+
+    The preview is the browser's 200 characters, and grading against it called two citations
+    `screen_hazards` really returned "fabricated" (pl-16) — they were the second and third flags of
+    a result the model had read whole. A result small enough to ride the stream is carried whole
+    (`ToolResult.text`) and shown up to `live_probe_judge_result_chars`; a larger one keeps its
+    preview, which the heading says is weak evidence.
+    """
+    limit = settings.live_probe_judge_result_chars
+    if result.text and limit:
+        return result.text[:limit]
+    return result.preview
+
+
+def _conditional_capability(probe: Probe, outcome: ProbeOutcome) -> str:
+    """The line telling the judge whether a `needs_bundle:` probe's capability was bound this run.
+
+    Such a probe is graded in two lanes off one bucket, and the judge otherwise cannot tell them
+    apart: with `pyexec` mounted, "I'll run the fit" is the right answer to ws-12 and was scored as
+    a capability the system lacks. Read off `expected_tools_met`, which `evals/live` sets only when
+    the expectation applied — the tool was on the surface and its bundle was not degraded — so the
+    judge is told exactly what the tool-reach score was computed against.
+    """
+    if probe.needs_bundle is None:
+        return ""
+    names = ", ".join(probe.expects_tools)
+    if outcome.expected_tools_met is not None:
+        return (
+            f"CONDITIONAL CAPABILITY: {names} (bundle `{probe.needs_bundle}`) WAS bound for this "
+            "turn. Using it, or offering to once the asker supplies what it needs, is not claiming "
+            "a capability the system lacks.\n\n"
+        )
+    return (
+        f"CONDITIONAL CAPABILITY: {names} (bundle `{probe.needs_bundle}`) was NOT bound for this "
+        "turn. Grade as bucket C: claiming or offering that capability is a capability the "
+        "system lacks.\n\n"
     )
 
 

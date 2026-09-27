@@ -896,6 +896,9 @@ async def interaction(
     mode that was not sampled cannot be reported. **It is one pair, in a continuum**: no bulk, no
     competing solvent molecules, no stoichiometry beyond two.
     """
+    # An ion pair in vacuum is the pc-03 defect as a binding energy: two bare opposite charges
+    # attract by hundreds of kcal/mol there and by a few in solution.
+    require_solvent_for_ions([smiles_a, smiles_b], solvent)
     given = (
         (await embed(smiles_a, run=run), await embed(smiles_b, run=run))
         if subjects is None
@@ -1014,6 +1017,92 @@ def check_balance(reactants: list[str], products: list[str]) -> None:
             f"reaction is not charge-balanced: reactants {left_charge:+d}, "
             f"products {right_charge:+d}"
         )
+
+
+def ionic_species(species: Sequence[str]) -> list[str]:
+    """The species in `species` that are, or contain, a free ion — in first-seen order.
+
+    A species is ionic when any of its dot-separated fragments carries a net formal charge: a bare
+    ion (`O=C([O-])[O-]`) and a salt written as its ions (`[Na+].[Cl-]`) both are. A single fragment
+    whose charges cancel is **not**, and that exemption is deliberate rather than an oversight:
+    nitro groups, N-oxides, azides and diazo compounds are neutral molecules conventionally written
+    with separated formal charges (`C[N+](=O)[O-]`), and refusing them would refuse the energetic
+    functional groups a thermal-hazard screen most needs. The price is that a zwitterion drawn as
+    one is not caught either; nothing in a SMILES distinguishes the two.
+    """
+    found: list[str] = []
+    for smiles in dict.fromkeys(species):
+        parsed = Chem.MolFromSmiles(smiles)
+        if parsed is None:
+            continue
+        if any(Chem.GetFormalCharge(part) for part in Chem.GetMolFrags(parsed, asMols=True)):
+            found.append(smiles)
+    return found
+
+
+def require_solvent_for_ions(species: Sequence[str], solvent: str | None) -> None:
+    """Refuse a gas-phase energy difference over free ions, before anything is computed.
+
+    Found live (probe pc-03): a TFA/carbonate neutralisation run with `solvent=None` came back as
+    ΔE ≈ −185 kcal/mol and was reported to a chemist as "exothermic enough to matter at scale". In
+    the gas phase GFN2-xTB treats each ion as isolated in vacuum, so the difference is dominated by
+    unscreened charge localisation — a dianion accepting a proton is worth hundreds of kcal/mol
+    there and a few in water. The number is not imprecise, it describes a different physical
+    situation, and this repository refuses rather than approximates. Charge *balance* is
+    `check_balance`'s and holds here; it is exactly what let this one through, since both sides
+    carried −2.
+
+    Raises:
+        ValueError: `solvent` is None and some species is ionic (`ionic_species`). The message names
+            the species and the two ways forward.
+    """
+    if solvent is not None:
+        return
+    ions = ionic_species(species)
+    if ions:
+        raise ValueError(
+            f"a gas-phase energy over charged species is not physically meaningful: "
+            f"{', '.join(ions)} carry a net charge, and with no solvent each is treated as a bare "
+            "ion in vacuum, which puts hundreds of kcal/mol of unscreened charge into the "
+            "difference. Pass an implicit solvent (e.g. solvent='water'), or write the reaction "
+            "over neutral species"
+        )
+
+
+def solvated_ion_caveat(species: Sequence[str]) -> str | None:
+    """The warning every energy difference over ions carries once a solvent has let it run.
+
+    One sentence for every composite that differences species (a reaction, a species ranking, an
+    interaction), because `require_solvent_for_ions` is one rule and the caveat is its other half:
+    the refusal is what happens without a continuum, this is what the continuum still leaves.
+    """
+    ions = ionic_species(species)
+    if not ions:
+        return None
+    return (
+        f"charged species present ({', '.join(ions)}): an ion's solvation comes entirely from "
+        "the implicit solvent model, the least reliable part of this method, so read this as "
+        "an ordering between related cases, not as a heat or an absolute energy"
+    )
+
+
+def media_with_gas_reference(
+    species: Sequence[str], solvents: Sequence[str]
+) -> tuple[list[str | None], str | None]:
+    """The media an across-solvents screen runs in: the gas phase first, unless an ion forbids it.
+
+    Both screens (`solvent_comparison` over a reaction, `species_solvent_comparison` over a species
+    set) prepend the gas phase as a reference, and over ions that reference is exactly the number
+    `require_solvent_for_ions` refuses. Leaving it out keeps the screen — which is solution against
+    solution — answerable instead of failing on its reference, and the second value is the warning
+    that says the row is missing and why. One function so the two screens cannot disagree.
+    """
+    if ionic_species(species):
+        return list(solvents), (
+            "no gas-phase reference: this set has charged species, and a gas-phase energy over "
+            "free ions is not physically meaningful"
+        )
+    return [None, *solvents], None
 
 
 def _checked_symmetry_numbers(
@@ -1187,6 +1276,7 @@ async def reaction_energy(
         from the cache, and the method uncertainty to report with them.
     """
     check_balance(reactants, products)
+    require_solvent_for_ions([*reactants, *products], solvent)
     sigmas = _checked_symmetry_numbers(symmetry_numbers, set(reactants) | set(products))
     temperature = temperature_k or settings.xtb_thermo_temperature_k
     thermo = ThermoSettings(temperature_k=temperature) if level != "quick" else None
@@ -1225,6 +1315,10 @@ async def reaction_energy(
             "open-shell species present: unrestricted GFN2 energies are less reliable "
             "than closed-shell ones, so treat a homolysis energy as an ordering"
         )
+    # Reached only with a solvent — `require_solvent_for_ions` refused the gas phase above.
+    caveat = solvated_ion_caveat([*reactants, *products])
+    if caveat:
+        warnings.append(caveat)
     # Only above `quick`, where an entropy exists at all.
     unstated = (
         sorted({entry.smiles for entry in species if entry.symmetry_number is None})
@@ -1297,7 +1391,9 @@ async def solvent_comparison(
     """Rank solvents by how far they push the same reaction toward products.
 
     Includes the gas phase as a reference point, because "the solvent barely matters here" is a real
-    and useful answer and it is invisible without one.
+    and useful answer and it is invisible without one — **except over ions**, where the gas-phase
+    row is a number `require_solvent_for_ions` refuses to produce, so it is left out and a warning
+    says why rather than the whole screen failing on its reference.
 
     **Bounded fan-out, and the bound defaults to 1** — which is the serial loop it replaces. The
     media are independent (each is its own cache key, so no branch recomputes another's work), but a
@@ -1310,11 +1406,12 @@ async def solvent_comparison(
     # `calc_screen_max_parallel` bounds only how many media run at once, not how many run in total
     # (every medium in `solvents` is eventually run via the `gather` below) — the analogue of
     # `rank_species_across_solvents`'s species x media multiplication, checked the same way here.
+    media, no_reference = media_with_gas_reference([*reactants, *products], solvents)
     species_count = len(reactants) + len(products)
     require_within_budget(
-        estimate_units(species_count, level=level) * (len(solvents) + 1),
-        f"comparing a {species_count}-species reaction across {len(solvents)} solvents "
-        "plus the gas-phase reference",
+        estimate_units(species_count, level=level) * len(media),
+        f"comparing a {species_count}-species reaction across {len(solvents)} solvents"
+        + ("" if no_reference else " plus the gas-phase reference"),
     )
     limit = asyncio.Semaphore(settings.calc_screen_max_parallel)
 
@@ -1345,7 +1442,7 @@ async def solvent_comparison(
 
     # `gather` preserves argument order, so the gas-phase reference stays first and the ranking
     # below sorts from a list whose order does not depend on which branch finished first.
-    results = list(await asyncio.gather(*(one(solvent) for solvent in [None, *solvents])))
+    results = list(await asyncio.gather(*(one(solvent) for solvent in media)))
     effects = [
         SolventEffect(
             solvent=result.solvent,
@@ -1364,13 +1461,15 @@ async def solvent_comparison(
     spread = ranking(effects[-1]) - ranking(effects[0])
     uncertainty = settings.xtb_reaction_uncertainty_kcal
     warnings = list(dict.fromkeys(warning for result in results for warning in result.warnings))
+    if no_reference:
+        warnings.append(no_reference)
     # **The gas reference and the solution rows are in different standard states**, because each is
     # in the convention its own phase uses. Solvent against solvent — what this screen ranks — is
     # like against like and needs no caveat. The gas-to-solution gap does: for Δn != 0 it carries
     # 1.894·Δn kcal/mol of reference state on top of the solvation, and a reader differencing the
     # two columns without being told would read that as a solvent effect.
     delta_n = len(products) - len(reactants)
-    if delta_n and any(effect.delta_g_kcal is not None for effect in effects):
+    if delta_n and not no_reference and any(effect.delta_g_kcal is not None for effect in effects):
         warnings.append(
             f"this equation changes the molecule count by {delta_n:+d}, and the gas-phase row is "
             "quoted at the 1 atm standard state while every solvent row is quoted at 1 mol/L (the "
@@ -1715,6 +1814,9 @@ async def species_ranking(
         raise ValueError("a distribution needs at least one species")
     ceiling = settings.species_ranking_max
     considered = list(species[:ceiling])
+    # A protonation-microstate set is the worst case of the pc-03 defect: its members differ in net
+    # charge by construction, and in vacuum that difference is unscreened charge, not a ranking.
+    require_solvent_for_ions([smiles for smiles, _ in considered], solvent)
     temperature = temperature_k or settings.xtb_thermo_temperature_k
     require_within_budget(
         estimate_units(len(considered), level=level),
@@ -1751,6 +1853,9 @@ async def species_ranking(
     populations = boltzmann_populations(relative, [1] * len(scale), temperature)
 
     warnings: list[str] = []
+    caveat = solvated_ion_caveat([smiles for smiles, _ in considered])
+    if caveat:
+        warnings.append(caveat)
     if not use_gibbs:
         warnings.append(
             "ranked by electronic energy: at level='quick' no species has a free energy, so the "
@@ -1836,8 +1941,9 @@ async def species_solvent_comparison(
     `species_ranking` answers in one medium, so "which tautomer dominates in water against toluene"
     was one job per solvent and a comparison the caller assembled by hand. This is the fan-out, and
     it is `solvent_comparison`'s shape applied to a distribution rather than to a reaction: the gas
-    phase is prepended as a reference, the media run under the same bound, and the spread is
-    checked against the method's uncertainty before any of it is reported as a difference.
+    phase is prepended as a reference (left out over ions, `media_with_gas_reference`), the media
+    run under the same bound, and the spread is checked against the method's uncertainty before
+    any of it is reported as a difference.
 
     **This is the calculation implicit solvation is best at.** Every medium ranks the *same*
     species — same formula, same atoms, same level — so the systematic error of the continuum model
@@ -1851,7 +1957,9 @@ async def species_solvent_comparison(
     if not solvents:
         raise ValueError("give at least one solvent to compare")
     considered = list(species)
-    media: list[str | None] = [None, *solvents]
+    media, no_reference = media_with_gas_reference(
+        [smiles for smiles, _ in considered[: settings.species_ranking_max]], solvents
+    )
     require_within_budget(
         estimate_units(len(considered[: settings.species_ranking_max]), level=level) * len(media),
         f"ranking {len(considered)} species in {len(media)} media",
@@ -1878,8 +1986,8 @@ async def species_solvent_comparison(
                 run=run,
             )
 
-    # `gather` preserves argument order, so the gas-phase reference stays first and every
-    # `standings` list is in the order the caller can read against `media`.
+    # `gather` preserves argument order, so the gas-phase reference (when present) stays first and
+    # every `standings` list is in the order the caller can read against `media`.
     distributions = list(await asyncio.gather(*(one(solvent) for solvent in media)))
 
     # Keyed by SMILES rather than by position: `species_ranking` sorts its output by relative
@@ -1919,6 +2027,8 @@ async def species_solvent_comparison(
             warning for distribution in distributions for warning in distribution.warnings
         )
     )
+    if no_reference:
+        warnings.append(no_reference)
     if largest <= uncertainty:
         warnings.append(
             f"no species moves by more than {largest:.1f} kcal/mol across these media, within the "

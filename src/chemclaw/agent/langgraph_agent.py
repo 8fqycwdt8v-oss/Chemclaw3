@@ -499,15 +499,76 @@ def build_langgraph_agent(
         # is this helper's own graph state. The bound is the same bound, arrived at by construction.
         from langchain.agents import create_agent
 
+        _log_bound_surface(prof, bound, handoffs, [], helper=True, peer=peer)
         return create_agent(**shared)
+    helpers = _subagents(prof, chat_model, sink, correlation_id, actor, connectors)
+    _log_bound_surface(prof, bound, handoffs, helpers, helper=False, peer=peer)
     return create_deep_agent(
         backend=backend,
         # `skills=` is deliberately absent: it is what would make upstream compose a second skills
         # middleware beside `ReloadingSkillsMiddleware`. `_skills_middleware` says why one is right.
         permissions=filesystem_permissions(),
-        subagents=_subagents(prof, chat_model, sink, correlation_id, actor, connectors),
+        subagents=helpers,
         **shared,
     )
+
+
+def _log_bound_surface(
+    profile: AgentProfile,
+    bound: Sequence[Any],
+    handoffs: Sequence[Any] | None,
+    helpers: Sequence[Mapping[str, Any]],
+    *,
+    helper: bool,
+    peer: str,
+) -> None:
+    """Record what one compiled graph can delegate to at INFO, and every tool it binds at DEBUG.
+
+    **"The model never chose to hand off" was not verifiable.** The 2026-09-27 delegation run's
+    `peer` arm handed off in 0 of 24 repeats, and nothing in the process's logs said whether a
+    `transfer_to_<peer>` tool had been on the surface at all — so a model declining and a roster
+    that never bound were the same observation
+    (`D-2026-09-27-delegation-does-not-pay-on-the-measured-gateway-model`). This is the line that
+    tells them apart, per graph, with the helper roster `task` reaches beside it.
+
+    The delegation half is INFO because it is short and it is the one question the logs have to
+    answer after the fact; the whole tool list is DEBUG, for `_log_narrowing`'s reason — a graph is
+    compiled per turn, so at INFO it would be the loudest line in the process. Names only:
+    configuration, never content.
+    """
+    transfers = sorted(tool.name for tool in handoffs or [])
+    roster = sorted(str(spec.get("name", "")) for spec in helpers)
+    # A helper can neither hand off nor spawn (`_subagents`), and a turn compiles one per rostered
+    # name, so its line is DEBUG: at INFO the roster would drown the one line per turn that matters.
+    log_event(
+        logger,
+        "tools.delegation_bound",
+        "profile %s%s binds %d tool(s); handoffs: %s; helpers via task: %s",
+        profile.name,
+        f" (peer {peer})" if peer else " (helper)" if helper else "",
+        len(bound),
+        ", ".join(transfers) or "none",
+        ", ".join(roster) or "none",
+        profile=profile.name,
+        peer=peer,
+        helper=helper,
+        tools=len(bound),
+        handoffs=", ".join(transfers),
+        helpers=", ".join(roster),
+        level=logging.DEBUG if helper else logging.INFO,
+    )
+    if logger.isEnabledFor(logging.DEBUG):
+        names = sorted(tool.name for tool in bound)
+        log_event(
+            logger,
+            "tools.bound",
+            "profile %s binds: %s",
+            profile.name,
+            ", ".join(names),
+            level=logging.DEBUG,
+            profile=profile.name,
+            tools=", ".join(names),
+        )
 
 
 def _resolve_chat_model(supplied: Any | None, profile: AgentProfile) -> Any:

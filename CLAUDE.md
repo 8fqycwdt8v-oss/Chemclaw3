@@ -79,9 +79,11 @@ it builds on `create_react_agent`, deprecated since LangGraph 1.0.
 
 **The constraint that binds whoever adds delegation**: deepagents builds a bare `SubAgent` dict with
 *only* `spec["middleware"]`, so anything not compiled by `build_langgraph_agent` runs with **no audit
-trail, no authorization and no plan gate — silently.** What is still open is whether delegation pays:
-`evals/delegation.py` has never run against a model, and the corpus that was meant to settle it
-measured delegation *rate* over one-tool probes, which is a mediator rather than an outcome.
+trail, no authorization and no plan gate — silently.** Whether delegation pays was measured against a
+real gateway model with `make live-delegation` and it did not
+(`D-2026-09-27-delegation-does-not-pay-on-the-measured-gateway-model`): the model rarely delegated,
+delegating cost more, and no arm beat the baseline's own run-to-run variation. The surface stays as
+shipped; that ADR's trigger says when the question reopens.
 
 **Context and cost.** Compaction is `agent/compaction.py` — upstream's `ClearToolUsesEdit` for tool
 results and a first-party conversation window, both non-destructive inside `wrap_model_call`, with

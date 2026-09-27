@@ -9,7 +9,7 @@ same audit+authz middleware. See `docs/archive/audit/10-config-extensibility.md`
 import pytest
 
 from chemclaw.agent.chemclaw_agent import _capability_tools, _withheld_launcher_names
-from chemclaw.connectors.registry import enabled
+from chemclaw.connectors.registry import enabled, withheld_job_names
 from chemclaw.core.tool_registry import (
     _REGISTRY,
     register_tool,
@@ -134,8 +134,13 @@ def test_registry_holds_the_inprocess_tools_and_only_generated_launchers_besides
     # Bounded on both sides rather than equal: the registry only grows, so a launcher an earlier
     # build in this process registered under another configuration can still be held while this
     # deployment withholds it (`chemclaw_agent._withheld_launcher_names` subtracts it on read).
+    # A job whose manifest says this deployment cannot run it is withheld from the build too
+    # (`registry.withheld_job_names`), so the lower bound leaves it out and the upper keeps it.
+    bound_jobs = jobs - set(withheld_job_names())
     assert (
-        jobs | set(template_tool_names()) <= extra <= jobs | set(template_tool_names(declared=True))
+        bound_jobs | set(template_tool_names())
+        <= extra
+        <= jobs | set(template_tool_names(declared=True))
     )
 
 

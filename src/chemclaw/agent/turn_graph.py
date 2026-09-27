@@ -12,9 +12,10 @@ back to the single agent it built before — so the default path is not merely e
 same object built by the same call. Three independent reasons, and the first alone would be enough:
 
 1. `D-2026-08-10-a-subagent-is-an-attenuation-not-a-new-actor` requires a multi-agent arrangement
-   to ship disabled until hand-off accuracy is measured against the single-agent baseline. That
-   measurement does not exist — `evals/delegation.py` has still never run against a model — and
-   this feature does not create it. **Nothing here is evidence that handing over pays.**
+   to ship disabled until hand-off accuracy is measured against the single-agent baseline. The
+   one run there is (`D-2026-09-27-delegation-does-not-pay-on-the-measured-gateway-model`)
+   recorded no hand-off in 24 peer-arm repeats, so there is still no accuracy to measure.
+   **Nothing here is evidence that handing over pays.**
 2. A mis-routing mesh is worse than the single agent it replaces, which is the same sentence that
    ADR wrote about a mis-routing supervisor and is not weakened by the topology changing.
 3. An empty roster binds no handoff tool, so `tests/test_context_floor.py`'s prefix is untouched

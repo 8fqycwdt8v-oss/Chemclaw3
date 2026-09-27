@@ -107,6 +107,13 @@ class EvalSettings(BaseSettings):
     # comfortably: at 1024 the reply was truncated mid-JSON on long answers and the parse failure
     # was recorded as a verdict of `unserved`, mislabelling 65 of 190 probes in the first run.
     live_probe_judge_max_tokens: int = Field(default=4096, gt=0)
+    # How much of each tool result the judge is shown. A result small enough to ride the stream
+    # whole (`stream_inline_result_bytes`) is shown up to this many characters instead of the
+    # 200-character browser preview, which is what made a judge call two citations `screen_hazards`
+    # had returned "fabricated" (probe pl-16, 2026-09-27: both sat past character 200 of a result
+    # the model read whole). Sized to the inline cap so a small result is never cut; 0 restores the
+    # previews alone.
+    live_probe_judge_result_chars: int = Field(default=4096, ge=0)
     # The M12 re-validation suites (plan gate, durable-launcher ordering, team routing). Their own
     # directory *under* the corpus, not beside it: `load_probes` globs one level, so a subdirectory
     # is invisible to `make live-probes` — which is the point. These probes are scripted

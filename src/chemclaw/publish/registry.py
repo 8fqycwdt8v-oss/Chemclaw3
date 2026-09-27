@@ -120,6 +120,21 @@ def publishing_enabled() -> bool:
     return bool(settings.result_sink_list)
 
 
+def unpublishable_reason() -> str | None:
+    """Why this deployment cannot republish anything, or `None` when a sink is enabled.
+
+    The `unavailable_reason` the `results` bundle's `republish_calculations` job declares, so the
+    launcher is withheld where it could only fail — and the sentence its own guard raises, so the
+    two cannot say different things about one condition.
+    """
+    if publishing_enabled():
+        return None
+    return (
+        "no result sink is enabled (CHEMCLAW_RESULT_SINKS is empty), so a republish would scan "
+        "the whole stored corpus and queue nothing. Enable a sink first."
+    )
+
+
 def _resolve(reference: str) -> Callable[..., Any]:
     """Import `module:callable` and return it, or fail naming both halves of the reference.
 

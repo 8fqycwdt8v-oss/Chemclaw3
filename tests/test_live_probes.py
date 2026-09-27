@@ -36,7 +36,7 @@ from chemclaw.core.errors import SubsystemUnavailableError
 from chemclaw.evals.live import ProbeOutcome, _score_citations, load_probes, run_probe
 from chemclaw.evals.probe import Probe, ProbeSet
 from chemclaw.kg.note import mentioned_ids
-from tests.test_probe_coverage import fleet_expected_tools
+from tests.test_probe_coverage import fleet_expected_tools, withheld_tools
 
 PROBE_DIR = Path(__file__).resolve().parent.parent / "data" / "evals" / "probes"
 
@@ -602,8 +602,9 @@ def test_every_expected_tool_in_the_shipped_corpus_exists_on_the_agent_surface()
     """
     surface = available_tool_names()
     unknown = {t for p in load_probes(str(PROBE_DIR)) for t in p.expects_tools if t not in surface}
-    assert unknown - fleet_expected_tools() == set(), (
-        f"probes expect tools that do not exist: {sorted(unknown - fleet_expected_tools())}"
+    exempt = fleet_expected_tools() | withheld_tools()
+    assert unknown - exempt == set(), (
+        f"probes expect tools that do not exist: {sorted(unknown - exempt)}"
     )
 
 

@@ -466,6 +466,16 @@ class JobSpec(BaseModel):
     # replaced the hand-written adapters this is the launch boundary. Declaring it is how a job
     # keeps a guard it would otherwise silently lose.
     precondition: str | None = Field(default=None, pattern=r"^[\w.]+:[A-Za-z_]\w*$")
+    # Whether *this deployment* can run the job at all: a dotted `module:function` taking nothing
+    # and returning a sentence saying why not, or `None` when it can. A job with a reason is
+    # withheld from the model (`registry.job_tools`) and refused on every other launch path
+    # (`jobs.prepare_job_launch`). The deployment-level twin of `precondition`, which judges one
+    # launch's arguments — no argument can make a job runnable that has nowhere to put its result,
+    # and offering it anyway is a tool whose only outcome is a failed run (`jobs.unavailable_reason`
+    # has the live measurement). Declared-but-unbound, the pattern
+    # `D-2026-09-26-a-launcher-no-profile-names-is-withheld-when-its-capability-is-off` applies to
+    # template launchers.
+    unavailable_reason: str | None = Field(default=None, pattern=r"^[\w.]+:[A-Za-z_]\w*$")
     expensive: bool = False
     publish_to_graph: bool = False
     # What this job changes *outside* this deployment, and whether it can be undone. Absent means

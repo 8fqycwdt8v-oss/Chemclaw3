@@ -139,13 +139,14 @@ that a single-structure answer is good enough.
   structure* rather than the canonical drawing, and a member whose bonding could not be read
   carries no SMILES at all rather than a guess.
 - **Does the form change with the solvent?** → `rank_species_across_solvents`, the same ranking
-  in each medium plus the gas phase. Reach for it whenever the question spans two solvents — an
+  in each medium plus the gas phase (left out for a set with a charged member). Reach for it whenever the question spans two solvents — an
   assay in water and a crystallisation out of toluene — rather than running `rank_species` twice
   and comparing: the ranking is sorted by energy, so two payloads are not a diff, and the result's
   `dominance_changes` is the finding. If it is true, no single-structure number above is a number
   about "the compound" without naming the medium.
 - **What is charged, at which pH?** → `enumerate_protonation_states` then `rank_species`, or
-  `run_microspecies_profile`. This is the amphoteric and polyprotic case `predict_pka` and
+  `run_microspecies_profile` — always with a `solvent`: microstates differ in charge, and a
+  gas-phase ranking over them is refused (a bare ion in vacuum is off by hundreds of kcal/mol). This is the amphoteric and polyprotic case `predict_pka` and
   `predict_logd` refuse; it is not a substitute for them on a single site, where they are calibrated
   and this is not.
 - **Is this property a real number for a floppy molecule?** → `compute_ensemble_property`. Returns
@@ -199,7 +200,11 @@ electronic energies is needed; it skips every Hessian.
   carries `is_strongly_exothermic` against a configured threshold. Use `level="quick"` when the
   flag is all you need: it skips every Hessian and differences electronic energies only.
   Advisory, like the structural hazard screen (`screen_hazards`) — a flag for attention, never
-  a safety certification.
+  a safety certification. **An acid-base quench or neutralisation is not a candidate**: its
+  species are ions, a gas-phase run over them is refused (a bare ion in vacuum is off by hundreds
+  of kcal/mol), and even with `solvent` the continuum is the weakest part of the method for an
+  ion, so the number orders related reactions and is never a heat of neutralisation. Say that a
+  quench exotherm needs calorimetry rather than computing one.
 
 ## Reading results honestly
 

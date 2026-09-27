@@ -112,6 +112,11 @@ class ToolResult(BaseModel):
 
     tool: str
     preview: str = ""
+    # The whole result when it was small enough to ride the stream
+    # (`ToolResultEvent.result_inline`), else empty. What the judge reads in place of the preview,
+    # bounded by `live_probe_judge_result_chars`: a preview is the browser's 200 characters, and
+    # pl-16's two citations sat past them in a result the model had read whole.
+    text: str = ""
 
 
 class ProbeOutcome(BaseModel):
@@ -600,7 +605,11 @@ async def run_turn(
                     returned_ids.update(str(note_id) for note_id in event.get("note_ids", []))
                     returned_values.extend(_numbers(event.get("numbers", []), probe.id))
                     outcome.tool_results.append(
-                        ToolResult(tool=str(event.get("tool", "")), preview=preview)
+                        ToolResult(
+                            tool=str(event.get("tool", "")),
+                            preview=preview,
+                            text=str(event.get("result_inline", "")),
+                        )
                     )
                 elif kind == "tool_failed":
                     tool = str(event.get("tool", ""))
