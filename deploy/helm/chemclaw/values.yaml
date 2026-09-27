@@ -785,7 +785,8 @@ migrateJob:
   # and the release sits in `pending-upgrade`, which blocks the next upgrade and needs a recovery an
   # operator has to already know (`docs/guides/runbook.md` §(xi) documents it). 15 minutes covers a
   # migration run plus its retries on a database of the size this chart is written for; raise it
-  # before a release that adds an index to a large table.
+  # before a release that adds an index to a large table, or that backfills one (109 rewrites every
+  # `session_messages` row; `infra/sql/109_session_message_authorship.sql` has the measurement).
   activeDeadlineSeconds: 900
 
 # The stored-message conversion Job (`post-upgrade`, the second document in `migrate-job.yaml`).

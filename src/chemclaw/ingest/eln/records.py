@@ -210,7 +210,7 @@ _SELECT_RETRACTED = (
 )
 
 # Which of a page of candidate ids no structure search may serve: withdrawn by the source, or
-# citation-only (`109`). The second can only carry a fingerprint row if an entry was ingested
+# citation-only (`110`). The second can only carry a fingerprint row if an entry was ingested
 # structured and later amended to name a species without its structure — the app role cannot
 # DELETE from `reaction_fingerprints`, so the stale row stays and this is what keeps it unserved.
 _SELECT_WITHHELD = (
@@ -249,7 +249,7 @@ class ReactionRecord(BaseModel):
     # Set from `RawEntry.retracted_at`, never inferred from absence
     # (`D-2026-09-13-a-withdrawal-is-a-fact-a-source-reports`, and `infra/sql/066`).
     retracted_at: datetime | None = None
-    # `CITATION_ONLY` when the source named a species without its structure (`infra/sql/109`):
+    # `CITATION_ONLY` when the source named a species without its structure (`infra/sql/110`):
     # the row is citable and no structure search may serve it. Defaulted to `STRUCTURED` because
     # that is what every record was before the tier existed, and what the migration says of them.
     tier: RecordTier = RecordTier.STRUCTURED

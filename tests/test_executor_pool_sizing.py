@@ -18,76 +18,111 @@ the difference visible.
 """
 
 import asyncio
-import statistics
 import threading
 import time
+from dataclasses import dataclass
 
 import pytest
 
 from chemclaw.core.config import settings
 from chemclaw.core.executor import front_door_reserved, install_default_executor
 
-#: How long each stand-in for "a corpus parse on an executor thread" blocks. Half of it holds the
-#: GIL and half releases it, because that is the shape of `load_notes`/`build_graph` and because a
-#: pure `time.sleep` would understate what a queued caller waits for.
-_BLOCK_SECONDS = 0.2
+#: How long any wait in this file may take before it is a failure rather than a wait. Nothing here
+#: is *measured* against it: every wait below ends on an event the code under test produces, and
+#: this only bounds how long a broken pool — one that never starts an offload, or never runs the
+#: short call — can hang the suite. It sits far from the passing case (milliseconds) on purpose,
+#: which is lesson 59's rule: a deadline separates two outcomes, not two speeds.
+_BACKSTOP_SECONDS = 30.0
 
 
-def _block(started: threading.Semaphore | None = None) -> None:
-    """One offloaded parse: a GIL-holding half and a file-I/O half.
+@dataclass(frozen=True)
+class _Saturation:
+    """What one arm observed about its pool.
 
-    `started` is released the instant this lands on a thread, which is what lets the caller wait
-    for the pool to be *actually* full rather than sleep and hope.
+    How wide it was, how many threads the fan-out held, and whether the short call had to wait
+    for the fan-out to let go before it could run.
     """
-    if started is not None:
-        started.release()
-    end = time.perf_counter() + _BLOCK_SECONDS / 2
-    while time.perf_counter() < end:
-        pass
-    time.sleep(_BLOCK_SECONDS / 2)
+
+    width: int
+    held: int
+    queued: bool
 
 
-def _short_call_ms(*, pool_reserved: int, offloads: int, trials: int = 3) -> float:
-    """Saturate a pool sized for `pool_reserved` with `offloads` parses, then time a tiny call.
+def _short_call_under_fan_out(*, pool_reserved: int, offloads: int) -> _Saturation:
+    """Fill a pool sized for `pool_reserved` with `offloads` parses, then submit one tiny call.
 
     The tiny call stands in for `api/auth.py`'s `await asyncio.to_thread(validate_token, ...)`,
-    which every authenticated request makes. What is returned is the wait an operator feels.
+    which every authenticated request makes. What is returned is not how long it waited but
+    **whether it could run at all while every offload was still in flight** — the property the
+    pool's width decides, observed rather than inferred from a clock.
 
-    **The pool is saturated by waiting for it, not by sleeping at it — and that was the defect.**
-    This used to `await asyncio.sleep(0.05)` and assume all `offloads` had reached the executor.
-    `asyncio.to_thread` submits when its coroutine first runs, so on a loaded machine a fixed 50 ms
-    leaves most of them unsubmitted, the narrow pool is *not* full, and the short call sails
-    through. Measured on CI: **1.1 ms** on an arm whose entire purpose is to show a short call
-    waiting, which this test then reported as "no longer reproducing the queuing it exists to fix"
-    — a true statement about that run and a false one about the code. Every worker now releases a
-    semaphore as it lands, and the caller waits for as many as the pool can run at once, so
-    "saturated" is a fact of the run rather than a hope about its speed.
+    **Why not a clock, which is what this used to be.** It timed the short call and asserted the
+    narrow arm waited more than half a block, and CI kept sampling the narrow arm at **1.1 ms** —
+    most recently on PR #469 and on `main` run 36247322939, green on rerun. The offloads ended on a
+    wall-clock deadline, while the short call was submitted whenever the event loop next got the GIL
+    back from twenty-odd threads contending for it — so what the arm measured was a race between the
+    fan-out draining and the loop being scheduled, which the pool's width does not decide. Measured
+    in the gate container (8 cores, the old width, 98 offloads, twelve runs per arm): the lag from
+    "the pool is saturated" to "the short call is submitted" was **81-416 ms** idle and
+    **570-1,462 ms** with twelve CPU-spinning processes beside it, the queue in front of the call
+    fell from **52-72** items to as few as **12**, and the call's wait from ~0.9-1.3 s to
+    **197 ms**. A runner loaded further than that reaches an empty queue, and 1.1 ms is what an
+    empty queue looks like. Best-of-five, then the median, then a start semaphore each narrowed
+    the race and none removed it, because each still read the answer off elapsed time.
 
-    That is also why the earlier attempts to fix this with statistics did not hold. A single sample
-    became the best of five, which reads what a configuration *achieves* — right for the wide arm,
-    wrong for the narrow one, where the best of five is precisely the run that failed to saturate.
-    The repeat stays, at the median, because the wide arm still ranges 20-235 ms on one idle box
-    and a lone sample is not an estimate; but the race is fixed where it lives.
+    **So every offload now holds its thread on a gate, not on a sleep.** Nothing finishes until the
+    gate opens, the count of held threads is read from the loop without borrowing one, and the short
+    call is submitted while that count is the whole truth about the pool. Then:
+
+    - if the fan-out holds **every** thread, the short call cannot run until the gate opens — it
+      reports the gate open when it finally does, which is its own record of having queued;
+    - if a thread is **free**, the short call is awaited *before* the gate opens, so it can only
+      complete by running beside the held fan-out, and it reports the gate still shut.
+
+    Both outcomes are decided by the width and by nothing about the machine's speed. The only
+    timing left is `_BACKSTOP_SECONDS`, which a correct run never approaches.
     """
 
-    async def scenario() -> float:
+    async def scenario() -> _Saturation:
+        loop = asyncio.get_running_loop()
         pool = install_default_executor(component="front-door", reserved=pool_reserved)
         width = pool._max_workers
-        started = threading.Semaphore(0)
-        blocking = [
-            asyncio.create_task(asyncio.to_thread(_block, started)) for _ in range(offloads)
-        ]
-        # Every thread the pool has is now running a block, so the next submission must queue.
-        # `min` because a pool wider than the fan-out never fills, which is the wide arm's point.
-        occupied = min(width, offloads)
-        await asyncio.to_thread(lambda: [started.acquire() for _ in range(occupied)])
-        submitted = time.perf_counter()
-        await asyncio.to_thread(lambda: None)
-        waited = (time.perf_counter() - submitted) * 1000
-        await asyncio.gather(*blocking)
-        return waited
+        gate = threading.Event()
+        lock = threading.Lock()
+        started = 0
 
-    return statistics.median(asyncio.run(scenario()) for _ in range(trials))
+        def hold() -> None:
+            nonlocal started
+            with lock:
+                started += 1
+            gate.wait(_BACKSTOP_SECONDS)
+
+        blocking = [loop.run_in_executor(None, hold) for _ in range(offloads)]
+        try:
+            # A pool wider than the fan-out never fills, which is the wide arm's whole point.
+            target = min(width, offloads)
+            deadline = time.monotonic() + _BACKSTOP_SECONDS
+            while True:
+                with lock:
+                    held = started
+                if held >= target:
+                    break
+                assert time.monotonic() < deadline, (
+                    f"only {held} of {target} offloads reached a thread in {_BACKSTOP_SECONDS}s"
+                )
+                await asyncio.sleep(0.001)
+            # `run_in_executor` submits synchronously, so the call is in the pool's queue — or on a
+            # free thread — before anything else here runs.
+            short = loop.run_in_executor(None, gate.is_set)
+            if held < width:
+                await asyncio.wait_for(asyncio.shield(short), _BACKSTOP_SECONDS)
+        finally:
+            gate.set()
+        ran_after_release = await asyncio.wait_for(short, _BACKSTOP_SECONDS)
+        await asyncio.gather(*blocking)
+        return _Saturation(width=width, held=held, queued=ran_after_release)
+
+    return asyncio.run(scenario())
 
 
 def test_the_front_door_reserves_for_the_fan_out_a_permit_licenses() -> None:
@@ -118,33 +153,32 @@ def test_a_short_call_queues_at_the_old_width_and_does_not_at_this_one() -> None
     how wide the pool installed under it is. The first arm is the shipped sizing and is what a
     token validation waited behind; the second is `front_door_reserved()`.
 
-    Measured on a 4-core sandbox at 96 offloads of 200 ms: 762.7 ms against 123.2 ms worst case.
-    The assertion is a ratio against `_BLOCK_SECONDS` rather than either figure, because absolute
-    milliseconds on shared CI hardware are not a claim anybody can keep true.
-
-    **The ratio is not enough on its own, which cost two red builds.** Both arms are timing
-    samples, so a runner that stalls the *wide* one inverts a ratio just as readily as it inflates
-    an absolute — CI sampled 228.5 ms narrow against 636.0 ms wide, which reads as "widening bought
-    nothing" and is a claim about the runner. `_short_call_ms` repeats each arm five times for that
-    reason. It takes the **median** and not the minimum, which was the second red build: the
-    minimum is the right reading of the wide arm and the wrong one of the narrow arm, whose point
-    is that a short call waits — best-of-five found the lucky run at 1.1 ms and this test announced
-    it was no longer reproducing its own premise.
+    Asserted as the property rather than as a duration (`_short_call_under_fan_out` says why the
+    duration kept lying): at the old width the fan-out holds every thread and the short call runs
+    only once it lets go; at this width the fan-out leaves threads free and the short call runs
+    beside it. Measured on a 4-core sandbox at 96 offloads of 200 ms, the difference used to be
+    762.7 ms against 123.2 ms worst case — which is what the queueing costs, and what this now
+    proves happens rather than how long it takes.
     """
     offloads = front_door_reserved()
     old_width = settings.service_max_concurrent_turns + settings.attachment_max_concurrent_parses
 
-    narrow = _short_call_ms(pool_reserved=old_width, offloads=offloads)
-    wide = _short_call_ms(pool_reserved=offloads, offloads=offloads)
+    narrow = _short_call_under_fan_out(pool_reserved=old_width, offloads=offloads)
+    wide = _short_call_under_fan_out(pool_reserved=offloads, offloads=offloads)
 
-    assert narrow > _BLOCK_SECONDS * 1000 / 2, (
-        f"a short call waited only {narrow:.1f} ms behind {offloads} offloads at the old pool "
-        f"width of {old_width}; this test is no longer reproducing the queuing it exists to fix"
+    assert offloads > narrow.width, (
+        f"{offloads} offloads no longer overfill the old pool of {narrow.width} threads, so the "
+        "counterfactual this test exists for cannot arise; the caps or the headroom moved"
     )
-    assert wide < narrow / 2, (
-        f"widening the pool from {old_width} to {offloads} reserved threads moved the queued short "
-        f"call from {narrow:.1f} ms only to {wide:.1f} ms; sizing for the fan-out bought nothing "
-        "and this repository should not pay for threads it does not need"
+    assert narrow.held == narrow.width and narrow.queued, (
+        f"at the old width the fan-out held {narrow.held} of {narrow.width} threads and the short "
+        "call ran while it was still in flight; this test is no longer reproducing the queuing it "
+        "exists to fix"
+    )
+    assert wide.held == offloads and not wide.queued, (
+        f"widening the pool from {old_width} to {offloads} reserved threads left the short call "
+        f"queued behind the fan-out ({wide.held} of {wide.width} threads held); sizing for the "
+        "fan-out bought nothing and this repository should not pay for threads it does not need"
     )
 
 

@@ -410,30 +410,20 @@ only holds defects can only ever restore the system to what it already intended 
       said 39 and then 40 for one count three sentences apart, which is why the number now appears
       once, with the date it was measured.
 
-- [ ] **Three subsystems want one missing column: who wrote this** — [M]. `src/chemclaw/kg/note.py`'s `Note.created_by` is
-      `Literal["human", "agent"]` and `Note.source` is the ingest source, so **a note names no
-      person** — found while scoping the conflict notice
-      (`D-2026-09-14-a-contradiction-only-a-querier-sees-is-not-a-warning`, which addressed the
-      subscriber instead and needs no column). `audit_events.agent` is the same shape one layer
-      over (`D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution` deleted the claim
-      rather than the column), and `session_messages` is the third, in the row below. Each is a
-      schema change plus a backfill question over rows already written, and taking it three times
-      in the corner each subsystem noticed it is how three subtly different answers to one question
-      get shipped. Decide the shape once — what an author *is* when the writer is an agent acting
-      for a person — then migrate each. Nothing is blocked on it today: every consumer that wanted
-      it has an addressee it can reach without one.
-
 - [ ] **Several humans in one session is five pieces, and the policy one has to be settled first**
       — [L], scoped in `docs/archive/PLAN-2026-09-14-multiplayer-and-the-open-delegation-questions.md`.
-      Not the owner gate relaxed: measured, `session_messages` has **no actor column** so a shared
-      transcript cannot say who wrote what; ownership is checked in 46 places under
+      Not the owner gate relaxed: a message now names who wrote it (`session_messages.actor`/`agent`,
+      `D-2026-09-27-an-author-is-a-person-and-an-agent`), and a message's `actor` is its sender for
+      the sender-governs decision (owner, 2026-09-26) to read; ownership is checked in 46 places under
       `src/chemclaw/api/`; `api/detach.py` holds one queue and one `_attached` flag, so a second
       reader *steals* events rather than seeing a copy; and two writers on one thread fork the DAG
       silently (Wave 2's measurement), which is what `SessionTurnClaims` prevents by refusing.
 
       The serialisation is already correct and only its *answer* is wrong — one turn at a time is
       the right semantic for a shared thread, so the 409 becomes a bounded queue rather than the
-      claim being relaxed. Order: participants, attribution, queued turn, reader fan-out. **Settle
+      claim being relaxed. Order: participants, queued turn, reader fan-out — attribution's schema half is the authorship
+      pair above, and what is left of it is the owner gate and the erasure's claim coverage for a
+      session somebody else owns. **Settle
       the authority questions before the schema**: whose roles govern a tool call, whether B may
       approve a plan A's message produced, and whose `/memories/` load (they are namespaced per
       actor digest, so a shared session loads none, the sender's, or a session tier that does not

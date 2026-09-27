@@ -112,13 +112,19 @@ _INSERT_BACK = sql.SQL("INSERT INTO {table} SELECT * FROM {temp}")
 # the newest message lands at *now* and the spacing between messages is preserved. Stamping them
 # all to `now()` would have been simpler and would have flattened a conversation's timeline into a
 # single instant, which is a fact about the parent that the fork has no business rewriting.
+#
+# **Who wrote each message is copied too, and it is not the forker.** A fork is a copy of what was
+# said, and the authorship pair (`core/authorship.py`) is a fact about the saying: stamping the
+# person who forked onto the parent's messages would attribute words to them they did not write,
+# which in a shared session would be somebody else's words.
 _COPY_MESSAGES = """
-    INSERT INTO session_messages (session_id, message, created_at, message_shape, correlation_id)
+    INSERT INTO session_messages
+        (session_id, message, created_at, message_shape, correlation_id, actor, agent)
     SELECT %s, message,
            created_at + (now() - (
                SELECT max(created_at) FROM session_messages WHERE session_id = %s
            )),
-           message_shape, correlation_id
+           message_shape, correlation_id, actor, agent
     FROM session_messages WHERE session_id = %s
 """
 

@@ -16,6 +16,7 @@ import frontmatter
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
+from chemclaw.core.authorship import UNNAMED_AGENT, Authorship
 from chemclaw.core.errors import ChemclawError
 from chemclaw.kg import relations
 
@@ -693,6 +694,13 @@ class Note(TemporalWindow):
     from curated knowledge at the point of use. `confidence` (0–1) and `valid_from`/`valid_to` let
     a later query weigh and time-scope evidence.
 
+    `actor` is the other half of who wrote it (`core/authorship.py`,
+    `D-2026-09-27-an-author-is-a-person-and-an-agent`): the person on whose behalf an agent wrote
+    the note, stamped by `record_note` from the turn's or job's identity. Absent means *not
+    recorded* — every note written before it existed, and every note written where no person is
+    bound — and is never filled in by guessing. `authorship` reads the two together, so a note
+    answers the question in the shape an audit row and a transcript message do.
+
     Frozen: a note is an immutable value object. The graph indexer caches parsed notes and
     hands the same instances to every reader (KM-14); immutability makes that sharing safe —
     no caller can mutate a cached note and corrupt it for the next query.
@@ -710,6 +718,10 @@ class Note(TemporalWindow):
     compound_smiles: str | None = None
     tags: list[str] = Field(default_factory=list)
     created_by: Literal["human", "agent"] = "human"
+    # Omitted from the rendered frontmatter while `None` (`render_note` dumps `exclude_none`), so
+    # every note written before this field existed re-renders to the same bytes and the writer's
+    # "nothing staged, nothing to commit" rule holds across the change.
+    actor: str | None = Field(default=None, min_length=1)
     source: str | None = None
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     # Calculations and stored by-products this note's claims rest on (STO-7). These are
@@ -780,6 +792,20 @@ class Note(TemporalWindow):
         """
         _walk_encodable(self, "")
         return self
+
+    @property
+    def authorship(self) -> Authorship:
+        """Who wrote this note, in the shape every subsystem answers that question in.
+
+        `created_by: agent` is the agent half, and it names no agent: nothing that writes a note
+        knows which graph it runs on (the value is a build-time argument of the audit middleware and
+        reaches no tool body), so it reads as `UNNAMED_AGENT` rather than as a name somebody chose.
+        A note from before `actor` existed reads with the person unrecorded — the backfill rule for
+        frontmatter, applied at read time because the files are not this system's to rewrite.
+        """
+        return Authorship(
+            actor=self.actor, agent=UNNAMED_AGENT if self.created_by == "agent" else None
+        )
 
     def outgoing_links(self) -> list[str]:
         """The ids this note links to, from its body `[[wikilinks]]` and its `relations:`.

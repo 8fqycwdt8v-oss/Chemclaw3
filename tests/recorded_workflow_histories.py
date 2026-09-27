@@ -170,6 +170,21 @@ async def replay_failure(archived: ArchivedHistory, workflow_class: type) -> str
         # through its own `asyncio.run`, so the loop closing behind it is the teardown.
         for task in pending:
             task.cancel()
+        # **The watcher is asked first, and the order is the whole control.** `asyncio.wait` with
+        # `FIRST_COMPLETED` returns every future that finished in that cycle, not one — so when the
+        # SDK logs the divergence and the replay coroutine then completes without raising, *both*
+        # are in `done`. Asking `replay` first took its silence over the watcher's evidence and
+        # returned "", which reports a known-divergent history as clean: measured, both futures
+        # done, `tripped` set, `reason` populated, verdict "". That is
+        # `test_the_control_still_detects_the_divergence_it_was_built_for` going green for the one
+        # reason its own docstring says would be a real finding — while the finding was false.
+        #
+        # `reason` rather than `tripped` because `emit` assigns it synchronously and only
+        # *schedules* the event through `call_soon_threadsafe`, so it is set in strictly more cases
+        # and is the earliest honest answer. Absence of an exception is absence of evidence;
+        # a logged `TMPRL1100` is evidence. Evidence wins.
+        if watcher.reason:
+            return watcher.reason
         if replay in done:
             error = replay.exception()
             return "" if error is None else f"{type(error).__name__}: {error}"

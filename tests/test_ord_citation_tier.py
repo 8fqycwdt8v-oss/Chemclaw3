@@ -503,7 +503,7 @@ def test_the_memory_corpus_leaves_citation_only_records_out_and_stays_complete(
 
 
 async def test_the_durable_store_keeps_the_tier_and_withholds_it_from_structure_search() -> None:
-    """`109`'s column round-trips, the upsert moves it, and `structurally_withheld` reads it."""
+    """`110`'s column round-trips, the upsert moves it, and `structurally_withheld` reads it."""
     await migrated_db_or_skip()
     store = PostgresReactionRecordStore()
     source = "tier-test-source"
