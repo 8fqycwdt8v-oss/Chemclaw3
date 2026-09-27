@@ -69,6 +69,7 @@ from pydantic import BaseModel, Field
 
 from chemclaw.agent.plan_link import plan_link_for_call
 from chemclaw.connectors.transport import SERVED_BY
+from chemclaw.core.authorship import UNNAMED_AGENT
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import (
     get_current_actor,
@@ -258,7 +259,16 @@ class AuditEvent(BaseModel):
     # row already knows which one it is, and a contextvar would reintroduce a producer that can be
     # forgotten. `tests/test_audit.py` drives both graphs and asserts each row's value rather than
     # scanning for the absence of one.
-    agent: str = ""
+    #
+    # **`actor` and this field are the authorship pair every subsystem now shares**
+    # (`core/authorship.py`, `D-2026-09-27-an-author-is-a-person-and-an-agent`), and this table's
+    # encoding is the one the others took rather than the other way round: `""` is `UNNAMED_AGENT`,
+    # an agent that goes unnamed, which is exactly what a note or a transcript row says when it
+    # cannot name the graph that wrote it. So the trail joined the model with no migration and no
+    # backfill. The one value it can never hold is "no agent" — every row is a tool call, and a tool
+    # call is an agent's act by definition — which is why the column is `NOT NULL` here and nullable
+    # on `session_messages`, where a row can be the chemist's own words.
+    agent: str = UNNAMED_AGENT
     # The plan step this call served — the `content` of the first `in_progress` todo, or empty when
     # the call was not made from a plan step (`agent/plan_link.plan_link_for_call`, the same rule
     # and the same function a durable job's `job_records.plan_step` is stamped from).
@@ -478,7 +488,7 @@ def make_audit_middleware(
     correlation_id: str,
     actor: str,
     sink: AuditSink | None = None,
-    agent: str = "",
+    agent: str = UNNAMED_AGENT,
 ) -> AgentMiddleware[Any, Any]:
     """The trail as tool-call middleware — the wiring, with the recording itself in `_recording`.
 
@@ -563,7 +573,7 @@ async def _recording(
     tool_revision: str = "",
     plan_step: str = "",
     metric_name: str = "",
-    agent: str = "",
+    agent: str = UNNAMED_AGENT,
 ) -> AsyncIterator[_Recorded]:
     """The trail itself, with no framework in it — both engines' middlewares are wrappers.
 

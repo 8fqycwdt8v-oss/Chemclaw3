@@ -35,6 +35,12 @@ zero-row table renders at all belongs to the caller, because only the caller kno
 came back" or "nothing was asked" is the true statement. `core` is the only package all five
 importers already depend on, and the module imports nothing but `collections.abc`.
 
+`authorship` is the one answer to "who wrote this" (`D-2026-09-27-an-author-is-a-person-and-an-agent`):
+the person it was written for and the agent that wrote it, which a knowledge note, an audit row and a
+transcript message all store under the same two names. It is here for the `fulltext` reason — `kg`,
+`agent` and `api` each read it, and three corners answering the question separately is the failure
+it was decided once to prevent.
+
 `connect` is the one way to attach a database this system does **not** own, and it is here for the
 `fulltext` reason rather than the `db` one: three seams reach somebody else's database — the
 warehouse ELN inbound (`ingest`), the result store outbound (`publish`), and the dense half of
