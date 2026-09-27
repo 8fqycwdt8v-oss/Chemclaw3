@@ -44,6 +44,7 @@ from langchain_core.messages import AIMessageChunk, ToolMessage
 from chemclaw.agent.plan_gate import plan_identity
 from chemclaw.agent.plan_scope import declared_scope
 from chemclaw.agent.state import PEER_DEPTH_ATTR, turn_input
+from chemclaw.agent.tool_result_size import full_result_ref, was_cut
 from chemclaw.api.events import (
     Event,
     EvidenceSourceEvent,
@@ -458,9 +459,15 @@ async def _from_update(
                 if call_id in failed_calls or getattr(message, "status", "success") == "error":
                     logger.debug("tool call %s failed; already reported as tool_failed", call_id)
                 else:
+                    # `cut`/`full_ref` read off the message rather than recomputed: the cut
+                    # happened inside the tool chain, which is the only place that saw both texts,
+                    # and it left its verdict and the full text's ref on `response_metadata`.
                     yield _attributed(
                         await trace.returned(
-                            str(getattr(message, "tool_call_id", "")), message_text(message)
+                            str(getattr(message, "tool_call_id", "")),
+                            message_text(message),
+                            cut=was_cut(message),
+                            full_ref=full_result_ref(message),
                         ),
                         agent,
                     )

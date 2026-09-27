@@ -61,7 +61,11 @@ from chemclaw.agent.skill_fingerprint import skill_fingerprint
 from chemclaw.agent.spend_cap import spend_hit_cap, turn_billed_tokens
 from chemclaw.agent.state import turn_config
 from chemclaw.agent.stored_skill_tools import stored_skill_declarations
-from chemclaw.agent.tool_result_size import bounded_content
+from chemclaw.agent.tool_result_size import (
+    bounded_content,
+    reset_full_result_sink,
+    set_full_result_sink,
+)
 from chemclaw.agent.turn_ambient import reset_tolerantly, turn_caps
 from chemclaw.agent.turn_cost import TurnCost, record_turn_cost
 from chemclaw.agent.turn_graph import build_turn_agent
@@ -82,7 +86,7 @@ from chemclaw.api.events import (
 from chemclaw.api.graph_stream import graph_events
 from chemclaw.api.runner_answer import build_answer_event
 from chemclaw.api.runner_trace import ToolCallTrace
-from chemclaw.api.tool_results import session_sink
+from chemclaw.api.tool_results import full_result_sink, session_sink
 from chemclaw.connectors.registry import open_connector_specs
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
@@ -1022,6 +1026,11 @@ def _turn_ambient(
       build-time id was shared by every turn from every user on the pod, and the audit trail could
       not tell two conversations apart;
 
+    - where a cut tool result keeps its full text (`full_result_sink`), because the cut runs in a
+      middleware cached per profile for the process, so it cannot be handed this turn's session at
+      build time — and the session plus this turn's correlation id are exactly what a stored result
+      is filed under (`D-2026-09-27-a-cut-result-is-kept-for-the-chemist-not-the-model`);
+
     `dry_run` rides here too for the reason it is ambient at all: the model can neither set it nor
     clear it (IDEA-4). `user_texts` — the chemist's own words in this thread, this turn's message
     last — rides here for exactly that reason and no other: `protocols` checks a `basis="stated"`
@@ -1034,7 +1043,8 @@ def _turn_ambient(
 
     Reset order is unchanged by the extraction and was checked rather than assumed: the nested
     `with` exits while the exception propagates out of the `yield`, so the five cap ambients still
-    tear down first and in their old order, then the dry-run flag, then the three identity vars.
+    tear down first and in their old order, then the full-result sink (set last, reset first), then
+    the dry-run flag, then the three identity vars.
     `set_current_identity` is skipped entirely when there is no actor, so the unauthenticated path
     stamps nothing to reset.
     """
@@ -1043,6 +1053,7 @@ def _turn_ambient(
     identity_token = set_current_identity(actor, roles) if actor is not None else None
     correlation_token = set_current_correlation_id(correlation_id)
     dry_run_token = set_dry_run(dry_run)
+    full_results_token = set_full_result_sink(full_result_sink(session_id, correlation_id))
     try:
         # **The four cap ambients are `agent.turn_ambient.turn_caps`', not this function's, and
         # that is the whole of the change.** This front door opened all four; the Temporal
@@ -1055,6 +1066,7 @@ def _turn_ambient(
         with turn_caps(usage, closing=f"session {session_id}"):
             yield
     finally:
+        _unstamp(session_id, reset_full_result_sink, full_results_token)
         _unstamp(session_id, reset_dry_run, dry_run_token)
         _unstamp(session_id, reset_current_user_texts, user_texts_token)
         _unstamp(session_id, reset_current_session_id, session_token)

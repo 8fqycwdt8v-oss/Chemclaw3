@@ -33,7 +33,7 @@ else in this module changes.
 import logging
 
 from chemclaw.api.events import ResultValue, ToolCallEvent, ToolResultEvent
-from chemclaw.api.tool_results import ResultSink
+from chemclaw.api.tool_results import ResultSink, stored_within_cap
 from chemclaw.core.config import settings
 from chemclaw.core.quantities import labelled_values, returned_values
 from chemclaw.kg.note import mentioned_ids
@@ -111,7 +111,9 @@ class ToolCallTrace:
         self._issued[key] = tool
         return ToolCallEvent(tool=tool, arguments=arguments[: settings.agent_audit_max_arg_chars])
 
-    async def returned(self, key: str, text: str) -> ToolResultEvent:
+    async def returned(
+        self, key: str, text: str, *, cut: bool = False, full_ref: str = ""
+    ) -> ToolResultEvent:
         """Record and describe one tool result — this module's one write.
 
         Ids and values come off the *full* text and the preview off the truncated one, for the
@@ -120,6 +122,15 @@ class ToolCallTrace:
         run, and the re-run with ids fixed still called six verbatim ICH limits invented because
         the figures were only in the preview.
 
+        **`text` is what the model read, and for a cut result that is not what the tool returned**
+        (`agent/tool_result_size.py`). Everything above — `outputs`, ids, numbers, values — stays on
+        `text`, because the grounding question is what was *in front of the model*, and a figure
+        from the removed middle was not. What changes is only the ref: `full_ref` names the full
+        text the cut kept (`kept_in_full` wrote it before the message left the middleware), so a
+        surface fetching `result_ref` opens what the tool returned rather than what the model was
+        shown. When the full text could not be kept (`full_ref == ""` on a cut), the model's text
+        is stored as before — it carries the cut's own notice in-band, so it cannot read as whole.
+
         A result whose call was never announced is reported under its own id rather than under a
         name this trace does not have. Nothing takes that fallback today — a node's update carries
         the `tool_calls` entry before the `ToolMessage` answering it — and a `ToolResultEvent` with
@@ -127,7 +138,9 @@ class ToolCallTrace:
 
         Args:
             key: The call id this answers, so the result is reported under the call's tool name.
-            text: The result's full text.
+            text: The result's text as the model received it.
+            cut: Whether the model received a cut of the result (`tool_result_size.was_cut`).
+            full_ref: The ref of the full text the cut kept, `""` when it kept none.
 
         Returns:
             The event a surface renders for this result.
@@ -141,9 +154,10 @@ class ToolCallTrace:
             numbers=_capped_numbers(tool, text),
             values=_capped_values(tool, text),
             # Awaited here rather than by the caller so the bytes are durable before the ref
-            # naming them leaves the process.
-            result_ref=await _stored_ref(self._sink, tool, text),
+            # naming them leaves the process. A kept full text was already written, by the cut.
+            result_ref=full_ref or await stored_within_cap(self._sink, tool, text),
             result_inline=_inline(text),
+            result_cut=cut,
         )
 
 
@@ -195,7 +209,7 @@ def _capped_values(tool: str, text: str) -> list[ResultValue]:
 def _inline(text: str) -> str:
     """The result itself when it is small enough to ride along, or `""` when it is not.
 
-    Measured in bytes for the same reason `_stored_ref` measures in bytes: the cap is protecting a
+    Measured in bytes for the same reason `tool_results.stored_within_cap` measures in bytes: the cap is protecting a
     wire, and a result full of multi-byte characters is up to four times its length in what is
     actually sent.
 
@@ -207,35 +221,3 @@ def _inline(text: str) -> str:
     if settings.stream_inline_result_bytes <= 0:
         return ""
     return text if len(text.encode("utf-8")) <= settings.stream_inline_result_bytes else ""
-
-
-async def _stored_ref(sink: ResultSink | None, tool: str, text: str) -> str:
-    """Store `text` and return the ref a surface fetches it by, or `""` when it was not stored.
-
-    Deliberately the same shape as `_capped_numbers` above, because it is the same rule one step
-    further on: the bound comes from `settings` rather than a literal, an over-cap result is
-    *refused rather than trimmed*, and the refusal is logged. Trimming would be the worse failure
-    here — a truncated `ScreenResult` is still valid JSON and would render as a complete hazard
-    screen with flags missing, which is precisely the "silent truncation reads as completeness"
-    problem the numbers cap exists to avoid, made worse by the payload looking whole.
-
-    Measured in bytes, not characters, because the cap is protecting a `BYTEA` column: a result
-    full of multi-byte characters is up to four times its length in what is actually written.
-
-    `""` covers every way a result can fail to be stored — no sink, over the cap, or a write that
-    raised (swallowed one layer down in `session_sink`). One value, one meaning, and none of them
-    fails the turn.
-    """
-    if sink is None or settings.stream_max_result_bytes <= 0:
-        return ""
-    size = len(text.encode("utf-8"))
-    if size > settings.stream_max_result_bytes:
-        logger.warning(
-            "tool %s returned %d bytes, over the %d-byte store cap; its trace event carries no "
-            "result_ref and the full result is not fetchable",
-            tool,
-            size,
-            settings.stream_max_result_bytes,
-        )
-        return ""
-    return await sink(tool, text)
