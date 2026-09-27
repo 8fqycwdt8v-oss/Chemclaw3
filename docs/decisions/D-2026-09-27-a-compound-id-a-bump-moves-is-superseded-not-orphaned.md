@@ -71,7 +71,7 @@ ethylamine, so nothing caught it.
 Matching is done after `Cleanup`, because `Cleanup` rewrites perchloric acid into a
 charge-separated form that no hand-written SMILES matches. `tests/test_compound_identity.py` checks:
 
-- every acid × six basic partners converges;
+- every acid × seven basic partners (including a quaternary ammonium, the charge arm) converges;
 - every acid × ten non-basic partners (boronic acid, phenol, carboxylic acid, amide, carbamate,
   sulfonamide, aniline, nitroarene, pyrrole, ester) keeps its own id;
 - every acid registered alone is untouched.

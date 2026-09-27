@@ -1019,6 +1019,8 @@ _BASES = {
     "imidazole": ("c1c[nH]cn1", "c1c[nH]c[nH+]1"),
     "amidine": ("CC(=N)N", "CC(=[NH2+])N"),
     "guanidine": ("NC(=N)N", "NC(=[NH2+])N"),
+    # no basic site at all, only the charge: the gate's fourth arm, and the only row that reaches it
+    "quaternary ammonium": ("C[N+](C)(C)C", "C[N+](C)(C)C"),
 }
 
 #: Partners with no such site: beside one of the acids they make a mixture, not a salt.
