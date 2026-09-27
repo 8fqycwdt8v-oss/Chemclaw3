@@ -410,7 +410,7 @@ only holds defects can only ever restore the system to what it already intended 
       said 39 and then 40 for one count three sentences apart, which is why the number now appears
       once, with the date it was measured.
 
-- [ ] **Three subsystems want one missing column: who wrote this** — [M]. `src/chemclaw/kg/note.py`'s `Note.created_by` is
+- [ ] **Three subsystems want one missing column: who wrote this** (issue #474) — [M]. `src/chemclaw/kg/note.py`'s `Note.created_by` is
       `Literal["human", "agent"]` and `Note.source` is the ingest source, so **a note names no
       person** — found while scoping the conflict notice
       (`D-2026-09-14-a-contradiction-only-a-querier-sees-is-not-a-warning`, which addressed the
