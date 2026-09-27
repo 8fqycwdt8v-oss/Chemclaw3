@@ -209,8 +209,9 @@ def _capped_values(tool: str, text: str) -> list[ResultValue]:
 def _inline(text: str) -> str:
     """The result itself when it is small enough to ride along, or `""` when it is not.
 
-    Measured in bytes for the same reason `tool_results.stored_within_cap` measures in bytes: the cap is protecting a
-    wire, and a result full of multi-byte characters is up to four times its length in what is
+    Measured in bytes for the same reason `tool_results.stored_within_cap` measures in bytes: the
+    cap is protecting a wire, and a result full of multi-byte characters is up to four times its
+    length in what is
     actually sent.
 
     No log line on the empty case, and that is the difference from every other cap in this file.

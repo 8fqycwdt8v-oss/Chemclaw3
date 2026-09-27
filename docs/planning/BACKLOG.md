@@ -461,40 +461,6 @@ only holds defects can only ever restore the system to what it already intended 
       said 39 and then 40 for one count three sentences apart, which is why the number now appears
       once, with the date it was measured.
 
-- [ ] **A cut tool result is unrecoverable, and the store that would hold it is downstream of the
-      cut** (issue #471) — [M], the last open Wave 1 item ("make a cleared tool result retrievable by address").
-      Measured 2026-09-14, and the two halves are not the same problem.
-      `D-2026-09-14-the-lossy-step-is-the-cut-and-upstream-already-offloads` already established
-      that the *clear* loses nothing — it runs over a deep copy inside `wrap_model_call` and the
-      next turn re-derives the same reduction from the full thread. The **cut** in
-      `agent/tool_result_size.py` is the lossy one, and driven through the real middleware a 65,000
-      character result comes out at 59,999 with the middle replaced by a notice.
-      `api/tool_results.py` is exactly the address that should hold it — content-addressed on the
-      SHA-256 of the text, already served by `GET /sessions/{id}/tool-results/{ref}` — but
-      `api/graph_stream.py` calls `trace.returned(...)` on the `ToolMessage` the graph *emits*,
-      which is post-middleware, so `tool_result_blobs` stores the cut text and the removed middle
-      reaches no store at all.
-      **The plan this row first carried does not reach the goal, and that is checked rather than
-      argued.** It said to hand `bound_tool_results` a sink so it stores the raw text before
-      cutting. It would — and the *stream event's* `result_ref` would still address the cut text,
-      because that ref comes from `ToolCallTrace.returned`, which `api/graph_stream.py` calls on the
-      `ToolMessage` the graph emits. The store is content-addressed, so raw and cut are different
-      rows by construction (driven: two refs, not one). Storing the raw bytes therefore puts them
-      somewhere real and leaves every existing consumer pointing at the cut version — which is the
-      feature looking done while nothing a chemist clicks has changed.
-
-      So the open decision is *which consumer* is being served, and the two answers want different
-      builds. **A chemist's "show the full result"** needs the trace's ref to be the raw one, which
-      means the raw text reaching `ToolCallTrace` — and the trace sits downstream of the middleware
-      by construction, so this is a plumbing question about the stream, not about a sink.
-      **A model that can re-read what was cut** needs the notice to name a ref *and* a tool to
-      fetch it, which is a new model-facing surface that re-inflates exactly what the budget just
-      reclaimed, and wants the offload-and-pointer argument in
-      `D-2026-09-14-the-lossy-step-is-the-cut-and-upstream-already-offloads` rather than this row.
-      Pick the consumer first; `tests/test_layering.py` forbids `agent -> api` either way, so
-      whatever is chosen arrives through an injected callable (`ResultSink` is already one) rather
-      than an import.
-
 - [ ] **Three subsystems want one missing column: who wrote this** — [M]. `src/chemclaw/kg/note.py`'s `Note.created_by` is
       `Literal["human", "agent"]` and `Note.source` is the ingest source, so **a note names no
       person** — found while scoping the conflict notice

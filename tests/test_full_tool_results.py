@@ -1,12 +1,12 @@
-"""A result the model was shown a cut of keeps its full text, for the chemist and never for the model.
+"""A result the model was shown a cut of keeps its full text — for the chemist, never the model.
 
 `D-2026-09-27-a-cut-result-is-kept-for-the-chemist-not-the-model`. The cut in
 `agent/tool_result_size.py` is the one lossy step between a tool and the model, and the removed
-middle used to reach no store: the tool-result store is fed from the stream, and the stream only ever
-sees the message the model got. So these drive each hop the full text now takes — the cut handing it
-to the turn's sink and stamping the ref, the stream naming that ref, a reload naming it again, the
-owner-scoped route serving it, and an erasure taking it — and each asserts the other half of the
-decision too: **what the model reads is unchanged, still cut.**
+middle used to reach no store: the tool-result store is fed from the stream, and the stream only
+ever sees the message the model got. So these drive each hop the full text now takes — the cut
+handing it to the turn's sink and stamping the ref, the stream naming that ref, a reload naming it
+again, the owner-scoped route serving it, and an erasure taking it — and each asserts the other half
+of the decision too: **what the model reads is unchanged, still cut.**
 
 The Postgres-backed tests skip cleanly with no database (`tests/pg.py`) and run for real in CI.
 """
@@ -194,11 +194,11 @@ def test_a_result_both_passes_cut_is_kept_once_from_the_inner_pass(
     assert sink.kept == {full_result_ref(message): raw}
 
 
-# --- the stream and the reload name the full text --------------------------------------------------
+# --- the stream and the reload name the full text ------------------------------------------------
 
 
 def _stream(message: ToolMessage, trace: ToolCallTrace) -> Any:
-    """The `tool_result` event `graph_stream` raises for `message`, through its own update reader."""
+    """The `tool_result` event `graph_stream` raises for `message`, via its own update reader."""
     trace.issued("c1", "read_document", "{}")
 
     async def _events() -> list[Any]:
@@ -339,7 +339,7 @@ def test_a_turn_through_the_front_door_names_the_full_text_it_kept(
     assert full_result_ref(stored) == content_address(raw)
 
 
-# --- the size bound --------------------------------------------------------------------------------
+# --- the size bound ------------------------------------------------------------------------------
 
 
 def test_the_store_cap_admits_the_largest_first_party_result_it_exists_for() -> None:
@@ -371,12 +371,15 @@ def test_a_full_text_over_the_cap_is_refused_whole_not_trimmed(
     monkeypatch.setattr(settings, "stream_max_result_bytes", 100)
     put = full_result_sink("s-cap", "corr")
 
-    assert asyncio.run(put("read_document", "x" * 101)) == ""
-    assert asyncio.run(put("read_document", "x" * 100)) == content_address("x" * 100)
+    async def _put(text: str) -> str:
+        return await put("read_document", text)
+
+    assert asyncio.run(_put("x" * 101)) == ""
+    assert asyncio.run(_put("x" * 100)) == content_address("x" * 100)
     assert written == ["x" * 100]
 
 
-# --- the route and erasure, against a real database ------------------------------------------------
+# --- the route and erasure, against a real database ----------------------------------------------
 
 _ALICE = Principal(oid="full-results-alice", upn="alice@corp", roles=frozenset())
 _BOB = Principal(oid="full-results-bob", upn="bob@corp", roles=frozenset())
@@ -392,7 +395,7 @@ def _keep_through_the_real_store(session_id: str, raw: str) -> ToolMessage:
 
 
 def test_the_owner_opens_the_full_result_and_nobody_else_can() -> None:
-    """Owner 200 with every byte; another actor 404; an unknown ref 404 — one gate, the session's."""
+    """Owner 200 with every byte; another actor 404; an unknown ref 404 — the session's one gate."""
     asyncio.run(migrated_db_or_skip())
     app = create_app()
     client = TestClient(app)
