@@ -62,6 +62,9 @@ _BAD_DATA_TYPES = [
     # `tests/test_publish.py` walks the hierarchy precisely so this cannot be forgotten. Retrying a
     # string the parser has already refused finds the identical refusal.
     "FingerprintInputError",
+    # A structure asked of a citation-only reaction (`ingest/eln/ord.py`): the source named a
+    # species without its structure, and a retry finds the identical record.
+    "StructureNotGiven",
     # A fork of a session with no saved state (`agent/session_fork.py`). Bad data rather than
     # transient: the parent has taken no turn, so there is no thread to copy, and retrying finds
     # exactly the same absence — nothing about waiting makes a checkpoint appear.

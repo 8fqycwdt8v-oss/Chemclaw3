@@ -53,7 +53,7 @@ from tests.pg import migrated_db_or_skip
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 _SOURCE = "eln-ord"
 
-# The real shape, transcribed from `Chemclaw3_mock/app/eln/real_hte.py`: the quinoline, the
+# The real shape, transcribed from the mock repository's flow-Suzuki seeding: the quinoline, the
 # catalyst, the ligand and the base carry SMILES, the second coupling partner and the product carry
 # only a NAME.
 _QUINOLINE = "Clc1ccc2ncccc2c1"
@@ -255,7 +255,7 @@ def test_a_named_only_input_is_not_a_mass_balance_violation() -> None:
         provenance="t",
     )
     assert validate_ord(reaction) == []
-    drawn = reaction.model_copy(update={"unstructured": []})
+    drawn = OrdReaction.model_validate({**reaction.model_dump(), "unstructured": []})
     assert validate_ord(drawn) == ["mass balance: products contain B but no input supplies it"]
     broken = OrdReaction.model_validate(
         {**reaction.model_dump(), "inputs": [{"smiles": "C1CC", "role": "reactant"}]}

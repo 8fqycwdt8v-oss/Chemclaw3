@@ -119,7 +119,7 @@ and the label record phase:
 - **An amendment into the tier leaves a label row behind.** `reaction_labels` is INSERT/UPDATE-only
   for the app role, so the facet tools can still count a run amended from structured to
   citation-only; the fingerprint half of the same residue is what `structurally_withheld` guards. A
-  `BACKLOG.md` row carries it, with `protocol_design_tools._uncited_precedents`, which asks neither
+  `BACKLOG.md` row carries it, with `protocol_design_tools.uncited_precedent`, which asks neither
   question.
 
 **Revisit when:** the label index can hold a row with named-only species and no derivation — at

@@ -117,8 +117,11 @@ def record_from_ord_reaction(reaction: OrdReaction) -> ReactionRecord:
         # (D-2026-08-25), so these ride on it and there is still exactly one place a run's numbers
         # live. What it rejected was a store *just* for conditions, which this is not.
         conditions=_conditions(reaction),
-        body=body,
         tier=reaction.tier,
+        # Last, and it matters to one reader: pydantic truncates a long `input_value` repr in the
+        # middle, and an unstorable byte in the body is reported from its tail
+        # (`tests/test_ingest_rejections.py` pins that the refusal quotes it).
+        body=body,
     )
 
 

@@ -653,4 +653,4 @@ those belong in.
       survives the amendment and `connectors/rxnfp/server/tools.py`'s `reagent_frequency` and
       `workup_precedent` can still count the run. The fingerprint half of the same residue is
       guarded on read (`ReactionRecordStore.structurally_withheld`);
-      `agent/protocol_design_tools.py::_uncited_precedents` asks neither that nor `retracted`.
+      `agent/protocol_design_tools.py::uncited_precedent` asks neither that nor `retracted`.
