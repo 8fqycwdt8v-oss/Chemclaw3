@@ -4,8 +4,9 @@
 `task` and ranks what comes back — cannot work here, and the reason is arithmetic rather than
 taste. `agent/loop_cap.py` enforces `harness_max_loop_iterations` (25) as a *turn-wide* budget
 shared across every branch of a fan-out, so ten generators plus the `n·log2(n)` comparisons a
-ranking needs exhaust it several times over and the turn ends silently truncated
-(`{"jump_to": "end", "loop_capped": True}`). A second constraint points the same way:
+ranking needs exhaust it several times over and the turn ends truncated — each graph gets one
+tool-less call to write up what it has, then `{"jump_to": "end", "loop_capped": True}`. A second
+constraint points the same way:
 `agent/subagents.py` attenuates a helper's surface to `caller − side_effecting_tools()`, and
 `compute_xtb_energy` is in that set, so a helper *cannot run a calculation* — which is precisely
 what "settle it if the tools can" requires. An activity has neither limit.

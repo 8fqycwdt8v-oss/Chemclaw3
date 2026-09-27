@@ -40,6 +40,7 @@ inside a helper too, and nobody will remember.
 from typing import Any, cast, get_type_hints
 
 import pytest
+from deepagents.middleware._state import private_state_field_names
 from langchain.agents import create_agent
 from langchain.agents.middleware import after_model, before_model
 from langchain.agents.middleware.todo import PlanningState
@@ -52,6 +53,11 @@ from tests.fakes_langgraph import ScriptedChatModel
 # is covered the day it is declared — the failure above was a field nobody remembered.
 _UPSTREAM = set(get_type_hints(PlanningState, include_extras=True))
 _PROBE_VALUE: dict[str, Any] = {"bool": True, "int": 7, "str": "a-peer"}
+
+# Channels declared `PrivateStateAttr`: kept out of a run's output and out of what crosses the
+# subagent boundary, so they are read back from inside the run rather than off its result. Found by
+# the function deepagents strips them by, so the two cannot disagree about which they are.
+_PRIVATE = private_state_field_names(ChemclawState)
 
 
 def _declared_channels() -> list[tuple[str, Any]]:
@@ -114,15 +120,31 @@ def test_a_declared_channel_survives_a_write_from_a_node(channel: str, value: An
     def _write(state: Any, runtime: Any) -> dict[str, Any]:
         return {channel: value}
 
+    seen: dict[str, Any] = {}
+
+    @after_model
+    def _read(state: Any, runtime: Any) -> None:
+        # A `PrivateStateAttr` channel is omitted from the run's *output* by design, so the finished
+        # run cannot show it; a later node reading the live state is where it has to be found.
+        if channel in state:
+            seen[channel] = state[channel]
+
     graph = create_agent(
         model=ScriptedChatModel(["done"]),
         tools=[],
         state_schema=ChemclawState,
-        middleware=[_write],
+        middleware=[_write, _read],
     )
     final = graph.invoke(
         cast(Any, {"messages": [("user", "go")]}), cast(Any, {"recursion_limit": 20})
     )
+    if channel in _PRIVATE:
+        assert seen.get(channel) == value, (
+            f"`{channel}` is declared on ChemclawState but a node's write to it never reached the "
+            "next node — the channel is missing from the compiled state schema"
+        )
+        assert channel not in final, f"`{channel}` is private and leaked into the run's output"
+        return
 
     assert channel in final, (
         f"`{channel}` is declared on ChemclawState but the graph dropped a node's write to it — "
