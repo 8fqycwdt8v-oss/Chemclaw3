@@ -262,7 +262,19 @@ _ERASE: tuple[tuple[str, str], ...] = (
         "   WHERE l.content_hash = b.content_hash"
         "     AND (o.owner IS NULL OR o.owner <> ALL(%(actors)s)))",
     ),
-    ("session_messages", f"DELETE FROM session_messages WHERE session_id IN ({_SESSION_SCOPED})"),
+    # **By session and by author**, because since 109 a message names who wrote it
+    # (`D-2026-09-27-an-author-is-a-person-and-an-agent`). Today the two arms find the same rows —
+    # every session has one person in it and the backfill set `actor` to that person — so the second
+    # arm costs a sequential scan and finds nothing new: measured at 0.88 s over a million rows,
+    # against a sweep already measured in minutes. It is here for the day a session holds two
+    # people, which is the row this column exists for: a leaver's words in a session somebody else
+    # owns are the leaver's conversation, and an erasure that reached only their own sessions would
+    # leave them behind while reporting the table cleared.
+    (
+        "session_messages",
+        "DELETE FROM session_messages "
+        f"WHERE session_id IN ({_SESSION_SCOPED}) OR actor = ANY(%(actors)s)",
+    ),
     *_CHECKPOINT_ERASE,
     *_MEMORY_ERASE,
     # **Two kinds of session id reach this table, and the join only ever found one of them.**
@@ -493,6 +505,16 @@ _BEYOND_REACH: dict[str, str] = {
     "audit_anchors": "the runtime role holds no privilege on it and its writer was removed with "
     "the audit hash chain, so this deployment's copy is empty; a schema is forward-only, so a "
     "database that ran the pre-removal build needs an operator with owner rights to check",
+    # Not a table, and named here for exactly that reason: it is the one place this system writes a
+    # person's id that no query can reach. A note's `actor:` frontmatter is who an agent wrote it
+    # for (`D-2026-09-27-an-author-is-a-person-and-an-agent`), and a note is the record — knowledge
+    # someone may cite, retained on the audit trail's line — in a git repository whose history is
+    # the point of keeping it there.
+    "knowledge notes (`actor:` frontmatter)": "an agent-written note names the person it was "
+    "written for, and the note lives in the knowledge repository rather than in this database, so "
+    "this command neither counts nor clears it. Find them with `git grep -l 'actor: <id>'` in the "
+    "note repository. The note is the record and stays, as the audit trail does; removing the name "
+    "from it is a rewrite of that repository's history, which is its owner's decision",
 }
 
 

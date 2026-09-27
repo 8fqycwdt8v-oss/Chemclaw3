@@ -628,9 +628,10 @@ def test_a_key_the_job_does_not_declare_refuses_rather_than_being_dropped(
     assert refusal.code == code
 
 
-#: Every shipped template, since all nine declare `smiles` and nothing else as required. Pinned so
-#: a template that gains a second required input, or an agent step holding a write tool, drops out
-#: loudly rather than by nobody noticing.
+#: Every shipped template that requires `smiles` and nothing else, computes, and holds no write
+#: tool — not every shipped template, and no count is written here because the one that was went
+#: stale. Pinned so a template that gains a second required input, or an agent step holding a
+#: write tool, drops out loudly rather than by nobody noticing.
 _DISPATCHABLE_TEMPLATES = {
     "bond-strength-survey",
     "conformer-refinement",
@@ -638,6 +639,7 @@ _DISPATCHABLE_TEMPLATES = {
     "microspecies-profile",
     "regioselectivity-in-conformer",
     "stereoisomer-ranking",
+    "substitution-series",
     "tautomer-resolution",
 }
 

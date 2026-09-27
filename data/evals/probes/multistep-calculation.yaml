@@ -553,3 +553,27 @@ probes:
       points out what it does not cover: an impurity that is not a positional isomer (a
       difluoro or a des-fluoro species) needs a different question. Ranking the isomers or
       assigning the peaks from the list alone is the failure this probe is here to catch.
+
+  - id: ms-21
+    section: 6
+    persona: lab_leader
+    bucket: A
+    question: >-
+      We have Cc1ccc(O)cc1 in hand. If the methyl sat somewhere else on the ring, which positional
+      isomer would be the most stable, and is the one we have already the best of them?
+    expects_tools: [run_substitution_series, rank_species]
+    expects_job: true
+    forbids_claims:
+      - "an isomer population the calculation did not return"
+      - "a positional isomer that was never enumerated"
+      - "a claim about which isomer a substitution reaction would give"
+    direction: >-
+      A "which position" question, and the universe is the thing to get right: move the methyl to
+      every other aromatic position by enumeration, keep the isomer as drawn in the set, and rank
+      that set — by the named protocol or by the two parts in order. A ranking over isomers the
+      model wrote out itself is confident about the wrong universe. The second half of the question
+      is answered by where the drawn isomer falls in the ranking, and a gap inside the method's own
+      uncertainty does not separate two isomers. The line not to cross: this is the thermodynamic
+      order of finished isomers, not a regioselectivity — which isomer a methylation or any
+      electrophilic aromatic substitution actually delivers is decided kinetically at the sigma
+      complex, and nothing here computed a transition state.

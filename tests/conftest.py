@@ -275,17 +275,21 @@ def _fresh_attached_connections() -> Iterator[None]:
 def loopback_dev_posture(monkeypatch: pytest.MonkeyPatch) -> None:
     """Run tests in the loopback dev posture, so the fail-closed boot guards admit them.
 
-    Two guards, two postures, and both are *stated* here rather than inferred from the suite's
+    Three guards, three postures, and each is *stated* here rather than inferred from the suite's
     circumstances. The front door refuses to boot unauthenticated on a non-loopback bind (SEC-2);
     tests drive the app entirely in-process (TestClient — no socket is ever bound), so they use the
     loopback bind. And every process that makes model calls refuses a loopback `llm_base_url`
     unless the posture is declared (`core/llm_gateway`) — the suite's gateway is
     `chemclaw.cli.mock_llm`'s shipped default address, which is exactly that case, so it declares
-    it. Each guard's own refuse/opt-in/boot behaviour is proven explicitly — `test_auth.py` for the
-    first, `tests/test_llm_gateway_guard.py` for the second — by overriding these per test.
+    it. And a Temporal worker refuses to boot with sign-in off unless that is declared
+    (`durable/serve.refuse_unauthenticated_worker`) — the suite runs with `entra_required` off, so
+    it declares that too. Each guard's own refuse/opt-in/boot behaviour is proven explicitly —
+    `test_auth.py` for the first, `tests/test_llm_gateway_guard.py` for the second,
+    `tests/test_worker_posture.py` for the third — by overriding these per test.
     """
     monkeypatch.setattr(settings, "service_host", "127.0.0.1")
     monkeypatch.setattr(settings, "llm_allow_loopback_gateway", True)
+    monkeypatch.setattr(settings, "worker_allow_unauthenticated", True)
 
 
 def timeout_scale() -> float:

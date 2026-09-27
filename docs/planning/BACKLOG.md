@@ -110,27 +110,6 @@ topic).
   new code. Anchors: `core/netguard_preload.c`, `core/netguard_preload.py`, `deploy/entrypoint.sh`,
   `kg/git_writer.py`.
 
-- [ ] **What "network-exposed" means for a process that only makes outbound calls** — [M],
-  opened by `D-2026-09-04-a-gateway-is-the-only-provider`, narrowed to this half by
-  `D-2026-09-12-a-gateway-guard-in-the-front-door-is-not-a-deployment-guard`.
-  `_refuse_unauthenticated_exposure` is still called only from `api/app.py`, so no worker runs it,
-  and it cannot simply be hoisted the way its neighbour was: its signal *is* `service_host` being
-  non-loopback — a property of a **bind** — and a Temporal worker does not bind a request surface.
-  (It does bind `worker_metrics_host`, default `0.0.0.0`: an unauthenticated `/healthz`, `/readyz`
-  and `/metrics` surface whose exposition carries counts and capacity only, which is why reusing
-  that as the signal would refuse every worker in every deployment for a surface the NetworkPolicy
-  is what keeps inside the cluster.) So the question is a design one and it is genuinely open: with
-  `entra_required=false` a worker's activities run as the shared dev principal with every
-  authorization gate open, exactly as a request would — but nothing is *listening*, so what an
-  operator should be refused for is the thing to decide before any code moves. Whatever it turns
-  out to be, `CHEMCLAW_LLM_ALLOW_LOOPBACK_GATEWAY`'s shape is the precedent to weigh: a posture a
-  deployment states beats one inferred from a field that means something else in the process
-  reading it.
-  **The gateway half of this row is closed** — `core/llm_gateway.refuse_unconfigured_llm_gateway`
-  is called from `create_app`, `api/mcp_face.main`, `durable/background_worker.main` and
-  `cli/chat.main`, the two connector components are shown unable to reach the gateway, and
-  `tests/test_llm_gateway_guard.py` drives the processes. Do not read that as covering this one.
-
 ## 2 — Answers that are wrong without saying so
 
 - [ ] **A salt written neutral and the same salt written ionic get two `compound_id`s, for the
@@ -259,53 +238,23 @@ topic).
 
 ## 3 — Work that is lost, dropped or invisible
 
-- [ ] **A chemist's own `/scratch/` writes are unbounded and, by default, permanent** — [M].
-  `agent_subagent_files_max_chars` bounds only what a *helper* hands back: it is applied in
-  `rewritten_command_files`, which rewrites a `task` return's `Command`. A caller's own
-  `write_file` goes through `StateBackend`, which writes the `files` channel directly as a channel
-  write and reaches no middleware, so nothing caps `write_file`'s `content` argument. The channel
-  is a `DeltaChannel` and accumulates; it is checkpointed under `thread_id`; and in the shipped
-  configuration nothing ever deletes it — `checkpoint_retain_per_thread` prunes *superseded*
-  copies only (the newest checkpoint still holds every file whole), `retention_enabled` is
-  `False` and `retention_checkpoints_days` is 0, so the only route that removes a scratch file is
-  `make user-erase`.
-
-  **This is what is left of the row `D-2026-09-18-a-checkpointer-of-none-is-the-callers-checkpointer`
-  closed**, and it is worth stating separately because that row's framing is now wrong in the
-  reader's favour: the bulk of the 20,712 kB it costed was the helper's inherited checkpointer
-  rather than this channel — most of it, not "~98%", because that arm's own cap reclaimed 8.8% of
-  the 20,712 — so the amplification argument for urgency is gone while the unbounded surface is
-  not.
-  It stays a decision rather than an edit for the reason it always did — a cap here truncates a
-  chemist's own document, which is a different act from truncating a helper's. Anchors:
-  `agent/scratchpad.py`, `deepagents.backends.state.StateBackend`, `agent/tool_result_size.py::_bounded_file`.
-
-- [ ] **The helper file budget is charged to siblings that wrote nothing, and two write verbs are
-  charged to nobody** — [M], opened by
-  `D-2026-09-18-a-pre-batch-snapshot-cannot-see-its-own-superstep`, which closed the fan-out's
-  fail-open and states both of these as what it did not do. Two halves of one resource, the
-  caller's `files` channel.
-
-  **The over-charge.** `batch_siblings` divides the remaining budget by the batch's calls *naming*
-  `task`, because the siblings' results do not exist when it runs. Most `task` calls read and write
-  nothing, so one helper filing a note beside seven silent ones is charged an eighth: driven at the
-  shipped budget, a 199,999-character note lands whole at width 1 and as 25,000 at width 8. The
-  bound holds — an unclaimed share is wasted, never spent — so this is lost allowance rather than a
-  hole. The shape that would be exact is a trim over the **merged** channel after the superstep,
-  where every real contribution is visible, and it is not free: the exemption that keeps a
-  chemist's own documents out of this budget is `rewritten_command_files` comparing each command
-  against the state *before* it, and a post-merge trim has nothing to compare against, so exact
-  accounting has to buy the channel provenance first.
+- [ ] **The helper file budget is charged to siblings that wrote nothing** (issue #463) — [M],
+  opened by `D-2026-09-18-a-pre-batch-snapshot-cannot-see-its-own-superstep`; its other half, the
+  two write verbs nothing bounded, is closed by
+  `D-2026-09-26-a-helpers-unbounded-write-verbs-take-the-scratch-cap`.
+  `batch_siblings` divides the remaining budget by the batch's calls *naming* `task`, because the
+  siblings' results do not exist when it runs. Most `task` calls read and write nothing, so one
+  helper filing a note beside seven silent ones is charged an eighth: driven at the shipped budget,
+  a 199,999-character note lands whole at width 1 and as 25,000 at width 8. The bound holds — an
+  unclaimed share is wasted, never spent — so this is lost allowance rather than a hole. The shape
+  that would be exact is a trim over the **merged** channel after the superstep, where every real
+  contribution is visible, and it is not free: the exemption that keeps a chemist's own documents
+  out of this budget is `rewritten_command_files` comparing each command against the state
+  *before* it, and a post-merge trim has nothing to compare against, so exact accounting has to buy
+  the channel provenance first.
   `test_a_chemists_own_file_survives_a_delegation_it_had_nothing_to_do_with` is what a naive
-  version breaks, which makes this a design with an ADR rather than an edit.
-
-  **The unbounded half.** `write_file` and `edit_file` reach the same channel through
-  `StateBackend`'s `send(...)` and return a plain `ToolMessage`, so they never pass
-  `rewritten_command_files` and **nothing bounds them at all** — while everything they store is
-  charged into `held` against every later helper. So the tightest arm of this budget is spent by
-  the arm nobody measures. Anchors: `agent/tool_result_size.py::batch_siblings`,
-  `_bounded_file`, `agent/tool_result_shape.py::rewritten_command_files`,
-  `deepagents.backends.state.StateBackend`.
+  version breaks, which makes this a design with an ADR rather than an edit. Anchors:
+  `agent/tool_result_size.py::batch_siblings`, `agent/tool_result_shape.py::rewritten_command_files`.
 
 ## 4 — Operating it
 
@@ -394,64 +343,20 @@ only holds defects can only ever restore the system to what it already intended 
       said 39 and then 40 for one count three sentences apart, which is why the number now appears
       once, with the date it was measured.
 
-- [ ] **A cut tool result is unrecoverable, and the store that would hold it is downstream of the
-      cut** — [M], the last open Wave 1 item ("make a cleared tool result retrievable by address").
-      Measured 2026-09-14, and the two halves are not the same problem.
-      `D-2026-09-14-the-lossy-step-is-the-cut-and-upstream-already-offloads` already established
-      that the *clear* loses nothing — it runs over a deep copy inside `wrap_model_call` and the
-      next turn re-derives the same reduction from the full thread. The **cut** in
-      `agent/tool_result_size.py` is the lossy one, and driven through the real middleware a 65,000
-      character result comes out at 59,999 with the middle replaced by a notice.
-      `api/tool_results.py` is exactly the address that should hold it — content-addressed on the
-      SHA-256 of the text, already served by `GET /sessions/{id}/tool-results/{ref}` — but
-      `api/graph_stream.py` calls `trace.returned(...)` on the `ToolMessage` the graph *emits*,
-      which is post-middleware, so `tool_result_blobs` stores the cut text and the removed middle
-      reaches no store at all.
-      **The plan this row first carried does not reach the goal, and that is checked rather than
-      argued.** It said to hand `bound_tool_results` a sink so it stores the raw text before
-      cutting. It would — and the *stream event's* `result_ref` would still address the cut text,
-      because that ref comes from `ToolCallTrace.returned`, which `api/graph_stream.py` calls on the
-      `ToolMessage` the graph emits. The store is content-addressed, so raw and cut are different
-      rows by construction (driven: two refs, not one). Storing the raw bytes therefore puts them
-      somewhere real and leaves every existing consumer pointing at the cut version — which is the
-      feature looking done while nothing a chemist clicks has changed.
-
-      So the open decision is *which consumer* is being served, and the two answers want different
-      builds. **A chemist's "show the full result"** needs the trace's ref to be the raw one, which
-      means the raw text reaching `ToolCallTrace` — and the trace sits downstream of the middleware
-      by construction, so this is a plumbing question about the stream, not about a sink.
-      **A model that can re-read what was cut** needs the notice to name a ref *and* a tool to
-      fetch it, which is a new model-facing surface that re-inflates exactly what the budget just
-      reclaimed, and wants the offload-and-pointer argument in
-      `D-2026-09-14-the-lossy-step-is-the-cut-and-upstream-already-offloads` rather than this row.
-      Pick the consumer first; `tests/test_layering.py` forbids `agent -> api` either way, so
-      whatever is chosen arrives through an injected callable (`ResultSink` is already one) rather
-      than an import.
-
-- [ ] **Three subsystems want one missing column: who wrote this** — [M]. `src/chemclaw/kg/note.py`'s `Note.created_by` is
-      `Literal["human", "agent"]` and `Note.source` is the ingest source, so **a note names no
-      person** — found while scoping the conflict notice
-      (`D-2026-09-14-a-contradiction-only-a-querier-sees-is-not-a-warning`, which addressed the
-      subscriber instead and needs no column). `audit_events.agent` is the same shape one layer
-      over (`D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution` deleted the claim
-      rather than the column), and `session_messages` is the third, in the row below. Each is a
-      schema change plus a backfill question over rows already written, and taking it three times
-      in the corner each subsystem noticed it is how three subtly different answers to one question
-      get shipped. Decide the shape once — what an author *is* when the writer is an agent acting
-      for a person — then migrate each. Nothing is blocked on it today: every consumer that wanted
-      it has an addressee it can reach without one.
-
 - [ ] **Several humans in one session is five pieces, and the policy one has to be settled first**
       — [L], scoped in `docs/archive/PLAN-2026-09-14-multiplayer-and-the-open-delegation-questions.md`.
-      Not the owner gate relaxed: measured, `session_messages` has **no actor column** so a shared
-      transcript cannot say who wrote what; ownership is checked in 46 places under
+      Not the owner gate relaxed: a message now names who wrote it (`session_messages.actor`/`agent`,
+      `D-2026-09-27-an-author-is-a-person-and-an-agent`), and a message's `actor` is its sender for
+      the sender-governs decision (owner, 2026-09-26) to read; ownership is checked in 46 places under
       `src/chemclaw/api/`; `api/detach.py` holds one queue and one `_attached` flag, so a second
       reader *steals* events rather than seeing a copy; and two writers on one thread fork the DAG
       silently (Wave 2's measurement), which is what `SessionTurnClaims` prevents by refusing.
 
       The serialisation is already correct and only its *answer* is wrong — one turn at a time is
       the right semantic for a shared thread, so the 409 becomes a bounded queue rather than the
-      claim being relaxed. Order: participants, attribution, queued turn, reader fan-out. **Settle
+      claim being relaxed. Order: participants, queued turn, reader fan-out — attribution's schema half is the authorship
+      pair above, and what is left of it is the owner gate and the erasure's claim coverage for a
+      session somebody else owns. **Settle
       the authority questions before the schema**: whose roles govern a tool call, whether B may
       approve a plan A's message produced, and whose `/memories/` load (they are namespaced per
       actor digest, so a shared session loads none, the sender's, or a session tier that does not
@@ -603,34 +508,6 @@ re-proposal a future session can settle in an afternoon and a fabricated number 
       so it stays a serving copy rather than a second record); the expensive one is handing `Protocol` a
       component list, which `agent.condense` deliberately does not have because a share document has none.
       Wants its own ADR and a measurement of what the extra column costs on a real corpus.
-
-## No substitution-product enumerator, so one class of "which molecule" question stays a proposal
-
-`D-2026-09-20-the-chain-already-existed-and-it-is-called-a-template` lets a discriminating check
-name a reviewed procedure, so a question about a molecule's *derived* forms — tautomers,
-protonation microstates, stereoisomers, breakable bonds, degradants — is now a check the tournament
-runs rather than an experiment it proposes.
-
-What that does **not** cover is a substitution series: "which regiochemistry will this reaction
-give", "what does moving the methyl do to the barrier". `rank_species` ranks a candidate set and
-three of the enumerators produce one it can rank, but none enumerates *substitution products* —
-the six in `connectors/chem/connector.yaml` are tautomers, protonation states, stereoisomers, bond
-cleavages, torsions and degradants, of which cleavages feed `survey_bond_strengths`, torsions feed
-`profile_rotation`, and `degradant-triage.yaml` argues at length that ranking degradants by free
-energy is the wrong question. So the candidate set for a substitution question exists nowhere, and the
-check has to fall back to whatever compounds happen to be written down.
-
-**Where it belongs is the sibling fleet**, by this repo's own boundary rule: an enumerator is a
-primitive whose identity is derivable from its inputs, a pure RDKit traversal with no judgement in
-it, so it is a server in `Chemclaw3-mcp` — and the ranking, the cache and the template that chains
-them stay here. The template to add beside it is a fifth of the same shape
-(`enumerate_substitutions` → `rank_species`), which is a data file rather than a decision.
-
-Anchors: `data/templates/tautomer-resolution.yaml` (the shape to copy),
-`connectors/chem/connector.yaml` (what the fleet declares today). The file that shows this has
-fired is `tests/test_hypothesis_dispatch.py::test_the_dispatchable_template_set_is_exactly_what_is_pinned`,
-whose pinned set would grow. Decision:
-`D-2026-09-20-the-chain-already-existed-and-it-is-called-a-template`.
 
 ## Everything else
 

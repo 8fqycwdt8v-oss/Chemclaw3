@@ -28,6 +28,7 @@ from typing import Protocol
 from pydantic import BaseModel, ConfigDict, Field
 
 from chemclaw.core.config import settings
+from chemclaw.core.identity_context import get_current_actor
 from chemclaw.core.logging import redact_secrets
 from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.kg.graph import dangling_links, load_notes
@@ -288,14 +289,38 @@ async def record_note(
             writer's log and nothing this function returns: what a caller is handed is the
             reference for what landed.
 
+    **Stamps the person the note was written for, and refuses one that names somebody else.**
+    `actor` is half of a note's authorship (`core/authorship.py`,
+    `D-2026-09-27-an-author-is-a-person-and-an-agent`), and this is the one write path every
+    agent-authored note takes — so it is the one place that has to know whose turn or job this is,
+    rather than a dozen callers each remembering to pass it. It reads the same ambient identity the
+    audit trail's actor, the authorization gate and a connector's identity header read, which every
+    driver binds (`api/runner.py`, `durable/interceptor.py`, the memory and report jobs, the CLI).
+    A note that already names a *different* person is refused for the reason a `human` note is: it
+    would be forging the other half of the same provenance. With no person bound — a backfill run
+    from a terminal, a test — the field stays absent, which reads as "not recorded", and nothing is
+    guessed. Only the subject is stamped: a dependency is re-rendered from source data rather than
+    written for anyone, and a retirement is somebody else's note being closed, whose author it
+    keeps.
+
     Returns:
         The writer's reference for what landed — a commit, or the unchanged tree. A note whose
         `[[wikilinks]]` name ids nothing defines still lands, and logs a WARNING naming them.
     """
-    if note.created_by != "agent":
+    if not note.authorship.by_agent:
         raise ValueError(
             "record_note writes agent-authored notes; a human note is written by the human"
         )
+    actor = get_current_actor()
+    if note.actor is not None and note.actor != actor:
+        raise ValueError(
+            f"note {note.id} names {note.actor!r} as the person it was written for, and this "
+            f"write runs for {actor!r}; a note records the person whose turn wrote it"
+        )
+    if actor is not None:
+        # `model_copy` rather than a re-validation: the value is `get_current_actor()`'s, which is
+        # already stripped and non-blank — the only constraint the field states.
+        note = note.model_copy(update={"actor": actor})
 
     directory = knowledge_dir if knowledge_dir is not None else settings.knowledge_dir
     # **A link at a note nobody wrote used to land in silence, and the write is the one moment

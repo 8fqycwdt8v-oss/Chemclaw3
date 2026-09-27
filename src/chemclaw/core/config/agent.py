@@ -478,6 +478,33 @@ class AgentSettings(BaseSettings):
     # answers in the tree is the defect
     # `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` names.
     agent_subagent_files_max_chars: int = Field(default=200_000, ge=0)
+    # **The per-write bound on a turn's *own* files**, which nothing had
+    # (`D-2026-09-26-a-chemists-scratch-write-is-bounded-and-expires`). The setting above is applied
+    # only to what a *helper* hands back; a caller's `write_file` and `edit_file` go through
+    # `StateBackend`, which writes the `files` channel directly and reaches no middleware. So
+    # `agent/scratchpad.BoundedStateBackend` (the `/scratch/` route) and `BoundedStoreBackend` (the
+    # `/memories/` route) **refuse** a write or an edit whose resulting file would be longer than
+    # this, with a message naming the limit — never a truncation, because a cut would hand a chemist
+    # a document that simply stops, and a refusal lets the model split the file or write less.
+    #
+    # The same number as `agent_subagent_files_max_chars` by default, and for the resource's reason
+    # rather than by coincidence: that budget is the channel's whole allowance, and every file here
+    # is charged against it for every later helper, so one write larger than it would exhaust the
+    # channel by itself. No `0 = off` spelling: a refusal that can be switched off is the unbounded
+    # write this replaced, and a deployment that needs larger files raises the number.
+    agent_scratch_file_max_chars: int = Field(default=200_000, gt=0)
+    # **How long a file in a thread's `files` channel is kept after it was last written.** The
+    # channel is checkpointed under the thread and accumulates, and nothing deleted a scratch file
+    # short of `make user-erase` or disposing of the whole thread. Enforced at the start of each
+    # turn on that thread (`agent/scratchpad.expire_stale_scratch`), through the channel's reducer —
+    # the one path that can remove a key from a `DeltaChannel` without rewriting its checkpoint by
+    # hand. A thread nobody returns to keeps its files until the thread itself is disposed of
+    # (`retention_checkpoints_days`), which is the half this does not cover and says so.
+    #
+    # 90 days is the owner's default (2026-09-26). **0 keeps files for ever**, and only when a
+    # deployment sets it: unlike the `retention_*` windows this is not gated on `retention_enabled`,
+    # because it disposes of a turn's working surface rather than of a record.
+    agent_scratch_retention_days: int = Field(default=90, ge=0)
     agent_memory_enabled: bool = True
     # **What bounds the `store` table, which nothing did.** `durable/retention.py`'s register said
     # of it "**nothing bounds it**", and it was right: `store` is agent-writable with no size cap,

@@ -125,6 +125,7 @@ from chemclaw.agent.profile_discovery import ProfileError, load_profiles
 from chemclaw.agent.profiles import AgentProfile, get_profile, registered_profile_names
 from chemclaw.agent.repeat_guard import refuse_repeated_calls
 from chemclaw.agent.scratchpad import (
+    expire_stale_scratch,
     filesystem_permissions,
     scratchpad_backend,
     scratchpad_tools,
@@ -687,6 +688,10 @@ def _middleware(
             tools=list(scratchpad_tools()),
             _permissions=filesystem_permissions(),
         ),
+        # The `files` channel's retention, once per turn before the first model call: a file this
+        # thread has not written for `agent_scratch_retention_days` is removed through the channel's
+        # own reducer (`agent/scratchpad.py` says why that is the only safe place to do it).
+        expire_stale_scratch,
         # The second replacement, and the one that would otherwise have arrived by default rather
         # than by decision: `create_deep_agent` composes a summarizer unconditionally, and this
         # deployment has declined one since D-025 on indirect-prompt-injection grounds that the

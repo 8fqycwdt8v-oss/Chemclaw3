@@ -785,7 +785,8 @@ migrateJob:
   # and the release sits in `pending-upgrade`, which blocks the next upgrade and needs a recovery an
   # operator has to already know (`docs/guides/runbook.md` §(xi) documents it). 15 minutes covers a
   # migration run plus its retries on a database of the size this chart is written for; raise it
-  # before a release that adds an index to a large table.
+  # before a release that adds an index to a large table, or that backfills one (109 rewrites every
+  # `session_messages` row; `infra/sql/109_session_message_authorship.sql` has the measurement).
   activeDeadlineSeconds: 900
 
 # The stored-message conversion Job (`post-upgrade`, the second document in `migrate-job.yaml`).
@@ -1099,6 +1100,15 @@ config:
   CHEMCLAW_RXNLABEL_SERVER_URL: "http://chemclaw-mcp-rxnlabel:8865/mcp"
   # Entra identity is mandatory system-wide (the one exception is the generic LLM credential).
   CHEMCLAW_ENTRA_REQUIRED: "true"
+  # What a release that turns the line above off must *also* say, or its workers will not start.
+  # The background worker and every `connector-worker-*` bind no request surface, so the front
+  # door's refusal (a non-loopback bind with sign-in off) cannot reach them; each refuses to boot
+  # unauthenticated on its own unless this is `"true"`
+  # (`durable/serve.refuse_unauthenticated_worker`). Set it only beside
+  # `CHEMCLAW_ENTRA_REQUIRED: "false"` in a release nobody but its operator can reach — with it on,
+  # every activity runs as the shared dev principal with all authorization gates open, and the boot
+  # log says so. Inert while sign-in is on.
+  CHEMCLAW_WORKER_ALLOW_UNAUTHENTICATED: "false"
   CHEMCLAW_ENTRA_TENANT_ID: "00000000-0000-0000-0000-000000000000"
   CHEMCLAW_ENTRA_AUDIENCE: "api://chemclaw"
   # ⚠ EMPTY ON PURPOSE, AND EMPTY MEANS CLOSED. Until an operator sets this to their own Entra app

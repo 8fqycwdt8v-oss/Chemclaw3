@@ -540,6 +540,7 @@ def test_a_shipped_template_whose_arguments_cannot_be_checked_says_so() -> None:
             "stoessel_criticality_class",
         ],
         "stereoisomer-ranking": ["enumerate_stereoisomers"],
+        "substitution-series": ["enumerate_substitutions"],
         "tautomer-resolution": ["enumerate_tautomers"],
     }
 

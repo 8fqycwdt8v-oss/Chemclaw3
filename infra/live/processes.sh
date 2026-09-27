@@ -90,6 +90,12 @@ export CHEMCLAW_LLM_ALLOW_LOOPBACK_GATEWAY="${CHEMCLAW_LLM_ALLOW_LOOPBACK_GATEWA
 # there. This lane is where measurements run, so this is where the two directories meet.
 export CHEMCLAW_PROFILES_DIR="${CHEMCLAW_PROFILES_DIR:-data/profiles:data/evals/profiles}"
 export CHEMCLAW_ENTRA_REQUIRED="${CHEMCLAW_ENTRA_REQUIRED:-false}"
+# The lane's four Temporal workers bind no request surface, so the loopback bind above is not
+# their exemption: with sign-in off a worker refuses to boot unless the posture is *stated*
+# (`durable/serve.refuse_unauthenticated_worker`). Stated here, once, for every worker this lane
+# starts — and inert when the lane runs `CHEMCLAW_ENTRA_REQUIRED=true`, because the guard only
+# looks at an unauthenticated worker.
+export CHEMCLAW_WORKER_ALLOW_UNAUTHENTICATED="${CHEMCLAW_WORKER_ALLOW_UNAUTHENTICATED:-true}"
 
 # ---------------------------------------------------------------------------- enforced identity
 #

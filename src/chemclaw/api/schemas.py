@@ -21,8 +21,10 @@ from typing import Any
 
 from pydantic import BaseModel, Field, computed_field, field_validator
 
-from chemclaw.agent.session_store import stored_correlation_id
+from chemclaw.agent.session_store import stored_authorship, stored_correlation_id
+from chemclaw.agent.tool_result_size import full_result_ref, was_cut
 from chemclaw.api.tool_results import content_address
+from chemclaw.core.authorship import Authorship
 from chemclaw.core.config import settings
 
 # How much of a tool's arguments or result the transcript carries. The same bound the audit trail
@@ -125,12 +127,18 @@ class TranscriptToolCall(BaseModel):
     only consumer that acts on this — there is nothing to fetch — and telling them apart would
     mean keeping a tombstone per expired blob, which is a durable record of a rendering, on the one
     table in the schema that grows per tool call.
+
+    `result_cut` is `ToolResultEvent.result_cut` recovered from the stored message, with the same
+    meaning: the model was shown a cut of this result, and `result_ref` (when set) opens the full
+    text the tool returned rather than the cut — `result` stays the model's text, like the stream's
+    `preview` does.
     """
 
     tool: str
     arguments: str = ""
     result: str | None = None
     result_ref: str = ""
+    result_cut: bool = False
 
 
 class TranscriptMessage(BaseModel):
@@ -159,6 +167,12 @@ class TranscriptMessage(BaseModel):
     # `None` for a row stored off the request path or before the column existed. Optional and
     # additive: a client that does not read it sees the contract it always did.
     correlation_id: str | None = None
+    # Who wrote this message: the person it was written for and the agent that wrote it, `agent`
+    # null for the chemist's own words (`session_messages.actor`/`agent`, `core/authorship.py`).
+    # What a transcript needs before a session can hold two people — whose words each bubble is —
+    # and the same pair the audit trail and a knowledge note carry. `None` for a row that records
+    # neither half. Optional and additive, like `correlation_id` above.
+    author: Authorship | None = None
 
 
 class PlanDecisionIn(BaseModel):
@@ -480,7 +494,7 @@ def _transcript(
     rather than queried here so this stays a pure projection the tests can drive without an app,
     and so the one database read happens once per transcript rather than once per tool call.
     """
-    results: dict[str, tuple[str, str]] = {}
+    results: dict[str, tuple[str, str, bool]] = {}
     for message in stored:
         call_id = getattr(message, "tool_call_id", None)
         if not call_id:
@@ -489,24 +503,32 @@ def _transcript(
         # when the turn ran, which is the whole reason the computed ref matches a stored blob. A
         # result that came back empty gets no ref here: there is nothing for a surface to fetch,
         # and `fetchable` is what decides in every other case.
+        #
+        # **A cut result names its full text by the stamp, not by hashing** — the text in this
+        # row is the model's cut, and the stream named the full text the cut kept
+        # (`tool_result_size.FULL_RESULT_REF_KEY`, which the row's JSON round trip preserves).
+        # Falling back to the hash when the stamp is empty is the stream's own fallback: the full
+        # text was not kept, so the stream stored the cut, and this names that.
         text = message_text(message)
-        ref = content_address(text) if text else ""
+        ref = full_result_ref(message) or (content_address(text) if text else "")
         results[str(call_id)] = (
             _truncate_for_transcript(text),
             ref if ref in fetchable else "",
+            was_cut(message),
         )
     transcript: list[TranscriptMessage] = []
     for index, message in enumerate(stored):
         calls: list[TranscriptToolCall] = []
         for call in getattr(message, "tool_calls", None) or []:
             paired = results.get(str(call.get("id", "")))
-            result, ref = paired if paired is not None else (None, "")
+            result, ref, cut = paired if paired is not None else (None, "", False)
             calls.append(
                 TranscriptToolCall(
                     tool=str(call.get("name", "")),
                     arguments=_truncate_for_transcript(call.get("args", "")),
                     result=result,
                     result_ref=ref,
+                    result_cut=cut,
                 )
             )
         # A tool message is the carrier for a result that has already been attached to its call,
@@ -521,6 +543,7 @@ def _transcript(
                 text=message_text(message),
                 tool_calls=calls,
                 correlation_id=stored_correlation_id(message),
+                author=stored_authorship(message),
             )
         )
     return transcript
