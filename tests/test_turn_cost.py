@@ -60,17 +60,24 @@ def test_the_metric_registry_refuses_an_unbounded_label_which_is_why_this_is_a_t
     """The premise of the whole design, asserted rather than asserted-in-prose.
 
     A per-actor token counter is the obvious fix and is not available: the registry caps a counter
-    at 64 label series and refuses past it (D-152), because a label value is attacker-influenced and
-    minting tokens for many `oid`s is exactly the way around a per-principal limit. Any deployment
-    with more than 64 users would silently lose series — which is worse than not having them.
+    at `core/metrics._MAX_SERIES_PER_COUNTER` label series and refuses past it (D-152), because a
+    label value is attacker-influenced and minting tokens for many `oid`s is exactly the way around
+    a per-principal limit. Any deployment with more users than the cap would silently lose series —
+    which is worse than not having them. Driven one past the cap rather than at a fixed count, so
+    raising the cap (it is sized against the route table) cannot silently turn this into a test of
+    nothing.
     """
+    from chemclaw.core.metrics import _MAX_SERIES_PER_COUNTER
+
     registry = Metrics()
-    for index in range(200):
+    for index in range(_MAX_SERIES_PER_COUNTER + 1):
         registry.increment("chemclaw_tokens_total", 1.0, {"profile": f"actor-{index}"})
     series = [
         line for line in registry.render().splitlines() if line.startswith("chemclaw_tokens_total{")
     ]
-    assert len(series) < 200, "the registry accepted unbounded label cardinality"
+    assert len(series) == _MAX_SERIES_PER_COUNTER, (
+        "the registry accepted unbounded label cardinality"
+    )
 
 
 async def test_a_turn_cost_carries_the_identity_the_metric_cannot(

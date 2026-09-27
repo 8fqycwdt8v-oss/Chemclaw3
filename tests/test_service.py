@@ -2368,6 +2368,12 @@ def test_every_session_scoped_route_is_ownership_gated() -> None:
         # wearing the clothes of a create. 404 either way, like every route above it.
         ("/sessions/{session_id}/fork", "POST"),
         ("/sessions/{session_id}", "DELETE"),
+        # Who else may reach the session (`D-2026-09-27-in-a-shared-session-the-sender-governs`).
+        # A stranger is 404 on all three like every route above; what a *member* may do on them —
+        # and on delete, fork and stop above — is `tests/test_shared_sessions.py`'s subject.
+        ("/sessions/{session_id}/members", "GET"),
+        ("/sessions/{session_id}/members/{actor}", "PUT"),
+        ("/sessions/{session_id}/members/{actor}", "DELETE"),
     }, (
         "new session-scoped route detected — it MUST resolve ownership via _resolve_session, "
         "and this inventory + the non-owner sweep below must cover it"
@@ -2382,10 +2388,10 @@ def test_every_session_scoped_route_is_ownership_gated() -> None:
     app.dependency_overrides[require_principal] = lambda: bob
     for route in session_routes:
         for method in (route.methods or set()) - {"HEAD", "OPTIONS"}:
-            # `ref` is supplied for the tool-result route and ignored by every other path;
+            # `ref` and `actor` are supplied for the routes that take them and ignored by the rest;
             # `str.format` drops the surplus keyword rather than complaining, so one line still
             # builds a URL for all of them.
-            url = route.path.format(session_id=session_id, ref="0" * 64)
+            url = route.path.format(session_id=session_id, ref="0" * 64, actor=bob.oid)
             # The upload route takes multipart, the others JSON; send whichever the route expects so
             # a 404 here proves the *ownership* gate rather than a body-parsing rejection.
             if url.endswith("/attachments"):

@@ -19,12 +19,12 @@ from fastapi import FastAPI, HTTPException, Request
 from starlette.responses import Response
 
 from chemclaw.agent.plan_approval_store import ApprovalStore, Decision
-from chemclaw.agent.plan_gate import EMPTY_PLAN_HASH, gate_applies, plan_identity
+from chemclaw.agent.plan_gate import EMPTY_PLAN_HASH, gate_applies, may_decide, plan_identity
 from chemclaw.agent.plan_scope import declared_scope
 from chemclaw.agent.plan_state import session_plan
 from chemclaw.agent.profiles import get_profile
 from chemclaw.agent.session_store import SessionOwnerStore, encode_session_cursor
-from chemclaw.api.deps import CurrentSession, CurrentUser
+from chemclaw.api.deps import CurrentSession, CurrentUser, record_refusal
 from chemclaw.api.schemas import PendingPlan, PendingPlansOut, PlanDecisionIn, PlanStatusOut
 from chemclaw.api.state import SessionOwners, state
 from chemclaw.core.config import settings
@@ -60,6 +60,9 @@ class _PlanRead:
     approvable: str | None
     # The latest *effective* decision; `None` when nobody has decided at all.
     decision: Decision | None
+    # Whose turn last wrote the plan, when one is recorded — the one person who may decide on it
+    # (`plan_gate.may_decide`).
+    author: str | None
 
     @property
     def plan_hash(self) -> str:
@@ -81,11 +84,13 @@ async def _read_plan(session_id: str, approvals: ApprovalStore) -> _PlanRead:
     todos = None if plan is None else [str(step["content"]) for step in plan]
     approvable = plan_identity(plan or [])
     decision = await approvals.decision(session_id, approvable) if approvable else None
+    author = await approvals.author(session_id, approvable) if approvable else None
     return _PlanRead(
         todos=todos,
         scope=sorted(declared_scope(plan or [])),
         approvable=approvable,
         decision=decision,
+        author=author,
     )
 
 
@@ -235,6 +240,7 @@ async def get_plan(
         mode="execute" if approved else "plan",
         approved=approved,
         decided_by=read.decision.actor if read.decision else None,
+        author=read.author,
     )
 
 
@@ -309,6 +315,10 @@ async def pending_plans(request: Request, principal: CurrentUser) -> PendingPlan
         if read.todos is None:
             unread += 1
             continue
+        # A plan somebody else's turn wrote is not waiting on the caller — only its author may
+        # decide it — so an owner's inbox does not list a member's plan it would then refuse.
+        if not may_decide(read.author, principal.oid, principal.oid):
+            continue
         if read.approvable is not None and read.decision is None:
             plans.append(
                 PendingPlan(
@@ -382,13 +392,26 @@ async def decide_plan(
             status_code=409,
             detail="the plan changed since it was shown; re-read it and decide again",
         )
+    # **Only the plan's author decides on it** (`D-2026-09-27-in-a-shared-session-the-sender-
+    # governs`). In a shared session the session gate above admits every member, and a plan is the
+    # proposal one person's turn made about what *their* turns will do — so another member's yes,
+    # or the owner's, is not consent to it. 403 rather than the gate's 404: the caller is already
+    # in the session, and the plan they were refused is on their screen.
+    approvals = state(request).plan_approvals
+    author = await approvals.author(session_id, plan_hash)
+    if not may_decide(author, live.owner, principal.oid):
+        record_refusal("session", "not the plan's author", principal, session_id, status=403)
+        raise HTTPException(
+            status_code=403,
+            detail="only the person whose message produced this plan may decide on it",
+        )
     # Recording *is* the re-arm. An approval authorizes one turn and is spent when that turn
     # ends (D-167), so re-approving an unchanged plan has to mean "yes, again" rather than a
     # no-op that silently leaves the session unable to act — and since the store is append-only
     # and reads the latest row, a second decision is a fresh, unspent one by construction. It
     # used to need a separate `rearm_plan` call against session state, which is one more thing a
     # future route could forget to do.
-    await state(request).plan_approvals.record(
+    await approvals.record(
         session_id,
         plan_hash,
         principal.oid or "",

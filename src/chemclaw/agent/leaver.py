@@ -130,6 +130,9 @@ def _actor_forms(actor: str) -> list[str]:
 # spellings of one id that `_actor_forms` returns, and `ANY` over an array is still exact equality
 # against each element — the same comparison, applied to each form the same person's id can take.
 _SESSION_SCOPED = "SELECT session_id FROM session_owners WHERE owner = ANY(%(actors)s)"
+# The sessions somebody else owns that this person was let into — claimed for the sweep's
+# duration, never residue-probed (`_actor_sessions`).
+_MEMBER_OF = "SELECT session_id FROM session_members WHERE actor = ANY(%(actors)s)"
 # The LangGraph checkpointer holds the same conversation as graph state, keyed by `thread_id` —
 # which is the session id. Erasing `session_messages` and leaving these behind would remove a
 # departing person's transcript while their turn state, tool calls and results stayed readable, and
@@ -263,13 +266,12 @@ _ERASE: tuple[tuple[str, str], ...] = (
         "     AND (o.owner IS NULL OR o.owner <> ALL(%(actors)s)))",
     ),
     # **By session and by author**, because since 109 a message names who wrote it
-    # (`D-2026-09-27-an-author-is-a-person-and-an-agent`). Today the two arms find the same rows —
-    # every session has one person in it and the backfill set `actor` to that person — so the second
-    # arm costs a sequential scan and finds nothing new: measured at 0.88 s over a million rows,
-    # against a sweep already measured in minutes. It is here for the day a session holds two
-    # people, which is the row this column exists for: a leaver's words in a session somebody else
-    # owns are the leaver's conversation, and an erasure that reached only their own sessions would
-    # leave them behind while reporting the table cleared.
+    # (`D-2026-09-27-an-author-is-a-person-and-an-agent`). The second arm is what reaches a member's
+    # words in a session somebody else owns (`D-2026-09-27-in-a-shared-session-the-sender-governs`):
+    # they are the leaver's conversation, and an erasure that reached only their own sessions would
+    # leave them behind while reporting the table cleared. It costs a sequential scan — measured at
+    # 0.88 s over a million rows, against a sweep already measured in minutes. What it cannot reach
+    # is the same words in the owner's checkpointed thread, which `_BEYOND_REACH` names.
     (
         "session_messages",
         "DELETE FROM session_messages "
@@ -327,6 +329,22 @@ _ERASE: tuple[tuple[str, str], ...] = (
     # taken by omission — a person in a column an erase predicate could not see, exactly the
     # `note_proposals.decided_by` defect `tests/test_leaver.py` was written for.
     ("composed_workflows", "DELETE FROM composed_workflows WHERE owner = ANY(%(actors)s)"),
+    # **A shared session holds this person in two more places, and both are theirs to lose**
+    # (`D-2026-09-27-in-a-shared-session-the-sender-governs`). A membership is their standing in a
+    # conversation somebody else owns, and an authorship is which plan their turn last wrote there —
+    # neither is a record of what they did to the science, so both go with the conversation. By
+    # person *and* by session: the second arm is the leaver's own sessions, which the cascade from
+    # `session_owners` would take anyway, spelled out so the report counts them.
+    (
+        "session_members",
+        "DELETE FROM session_members "
+        f"WHERE actor = ANY(%(actors)s) OR session_id IN ({_SESSION_SCOPED})",
+    ),
+    (
+        "plan_authors",
+        "DELETE FROM plan_authors "
+        f"WHERE actor = ANY(%(actors)s) OR session_id IN ({_SESSION_SCOPED})",
+    ),
     ("session_owners", "DELETE FROM session_owners WHERE owner = ANY(%(actors)s)"),
 )
 
@@ -510,6 +528,15 @@ _BEYOND_REACH: dict[str, str] = {
     # for (`D-2026-09-27-an-author-is-a-person-and-an-agent`), and a note is the record — knowledge
     # someone may cite, retained on the audit trail's line — in a git repository whose history is
     # the point of keeping it there.
+    # Not a table either: the graph state of a session somebody *else* owns. A member's messages
+    # there are erased from the transcript by author (`session_messages`' second arm), but the
+    # checkpointer holds the whole thread as the owner's turn state, keyed by the session, and a
+    # message cannot be cut out of it without rewriting the owner's conversation under them.
+    "a shared session's graph state (checkpoints of sessions this person was a member of)": "a "
+    "member's words are erased from the transcript by author, but the owner's checkpointed thread "
+    "still carries them — it is the owner's conversation state and is removed when the owner "
+    "deletes the session or leaves. Find those sessions before erasing with "
+    "`SELECT session_id FROM session_members WHERE actor = '<id>'`",
     "knowledge notes (`actor:` frontmatter)": "an agent-written note names the person it was "
     "written for, and the note lives in the knowledge repository rather than in this database, so "
     "this command neither counts nor clears it. Find them with `git grep -l 'actor: <id>'` in the "
@@ -614,18 +641,28 @@ class ErasureReport:
         return sum(self.residue.values())
 
 
-async def _actor_sessions(actors: list[str]) -> list[str]:
-    """Every session id this erasure is about to reach, read before the sweep opens.
+async def _actor_sessions(actors: list[str]) -> tuple[list[str], list[str]]:
+    """The sessions this erasure reaches: `(owned, shared)`, read before the sweep opens.
 
     Read on its own short connection rather than inside the erasure's transaction, because its
     consumers run *outside* that transaction: the turn claims are taken before it opens and the
     residue count runs after it commits, by which point `session_owners` no longer answers this
     question at all.
+
+    **`shared` is the sessions somebody else owns that this person is a member of**, and they are
+    claimed too (`D-2026-09-27-in-a-shared-session-the-sender-governs`). The sweep deletes this
+    person's messages there by author, and a member can be mid-turn in one — writing exactly the
+    rows being deleted — so the claim that stops that race on their own sessions has to span these
+    as well. They are *not* residue-probed: their ownership rows stay, and every other participant's
+    rows in them are meant to.
     """
     async with db.connection(_session_dsn()) as conn:
         async with conn.cursor() as cur:
             await cur.execute(_SESSION_SCOPED, {"actors": actors})
-            return [str(row[0]) for row in await cur.fetchall()]
+            owned = [str(row[0]) for row in await cur.fetchall()]
+            await cur.execute(_MEMBER_OF, {"actors": actors})
+            shared = [str(row[0]) for row in await cur.fetchall() if str(row[0]) not in owned]
+    return owned, shared
 
 
 async def _residue_for(sessions: list[str]) -> tuple[dict[str, int], list[str]]:
@@ -712,10 +749,10 @@ async def erase_actor(actor: str, *, apply: bool = False) -> ErasureReport:
 
     report = ErasureReport(actor=actor, applied=apply)
     try:
-        sessions = await _actor_sessions(actors)
+        sessions, shared = await _actor_sessions(actors)
     except psycopg.Error as exc:
         raise ErasureError(f"the database refused the erasure: {exc}") from exc
-    async with _sessions_held(sessions):
+    async with _sessions_held(sessions + shared):
         await _erase_within_claims(actors, report, apply=apply)
     if apply and sessions:
         try:

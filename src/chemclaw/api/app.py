@@ -64,6 +64,7 @@ from chemclaw.api.middleware import (
 )
 from chemclaw.api.routes import (
     jobs,
+    members,
     notes,
     ops,
     org_skills,
@@ -447,7 +448,8 @@ def create_app(
         return lease is not None and lease.deadline > time.monotonic()
 
     # Bounded LRU of live sessions, each carrying its owner Entra oid so a session can only be
-    # posted to / streamed by its creator (defense-in-depth beyond the unguessable uuid4 id).
+    # posted to / streamed by its creator and the members they admitted (defense-in-depth beyond
+    # the unguessable uuid4 id; membership itself is read per request, never cached here).
     # The bound keeps the map from growing for the pod's lifetime (COR-3). Sessions with a turn
     # in flight are pinned against eviction: dropping the handle mid-turn lets the next request
     # rehydrate a second one over the same durable history, and the two diverge (A5).
@@ -626,6 +628,7 @@ def create_app(
         jobs,
         protocols,
         workflows,
+        members,
     ):
         module.register(app)
 

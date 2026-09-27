@@ -133,6 +133,10 @@ def test_the_reachability_guard_names_every_session_scoped_erasure_table() -> No
         # Swept *with* the ownership row rather than guarding it — they are what is deleted.
         "session_turns",
         "session_owners",
+        # Cascade from the ownership row (`infra/sql/110_shared_sessions.sql`), so they cannot
+        # outlive it and have nothing to guard.
+        "session_members",
+        "plan_authors",
     }
     assert set(_SESSION_SCOPED_ROWS) == expected, (
         "the reachability guard and the erasure sweep disagree about which tables hold one "

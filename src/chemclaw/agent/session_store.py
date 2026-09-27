@@ -683,6 +683,10 @@ _SESSION_DELETE: dict[str, str] = {
     "session_messages": "DELETE FROM session_messages WHERE session_id = %(session_id)s",
     "session_events": "DELETE FROM session_events WHERE session_id = %(session_id)s",
     "session_turns": "DELETE FROM session_turns WHERE session_id = %(session_id)s",
+    # Both also cascade from `session_owners` (`infra/sql/110_shared_sessions.sql`); named so the
+    # delete says what it removed.
+    "session_members": "DELETE FROM session_members WHERE session_id = %(session_id)s",
+    "plan_authors": "DELETE FROM plan_authors WHERE session_id = %(session_id)s",
     "session_owners": "DELETE FROM session_owners WHERE session_id = %(session_id)s",
 }
 
