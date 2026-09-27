@@ -26,7 +26,7 @@ from starlette.types import Receive, Scope, Send
 
 from chemclaw.api.auth import DEV_PRINCIPAL_OID
 from chemclaw.api.budget import BudgetExceeded, check_thread_size, refused_metric
-from chemclaw.api.deps import CurrentSession, CurrentUser
+from chemclaw.api.deps import CurrentSession, CurrentUser, require_owner
 from chemclaw.api.detach import DetachableTurn
 from chemclaw.api.events import TURN_EVENT_REF, ErrorEvent, QueuedEvent, sse_frame
 from chemclaw.api.middleware import AT_CAPACITY
@@ -545,8 +545,8 @@ async def stop_turn(
     Closing the SSE stream used to be how a turn was stopped, which made the Stop button and a
     network blip the same event; now the stream only *detaches*
     (`D-2026-08-27-a-disconnect-is-a-detach-not-a-stop`) and this is the one way to cancel work
-    in flight. Guarded by the same session-ownership dependency as the turn route itself, so
-    stopping a turn requires exactly the standing that starting one does.
+    in flight. Guarded by the same session dependency as the turn route itself, and in a shared
+    session by one more rule: a member stops only their own turn, and the owner any.
 
     404 when no turn is running rather than a silent 200: "there was nothing to stop" and
     "stopped" are different facts, and a client that raced the turn's own completion should know
@@ -554,9 +554,18 @@ async def stop_turn(
     multi-replica deployment the client calls the same origin its stream was on, which it always
     does, because the stream *is* how it knows a turn is running.
     """
-    turn = state(request).running_turns.get(session_id)
+    front = state(request)
+    turn = front.running_turns.get(session_id)
     if turn is None:
         raise HTTPException(status_code=404, detail="no turn is running for this session")
+    # **In a shared session, a turn is its sender's to stop — or the owner's**
+    # (`D-2026-09-27-in-a-shared-session-the-sender-governs`). The session gate admits every member,
+    # and one member ending another's work in flight is not a standing a membership grants; the
+    # owner keeps it, as the person who decides who is in the conversation at all.
+    lease = front.active_turns.get(session_id)
+    sender = lease.actor if lease is not None else None
+    if sender is not None and sender != principal.oid:
+        require_owner(live, principal, session_id, "stop somebody else's turn")
     await turn.stop()
     METRICS.increment("chemclaw_turns_stopped_total")
     logger.info("session %s's turn was stopped by request", session_id)

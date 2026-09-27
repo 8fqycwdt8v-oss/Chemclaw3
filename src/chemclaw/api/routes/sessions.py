@@ -23,7 +23,13 @@ from chemclaw.agent.session import TurnSession
 from chemclaw.agent.session_fork import SessionForkError, fork_session
 from chemclaw.agent.session_store import SessionOwnerStore, encode_session_cursor
 from chemclaw.api import app as front_door
-from chemclaw.api.deps import CurrentSession, CurrentUser, resolve_session
+from chemclaw.api.deps import (
+    CurrentSession,
+    CurrentUser,
+    OwnedSession,
+    resolve_owned_session,
+    resolve_session,
+)
 from chemclaw.api.schemas import (
     SessionIn,
     SessionOut,
@@ -107,16 +113,17 @@ async def fork_session_route(
     request: Request,
     session_id: str,
     principal: CurrentUser,
-    live: CurrentSession,
+    live: OwnedSession,
 ) -> SessionOut:
     """Branch this session onto a new one carrying its whole history, and return the new id.
 
-    **The authorization is the `CurrentSession` dependency and nothing else here.** A fork reads
-    every message of the parent and hands it to the caller under a new id, so it is exactly as
-    sensitive as `GET /sessions/{id}/messages` — and `resolve_session` is the check that route
-    already uses. Doing it that way rather than re-deriving ownership in the body is the point:
-    `chemclaw.api.deps` refuses with 404 rather than 403, so a caller cannot use this endpoint to
-    discover that a session id exists.
+    **The authorization is the `OwnedSession` dependency and nothing else here.** A fork reads
+    every message of the parent and hands it to the caller under a new id — the session gate's
+    check first, so a stranger gets its 404 and cannot use this endpoint to discover that a session
+    id exists. **And then the owner's, because a shared session holds other people's words**
+    (`D-2026-09-27-in-a-shared-session-the-sender-governs`): a member's fork would copy every
+    participant's messages into a session only the member owns, out of reach of the owner's later
+    decision to remove anybody. A member is answered 403 — they already know the session exists.
 
     **The fork inherits the parent's profile**, taken from the resolved live session rather than
     from the request. A profile only ever narrows, so accepting one from the caller would let a
@@ -285,8 +292,8 @@ async def get_messages(
 ) -> list[TranscriptMessage]:
     """One session's stored transcript, in order — what a client reads back after a reload.
 
-    Ownership-gated by the same `resolve_session` the turn route uses, so a transcript is
-    readable only by the chemist whose session it is (a non-owner gets the same 404 as an
+    Gated by the same `resolve_session` the turn route uses, so a transcript is readable only by
+    the session's owner and the members that owner let in (anybody else gets the same 404 as an
     unknown id, leaking nothing about which ids exist).
 
     Read through the agent's own history provider rather than by querying `session_messages`:
@@ -319,13 +326,14 @@ async def delete_session(
 ) -> Response:
     """Delete one conversation and everything keyed by it — the owner's own erasure.
 
-    **Authorized exactly as reading it is**, through the same `resolve_session` dependency the
-    transcript route uses — declared as a route dependency rather than as a parameter, the way the
-    attachment route does it, because this handler needs the *gate* and not the handle. That
-    identity is the whole design rather than a convenience: a
-    caller who cannot read a session must not be able to delete it, and the cheapest way to
-    guarantee that is to have one gate rather than two that can drift apart. So a session that does
-    not exist and a session that is somebody else's answer the same **404**, exactly as they do on
+    **Authorized as reading it is, and then as owning it** — `resolve_owned_session`, which is the
+    transcript route's `resolve_session` followed by `require_owner`, declared as a route dependency
+    rather than as a parameter because this handler needs the *gate* and not the handle. A caller
+    who cannot read a session must not be able to delete it, and one gate rather than two that can
+    drift apart is what guarantees that; a **member** can read it and still may not delete it
+    (`D-2026-09-27-in-a-shared-session-the-sender-governs`), and is answered 403 because the session
+    is no secret from them. A session that does not exist and a session that is somebody else's
+    and not shared answer the same **404**, exactly as they do on
     every other session-scoped route (`chemclaw.api.deps._refuse`): a 403 here would confirm which
     ids exist, and turn a delete endpoint into an id oracle. The refusal is recorded server-side,
     which is where that distinction survives.
@@ -504,9 +512,9 @@ def register(app: FastAPI) -> None:
     app.post("/sessions")(create_session)
     app.get("/sessions")(list_sessions)
     app.get("/sessions/{session_id}/messages")(get_messages)
-    app.delete("/sessions/{session_id}", status_code=204, dependencies=[Depends(resolve_session)])(
-        delete_session
-    )
+    app.delete(
+        "/sessions/{session_id}", status_code=204, dependencies=[Depends(resolve_owned_session)]
+    )(delete_session)
     app.post("/sessions/{session_id}/fork")(fork_session_route)
     app.post("/sessions/{session_id}/attachments", dependencies=[Depends(resolve_session)])(
         upload_attachment

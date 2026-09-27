@@ -85,3 +85,32 @@ async def test_a_session_somebody_else_owns_is_refused_and_does_not_confirm_it_e
     finally:
         reset_current_session_id(session)
         reset_current_identity(identity)
+
+
+async def test_a_member_of_a_shared_session_reads_its_pack_and_a_stranger_still_does_not(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The tool admits whom the route admits (the shared-session ADR of 2026-09-27).
+
+    A member the owner let in reads the conversation at `/sessions/{id}/…`, so the agent's own read
+    of the same conversation must answer the same way — and admitting one person must not open the
+    session to the next.
+    """
+    from chemclaw.agent import session_members
+
+    await migrated_db_or_skip()
+    monkeypatch.setattr(settings, "session_store", "postgres")
+    session_members.session_member_store.cache_clear()
+    shared = "sess-evidence-shared"
+    member = "u-member-evidence"
+    try:
+        await SessionOwnerStore().record(shared, OWNER)
+        await session_members.session_member_store().add(shared, member)
+        for actor, expected in ((member, True), (INTRUDER, False)):
+            identity = set_current_identity(actor, frozenset())
+            try:
+                assert await _may_read(shared) is expected, actor
+            finally:
+                reset_current_identity(identity)
+    finally:
+        session_members.session_member_store.cache_clear()

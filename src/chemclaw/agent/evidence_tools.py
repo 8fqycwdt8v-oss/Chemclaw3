@@ -12,12 +12,13 @@ this path at all, while `session_id` is a plain argument the model can set to an
 ids were discoverable: `check_pending_requests` returned every open request in the deployment with
 its `session_id` attached. So Alice could ask what was outstanding, read Bob's session id out of the
 answer, and assemble Bob's every tool call, job rationale, approval and external effect. The gate is
-now here, against the same `owner_permits` rule the routes use, and a session the caller does not
-own is refused with the wording an unknown one gets — no existence leak, as at the front door.
+now here, against the same `participant_permits` rule the routes use, and a session the caller is
+not in is refused with the wording an unknown one gets — no existence leak, as at the front door.
 """
 
 from chemclaw.agent.framing import defang
-from chemclaw.agent.session_store import SessionOwnerStore, owner_permits
+from chemclaw.agent.session_members import participant_permits
+from chemclaw.agent.session_store import SessionOwnerStore
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import get_current_actor
 from chemclaw.core.session_context import get_current_session_id
@@ -28,15 +29,16 @@ from chemclaw.operations import assemble
 async def _may_read(session_id: str) -> bool:
     """Whether this turn's actor may assemble a pack for a session that is not their own.
 
-    The same `owner_permits` rule `/sessions/{id}/…` resolves, so the tool and the route cannot
-    disagree about who owns a conversation. A session with no ownership row at all is refused under
+    The same rule `/sessions/{id}/…` resolves — the owner, or a member the owner let in
+    (`session_members.participant_permits`) — so the tool and the route cannot disagree about who is
+    in a conversation. A session with no ownership row at all is refused under
     enforcement and allowed in dev, which is what `owner_permits` already decides for a row whose
     owner is absent — an unknown session and an owner-less one are the same claim about the record.
     """
     found, owner, _ = await SessionOwnerStore().lookup(session_id)
     if not found:
         return not settings.entra_required
-    return owner_permits(owner, get_current_actor())
+    return await participant_permits(session_id, owner, get_current_actor())
 
 
 @tool

@@ -410,25 +410,21 @@ only holds defects can only ever restore the system to what it already intended 
       said 39 and then 40 for one count three sentences apart, which is why the number now appears
       once, with the date it was measured.
 
-- [ ] **Several humans in one session is five pieces, and the policy one has to be settled first**
-      — [L], scoped in `docs/archive/PLAN-2026-09-14-multiplayer-and-the-open-delegation-questions.md`.
-      Not the owner gate relaxed: a message now names who wrote it (`session_messages.actor`/`agent`,
-      `D-2026-09-27-an-author-is-a-person-and-an-agent`), and a message's `actor` is its sender for
-      the sender-governs decision (owner, 2026-09-26) to read; ownership is checked in 46 places under
-      `src/chemclaw/api/`; `api/detach.py` holds one queue and one `_attached` flag, so a second
-      reader *steals* events rather than seeing a copy; and two writers on one thread fork the DAG
-      silently (Wave 2's measurement), which is what `SessionTurnClaims` prevents by refusing.
-
-      The serialisation is already correct and only its *answer* is wrong — one turn at a time is
-      the right semantic for a shared thread, so the 409 becomes a bounded queue rather than the
-      claim being relaxed. Order: participants, queued turn, reader fan-out — attribution's schema half is the authorship
-      pair above, and what is left of it is the owner gate and the erasure's claim coverage for a
-      session somebody else owns. **Settle
-      the authority questions before the schema**: whose roles govern a tool call, whether B may
-      approve a plan A's message produced, and whose `/memories/` load (they are namespaced per
-      actor digest, so a shared session loads none, the sender's, or a session tier that does not
-      exist). Cheap to decide now, a migration to decide later. A chat-room connector is separate
-      work on top and wants 1–4 finished first.
+- [ ] **A shared session serialises by refusing and streams to one reader** — [M]. What is left of
+      the multi-human-session work after `D-2026-09-27-in-a-shared-session-the-sender-governs`
+      settled the authority questions and shipped membership (`session_members`, the sender
+      governing each turn, a plan decided only by its author). Three pieces, in dependency order:
+      **a queued turn** — a member's message while another participant's turn runs is refused 409 by
+      `SessionTurnClaims`, which is the right serialisation and the wrong answer; it becomes a
+      bounded wait with a position, and the lease already handles a dead holder. **Reader fan-out** —
+      `api/detach.DetachableTurn` holds one queue and one `_attached` flag, so a second participant
+      reattaching *steals* events rather than seeing a copy; it needs N readers with per-reader
+      backpressure so one stalled browser cannot hold the turn (the bound
+      `service_sse_send_timeout_seconds` sets for one reader). **The plan inbox for members** —
+      `GET /plans/pending` pages the caller's *owned* sessions, so a plan a member's turn wrote in
+      somebody else's session reaches that member only through the in-turn card; it wants the
+      sessions `GET /sessions/shared` lists as well. A chat-room connector is separate work on top
+      and wants all three finished first.
 
 - [ ] **A routing corpus where the right profile is not inferable from the question's surface**
       — [M]. Seven profiles ship and genuinely narrow (`evidence` reaches zero side-effecting tools,
