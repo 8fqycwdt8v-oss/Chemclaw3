@@ -518,3 +518,27 @@ def test_a_refused_turn_is_recorded_as_its_status_rather_than_as_a_transport_fai
     assert result.status == 429
     assert result.transport_error is None
     assert result.answered is False
+
+
+def test_the_calibration_check_reads_the_ratio_not_the_in_flight_estimate() -> None:
+    """Check H asked `turn_costs.estimated_tokens` to be positive on a turn that completed.
+
+    That column is only what nobody was billed *through* — an in-flight or cancelled prompt
+    (`agent/turn_usage.InFlightPrompts`) — so it is 0 on every completed turn and the check could
+    not pass. The property is the published ratio leaving its clamp, and exactly-1.0 is the clamp.
+    """
+    exposition = (
+        "# HELP chemclaw_context_estimator_ratio x\n"
+        "# TYPE chemclaw_context_estimator_ratio gauge\n"
+        "chemclaw_context_estimator_ratio 2.0625\n"
+        "chemclaw_context_estimator_ratio_other 9\n"
+    )
+    ratio = live_storm.metric_sample(exposition, live_storm.ESTIMATOR_RATIO_GAUGE)
+    assert ratio == 2.0625
+    assert live_storm.metric_sample("", live_storm.ESTIMATOR_RATIO_GAUGE) is None
+
+    assert live_storm._calibration_finding(200, 41_000, ratio).ok
+    assert not live_storm._calibration_finding(200, 41_000, 1.0).ok, "1.0 is the clamp itself"
+    assert not live_storm._calibration_finding(200, 41_000, None).ok, "unreadable is not a pass"
+    assert not live_storm._calibration_finding(200, 0, ratio).ok, "nothing billed, nothing shown"
+    assert not live_storm._calibration_finding(500, 41_000, ratio).ok

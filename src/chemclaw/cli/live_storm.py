@@ -879,6 +879,50 @@ async def family_e_chaos() -> list[Finding]:
     return findings
 
 
+#: The gauge the estimator calibration publishes (`agent/context_budget.py` binds it).
+ESTIMATOR_RATIO_GAUGE = "chemclaw_context_estimator_ratio"
+
+
+def metric_sample(exposition: str, name: str) -> float | None:
+    """The value of an unlabelled series in a Prometheus text exposition, or `None` if absent."""
+    for line in exposition.splitlines():
+        head, _, value = line.partition(" ")
+        if head == name and value:
+            return float(value.split()[0])
+    return None
+
+
+async def _front_door_gauge(name: str) -> float | None:
+    """One gauge as the front door's own `/metrics` reports it — `None` if it cannot say."""
+    try:
+        async with httpx.AsyncClient(base_url=FRONT_DOOR, timeout=10.0, trust_env=False) as client:
+            response = await client.get("/metrics")
+    except httpx.HTTPError:
+        return None
+    return metric_sample(response.text, name) if response.status_code == 200 else None
+
+
+def _calibration_finding(status: int, billed: int, ratio: float | None) -> Finding:
+    """H's calibration check: a billed, request-sized turn left the published ratio above 1.
+
+    Above 1 and not merely equal, because 1.0 is the clamp every untightened process reads —
+    so equality is indistinguishable from the branch never running.
+    """
+    return Finding(
+        family="H",
+        name="a request-sized bill drives the estimator ratio above 1",
+        ok=status == 200 and billed > 0 and ratio is not None and ratio > 1.0,
+        observed=(
+            f"turn_costs billed={billed} for this session; "
+            f"{ESTIMATOR_RATIO_GAUGE}={'unreadable' if ratio is None else f'{ratio:.3f}'}"
+        ),
+        detail=(
+            "every other behaviour bills a constant, which clamps the ratio to 1.0 and leaves "
+            "the tightening branch two budget decisions rest on unexercised by any lane"
+        ),
+    )
+
+
 async def family_h_edges() -> list[Finding]:
     """H · data a chemist could plausibly send that nothing in the corpus resembles.
 
@@ -919,27 +963,23 @@ async def family_h_edges() -> list[Finding]:
     # lane anywhere, only by unit tests with hand-fed numbers. `h-size-billed` bills the serialized
     # request at 0.5 tokens per character, roughly twice the chars/4 estimator, so the ratio this
     # asserts is the one direction that can only tighten a budget and never loosen it.
+    #
+    # **Asked of the ratio itself, not of `turn_costs`.** This compared `input_tokens` against
+    # `turn_costs.estimated_tokens` and wanted `billed > estimated > 0` — but `estimated_tokens` is
+    # by design only what nobody was billed *through* (`agent/turn_usage.InFlightPrompts`: a
+    # cancelled or in-flight prompt), so on a turn that completes it is 0 every time and the check
+    # could never pass. The quantity the property is about is
+    # `agent/context_budget.estimator_ratio`, which the front door publishes as
+    # `chemclaw_context_estimator_ratio`. Every other behaviour bills the mock's constant 900
+    # against a request estimated in the tens of thousands, which is below `_Calibration._SANE`'s
+    # floor and dropped, so this turn's samples are what move it.
     (sized,) = await storm("h-size-billed", turns=1, concurrency=1)
     billed = await _scalar(
         "select coalesce(sum(input_tokens), 0) from turn_costs where session_id = %s",
         (sized.session_id,),
     )
-    estimated = await _scalar(
-        "select coalesce(sum(estimated_tokens), 0) from turn_costs where session_id = %s",
-        (sized.session_id,),
-    )
-    findings.append(
-        Finding(
-            family="H",
-            name="a request-sized bill drives the estimator ratio above 1",
-            ok=sized.status == 200 and billed > estimated > 0,
-            observed=f"turn_costs billed={billed} estimated={estimated} for this session",
-            detail=(
-                "every other behaviour bills a constant, which clamps the ratio to 1.0 and leaves "
-                "the tightening branch two budget decisions rest on unexercised by any lane"
-            ),
-        )
-    )
+    ratio = await _front_door_gauge(ESTIMATOR_RATIO_GAUGE)
+    findings.append(_calibration_finding(sized.status, billed, ratio))
 
     # The one request-level refusal that unlocks a label nothing else reaches.
     # `Behaviour.http_status` injects a failure per behaviour and every such injection classifies
