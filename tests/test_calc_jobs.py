@@ -32,6 +32,8 @@ from temporalio.worker import Worker
 from chemclaw.connectors.calc import activities
 from chemclaw.connectors.calc.results import XtbJobResult
 from chemclaw.connectors.calc.specs import (
+    BondCleavageSpec,
+    BondSurveyJobSpec,
     ComplexJobSpec,
     EnsembleJobSpec,
     MicrostatePkaJobSpec,
@@ -283,6 +285,35 @@ def test_a_pka_job_names_the_proton_it_is_about(server: FakeCalcServer) -> None:
     assert result.pka.site_smiles == "[O-]c1ccccc1"
     assert server.count("search_conformer_ensemble") == 2
     assert "[O-]c1ccccc1" in result.summary
+
+
+def test_a_survey_that_lost_a_bond_says_so_in_its_summary(server: FakeCalcServer) -> None:
+    """The summary is the line people read, so a survey that lost a bond cannot hide it there.
+
+    "weakest of 2 bonds" over a survey asked for two, one of which the server refused, is the
+    silent drop the per-item outcome exists to prevent — moved from the payload into the sentence
+    a completion push-back carries.
+    """
+
+    def refusing(arguments: dict[str, object]) -> dict[str, object]:
+        if arguments["smiles"] == "[CH3]":
+            raise ValueError("no parameters for this input on the server")
+        return server._embed_structure(arguments)
+
+    server.overrides["embed_structure"] = refusing
+    result = _run(
+        BondSurveyJobSpec(
+            smiles="CCc1ccccc1",
+            cleavages=[
+                BondCleavageSpec(atoms=[0, 1], bond="C-C", fragments=["[CH2]c1ccccc1", "[CH3]"]),
+                BondCleavageSpec(atoms=[1, 2], bond="C-C", fragments=["[CH2]C", "[c]1ccccc1"]),
+            ],
+        )
+    )
+
+    assert result.bonds is not None and len(result.bonds.failed) == 1
+    assert "weakest of 1 bonds" in result.summary
+    assert "1 of the bonds could not be computed" in result.summary
 
 
 def test_a_pka_job_carries_the_branch_into_its_summary(server: FakeCalcServer) -> None:

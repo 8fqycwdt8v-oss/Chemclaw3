@@ -1,0 +1,365 @@
+"""Every item of a screen ends as an outcome: an answer, or a failure that names it.
+
+The three screens — bonds, reaction media, species media — are sets of *independent* answers, so
+one item the calculation refuses is reported beside the rest rather than aborting the job at the
+first one. A species ranking is not a set of independent answers: its populations are normalised
+over the whole set, so it refuses, naming every form it could not compute, rather than re-share the
+missing forms' population among the survivors.
+
+The boundary is `ValueError` — the repository's "this input is bad" contract — and nothing wider,
+so every test that makes an item fail also has a sibling that makes the *backend* fail and shows
+the outage still propagating. Every refusal here is driven through `FakeCalcServer.overrides`, so it
+arrives down the real wire path (`core/mcp_session.invoke` -> `connectors/calc/remote._call`)
+rather than being raised by a stub: a refusal as `CalcToolError`, a full pod as `CalcBusyError`, a
+server fault as `CalcServerError`.
+"""
+
+import asyncio
+from collections.abc import Callable, Coroutine
+from typing import Any
+
+import pytest
+from pydantic import BaseModel
+from rdkit import Chem
+
+from chemclaw.connectors.calc import compose
+from chemclaw.connectors.calc.remote import CalcBusyError, CalcServerError
+from chemclaw.core.mcp_session import SERVER_AT_CAPACITY, SERVER_INTERNAL_ERROR
+from chemclaw.science.calc.models import (
+    BondDissociationSurvey,
+    FailedMedium,
+    SolventComparisonResult,
+    SpeciesSolventComparison,
+)
+from chemclaw.science.calc.store import InMemoryStore
+from tests.calc_server_fake import FakeCalcServer, install
+
+_ETHYLBENZENE = "CCc1ccccc1"
+# Two C-C homolyses of ethylbenzene; the first is the one the tests below make fail.
+_CLEAVAGES = [
+    ((0, 1), "C-C", ["[CH2]c1ccccc1", "[CH3]"]),
+    ((1, 2), "C-C", ["[CH2]C", "[c]1ccccc1"]),
+]
+_ESTERIFICATION = (["CC(=O)O", "CCO"], ["CC(=O)OCC", "O"])
+_ESTER_SIGMAS = {"CC(=O)O": 1, "CCO": 1, "CC(=O)OCC": 1, "O": 2}
+_KETO, _ENOL = "CC(=O)CC(C)=O", "CC(O)=CC(C)=O"
+_TAUTOMERS = [(_KETO, "keto"), (_ENOL, "enol")]
+_REFUSAL = "no parameters for this input on the server"
+
+
+def _run(coroutine: Any) -> Any:
+    """Run one coroutine to completion, the shape every test here uses."""
+    return asyncio.run(coroutine)
+
+
+def _refuse(
+    server: FakeCalcServer,
+    tool: str,
+    when: Callable[[dict[str, Any]], bool],
+    message: str = _REFUSAL,
+) -> None:
+    """Make `tool` refuse the calls `when` selects, and answer every other call as before.
+
+    Raising `ValueError` is how the fake sends a refused call over the wire; the message's head
+    decides what the client makes of it, which is how one helper produces all three failures.
+    """
+    answer = getattr(server, f"_{tool}")
+
+    def refusing(arguments: dict[str, Any]) -> dict[str, Any]:
+        if when(arguments):
+            raise ValueError(message)
+        result: dict[str, Any] = answer(arguments)
+        return result
+
+    server.overrides[tool] = refusing
+
+
+def _embedding(*smiles: str) -> Callable[[dict[str, Any]], bool]:
+    """Select the embedding of any of these SMILES: where every species' calculation begins."""
+    return lambda arguments: arguments["smiles"] in smiles
+
+
+def _relaxing(smiles: str | None = None, solvent: str | None = None) -> Callable[..., bool]:
+    """Select a relaxation by species, by medium, or by both."""
+    # A relaxed structure carries the canonical SMILES, not the string the caller wrote.
+    wanted = None if smiles is None else Chem.MolToSmiles(Chem.MolFromSmiles(smiles))
+
+    def selected(arguments: dict[str, Any]) -> bool:
+        species = wanted is None or arguments["structure"].get("smiles") == wanted
+        medium = solvent is None or arguments.get("solvent") == solvent
+        return species and medium
+
+    return selected
+
+
+# --- the bond survey ---------------------------------------------------------------------------
+
+
+def test_a_refused_bond_is_reported_beside_the_bonds_that_were_computed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One bond the server refuses is that bond's answer, not the survey's.
+
+    `considered == bonds + failed` is the invariant that makes the drop impossible to hide: every
+    bond asked about is in exactly one of the two lists. And the weakest bond is flagged as the
+    weakest *of the rest*, with a warning that says the refused one may be weaker — the flag is a
+    claim about the whole molecule otherwise, and nobody measured the missing bond.
+    """
+    server = install(monkeypatch, FakeCalcServer())
+    _refuse(server, "embed_structure", _embedding("[CH3]"))
+
+    survey = _run(compose.bond_dissociation_survey(InMemoryStore(), _ETHYLBENZENE, _CLEAVAGES))
+
+    assert survey.considered == len(survey.bonds) + len(survey.failed) == 2
+    assert [bond.atoms for bond in survey.bonds] == [[1, 2]]
+    assert survey.bonds[0].is_weakest
+    (failed,) = survey.failed
+    assert (failed.atoms, failed.fragments) == ([0, 1], ["[CH2]c1ccccc1", "[CH3]"])
+    assert _REFUSAL in failed.reason, "the server's own sentence is the reason"
+    (warning,) = [w for w in survey.warnings if "could not be computed" in w]
+    assert "C-C [0, 1]" in warning, "a bond is named with its atoms — 'C-C' alone is ambiguous"
+    assert "may be weaker" in warning
+
+
+def test_a_survey_in_which_no_bond_could_be_computed_refuses_naming_each(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No answer is not an empty ranking: the job fails, and says which bond failed and why."""
+    server = install(monkeypatch, FakeCalcServer())
+    _refuse(server, "embed_structure", _embedding("[CH3]", "[CH2]C"))
+
+    with pytest.raises(ValueError, match="no bond of") as refused:
+        _run(compose.bond_dissociation_survey(InMemoryStore(), _ETHYLBENZENE, _CLEAVAGES))
+    assert "C-C [0, 1]" in str(refused.value)
+    assert "C-C [1, 2]" in str(refused.value)
+
+
+@pytest.mark.parametrize(
+    ("head", "outage"),
+    [(SERVER_INTERNAL_ERROR, CalcServerError), (SERVER_AT_CAPACITY, CalcBusyError)],
+)
+def test_an_outage_during_a_survey_is_not_reported_as_a_failed_bond(
+    monkeypatch: pytest.MonkeyPatch, head: str, outage: type[Exception]
+) -> None:
+    """A fault or a full pod says nothing about the bond, so it must reach Temporal as itself.
+
+    Both are `SubsystemUnavailableError`s — the *retryable* hierarchy. Folding either into
+    `failed` would turn a pod restart into a survey that confidently omits a bond, and the job
+    would complete instead of being retried.
+    """
+    server = install(monkeypatch, FakeCalcServer())
+    _refuse(server, "embed_structure", _embedding("[CH3]"), message=f"{head} try later")
+
+    with pytest.raises(outage):
+        _run(compose.bond_dissociation_survey(InMemoryStore(), _ETHYLBENZENE, _CLEAVAGES))
+
+
+# --- the reaction solvent screen -------------------------------------------------------------
+
+
+def test_a_refused_medium_is_reported_and_the_rest_are_still_ranked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A solvent the server has no parameters for costs that row, not the screen."""
+    server = install(monkeypatch, FakeCalcServer())
+    _refuse(server, "relax_structure", _relaxing(solvent="toluene"))
+
+    result = _run(
+        compose.solvent_comparison(
+            InMemoryStore(),
+            *_ESTERIFICATION,
+            ["water", "toluene"],
+            symmetry_numbers=_ESTER_SIGMAS,
+        )
+    )
+
+    assert sorted(str(effect.solvent) for effect in result.effects) == ["None", "water"]
+    assert [entry.solvent for entry in result.failed] == ["toluene"]
+    assert _REFUSAL in result.failed[0].reason
+    assert result.best_solvent != "toluene"
+    (lost,) = [w for w in result.warnings if "could not be computed" in w]
+    assert "1 of 3 media" in lost and "toluene" in lost
+
+
+def test_a_screen_left_with_one_medium_does_not_claim_the_media_are_indistinguishable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A spread over one row is zero by construction, not a finding about the solvents.
+
+    The "does not distinguish them" sentence is a verdict on a comparison, and with one medium left
+    no comparison happened — so it says there is nothing to compare instead.
+    """
+    server = install(monkeypatch, FakeCalcServer())
+    _refuse(server, "relax_structure", _relaxing(solvent="water"))
+
+    result = _run(
+        compose.solvent_comparison(
+            InMemoryStore(), *_ESTERIFICATION, ["water"], symmetry_numbers=_ESTER_SIGMAS
+        )
+    )
+
+    assert [effect.solvent for effect in result.effects] == [None]
+    assert not [w for w in result.warnings if "does not distinguish" in w]
+    assert any("nothing to compare" in w for w in result.warnings)
+
+
+def test_a_solvent_screen_in_which_every_medium_is_refused_names_each(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every medium refused is no answer, and the refusal says which media and why."""
+    server = install(monkeypatch, FakeCalcServer())
+    _refuse(server, "relax_structure", _relaxing())
+
+    with pytest.raises(ValueError, match="no medium of this solvent screen") as refused:
+        _run(
+            compose.solvent_comparison(
+                InMemoryStore(), *_ESTERIFICATION, ["water"], symmetry_numbers=_ESTER_SIGMAS
+            )
+        )
+    assert "gas phase" in str(refused.value)
+    assert "water" in str(refused.value)
+
+
+def test_an_outage_in_one_medium_fails_the_screen_rather_than_the_medium(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The per-medium boundary is inside the `gather`, so an outage still leaves through it."""
+    server = install(monkeypatch, FakeCalcServer())
+    _refuse(
+        server,
+        "relax_structure",
+        _relaxing(solvent="toluene"),
+        message=f"{SERVER_AT_CAPACITY} 0 of 4 slots free",
+    )
+
+    with pytest.raises(CalcBusyError):
+        _run(
+            compose.solvent_comparison(
+                InMemoryStore(),
+                *_ESTERIFICATION,
+                ["water", "toluene"],
+                symmetry_numbers=_ESTER_SIGMAS,
+            )
+        )
+
+
+# --- the species ranking and its solvent screen -------------------------------------------------
+
+
+def test_a_ranking_with_a_refused_form_refuses_after_trying_every_form(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A population over part of the set is wrong, so the ranking refuses — usefully.
+
+    Usefully means two things, and both are asserted. The refusal names the form, and it comes
+    after every other form was computed: each one that could be is now cached (D-011), so the rerun
+    without the offender pays for nothing a second time.
+    """
+    server = install(monkeypatch, FakeCalcServer())
+    _refuse(server, "embed_structure", _embedding(_ENOL))
+    store = InMemoryStore()
+
+    with pytest.raises(ValueError, match="1 of 2 species could not be computed") as refused:
+        _run(compose.species_ranking(store, _TAUTOMERS, kind="tautomers"))
+    assert _ENOL in str(refused.value)
+    assert _REFUSAL in str(refused.value)
+    relaxed = server.count("relax_structure")
+    assert relaxed >= 1, "the keto form was computed although the enol was refused"
+
+    _run(compose.species_ranking(store, [(_KETO, "keto")], kind="tautomers"))
+    assert server.count("relax_structure") == relaxed, "the rerun recomputed nothing"
+
+
+def test_a_ranking_names_every_refused_form_not_only_the_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Refusing at the first form made the chemist find the second one on the next run."""
+    server = install(monkeypatch, FakeCalcServer())
+    _refuse(server, "embed_structure", _embedding(_KETO, _ENOL))
+
+    with pytest.raises(ValueError, match="2 of 2 species") as refused:
+        _run(compose.species_ranking(InMemoryStore(), _TAUTOMERS, kind="tautomers"))
+    assert _KETO in str(refused.value)
+    assert _ENOL in str(refused.value)
+
+
+def test_a_full_pod_during_a_ranking_stays_retryable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`CalcBusyError` must leave a ranking as itself, not as a refused species."""
+    server = install(monkeypatch, FakeCalcServer())
+    _refuse(server, "embed_structure", _embedding(_ENOL), message=f"{SERVER_AT_CAPACITY} 0 free")
+
+    with pytest.raises(CalcBusyError):
+        _run(compose.species_ranking(InMemoryStore(), _TAUTOMERS, kind="tautomers"))
+
+
+def test_a_species_screen_reports_the_medium_where_a_form_failed_and_ranks_the_rest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A form that fails in one medium costs that medium — whole — and no other.
+
+    Never a distribution over part of the set: `species_ranking` refuses the medium, so every
+    distribution that *is* reported ranks both forms, and every response has one standing per
+    reported medium.
+    """
+    server = install(monkeypatch, FakeCalcServer())
+    _refuse(server, "relax_structure", _relaxing(smiles=_ENOL, solvent="toluene"))
+
+    screen = _run(
+        compose.species_solvent_comparison(
+            InMemoryStore(), _TAUTOMERS, ["water", "toluene"], kind="tautomers"
+        )
+    )
+
+    assert [d.solvent for d in screen.distributions] == [None, "water"]
+    assert all(len(d.species) == 2 for d in screen.distributions)
+    (failed,) = screen.failed
+    assert failed.solvent == "toluene"
+    assert _ENOL in failed.reason, "the medium's reason names the form that failed in it"
+    for response in screen.responses:
+        assert [standing.solvent for standing in response.standings] == [None, "water"]
+    assert any("toluene" in w and "could not be computed" in w for w in screen.warnings)
+
+
+def test_a_species_screen_with_no_species_is_one_refusal_not_one_per_medium() -> None:
+    """Every medium would refuse an empty set identically; one sentence is the answer."""
+    with pytest.raises(ValueError, match="at least one species"):
+        _run(compose.species_solvent_comparison(InMemoryStore(), [], ["water"], kind="tautomers"))
+
+
+# --- the wire ------------------------------------------------------------------------------------
+
+
+_BUILDERS: dict[str, Callable[[InMemoryStore], Coroutine[Any, Any, BaseModel]]] = {
+    "survey": lambda store: compose.bond_dissociation_survey(store, _ETHYLBENZENE, _CLEAVAGES),
+    "solvents": lambda store: compose.solvent_comparison(
+        store, *_ESTERIFICATION, ["water"], symmetry_numbers=_ESTER_SIGMAS
+    ),
+    "species": lambda store: compose.species_solvent_comparison(
+        store, _TAUTOMERS, ["water"], kind="tautomers"
+    ),
+}
+
+
+@pytest.mark.parametrize("screen", sorted(_BUILDERS))
+def test_a_payload_written_before_failed_existed_still_decodes(
+    monkeypatch: pytest.MonkeyPatch, screen: str
+) -> None:
+    """These are Temporal wire types, so a run in flight across the deploy must still decode.
+
+    Built from a real result and dumped *without* the new field, rather than from a literal, so
+    the test tracks the model instead of a copy of it.
+    """
+    install(monkeypatch, FakeCalcServer())
+    result = _run(_BUILDERS[screen](InMemoryStore()))
+    assert isinstance(
+        result, BondDissociationSurvey | SolventComparisonResult | SpeciesSolventComparison
+    )
+    old_shape = result.model_dump(mode="json", exclude={"failed"})
+
+    assert "failed" not in old_shape
+    assert type(result).model_validate(old_shape).failed == []
+
+
+def test_a_failed_medium_names_the_gas_phase_as_none() -> None:
+    """`solvent=None` is the gas-phase reference, the convention every row in these models uses."""
+    assert FailedMedium(solvent=None, reason="x").solvent is None

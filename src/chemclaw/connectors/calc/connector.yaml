@@ -176,6 +176,9 @@ jobs:
       SMILES, 1 for no rotational symmetry, 2 for H2/N2/O2/CO2/water, 3 for ammonia, 6 for ethane,
       12 for benzene. Omit it and no reaction reports a ΔG, so the screen falls back to ranking by
       electronic energy — which ignores solvation entropy, the part a solvent screen is about.
+
+      A medium the calculation refuses is listed under `failed` with its reason, and the rest are
+      still ranked; name the missing media when reporting.
     params_model: chemclaw.connectors.calc.specs:SolventScreenJobSpec
     precondition: chemclaw.science.calc.solvents:require_supported_solvents
 
@@ -384,6 +387,9 @@ jobs:
       `level="quick"` ranks by electronic energy and says so in a warning; `standard` adds a Hessian
       per species for a free energy; `thorough` adds a conformer search per species and is the
       expensive case.
+
+      If any form cannot be computed, the job fails naming every such form rather than ranking the
+      rest — a population over part of the set is wrong. The forms that did compute are cached.
     params_model: chemclaw.connectors.calc.specs:SpeciesRankingJobSpec
     precondition: chemclaw.science.calc.solvents:require_supported_solvents
     expensive: true
@@ -409,7 +415,8 @@ jobs:
 
       **Enumerate first; this does not** — use `chem`'s enumerate_tautomers,
       enumerate_protonation_states or enumerate_stereoisomers. A form not in `species` was not
-      ranked in any medium. Cost is species x media, checked before the first calculation.
+      ranked in any medium. Cost is species x media, checked before the first calculation. A
+      medium where any form could not be computed is listed under `failed` rather than ranked.
     params_model: chemclaw.connectors.calc.specs:SpeciesSolventScreenJobSpec
     precondition: chemclaw.science.calc.solvents:require_supported_solvents
     expensive: true
@@ -434,6 +441,9 @@ jobs:
       BDE, and little enough that the ranking within one molecule is informative. Defaults to
       `level="quick"` for that reason: a Hessian per fragment per bond triples the cost for a
       magnitude the method does not deliver.
+
+      A bond the calculation refuses is listed under `failed` with its reason and the rest are still
+      ranked, so the flagged weakest bond is the weakest of those computed; say which were missed.
     params_model: chemclaw.connectors.calc.specs:BondSurveyJobSpec
     precondition: chemclaw.science.calc.solvents:require_supported_solvents
     expensive: true
