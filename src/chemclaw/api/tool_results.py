@@ -292,3 +292,58 @@ def session_sink(session_id: str, correlation_id: str) -> ResultSink:
             return ""
 
     return _put
+
+
+async def stored_within_cap(sink: ResultSink | None, tool: str, text: str) -> str:
+    """Store `text` and return the ref a surface fetches it by, or `""` when it was not stored.
+
+    The one place the store's size cap is applied, for both of its writers: the trace storing what
+    the model read (`api/runner_trace.py`) and the cut keeping what the tool returned
+    (`full_result_sink`). The bound comes from `settings` rather than a literal, an over-cap result
+    is *refused rather than trimmed*, and the refusal is logged. Trimming would be the worse failure
+    — a truncated `ScreenResult` is still valid JSON and would render as a complete hazard screen
+    with flags missing, which is the "silent truncation reads as completeness" problem made worse
+    by the payload looking whole.
+
+    Measured in bytes, not characters, because the cap is protecting a `BYTEA` column: a result
+    full of multi-byte characters is up to four times its length in what is actually written.
+
+    `""` covers every way a result can fail to be stored — no sink, the store off, over the cap, or
+    a write that raised (swallowed one layer down in `session_sink`). One value, one meaning, and
+    none of them fails the turn.
+    """
+    if sink is None or settings.stream_max_result_bytes <= 0:
+        return ""
+    size = len(text.encode("utf-8"))
+    if size > settings.stream_max_result_bytes:
+        logger.warning(
+            "tool %s returned %d bytes, over the %d-byte store cap; its trace event carries no "
+            "result_ref for these bytes and they are not fetchable",
+            tool,
+            size,
+            settings.stream_max_result_bytes,
+        )
+        return ""
+    return await sink(tool, text)
+
+
+def full_result_sink(session_id: str, correlation_id: str) -> ResultSink:
+    """Where a cut result keeps its full text: this session's store, under the store's own cap.
+
+    The consumer is the chemist, never the model
+    (`D-2026-09-27-a-cut-result-is-kept-for-the-chemist-not-the-model`): the cut in
+    `agent/tool_result_size.py` hands the full text here, stamps the returned ref on the message,
+    and the stream names it on `ToolResultEvent.result_ref`, so `GET /sessions/{id}/tool-results/
+    {ref}` opens what the tool returned. The same tables, the same link-join authorization, the same
+    retention and the same erasure as every other stored result — a full text is a stored result,
+    and a second store would have needed a second answer to each of those.
+
+    Installed by `api/runner._turn_ambient` through `set_full_result_sink`, which is the only way
+    it reaches the middleware: `tests/test_layering.py` forbids `agent -> api`.
+    """
+    put = session_sink(session_id, correlation_id)
+
+    async def _put(tool: str, text: str) -> str:
+        return await stored_within_cap(put, tool, text)
+
+    return _put

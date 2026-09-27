@@ -63,12 +63,22 @@ class ObservabilitySettings(BaseSettings):
     # what it refused, for the reason stated one field up: a silent truncation reads as
     # completeness, which is what `_capped_numbers` exists to avoid.
     #
-    # 128 KiB against a largest-measured real result of ~20,000 characters (a 40-chunk evidence
-    # sweep), so it is far out of reach of normal traffic and exists only so a pathological result
-    # cannot put megabytes per call into Postgres. 0 disables storing entirely — one knob rather
-    # than a cap plus an on/off flag, because "store nothing" is the cap at its floor and two
-    # settings would be two ways to say one thing.
-    stream_max_result_bytes: int = Field(default=131072, ge=0)
+    # **1 MiB, because the store now also keeps the full text of a result the model was shown a
+    # cut of** (`D-2026-09-27-a-cut-result-is-kept-for-the-chemist-not-the-model`). It was 128 KiB,
+    # sized against what the model reads — a largest-measured real result of ~20,000 characters,
+    # and nothing the model reads can exceed `agent_max_tool_result_chars` anyway. A *cut* result
+    # is by construction over that ceiling, and the measured case that motivated the cut, a
+    # `read_document` at its own `document_read_max_chars` of 200,000 characters, is 200,000 bytes
+    # of ASCII: at 128 KiB the one result the feature exists for would have been refused. The floor
+    # is derived, not chosen — four UTF-8 bytes per character times the largest first-party
+    # per-tool ceiling — and `tests/test_full_tool_results.py` pins it against those settings, so
+    # raising one of them without this fails there rather than silently un-keeping its results.
+    # A connector has no such ceiling, and over this cap its full text is refused (never trimmed —
+    # a trimmed "full" result reads as whole); the stream then stores the model's cut, which says
+    # in-band that it is one. 0 disables storing entirely — one knob rather than a cap plus an
+    # on/off flag, because "store nothing" is the cap at its floor and two settings would be two
+    # ways to say one thing.
+    stream_max_result_bytes: int = Field(default=1_048_576, ge=0)
     # How large one tool result may be, in UTF-8 bytes, and still ride along on its own
     # `ToolResultEvent` as `result_inline` instead of costing a surface a second round trip.
     #
