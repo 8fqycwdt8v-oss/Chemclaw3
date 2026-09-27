@@ -16,7 +16,7 @@ Closes the gap `tasks/todo.md` used to name: *"the cross-repo sequence `Chemclaw
 | --- | --- | --- | --- |
 | Postgres/pgvector + Temporal | this repo | 5432, 7233 | `infra/live/bootstrap.sh` |
 | note-writer repo | this repo | — | `infra/live/bootstrap.sh` |
-| every fleet bundle this repo declares an endpoint for — `props`, `rxnpredict` (`fake_a`/`fake_c` doubles), `chem`, `safety`, … | Chemclaw3-mcp | each from its fleet manifest | `infra/live/processes.sh` |
+| every fleet bundle this repo declares an endpoint for and the front door binds — `chem`, `safety`, `rxnpredict` (`fake_a`/`fake_c` doubles), and the five opt-in process-development bundles (`props`, `kinetics`, `suitability`, `thermalsafety`, `unitops`), which this lane enables | Chemclaw3-mcp | each from its fleet manifest | `infra/live/processes.sh` |
 | `pyexec` (bounded offline Python analysis sandbox) | Chemclaw3-mcp | 8899 | this script |
 | `calc` (the physics behind this repo's calculator tools — *not* a connector) | Chemclaw3-mcp | 8860 | `infra/live/processes.sh` |
 | `mock-eln` (ELN/ORD data) | Chemclaw3_mock | 8090 | this script |
@@ -27,7 +27,17 @@ Closes the gap `tasks/todo.md` used to name: *"the cross-repo sequence `Chemclaw
 **Every fleet bundle this repository declares an endpoint for, and the `calc` backend, are started
 by `infra/live/processes.sh`, which this script calls.** The set is not listed here:
 `processes.sh::fleet_bundle_names` derives it (core's endpoint-declaring bundles that the fleet also
-publishes), and every enumeration of it in this lane has gone stale. The only fleet server this
+publishes *and the front door binds*), and every enumeration of it in this lane has gone stale.
+
+**This lane binds every bundle it discovers, the `default_enabled: false` ones included.** `up.sh`
+sets `CHEMCLAW_CONNECTORS_ENABLED` to every name on its `CHEMCLAW_CONNECTORS_DIR` (derived from
+the registry; override it to narrow), because it is the full-stack test: with the list empty the
+five process-development bundles were started and never bound, so five servers ran that nothing
+called. The cost is their schemas on every model call, which
+`tests/test_context_floor.FLEET_PUBLISHED_ALLOWANCE` bounds. `make live-up` sets no list, binds
+none of the five and — since `processes.sh` starts only what the front door binds — starts none.
+
+The only fleet server this
 script starts itself is `pyexec`, which this repository declares no manifest for. One lane starts
 them, and it is the one that cannot do its work without them
 (`docs/decisions/D-2026-08-27-one-lane-starts-the-fleet.md`, extended to `calc` by
@@ -83,7 +93,10 @@ Or drive it directly: `infra/live/e2e-full-stack/up.sh [up|down|status|restart <
 restarts one external process in place — the primitive the chaos round uses. Restarting a piece of
 this repo's own stack (a connector, a worker, `calc`, or any fleet bundle `processes.sh` starts —
 `props`, `rxnpredict`, `chem`, `safety`, …) is `infra/live/processes.sh restart <name>` instead;
-asking this script for one of those says so rather than reporting an unknown process.
+asking this script for one of those says so rather than reporting an unknown process. A restart
+comes back in this lane's environment — `up` persists what it composed to `.live/run/lane-env.sh`,
+which `processes.sh` reads back with your own shell's values winning — so a restarted front door
+keeps `mock-vendor`, `pyexec`, the ELN/ORD sources and the gateway this lane named.
 
 ## The corpus is backfilled on bring-up, and it takes hours
 
@@ -110,9 +123,14 @@ them rather than inventing a structure. That is declared, not discovered — see
 
 ```sh
 curl -s localhost:8000/metrics | grep '^chemclaw_connector_unhealthy{'
-# chemclaw_connector_unhealthy{connector="props"} 0
-# chemclaw_connector_unhealthy{connector="rxnpredict"} 0
+# chemclaw_connector_unhealthy{connector="kinetics"} 0
 # chemclaw_connector_unhealthy{connector="mock-vendor"} 0
+# chemclaw_connector_unhealthy{connector="props"} 0
+# chemclaw_connector_unhealthy{connector="pyexec"} 0
+# chemclaw_connector_unhealthy{connector="rxnpredict"} 0
+# chemclaw_connector_unhealthy{connector="suitability"} 0
+# chemclaw_connector_unhealthy{connector="thermalsafety"} 0
+# chemclaw_connector_unhealthy{connector="unitops"} 0
 # ... plus this repo's own bo, calc, chem, molfp, results, rxnfp, safety
 ```
 

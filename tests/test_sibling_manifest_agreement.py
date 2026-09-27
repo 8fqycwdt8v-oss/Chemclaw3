@@ -198,11 +198,11 @@ _OPT_IN_ARGUMENT = (
     "`CHEMCLAW_CONNECTORS_DIR`, and `registry._bundle_dirs` is first-directory-wins, so there the "
     "fleet's copy is the one loaded. A chart release never reads the flag at all, though — "
     "`chemclaw.connectorsEnabled` refuses to render an empty `CHEMCLAW_CONNECTORS_ENABLED` — so "
-    "which copy wins decides nothing there. `infra/live/e2e-full-stack/up.sh` is the one wiring "
-    "that leaves `connectors_enabled` empty *and* mounts the fleet's `manifests/`, and it puts "
-    "this tree's connectors directory first, so this copy wins and the empty list binds none of "
-    "these bundles; the server `processes.sh` starts for one runs unused. Binding one is naming it "
-    "in `CHEMCLAW_CONNECTORS_ENABLED`, which overrides the flag."
+    "which copy wins decides nothing there. `infra/live/e2e-full-stack/up.sh` mounts the fleet's "
+    "`manifests/` too, and it names every discovered bundle in `CHEMCLAW_CONNECTORS_ENABLED`, so "
+    "the flag is not read there either; it also puts this tree's connectors directory first, so "
+    "even with that list emptied this copy wins and binds none of these bundles. Binding one is "
+    "naming it in `CHEMCLAW_CONNECTORS_ENABLED`, which overrides the flag."
 )
 
 
@@ -416,8 +416,8 @@ def test_the_e2e_lane_binds_no_opt_in_bundle_by_default(monkeypatch: pytest.Monk
     The rows used to say the opposite — that in the four-repo lane the fleet's copy wins the name
     and these bundles bind — and nothing checked it: `up.sh` lists this tree's connectors first and
     discovery is first-directory-wins, so this tree's `default_enabled: false` decides there too.
-    Driven through `registry.enabled()` with the exported directory order and no enable-list, which
-    is how `processes.sh` runs the front door.
+    Driven through `registry.enabled()` with the exported directory order and no enable-list — the
+    lane itself now names every bundle, so this holds the claim for an operator who empties it.
     """
     from chemclaw.connectors import registry
     from chemclaw.core.config import settings
