@@ -326,7 +326,7 @@ only holds defects can only ever restore the system to what it already intended 
       bounding risk. Choose the next second questions by what a deployment calls —
       `audit_events` per tool name — once one exists to read.
 
-- [ ] **`deep-research` has no index behind it** (issue #486; WIP branch `backlog/idempotent-std-research-decline-probes`) — [M]. `agent/research_tools.py::gather_evidence`
+- [ ] **`deep-research` has no index behind it** (issue #486) — [M]. `agent/research_tools.py::gather_evidence`
       sweeps the knowledge graph, the ELN, the mounted document share and the fingerprint store —
       every one internal. `skills/deep-research/SKILL.md` describes a capability whose corpus is
       whatever notes exist (41 on this checkout, 2026-09-22). `Chemclaw3-mcp/MODULES.md` files `litsearch`
@@ -339,7 +339,7 @@ only holds defects can only ever restore the system to what it already intended 
       said 39 and then 40 for one count three sentences apart, which is why the number now appears
       once, with the date it was measured.
 
-- [ ] **A shared session serialises by refusing and streams to one reader** (issue #488; WIP branch `backlog/shared-session-queue-multireader`) — [M]. What is left of
+- [ ] **A shared session serialises by refusing and streams to one reader** (issue #488) — [M]. What is left of
       the multi-human-session work after `D-2026-09-27-in-a-shared-session-the-sender-governs`
       settled the authority questions and shipped membership (`session_members`, the sender
       governing each turn, a plan decided only by its author). Three pieces, in dependency order:
@@ -565,7 +565,7 @@ those belong in.
 
 ## Recover the flow-Suzuki screen, or decide it stays out
 
-- [ ] **5,760 ORD records — 57% of the seeded corpus — cannot be ingested at all** (issue #477; implemented in PR #482, reviewed, not yet merged) — [L].
+- [ ] **5,760 ORD records — 57% of the seeded corpus — cannot be ingested at all** (issue #477) — [L].
       `Chemclaw3_mock` seeds 10,011 ORD records and **5,760 of them — 57% — cannot be ingested at all**.
       Every refusal is the Perera flow-Suzuki set (*Science* 2018, 359, 429), whose second coupling
       partner the source spreadsheet publishes only as its own shorthand (`2a, Boronic Acid`).
