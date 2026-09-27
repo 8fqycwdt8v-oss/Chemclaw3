@@ -92,6 +92,8 @@ class CompoundRekeyPlan(BaseModel):
     not_structural: int = 0
     #: Compound notes whose structure no longer parses, so no id can be derived for them.
     unreadable: int = 0
+    #: Old ids whose chain of moves returns to itself, so no note is the end of it; left alone.
+    cyclic: int = 0
     #: New ids whose existing note a person wrote or was written for; nothing is recorded onto it.
     blocked: list[str] = []
     rekeys: list[CompoundRekey] = []
@@ -103,11 +105,24 @@ class CompoundRekeyPlan(BaseModel):
             "unchanged": self.unchanged,
             "not_structural": self.not_structural,
             "unreadable": self.unreadable,
+            "cyclic": self.cyclic,
             "successors": len(self.rekeys),
             "retired": sum(len(rekey.retired) for rekey in self.rekeys),
             "kept_current_human": sum(len(rekey.kept) for rekey in self.rekeys),
             "blocked_successor": len(self.blocked),
         }
+
+
+def _end_of_chain(old_id: str, target: dict[str, str]) -> str | None:
+    """Where `old_id` finally lands when its target may itself be moving; `None` on a cycle."""
+    seen = {old_id}
+    current = target[old_id]
+    while current in target:
+        if current in seen:
+            return None
+        seen.add(current)
+        current = target[current]
+    return current
 
 
 def plan_compound_rekey(notes: list[Note], as_of: date) -> CompoundRekeyPlan:
@@ -127,8 +142,9 @@ def plan_compound_rekey(notes: list[Note], as_of: date) -> CompoundRekeyPlan:
         as_of: The run's date, used as each retired note's `valid_to`.
     """
     by_id = {note.id: note for note in notes}
+    target: dict[str, str] = {}
     moved: dict[str, list[Note]] = defaultdict(list)
-    examined = unchanged = not_structural = unreadable = 0
+    examined = unchanged = not_structural = unreadable = cyclic = 0
     for note in notes:
         if note.type != "compound":
             continue
@@ -144,9 +160,21 @@ def plan_compound_rekey(notes: list[Note], as_of: date) -> CompoundRekeyPlan:
         if current == note.id:
             unchanged += 1
         elif note.valid_to is None:
-            moved[current].append(note)
+            target[note.id] = current
         # A structure whose id moved and whose note is already closed was re-keyed by an earlier
         # pass; it is neither unchanged nor a candidate, and counting it as either would be a lie.
+
+    # **A target can itself be moving.** Old note A may land on B's id while B's own structure
+    # moves it on to C; planning A onto B and B onto C separately wrote B twice in one pass — the
+    # successor carrying `supersedes A`, then the retirement of the unedited B — and the second
+    # write discarded the first. So each old id is followed to the end of its chain and every note
+    # on the chain is superseded by the last one. A cycle has no end and is left alone.
+    for old_id in sorted(target):
+        final = _end_of_chain(old_id, target)
+        if final is None:
+            cyclic += 1
+        else:
+            moved[final].append(by_id[old_id])
 
     blocked: list[str] = []
     rekeys: list[CompoundRekey] = []
@@ -159,9 +187,10 @@ def plan_compound_rekey(notes: list[Note], as_of: date) -> CompoundRekeyPlan:
         if existing is not None and (not existing.authorship.by_agent or existing.actor):
             blocked.append(new_id)
             continue
-        base = (
-            existing if existing is not None else compound_note(old_notes[0].compound_smiles or "")
-        )
+        # Built from a note whose own structure lands here — the last link of a chain, not the
+        # first old note, whose structure names an id further back along it.
+        landing = next(old for old in old_notes if target[old.id] == new_id)
+        base = existing if existing is not None else compound_note(landing.compound_smiles or "")
         declared = {relation.to for relation in base.relations if relation.rel == "supersedes"}
         added = [
             Relation(rel="supersedes", to=old.id) for old in old_notes if old.id not in declared
@@ -181,6 +210,7 @@ def plan_compound_rekey(notes: list[Note], as_of: date) -> CompoundRekeyPlan:
         unchanged=unchanged,
         not_structural=not_structural,
         unreadable=unreadable,
+        cyclic=cyclic,
         blocked=blocked,
         rekeys=rekeys,
     )

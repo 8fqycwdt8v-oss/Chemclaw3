@@ -277,6 +277,7 @@ def test_the_preview_counts_what_the_apply_writes_and_a_second_apply_writes_noth
         "unchanged": 1,
         "not_structural": 1,
         "unreadable": 0,
+        "cyclic": 0,
         "successors": 3,
         "retired": 2,
         "kept_current_human": 1,
@@ -444,3 +445,29 @@ def test_a_supersede_cycle_ends_the_walk() -> None:
         ("compound-a", "superseded-by", "compound-b"), ("compound-b", "superseded-by", "compound-a")
     )
     assert current_successor(graph, "compound-a", date.today()) is None
+
+
+def test_a_target_that_is_itself_moving_is_followed_to_the_end_of_the_chain() -> None:
+    """A lands on B's id while B's structure moves B on to C: both are superseded by C, once each.
+
+    Planned pairwise, B was written twice in one pass — as A's successor and as C's retirement —
+    and the second write discarded the `supersedes` edge the first had added.
+    """
+    b_id = compound_id("CCO")
+    a = Note(id="compound-000000000001", type="compound", compound_smiles="CCO", created_by="agent")
+    b = Note(id=b_id, type="compound", compound_smiles="CCN", created_by="agent")
+    plan = plan_compound_rekey([a, b], _RETIRED_ON)
+    (rekey,) = plan.rekeys
+    assert rekey.successor.id == compound_id("CCN")
+    assert {r.to for r in rekey.successor.relations if r.rel == "supersedes"} == {a.id, b_id}
+    assert sorted(note.id for note in rekey.retired) == sorted([a.id, b_id])
+    written = [rekey.successor.id, *(note.id for note in rekey.retired)]
+    assert len(written) == len(set(written)), "one note written twice in one pass"
+
+
+def test_a_cycle_of_moves_is_left_alone() -> None:
+    """Two notes each filed under the other's structure id have no end to supersede onto."""
+    a = Note(id=compound_id("CCN"), type="compound", compound_smiles="CCO", created_by="agent")
+    b = Note(id=compound_id("CCO"), type="compound", compound_smiles="CCN", created_by="agent")
+    plan = plan_compound_rekey([a, b], _RETIRED_ON)
+    assert plan.rekeys == [] and plan.cyclic == 2
