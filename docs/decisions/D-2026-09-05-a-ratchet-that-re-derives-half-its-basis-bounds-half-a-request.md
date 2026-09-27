@@ -22,7 +22,8 @@ fix read the surface off the compiled graph's `ToolNode`, and the file recorded 
 prose half — `instructions_for(profile)` plus `_skills_listing(profile, ...)` — and a tool half read
 off the graph. The prose half is a re-derivation of the system message, not the system message.
 
-Three independent fresh-context measurements agree on what that cost, at `aed402c`:
+Three independent fresh-context measurements agree on what that cost, measured on the branch
+merged as #327:
 
 | | tokens |
 | --- | --- |
@@ -96,7 +97,7 @@ and `agent/context_budget.py`. `.env.example` moved with the default because
 `test_config.py::test_env_example_ships_the_code_defaults` compares parsed values and would
 otherwise be red.
 
-**The numbers here are about this commit.** The observed floor was 43,521 at `aed402c` and 43,681
+**The numbers here are about this commit.** The observed floor was 43,521 on that branch and 43,681
 two commits later, drifted by work in this same sweep that never touched a tool schema on purpose.
 The figure worth reading is the ceiling, because a ceiling only moves when somebody decides it
 should; the live measurement is whatever `_report` prints.

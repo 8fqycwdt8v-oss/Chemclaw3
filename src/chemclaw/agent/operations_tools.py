@@ -7,7 +7,7 @@ turn, the static prefix is already the subject of a measured ceiling
 and a single sentence of guidance. Four names would have bought nothing the enum does not and cost
 four schemas.
 
-**It reads and it does not remember.** Nothing here proposes a note, records an observation or
+**It reads and it does not remember.** Nothing here records a note, records an observation or
 writes a preference: an operational reading is a projection of rows this system already wrote, so
 it is `read_only` in the sense the manifest gate means and needs no gate of its own.
 """

@@ -62,6 +62,27 @@ def strip_links(text: str) -> str:
     return WIKILINK.sub(lambda match: split_link(match.group(1))[1], text)
 
 
+def as_cell(text: str) -> str:
+    """`text` as one line that can fill a slot in a note body but cannot add structure to it.
+
+    The two rules `retrieval/harness._as_evidence` argues at length, in one place because there are
+    now three callers: `strip_links` so interpolated text cannot mint a graph edge on the note being
+    written, and whitespace collapse so it cannot mint Markdown. A newline ends a line and a leading
+    `- ` starts a list item, so multi-line text placed in a bullet does not render badly — it
+    renders
+    as *more bullets*, which read as independent, uncited content. Measured on the committed corpus,
+    eight retrieved chunks became twenty-three bullets that way.
+
+    **Model-authored text needs this exactly as much as retrieved text does**, which is what brought
+    it here from `harness`. A hypothesis statement is a sentence this system asked a model to write,
+    and a model that emits `[[playbook-degassing]]` inside it would put a real outgoing edge on a
+    proposal note, citing a note nothing retrieved.
+
+    The text is preserved rather than truncated: a reader still sees what it said, on one line.
+    """
+    return " ".join(strip_links(text).split())
+
+
 def cited_links(text: str) -> list[tuple[str, str]]:
     """Every `(relation, note id)` a body cites, deduplicated by pair in first-seen order.
 
@@ -77,8 +98,18 @@ def cited_links(text: str) -> list[tuple[str, str]]:
     return list(ordered)
 
 
-def note_id_for_reaction(record_id: str) -> str:
-    """The `reaction` note id for a fingerprint-index record id.
+#: What separates a source from an entry id inside a qualified `reaction-` citation.
+#:
+#: A `.` because `_SLUG` already admits it, so a qualified id is a legal note slug, a legal git ref
+#: component and a legal filename with no widening anywhere. It splits on the **first** occurrence,
+#: so an entry id containing dots survives and a *source* name containing one is refused at the
+#: point it would be spelled — a source name is a token in `CHEMCLAW_DATA_SOURCES` and an
+#: unsplittable id is a citation that silently names the wrong run.
+_SOURCE_SEPARATOR = "."
+
+
+def note_id_for_reaction(record_id: str, source: str = "") -> str:
+    """The `reaction` note id for a fingerprint-index record id, qualified by its source.
 
     One definition, because three callers were each spelling `f"reaction-{id}"` themselves and one
     of them did not. `connectors.rxnfp.similar_reactions` returned the raw index key while
@@ -86,23 +117,41 @@ def note_id_for_reaction(record_id: str) -> str:
     straight to `expand_note` was told the note did not exist — while it sat on disk under the
     prefixed name. Two spellings of one id is how a search stops reaching the thing it found.
 
-    **There is no source-qualified form, and its absence is deliberate.** One existed here for a
-    day: an optional `source` argument spelling `reaction-<source>.<id>`, so that two sites behind
-    one entry id could be cited apart — the read `ingest.eln.records._one_of` refuses rather than
-    guessing. Nothing in `src/` ever passed it. Every reader that would have to *resolve* such an
-    id — `agent.graph_tools.expand_note`, `agent.protocol_tools`, `ingest.eln.records.read`,
-    `ingest.labels.record.record_phase`, `retrieval.retrievers`, `connectors.rxnfp.tools` — still
-    spells and strips the bare form, so the qualified id it built resolved to nothing anywhere, and
-    its own docstring said so. A spelling no reader accepts is not a spelling; it is a claim that
-    two sites can be told apart in a citation, which is exactly the shape `reject_widening` and
-    `map_to_hpc_identity` were deleted for.
+    **The qualified form exists now, and what makes it real is that the readers take it.** One
+    existed here for a day and was deleted, correctly: nothing passed it, every reader still
+    spelled and stripped the bare form, and a spelling no reader accepts is a claim that two sites
+    can be told apart rather than a way of telling them apart. Migration `063` had already keyed
+    the fingerprint index on `(source, id)`, so a two-source deployment returned **two hits citing
+    one id** and `ingest.eln.records._one_of` raised `AmbiguousReactionRecord` the moment a reader
+    expanded either — loud rather than wrong, and still not an answer. `Match.source` is what the
+    search knows and the citation did not carry.
 
-    The need is real and unchanged — `_one_of`'s refusal is still a chemist unable to open a run a
-    search just found — and it is a knowledge-graph *identity* change: the readers, the stored
-    citations and the validator move together or not at all. That is its own decision, and it starts
-    from the six readers above, not from a citation spelling waiting for them.
+    **The bare form is not deprecated and must keep resolving.** Every citation already committed
+    to `knowledge/` and every `reaction_labels.citation` row written before this spells it, so the
+    resolvers (`kg.note.external_record_ref`, `ingest.eln.records.read`) accept both: a qualified
+    id names one source's row exactly, and a bare one resolves through `_one_of`, which is
+    unchanged — it still refuses when two sources hold the id, because a bare citation genuinely
+    does not name one run.
+
+    Args:
+        record_id: The ELN's own entry id, as the store and the index key it.
+        source: The registry source name that transcribed it — `Match.source`, or the `source`
+            argument an ingest already carries. Empty produces the bare, unqualified form.
+
+    Returns:
+        `reaction-<source>.<id>`, or `reaction-<id>` when no source is given.
+
+    Raises:
+        ValueError: `source` contains the separator, so the id could not be split back apart.
     """
-    return f"reaction-{record_id}"
+    if not source:
+        return f"reaction-{record_id}"
+    if _SOURCE_SEPARATOR in source:
+        raise ValueError(
+            f"ingest source {source!r} contains {_SOURCE_SEPARATOR!r}, so a "
+            "`reaction-<source>.<id>` citation could not be split back into its two halves"
+        )
+    return f"reaction-{source}{_SOURCE_SEPARATOR}{record_id}"
 
 
 # Id namespaces that resolve *outside* the markdown graph (D-2026-08-25).
@@ -130,18 +179,47 @@ def resolves_outside_graph(note_id: str) -> bool:
     return note_id.startswith(EXTERNAL_ID_PREFIXES)
 
 
+def external_record_ref(note_id: str) -> tuple[str, str]:
+    """The `(source, record_id)` an external citation names — `("", id)` for the bare form.
+
+    The inverse of `note_id_for_reaction`, and the pair rather than the id alone because a
+    qualified citation's whole point is that the source is part of what it names: a resolver handed
+    only the id back would ask the store the same ambiguous question the qualification was written
+    to answer.
+
+    Split on the **first** separator, so an entry id containing dots is returned whole.
+    `note_id_for_reaction` refuses a source containing one, which is what makes that split exact
+    rather than a guess.
+
+    A citation with no separator is bare — every one committed to `knowledge/` before this — and
+    comes back with an empty source, which every caller reads as "ask across all sources", the
+    behaviour it has always had.
+    """
+    for prefix in EXTERNAL_ID_PREFIXES:
+        if note_id.startswith(prefix):
+            stripped = note_id[len(prefix) :]
+            source, separator, record_id = stripped.partition(_SOURCE_SEPARATOR)
+            return (source, record_id) if separator and record_id else ("", stripped)
+    return "", note_id
+
+
 def external_record_id(note_id: str) -> str:
-    """The store-side id behind an external citation — the prefix stripped, whichever matched.
+    """The store-side id behind an external citation — the prefix and any source stripped.
 
     `unresolved_citations` used to spell `removeprefix("reaction-")` twice against a constant that
     is a *tuple*, so a second entry in `EXTERNAL_ID_PREFIXES` would have queried the store with an
     unstripped id and reported every such citation missing. One function, driven by the constant,
     so growing the namespace list cannot silently break the lookup.
+
+    The id half of `external_record_ref`, for the one caller that asks only whether a record
+    *exists* (`kg.validate.unresolved_citations`). **That is a deliberately weaker check than a
+    resolve, and saying so is the point**: a qualified citation whose source does not hold the id
+    passes the validator when another source does, and is then refused at read time by
+    `records.read`, loudly, naming the id. The cut is drawn there rather than closed because
+    `records.known` answers a page of ids with one indexed lookup, and this validator's own
+    message says what it asked.
     """
-    for prefix in EXTERNAL_ID_PREFIXES:
-        if note_id.startswith(prefix):
-            return note_id[len(prefix) :]
-    return note_id
+    return external_record_ref(note_id)[1]
 
 
 def note_relative_path(note_type: str, note_id: str) -> str:
@@ -389,8 +467,45 @@ KNOWN_NOTE_TYPES: frozenset[str] = frozenset(
         # rather than from a surrogate model (D-162) — the non-BO sibling of `bo-candidate`.
         "experiment-proposal",
         "failure-mode",  # a negative result worth not repeating (gap KNW-3)
+        # A field of competing explanations, ranked against each other by judged pairwise
+        # comparison (`durable/hypothesis_tournament.py`). Distinct from `experiment-proposal`,
+        # which is the single next run argued from the record: this one holds the *alternatives*
+        # that were considered and how they placed, so a later session can see what was ruled
+        # against rather than only what was chosen. The tournament writes `experiment-proposal`
+        # notes for the checks a human must run; this type is the field they came out of.
+        "hypothesis-field",
+        # How a measurement was made: the assay or purity method a chemist actually ran, as they
+        # recorded it. **This exists because `relations.py` declares `measured-by` — "this claim
+        # rests on that experimental method or instrument" — and until now no note type could be
+        # its target.** Measured on the shipped corpus: the one `measured-by` edge in it points at
+        # `playbook-recrystallisation-purity`, a *transferable rule* about quoting a yield with the
+        # purification that produced it, because that was the nearest thing available. A corpus
+        # author had already hit the gap and worked around it
+        # (`D-2026-09-15-a-relation-with-no-legal-target-is-a-question-nobody-can-answer`).
+        #
+        # **It holds a method somebody ran; this system never devises one.** There is no
+        # chromatographic model here and nothing in this change adds one — what changes is that a
+        # method a chemist states can be recorded, cited, and pointed at by the results that rest
+        # on it, instead of being prose inside a reaction note that no edge can reach.
+        "analytical-method",
     }
 )
+
+#: The tag a `playbook` carries while it records a recurrence and no rule has been distilled.
+#:
+#: **It is a tag rather than a note type, and the distinction is what keeps a chemist safe.** The
+#: cross-project miner finds a real, deterministic fact — this transformation recurs across these
+#: projects, here is the evidence — and that fact is knowledge the moment it is found
+#: (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`). What it is *not* is a transferable
+#: rule, which is judgment over the cited runs and is the `playbook-distillation` skill's. A second
+#: note type would make the pattern unfindable by every reader that already asks for playbooks; a
+#: tag leaves it in the corpus, citable, and says what it is.
+#:
+#: Here rather than in `memory/` because two packages must agree on the string and only one of them
+#: may import the other: `memory/jobs.py` stamps it and `kg/analytics.py` counts it, and `kg` is
+#: layer 4 with no edge to `memory`. `tests/test_memory.py` and `tests/test_knowledge_gaps.py`
+#: both read it from here, so the producer and the reporter cannot drift apart.
+UNDISTILLED_TAG = "undistilled"
 
 
 def known_note_types() -> frozenset[str]:
@@ -549,7 +664,23 @@ class ProcessConditions(BaseModel):
 
     # `extra="forbid"` for the reason `TemporalWindow` gives: a typo'd key silently dropped is a
     # number a chemist wrote that no comparison will ever render.
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    #
+    # `allow_inf_nan=False` because this model is written straight into a `jsonb` column
+    # (`reaction_records.conditions`), and `NaN`/`±Infinity` are not JSON. Postgres refuses them at
+    # the wall, as an `InvalidTextRepresentation` naming a *token* — a `psycopg` error that is
+    # neither `ChemclawError` nor `ValidationError`, so it walked past the per-entry
+    # reject-and-continue in `ingest/eln/sync.py`, aborted the pass and advanced no cursor: one
+    # entry deterministically holding a whole corpus at a fixed date on every scheduled run after
+    # it. As a `ValidationError` it is one rejected entry with the field named in the ledger.
+    #
+    # **Four of these five fields were guarded by accident, and only three of them fully.** Every
+    # comparison
+    # against NaN is false, so `ge`/`le` already rejected it on `yield_percent`, `purity_percent`,
+    # `impurity_area_percent` and `time_h` — while `temperature_c`, the one field with no bounds to
+    # state, took it, and `time_h`'s `ge=0.0` still admitted `+Infinity`. A guarantee that is a
+    # side effect of a range nobody chose for it is a guarantee that disappears the day the range
+    # is widened, which is why it is stated here rather than left to the bounds.
+    model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
 
 
 class Note(TemporalWindow):
@@ -691,6 +822,43 @@ class Note(TemporalWindow):
         for relation in self.relations:
             seen[(relation.rel, relation.to)] = relation
         return list(seen.values())
+
+    def headline(self, limit: int = 120) -> str:
+        """The note's first line of prose, for a surface that can show one line and not a note.
+
+        **There is no `title` field and this is deliberately not one.** A title would be a second
+        place to say what a note is about, settable independently of the body and therefore able to
+        disagree with it — and every existing note would need one backfilled. The first non-empty
+        body line already *is* the headline in every note this corpus holds: a playbook opens with
+        the rule as a heading ("## Degas properly for Pd(0), or accept a bimodal yield
+        distribution"), a campaign with a one-sentence summary. Deriving it cannot drift from the
+        note, and it needs no migration.
+
+        Written because `durable/digest.py` had nothing else to send. A digest names the notes that
+        matched a standing query, and it named them by **id** — so the one proactive surface this
+        system has told a chemist `playbook-aee3d30407cc` and left them to go and look. The job
+        already holds the parsed note, so the line costs nothing to carry.
+
+        Leading `#` marks are stripped because they are the file's formatting rather than the
+        sentence, and `[[wikilinks]]` are flattened to their target text so a headline rendered
+        outside the graph does not show its brackets. Empty for a note with no body, which a caller
+        shows as the id — there is nothing better to say and inventing one would be worse.
+
+        Args:
+            limit: Longest headline to return; a longer first line is cut on a word boundary and
+                given a trailing ellipsis, so a surface can size a row without re-trimming.
+
+        Returns:
+            One line, never containing a newline, at most `limit` characters.
+        """
+        for raw in self.body.splitlines():
+            line = strip_links(raw).lstrip("#").strip()
+            if line:
+                if len(line) <= limit:
+                    return line
+                head = line[:limit].rsplit(" ", 1)[0] or line[:limit]
+                return f"{head}…"
+        return ""
 
 
 class NoteError(ChemclawError):

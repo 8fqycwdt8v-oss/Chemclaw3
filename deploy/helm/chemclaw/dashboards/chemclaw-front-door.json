@@ -390,6 +390,61 @@
           "refId": "H"
         }
       ]
+    },
+    {
+      "type": "graph",
+      "title": "Parse capacity lost to a killed reader",
+      "datasource": "prometheus",
+      "span": 12,
+      "fill": 0,
+      "stack": false,
+      "linewidth": 2,
+      "nullPointMode": "null",
+      "legend": {
+        "show": true,
+        "current": true,
+        "max": true,
+        "values": true
+      },
+      "tooltip": {
+        "shared": true,
+        "sort": 2,
+        "value_type": "individual"
+      },
+      "yaxes": [
+        {
+          "format": "reqps",
+          "show": true,
+          "min": 0
+        },
+        {
+          "format": "short",
+          "show": false
+        }
+      ],
+      "xaxis": {
+        "mode": "time",
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(chemclaw_document_parse_kills_total[15m]))",
+          "legendFormat": "readers killed on their deadline",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(chemclaw_attachment_parses_shed_total[15m]))",
+          "legendFormat": "uploads shed (all slots busy)",
+          "refId": "B"
+        }
+      ],
+      "id": 11,
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 28
+      }
     }
   ],
   "refresh": "30s",

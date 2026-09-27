@@ -112,9 +112,22 @@ from langchain.agents.middleware import wrap_tool_call
 from langchain_core.messages import ToolMessage
 from pydantic import BaseModel
 
-from chemclaw.agent.framing import defang, envelope_delimiters, frame_untrusted
+from chemclaw.agent.framing import (
+    SYSTEM_SPEECH_MARK,
+    defang,
+    envelope_delimiters,
+    frame_untrusted,
+    neutralise_marks,
+)
 from chemclaw.agent.tool_result_shape import rewritten_tool_messages
-from chemclaw.agent.tool_result_size import bounded_for_batch
+from chemclaw.agent.tool_result_size import (
+    bounded_for_batch,
+    full_text,
+    kept_in_full,
+    original_chars,
+    text_chars,
+    was_cut,
+)
 from chemclaw.connectors.transport import SERVED_BY
 
 #: What `defanged_payload` preserves: a payload comes back as the type it went in as.
@@ -145,9 +158,28 @@ def defanged_payload(payload: _Payload) -> _Payload:
     through *live*; `set`/`frozenset` members fell to the identity branch and did the same; and
     `model_copy(update=…)` widens `model_fields_set`, so a consumer dumping the copy with
     `exclude_unset=True` got a different document from the one it would have got for the original.
-    None was reachable at today's three call sites — that is why they survived — but this function's
-    whole contract is "pass it anything structured", and a claim nobody can rely on is worse here
-    than a narrower one, because the module docstring makes it a review rule.
+
+    **How far that reached is worth stating exactly, because the sentence here used to state it
+    over a third of the call sites.** It said none of the four was reachable "at today's three call
+    sites"; there are **eight** (five in `agent/graph_tools.py`, one each in
+    `agent/durable_tools.py`, `connectors/transport.py` and `connectors/jobs.py`), so the bound was
+    computed over three of eight and the other five were never checked. Re-measured across all
+    eight: three of the four are unreachable, and by declared type rather than by luck — seven
+    sites pass a `str | None`, a `list[str]`, or a JSON-decoded dict (a Temporal result, a
+    `job_records` row's `result`, an MCP args schema), none of which can carry an enum member, a
+    set or a pydantic extra. The fourth,
+    `connectors/jobs.py`, is the one site that hands over a whole model, so the `model_copy`
+    widening does run there — its *consequence* needs a consumer dumping with `exclude_unset=True`,
+    and there is none in `src/` — while the other three stay out of reach on that path too, because
+    `ConnectorJobResult` is `extra="ignore"`, `Note`/`Relation`/`ProcessConditions` are
+    `extra="forbid"`, and no field of any of them is an enum or a set. Driven rather than argued: an
+    envelope carrying a live closing delimiter in its `summary`, in a `data` key, in a `data` value
+    and in its note's `tags` comes back neutralised in all four, still a `ConnectorJobResult`, with
+    `model_fields_set` unchanged on the frozen envelope *and* on the frozen note it holds.
+
+    All four are closed regardless of reach, which is the part the count does not change: this
+    function's whole contract is "pass it anything structured", and a claim nobody can rely on is
+    worse here than a narrower one, because the module docstring makes it a review rule.
 
     A model is rebuilt with `model_copy`, which does not re-validate. That is deliberate rather
     than incidental: a `Note` reaching here has already passed the graph's validators, and
@@ -431,6 +463,15 @@ async def frame_connector_results(request: Any, handler: Callable[[Any], Any]) -
     from chemclaw.agent.scratchpad import scratchpad_tools
 
     result = await handler(request)
+    # A result only *this* pass cuts — under the ceiling until escaping pushed it over, so the
+    # nested `bound_tool_results` stamped nothing — still reaches the model shortened, and its full
+    # text is kept exactly as the inner pass keeps one (`tool_result_size.kept_in_full`). The text
+    # recorded is the pre-escape content, which on that path *is* what the tool returned.
+    originals: dict[str, str] = {}
+
+    def _kept(message: ToolMessage, offered: Any, bounded: Any) -> None:
+        if bounded is not offered and not was_cut(message):
+            originals[message.tool_call_id] = full_text(message.content)
 
     def _defanged(message: ToolMessage) -> ToolMessage:
         # **Re-bounded after escaping, because escaping is what makes the text longer.**
@@ -442,8 +483,34 @@ async def frame_connector_results(request: Any, handler: Callable[[Any], Any]) -
         # against a bound the deployment believed it had. The inner cut is not wrong and is not
         # moved — a ceiling is enforced on what the model is actually sent, so the layer that does
         # the expanding is the layer that has to re-check.
+        # `charged_total`/`expanded_from`/`count`: the nested `bound_tool_results` has already cut
+        # the raw payload and recorded what the tool returned, so this pass writes a notice about
+        # *that* number and does not count the cut a second time. Without it the delivered sentence
+        # described the intermediate — measured, a 200,000-character result reaching the model as
+        # "451 of 60,102 characters removed" — and the truncation counter fired twice for one cut.
+        #
+        # **`charged_total` falls back to the size in hand rather than to `None`, and that was the
+        # first half of a live overstatement.** When the inner pass does *not* cut — a result under
+        # the ceiling that only escaping pushes over it — nothing stamps `ORIGINAL_CHARS_KEY`, so
+        # `bounded_content` fell back to the escaped total and a tool returning 59,900 characters
+        # delivered "179,900 of 239,554 characters removed". The size in hand *is* what the tool
+        # returned on that path, so it is the honest fallback; `original_chars` still wins when it
+        # is there, because then the text in hand is already a cut of the tool's output.
+        #
+        # `expanded_from` is the second half: this pass hands on text it has expanded, so the kept
+        # span has to be converted back into the tool's own units or the notice understates by the
+        # expansion factor. See `bounded_content`.
+        in_hand = text_chars(message.content)
         escaped = _rewritten(message.content, defang)
-        return message.model_copy(update={"content": bounded_for_batch(request, escaped)})
+        bounded = bounded_for_batch(
+            request,
+            escaped,
+            charged_total=original_chars(message) or in_hand,
+            expanded_from=in_hand,
+            count=original_chars(message) is None,
+        )
+        _kept(message, escaped, bounded)
+        return message.model_copy(update={"content": bounded})
 
     origin = served_by(request)
     if origin:
@@ -451,10 +518,68 @@ async def frame_connector_results(request: Any, handler: Callable[[Any], Any]) -
         def _framed(message: ToolMessage) -> ToolMessage:
             if message.status == "error":
                 return _defanged(message)
-            return message.model_copy(update={"content": _framed_content(message.content, origin)})
+            # **Re-bounded for the same reason `_defanged` is, and it was missing here.** The
+            # sibling branch three lines up has carried that argument since it shipped; this one
+            # wrapped and returned. `_framed_content` defangs before it wraps, so it runs the same
+            # second pass — the one that escapes every `<` once an invisible character reveals a
+            # disguised tag — and that is a 4x expansion of the one character worth filling a
+            # payload with. Measured on the shipped ceiling: a connector *success* payload already
+            # cut to 60,000 by the nested `bound_tool_results`, carrying a delimiter disguised with
+            # one zero-width byte, left this branch at 236,129 characters, exactly 4.00x.
+            #
+            # **What that cost is not an over-long result, and the difference is why the obvious
+            # guard is vacuous.** Past upstream's evict threshold the whole result is replaced by
+            # `Tool result too large, … was saved in …` — 1,750 characters. So a
+            # `delivered <= ceiling` assertion passes against the defect (1,750 <= 60,000) while
+            # the chemist loses the entire answer. The property is that the result is still
+            # *itself*, which is what
+            # `test_a_connector_success_survives_the_ceiling_instead_of_being_evicted` asserts —
+            # written the wrong way first, and caught by driving it against unfixed source.
+            #
+            # Bounding the *framed* string rather than the content is safe and is the point:
+            # `bounded_for_batch` cuts head-and-tail, so both delimiters survive and the span stays
+            # one well-formed envelope — the property
+            # `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` records as holding for two
+            # independent reasons. Only a head-only cut in this position would lose the closing tag.
+            #
+            # **And the cut's own notice then lands inside the envelope, so it carries the escaped
+            # mark rather than the live one.** `bounded_for_batch` ends its notice in
+            # `SYSTEM_SPEECH_MARK` — genuine system speech, and right everywhere else it is used.
+            # Between these two delimiters it would not be: the envelope says "this span is
+            # retrieved data" and the mark says "this sentence is mine", which is a pair no reader
+            # can hold at once and the one an attacker most wants to write.
+            # `tool_result_size._notice`'s own docstring already settled the question for the
+            # *inner* bound — that notice reaches the model as `&#91;system …]` because
+            # `_framed_content` defangs the span it is in — and calls it "the consistent answer
+            # rather than a hole". This is the same answer for the outer one.
+            #
+            # **Escaped at source rather than after the cut, because after is 8 characters too
+            # late.** Neutralising the bounded string was tried first and measured 60,008 against
+            # the 60,000 ceiling: two `[` in the notice, four characters each. The bound is exact
+            # by contract (`bounded_content`: "the notice is charged against `limit`"), so
+            # anything appended afterwards breaks it — the mark has to be the escaped one *while*
+            # the notice is being sized.
+            in_hand = text_chars(message.content)
+            framed = _framed_content(message.content, origin)
+            # See `_defanged` above for `charged_total`/`expanded_from`/`count`: this branch
+            # re-bounds the *framed* string, so the same double-pass arithmetic applies to it —
+            # including the fallback for a result the inner pass never cut, which is where the
+            # overstatement was measured on this path too.
+            bounded = bounded_for_batch(
+                request,
+                framed,
+                mark=neutralise_marks(SYSTEM_SPEECH_MARK),
+                charged_total=original_chars(message) or in_hand,
+                expanded_from=in_hand,
+                count=original_chars(message) is None,
+            )
+            _kept(message, framed, bounded)
+            return message.model_copy(update={"content": bounded})
 
-        return rewritten_tool_messages(result, _framed)
+        return await kept_in_full(
+            rewritten_tool_messages(result, _framed), originals, str(request.tool_call["name"])
+        )
     name = request.tool_call["name"]
     if name in subagent_tool_names() or name in scratchpad_tools():
-        return rewritten_tool_messages(result, _defanged)
+        return await kept_in_full(rewritten_tool_messages(result, _defanged), originals, str(name))
     return result

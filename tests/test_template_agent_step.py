@@ -31,6 +31,7 @@ import contextlib
 import os
 import subprocess
 import sys
+import typing
 from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -42,16 +43,20 @@ from temporalio.testing import ActivityEnvironment
 
 from chemclaw.agent.authz import side_effecting_tools
 from chemclaw.agent.chemclaw_agent import advertised_tool_names
+from chemclaw.agent.framing import SYSTEM_SPEECH_MARK
 from chemclaw.agent.state import answer_text
+from chemclaw.agent.tool_result_size import STEP_REMEDY, TOOL_REMEDY
 from chemclaw.agent.turn_cost import TurnCost
 from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
 from chemclaw.durable.template_activities import (
     AgentStepInput,
+    AgentStepResult,
     StepIdentity,
     ToolStepInput,
     step_profile,
 )
+from chemclaw.durable.template_job import run_summary, template_job_record
 from chemclaw.templates.manifest import AgentStep
 from tests.fakes_langgraph import ScriptedChatModel
 
@@ -130,12 +135,17 @@ class _Step(NamedTuple):
     events: list[Any]
     offered: list[str]
     costs: list[TurnCost]
+    # The whole `AgentStepResult`, because the answer text is now only *part* of what the step
+    # returns and the rest of it — what was unreachable, how the turn ended — is the thing the
+    # degradation group below is about.
+    result: AgentStepResult
 
 
 def _drive(
     monkeypatch: pytest.MonkeyPatch,
     step: AgentStepInput,
     script: list[Any] | ScriptedChatModel,
+    unreachable: list[str] | None = None,
 ) -> _Step:
     """Run the real `run_agent_step` against a scripted model, and report what happened.
 
@@ -172,18 +182,26 @@ def _drive(
     async def fake_open(_stack: AsyncExitStack, specs: Any) -> tuple[list[Any], list[str]]:
         names = [name for spec in specs for name in (spec.allowed_tools or [])]
         offered.extend(names)
-        return [_stand_in(name, calls) for name in names], []
+        # The second element is what a real `open_connector_specs` reports as *not* opened, and
+        # `unreachable` is how a test asks for that half — a dark bundle contributes no tools, so
+        # there is nothing else about it a caller could observe.
+        return [_stand_in(name, calls) for name in names], list(unreachable or [])
 
     monkeypatch.setattr(template_activities, "open_connector_specs", fake_open)
 
-    async def _run() -> str:
-        answer = await template_activities.run_agent_step(step)
+    async def _run() -> AgentStepResult:
+        result = await template_activities.run_agent_step(step)
         # One scheduling round is enough for a recorder that never awaits anything real; the point
         # is only that the cost task gets to run before the loop `asyncio.run` closes it.
         await asyncio.sleep(0)
-        return answer
+        # The activity is annotated `AgentStepResult | str` for the rollout window it documents;
+        # *this* code path is always the current one, so narrowing here is an assertion rather
+        # than a cast.
+        assert isinstance(result, AgentStepResult), result
+        return result
 
-    return _Step(asyncio.run(_run()), calls, sink.events, offered, costs)
+    outcome = asyncio.run(_run())
+    return _Step(outcome.answer, calls, sink.events, offered, costs, outcome)
 
 
 class _CostRecorder:
@@ -589,7 +607,9 @@ def test_the_sequencer_hands_the_step_its_declared_writes() -> None:
             template_job, "workflow", types.SimpleNamespace(execute_activity=execute_activity)
         )
         asyncio.run(
-            template_job.TemplateWorkflow()._run_step(step, {}, identity, timedelta(seconds=60))
+            template_job.TemplateWorkflow()._run_step(
+                step, {}, identity, timedelta(seconds=60), "probe"
+            )
         )
 
     (payload,) = sent
@@ -638,7 +658,9 @@ def test_every_dispatched_step_carries_a_heartbeat_timeout() -> None:
         )
         for step in steps:
             asyncio.run(
-                template_job.TemplateWorkflow()._run_step(step, {}, identity, timedelta(seconds=60))
+                template_job.TemplateWorkflow()._run_step(
+                    step, {}, identity, timedelta(seconds=60), "probe"
+                )
             )
 
     expected = timedelta(seconds=settings.template_step_heartbeat_timeout_seconds)
@@ -796,7 +818,7 @@ def test_every_dispatched_step_actually_heartbeats(
 
 def _problems(write_tools: list[str], profile: str | None = None) -> list[str]:
     """Every problem the validator reports for one agent step declaring `write_tools`."""
-    from chemclaw.cli.validate_templates import _available_tools, _step_problems
+    from chemclaw.agent.template_surface import available_tools, step_problems
     from chemclaw.templates.manifest import Template
 
     template = Template.model_validate(
@@ -814,8 +836,8 @@ def _problems(write_tools: list[str], profile: str | None = None) -> list[str]:
             ],
         }
     )
-    _available_tools()  # the in-process registry is an import side effect; see the validator
-    return _step_problems(template)
+    available_tools()  # the in-process registry is an import side effect; see the validator
+    return step_problems(template)
 
 
 def test_declaring_a_read_tool_as_a_write_is_a_problem() -> None:
@@ -1031,3 +1053,317 @@ def test_a_spend_capped_step_is_booked_as_capped_rather_than_answered(
 
     assert [row.outcome for row in step.costs] == ["spend_capped"]
     assert "No files found" not in step.answer
+
+
+# --- the degradation an `agent` step used to swallow ---------------------------------------------
+#
+# The theme these four pin: a step that ran with its capability bundles dark, or that was stopped by
+# one of its two caps, returned a `str` **byte-identical in shape** to a complete one. Measured on
+# this activity against one scripted model, before the fix:
+#
+#     COMPLETE (cap=20, unreachable=[])            'FINAL: five hazard flags; two are severe.'
+#     CONNECTORS UNREACHABLE (['eln','calc'])      'FINAL: five hazard flags; two are severe.'
+#     LOOP-CAPPED (cap=2)                          'Interim: three hazard flags so far; ...'
+#
+# — and `run_summary` had no degradation to state, so the run's `job_records` row read "template
+# 'hazard-briefing' completed 1 step(s)" in all three. The fact was never missing: `unreachable`
+# came back from `open_connector_specs` and was discarded into `_`, and `loop_capped`/`spend_capped`
+# were read into `turn_costs.outcome` alone — a cost ledger neither the next step nor the artifact
+# a chemist signs can see.
+
+
+def test_a_clean_step_carries_no_notice(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The control arm, first: nothing is added to an answer that is whole.
+
+    Without this the three below are satisfied by a notice on *every* step, which would make the
+    marker meaningless in exactly the way an always-on warning is.
+    """
+    monkeypatch.setattr(settings, "harness_max_loop_iterations", 25)
+    monkeypatch.setattr(settings, "agent_max_turn_billed_tokens", 0)
+
+    step = _drive(monkeypatch, _step(), ["five hazard flags; two are severe"])
+
+    assert step.result.degraded is False
+    assert step.result.notice() == ""
+    assert step.result.step_value() == "five hazard flags; two are severe"
+    assert run_summary("hazard-briefing", 1, {}) == "template 'hazard-briefing' completed 1 step(s)"
+
+
+def test_a_step_whose_bundles_were_dark_says_so_where_the_next_step_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dark connector reaches the value the template passes on, not just a discarded local.
+
+    `api/runner.py` yields `CapabilityDegradedEvent` off this same tuple *before* the answer, and
+    the `tool` step names the same list in its own failure — this path threw it away, so the one
+    surface with no event stream to warn on was the one producing the artifact a chemist signs.
+    """
+    monkeypatch.setattr(settings, "harness_max_loop_iterations", 25)
+    monkeypatch.setattr(settings, "agent_max_turn_billed_tokens", 0)
+
+    step = _drive(
+        monkeypatch, _step(), ["five hazard flags; two are severe"], unreachable=["eln", "calc"]
+    )
+
+    assert step.result.unreachable == ["eln", "calc"]
+    assert step.result.degraded is True
+    # By name, because "2 unreachable" sends nobody anywhere.
+    assert "calc" in step.result.notice() and "eln" in step.result.notice()
+    value = step.result.step_value()
+    assert value.startswith("[INCOMPLETE"), value
+    # The answer itself is still there — a degraded answer is delivered, marked, not withheld.
+    assert value.endswith("five hazard flags; two are severe")
+
+
+def test_a_capped_step_hands_on_a_marked_partial_rather_than_a_bare_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The comment above the connector call said this landed; it landed in the ledger only.
+
+    "a truncated runaway booked `outcome="answered"` and handed the next step of the template a
+    partial answer with nothing saying so" — the booking was fixed, the handing-on was not.
+    """
+    monkeypatch.setattr(settings, "harness_max_loop_iterations", 3)
+    monkeypatch.setattr(settings, "agent_max_turn_billed_tokens", 0)
+
+    step = _drive(monkeypatch, _step(), _looping(8))
+
+    assert step.result.outcome == "loop_capped"
+    assert step.result.degraded is True
+    assert step.result.step_value().startswith("[INCOMPLETE")
+    assert step.result.step_value().endswith("partial 2")
+
+
+def test_the_runs_record_states_which_step_ran_degraded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The durable half: a listing and a stored row that stop reading as a clean run.
+
+    `find_past_jobs` and `get_durable_job_status` render `summary` and nothing else about a
+    completed run, so the degradation has to be *in* it; `result["degraded"]` is beside it so a
+    reader that wants the fact machine-readably need not parse prose. Both, deliberately — the
+    chemist reads the text and the auditor queries the row.
+
+    `state` stays `completed` and that is argued in `run_summary`: the run did run to its end, and
+    `job_records.state` is a two-value discriminator owned by `infra/sql/061_job_record_state.sql`.
+    """
+    monkeypatch.setattr(settings, "harness_max_loop_iterations", 25)
+    monkeypatch.setattr(settings, "agent_max_turn_billed_tokens", 0)
+
+    step = _drive(monkeypatch, _step(), ["five hazard flags; two are severe"], unreachable=["eln"])
+    degradations = {"brief": step.result.notice()}
+    summary = run_summary("hazard-briefing", 2, degradations)
+
+    assert summary == "template 'hazard-briefing' completed 2 step(s) — DEGRADED at brief"
+    record = template_job_record(
+        "wf-1",
+        _template_run(),
+        {"brief": step.result.step_value()},
+        summary,
+        degradations,
+    )
+    assert record.state == "completed"
+    assert record.summary == summary
+    assert record.result["degraded"] == degradations
+    # A clean run's row is byte-identical to what it has always been.
+    clean = template_job_record("wf-2", _template_run(), {"brief": "whole"}, "done")
+    assert clean.result == {"steps": {"brief": "whole"}}
+
+
+def _template_run() -> Any:
+    """One `TemplateRunInput` — imported here because only this group needs the workflow's input."""
+    from chemclaw.durable.template_job import TemplateRunInput
+    from chemclaw.templates.manifest import Template
+
+    return TemplateRunInput(
+        template=Template.model_validate(
+            {
+                "name": "hazard-briefing",
+                "summary": "Screen a molecule for hazards and write a brief.",
+                "inputs": [{"name": "smiles", "type": "string", "description": "The molecule."}],
+                "steps": [
+                    {
+                        "id": "brief",
+                        "kind": "agent",
+                        "purpose": "Turn the flags into something a chemist can act on.",
+                        "prompt": "Write a short brief for ${inputs.smiles}.",
+                    }
+                ],
+            }
+        ),
+        inputs={"smiles": "CCO"},
+        requested_by="chemist-1",
+    )
+
+
+def test_the_step_still_admits_the_answer_an_old_worker_returns() -> None:
+    """The rollout claim `run_agent_step`'s `| str` makes, asserted rather than believed.
+
+    Both workers poll `background-jobs`, so during a deploy a new-code workflow can schedule this
+    activity onto an old-code worker that answers a bare string. Without the union the pydantic
+    data converter refuses it and the run fails — for the whole rollout, on a workflow whose own
+    ceiling (`template_run_timeout_seconds`) is 45,330 seconds. Checked on the annotation because
+    that is what the converter reads, and through the converter's own adapter because a hint that
+    *looks* permissive and decodes differently is the failure this is about.
+
+    The sequencer's other half — that a bare string still becomes the step's result — is driven end
+    to end against a real workflow environment by `tests/test_templates.py`, whose `run_agent_step`
+    stand-in returns exactly that.
+    """
+    from pydantic import TypeAdapter
+    from temporalio.contrib.pydantic import pydantic_data_converter
+
+    from chemclaw.durable import template_activities
+
+    hints = typing.get_type_hints(template_activities.run_agent_step)
+    adapter: TypeAdapter[Any] = TypeAdapter(hints["return"])
+
+    assert adapter.validate_python("briefing text") == "briefing text"
+    assert isinstance(adapter.validate_python({"answer": "x"}), AgentStepResult)
+    # And the worker's converter is the pydantic one, which is what makes the adapter above the
+    # right thing to have asked (`core/temporal_client.py`).
+    assert pydantic_data_converter is not None
+
+
+# --- the prompt a step is handed is bounded, because nothing else on this path bounds it ---------
+#
+# `bound_tool_results` is an entry of `tool_call_middleware`. A template `tool` step runs through
+# `invoke_governed`, which folds `tool_governance_middleware` — the same chain minus the three
+# entries that exist to serve a model, deliberately, because a `tool` step has no model. That is
+# right for the step and silently wrong for the *next* one: its prompt interpolates the unbounded
+# result through `${steps.<id>.result}`, and there is a model there.
+#
+# Measured over the shipped ceiling before the fix, one payload through both paths:
+#
+#     raw step result            :   245,688 chars
+#     chat-turn cap (config)     :    60,000 chars   agent_max_tool_result_chars
+#     template agent-step prompt :   245,700 chars   uncut
+#
+# And unreclaimable afterwards: the step's graph gets `agent/compaction.py` like any turn, but both
+# of its edits are for *history* — clearing tool results, dropping old turns — and a step is one
+# `HumanMessage` with no history. So it ticks `chemclaw_context_unreducible_total` and goes whole.
+
+
+#: What the step's model was asked to answer, one entry per model call.
+_SEEN: list[list[Any]] = []
+
+
+def _model_prompt(monkeypatch: pytest.MonkeyPatch, prompt: str) -> str:
+    """Drive the real activity on `prompt` and return the human text the model actually received.
+
+    **The model's own hooks are recorded, rather than `bounded_prompt` asserted on directly**,
+    because the question is what the *model* was sent: between the cut and the provider sit
+    `turn_input`, the graph's prompt assembly and `create_agent`'s model node, and a unit test on
+    the arithmetic alone would pass with the call site deleted.
+
+    Both hooks, because which one LangChain calls is its decision and not this test's —
+    `graph.ainvoke` does not stream, so a capture on `_stream` alone recorded nothing at all, which
+    is the failure this pair exists to have already had.
+
+    Patched on the class rather than on a subclass: `ScriptedChatModel` is a pydantic model, and
+    mypy's pydantic plugin regenerates `__init__` from the fields for any subclass — so a capturing
+    subclass cannot be constructed with the script shorthand every other test in this file uses.
+    """
+    _SEEN.clear()
+    for hook in ("_generate", "_stream"):
+        original = getattr(ScriptedChatModel, hook)
+
+        def recorded(
+            self: Any, messages: list[Any], *args: Any, _original: Any = original, **kwargs: Any
+        ) -> Any:
+            _SEEN.append(list(messages))
+            return _original(self, messages, *args, **kwargs)
+
+        monkeypatch.setattr(ScriptedChatModel, hook, recorded)
+
+    _drive(monkeypatch, _step(prompt=prompt, template="tautomer-resolution"), ["ok"])
+
+    human = [
+        message for request in _SEEN for message in request if isinstance(message, HumanMessage)
+    ]
+    assert human, "the step's own prompt never reached the model as a human message"
+    return str(human[0].content)
+
+
+def test_an_oversized_step_prompt_reaches_the_model_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The headline: a step result too large to read does not reach the step's model whole.
+
+    The ceiling is `agent_max_tool_result_chars` rather than a second setting, and that is the
+    argument rather than the convenience — it is this system's one answer to "how much text may
+    reach a model in one blob", and a prompt is a blob.
+    """
+    ask = "Report the tautomer resolution of CCO."
+    close = "Close by naming which downstream numbers this changes."
+    ranking = '{"g": 0.01}, ' * 20_000
+    prompt = f"{ask}\n\nRanking: {ranking}\n\n{close}"
+    assert len(prompt) > settings.agent_max_tool_result_chars
+
+    sent = _model_prompt(monkeypatch, prompt)
+
+    assert len(sent) <= settings.agent_max_tool_result_chars
+    # Head *and* tail, which is the property that makes cutting a prompt safe at all: a template
+    # prompt is instructions, then data, then instructions, and the judgment the step exists for is
+    # in the last sentences. A head-only cut would keep the ask and throw away the answer's shape.
+    assert sent.startswith(ask)
+    assert sent.rstrip().endswith(close)
+    assert "characters removed from the middle" in sent
+
+
+def test_the_cut_tells_the_step_something_it_can_actually_do(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The remedy is the step's, not a tool caller's — the wrong advice is worse than none.
+
+    Every other sentence in `_notice` is true of any cut. The last one assumes the model *asked*
+    for this text and can therefore ask for less, which holds for a tool result and for a `task`
+    report and is false here: the prompt was interpolated by a `${steps.<id>.result}` reference in
+    a file this model cannot see and did not write. Telling it to narrow its question sends it to
+    re-fetch what the step was already handed.
+    """
+    prompt = "Brief me.\n\n" + ("x" * settings.agent_max_tool_result_chars) + "\n\nBe brief."
+
+    sent = _model_prompt(monkeypatch, prompt)
+
+    assert STEP_REMEDY in sent
+    assert TOOL_REMEDY not in sent
+    # And it is named as this system's speech, which is the part a connector cannot forge: the
+    # interpolated half of that prompt is a tool result, so an unmarked sentence inside it would be
+    # asking to be believed on the strength of its own wording (`agent/tool_result_size._notice`).
+    assert SYSTEM_SPEECH_MARK in sent
+
+
+def test_a_prompt_inside_the_ceiling_is_handed_over_untouched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The control arm: the bound is not a rewrite that happens to every step.
+
+    Without this the two above are satisfied by cutting unconditionally, which would put a notice
+    about removed characters on every template prompt in the catalogue — all nine of which are far
+    inside the ceiling.
+    """
+    sent = _model_prompt(monkeypatch, "brief me on CCO")
+
+    assert sent == "brief me on CCO"
+    assert "characters removed" not in sent
+
+
+def test_the_counter_names_the_template_whose_prompt_was_cut(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cut that nothing counts is the invisible kind this repository keeps finding.
+
+    Labelled by *template* and not by tool, because the two cuts have different remedies: a
+    truncated tool result is a tool answering too broadly and is fixed in that tool's own ceiling;
+    a truncated template prompt is a step interpolating more than a model can read and is fixed in
+    the template — a narrower step, or a field path instead of the whole result.
+    """
+    seen: list[tuple[str, dict[str, str] | None]] = []
+    monkeypatch.setattr(
+        METRICS,
+        "increment",
+        lambda name, value=1.0, labels=None: seen.append((name, labels)),
+    )
+
+    _model_prompt(monkeypatch, "a\n\n" + "x" * settings.agent_max_tool_result_chars + "\n\nb")
+
+    assert ("chemclaw_template_prompt_truncated_total", {"template": "tautomer-resolution"}) in seen

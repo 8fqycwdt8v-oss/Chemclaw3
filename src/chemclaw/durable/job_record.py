@@ -10,7 +10,7 @@ history aged out: *what did that campaign actually try*, *how do I find it from 
 and — for every job this system runs, not just BO — *why was it run at all*.
 
 So the record is written by core's `ConnectorJobWorkflow` for **every** connector job, not by each
-connector. That placement is the same rule the PR-gate and the actor stamp follow: an obligation
+connector. That placement is the same rule the note write and the actor stamp follow: an obligation
 that must hold for every capability belongs to the one wrapper they all run inside, because "each
 connector remembers" is precisely the discipline that fails silently.
 
@@ -21,10 +21,10 @@ back to the null sink and loses nothing it had before.
 """
 
 import logging
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, computed_field
 from temporalio import activity
 
 from chemclaw.core.config import settings
@@ -82,7 +82,8 @@ class JobRecord(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
     summary: str = ""
     result: dict[str, Any] = Field(default_factory=dict)
-    # The note this run proposed, or "" — a join to the graph, not proof of a merge.
+    # The note this run produced, or "" — a join to the graph, and not proof the write landed:
+    # it is copied off the result envelope, and the graph write that follows is best-effort.
     note_id: str = ""
     # The calculation keys the run rested on, from its envelope (D-2026-08-21). Kept beside the
     # note rather than inside `result` for the same reason `note_id` is: `result` is the
@@ -143,6 +144,67 @@ class JobRecordSummary(BaseModel):
     # listing says *that* a run failed, and opening the record says why.
     state: str = "completed"
     completed_at: datetime | None = None
+
+
+class JobRecordSearch(BaseModel):
+    """One search over the past runs: the hits, **and whether they are all of them**.
+
+    Why this is not a bare `list`, which it was: the search is capped
+    (`job_record_search_limit`), and a capped list that merely ended looks exactly like the
+    complete answer. Measured against this table with 50 matching rows and the shipped cap of 20,
+    `search_job_records("Suzuki")` returned 20 with no total, no flag and no cursor — so the
+    21st-oldest matching campaign was invisible, on the one tool whose stated purpose is not paying
+    twice for a run that already happened. "Have we optimized this coupling before?" came back
+    "no" because a page had ended.
+
+    Deliberately the same shape as `science.fingerprints.store.FingerprintSearch`, down to
+    `hits_truncated` and a `computed_field` verdict, rather than a second answer to the same
+    question: both are "have we seen this before?" tools, and both have an empty result that means
+    two different things. `records_kept` is this seam's `index_empty` — a deployment that keeps no
+    durable records answers every query with an empty list, which is not evidence that nothing was
+    ever run.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    hits: list[JobRecordSummary] = Field(default_factory=list)
+    # True when more rows matched than this page could hold, so the count is a floor rather than a
+    # total. Established exactly — the store asks for one row beyond the limit — rather than
+    # inferred from a full page, because "exactly `limit` matches exist" is a real corpus and
+    # reporting it as truncated would make the flag decoration instead of evidence.
+    hits_truncated: bool = False
+    # False when this deployment keeps no durable job records at all (`session_store != postgres`),
+    # in which case the empty list above says nothing about what has been run. The honest answer
+    # was already being *returned*; nothing on the wire distinguished it from "no match", so the
+    # model read a configuration as a finding.
+    records_kept: bool = True
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def verdict(self) -> str:
+        """The one sentence a reader must take from this result before drawing a conclusion.
+
+        A `computed_field` and not a bare `property`, which is the whole point of the method:
+        a plain property is **not serialized**, so `model_dump()` would carry the hits and the
+        flags and leave the sentence that explains them inside this process. That is the defect
+        `FingerprintSearch.verdict` was written against after a hazard screen reported "no hazards
+        detected" six times, and this model would have repeated it.
+        """
+        if not self.records_kept:
+            return (
+                "This deployment keeps no durable job records, so this is not evidence that the "
+                "run has not happened — nothing is recorded either way."
+            )
+        if not self.hits:
+            return "No past run matches this query, out of every run this system has recorded."
+        if self.hits_truncated:
+            return (
+                f"{len(self.hits)} past run(s) shown, the most recent first — more matched than "
+                "this list holds, so the count is a floor and an older matching run may not "
+                "appear. Narrow the query (or the connector) before concluding there is no "
+                "precedent."
+            )
+        return f"{len(self.hits)} past run(s) matched, and that is all of them."
 
 
 class JobRecordSink(Protocol):
@@ -229,20 +291,34 @@ async def lookup_job_record(job_id: str) -> JobRecord | None:
 
 
 async def search_job_records(
-    text: str = "", connector: str = "", limit: int | None = None
-) -> list[JobRecordSummary]:
+    text: str = "", connector: str = "", limit: int | None = None, after: str = ""
+) -> JobRecordSearch:
     """Past runs matching `text` (in the reason, the summary or the job name), newest first.
 
-    Returns an empty list rather than raising when no durable store is configured: "we have no
-    record of past runs" is the honest answer for such a deployment, and it is the same answer the
-    caller gets from an empty table.
+    Answers with an empty `hits` rather than raising when no durable store is configured — "we
+    have no record of past runs" is the honest answer for such a deployment — and says which
+    empty it is: `records_kept` is False there, and the same empty list from an empty table is not
+    the same fact.
+
+    Args:
+        text: Words to look for in the reason, the summary or the job name. Empty matches all.
+        connector: Restrict to one bundle. Empty searches all.
+        limit: Page size; `job_record_search_limit` when omitted.
+        after: The `job_id` of the last row of the previous page — a keyset anchor, not an
+            offset. Empty starts at the newest run.
+
+    Returns:
+        The page, carrying whether more matched than it holds.
     """
     if not _records_are_durable():
-        return []
+        return JobRecordSearch(records_kept=False)
     from chemclaw.durable.job_record_store import read_job_record_summaries
 
     return await read_job_record_summaries(
-        text, connector, limit if limit is not None else settings.job_record_search_limit
+        text,
+        connector,
+        limit if limit is not None else settings.job_record_search_limit,
+        after=after,
     )
 
 
@@ -313,25 +389,45 @@ async def record_job(record: JobRecord) -> None:
         )
 
 
-def note_with_run_provenance(note: Note, record: JobRecord) -> Note:
+def note_with_run_provenance(note: Note, record: JobRecord, *, ran_on: date | None = None) -> Note:
     """Return `note` with a footer naming the run that produced it and the reason it was started.
 
     **Applied by core to every connector note**, which is the whole point: the reason a job ran is
-    the one thing a merged markdown note could never say, and asking each connector to append it
+    the one thing a markdown note could never say by itself, and asking each connector to append it
     would guarantee that some connector does not. A reader months later gets *why this was done*
-    from the same file that says what came out, with no second store to consult — and a reviewer
-    sees the reason on the PR they are being asked to sign.
+    from the same file that says what came out, with no second store to consult. This paragraph
+    ended "and a reviewer sees the reason on the PR they are being asked to sign", which
+    `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` falsified — and the footer matters
+    *more* without that reader, because nobody now meets the note before it is in the graph.
 
-    The footer carries **no `[[wikilink]]`**, deliberately. A link to a note that does not exist
-    fails `chemclaw.kg.validate` on the very PR this note opens, and the job id names a database
+    The footer carries **no `[[wikilink]]`**, deliberately. A link to a note that does not exist is
+    what `kg-validate` fails the corpus on, and the job id names a database
     row rather than a graph node; it is rendered as code so it stays a literal.
 
     `Note` is frozen, so this builds a copy — which also leaves the connector's own object intact
     for the result envelope the launching tool hands back.
+
+    **`ran_on` dates the note so a standing query can see it, and only where the connector did
+    not.** `durable/digest._is_new` reads an absent `valid_from` as *open-ended* — true for as long
+    as anyone has known — and therefore as not news, so an undated `job-result` note reaches a
+    subscriber who has never been told anything and then nobody, ever. Measured on the shipped
+    corpus, 32 of 39 notes carried no `valid_from` across ten types and `job-result` was three of
+    them; `D-2026-09-14-an-undated-note-is-not-news-every-hour`'s mitigation reached only the
+    memory miners. A connector result's validity date and its arrival date are the same day by
+    construction, so the run's own day is the honest reading.
+
+    A note that already carries a date keeps it: the connector knows what its result is *about*
+    and this function does not, so overwriting would replace a claim about chemistry with a claim
+    about scheduling. `record.completed_at` is deliberately not the source — it is filled by the
+    database's own `now()` *after* this runs, so it is `None` here — and the caller is workflow
+    code, which is why the date is passed in from `workflow.now()` rather than read from a clock.
     """
     footer = (
         f"\nWhy this ran: {record.rationale}\n\n"
         f"- run: `{record.job_id}` ({record.connector}/{record.job})\n"
         f"- requested by: {record.requested_by}\n"
     )
-    return note.model_copy(update={"body": note.body.rstrip("\n") + "\n" + footer})
+    update: dict[str, object] = {"body": note.body.rstrip("\n") + "\n" + footer}
+    if ran_on is not None and note.valid_from is None:
+        update["valid_from"] = ran_on
+    return note.model_copy(update=update)

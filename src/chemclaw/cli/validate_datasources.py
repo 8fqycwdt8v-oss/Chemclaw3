@@ -46,7 +46,7 @@ import inspect
 from collections.abc import Sequence
 
 from chemclaw.core.config import settings
-from chemclaw.core.connect import resolve_driver, signature_mismatch
+from chemclaw.core.connect import option_type_mismatch, resolve_driver, signature_mismatch
 from chemclaw.ingest.eln.warehouse.binding import (
     BindingError,
     ConnectionBinding,
@@ -89,6 +89,14 @@ def _check_half(name: str, field: str, reference: str, config: dict[str, object]
         inspect.signature(factory).bind(**passed)
     except TypeError as exc:
         return [f"{name}: {field}: {reference} will not accept config {sorted(passed)}: {exc}"]
+    # **And what it was given, not only what it accepts.** `bind` above proves the *keys* are real;
+    # this proves a scalar value is the type the parameter declares. The gap was not academic:
+    # `snapshot: "false"` bound cleanly here and armed a destructive sweep, because every non-empty
+    # string is truthy and a manifest value is passed through exactly as YAML parsed it
+    # (`D-2026-09-16-a-truthy-string-is-not-the-flag-somebody-wrote`). `_build_half` raises on the
+    # same condition, so this gate and the build agree rather than one of them being the real one.
+    if mismatch := option_type_mismatch(factory, config):
+        return [f"{name}: {field}: {reference} was given {mismatch}"]
     return []
 
 

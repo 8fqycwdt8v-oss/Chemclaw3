@@ -29,6 +29,7 @@ instead of being added to a list nobody re-reads.
 
 import asyncio
 import copy
+import logging
 from collections.abc import Callable
 from typing import Any, get_args
 
@@ -719,6 +720,80 @@ def test_a_refined_ensemble_publishes_electronic_energies_and_free_energy_popula
     )
 
 
+def test_a_refined_ensemble_stored_before_the_rename_still_publishes_both_headline_numbers(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The one field rename in this tree that a projector read past in silence.
+
+    `c7035b66` renamed `RefinedEnsemble.conformational_entropy_cal_per_mol_k` to
+    `refined_conformational_entropy_cal_per_mol_k` (and the correction likewise), and
+    `_refined_ensemble` read only the new names through `.get()`. So a row stored between migration
+    055 and that commit projected cleanly, counted as queued, and reached the results store
+    **missing both of its headline numbers** — no warning, no counter, no refusal, and a consumer
+    could not tell it from an ensemble that genuinely had none. Measured before the fix: the old
+    shape published `[total_conformers, refined_conformers, refined_population_covered,
+    conformer_treatment]` where the new one published those plus the two.
+
+    Read the same numbers under both names, because the rename **was a rename**: the commit changed
+    two keyword names in `connectors/calc/compose.py` and nothing else — same `entropy`, same
+    `populations`, same `degeneracies`, same `round(-temperature * entropy / 1000.0, 3)` — and its
+    own message says the label was wrong, not the arithmetic. A rename where the quantity had also
+    moved would have to refuse the row instead, and the assertion on the *values* here is what says
+    which of the two this is.
+
+    The warning is asserted too: publishing a number from a field name this release does not write
+    is a fact about a legacy corpus that an operator running a backfill over one wants to see.
+    """
+    legacy = _refined().model_dump(mode="json")
+    entropy = legacy.pop("refined_conformational_entropy_cal_per_mol_k")
+    correction = legacy.pop("refined_ensemble_correction_kcal")
+    legacy["conformational_entropy_cal_per_mol_k"] = entropy
+    legacy["ensemble_correction_kcal"] = correction
+
+    with caplog.at_level(logging.WARNING, logger="chemclaw.publish.project"):
+        record = records_for(
+            calc_ref="calc-job-refined-legacy",
+            calc_type="calc.refine_ensemble",
+            payload=legacy,
+            payload_kind="RefinedEnsemble",
+        )[0]
+
+    facts = {fact.property: fact.value for fact in record.properties}
+    assert facts.get("refined_conformational_entropy") == entropy, (
+        "an ensemble stored under the pre-rename field names published without its entropy, "
+        f"indistinguishable from one that had none: {sorted(facts)}"
+    )
+    assert facts.get("refined_ensemble_correction") == correction
+    assert "conformational_entropy" not in facts and "ensemble_correction" not in facts, (
+        "the refined subset's numbers must still land under the refined names — the rename is the "
+        "reason the fallback is allowed at all"
+    )
+    assert any("legacy field" in message for message in caplog.messages), (
+        f"reading a legacy field name must say so: {caplog.messages}"
+    )
+
+
+def test_a_current_refined_ensemble_reads_no_legacy_field_and_says_nothing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The fallback must be a fallback: a current payload must not trip it.
+
+    Without this, `_renamed` reading the legacy name *first* — or a payload carrying both — would
+    pass the test above while warning on every ensemble this system writes today.
+    """
+    with caplog.at_level(logging.WARNING, logger="chemclaw.publish.project"):
+        record = records_for(
+            calc_ref="calc-job-refined-current",
+            calc_type="calc.refine_ensemble",
+            payload=_refined().model_dump(mode="json"),
+            payload_kind="RefinedEnsemble",
+        )[0]
+
+    facts = {fact.property: fact.value for fact in record.properties}
+    assert facts["refined_conformational_entropy"] == 0.9
+    assert not [m for m in caplog.messages if "legacy field" in m], caplog.messages
+
+
 def test_a_bond_survey_publishes_pairs_and_hoists_the_weakest() -> None:
     """A bond is an atom *pair*, and 'which breaks first' must be a scalar predicate.
 
@@ -1165,7 +1240,7 @@ def test_a_hessian_cache_miss_publishes_what_its_row_actually_holds(
     )
 
 
-def test_a_published_gradient_is_converted_into_the_unit_the_registry_keeps(
+async def test_a_published_gradient_is_converted_into_the_unit_the_registry_keeps(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The predicate column is canonical or it is a lie, and it was a lie for `max_gradient`.
@@ -1189,13 +1264,10 @@ def test_a_published_gradient_is_converted_into_the_unit_the_registry_keeps(
     install(monkeypatch, FakeCalcServer())
     queued = _publishing(monkeypatch)
 
-    async def _relax_and_differentiate() -> None:
-        store = InMemoryStore()
-        structure = await compose.embed("CCO")
-        relaxed, _ = await compose.relax(store, structure, None)
-        await compose.hessian(store, relaxed.structure, None, artifacts=InMemoryArtifactStore())
-
-    asyncio.run(_relax_and_differentiate())
+    store = InMemoryStore()
+    structure = await compose.embed("CCO")
+    relaxed, _ = await compose.relax(store, structure, None)
+    await compose.hessian(store, relaxed.structure, None, artifacts=InMemoryArtifactStore())
 
     gradients = [
         fact for record in queued for fact in record.properties if fact.property == "max_gradient"
@@ -1285,7 +1357,9 @@ def test_every_declared_tool_composite_is_published_by_a_real_tool_call(
     assert published[0].properties, "a record with no facts says nothing was found"
 
 
-def test_asking_the_same_composite_twice_is_one_record(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_asking_the_same_composite_twice_is_one_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A tool composite has no cache key, so its identity is the result it produced.
 
     The route plus a hash of the payload: two identical questions collapse to one row on the
@@ -1295,15 +1369,10 @@ def test_asking_the_same_composite_twice_is_one_record(monkeypatch: pytest.Monke
     calc_tools = _calc_stack(monkeypatch)
     queued = _publishing(monkeypatch)
 
-    async def _three_calls() -> None:
-        manager = calc_tools.server._tool_manager
-        await manager.call_tool("compute_thermochemistry", {"smiles": "CCO"})
-        await manager.call_tool("compute_thermochemistry", {"smiles": "CCO"})
-        await manager.call_tool(
-            "compute_thermochemistry", {"smiles": "CCO", "temperature_k": 310.0}
-        )
-
-    asyncio.run(_three_calls())
+    manager = calc_tools.server._tool_manager
+    await manager.call_tool("compute_thermochemistry", {"smiles": "CCO"})
+    await manager.call_tool("compute_thermochemistry", {"smiles": "CCO"})
+    await manager.call_tool("compute_thermochemistry", {"smiles": "CCO", "temperature_k": 310.0})
 
     refs = [record.calc_ref for record in queued if record.payload_kind == "ThermochemistryResult"]
     assert len(refs) == 3
@@ -1311,7 +1380,7 @@ def test_asking_the_same_composite_twice_is_one_record(monkeypatch: pytest.Monke
     assert refs[2] != refs[0], "a second temperature is a second measurement, not a duplicate"
 
 
-def test_an_unstated_default_and_the_value_it_resolves_to_are_one_record(
+async def test_an_unstated_default_and_the_value_it_resolves_to_are_one_record(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Both tool composites take a **sentinel** default, and a request hash cannot see through one.
@@ -1331,19 +1400,16 @@ def test_an_unstated_default_and_the_value_it_resolves_to_are_one_record(
     calc_tools = _calc_stack(monkeypatch)
     queued = _publishing(monkeypatch)
 
-    async def _four_calls() -> None:
-        manager = calc_tools.server._tool_manager
-        await manager.call_tool("predict_logd", {"smiles": "CC(=O)Nc1ccc(O)cc1"})
-        await manager.call_tool(
-            "predict_logd", {"smiles": "CC(=O)Nc1ccc(O)cc1", "ph": settings.logd_default_ph}
-        )
-        await manager.call_tool("compute_thermochemistry", {"smiles": "CCO"})
-        await manager.call_tool(
-            "compute_thermochemistry",
-            {"smiles": "CCO", "temperature_k": settings.xtb_thermo_temperature_k},
-        )
-
-    asyncio.run(_four_calls())
+    manager = calc_tools.server._tool_manager
+    await manager.call_tool("predict_logd", {"smiles": "CC(=O)Nc1ccc(O)cc1"})
+    await manager.call_tool(
+        "predict_logd", {"smiles": "CC(=O)Nc1ccc(O)cc1", "ph": settings.logd_default_ph}
+    )
+    await manager.call_tool("compute_thermochemistry", {"smiles": "CCO"})
+    await manager.call_tool(
+        "compute_thermochemistry",
+        {"smiles": "CCO", "temperature_k": settings.xtb_thermo_temperature_k},
+    )
 
     for kind in ("LogdResult", "ThermochemistryResult"):
         refs = [record.calc_ref for record in queued if record.payload_kind == kind]
@@ -1353,7 +1419,7 @@ def test_an_unstated_default_and_the_value_it_resolves_to_are_one_record(
         )
 
 
-def test_a_presentational_argument_does_not_fork_a_composite_s_identity(
+async def test_a_presentational_argument_does_not_fork_a_composite_s_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Moving the identity onto the result put a *presentational* argument inside it.
@@ -1373,12 +1439,9 @@ def test_a_presentational_argument_does_not_fork_a_composite_s_identity(
     calc_tools = _calc_stack(monkeypatch)
     queued = _publishing(monkeypatch)
 
-    async def _two_calls() -> None:
-        manager = calc_tools.server._tool_manager
-        await manager.call_tool("compute_thermochemistry", {"smiles": "CCO"})
-        await manager.call_tool("compute_thermochemistry", {"smiles": "CCO", "top_bands": 200})
-
-    asyncio.run(_two_calls())
+    manager = calc_tools.server._tool_manager
+    await manager.call_tool("compute_thermochemistry", {"smiles": "CCO"})
+    await manager.call_tool("compute_thermochemistry", {"smiles": "CCO", "top_bands": 200})
 
     records = [record for record in queued if record.payload_kind == "ThermochemistryResult"]
     assert len(records) == 2, "both calls must reach the hook"

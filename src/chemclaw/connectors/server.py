@@ -39,14 +39,14 @@ from starlette.responses import Response
 from starlette.types import ASGIApp
 
 from chemclaw.connectors.caller import bind_caller, reset_caller
-from chemclaw.connectors.identity import (
+from chemclaw.core import db
+from chemclaw.core.asgi import BodySizeLimit
+from chemclaw.core.call_identity import (
     HEADER_ACTOR,
     HEADER_CORRELATION,
     HEADER_DRY_RUN,
     HEADER_SESSION,
 )
-from chemclaw.core import db
-from chemclaw.core.asgi import BodySizeLimit
 from chemclaw.core.config import settings
 from chemclaw.core.metrics import CONTENT_TYPE, METRICS
 from chemclaw.core.tracing import continue_trace

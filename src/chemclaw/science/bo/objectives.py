@@ -71,12 +71,24 @@ class RegisteredObjective:
 
     So the registry states it, `require_campaign_startable` checks it, and the mismatch becomes a
     refusal at launch instead of a plausible answer hours later.
+
+    **`requires` is the same argument about the other half of the same mismatch.** An objective is
+    a function over *named* parameters, and nothing compared those names either: a spec naming
+    `reizman_suzuki` over an unrelated decision space was accepted at launch and failed at evaluate
+    time with a bare `KeyError: 'catalyst'` — hours in, after the seed rounds had been paid for,
+    and as an exception neither `SurrogateFitError` nor `_BAD_DATA_TYPES` reads. What a function
+    reads is a property of the function, so it is declared beside the direction rather than
+    inferred by whoever launches a campaign.
     """
 
     factory: Callable[[LogSFor], Objective]
     #: `"maximize"` or `"minimize"` — the same vocabulary `problem.Objective.direction` uses,
     #: because the whole point is that the two are compared as equals.
     direction: str
+    #: The parameter names this objective reads out of a candidate's `params`. Every entry declares
+    #: at least one: a row declaring none would pass the launch check vacuously and hand the
+    #: `KeyError` back to whatever is registered next.
+    requires: tuple[str, ...]
 
 
 #: The objective that is not a function: the numbers come back from a bench, not from a process.
@@ -101,10 +113,15 @@ def is_measured(name: str) -> bool:
 # no calculator at all. A per-entry signature would push the branch into `get_objective` and make
 # adding a calculator-backed objective a change to the resolver rather than a row here.
 _REGISTRY: dict[str, RegisteredObjective] = {
-    # Reaction yield: more is better.
-    "reizman_suzuki": RegisteredObjective(lambda _log_s_for: _reizman_suzuki(), "maximize"),
+    # Reaction yield: more is better. The four names are the emulator's own encoding order
+    # (`benchmarks.reizman_suzuki.YieldSurrogate._encode`), which is what a candidate must supply.
+    "reizman_suzuki": RegisteredObjective(
+        lambda _log_s_for: _reizman_suzuki(),
+        "maximize",
+        ("catalyst", "t_res", "temperature", "catalyst_loading"),
+    ),
     # Predicted log S. The name says `_max` and the direction says it again, checkably.
-    "solubility_max": RegisteredObjective(solubility_objective, "maximize"),
+    "solubility_max": RegisteredObjective(solubility_objective, "maximize", (MOLECULE_KEY,)),
 }
 
 
@@ -124,6 +141,19 @@ def get_objective(name: str, log_s_for: LogSFor) -> Objective:
     if registered is None:
         raise ValueError(f"unknown objective {name!r}; known: {sorted(_REGISTRY)}")
     return registered.factory(log_s_for)
+
+
+def registered_parameters(name: str) -> tuple[str, ...]:
+    """The parameter names this registered objective reads, or raise with the known names.
+
+    Split from `get_objective` for the reason `registered_direction` gives: the launch-time
+    precondition must answer this *without building the objective*, and a campaign refused for a
+    mismatch should cost nothing.
+    """
+    registered = _REGISTRY.get(name)
+    if registered is None:
+        raise ValueError(f"unknown objective {name!r}; known: {sorted(_REGISTRY)}")
+    return registered.requires
 
 
 def registered_direction(name: str) -> str:

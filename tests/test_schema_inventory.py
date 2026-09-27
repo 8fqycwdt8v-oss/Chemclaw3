@@ -30,6 +30,12 @@ from pathlib import Path
 
 import pytest
 
+from tests.test_migrations_are_additive import (
+    _REVIEWED_REPLAY_BREAKS,
+    _REVIEWED_ROLLBACK_BREAKS,
+    _REVIEWED_SEMANTIC_BREAKS,
+)
+
 _ROOT = Path(__file__).resolve().parents[1]
 _SQL = _ROOT / "infra" / "sql"
 _README = _SQL / "README.md"
@@ -60,6 +66,24 @@ _NUMBER = re.compile(r"\d{3}")
 
 _LINE_COMMENT = re.compile(r"--[^\n]*")
 
+# The two operator lists at the foot of the README, each keyed by its own `###` heading rather than
+# by position, and each read as the migration filenames its bullets open with. Scoped to a heading
+# on purpose: migration filenames appear in the README's running prose too (`037_document_index.sql`
+# is named in the "two files may share a number" paragraph), so a whole-file scan would read that as
+# a claim about rollbacks.
+_ROLLBACK_HEADING = '### Migrations that end "deploy the previous image"'
+_REPLAY_HEADING = "### Migrations that are not re-runnable, and the recipe for each"
+_BULLET = re.compile(r"^- `(\d{3}_[a-z0-9_]+\.sql)`", re.MULTILINE)
+
+
+def _listed_under(heading: str) -> list[str]:
+    """The migration filenames the bullets under `heading` name, in the order they are listed."""
+    body = _README.read_text(encoding="utf-8")
+    assert heading in body, f"infra/sql/README.md no longer has the section {heading!r}"
+    after = body.split(heading, 1)[1]
+    return _BULLET.findall(after.split("\n### ", 1)[0].split("\n## ", 1)[0])
+
+
 # A statement acts on the table it names in one of these positions. Matching the construct rather
 # than the bare identifier is load-bearing: `observations` is both a table and a column of
 # `bo_suggestions`, so "the name appears in the file" would credit migration 031 with touching a
@@ -76,9 +100,21 @@ _TOUCHES = (
     re.compile(rf"^COMMENT ON COLUMN\s+({_NAME})\.", re.I),
     re.compile(rf"^INSERT INTO\s+({_NAME})", re.I),
     re.compile(rf"^UPDATE\s+({_NAME})\s", re.I),
+    # An anonymous block, credited to the table its first `ALTER TABLE` acts on — the shape `108`
+    # has, a guarded `ADD CONSTRAINT`. A block that altered no table would match nothing here and
+    # fail `test_every_migration_statement_is_one_the_rule_understands` rather than pass unread.
+    re.compile(rf"^DO\s+\$\$.*?\bALTER TABLE\s+(?:IF EXISTS\s+)?(?:ONLY\s+)?({_NAME})", re.I),
 )
 # Statements that legitimately name no table.
-_TABLE_FREE = (re.compile(r"^CREATE EXTENSION", re.I),)
+#
+# `DROP INDEX` is here rather than in `_TOUCHES` because its syntax names an *index*, never the
+# table under it — so there is no table to credit, and crediting the index's own name to the
+# Migration column would put a non-table in it. It is a real construct in this directory since
+# `106`, which drops an index `105` created for a containment query nobody ever wrote.
+_TABLE_FREE = (
+    re.compile(r"^CREATE EXTENSION", re.I),
+    re.compile(r"^DROP INDEX", re.I),
+)
 
 
 def _split_on_statement_ends(body: str) -> list[str]:
@@ -97,14 +133,26 @@ def _split_on_statement_ends(body: str) -> list[str]:
 
     SQL escapes a quote inside a literal by doubling it, and a doubled quote is just two state
     flips in a row, so tracking a single boolean is sufficient and `''` needs no special case.
+
+    **A `DO $$ … $$` block is one statement too**, and for the same reason: its body is PL/pgSQL
+    with semicolons of its own, which the runner sends whole (`core.migrate` says so) and a split
+    here would turn into `END IF` and `END $$` fragments naming nothing. The first one is `108`, a
+    constraint added behind a `pg_constraint` guard because `ALTER TABLE … ADD CONSTRAINT` has no
+    `IF NOT EXISTS`. Only the anonymous `$$` tag is read, because it is the only one this directory
+    writes; a quote inside the body does not toggle the literal state, since the body is itself the
+    literal.
     """
     out: list[str] = []
     current: list[str] = []
     in_literal = False
-    for char in body:
-        if char == "'":
+    in_dollar = False
+    for index, char in enumerate(body):
+        # The opening `$` of a `$$` pair toggles; its second `$` is not itself the start of one.
+        if not in_literal and body.startswith("$$", index) and body[index - 1 : index] != "$":
+            in_dollar = not in_dollar
+        if char == "'" and not in_dollar:
             in_literal = not in_literal
-        if char == ";" and not in_literal:
+        if char == ";" and not in_literal and not in_dollar:
             out.append("".join(current))
             current = []
         else:
@@ -228,6 +276,24 @@ def test_a_semicolon_inside_a_comment_does_not_end_the_statement() -> None:
     ]
 
 
+def test_a_do_block_is_one_statement_and_names_its_table() -> None:
+    """A PL/pgSQL body's own semicolons do not end the statement the runner sends whole.
+
+    Driven on synthetic SQL for the reason the comment test above is: the tree's one block could be
+    rewritten tomorrow without a semicolon inside it, and this would then pass for nothing.
+    """
+    body = (
+        "DO $$\nBEGIN\n    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'c') THEN\n"
+        "        ALTER TABLE ONLY public.audit_events ADD CONSTRAINT c CHECK (a <> ';');\n"
+        "    END IF;\nEND\n$$;\nCREATE INDEX IF NOT EXISTS i ON t (a);\n"
+    )
+    statements = [" ".join(raw.split()) for raw in _split_on_statement_ends(body)]
+    statements = [s for s in statements if s]
+    assert len(statements) == 2
+    assert table_named_by(statements[0]) == "audit_events"
+    assert table_named_by(statements[1]) == "t"
+
+
 def test_every_migration_statement_is_one_the_rule_understands() -> None:
     """Guard the guard: an unrecognised statement must fail loudly, not count as touching nothing.
 
@@ -298,4 +364,155 @@ def test_the_migration_column_names_every_migration_that_touches_the_table() -> 
         "infra/sql/README.md's Migration column disagrees with the migrations, "
         f"{{table: (row says, files say)}}: {wrong}. Extend the row in the same commit as the "
         "migration — a later ALTER TABLE belongs in the cell as much as the CREATE does"
+    )
+
+
+def test_the_rollback_note_names_every_reviewed_break() -> None:
+    """The list an operator reads before a `helm rollback`, checked against the registers.
+
+    It was transcribed, and it was wrong in the direction that matters: the README said **four**
+    reviewed rollback-breaking migrations and listed 041, 056, 058, 063 while the register held
+    five, the missing one being 088 — the newest, and the only one bearing on a rollback of the
+    current release. So a paragraph whose own sentence claimed the list was "derived from that set"
+    told an operator that the `turn_costs` primary-key move is not a rollback break. It is.
+
+    Checked in both directions and in order, the same shape as the **Migration** column above: a
+    register entry with no bullet is a break nobody planning a rollback will see, and a bullet with
+    no entry is a warning about a migration that does not break anything. The count that used to
+    open the paragraph is gone rather than checked — it is derivable from the list, and a redundant
+    number is the thing that went stale.
+
+    Both registers, because an operator does not care which one found the break: one holds the
+    migrations a pattern flagged, the other the one that only review could reach.
+    """
+    reviewed = sorted(set(_REVIEWED_ROLLBACK_BREAKS) | set(_REVIEWED_SEMANTIC_BREAKS))
+    assert _listed_under(_ROLLBACK_HEADING) == reviewed, (
+        "infra/sql/README.md's rollback list disagrees with `_REVIEWED_ROLLBACK_BREAKS` + "
+        f"`_REVIEWED_SEMANTIC_BREAKS` (which say {reviewed}). Extend the list in the same commit "
+        "as the exemption — an operator plans a rollback from this file, not from a test"
+    )
+
+
+def test_the_replay_note_names_every_recipe() -> None:
+    """The same, for the migrations that cannot simply be replayed.
+
+    A restore whose `schema_migrations` ledger is older than its tables is recovered by re-running
+    the migrations, and two of them abort the run instead (046 on a restore, 058 on a
+    hand-built database). The recipe for each is one statement, and it is useless in a test file:
+    the person who needs it is reading this directory at the time.
+    """
+    assert _listed_under(_REPLAY_HEADING) == sorted(_REVIEWED_REPLAY_BREAKS), (
+        "infra/sql/README.md's replay-recipe list disagrees with `_REVIEWED_REPLAY_BREAKS` "
+        f"(which says {sorted(_REVIEWED_REPLAY_BREAKS)})"
+    )
+    body = _README.read_text(encoding="utf-8")
+    for name, (_, _, recipe) in _REVIEWED_REPLAY_BREAKS.items():
+        assert recipe in body, (
+            f"{name}'s replay recipe is not in infra/sql/README.md verbatim: {recipe!r}. A recipe "
+            "an operator has to reconstruct is a recipe nobody runs under pressure"
+        )
+
+
+# The notations a second structure-identity scheme would arrive as. Names, not prose: `051`'s own
+# comment lists three of these while declining them, and a test that matched the comment would
+# pass on a migration that adds the column beside it
+# (`D-2026-09-13-a-second-identity-scheme-inherits-the-first-ones-instability`).
+_SECOND_IDENTITY = re.compile(
+    r"^(std_)?(inchi|inchi_key|inchikey|cas|cas_number|cas_rn|formula|molecular_formula"
+    r"|molecular_weight|mol_weight|registry_number|corporate_id)$"
+)
+
+_ADD_COLUMN = re.compile(rf"ADD COLUMN(?: IF NOT EXISTS)?\s+({_NAME})", re.I)
+_CREATE_BODY = re.compile(rf"CREATE TABLE IF NOT EXISTS\s+{_NAME}\s*\((.*)\)", re.I)
+
+
+def _top_level_parts(body: str) -> list[str]:
+    """Split a `CREATE TABLE` body on the commas that separate its definitions.
+
+    Depth-aware, because `VARCHAR(64)` and a `CHECK (a IN ('x', 'y'))` both carry commas that do
+    not separate anything.
+    """
+    parts: list[str] = []
+    current: list[str] = []
+    depth = 0
+    for char in body:
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        if char == "," and depth == 0:
+            parts.append("".join(current))
+            current = []
+        else:
+            current.append(char)
+    parts.append("".join(current))
+    return parts
+
+
+def _declared_columns() -> list[tuple[str, str]]:
+    """Every `(file, column)` this family's schemas declare — both databases.
+
+    `schema/result-store/` is included because it is the *other* place a compound is named, and the
+    argument being held is about structure identity across both: the result store's `compound` row
+    reuses `compound_id` deliberately, and a second scheme added there would be exactly as dead as
+    one added here.
+    """
+    out: list[tuple[str, str]] = []
+    files = sorted(_SQL.glob("*.sql")) + sorted((_ROOT / "schema").rglob("*.sql"))
+    for path in files:
+        body = _LINE_COMMENT.sub(" ", path.read_text(encoding="utf-8"))
+        for raw in _split_on_statement_ends(body):
+            statement = " ".join(raw.split())
+            if (match := _CREATE_BODY.search(statement)) is not None:
+                for part in _top_level_parts(match.group(1)):
+                    words = part.split()
+                    if words and words[0].upper() not in {
+                        "PRIMARY",
+                        "FOREIGN",
+                        "UNIQUE",
+                        "CHECK",
+                        "CONSTRAINT",
+                        "EXCLUDE",
+                    }:
+                        out.append((path.name, _bare(words[0])))
+            for added in _ADD_COLUMN.findall(statement):
+                out.append((path.name, _bare(added)))
+    return out
+
+
+def test_the_schemas_declare_columns_at_all() -> None:
+    """The positive control: a scan that found nothing would pass the guard below forever."""
+    columns = _declared_columns()
+    assert len(columns) > 100, f"only {len(columns)} column(s) parsed; the scan stopped working"
+    assert ("052_reaction_records.sql", "reaction_id") in columns
+    assert ("001_core.sql", "canonical_smiles") in columns
+
+
+def test_no_schema_mints_a_second_structure_identity() -> None:
+    """Structure identity is the standardized SMILES and nothing else.
+
+    `051_reaction_labels.sql` declined an InChIKey, a formula and a molecular weight because
+    nothing asked and this tree deletes dead columns, and
+    `D-2026-09-13-a-second-identity-scheme-inherits-the-first-ones-instability` measured the
+    argument that was supposed to reopen it — that an InChIKey survives a `STANDARDIZATION_VERSION`
+    bump — and found it false: an InChIKey taken after standardization moves exactly when
+    `compound_id` moves, and one taken before it fragments the join `standard_smiles` exists to
+    make. So a column here is dead on the day it is added, in both databases.
+
+    This is a column-name check over comment-stripped SQL, which is the whole reason it can fail:
+    the three notations it forbids are named in `051`'s own prose, so a test reading the file as
+    text would pass on a migration that adds the column directly beneath that sentence.
+    """
+    minted = sorted(
+        {
+            f"{path}:{column}"
+            for path, column in _declared_columns()
+            if _SECOND_IDENTITY.match(column)
+        }
+    )
+    assert not minted, (
+        f"{minted} declares a second structure identity. The honest form of that change is to "
+        "name the reader first (D-2026-09-13-a-second-identity-scheme-inherits-the-first-ones-"
+        "instability), and a site's own registry number rides `Component.attributes` today with "
+        "no schema change at all"
     )

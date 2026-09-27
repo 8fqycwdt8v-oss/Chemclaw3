@@ -119,13 +119,26 @@ def open_qdrant_client() -> QdrantClient:
         "url": settings.vector_store_url,
         "api_key": settings.vector_store_api_key.get_secret_value() or None,
         "timeout": int(settings.vector_store_timeout_seconds),
+        # Unconditional, and it is the only seam there is. `AsyncQdrantClient` forwards its extra
+        # keywords through `AsyncApiClient` straight into the `httpx.AsyncClient` it builds for
+        # itself, so `trust_env` lands where it is needed — while a caller-supplied `http_client`
+        # is refused, because that same forwarding hands it to httpx as an unknown keyword.
+        # Observed 2026-09-12 against qdrant-client 1.19.0 in a scratch venv, construction only:
+        # default `trust_env=True`, with this keyword `False`, `http_client=` a `TypeError`. That
+        # is a dated observation rather than a claim this tree can hold — the extra is not in this
+        # closure (`pgvector` is the shipped provider), so `tests/test_vector_store.py` can only
+        # assert that the keyword is *sent*. Without it, a proxy variable on the pod would carry
+        # this store's embedded note text and query vectors off-address, past a guard that sees
+        # only the dial to the proxy.
+        "trust_env": False,
     }
-    # The private-CA bundle the rest of this system's transports honour, passed **only** when one is
-    # configured. Not unconditionally: `verify` is forwarded to the underlying httpx client rather
-    # than being part of the constructor's own documented signature, and nothing here has run
-    # against a real client, so an unrecognised keyword would fail every deployment — including the
-    # ones that never needed a private CA. Narrowing it means the default path uses only the three
-    # keywords the client certainly accepts, and the risk is carried by the deployments that opt in.
+    # The private-CA bundle the rest of this system's transports honour, passed **only** when one
+    # is configured. The original reason for the condition is spent: it was that `verify` is
+    # forwarded to the underlying httpx client rather than being in the constructor's own
+    # signature and nothing here had run against a real client, so an unrecognised keyword might
+    # fail every deployment. The `trust_env` measurement above is a measurement of that forwarding,
+    # and httpx takes `verify`. The condition stays for its own reason instead: the setting's
+    # unset value is the empty string, which is not a CA bundle path.
     if settings.llm_tls_ca_bundle:
         options["verify"] = settings.llm_tls_ca_bundle
     client: QdrantClient = module.AsyncQdrantClient(**options)

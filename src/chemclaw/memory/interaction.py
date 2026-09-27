@@ -1,8 +1,8 @@
 """User interactions as a memory source (plan step 5.5).
 
 A confirmed or corrected answer from a chemist is evidence too. It becomes an episodic
-`interaction` note through the **same** PR-gate as every other agent note (same type family,
-same gate — no special path), so a validated Q&A re-enters the knowledge base and informs
+`interaction` note through the **same** write path as every other agent note (`kg/record.py`, same
+type family — no special path), so a validated Q&A re-enters the knowledge base and informs
 later retrieval. Any source notes the answer drew on are cited as `[[...]]` back-references.
 """
 
@@ -20,8 +20,11 @@ def note_from_confirmed_answer(
     """Build an agent `interaction` note capturing a confirmed **or corrected** user answer.
 
     `evidence_note_ids` are the notes the answer relied on (cited as wikilinks); an answer
-    with no cited source simply carries none. It is `created_by: agent` because it is still a
-    proposal the PR-gate has a human confirm before it becomes trusted knowledge (D-005).
+    with no cited source simply carries none. It is `created_by: agent` because that is what
+    wrote it, and a reader weighs it beside its own citations — not because anything confirms it
+    first. D-005's PR-gate is gone (D-2026-09-05-the-gate-follows-behaviour-not-knowledge);
+    this line claimed in the present tense that a human confirms the note, over a write path that
+    lands it in `knowledge/` the moment it is learned.
 
     **A correction used to be stored as a confirmation, which threw away the part worth keeping.**
     The body was rendered `A (confirmed):` unconditionally, while this module's own docstring, the

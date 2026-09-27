@@ -275,7 +275,7 @@ def test_a_worker_whose_broker_has_gone_quiet_reports_not_ready() -> None:
         assert not worker_ready(cast(Worker, SimpleNamespace(is_running=False)))
 
 
-def test_the_bind_flag_wait_is_cancelled_when_the_bind_does_not_win_the_race(
+async def test_the_bind_flag_wait_is_cancelled_when_the_bind_does_not_win_the_race(
     monkeypatch: pytest.MonkeyPatch, metrics_port: int
 ) -> None:
     """The surface races two awaitables and must not walk away from the loser.
@@ -310,16 +310,13 @@ def test_the_bind_flag_wait_is_cancelled_when_the_bind_does_not_win_the_race(
     monkeypatch.setattr(_QuietServer, "__init__", _remember)
     monkeypatch.setattr(_QuietServer, "startup", _declined)
 
-    async def _run() -> None:
-        async with worker_http(component="declined", ready=lambda: True):
-            assert servers, "the surface did not build a server"
-            # One turn of the loop, because `Task.cancel()` schedules the throw rather than
-            # performing it — the waiter is removed by `Event.wait`'s own `finally` when the task
-            # next runs. Without the cancel no number of turns removes it, which is the difference
-            # being asserted.
-            await asyncio.sleep(0)
-            assert not servers[0].bound._waiters, (
-                "the bind-flag wait is still queued on an event nothing will set"
-            )
-
-    asyncio.run(_run())
+    async with worker_http(component="declined", ready=lambda: True):
+        assert servers, "the surface did not build a server"
+        # One turn of the loop, because `Task.cancel()` schedules the throw rather than
+        # performing it — the waiter is removed by `Event.wait`'s own `finally` when the task
+        # next runs. Without the cancel no number of turns removes it, which is the difference
+        # being asserted.
+        await asyncio.sleep(0)
+        assert not servers[0].bound._waiters, (
+            "the bind-flag wait is still queued on an event nothing will set"
+        )

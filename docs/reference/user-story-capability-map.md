@@ -234,5 +234,6 @@ no record of what an audit is worth.
 
 **Two things did not change, and they are the two that matter most.** `project`, `method`,
 `document` and `near-miss` are still not entities, so the 30 `MISSING-ENTITY` rows are still 30.
-And the honesty work is **argued, not re-measured** — the shape gate ships off by default and the
-46% has not been re-run with it on (`docs/planning/BACKLOG.md`).
+And the honesty work is **argued, not re-measured** — the 46% has not been re-run with the shape
+gate on, and the gate now ships on by default, so that figure describes a configuration nobody runs
+(`docs/planning/BACKLOG.md`).

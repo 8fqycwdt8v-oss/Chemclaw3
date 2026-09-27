@@ -101,7 +101,7 @@ def test_both_knobs_are_env_overridable(monkeypatch: pytest.MonkeyPatch) -> None
     assert configured.hnsw_iterative_scan == "strict_order"
 
 
-def test_recall_parameters_are_transaction_local_on_a_shared_connection(
+async def test_recall_parameters_are_transaction_local_on_a_shared_connection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The configured parameters hold for the search's transaction and are gone after it commits.
@@ -117,37 +117,34 @@ def test_recall_parameters_are_transaction_local_on_a_shared_connection(
     monkeypatch.setattr(settings, "hnsw_ef_search", 200)
     monkeypatch.setattr(settings, "hnsw_iterative_scan", "strict_order")
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        async with db.pooling():
-            async with db.connection(settings.postgres_dsn) as conn:
-                # Touch a vector value first: pgvector registers `hnsw.ef_search` when its library
-                # is loaded into the backend, and until then the name is an empty placeholder — so
-                # without this the "gone afterwards" read below would pass for the wrong reason.
-                await conn.execute("SELECT '[1,0]'::vector <=> '[0,1]'::vector")
-            async with db.connection(settings.postgres_dsn) as conn:
-                async with conn.cursor() as cur:
-                    await db.apply_vector_recall_settings(cur)
-                    await cur.execute(
-                        "SELECT current_setting('hnsw.ef_search'), "
-                        "current_setting('hnsw.iterative_scan'), pg_backend_pid()"
-                    )
-                    applied = await cur.fetchone()
-            assert applied is not None
-            assert applied[0] == "200"
-            assert applied[1] == "strict_order"
-            async with db.connection(settings.postgres_dsn) as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute("SELECT current_setting('hnsw.ef_search'), pg_backend_pid()")
-                    after = await cur.fetchone()
-            assert after is not None
-            assert after[1] == applied[2], "not the same backend; the leak check proves nothing"
-            assert after[0] == PGVECTOR_DEFAULT_EF_SEARCH
-
-    asyncio.run(_run())
+    await migrated_db_or_skip()
+    async with db.pooling():
+        async with db.connection(settings.postgres_dsn) as conn:
+            # Touch a vector value first: pgvector registers `hnsw.ef_search` when its library
+            # is loaded into the backend, and until then the name is an empty placeholder — so
+            # without this the "gone afterwards" read below would pass for the wrong reason.
+            await conn.execute("SELECT '[1,0]'::vector <=> '[0,1]'::vector")
+        async with db.connection(settings.postgres_dsn) as conn:
+            async with conn.cursor() as cur:
+                await db.apply_vector_recall_settings(cur)
+                await cur.execute(
+                    "SELECT current_setting('hnsw.ef_search'), "
+                    "current_setting('hnsw.iterative_scan'), pg_backend_pid()"
+                )
+                applied = await cur.fetchone()
+        assert applied is not None
+        assert applied[0] == "200"
+        assert applied[1] == "strict_order"
+        async with db.connection(settings.postgres_dsn) as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT current_setting('hnsw.ef_search'), pg_backend_pid()")
+                after = await cur.fetchone()
+        assert after is not None
+        assert after[1] == applied[2], "not the same backend; the leak check proves nothing"
+        assert after[0] == PGVECTOR_DEFAULT_EF_SEARCH
 
 
-def test_dense_search_runs_under_the_configured_parameters(
+async def test_dense_search_runs_under_the_configured_parameters(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A scoped dense search still finds its note with both knobs turned on.
@@ -160,31 +157,28 @@ def test_dense_search_runs_under_the_configured_parameters(
     monkeypatch.setattr(settings, "hnsw_ef_search", 100)
     monkeypatch.setattr(settings, "hnsw_iterative_scan", "relaxed_order")
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        async with db.connection(settings.postgres_dsn) as conn:
-            await conn.execute("TRUNCATE note_index")
-            await conn.commit()
+    await migrated_db_or_skip()
+    async with db.connection(settings.postgres_dsn) as conn:
+        await conn.execute("TRUNCATE note_index")
+        await conn.commit()
 
-        index = PostgresNoteIndex()
-        near, far = await asyncio.to_thread(
-            embed_texts, ["amide coupling epimerization", "amide coupling workup"]
-        )
-        await index.upsert(
-            [
-                NoteRecord(note_id="rxn-1", text="amide coupling epimerization", embedding=near),
-                NoteRecord(note_id="rxn-2", text="amide coupling workup", embedding=far),
-            ],
-            note_embedding_key(),
-        )
-        (query,) = await asyncio.to_thread(embed_texts, ["amide coupling epimerization"])
-        assert [h.note_id for h in await index.search_dense(query, top_k=1)] == ["rxn-1"]
-        # The scoped shape is the one the knobs exist for: `within=` is a post-filter over the
-        # candidate list, so this is the query that can come back short.
-        scoped = await index.search_dense(query, top_k=1, within={"rxn-2"})
-        assert [h.note_id for h in scoped] == ["rxn-2"]
-
-    asyncio.run(_run())
+    index = PostgresNoteIndex()
+    near, far = await asyncio.to_thread(
+        embed_texts, ["amide coupling epimerization", "amide coupling workup"]
+    )
+    await index.upsert(
+        [
+            NoteRecord(note_id="rxn-1", text="amide coupling epimerization", embedding=near),
+            NoteRecord(note_id="rxn-2", text="amide coupling workup", embedding=far),
+        ],
+        note_embedding_key(),
+    )
+    (query,) = await asyncio.to_thread(embed_texts, ["amide coupling epimerization"])
+    assert [h.note_id for h in await index.search_dense(query, top_k=1)] == ["rxn-1"]
+    # The scoped shape is the one the knobs exist for: `within=` is a post-filter over the
+    # candidate list, so this is the query that can come back short.
+    scoped = await index.search_dense(query, top_k=1, within={"rxn-2"})
+    assert [h.note_id for h in scoped] == ["rxn-2"]
 
 
 def test_the_document_dense_path_runs_under_the_configured_parameters(

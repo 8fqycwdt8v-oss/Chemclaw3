@@ -49,28 +49,20 @@ _UPSERT = re.compile(r"\bINSERT\s+INTO\s+(\w+).*?\bON CONFLICT\b.*?\bDO UPDATE\b
 # - The retention sweep builds `DELETE FROM {table}` over the closed `_PRUNABLE` map.
 #
 # - The LangGraph checkpointer and store issue their own SQL from inside the installed package, so
-#   *no* first-party literal names them at all. Their verbs are recorded here, read off those
-#   packages rather than assumed: `checkpoints`/`checkpoint_writes`/`store`/`store_vectors` upsert
-#   with `ON CONFLICT … DO UPDATE`, `checkpoint_blobs` uses `DO NOTHING` and so needs no UPDATE, and
-#   the three version ledgers take one INSERT per schema step. The DELETEs on the checkpoint tables
-#   and on `store`/`store_vectors` are ours (retention by thread, erasure by subject) and *are*
-#   visible as literals — they are folded in below by the ordinary scan.
+#   *no* first-party literal names them at all. Their verbs are **not** listed here: they are read
+#   off those packages by `_upstream_verbs()` below, for the reason `_upstream_tables()` derives the
+#   names rather than listing them. The DELETEs on the checkpoint tables and on
+#   `store`/`store_vectors` are ours (retention by thread, erasure by subject) and *are* visible as
+#   literals — they are folded in by the ordinary scan.
 _DYNAMIC: dict[str, set[str]] = {
     "molecule_fingerprints": {"INSERT", "UPDATE"},
     "reaction_fingerprints": {"INSERT", "UPDATE"},
     "corpus_reactions": {"INSERT", "UPDATE"},
-    # `_PRUNABLE` first, so the fuller upstream matrix below wins for `checkpoints` rather than
-    # being flattened back to the retention sweep's single DELETE — which is what a later `**`
-    # expansion did, and it read as "the grant allows an INSERT nobody performs".
+    # Every verb here is *added* to what the scans find (`note()` unions into a set), so the
+    # retention sweep's DELETE and upstream's own matrix compose rather than one replacing the
+    # other. An earlier `**` expansion overwrote instead, and it read as "the grant allows an
+    # INSERT nobody performs".
     **{table: {"DELETE"} for table in _PRUNABLE},
-    "checkpoints": {"INSERT", "UPDATE", "DELETE"},
-    "checkpoint_writes": {"INSERT", "UPDATE", "DELETE"},
-    "checkpoint_blobs": {"INSERT", "DELETE"},
-    "checkpoint_migrations": {"INSERT"},
-    "store": {"INSERT", "UPDATE", "DELETE"},
-    "store_vectors": {"INSERT", "UPDATE", "DELETE"},
-    "store_migrations": {"INSERT"},
-    "vector_migrations": {"INSERT"},
 }
 
 # Written by the migrator alone: the ledger of its own work. A runtime credential that could write
@@ -137,6 +129,69 @@ def _upstream_tables() -> set[str]:
             if match := re.search(r"CREATE TABLE IF NOT EXISTS\s+(\w+)", str(statement), re.I):
                 created.add(match.group(1).lower())
     return created
+
+
+def _upstream_modules() -> list[Path]:
+    """The installed modules whose SQL the two `setup()`s and their writers actually issue.
+
+    The same four `_upstream_tables()` reads its `MIGRATIONS` out of, plus each one's `aio` half,
+    because the DDL lives in `base` and the DELETEs and the version-ledger INSERTs live beside the
+    async savers this repository imports (`agent/checkpointer.py`, `agent/scratchpad.py`).
+
+    `langgraph.checkpoint.postgres.shallow` is deliberately absent. `ShallowPostgresSaver` writes
+    `checkpoint_blobs` with `DO UPDATE` where the saver this repository runs writes it with
+    `DO NOTHING`, so scanning it would derive — and this file would then require the grant file to
+    hand out — an UPDATE no process here performs. The basis is the code that runs, which is the
+    same rule `_ADMIN_ONLY_MODULES` applies to `src/`.
+    """
+    from langgraph.checkpoint.postgres import aio as checkpoint_aio
+    from langgraph.checkpoint.postgres import base as checkpoint_base
+    from langgraph.store.postgres import aio as store_aio
+    from langgraph.store.postgres import base as store_base
+
+    return [
+        Path(str(module.__file__))
+        for module in (checkpoint_base, checkpoint_aio, store_base, store_aio)
+    ]
+
+
+def _verbs_in(paths: list[Path]) -> dict[str, set[str]]:
+    """`{table: {INSERT, UPDATE, DELETE}}` for every write the SQL in `paths` performs.
+
+    The same scan `verbs_the_code_uses()` runs over `src/`, factored out so it can be pointed at
+    the installed distributions — and at a synthetic module, which is how the test proves the
+    derivation reacts to upstream's statement changing rather than to this file being edited.
+    """
+    found: dict[str, set[str]] = {}
+    for path in paths:
+        for statement in _sql_literals(path):
+            for pattern, verb in ((_INSERT, "INSERT"), (_UPDATE, "UPDATE"), (_DELETE, "DELETE")):
+                for match in pattern.finditer(statement):
+                    found.setdefault(match.group(1).lower(), set()).add(verb)
+            for match in _UPSERT.finditer(statement):
+                found.setdefault(match.group(1).lower(), set()).add("UPDATE")
+    return found
+
+
+def _upstream_verbs() -> dict[str, set[str]]:
+    """How LangGraph writes each table it creates, read off the distributions that issue the SQL.
+
+    This was a hand-written map for as long as it existed, and the hazard is the one
+    `_upstream_tables()` was derived to close, one column over. A minor bump that turns
+    `checkpoint_blobs`' `ON CONFLICT … DO NOTHING` into a `DO UPDATE` needs UPDATE on that table;
+    the map said INSERT and DELETE, the grant file agreed with the map, and every check in this
+    repository would have stayed green until two writers raced on one key and met
+    `permission denied`. Derived, an upstream bump moves this and the grant file has to move with
+    it.
+
+    Narrowed to the tables upstream creates, because these modules also name `schema_migrations`-
+    shaped things this repository does not run and, more to the point, the tables are the closed
+    set the grant file's `to_regclass` guards enumerate.
+    """
+    created = _upstream_tables()
+    return {
+        table: verbs for table, verbs in _verbs_in(_upstream_modules()).items() if table in created
+    }
 
 
 def _tables() -> set[str]:
@@ -241,9 +296,10 @@ def verbs_the_code_uses() -> dict[str, set[str]]:
                     note(match.group(1).lower(), verb)
             for match in _UPSERT.finditer(statement):
                 note(match.group(1).lower(), "UPDATE")
-    for table, verbs in _DYNAMIC.items():
-        for verb in verbs:
-            note(table, verb)
+    for source in (_DYNAMIC, _upstream_verbs()):
+        for table, verbs in source.items():
+            for verb in verbs:
+                note(table, verb)
     return used
 
 
@@ -269,6 +325,47 @@ def verbs_the_grant_allows() -> dict[str, set[str]]:
             if table:
                 allowed.setdefault(table, set()).update(granted)
     return allowed
+
+
+def test_an_upstream_upsert_that_starts_updating_is_seen(tmp_path: Path) -> None:
+    """A `DO NOTHING` that becomes a `DO UPDATE` upstream fails here, not at a concurrent write.
+
+    `_upstream_tables()` derives the table *names* from the installed `MIGRATIONS`, so a ninth
+    table turns CI red. Nothing did that for the **verbs**: they were a hand-written map, and a
+    minor bump that turned `checkpoint_blobs`' `ON CONFLICT … DO NOTHING` into a `DO UPDATE` would
+    pass every check in this repository and then meet `permission denied for table
+    checkpoint_blobs` the first time two writers raced on one key — the map says the grant file is
+    right, and the grant file says the map is right.
+
+    Driven against a synthetic module rather than the installed one, because the assertion is that
+    the derivation *reacts*, and upstream's real statement is the thing that must not have to
+    change for this to be provable.
+    """
+    module = tmp_path / "upstream_probe.py"
+    do_nothing = (
+        "UPSERT = '''\n"
+        "    INSERT INTO checkpoint_blobs (thread_id, channel, version, blob)\n"
+        "    VALUES (%s, %s, %s, %s)\n"
+        "    ON CONFLICT (thread_id, channel, version) DO NOTHING\n"
+        "'''\n"
+    )
+    module.write_text(do_nothing, encoding="utf-8")
+    assert _verbs_in([module]) == {"checkpoint_blobs": {"INSERT"}}
+
+    module.write_text(do_nothing.replace("DO NOTHING", "DO UPDATE SET blob = EXCLUDED.blob"))
+    assert _verbs_in([module]) == {"checkpoint_blobs": {"INSERT", "UPDATE"}}
+
+
+def test_the_upstream_verbs_are_read_off_the_distributions_that_issue_them() -> None:
+    """Every table upstream creates is a table upstream's own SQL says how it writes.
+
+    The two halves must be derived from the same place or the pair drifts: a table named by
+    `_upstream_tables()` with no verb behind it is a grant nobody can check, and a verb attributed
+    to a table upstream no longer creates is a privilege on nothing.
+    """
+    derived = _upstream_verbs()
+    assert set(derived) == _upstream_tables(), sorted(set(derived) ^ _upstream_tables())
+    assert all("INSERT" in verbs for verbs in derived.values()), derived
 
 
 def test_a_write_against_an_interpolated_table_is_declared_for_every_table_it_can_hit() -> None:
@@ -384,6 +481,78 @@ def test_the_grants_are_not_numbered_migrations() -> None:
     assert [path.name for path in grant_files()] == [_GRANTS.name]
 
 
+# The chart document that applies the reconciliation. Read as text rather than rendered, because
+# what is asserted below is which points in a release's life the Job is attached to, and that is an
+# annotation Helm reads off the manifest rather than anything a rendered value can show.
+_MIGRATE_JOB = _ROOT / "deploy" / "helm" / "chemclaw" / "templates" / "migrate-job.yaml"
+
+
+def test_a_rolled_back_release_re_applies_its_own_grant_file() -> None:
+    """The reconciliation is a full restatement, so it **narrows**, and a rollback must undo that.
+
+    `app_privileges.sql` states the whole matrix and revokes first, which is what makes a verb
+    removed from the file a verb *revoked* from the role. Measured on `7654cfb0`, the commit that
+    dropped `note_proposals` from the writer list: `note_proposals INSERT | t` under release N,
+    `| f` after release N+1's hook, and `permission denied for table note_proposals` as the role.
+
+    `helm rollback` restores the previous release's manifest and its image — and runs neither the
+    `pre-upgrade` nor the `post-upgrade` hooks, because rollback has hook points of its own. So
+    without `pre-rollback` here the older image comes back against the newer release's ACL and
+    stays there until the next successful deploy, which is the one window in this whole file that
+    is not bounded by a rollout. `pre-` rather than `post-`, deliberately: the restored pods must
+    find their own ACL already in place, and the release that loses verbs in the meantime is the
+    one being abandoned.
+
+    Asserted here rather than in `tests/test_helm_chart.py` because it is a claim about the grant
+    lifecycle — the same claim `test_the_grants_are_not_numbered_migrations` above makes about the
+    other end of it — and it fails with the reason rather than as a diff in an annotation string.
+    """
+    migrate = _MIGRATE_JOB.read_text(encoding="utf-8").split("\n---\n")[0]
+    # The guard that picks the right document, and it had to change with the thing it selects. It
+    # used to look for `python -m chemclaw.core.grants` in the Job's own `command:`; W21 moved that
+    # command into `deploy/entrypoint.sh` so the Job reaches the image ENTRYPOINT and is therefore
+    # covered by the compiled egress layer, which a `command:` override bypasses entirely. So the
+    # document is now identified by the component it dispatches, and the claim the old assertion
+    # actually carried — that grants run after the migrations, in that order — is asserted below
+    # against the script that now owns it. Selecting by `command:` again would pass while the
+    # sequence had moved somewhere unexecuted, which is the shape this whole wave is about.
+    assert re.search(r'value:\s*"?migrate"?', migrate), (
+        "wrong document: this one is not the migrate Job"
+    )
+    entrypoint = (_ROOT / "deploy" / "entrypoint.sh").read_text(encoding="utf-8")
+    case = entrypoint.split("migrate)", 1)[-1].split(";;", 1)[0]
+    assert "python -m chemclaw.core.migrate" in case and "python -m chemclaw.core.grants" in case, (
+        "the migrate component no longer runs both halves, so a release applies schema without "
+        "reconciling the runtime role's grants"
+    )
+    assert case.index("chemclaw.core.migrate") < case.index("chemclaw.core.grants"), (
+        "grants run before the migrations that create the tables they name, and a grant applied "
+        "before its table exists fails"
+    )
+    assert re.search(r'"helm\.sh/hook":[^\n]*\bpre-rollback\b', migrate), (
+        "the Job that reconciles the grants does not run on rollback, so `helm rollback` restores "
+        "the older image against the newer release's ACL — and the grant set contracts, so that "
+        "ACL can be strictly narrower than the restored image needs"
+    )
+
+
+def test_the_chart_does_not_claim_the_grants_only_widen() -> None:
+    """An absence test, because the claim was false in the file that made it.
+
+    `migrate-job.yaml` justified its `pre-upgrade` hook with "the grants only widen", and
+    `app_privileges.sql` advertises the opposite in the same tree: "re-running it after a verb is
+    *removed* from the code narrows the grant". Both are true within one generation of the file and
+    the pair is what makes a contraction land on the still-serving release. The sentence is
+    corrected; this fails whoever writes it again.
+    """
+    for path in (_MIGRATE_JOB, _GRANTS):
+        text = re.sub(r"\s+", " ", path.read_text(encoding="utf-8"))
+        assert "grants only widen" not in text, (
+            f"{path.name} says the grants only widen. They do not: the file is a full restatement, "
+            "so a verb removed from it is revoked from the role on the next deploy"
+        )
+
+
 # Modules whose SQL literals are the *migrator's*, not a runtime process's, plus the one module
 # that only discusses DDL in prose. `core/migrate.py` is what `make db-migrate` runs under the
 # owning principal; `core/grants.py` applies `app_privileges.sql` beside it. Anything else issuing
@@ -430,4 +599,76 @@ def test_the_only_ddl_a_runtime_process_issues_is_upstreams_setup() -> None:
         "bounded by what upstream's checkpointer needs — revisit "
         "D-2026-09-07-the-app-is-its-own-migrator-for-the-tables-it-owns before adding it:\n  "
         + "\n  ".join(offenders)
+    )
+
+
+def test_the_store_tables_are_created_before_the_grants_that_name_them() -> None:
+    """The middle term of the migrate role, and the ordering defect it closes.
+
+    `store` and `store_migrations` are upstream's schema, created at *runtime* by
+    `AsyncPostgresStore.setup()` rather than by a numbered migration —
+    `test_the_only_ddl_a_runtime_process_issues_is_upstreams_setup` above holds that deliberately.
+    `infra/sql/grants/app_privileges.sql` therefore grants on them only `IF to_regclass(...) IS NOT
+    NULL`, and the migrate Job is a `pre-install` hook that runs before any app pod exists — so on a
+    fresh install the tables did not exist when the grants ran, the runtime role got no
+    INSERT/UPDATE/DELETE on `store`, and every durable write failed until the *next* release.
+
+    That was invisible while `agent_memory_enabled` shipped off, because nothing wrote to `store`.
+    `D-2026-09-20-a-behaviour-change-is-gated-by-its-blast-radius` turned it on, which makes it the
+    first-boot experience, so the ordering is asserted rather than described.
+
+    The sequence is the guarantee, so this reads the script rather than the module: a
+    `create_store_tables` that exists and is never called is exactly the failure this is about.
+    """
+    entrypoint = (_ROOT / "deploy" / "entrypoint.sh").read_text(encoding="utf-8")
+    case = entrypoint.split("migrate)", 1)[-1].split(";;", 1)[0]
+
+    assert "python -m chemclaw.agent.store_setup" in case, (
+        "the migrate component does not create the store's tables, so the grants that name them "
+        "find nothing and the runtime role cannot write to `store` until the next release"
+    )
+    assert (
+        case.index("chemclaw.core.migrate")
+        < case.index("chemclaw.agent.store_setup")
+        < case.index("chemclaw.core.grants")
+    ), (
+        "the three steps of the migrate role are out of order: migrations, then the store's own "
+        "tables, then the grants that name them — any other order grants on something absent"
+    )
+
+
+def test_the_store_setup_step_runs_as_the_migrator() -> None:
+    """Which credential creates the tables, because the obvious one cannot.
+
+    `agent/scratchpad.memory_store()` builds the store over the *checkpointer's* pool, which is the
+    runtime credential — and on a fresh install the runtime role has no `CREATE` on the schema yet,
+    because granting it is what the step *after* this one does. Reusing that function would have
+    been the natural thing to write and would deadlock the install on its own chicken-and-egg.
+
+    Asserted on the resolution rather than on a string: `migration_dsn()` is the one answer
+    `core/migrate.py` and `core/grants.py` already share, so the three steps of one Job cannot
+    disagree about which role owns the schema.
+    """
+    import inspect
+
+    from chemclaw.agent import store_setup
+
+    tree = ast.parse(inspect.getsource(store_setup))
+    called = {
+        node.func.id if isinstance(node.func, ast.Name) else node.func.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name | ast.Attribute)
+    }
+
+    assert "migration_dsn" in called, (
+        "the store setup step does not resolve the migrator's credential, so it runs as whatever "
+        f"the runtime role is — which on a fresh install cannot CREATE in the schema. Calls: "
+        f"{sorted(called)}"
+    )
+    # An AST walk rather than a substring, because this module *names* `memory_store` in its
+    # docstring to say why it is not that function — and a grep would read the explanation as the
+    # defect it exists to explain.
+    assert "memory_store" not in called, (
+        "the store setup step reuses the process-wide store, which builds over the checkpointer's "
+        "pool: that is the runtime credential, and it has no CREATE until the grants run"
     )

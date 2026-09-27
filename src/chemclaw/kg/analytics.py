@@ -26,7 +26,7 @@ from pydantic import BaseModel, Field
 
 from chemclaw.core.config import settings
 from chemclaw.kg.graph import dangling_links
-from chemclaw.kg.note import Note
+from chemclaw.kg.note import UNDISTILLED_TAG, Note
 
 
 class GraphGaps(BaseModel):
@@ -40,6 +40,11 @@ class GraphGaps(BaseModel):
     # right — is what let a live run report "27 projects tagged" as a portfolio status. A field
     # name is an assertion about what the values *are*, and the model has nothing else to go on.
     tags_without_distillation: list[str] = Field(default_factory=list)
+    # Playbooks that record a *recurrence* and state no rule — the cross-project miner's own
+    # output, before anybody generalised it. A different question from the field above, which asks
+    # which topics have no playbook at all: this one asks which playbooks are still waiting.
+    # Neither subsumes the other, and only this one has a note id to act on.
+    undistilled_playbook_ids: list[str] = Field(default_factory=list)
     most_cited: list[tuple[str, int]] = Field(default_factory=list)
     dangling_links: list[str] = Field(default_factory=list)
 
@@ -78,6 +83,7 @@ def analyze(graph: nx.DiGraph, notes: list[Note], *, top_n: int | None = None) -
         ),
         type_counts=dict(sorted(by_type.items())),
         tags_without_distillation=_undistilled_tags(notes),
+        undistilled_playbook_ids=sorted(note.id for note in notes if UNDISTILLED_TAG in note.tags),
         most_cited=_hubs(graph, hubs),
         dangling_links=[f"{source} -> {target}" for source, target in dangling_links(notes)],
     )

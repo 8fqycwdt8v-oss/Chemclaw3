@@ -1,0 +1,61 @@
+{
+  "probe": {
+    "id": "pc-16",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "What is the likely product of this coupling, and what conditions would you start from? Brc1ccc(OC)cc1 with OB(O)c1ccccc1",
+    "expects_tools": [
+      "predict_forward_reaction",
+      "predict_reaction_conditions",
+      "conditions_for_similar_reaction",
+      "classify_reaction"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a predicted product stated without the model's own confidence or identity",
+      "an in-house precedent claimed that the turn did not retrieve",
+      "a condition set presented as validated rather than predicted"
+    ],
+    "direction": "Exercises real capability. Calls the forward predictor and the condition predictor, reports the model's confidence, and says which model produced it. A good answer separates the prediction from the in-house precedent if it has both, because they are different kinds of evidence and a chemist weighs them differently.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "pc-16",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "What is the likely product of this coupling, and what conditions would you start from? Brc1ccc(OC)cc1 with OB(O)c1ccccc1",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 2.07,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "2d68c55941d646b99451d44a543465e8",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

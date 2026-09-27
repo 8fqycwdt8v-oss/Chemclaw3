@@ -69,15 +69,31 @@ nothing had been started. The fix is not a name added to that set: `write_file` 
 """
 
 import logging
+from collections.abc import Mapping
+from datetime import UTC, datetime, timedelta
 from functools import cache
 from typing import Any, cast
 
 from deepagents import FsToolName
 from deepagents.backends import CompositeBackend, StateBackend, StoreBackend
+from deepagents.backends.protocol import EditResult, WriteResult
+from deepagents.backends.utils import file_data_to_string, perform_string_replacement
+from deepagents.middleware.filesystem import FilesystemState
+from langchain.agents.middleware import before_agent
+from langgraph.runtime import Runtime
+from langgraph.store.base import SearchItem
 from langgraph.store.postgres.aio import AsyncPostgresStore
 
+from chemclaw.agent.local_skills import (
+    LOCAL_SKILLS_ROOT,
+    local_skills_backend,
+)
+from chemclaw.agent.org_skills import ORG_SKILLS_ROOT, org_skills_backend
+from chemclaw.agent.skill_access import SkillNarrowing
+from chemclaw.core.config import settings
 from chemclaw.core.identity_context import get_current_actor
 from chemclaw.core.ids import stable_hash
+from chemclaw.core.metrics import METRICS
 
 logger = logging.getLogger(__name__)
 
@@ -223,7 +239,376 @@ async def close_memory_store() -> None:
     _store = None
 
 
-def scratchpad_backend(skills: CompositeBackend, store: Any | None = None) -> CompositeBackend:
+class BoundedStoreBackend(StoreBackend):
+    """`StoreBackend` with a row cap per namespace — the bound `store` did not have.
+
+    **The table was unbounded and agent-writable, which is a combination this repository has one
+    other instance of and already answered.** `durable/retention.py`'s disposal register said of
+    `store`, in as many words, "**nothing bounds it**": no size cap, no window, no clock, and a
+    retention sweep that deliberately does not touch it because a memory is written *to persist*.
+    Driven before this, 2,000 writes of 5 kB under one namespace left `(2000, '816 kB')` with
+    nothing evicted and nothing counted.
+
+    The runaway is **not** a looping turn. `harness_max_loop_iterations` x
+    `agent_max_parallel_tool_calls` is a hard ceiling on how many writes one turn can make. It is
+    accumulation *across* turns, over a deployment's life, because nothing ever removed a row —
+    which is the same shape `ingest/rejections.py` answers with `_MAX_ROWS_PER_SOURCE`, and this is
+    its per-actor twin.
+
+    **Here rather than in a `BaseStore` wrapper, and that is what keeps the audit property true.**
+    `tests/test_scratchpad.py` asserts that no first-party module calls `aput`/`adelete` on a store,
+    because every memory write has to arrive as a `write_file`/`edit_file` *tool* call — that is
+    what crosses the `wrap_tool_call` chain and produces the audit row, the authorization decision
+    and the dry-run refusal. This class is the one exemption and it is an eviction rather than a
+    write: it removes what the cap says may not stay, in the same call the tool made, so nothing
+    enters the store outside the chain. That rule is refined rather than deleted, in the shape
+    `kg/record.py` already has — exactly one module may, and a test names it.
+
+    **The invariant is eventual, not atomic, and the reason is the pool.** The memory store shares
+    the checkpointer's **autocommit** pool (`memory_store`, and `agent/checkpointer.py` for why it
+    is autocommit), so the write and the eviction are two statements rather than one transaction.
+    What holds is therefore "at most the cap, plus whatever is in flight" — two turns writing the
+    same namespace at the same instant can both see the count at the cap and both evict one, or
+    both land before either evicts. Neither outcome is a leak: the next write converges. Saying so
+    is the point; `ingest_rejections` can promise atomicity because its writer owns a transaction,
+    and claiming the same here would be claiming a property the pool cannot give.
+    """
+
+    async def awrite(self, file_path: str, content: str) -> WriteResult:
+        """Write, then evict whatever the cap no longer has room for.
+
+        After rather than before, because a write of an *existing* key replaces a row instead of
+        adding one — checking first would evict on every overwrite of a namespace sitting exactly
+        at the cap, which is a memory lost to a write that added nothing.
+
+        Args:
+            file_path: The memory's path under `/memories/`.
+            content: What to store.
+
+        Returns:
+            Upstream's result, unchanged — the cap is about what stays, not about what a turn is
+            told it wrote — or a refusal when `content` is past `agent_scratch_file_max_chars`,
+            checked first so an oversized memory never lands and is never counted.
+        """
+        refusal = oversized_file(file_path, content)
+        if refusal is not None:
+            return WriteResult(error=refusal)
+        result = await super().awrite(file_path, content)
+        await self._evict_past_the_cap()
+        return result
+
+    async def aedit(
+        self, file_path: str, old_string: str, new_string: str, replace_all: bool = False
+    ) -> EditResult:
+        """Edit, unless this edit has already been applied and applying it again would duplicate.
+
+        **The one write in this system that a resumed turn can silently double, and the reason it is
+        this one.** `D-2026-09-14-a-turn-outlives-its-request-already-and-nothing-can-pick-it-up`
+        measured that a tool killed mid-call is re-run on resume with its original arguments,
+        because the checkpoint holds no result for it — only the `__pregel_tasks` `Send` that
+        enqueued it. Nearly every side-effecting tool survives that: the durable launchers derive a
+        workflow id with `stable_hash` over their arguments, the knowledge writes take a
+        deterministic note id and stage byte-identical content that produces no commit, and the
+        tabular writes are upserts or `ON CONFLICT DO NOTHING`.
+
+        A `/memories/` edit survives none of it, because it is a **read-modify-write against live
+        content** and its store sits *outside* the checkpoint. `/scratch/` is safe for exactly the
+        reason this is not: its backend is the checkpoint, so a killed tool left no write to replay
+        over. Here the write lands in Postgres, the checkpoint has no record of it, and the replay
+        applies the edit to content that already carries it.
+
+        The commonest edit a model writes is the shape that breaks: an insert under a heading it
+        names as the anchor, so that the replacement opens with the anchor and adds a line under
+        it. Measured over three applications: each inserts another copy and reports **one**
+        replacement every time. No error,
+        no counter, nothing versioning it, and `BoundedStoreBackend`'s only bound is a row count, so
+        the duplicated content does not even show up as an extra row.
+
+        So the guard is narrow and targets exactly that shape: an edit whose `new_string` *contains*
+        its `old_string` is not idempotent, and if `new_string` is already present the previous
+        application is visible. A plain substitution needs no guard — the second application fails
+        loudly with upstream's own "String not found", which is the right answer.
+
+        What it costs is stated rather than hidden: a chemist deliberately inserting the identical
+        block twice is refused, and so is a first edit whose `new_string` already happens to appear
+        elsewhere in the file. Both are refusals with a reason, against a silent corruption of
+        memory that outlives the deployment.
+
+        Args:
+            file_path: The memory's path under `/memories/`.
+            old_string: The anchor to replace.
+            new_string: What to put in its place.
+            replace_all: Replace every occurrence rather than requiring exactly one.
+
+        Returns:
+            Upstream's result, a refusal naming the repeat, or a refusal when the edited memory
+            would be past `agent_scratch_file_max_chars`.
+        """
+        edited = _edited_content(
+            await self._current_content(file_path), old_string, new_string, replace_all
+        )
+        if edited is not None:
+            refusal = oversized_file(file_path, edited)
+            if refusal is not None:
+                return EditResult(error=refusal)
+        if old_string and old_string in new_string:
+            # The raw store value, not `aread`: that method paginates at 2,000 lines by default, so
+            # a long memory would come back truncated and `new_string in content` would answer
+            # False for an edit that *is* already applied — a guard failing open on exactly the
+            # files big enough to have been edited before. Read the way `super().aedit` reads.
+            content = await self._current_content(file_path)
+            if content is not None and new_string in content:
+                return EditResult(
+                    error=(
+                        f"Error: this edit is already applied to {file_path}. Its replacement "
+                        "contains its own anchor, so applying it again would insert a second copy "
+                        "rather than change anything — and a memory write is not replayable. If "
+                        "you meant to add something further, edit with different text."
+                    )
+                )
+        return await super().aedit(file_path, old_string, new_string, replace_all)
+
+    async def _current_content(self, file_path: str) -> str | None:
+        """This memory's whole text, or `None` when there is none — the way `aedit` itself reads it.
+
+        Deliberately the same two calls `StoreBackend.aedit` makes (`store.aget`, then
+        `file_data_to_string`) rather than a paginated read, so the guard above sees exactly the
+        content the replacement would be applied to. A malformed stored value answers `None`, which
+        sends the caller to upstream's own error rather than inventing a second one here.
+        """
+        from deepagents.backends.utils import file_data_to_string
+
+        item = await self._get_store().aget(self._get_namespace(), file_path)
+        if item is None:
+            return None
+        try:
+            return str(file_data_to_string(self._convert_store_item_to_file_data(item)))
+        except ValueError:
+            return None
+
+    async def _evict_past_the_cap(self) -> None:
+        """Drop the least recently updated memories until this namespace is inside the cap.
+
+        `updated_at` is a tiebreak rather than a policy. The bound is a *count*; when it is reached
+        something has to go, and the store carries exactly one ordering that is not arbitrary. It
+        is deliberately not an age cutoff: the oldest memory is as likely to be the one worth
+        keeping as the newest, which is why the retention sweep leaves this table alone.
+
+        **The whole surplus goes, and reading one page over the cap was what made it the wrong
+        surplus.** Against `AsyncPostgresStore` a query-less `asearch` resolves to
+        `ORDER BY updated_at DESC LIMIT …` — most recently updated *first* — so reading
+        `cap + _EVICTION_PAGE` rows and then taking the oldest of that page takes a middle band:
+        the newest of the surplus, and never the tail. Driven on real Postgres with 89 files
+        written oldest-first, a cap of 5 and one bounded write, it deleted **021-084** and kept
+        **000-020** — every one of the twenty-one files the stated policy says go first, retained,
+        while the twenty-one *most recent* of the surplus were destroyed. Both spellings converge
+        to the same steady state over later writes, which is why this survived review; what differs
+        is the state a deployment is left in when the writes stop, and it is the exact inverse of
+        the policy. The case is the one this docstring already addressed — a deployment lowering
+        the cap under a large namespace — and it is the measured pre-fix state (2,000 files,
+        cap 200).
+
+        **So the namespace is paged whole and ordered here, rather than sampled and trusted.**
+        Fixing it by asking for `offset=cap` instead looks like the small change and is the same
+        bug: that page is the *newest* of the surplus, not the oldest, and it is also a bet on an
+        ordering `BaseStore` does not promise — measured, `InMemoryStore` answers a query-less
+        search in *insertion* order, so the two shipped store implementations disagree and the
+        Postgres one is the only reason the old spelling converged at all. Sorting by `updated_at`
+        over every row in the namespace depends on nothing but the field `Item` documents, and it
+        reaches the whole surplus in one write rather than a page of it.
+
+        `_EVICTION_PAGE` is the page size of that walk rather than a bound on the deletion. In
+        steady state — a namespace at most one over its cap — the walk is one query for
+        `cap + 1` rows, fewer than the `cap + _EVICTION_PAGE` this replaced.
+        """
+        cap = settings.agent_memory_max_files
+        store = self._get_store()
+        namespace = self._get_namespace()
+        held: dict[str, SearchItem] = {}
+        while True:
+            page = await store.asearch(namespace, limit=_EVICTION_PAGE, offset=len(held))
+            # A page that adds nothing is the end of the namespace — or a store that ignores
+            # `offset`, which would otherwise walk the first page for ever.
+            fresh = {item.key: item for item in page if item.key not in held}
+            if not fresh:
+                break
+            held.update(fresh)
+        if len(held) <= cap:
+            return
+        doomed = sorted(held.values(), key=lambda item: item.updated_at)[: len(held) - cap]
+        for item in doomed:
+            await store.adelete(namespace, item.key)
+        METRICS.increment("chemclaw_memory_evictions_total", len(doomed))
+        # Logged the way `ingest/rejections.py` logs its own eviction: an operator who set the cap
+        # needs to know it is binding, and a chemist whose memory vanished has no other trace.
+        logger.warning(
+            "evicted %d memory file(s) past the %d-file cap: %s",
+            len(doomed),
+            cap,
+            ", ".join(item.key for item in doomed),
+        )
+
+
+#: How many rows one page of the surplus walk reads. Not a `Settings` field, for the reason
+#: `_EVICTED_NAMES_REMEMBERED` in `agent/attachments.py` is not one: it is the page size of a walk,
+#: not a posture a deployment states. It bounds one *query*, never the deletion — a page that
+#: bounded the deletion is what made eviction take the newest of the surplus. See
+#: `_evict_past_the_cap`.
+_EVICTION_PAGE = 64
+
+
+def oversized_file(file_path: str, content: str) -> str | None:
+    """The refusal for a file a turn is about to store past `agent_scratch_file_max_chars`, if any.
+
+    **A refusal, never a cut** (`D-2026-09-26-a-chemists-scratch-write-is-bounded-and-expires`). A
+    helper's file is cut on its way into the caller (`tool_result_size._bounded_file`), because
+    nobody is there to be told; this is the caller's *own* document, written by a model that can
+    act on a sentence, and a truncated file would hand the chemist a document that simply stops.
+    So the write does not happen and the model is told the limit, which leaves splitting the file
+    or writing less as its choices.
+
+    One function for both routes that take a `write_file` — `/scratch/` and `/memories/` — so the
+    two cannot disagree about the number or the wording.
+
+    Args:
+        file_path: The path the turn named, for the message.
+        content: The whole text the file would hold after this write or edit.
+
+    Returns:
+        The error text to return in place of the write, or `None` when it fits.
+    """
+    limit = settings.agent_scratch_file_max_chars
+    if len(content) <= limit:
+        return None
+    return (
+        f"Error: {file_path} was not written. It would hold {len(content):,} characters and one "
+        f"file may hold at most {limit:,} (agent_scratch_file_max_chars). Nothing was truncated "
+        "and nothing was stored: split it across several files, or write less."
+    )
+
+
+def _edited_content(
+    current: str | None, old_string: str, new_string: str, replace_all: bool
+) -> str | None:
+    """The text an edit would leave, computed the way upstream's own `edit` computes it.
+
+    `perform_string_replacement` is the function both upstream backends call, so the size checked
+    is the size that would be stored. `None` when there is no file or the replacement would fail —
+    upstream's own error is the right answer then, and this returns nothing to check.
+    """
+    if current is None:
+        return None
+    result = perform_string_replacement(current, old_string, new_string, replace_all)
+    return result[0] if isinstance(result, tuple) else None
+
+
+class BoundedStateBackend(StateBackend):
+    """`StateBackend` whose `write`/`edit` refuse a file past `agent_scratch_file_max_chars`.
+
+    **Why here and not in a middleware.** A caller's `write_file` and `edit_file` reach this backend
+    and it writes the `files` channel directly through `CONFIG_KEY_SEND` — a channel write, not a
+    tool result — so no `wrap_tool_call` middleware ever sees the content, and
+    `tool_result_shape.rewritten_command_files` (which bounds a *helper's* files) is never on the
+    path. Everything stored here is charged against every later helper's share of
+    `agent_subagent_files_max_chars` (`tool_result_size._files_already_held`), so the arm nobody
+    bounded was spending the budget the bounded arm is measured against.
+
+    Only the two write verbs. `awrite`/`aedit` are upstream's `to_thread` over these, so the async
+    path a turn takes is covered by the same override.
+    """
+
+    def write(self, file_path: str, content: str) -> WriteResult:
+        """Write, unless the file would be past the cap — then refuse and store nothing."""
+        refusal = oversized_file(file_path, content)
+        if refusal is not None:
+            return WriteResult(error=refusal)
+        return super().write(file_path, content)
+
+    def edit(
+        self, file_path: str, old_string: str, new_string: str, replace_all: bool = False
+    ) -> EditResult:
+        """Edit, unless the edited file would be past the cap — then refuse and change nothing.
+
+        The size checked is the *result's*, because an edit is how a file grows past any bound a
+        write alone was held to: one `edit_file` per call, each appending, would otherwise walk a
+        file past the cap in steps the write check never sees.
+        """
+        stored = self._read_files().get(file_path)
+        current = file_data_to_string(stored) if stored is not None else None
+        edited = _edited_content(current, old_string, new_string, replace_all)
+        if edited is not None:
+            refusal = oversized_file(file_path, edited)
+            if refusal is not None:
+                return EditResult(error=refusal)
+        return super().edit(file_path, old_string, new_string, replace_all)
+
+
+def _stale_files(files: Mapping[str, Any], cutoff: datetime) -> list[str]:
+    """The paths in a `files` channel whose last write is older than `cutoff`.
+
+    Dated by upstream's own `modified_at`, which `create_file_data` stamps and `update_file_data`
+    restamps on every write and edit, so "last written" is the channel's own record rather than a
+    second clock this module keeps. A file that carries no parseable `modified_at` is **kept**: it
+    predates the stamp, and deleting what cannot be dated would be a retention policy applied to
+    an unknown age.
+    """
+    stale = []
+    for path, data in files.items():
+        stamp = data.get("modified_at") if isinstance(data, Mapping) else None
+        try:
+            written = datetime.fromisoformat(stamp) if isinstance(stamp, str) else None
+        except ValueError:
+            written = None
+        if written is None:
+            continue
+        if written.tzinfo is None:
+            written = written.replace(tzinfo=UTC)
+        if written < cutoff:
+            stale.append(path)
+    return stale
+
+
+@before_agent(state_schema=FilesystemState)
+def expire_stale_scratch(state: FilesystemState, runtime: Runtime[Any]) -> dict[str, Any] | None:
+    """Drop every file this thread has not written for `agent_scratch_retention_days`.
+
+    **At the start of a turn, through the channel's own reducer, and that is the whole design**
+    (`D-2026-09-26-a-chemists-scratch-write-is-bounded-and-expires`). `files` is a `DeltaChannel`
+    checkpointed under the thread: there is no row a sweep could delete a single file from, and
+    rewriting a checkpoint by hand would mean re-deriving a beta on-disk format and every other
+    channel of the graph. A `{path: None}` update is how the channel's reducer deletes a key, so the
+    graph's own write path does the disposal and the next checkpoint is simply the thread without
+    them; `checkpoint_retain_per_thread` then prunes the superseded copies that still held them.
+
+    **What it does not reach**: a thread nobody returns to runs no turn, so its files stay until the
+    thread itself is disposed of by `retention_checkpoints_days` — a stated policy, off by default,
+    which is where a deployment decides how long an idle conversation is kept.
+
+    `agent_scratch_retention_days = 0` keeps every file — how a deployment states "for ever".
+    """
+    del runtime  # the hook's signature; nothing here depends on the run
+    days = settings.agent_scratch_retention_days
+    files = state.get("files") or {}
+    if days <= 0 or not files:
+        return None
+    stale = _stale_files(files, datetime.now(UTC) - timedelta(days=days))
+    if not stale:
+        return None
+    logger.info(
+        "removed %d file(s) not written for %d day(s) (agent_scratch_retention_days): %s",
+        len(stale),
+        days,
+        ", ".join(sorted(stale)),
+    )
+    return {"files": dict.fromkeys(stale)}
+
+
+def scratchpad_backend(
+    skills: CompositeBackend,
+    store: Any | None = None,
+    *,
+    permits: SkillNarrowing,
+) -> CompositeBackend:
     """Extend a turn's skills backend with a scratchpad and, when enabled, durable memories.
 
     Takes the skills backend rather than rebuilding it, because the caller already holds it — the
@@ -243,11 +628,22 @@ def scratchpad_backend(skills: CompositeBackend, store: Any | None = None) -> Co
     Args:
         skills: The narrowed skills backend for this profile (`langgraph_agent.skills_backend`).
         store: This process's `AsyncPostgresStore` from `memory_store()`, or `None` for a turn with
-            no durable memory — which is every turn under the default configuration.
+            no durable memory.
+        permits: The narrowing this turn computed (`langgraph_agent.skill_narrowing`). **Its
+            `stored` half is what the two stored tiers get** — a different predicate from the one
+            the filed trees get, and not an oversight: `EnabledSkills` names *shipped* skills, so
+            applying it here deleted both tiers outright rather than narrowing them, which is what
+            `skill_access.SkillNarrowing` carries the measurement for. Taking the whole value rather
+            than a bare predicate is what makes the two impossible to swap at this call site.
+            **Required rather than defaulted**, because the personal tier shipped with no backend
+            predicate at all — it was narrowed in the prompt and served every body to anyone who
+            guessed a path — and a default here is how that reopens by omission.
 
     Returns:
-        A backend routing `/skills/…` as given, `/memories/…` to the store when both conditions
-        hold, and everything else — `/scratch/…` included — to graph state.
+        A backend routing `/skills/…` as given, `/org/…` to the store whenever there is one,
+        `/memories/…` and `/mine/…` to the store when there is also an actor, and everything else —
+        `/scratch/…` included — to graph state, through `BoundedStateBackend` so a turn's own
+        write is held to `agent_scratch_file_max_chars`.
     """
     routes = dict(skills.routes)
     actor = get_current_actor()
@@ -255,8 +651,20 @@ def scratchpad_backend(skills: CompositeBackend, store: Any | None = None) -> Co
         namespace = memory_namespace(actor)
         # A closure over the value, not a read through the runtime: see the module docstring. The
         # lambda takes the runtime upstream passes and ignores it, which is the whole point.
-        routes[MEMORY_ROOT] = StoreBackend(namespace=lambda _runtime: namespace, store=store)
-    return CompositeBackend(default=StateBackend(), routes=routes)
+        routes[MEMORY_ROOT] = BoundedStoreBackend(namespace=lambda _runtime: namespace, store=store)
+        # The chemist's own skills, on the same two conditions and for the same reason: a store to
+        # hold them and an actor to own them. A *different* first namespace component, so the
+        # tiers are separately erasable and a bug in one cannot serve another's rows — see
+        # `agent/local_skills.py`, which also says why this is stored rather than filed.
+        routes[LOCAL_SKILLS_ROOT] = local_skills_backend(store, actor, permits.stored)
+    # **The organisation's tier needs a store and no actor**, which is why it is mounted here rather
+    # than in the branch above. It is nobody's namespace: every turn resolves the same one, so an
+    # unauthenticated turn is still entitled to the deployment's own judgment — and there is no
+    # per-actor prefix to erase, which `agent/org_skills.py` states as a decision rather than
+    # leaving as an absence.
+    if store is not None:
+        routes[ORG_SKILLS_ROOT] = org_skills_backend(store, permits.stored)
+    return CompositeBackend(default=BoundedStateBackend(), routes=routes)
 
 
 @cache

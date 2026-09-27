@@ -84,6 +84,68 @@ def test_a_corpus_read_that_skipped_an_entry_reports_itself_incomplete(
     assert len(whole.reactions) == 3 and whole.complete is True
 
 
+class _OnePageSource:
+    """An ingest half that returns its whole corpus as one page — a drop directory, minimally.
+
+    The shape is not incidental: `OrdJsonAdapter.fetch_new_entries` accepts `limit` and **ignores
+    it** deliberately (its own docstring says an unsorted scan would return an arbitrary subset and
+    advance the cursor past what it skipped), so for a drop directory the page *is* the corpus.
+    That is what makes where the cap is checked decide whether it bounds anything.
+    """
+
+    def __init__(self, count: int) -> None:
+        """Serve `count` mappable entries in a single page."""
+        self._count = count
+
+    async def fetch_new_entries(self, since: datetime) -> list[RawEntry]:
+        """The whole corpus, once; a second call would return the same ids and be filtered out."""
+        return [RawEntry(entry_id=str(i), payload={}, created_at=since) for i in range(self._count)]
+
+    def map_to_ord(self, raw: RawEntry) -> OrdReaction:
+        """Every entry maps."""
+        return OrdReaction(
+            reaction_id=raw.entry_id,
+            inputs=[Component(smiles="CCO", role=Role.REACTANT)],
+            outcomes=[Component(smiles="CC=O", role=Role.PRODUCT)],
+            provenance=f"test:{raw.entry_id}",
+        )
+
+
+def test_the_corpus_read_stops_at_its_bound_and_says_the_pass_was_partial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`memory_corpus_max_reactions` bounds what one activity holds, and marks the read partial.
+
+    **Measured, this is a memory bound and not a time bound**: 10,000 ORD records read in 6.8 s and
+    397 MB of traced peak, about 25 kB of resident `OrdReaction` per entry on top of the adapter's
+    own page. The miners are whole-corpus algorithms over a `list`, so a deployment's decade of
+    entries is tens of GB in one activity's process — the pod is killed rather than slow.
+
+    Incomplete rather than raised, because `CorpusRead.complete` already exists and every miner
+    already honours it: a pass that saw part of the corpus must not be written down as the whole
+    record. A bounded partial pass beats a worker that dies with no note at all.
+
+    **The assertion is on the count, and the count is what the first version of this bound got
+    wrong.** Checked between pages it let a one-page source through entirely — driven on a 10,000
+    record corpus at a cap of 2,500, the read returned all 10,000 and marked itself incomplete
+    about a corpus it had already materialised, which is a bound that reports itself and bounds
+    nothing.
+    """
+    monkeypatch.setattr(memory_jobs, "active_ingest_sources", lambda: [_OnePageSource(50)])
+
+    monkeypatch.setattr(settings, "memory_corpus_max_reactions", 10)
+    bounded = asyncio.run(memory_jobs.read_corpus())
+    assert len(bounded.reactions) == 10, (
+        f"the bound let {len(bounded.reactions)} reaction(s) through; a one-page source is "
+        "unbounded unless the cap is checked per entry"
+    )
+    assert bounded.complete is False
+
+    monkeypatch.setattr(settings, "memory_corpus_max_reactions", 0)
+    whole = asyncio.run(memory_jobs.read_corpus())
+    assert len(whole.reactions) == 50 and whole.complete is True
+
+
 def test_background_worker_registers_memory_fan_out() -> None:
     """The publish child + the three build activities are wired onto the background worker (F10-D2).
 

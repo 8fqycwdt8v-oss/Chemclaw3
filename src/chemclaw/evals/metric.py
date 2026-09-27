@@ -96,9 +96,13 @@ Metric = Callable[[EvalCase], MetricResult]
 _REGISTRY: dict[str, Metric] = {}
 _DIRECTIONS: dict[str, Direction] = {}
 _LIVE: set[str] = set()
+#: Metrics that return a verdict (`passed`) rather than only a number. See `register`'s `gated`.
+_GATED: set[str] = set()
 
 
-def register(name: str, fn: Metric, direction: Direction, *, live: bool = False) -> None:
+def register(
+    name: str, fn: Metric, direction: Direction, *, live: bool = False, gated: bool = False
+) -> None:
     """Register a metric under `name` with the way it improves; a duplicate name is a bug.
 
     `direction` is required rather than defaulted: a default would silently give every new metric
@@ -111,6 +115,16 @@ def register(name: str, fn: Metric, direction: Direction, *, live: bool = False)
     thirteen watched quantities when it was two: `evals.baseline.render_comparison` says which are
     which because of this flag. Defaults to False, so a pinned metric — the ordinary kind — needs
     no argument and a live one is a deliberate claim.
+
+    `gated` says whether this metric compares its value against a config threshold and returns a
+    verdict. **It is declared here because it is a property of the metric and the only other place
+    it could be read from is a run's own results** — which is what
+    `EvalReport.gates_no_demonstration_can_fire` used to do, and why a gate whose every case was
+    deleted became invisible rather than unfireable
+    (`D-2026-09-14-a-gate-with-no-case-is-absent-not-satisfied`). Declared and *checked*: a run
+    that scores a metric whose verdicts disagree with this flag fails
+    `tests/test_evals.py::test_every_scored_metrics_gatedness_is_the_one_it_declares`, so this is
+    not a second declaration nobody reconciles.
     """
     if name in _REGISTRY:
         raise ValueError(f"metric {name!r} already registered")
@@ -118,13 +132,17 @@ def register(name: str, fn: Metric, direction: Direction, *, live: bool = False)
     _DIRECTIONS[name] = direction
     if live:
         _LIVE.add(name)
+    if gated:
+        _GATED.add(name)
 
 
-def metric(name: str, direction: Direction, *, live: bool = False) -> Callable[[Metric], Metric]:
+def metric(
+    name: str, direction: Direction, *, live: bool = False, gated: bool = False
+) -> Callable[[Metric], Metric]:
     """Decorator form of `register` — the idiom later phases use to add a metric."""
 
     def decorate(fn: Metric) -> Metric:
-        register(name, fn, direction, live=live)
+        register(name, fn, direction, live=live, gated=gated)
         return fn
 
     return decorate
@@ -160,6 +178,17 @@ def direction_of(name: str) -> Direction:
     if direction is None:
         raise ValueError(f"unknown metric {name!r}; known: {sorted(_DIRECTIONS)}")
     return direction
+
+
+def gated_names() -> set[str]:
+    """Every metric that returns a verdict rather than only a number.
+
+    The set a demonstration case is owed against. Read from the registry rather than from a run's
+    results, because those two differ in exactly the case that matters: a metric no case scores at
+    all has no results, so a check derived from results sees no gate and reports nothing. Driven —
+    moving both `runaway_rate` cases out of `data/evals/cases/` left `make eval-strict` at exit 0.
+    """
+    return set(_GATED)
 
 
 def registered_names() -> list[str]:

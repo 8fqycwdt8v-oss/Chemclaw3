@@ -20,6 +20,102 @@ from chemclaw.ingest.eln.ord import OrdReaction
 
 _LATE_ARRIVAL_NAMES_LOGGED = 10
 
+# How many colliding file names one refusal message spells out. The same bound as
+# `_LATE_ARRIVAL_NAMES_LOGGED` and for the same reason: the reason column is capped
+# (`ingest.rejections._MAX_REASON_CHARS`), so an unbounded list would be cut mid-name and the
+# count is what a reader needs first.
+_COLLIDING_NAMES_NAMED = 5
+
+
+def entry_id_or_stem(stated: object, path: Path, field: str) -> str:
+    """The id one export file claims, falling back to its file name when it claims none.
+
+    **Absent and blank are different answers and used to read alike.** Both adapters spelled this
+    `str(payload.get("id") or path.stem)`, which is truthiness: an id of `0`, `""` or `false`
+    reached the corpus as the *file stem*, and the record was then stored, cited and asked about
+    under an id the source never used. Measured: `id=0`, `id=""` and `id=false` in
+    `EXP_2026_0412.json` all produced `entry_id='EXP_2026_0412'`.
+
+    So a field the source omitted (or left `null`) falls back to the file name, which is the
+    documented behaviour and the only id such a file has; a field the source *stated* is
+    transcribed as given, `0` included; and a stated field that names nothing at all is refused,
+    because a source that wrote an id key wrote it to say something and the file name is not what
+    it said.
+
+    Args:
+        stated: whatever the payload carried in its id field — `None` when it carried none.
+        path: the export file, whose stem is the fallback.
+        field: the field's name in this format, for the refusal message.
+
+    Raises:
+        ElnMappingError: the field is present and names nothing. Both adapters' scan handlers
+            catch this class, so the file costs itself and the directory is still read.
+    """
+    if stated is None:
+        return path.stem
+    # A JSON `true`/`false` is not an id in any ELN, and `bool` is an `int` in Python, so the
+    # transcription below would file the entry under the literal string `"False"` — nonsense that
+    # reads like an id rather than like the malformed field it is.
+    text = "" if isinstance(stated, bool) else str(stated).strip()
+    if not text:
+        raise ElnMappingError(
+            f"{path.name} states {field!r} as {stated!r}, which names no entry. An export that "
+            f"carries {field!r} is claiming an id; leave the field out to be identified by file "
+            "name instead"
+        )
+    return text
+
+
+def refuse_colliding_ids(
+    logger: Logger, source: str, files_by_id: dict[str, list[str]]
+) -> dict[str, str]:
+    """Refuse every entry id two or more export files claim, and say which files claimed it.
+
+    A file-drop directory is one source, and `reaction_records` is keyed
+    `(ingest_source, reaction_id)` with every column refreshed on conflict — so two files carrying
+    one `id` are not two records, they are one row written twice, and the second write replaces the
+    first entirely. Measured before this existed: two exports, one `EXP-88`, `entries returned=2`,
+    `ingested=2` in the summary, and one of the two experiments simply absent from the corpus with
+    nothing refused, warned or filed.
+
+    **Both are refused, not one kept**, and the precedent is `records._one_of`, which answers the
+    identical question one layer up: with two transcriptions behind one id "there is genuinely no
+    right answer — and returning either is a coin flip that reads as a fact". Keeping the
+    alphabetically-first file would put an arbitrary one of two contradictory runs in the corpus
+    under an id a chemist then cites, with nothing at the point of use to say the other existed.
+    Refusing both costs the corpus one record it cannot identify and gains the ledger a row that
+    names both files, which is the answer to the question somebody will ask
+    (`D-2026-08-27-a-refused-record-is-a-question-somebody-will-ask`).
+
+    Collisions are looked for across the *whole* directory rather than across the fetch window: the
+    id is supposed to be unique in the source, so a run that happens to return only one of the two
+    is still wrong about which record it is returning.
+
+    Args:
+        logger: the calling adapter's own, so the record carries that module's name.
+        source: the data source's name, for the log line — two drop directories log alike.
+        files_by_id: every parsed entry id, mapped to the file names that claimed it.
+
+    Returns:
+        The refusals to file, keyed by entry id — empty in the ordinary case.
+    """
+    refused: dict[str, str] = {}
+    for entry_id, names in sorted(files_by_id.items()):
+        if len(names) < 2:
+            continue
+        shown = ", ".join(sorted(names)[:_COLLIDING_NAMES_NAMED])
+        if len(names) > _COLLIDING_NAMES_NAMED:
+            shown += f", … (+{len(names) - _COLLIDING_NAMES_NAMED} more)"
+        reason = (
+            f"{len(names)} export files carry the entry id {entry_id!r} ({shown}), so the id does "
+            "not name one run and every one of them is refused: the record store keys a row by "
+            "(source, entry id) and would have kept whichever was written last. Give each export "
+            "a distinct id, or split the directory by source"
+        )
+        refused[entry_id] = reason
+        logger.warning("%s: %s", source, reason)
+    return refused
+
 
 def parse_iso_utc(value: str) -> datetime:
     """Parse an ISO-8601 timestamp (accepting a trailing 'Z') as a tz-aware UTC datetime.
@@ -91,19 +187,29 @@ def warn_late_arrivals(logger: Logger, source: str, names: list[str]) -> None:
     )
 
 
-def entry_window(created_at: datetime, modified_at: datetime | None) -> datetime:
-    """The timestamp an entry should be filtered on: the later of creation and amendment.
+def entry_window(
+    created_at: datetime, modified_at: datetime | None, retracted_at: datetime | None = None
+) -> datetime:
+    """The timestamp an entry should be filtered on: the latest thing the source did to it.
 
     One definition, because an adapter that filtered on `created_at` alone would silently drop
     every in-place correction its source makes — the failure this exists to close — and an adapter
     that filtered on `modified_at` alone would drop every entry that has never been amended.
 
-    `max` rather than "modified if present, else created" only differs when a source reports an
-    amendment *older* than the creation it amends, which is clock skew rather than chemistry. It is
+    **A withdrawal is one of those things, and it is here because it is the only way the producer
+    half of a retraction can reach a cursor-based sync.** A source stamping a retraction column
+    without touching its amendment column leaves the entry behind the cursor forever, so the
+    tombstone is written at the site and never fetched — a producer nobody can write, which is the
+    shape `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution` deleted three
+    modules for. Folding it in costs nothing where a source *does* amend in place (the retraction
+    stamp is then no later than the amendment) and is the whole of the fix where it does not.
+
+    `max` rather than "the latest present one" only differs when a source reports an amendment
+    *older* than the creation it amends, which is clock skew rather than chemistry. It is
     cheap insurance and no test can distinguish the two; said here so the choice does not read as
     load-bearing.
     """
-    return max(created_at, modified_at) if modified_at is not None else created_at
+    return max(stamp for stamp in (created_at, modified_at, retracted_at) if stamp is not None)
 
 
 class ElnMappingError(ChemclawError):
@@ -134,6 +240,20 @@ class RawEntry(BaseModel):
     # Optional because a source may genuinely not record one; `None` means "not reported", not
     # "never amended", and the overlap replay remains the only thing that catches those.
     modified_at: datetime | None = None
+    # When the source reported this entry **withdrawn**, if it reports withdrawals at all.
+    #
+    # **An explicit field, never absence**, and that is the whole producer half of a retraction: an
+    # ELN fetch is a delta, so "not seen this run" is the normal state of every entry ever
+    # ingested, and reading it as a withdrawal would retract the entire corpus on the first quiet
+    # pass. A source that amends entries in place already re-exports a withdrawn one — the same
+    # channel that carries a corrected yield — so a tombstone rides the delta an adapter already
+    # produces and needs no second fetch, no capability probe and no corpus sweep.
+    #
+    # `None` means "not reported withdrawn", which is also what every adapter that says nothing
+    # about withdrawals produces. Re-publishing an entry without one *un*-retracts it, because this
+    # tier's rule is that the row is what the source last said
+    # (`D-2026-09-13-a-withdrawal-is-a-fact-a-source-reports`).
+    retracted_at: datetime | None = None
 
 
 @runtime_checkable

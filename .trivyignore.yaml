@@ -1,0 +1,50 @@
+# Findings the image scan reports that no change to this repository can fix.
+#
+# The rule `docs/guides/runbook.md` §(xiv) states and this file obeys: a finding that genuinely
+# cannot be fixed is an explicit ignore **with its reason in the diff**, never a downgrade of the
+# whole gate. Each entry below carries the measurement that put it here and an expiry, because a
+# suppression with no expiry is a finding nobody will look at again — the defect W29.2 opened
+# against the sibling fleet's eight permanent `--ignore-vuln` flags.
+#
+# **Both of these are pip's own vendored tree, and the previously recorded diagnosis was wrong.**
+# `deploy/Containerfile` said they were "cached copies of build dependencies, and the fix is to not
+# ship the cache", and `uv cache clean` was added for it. Measured 2026-09-14 on an image built
+# *with* that clean in place, both findings are still reported, and they resolve to one file:
+#
+#     /opt/app-root/lib/python3.11/site-packages/pip/_vendor/vendor.txt
+#       msgpack==1.1.2
+#       setuptools==70.3.0
+#
+# Both are genuinely present as code (`pip/_vendor/msgpack`, `pip/_vendor/pkg_resources`) in pip
+# **26.2.1**, which is the current release — so no pip upgrade moves them, and no lockfile change
+# can reach them: they are not in `uv.lock`, which pins setuptools 83.0.0 and contains no msgpack.
+# The build's own `find / -xdev` could not locate them because it searched for `setuptools-[0-9]*`
+# and `msgpack-[0-9]*`, which is a `dist-info`/wheel naming convention; a line in `vendor.txt` has
+# no such name. That gap — not a scanner disagreeing with an artifact — is what made this finding
+# look unanswerable for long enough to hold the gate back.
+#
+# Reachability: pip is not on any path this image runs. `deploy/entrypoint.sh` execs the
+# application out of `/app/.venv`; pip's vendored HTTP-cache serializer and `pkg_resources` shim
+# are exercised only by `pip` itself, which nothing here invokes at runtime.
+#
+# **Neither entry is scoped by path, and that is a limitation rather than a choice.** Trivy's
+# `python-pkg` result reports these two against the bare target `Python` with no `PkgPath`, so a
+# `paths:` filter matches nothing and the ignore does not apply — driven, the gate still exited 1
+# with the filter in place. The id alone therefore suppresses the advisory image-wide, which is a
+# real hole: the same advisory arriving on a package this repository *does* install would be
+# silenced here. What bounds it is that `make deps-audit` audits `uv.lock` independently and
+# blocking, on every branch push, and `uv.lock` contains no msgpack at all — so the lockfile half
+# of that hole is covered by a gate this file cannot influence.
+vulnerabilities:
+  - id: GHSA-6v7p-g79w-8964
+    statement: >-
+      msgpack 1.1.2 vendored inside pip 26.2.1 (the current release). Not in uv.lock, not
+      upgradable by any change here, and reached only by running pip, which this image never does
+      at runtime.
+    expired_at: 2027-03-14
+  - id: CVE-2025-47273
+    statement: >-
+      setuptools 70.3.0 as pip 26.2.1's vendored pkg_resources. The interpreter's own setuptools is
+      upgraded to 84.0.0 by deploy/Containerfile and the application venv pins 83.0.0; this entry
+      is pip's bundled copy, which no pip release has yet moved.
+    expired_at: 2027-03-14

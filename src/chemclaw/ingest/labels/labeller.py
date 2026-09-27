@@ -38,6 +38,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from chemclaw.core.call_identity import turn_identity_hook
 from chemclaw.core.chem import STANDARDIZATION_VERSION
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError, SubsystemUnavailableError
@@ -85,13 +86,51 @@ class SpeciesRepresentation(BaseModel):
 
 
 class ReactionRepresentation(BaseModel):
-    """The reaction-level representation: the atom map, and one entry per species sent."""
+    """The reaction-level representation: the atom map, and one entry per species sent.
+
+    **`version` and `degraded` are read from the answer rather than assumed from the pass**, and
+    that is what makes a degraded row re-labellable. `Chemclaw3-mcp`'s `servers/rxnlabel` answers
+    each reaction with `version.labeller_version(degraded)` — a stamp naming the failed component
+    (`mapper@failed`) rather than the healthy one — precisely so the row is stale against a pod
+    whose mapper works. This model declares `extra="ignore"`, so both fields were *dropped in
+    transit*: the drain stamped every row with the pass-level version it read once in
+    `plan_label_sync`, which reports the components it *probed* and not what happened on this call.
+    A mapper that was installed and failed therefore produced a row stamped healthy, which leaves
+    `stale()` and is never revisited until the deployment's component versions change. See
+    `enrich.label_stale` for the stamp and `_degradations` for the log.
+
+    **`reaction_smiles` and `unreadable_species` are deliberately still ignored.** The server sends
+    both and this side wants neither:
+
+    * `reaction_smiles` is the server's own canonicalisation of the reaction. The reaction text this
+      system stores is normalised by *our* rules, which is exactly what `STANDARDIZATION_VERSION`
+      versions and why `version()` folds it in — adopting the server's form would put its RDKit
+      build inside a field this repository versions itself, with nothing to notice.
+    * `unreadable_species` names species strings RDKit could not read. They come from *our* corpus,
+      so it is a data-quality fact about an ingested source rather than about this label — and the
+      place to act on it is the ingest path that wrote those strings. Keeping it here would be a
+      field with no consumer, and a per-row log of it is one line per bad record across a corpus
+      sized in millions. The loss is not silent in the way
+      `D-2026-08-08-a-partial-answer-must-say-so` is about: an unreadable species still comes back
+      in `species` at its own position, so nothing positional shifts, and the short-answer guard in
+      `represent` below is what covers the case where something does.
+    """
 
     model_config = ConfigDict(extra="ignore", frozen=True)
 
     id: str = Field(min_length=1)
     mapped_smiles: str | None = None
     species: list[SpeciesRepresentation] = Field(default_factory=list)
+    # Defaulted empty, so a server predating these fields — or a fake that does not set them —
+    # parses and falls back to the pass-level stamp, which is today's behaviour.
+    version: str = Field(
+        default="",
+        description="The labeller that produced *this* answer; empty means the server sent none.",
+    )
+    degraded: list[str] = Field(
+        default_factory=list,
+        description="Components installed on that pod that ran and failed, e.g. 'atom_mapper'.",
+    )
 
 
 class ReactionNaming(BaseModel):
@@ -107,6 +146,36 @@ class ReactionNaming(BaseModel):
     method: str | None = Field(
         default=None, description="'smirks' for a rule match, 'model' for the fallback classifier."
     )
+    # The same pair, for the same reason, on the other half of an answer — see
+    # `ReactionRepresentation`. A classifier that ran and matched nothing is a real answer about the
+    # chemistry and leaves `degraded` empty; one that ran and *failed* is a fault in the pod, and
+    # only these two fields tell the two apart.
+    version: str = Field(
+        default="",
+        description="The labeller that produced *this* answer; empty means the server sent none.",
+    )
+    degraded: list[str] = Field(
+        default_factory=list,
+        description="Components installed on that pod that ran and failed, e.g. 'reaction_namer'.",
+    )
+
+
+def stamped(remote: str) -> str:
+    """One remote labeller version, plus the two versions the server cannot see.
+
+    A function rather than two f-strings, because there are now two places a stamp is built: the
+    pass-level one `plan_label_sync` reads off `labeller_version`, and the per-answer one
+    `enrich.label_stale` takes off a degraded row. A second spelling of the fold would be a row
+    that can never match a healthy pass — well-formed, re-labelled forever, and nothing raising —
+    which is the same failure this module's header refuses for the remote half.
+
+    `STANDARDIZATION_VERSION` rides along because the species SMILES sent for classification were
+    normalised by our rules, and `VOCABULARY_VERSION` because the role names stored are ours.
+
+    Args:
+        remote: The version string the labelling server reported, as it reported it.
+    """
+    return f"{remote}:{STANDARDIZATION_VERSION}:{VOCABULARY_VERSION}"
 
 
 @runtime_checkable
@@ -160,7 +229,7 @@ class RxnLabelServer:
                 "staleness is decided by that string; without it every row would be re-labelled "
                 "on every pass forever."
             )
-        return f"{remote}:{STANDARDIZATION_VERSION}:{VOCABULARY_VERSION}"
+        return stamped(remote)
 
     async def represent(
         self, reactions: list[tuple[str, str, list[str]]]
@@ -256,16 +325,15 @@ class RxnLabelServer:
                 settings.rxnlabel_server_url,
                 token_env=settings.rxnlabel_server_token_env,
                 timeout_seconds=settings.rxnlabel_server_timeout_seconds,
-                # **No `request_hook` here, and the reason is a layering boundary rather than an
-                # oversight.** `connectors/calc/remote.py` passes `turn_identity_hook`, so its leg
-                # carries `traceparent`, the correlation id, the actor and the session; this one
-                # sends `Authorization` alone and is therefore untraceable, which matters because a
-                # labelling drain runs for hours inside a durable activity. The hook cannot simply
-                # be imported: it lives in `connectors/identity.py` on top of both
-                # `agent.turn_flags` and `connectors.manifest`, and `ingest -> connectors` is not an
-                # edge `tests/test_layering.py` permits. Closing it means deciding where a
-                # *non-connector* MCP client's identity stamping belongs — a real design question,
-                # not a line to add here. `docs/planning/BACKLOG.md` carries it.
+                # **The same stamp `connectors/calc/remote.py` puts on its leg**, since
+                # `D-2026-09-14-identity-stamping-is-cores-not-a-connectors` moved it to `core`.
+                # This used to be the one MCP leg in the system that went out anonymous: no actor,
+                # no session, no correlation id and no `traceparent`, for hours at a time inside a
+                # durable activity, because the hook lived in `connectors/identity.py` and
+                # `ingest -> connectors` is not an edge `tests/test_layering.py` permits. The hook
+                # is bound to this server's own origin and strips on a cross-origin redirect, so a
+                # labelling server answering `302` cannot harvest the trail.
+                request_hook=turn_identity_hook(settings.rxnlabel_server_url),
             ) as session:
                 payload = await invoke(session, tool, arguments)
         except McpCredentialRefused as exc:

@@ -55,7 +55,7 @@ def _factory(**kwargs: Any) -> Any:
     )
 
 
-def test_a_teardown_after_the_run_leaves_the_checkpoint_ahead_of_the_transcript(
+async def test_a_teardown_after_the_run_leaves_the_checkpoint_ahead_of_the_transcript(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Both records, after one teardown — and the counter that now says they parted company.
@@ -71,75 +71,72 @@ def test_a_teardown_after_the_run_leaves_the_checkpoint_ahead_of_the_transcript(
     # there is no second record to diverge from.
     monkeypatch.setattr(settings, "session_store", "postgres")
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await create_checkpoint_tables()
-        # Any saver a previous test left published belongs to a closed loop and, possibly, another
-        # DSN; the turn under test has to build its own on this one.
-        await close_checkpointer()
-        await SessionOwnerStore().record(_SESSION, "oid-divergence", None)
-        history = PostgresHistoryProvider()
+    await migrated_db_or_skip()
+    await create_checkpoint_tables()
+    # Any saver a previous test left published belongs to a closed loop and, possibly, another
+    # DSN; the turn under test has to build its own on this one.
+    await close_checkpointer()
+    await SessionOwnerStore().record(_SESSION, "oid-divergence", None)
+    history = PostgresHistoryProvider()
 
-        reached = asyncio.Event()
+    reached = asyncio.Event()
 
-        async def _slow_answer(*args: Any, **kwargs: Any) -> Any:
-            """Hold the turn in the window between the graph run and the transcript write."""
-            reached.set()
-            await asyncio.sleep(30)
-            raise AssertionError("unreachable")  # pragma: no cover
+    async def _slow_answer(*args: Any, **kwargs: Any) -> Any:
+        """Hold the turn in the window between the graph run and the transcript write."""
+        reached.set()
+        await asyncio.sleep(30)
+        raise AssertionError("unreachable")  # pragma: no cover
 
-        before = METRICS.value("chemclaw_transcript_thread_divergence_total")
-        # Patched by string on the module `run_turn` looks the name up in, not where it is
-        # defined: `runner` imports it, so patching the definition would not intercept the call,
-        # and a direct attribute assignment is neither an export mypy follows nor a form ruff
-        # allows. `MonkeyPatch` restores it.
-        patch = pytest.MonkeyPatch()
-        patch.setattr("chemclaw.api.runner.build_answer_event", _slow_answer)
-        try:
-            stream = run_turn(
-                TurnSession(session_id=_SESSION),
-                "the question the chemist asked",
-                history=history,
-                connectors=[],
-                graph_factory=_factory,
-            )
+    before = METRICS.value("chemclaw_transcript_thread_divergence_total")
+    # Patched by string on the module `run_turn` looks the name up in, not where it is
+    # defined: `runner` imports it, so patching the definition would not intercept the call,
+    # and a direct attribute assignment is neither an export mypy follows nor a form ruff
+    # allows. `MonkeyPatch` restores it.
+    patch = pytest.MonkeyPatch()
+    patch.setattr("chemclaw.api.runner.build_answer_event", _slow_answer)
+    try:
+        stream = run_turn(
+            TurnSession(session_id=_SESSION),
+            "the question the chemist asked",
+            history=history,
+            connectors=[],
+            graph_factory=_factory,
+        )
 
-            async def _drain() -> None:
-                async for _event in stream:
-                    pass
-
-            task = asyncio.create_task(_drain())
-            await asyncio.wait_for(reached.wait(), 20)
-            # The graph run is over and committed; `_record_transcript` has not run.
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
+        async def _drain() -> None:
+            async for _event in stream:
                 pass
-            await asyncio.sleep(0.2)
-        finally:
-            patch.undo()
 
-        saver = await checkpointer()
+        task = asyncio.create_task(_drain())
+        await asyncio.wait_for(reached.wait(), 20)
+        # The graph run is over and committed; `_record_transcript` has not run.
+        task.cancel()
         try:
-            stored = await saver.aget_tuple(cast("RunnableConfig", turn_config(_SESSION)))
-            assert stored is not None
-            thread = [
-                str(message.content) for message in stored.checkpoint["channel_values"]["messages"]
-            ]
-            transcript = await history.get_messages(_SESSION)
-        finally:
-            await close_checkpointer()
+            await task
+        except asyncio.CancelledError:
+            pass
+        await asyncio.sleep(0.2)
+    finally:
+        patch.undo()
 
-        # The measurement, pinned so the "no third outcome" claim cannot come back.
-        assert "the question the chemist asked" in thread, thread
-        assert transcript == [], (
-            f"the transcript is expected to be empty on this path; got {transcript}"
-        )
-        after = METRICS.value("chemclaw_transcript_thread_divergence_total")
-        assert after == before + 1, (
-            "a turn kept in the checkpointer and missing from the transcript must be counted; "
-            f"the counter went {before} -> {after}"
-        )
+    saver = await checkpointer()
+    try:
+        stored = await saver.aget_tuple(cast("RunnableConfig", turn_config(_SESSION)))
+        assert stored is not None
+        thread = [
+            str(message.content) for message in stored.checkpoint["channel_values"]["messages"]
+        ]
+        transcript = await history.get_messages(_SESSION)
+    finally:
+        await close_checkpointer()
 
-    asyncio.run(_run())
+    # The measurement, pinned so the "no third outcome" claim cannot come back.
+    assert "the question the chemist asked" in thread, thread
+    assert transcript == [], (
+        f"the transcript is expected to be empty on this path; got {transcript}"
+    )
+    after = METRICS.value("chemclaw_transcript_thread_divergence_total")
+    assert after == before + 1, (
+        "a turn kept in the checkpointer and missing from the transcript must be counted; "
+        f"the counter went {before} -> {after}"
+    )

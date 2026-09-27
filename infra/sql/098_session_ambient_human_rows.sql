@@ -1,0 +1,90 @@
+-- The `stated`-quote ambient reads one session's newest human messages on every turn, and on a
+-- busy database it walked the whole table's tail to do it.
+--
+-- `agent/session_store._SELECT_RECENT_USER_ROWS` — run once per turn on the answer path by
+-- `api/runner._turn_ambient` — is `session_id = $1 AND message_shape = $2 AND message_original IS
+-- NULL AND message->>'type' = 'human' ORDER BY id DESC LIMIT $3`. Postgres has no statistics for
+-- the *expression* `message->>'type'`, mis-estimates that predicate, sees `ORDER BY id DESC LIMIT
+-- 20` and walks the primary key backwards expecting to stop early. On a table with one session in
+-- it, it does stop early. On a busy one it does not.
+--
+-- Measured on this schema with its real indexes — one 12,000-row session plus 120,000 newer rows
+-- across 300 other sessions, VACUUM ANALYZE, warm cache, 3 warm reps then EXPLAIN ANALYZE:
+--
+--   shipped statement                     session_messages_pkey   120,020 rows removed   14.8 ms
+--   + CREATE STATISTICS on the expression session_messages_pkey   120,020 rows removed   16.1 ms
+--   type test hoisted into Python         session_messages_pkey   120,000 rows removed   16.8 ms
+--   bounded inner window, filter outside  session_messages_pkey   (same plan)            16.1 ms
+--   THIS INDEX                            (this index)                  0 rows removed    0.036 ms
+--
+-- So of the three candidates `docs/planning/BACKLOG.md` named, two are measured no-ops: extended
+-- statistics on the expression do not move the plan, and hoisting the type test out of SQL does not
+-- either, because `session_id = $1` alone still loses to the ordered primary-key walk. Only an
+-- index that makes the human rows directly addressable changes the shape of the read from
+-- O(table) to O(session).
+--
+-- The row's own objection to an index was that it is "a cost every write pays forever". Measured
+-- at 2,000 inserts: **162 us/row without it and 161 us/row with it** — no measurable cost, because
+-- it is *partial*. It indexes only the rows the ambient can quote (a human turn that was not
+-- migrated), which is a minority of the table: 3.6 MB against a 33 MB table in the same probe.
+--
+-- The column order is the statement's: `session_id` and `message_shape` are its equality
+-- predicates and `id` carries `ORDER BY id DESC` as a backward scan, so the whole read is one
+-- index range with nothing to re-check. The predicate must repeat the statement's two constant
+-- conditions verbatim or Postgres cannot prove the index covers the query.
+--
+-- `message->>'type'` is immutable, which is what makes it indexable at all.
+--
+-- **This build blocks every `session_messages` INSERT while it runs, and this is the hottest table
+-- in the schema.** `CREATE INDEX` takes a `SHARE` lock, which conflicts with the `ROW EXCLUSIVE`
+-- every INSERT needs, and a row is written here on *every turn* — so this table takes writes more
+-- often than `audit_events`, whose own index migration (059) carries this paragraph and whose
+-- stall figure is the one that has been quoted since. Measured on this repository's own Postgres
+-- image over a table with this one's shape and predicate, 1,000,000 rows / 311 MB, VACUUM ANALYZE,
+-- warm cache, four builds: **691 ms, 485 ms, 503 ms, 443 ms per million rows**, for a 10 MB index.
+-- Well under 059's 1.24 s/M, because the predicate is partial — but `session_messages` is the
+-- table that grows with conversation rather than with tool calls.
+--
+-- **What makes that a deploy failure rather than a stall is the lock timeout.** `core/migrate.py`
+-- sets `lock_timeout` from `pg_migration_lock_timeout_seconds`, which ships at 5.0 s, for all DDL
+-- in the set. On a deployment taking continuous turns this statement queues behind in-flight
+-- INSERTs, times out, and aborts the whole migration transaction — so the `pre-install`/
+-- `pre-upgrade` hook Job fails, and self-heals only within its `backoffLimit: 3`. The build being
+-- fast does not help: the wait for the lock is what expires, not the work.
+--
+-- `CONCURRENTLY` is not available *here*, for 059's reason: the runner applies the whole migration
+-- set in one transaction and Postgres refuses `CREATE INDEX CONCURRENTLY` inside a transaction
+-- block.
+--
+-- **Pre-building removes the build, not the wait, and the escape hatch 059 publishes is wrong
+-- about that.** 059 says a pre-built index makes its migration "a no-op" so "the deploy needs no
+-- window at all", and this file said the same until it was measured. `CREATE INDEX IF NOT EXISTS`
+-- opens the table with `ShareLock` **before** it checks whether the name is taken, so the lock
+-- wait is paid either way. Measured on this image (PostgreSQL 16.15), index already built, one
+-- open transaction holding `ROW EXCLUSIVE`:
+--
+--     SET lock_timeout='5s';
+--     CREATE INDEX IF NOT EXISTS ... ;
+--     Time: 5000.765 ms
+--     ERROR:  canceling statement due to lock timeout
+--
+--   pg_locks while waiting: relation | ShareLock | granted = f
+--
+-- which is the paragraph above happening exactly as it says — "the wait for the lock is what
+-- expires, not the work" — to the mitigation that paragraph then recommends.
+--
+-- So what pre-building actually buys is the ~0.5 s of build, and what a busy deployment needs is
+-- a moment with no in-flight write, or a raised `CHEMCLAW_PG_MIGRATION_LOCK_TIMEOUT_SECONDS` for
+-- the upgrade. Pre-build anyway if the table is large — it is free and it shortens the window the
+-- lock is held —
+--
+--     CREATE INDEX CONCURRENTLY IF NOT EXISTS session_messages_ambient_human_idx
+--         ON session_messages (session_id, message_shape, id)
+--         WHERE message_original IS NULL AND message->>'type' = 'human';
+--
+-- — outside any transaction, on the live database. The `IF NOT EXISTS` below then finds it and
+-- creates nothing. But plan for the lock either way: this is the hottest table in the schema and
+-- the hook Job self-heals only within its `backoffLimit: 3`.
+CREATE INDEX IF NOT EXISTS session_messages_ambient_human_idx
+    ON session_messages (session_id, message_shape, id)
+    WHERE message_original IS NULL AND message->>'type' = 'human';

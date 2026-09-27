@@ -43,6 +43,7 @@ import logging
 from datetime import UTC, datetime
 from typing import Any, Literal
 
+from langchain.tools import ToolRuntime
 from pydantic import BaseModel, ConfigDict, Field
 from temporalio.client import WorkflowExecutionStatus
 from temporalio.common import WorkflowIDReusePolicy
@@ -58,11 +59,16 @@ from chemclaw.core.config import settings
 from chemclaw.core.errors import SubsystemUnavailableError
 from chemclaw.core.identity_context import get_current_correlation_id, get_current_roles
 from chemclaw.core.ids import canonical_text, stable_hash
+from chemclaw.core.session_context import get_current_session_id
 from chemclaw.core.temporal_client import connect
 from chemclaw.core.tool_registry import tool
 from chemclaw.core.turn_signals import record_job_started
 from chemclaw.durable.connector_job import envelope_from_result
-from chemclaw.durable.job_record import JobRecordSummary, lookup_job_record, search_job_records
+from chemclaw.durable.hypothesis_tournament import (
+    HypothesisTournamentWorkflow,
+    TournamentRequest,
+)
+from chemclaw.durable.job_record import JobRecordSearch, lookup_job_record, search_job_records
 
 # Importing the workflow *types* to launch them is deliberate and bounded
 # (D-2026-08-17-a-workflow-type-is-a-launch-contract-not-a-durability-leak): it is what makes
@@ -256,8 +262,10 @@ _MEMORY_JOBS: dict[MemoryJobKind, MethodAsyncNoParam[Any, list[str]]] = {
 
 
 @tool
-async def synthesize_memory(kind: MemoryJobKind, fresh: bool = False) -> str:
-    """Mine the reaction corpus for a class of knowledge and propose what it finds for review.
+async def synthesize_memory(  # noqa: D417 - `runtime` is deliberately not in `Args:`; see below
+    kind: MemoryJobKind, runtime: ToolRuntime[Any, Any], fresh: bool = False
+) -> str:
+    """Mine the reaction corpus for a class of knowledge and record what it finds.
 
     Use this when someone asks what the corpus now supports — "have we accumulated enough on this
     route to write it up", "what campaigns are in the record", "is anything worth distilling" —
@@ -265,9 +273,9 @@ async def synthesize_memory(kind: MemoryJobKind, fresh: bool = False) -> str:
     sources and records notes directly, so nothing decides what becomes
     knowledge; this only decides *when to look*.
 
-    Nothing runs these on a timer (D-2026-08-25). A pull request nobody asked for is knowledge
-    arriving unbidden, which is the thing that decision removed — so the corpus is mined when a
-    person has a reason, and this tool is that reason arriving.
+    Nothing runs these on a timer (D-2026-08-25). Knowledge arriving unbidden is what that
+    decision removed — so the corpus is mined when a person has a reason, and this tool is that
+    reason arriving.
 
     The kinds:
 
@@ -275,9 +283,9 @@ async def synthesize_memory(kind: MemoryJobKind, fresh: bool = False) -> str:
       reactant, citing every member.
     - `playbook` — distil a transformation that recurs *across projects* into reusable judgment.
     - `optimization` — group same-transformation runs into a screen and read it as a series.
-    - `observation-promotion` — propose playbook notes for the ungated observations that have
-      crossed both support thresholds. The mining that feeds it still runs on a timer, because it
-      writes rows nobody reviews; only this half opens pull requests.
+    - `observation-promotion` — write playbook notes for the ungated observations that have
+      crossed both support thresholds. The mining that feeds it still runs on a timer; only this
+      half puts what it found into the graph.
 
     Args:
         kind: Which synthesis to run.
@@ -288,16 +296,18 @@ async def synthesize_memory(kind: MemoryJobKind, fresh: bool = False) -> str:
             has changed since the day's first run.
 
     Returns:
-        The job id. Poll it with `get_durable_job_status`; the result is the list of pull requests
-        opened, which may be empty when the corpus supports nothing new.
+        The job id. Poll it with `get_durable_job_status`; the result is the list of notes
+        recorded, which may be empty when the corpus supports nothing new.
     """
     authorize_trigger("synthesize_memory")
-    # `require_actor` before anything durable starts, the core rule (F4-T3): these open pull
-    # requests in the knowledge repository, and a PR with no author behind it is exactly what the
-    # gate exists to prevent.
+    # `require_actor` before anything durable starts, the core rule (F4-T3): these write notes
+    # into the knowledge repository, and a note with no author behind it is exactly what the gate
+    # exists to prevent.
     actor = require_actor()
     client = await connect()
-    workflow_id = _memory_job_id(kind, fresh=fresh)
+    # The tool call's own id is what is identical on a replay and different between two
+    # genuine asks — see `_memory_job_id` for why `fresh` may not read the clock.
+    workflow_id = _memory_job_id(kind, fresh=fresh, discriminator=str(runtime.tool_call_id))
     try:
         handle = await client.start_workflow(
             _MEMORY_JOBS[kind],
@@ -316,13 +326,13 @@ async def synthesize_memory(kind: MemoryJobKind, fresh: bool = False) -> str:
     return handle.id
 
 
-def _memory_job_id(kind: MemoryJobKind, *, fresh: bool = False) -> str:
+def _memory_job_id(kind: MemoryJobKind, *, fresh: bool = False, discriminator: str = "") -> str:
     """A deterministic id for one kind's synthesis, keyed on the **UTC date**.
 
     There is no request to key on: the input is the whole corpus as it stands, so two chemists
-    asking the same morning want the same answer and must not each pay a full re-scan — nor open
-    two pull requests for one finding, which is what `memory.ids.with_id`'s anchor can produce when
-    a cluster grows between two runs.
+    asking the same morning want the same answer and must not each pay a full re-scan — nor write
+    one finding twice, which is what `memory.ids.with_id`'s anchor can produce when a cluster grows
+    between two runs.
 
     A day is the unit because a day is what the retired Schedule used
     (`memory_synthesis_schedule_minutes` defaulted to 1440), so the cadence a deployment already
@@ -330,15 +340,30 @@ def _memory_job_id(kind: MemoryJobKind, *, fresh: bool = False) -> str:
 
     The cost of the daily unit is stated rather than hidden: a second ask on the same day
     rejoins the first run, so an ingest landing between the two is not picked up. `fresh` is the
-    escape hatch for exactly that — it suffixes the id with the current time, so the run really
-    re-mines. The caller opts in, because the default has to stay the shared scan: "mine after
-    this afternoon's import" was the tool's own recommended use, and it silently returned the
-    morning run's id.
+    escape hatch for exactly that — it makes the run really re-mine. The caller opts in, because
+    the default has to stay the shared scan: "mine after this afternoon's import" was the tool's
+    own recommended use, and it silently returned the morning run's id.
+
+    **`fresh` used to read the clock, and that made it the one launcher in this tree that a replay
+    duplicates.** The suffix was `strftime('%H%M%S')`, so a tool killed mid-call and re-run on
+    resume — which
+    `D-2026-09-14-a-turn-outlives-its-request-already-and-nothing-can-pick-it-up` measured happens
+    with the original arguments — minted a *different* workflow id and started a second
+    full-corpus mining run. Expensive rather than corrupting, because the notes both runs write
+    carry cluster-anchored ids and collide, but it is the only id here that is not a function of
+    its inputs, which is the property every other launcher has deliberately.
+
+    `discriminator` is that function instead: the caller passes something that is identical on a
+    replay of one ask and different between two genuine ones, which is what the tool call's own id
+    is. Empty falls back to the clock, preserving the old behaviour for a caller that has nothing
+    better — and `agent/durable_tools.py`'s tool passes the runtime's id, so the agent path never
+    takes that arm.
     """
     day = datetime.now(UTC).date().isoformat()
-    if fresh:
-        return f"memory-{kind}-{day}-{datetime.now(UTC).strftime('%H%M%S')}"
-    return f"memory-{kind}-{day}"
+    if not fresh:
+        return f"memory-{kind}-{day}"
+    suffix = discriminator or datetime.now(UTC).strftime("%H%M%S")
+    return f"memory-{kind}-{day}-{stable_hash(suffix, chars=10)}"
 
 
 @tool
@@ -378,15 +403,18 @@ async def get_durable_job_status(job_id: str) -> DurableJobStatus:
         instead of starting again from the molecule.
 
     Raises:
-        ValueError: When the id is unknown to both Temporal and the durable record, or names a
-            completed workflow whose result is not the connector envelope. That second case used to
-            degrade to a bare status, because the DFT job returned its own typed result and had
-            its own status tool (`agents/job_status.py`). D-118 made it a connector job, so
-            every durable job this system hands an id for returns the envelope — a result that is
-            not one means the id belongs to a workflow no tool advertises, and reporting
-            "completed" with an empty result would tell a chemist their calculation is done while
-            silently withholding it.
+        ValueError: When the id is unknown, or names a completed workflow whose result is not the
+            connector envelope — the id belongs to a workflow no tool advertises, and reporting it
+            as completed with an empty result would say a calculation is done while withholding it.
     """
+    # **Why the second case exists, in a comment rather than in the docstring**: Pydantic and
+    # `convert_to_openai_tool` publish this docstring as the tool's schema description, so every
+    # word of it is re-sent on every model call. The history below is for a reader of this file:
+    # the case used to degrade to a bare status, because the DFT job returned its own typed result
+    # and had its own status tool (`agents/job_status.py`). D-118 made it a connector job, so every
+    # durable job this system hands an id for returns the envelope. That tier is gone entirely now
+    # (`D-2026-08-26-semiempirical-is-the-whole-tier`), which is the sharper reason this paragraph
+    # does not belong in the model's context: it was describing a system the model cannot reach.
     status = await job_status(job_id, wait_seconds=settings.job_status_wait_seconds)
     # Framed **here**, in the `@tool`, and not in `job_status` below — which is the same mistake in
     # the same shape as the one this fixes. `job_status` is also the whole body of the front door's
@@ -550,7 +578,7 @@ def _framed_free_text(text: str, job_id: str) -> str:
 
 
 @tool
-async def find_past_jobs(text: str = "", connector: str = "") -> list[JobRecordSummary]:
+async def find_past_jobs(text: str = "", connector: str = "") -> JobRecordSearch:
     """Find durable jobs this system has already run, and why each of them was run.
 
     The retrospective view over every campaign, calculation, report and template run that has
@@ -576,8 +604,11 @@ async def find_past_jobs(text: str = "", connector: str = "") -> list[JobRecordS
         connector: Restrict to one capability bundle (e.g. "bo", "calc"). Empty searches all.
 
     Returns:
-        The matching runs, newest first: what ran, why, how it ended (`state` is `completed` or
-        `failed`), what came out in one line, and the note it proposed (if any).
+        `hits` — the matching runs, newest first: what ran, why, how it ended (`state` is
+        `completed` or `failed`), what came out in one line, and the note it proposed (if any) —
+        and `verdict`, one sentence saying what the hits are evidence of. **Read it before
+        concluding a run has not happened**: the search is capped, so an empty or a full list is
+        not proof of absence.
     """
     # Two fields are framed and four are not, and both halves of that are deliberate.
     #
@@ -604,15 +635,24 @@ async def find_past_jobs(text: str = "", connector: str = "") -> list[JobRecordS
     # exists to catch. Framing is also applied *here* rather than in `search_job_records`, because
     # the front door's `GET /jobs` reads that same function for a human UI, where an envelope is
     # noise; the envelope belongs to the model's context, so it belongs to the agent layer.
-    return [
-        record.model_copy(
-            update={
-                "rationale": _framed_free_text(record.rationale, record.job_id),
-                "summary": _framed_free_text(record.summary, record.job_id),
-            }
-        )
-        for record in await search_job_records(text, connector)
-    ]
+    #
+    # The framing is applied to the *hits* and the page's own flags are carried through untouched:
+    # `hits_truncated` and `records_kept` are this system's own statements about its own store, not
+    # anybody's free text, and a `verdict` is derived from them.
+    found = await search_job_records(text, connector)
+    return found.model_copy(
+        update={
+            "hits": [
+                record.model_copy(
+                    update={
+                        "rationale": _framed_free_text(record.rationale, record.job_id),
+                        "summary": _framed_free_text(record.summary, record.job_id),
+                    }
+                )
+                for record in found.hits
+            ]
+        }
+    )
 
 
 def completed_job_status(job_id: str, raw: Any) -> DurableJobStatus:
@@ -669,3 +709,78 @@ async def cancel_job(job_id: str) -> bool:
             ) from exc
         return False
     return True
+
+
+def _tournament_id(request: TournamentRequest) -> str:
+    """A deterministic workflow id, so re-asking the same question rejoins the run.
+
+    The actor and roles are in the key for the reason `_report_id` records: `job_status()` applies
+    no owner check, so two principals with different entitlements colliding on one id means one
+    collects the other's work. The question and context are model-authored text and go through
+    `canonical_text`; the entitlement half stays byte-exact.
+    """
+    payload = [
+        canonical_text(request.question),
+        canonical_text(request.context),
+        request.requested_by,
+        *sorted(request.requested_roles),
+    ]
+    return f"hypotheses-{stable_hash(payload)}"
+
+
+@tool
+async def rank_competing_hypotheses(question: str, context: str = "") -> str:
+    """Generate competing explanations, rank them, and say what experiment would settle them.
+
+    For a puzzling result with several possible causes — "the impurity appeared when I changed the
+    solvent", "the yield collapsed on scale-up" — where the useful answer is the *field* of
+    candidates with the evidence weighed across it. Generators propose hypotheses in parallel, each
+    is critiqued, then they are compared in pairs against retrieved evidence and rated on the Elo
+    scale.
+
+    Prefer `suggest_next_experiment` for an optimization over bounded numeric variables with runs
+    already done: a fitted surrogate is a stronger instrument than a judged comparison. Answer
+    directly when only one explanation is really in play — a tournament over a field of one tells
+    nobody anything.
+
+    Returns a job id rather than the ranking; poll `get_durable_job_status`. Re-asking the same
+    question rejoins the existing run.
+
+    **The rating orders the candidates this run generated. It is not a probability that any of them
+    is true.** Read `competing-hypotheses` before reporting one: it carries the rest, including
+    that an unseparated field is an answer rather than a failure.
+
+    Args:
+        question: The observation or puzzle to explain, in the chemist's own terms.
+        context: Optional extra detail — what was already tried, what was ruled out, constraints.
+
+    Returns:
+        The job id to poll. Its result carries the ranked field, every objection raised, the
+        discriminating check for each hypothesis, and the ids of any `experiment-proposal` notes
+        written for checks that need a laboratory.
+    """
+    authorize_trigger("rank_competing_hypotheses")
+    request = TournamentRequest(
+        question=question,
+        context=context,
+        requested_by=require_actor(),
+        requested_roles=sorted(get_current_roles()),
+        correlation_id=get_current_correlation_id() or "",
+        session_id=get_current_session_id() or "",
+    )
+    client = await connect()
+    workflow_id = _tournament_id(request)
+    try:
+        handle = await client.start_workflow(
+            HypothesisTournamentWorkflow.run,
+            request,
+            id=workflow_id,
+            task_queue=settings.background_task_queue,
+            id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE_FAILED_ONLY,
+        )
+    except WorkflowAlreadyStartedError:
+        # Same question, same actor: hand back the run rather than paying for it twice. No
+        # `job_started` signal, matching `request_development_report` — nothing new began.
+        return workflow_id
+    record_job_started(handle.id, "hypotheses")
+    return handle.id

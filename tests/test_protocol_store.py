@@ -294,23 +294,23 @@ def test_the_listing_filters_by_status_and_project_and_is_newest_first(backend: 
             await asyncio.sleep(0.01)
 
         mine = {row[0] for row in rows}
-        listed = [s.design_id for s in await store.listing() if s.design_id in mine]
+        listed = [s.design_id for s in (await store.listing()).designs if s.design_id in mine]
         assert listed == [rows[2][0], rows[1][0], rows[0][0]]
 
-        drafts = {s.design_id for s in await store.listing(status="draft")} & mine
+        drafts = {s.design_id for s in (await store.listing(status="draft")).designs} & mine
         assert drafts == {rows[1][0], rows[2][0]}
 
-        project_a = {s.design_id for s in await store.listing(project="prj-a")} & mine
+        project_a = {s.design_id for s in (await store.listing(project="prj-a")).designs} & mine
         assert project_a == {rows[0][0], rows[2][0]}
 
         both = [
             s.design_id
-            for s in await store.listing(status="draft", project="prj-a")
+            for s in (await store.listing(status="draft", project="prj-a")).designs
             if s.design_id in mine
         ]
         assert both == [rows[2][0]]
 
-        assert len(await store.listing(limit=1)) == 1
+        assert len((await store.listing(limit=1)).designs) == 1
 
     _run(_body)
 
@@ -706,8 +706,10 @@ def test_the_session_that_created_a_design_is_the_one_the_listing_filters_on(
 
         # `session_id` is not on the summary row, so the listing filter is where it is observable —
         # and it is also the caller that got the wrong answer.
-        assert design_id in {row.design_id for row in await store.listing(session_id="one")}
-        assert design_id not in {row.design_id for row in await store.listing(session_id="two")}
+        one = {row.design_id for row in (await store.listing(session_id="one")).designs}
+        two = {row.design_id for row in (await store.listing(session_id="two")).designs}
+        assert design_id in one
+        assert design_id not in two
 
     _run(_body)
 
@@ -1544,5 +1546,44 @@ def test_page_selects_a_revision_and_orders_the_two_histories(backend: str) -> N
         # *head* there and `None` here — a divergence in the one method written to remove one.
         assert await store.page(design_id, 0) is None
         assert await store.page(_id(backend, "page-nothing")) is None
+
+    _run(_body)
+
+
+@pytest.mark.parametrize("backend", _BACKENDS)
+def test_a_listing_says_how_many_designs_it_did_not_list(backend: str) -> None:
+    """The listing has always been a page and only the row count said so — which is not saying so.
+
+    Driven on both backends: 60 designs stored, `listing(limit=20)` returned 20 and the value
+    carried nothing else, so `find_experiment_protocols` and `GET /protocols` both answered "the
+    stored experiment designs" over a third of them. `GET /sessions` in the same API package was
+    explicitly fixed for exactly this — "it always bounded the answer, and nothing said so" — and
+    the sibling listing route was not.
+
+    Scoped to one project so the shared Postgres schema's other rows cannot make the total
+    meaningless: a count is only honest about the predicate it counts.
+    """
+
+    async def _body() -> None:
+        store = await _backend(backend)
+        project = f"page-{backend}-{uuid4().hex[:8]}"
+        for index in range(60):
+            await store.append(
+                _id(backend, f"page-{project}-{index:02d}"),
+                _design(project=project),
+                [],
+                author_kind="agent",
+            )
+
+        page = await store.listing(project=project, limit=20)
+        assert len(page.designs) == 20
+        assert page.total == 60
+        assert page.limit_applied == 20
+        assert page.truncated
+
+        # The clamp is visible as a clamp rather than as a corpus of 500.
+        clamped = await store.listing(project=project, limit=10_000)
+        assert clamped.limit_applied == 500
+        assert not clamped.truncated
 
     _run(_body)

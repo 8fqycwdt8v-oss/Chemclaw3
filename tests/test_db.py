@@ -192,7 +192,7 @@ def test_connect_wraps_unreachable_db_without_leaking_the_password(
     assert not isinstance(exc_info.value, ValueError)  # not a ChemclawError → Temporal retries
 
 
-def test_connection_without_a_pool_opens_a_dedicated_connection(
+async def test_connection_without_a_pool_opens_a_dedicated_connection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A process that never entered `pooling()` keeps the pre-pool behavior: one connect per call.
@@ -215,16 +215,14 @@ def test_connection_without_a_pool_opens_a_dedicated_connection(
 
     monkeypatch.setattr(db, "connect", _fake_connect)
 
-    async def _run() -> None:
-        for _ in range(3):
-            async with db.connection("postgresql://h/db"):
-                pass
+    for _ in range(3):
+        async with db.connection("postgresql://h/db"):
+            pass
 
-    asyncio.run(_run())
     assert opened == ["postgresql://h/db"] * 3
 
 
-def test_connection_defaults_the_statement_timeout_onto_the_connect(
+async def test_connection_defaults_the_statement_timeout_onto_the_connect(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A caller that names no timeout still connects with `pg_statement_timeout_seconds`.
@@ -250,17 +248,15 @@ def test_connection_defaults_the_statement_timeout_onto_the_connect(
 
     monkeypatch.setattr(psycopg.AsyncConnection, "connect", _fake_connect)
 
-    async def _run() -> None:
-        async with db.connection("postgresql://h/db"):
-            pass
-        # An explicit bound still wins — the readiness probe depends on being tighter than this.
-        async with db.connection("postgresql://h/db", statement_timeout_seconds=2.0):
-            pass
-        # ...and 0 is how a call site says "no bound" without leaving the pooled helper.
-        async with db.connection("postgresql://h/db", statement_timeout_seconds=0):
-            pass
+    async with db.connection("postgresql://h/db"):
+        pass
+    # An explicit bound still wins — the readiness probe depends on being tighter than this.
+    async with db.connection("postgresql://h/db", statement_timeout_seconds=2.0):
+        pass
+    # ...and 0 is how a call site says "no bound" without leaving the pooled helper.
+    async with db.connection("postgresql://h/db", statement_timeout_seconds=0):
+        pass
 
-    asyncio.run(_run())
     plan = "-c plan_cache_mode=force_custom_plan"
     assert seen == [f"{plan} -c statement_timeout=12000", f"{plan} -c statement_timeout=2000", plan]
 
@@ -337,21 +333,18 @@ def test_only_the_migration_paths_open_an_unbounded_postgres_connection() -> Non
     assert _modules_calling_db_connect() == _UNBOUNDED_BY_DESIGN
 
 
-def test_pooling_resets_its_state_even_when_the_block_raises() -> None:
+async def test_pooling_resets_its_state_even_when_the_block_raises() -> None:
     """`pooling()` must not leave the process believing it still has a pool after a crash.
 
     A stuck flag would send every later `connection()` at a pool dictionary that has been
     cleared, so the failure mode of a failed startup would be a permanently broken process
     rather than a restart.
     """
+    with pytest.raises(RuntimeError):
+        async with db.pooling():
+            assert db._POOLING is True
+            raise RuntimeError("boom")
 
-    async def _run() -> None:
-        with pytest.raises(RuntimeError):
-            async with db.pooling():
-                assert db._POOLING is True
-                raise RuntimeError("boom")
-
-    asyncio.run(_run())
     assert db._POOLING is False
     assert db._POOLS == {}
 

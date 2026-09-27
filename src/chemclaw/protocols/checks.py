@@ -25,11 +25,12 @@ band a unit mistake leaves.
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from typing import Any
 
 from chemclaw.core.chem import InvalidSmilesError, element_counts
 from chemclaw.core.reagents import resolve_compound_name
+from chemclaw.core.units import UnitError, parse_quantity
 from chemclaw.protocols.layout import PLATE_SHAPES, capacity, plate_shape, well_label
 from chemclaw.protocols.models import (
     ChargeLine,
@@ -38,7 +39,9 @@ from chemclaw.protocols.models import (
     EvidenceRef,
     ExperimentDesign,
     ProtocolCheck,
+    RecordedFailure,
     Setpoints,
+    UncitedPrecedent,
 )
 from chemclaw.science.labels.vocabulary import SpeciesRole
 
@@ -62,6 +65,64 @@ _PH_BAND = (-2.0, 16.0)
 _MAX_EQUIVALENTS = 200.0
 _MAX_MASS_MG = 1_000_000.0
 _MAX_VOLUME_ML = 20_000.0
+
+#: How far above the *declared* scale a charge may go before it reads as a unit mistake.
+#:
+#: **The two constants above are a bench bound wearing a unit-mistake badge, and at kilo scale the
+#: badge is wrong.** They say 1 kg and 20 L, which is a fine description of what a discovery
+#: chemist charges and a false one for a 20 kg campaign in a 250 L reactor — the opening probe of
+#: `data/evals/probes/process-chemistry.yaml`. A protocol at that scale still *stored*, because
+#: this check is a warning rather than a blocker; what it did was report every real charge on it as
+#: a suspected unit error. A warning that fires on correct input is worse than no warning, because
+#: it is the one that teaches a chemist to stop reading warnings — and this check sits beside
+#: `charge_is_consistent` and `limiting_is_limiting`, which they then stop reading too.
+#:
+#: So the bound moves with `request.scale` when the chemist stated one, and the defaults above are
+#: what "no scale stated" means. The multiplier is deliberately loose because the thing being
+#: caught is an *order-of-magnitude slip*, not an unusual recipe: a charge 1,000x the batch scale
+#: is a thousandfold unit error, while 30x is a solvent charged by mass and 5x is an antisolvent.
+#: Anything tighter starts arguing with process chemistry, which is not this function's business.
+_SCALE_MASS_MULTIPLE = 1_000.0
+
+#: Litres of any one charge per kilogram of declared scale, for the same purpose.
+#:
+#: Process volumes run 5-20 L/kg and a wash or a crystallisation liquor can double that, so 100 is
+#: several times the widest real number and still three orders below a mL/L slip.
+_SCALE_VOLUMES_PER_KG = 100.0
+
+#: The density assumed to read a *volume* scale as a mass one, and the only physical assumption in
+#: this module. Water, because the alternative is refusing to widen the mass band for a protocol
+#: whose scale the chemist stated in litres — which is most of them, above a few kilos.
+_ASSUMED_DENSITY_KG_PER_L = 1.0
+
+
+def _plausibility_bands(design: ExperimentDesign) -> tuple[float, float, str]:
+    """The mass (mg) and volume (mL) ceilings for this design, and how they were arrived at.
+
+    Returns the defaults unchanged when the request states no scale, states one this module cannot
+    read ("a 96-well plate", "pilot"), or states one in a dimension that fixes neither bound (mol,
+    with no molar mass to spend it against). **Never tightens**: both are `max`ed against the bench
+    defaults, so declaring a 5 g scale cannot start failing a charge that passes today. The band is
+    here to catch a slip, and a check that grew teeth on a quiet Tuesday is how a warning becomes
+    noise in the other direction.
+    """
+    quantity = parse_quantity(design.request.scale.value)
+    if quantity is None:
+        return _MAX_MASS_MG, _MAX_VOLUME_ML, ""
+    try:
+        if quantity.unit.dimension == "mass":
+            kilograms = quantity.to("kg").value
+        elif quantity.unit.dimension == "volume":
+            kilograms = quantity.to("L").value * _ASSUMED_DENSITY_KG_PER_L
+        else:
+            return _MAX_MASS_MG, _MAX_VOLUME_ML, ""
+    except UnitError:  # pragma: no cover - `to` cannot fail on a dimension just matched
+        return _MAX_MASS_MG, _MAX_VOLUME_ML, ""
+    if kilograms <= 0.0:
+        return _MAX_MASS_MG, _MAX_VOLUME_ML, ""
+    mass = max(_MAX_MASS_MG, kilograms * 1_000_000.0 * _SCALE_MASS_MULTIPLE)
+    volume = max(_MAX_VOLUME_ML, kilograms * _SCALE_VOLUMES_PER_KG * 1_000.0)
+    return mass, volume, f" for the declared scale of {design.request.scale.value}"
 
 
 def _ok(check_id: str, severity: CheckSeverity, detail: str = "") -> ProtocolCheck:
@@ -112,10 +173,10 @@ def _structures(design: ExperimentDesign) -> list[tuple[str, str]]:
         for component in design.request.components
         if component.smiles
     ]
-    return [*asked, *_used_structures(design)]
+    return [*asked, *used_structures(design)]
 
 
-def _used_structures(design: ExperimentDesign) -> list[tuple[str, str]]:
+def used_structures(design: ExperimentDesign) -> list[tuple[str, str]]:
     """Every `(where, smiles)` the design *does*, as opposed to the ones the ask names.
 
     The same distinction `_structures` draws for `reaction_smiles`, one field further in — and
@@ -747,6 +808,7 @@ def quantities_are_plausible(design: ExperimentDesign) -> ProtocolCheck:
             problems.append(
                 f"step {index}: {step.duration_h} h is over {_MAX_PLAUSIBLE_HOURS:.0f} h"
             )
+    max_mass_mg, max_volume_ml, basis = _plausibility_bands(design)
     for line in _all_charge_lines(design):
         if line.equivalents == 0.0 and not line.limiting:
             problems.append(f"charge line {line.component!r} is 0 equivalents")
@@ -755,10 +817,16 @@ def quantities_are_plausible(design: ExperimentDesign) -> ProtocolCheck:
                 f"charge line {line.component!r} at {line.equivalents} equivalents is over "
                 f"{_MAX_EQUIVALENTS:.0f} — a solvent is charged by volume, not by equivalents"
             )
-        if line.mass_mg is not None and line.mass_mg > _MAX_MASS_MG:
-            problems.append(f"charge line {line.component!r}: {line.mass_mg} mg is over 1 kg")
-        if line.volume_ml is not None and line.volume_ml > _MAX_VOLUME_ML:
-            problems.append(f"charge line {line.component!r}: {line.volume_ml} mL is over 20 L")
+        if line.mass_mg is not None and line.mass_mg > max_mass_mg:
+            problems.append(
+                f"charge line {line.component!r}: {line.mass_mg} mg is over "
+                f"{max_mass_mg / 1_000_000.0:g} kg{basis}"
+            )
+        if line.volume_ml is not None and line.volume_ml > max_volume_ml:
+            problems.append(
+                f"charge line {line.component!r}: {line.volume_ml} mL is over "
+                f"{max_volume_ml / 1_000.0:g} L{basis}"
+            )
     if problems:
         return _fail("quantities_are_plausible", "warning", "; ".join(problems))
     return _ok("quantities_are_plausible", "warning", "setpoints and amounts are in range")
@@ -790,7 +858,7 @@ def forbidden_absent(design: ExperimentDesign) -> ProtocolCheck:
     # a structure where one is known, and the written names are still compared beside it for the
     # reagents the table does not carry.
     names = {n.strip().lower() for n in _used_species(design) if n.strip()}
-    structures = {_identity(value) for value in (*names, *(s for _, s in _used_structures(design)))}
+    structures = {_identity(value) for value in (*names, *(s for _, s in used_structures(design)))}
     hits = [
         term for term in forbidden if term.strip().lower() in names or _identity(term) in structures
     ]
@@ -818,7 +886,7 @@ def _identity(value: str) -> str:
 def _used_species(design: ExperimentDesign) -> list[str]:
     """Every human-readable species name the design *uses*.
 
-    Deliberately not the ask's own `components`: see `_used_structures` for the measured failure
+    Deliberately not the ask's own `components`: see `used_structures` for the measured failure
     that inclusion caused. What a chemist names in the ask is frequently the thing they are trying
     to get rid of.
 
@@ -902,7 +970,120 @@ def is_a_protocol(design: ExperimentDesign) -> ProtocolCheck:
 
 #: The checks, in the order a reader wants them. Order is deliberate: what is unreadable, then what
 #: is arithmetically wrong, then what is missing, then what is merely worth knowing.
-_CHECKS: tuple[Callable[[ExperimentDesign], ProtocolCheck], ...] = (
+def no_documented_failure(
+    design: ExperimentDesign, failures: Sequence[RecordedFailure] = ()
+) -> ProtocolCheck:
+    """Nothing this design rests on has already been recorded as having failed.
+
+    **The gap this closes is the one the 2026-09-13 audit called the most concrete in the system**:
+    `forbidden_absent` tests what the chemist *typed* into `request.forbidden`, and nothing tested
+    what the corpus *knows*. So a design could cite a playbook and repeat a documented
+    `failure-mode` note sitting in the same graph — the memory was written, indexed, retrievable,
+    and consulted by nobody at the moment it would have mattered.
+
+    A `note` rather than a `blocker`, deliberately. A recorded failure is evidence and not a
+    verdict: `failure_note` carries a `confidence` precisely because a single failed run is not a
+    refutation of a general rule, the same reagent appears in routes that have nothing to do with
+    each other, and a chemist deliberately re-running something that failed — to characterise it,
+    or because a condition changed — is ordinary work rather than a mistake. Blocking that would
+    teach people to stop citing their evidence, which costs more than it saves.
+
+    **Pure over what the caller supplies, because the harness is synchronous and the corpus is
+    not.** Reading the graph is `async`, every check here is `(design) -> ProtocolCheck`, and making
+    the harness async to reach one corpus would put I/O behind fifteen functions that are all
+    arithmetic today. So the caller does the lookup (`memory/failure.failures_against`) and this
+    decides — the same division `forbidden_absent` already has, where the request supplies the
+    exclusions and the check applies them.
+
+    Args:
+        design: The design being checked.
+        failures: What `failures_against` found for this design's citations and structures. Empty
+            means either that nothing was found or that nobody looked, which this cannot tell apart
+            and does not try to: see `run_checks` for why that is the caller's honesty to keep.
+
+    Returns:
+        A passing `note` when nothing bears on it, and a failing one naming what to read.
+    """
+    if not failures:
+        return _ok("no_documented_failure", "note", "no recorded failure bears on this design")
+    named = "; ".join(
+        f"{failure.id} ({failure.summary})" if failure.summary else failure.id
+        for failure in failures[:_MAX_NAMED_FAILURES]
+    )
+    more = len(failures) - _MAX_NAMED_FAILURES
+    tail = f", and {more} more" if more > 0 else ""
+    return _fail(
+        "no_documented_failure",
+        "note",
+        f"the corpus records {len(failures)} failure(s) bearing on this design: {named}{tail}",
+    )
+
+
+def precedent_consulted(
+    design: ExperimentDesign, precedent: Sequence[UncitedPrecedent] = ()
+) -> ProtocolCheck:
+    """The record holds runs like this one, and this design cites none of them.
+
+    **Advisory, and it does not touch `evidence`.** A citation is a claim the chemist makes about
+    what a decision rests on; a search hit is a thing that exists. Writing a hit into `evidence`
+    would forge the first out of the second, and `evidence_present` would then pass on a design
+    nobody had actually grounded — a check satisfying itself, which is worse than the gap it
+    closes. So this names ids to go and read and stops there.
+
+    A `note`, for the same reason `no_documented_failure` is one: a structurally similar reaction
+    is not automatically relevant. A Tanimoto neighbour can share a scaffold and nothing else, the
+    chemist may have read it and judged it inapplicable, and a deliberate re-run under changed
+    conditions is ordinary work. Blocking on it would teach people to cite noise.
+
+    **The empty case is silence, not a pass claiming a negative.** `UncitedPrecedent` carries no
+    "nothing found" arm because the three reasons a search returns nothing — nobody looked, the
+    index is empty or mid-rebuild, the record genuinely holds nothing — are what
+    `FingerprintSearch.verdict` exists to keep apart, and a check that flattened them into "no
+    precedent" would be the `ScreenResult.verdict` lesson repeated. The caller passes only hits it
+    is willing to stand behind; everything else arrives here as `()`.
+
+    Args:
+        design: The design being checked.
+        precedent: Similar runs the record holds that this design does not cite, as
+            `agent.protocol_design_tools.uncited_precedent` reduced them.
+
+    Returns:
+        A passing `note` when there is nothing to offer, and a failing one naming what to read.
+    """
+    if not precedent:
+        return _ok(
+            "precedent_consulted", "note", "no uncited precedent was offered for this design"
+        )
+    named = "; ".join(
+        f"{hit.id} ({hit.similarity:.2f})" for hit in precedent[:_MAX_NAMED_PRECEDENT]
+    )
+    more = len(precedent) - _MAX_NAMED_PRECEDENT
+    tail = f", and {more} more" if more > 0 else ""
+    return _fail(
+        "precedent_consulted",
+        "note",
+        f"the record holds {len(precedent)} similar run(s) this design does not cite: {named}"
+        f"{tail}. Read them before running this — or say why they do not apply",
+    )
+
+
+#: How many precedents to name before the detail is the problem. A design that ignored twenty near
+#: neighbours has one thing wrong with it, and the count still reports the rest.
+_MAX_NAMED_PRECEDENT = 3
+
+
+#: How many failures to name before the detail is itself the problem. A design citing more than a
+#: handful of refuted notes has one thing wrong with it, not five, and the count still reports the
+#: rest.
+_MAX_NAMED_FAILURES = 3
+
+
+# **`no_documented_failure` is in here and is the one entry `run_checks` calls differently**,
+# because it is the only check whose input is not the design. Registered rather than appended so
+# `tests/test_protocol_checks.py::test_check_ids_matches_what_run_checks_actually_produces` still
+# holds the registry to what is produced, in both directions — a check outside `_CHECKS` would be a
+# verdict the id test cannot see.
+_CHECKS: tuple[Callable[..., ProtocolCheck], ...] = (
     is_a_protocol,
     components_resolve,
     charge_is_consistent,
@@ -917,6 +1098,8 @@ _CHECKS: tuple[Callable[[ExperimentDesign], ProtocolCheck], ...] = (
     controls_present,
     objectives_are_measured,
     quantities_are_plausible,
+    no_documented_failure,
+    precedent_consulted,
     coverage_is_stated,
 )
 
@@ -938,24 +1121,71 @@ _CHECKS: tuple[Callable[[ExperimentDesign], ProtocolCheck], ...] = (
 #: design running in 2-MeTHF. The exclusion is still a blocker where it means something — on a
 #: design that actually *uses* the species, at the protocol stage, which is the only place a chemist
 #: can be harmed by it.
-_REQUEST_STAGE: frozenset[str] = frozenset({"components_resolve"})
+#:
+#: `precedent_consulted` joins that pair on the same argument: `ExperimentRequest.reaction_smiles`
+#: is part of the ask, so what the record already holds like it is knowable before there is a
+#: procedure — which is the moment it is cheapest to read.
+_REQUEST_STAGE: frozenset[str] = frozenset(
+    {"components_resolve", "no_documented_failure", "precedent_consulted"}
+)
 
 
-def run_checks(design: ExperimentDesign, *, stage: CheckStage = "protocol") -> list[ProtocolCheck]:
+def run_checks(
+    design: ExperimentDesign,
+    *,
+    stage: CheckStage = "protocol",
+    failures: Sequence[RecordedFailure] = (),
+    precedent: Sequence[UncitedPrecedent] = (),
+) -> list[ProtocolCheck]:
     """Every check that means something at this stage, in reading order.
 
     At the `request` stage the protocol-only checks are reported as passing `note`s naming what
     they are waiting for, rather than being omitted: a UI that showed every check on a draft and two
     on a request would look like the checks had been skipped.
+
+    **`failures` is the one input that does not come from the design**, and it is a parameter rather
+    than a lookup because this function is synchronous and reading the corpus is not. The caller
+    asks `memory/failure.failures_against` and passes what it found.
+
+    That leaves an honesty problem this cannot solve and should not hide: an empty `failures` means
+    *either* that nothing bears on the design *or* that nobody looked, and the check reports the
+    same passing note for both. A caller that skips the lookup therefore publishes a clean bill the
+    corpus never gave — so the lookup belongs with the caller that has the corpus, and
+    `no_documented_failure` says so in as many words rather than implying a guarantee.
+
+    Both corpus checks run at **both** stages, unlike the protocol-only ones: a structured ask
+    already names reagents and can already cite evidence, so a failure bearing on it — and a
+    precedent the record already holds — are knowable before there is a procedure, which is the
+    moment they are cheapest to act on. (This said "it runs at both stages, unlike every other
+    protocol-only check" after `precedent_consulted` had joined it in `_REQUEST_STAGE`, which the
+    set's own comment ten lines below states.)
+
+    `precedent` is the second input of that kind and arrives on the same terms, which is why the
+    dispatch below is a mapping rather than a chain of identity tests: there is now a *class* of
+    checks the caller feeds from a corpus, and the next one should not need this function edited in
+    two places to be wired up.
     """
-    if stage == "protocol":
-        return [check(design) for check in _CHECKS]
-    return [
-        check(design)
-        if check.__name__ in _REQUEST_STAGE
-        else _ok(check.__name__, "note", "not checked yet — this design holds only the ask")
-        for check in _CHECKS
-    ]
+    supplied: dict[Callable[..., ProtocolCheck], Sequence[Any]] = {
+        no_documented_failure: failures,
+        precedent_consulted: precedent,
+    }
+
+    # **The stage gate is asked first, and that ordering is the whole reason `_REQUEST_STAGE`
+    # means anything.** It shipped the other way round — `check in supplied` tested before the
+    # stage — so a supplied check ran at both stages whatever `_REQUEST_STAGE` said, and the two
+    # names added to that set were dead configuration producing the right behaviour by accident.
+    # Driven: cutting `_REQUEST_STAGE` back to `{"components_resolve"}` left five tests green,
+    # including `test_the_failure_check_runs_at_the_request_stage_too`, which exists to pin exactly
+    # this. Gating first makes that set the mechanism its own comment claims it is.
+    def run_one(check: Callable[..., ProtocolCheck]) -> ProtocolCheck:
+        """One check, stage-gated first and only then dispatched."""
+        if stage != "protocol" and check.__name__ not in _REQUEST_STAGE:
+            return _ok(check.__name__, "note", "not checked yet — this design holds only the ask")
+        if check in supplied:
+            return check(design, supplied[check])
+        return check(design)
+
+    return [run_one(check) for check in _CHECKS]
 
 
 def blockers(checks: list[ProtocolCheck]) -> list[ProtocolCheck]:

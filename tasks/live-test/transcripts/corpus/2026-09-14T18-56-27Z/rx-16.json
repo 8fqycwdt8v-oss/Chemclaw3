@@ -1,0 +1,62 @@
+{
+  "probe": {
+    "id": "rx-16",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Design me the forced degradation study for this molecule. Which conditions, and which sites should analytics be looking for?",
+    "expects_tools": [
+      "predict_site_reactivity",
+      "compute_electronic_properties",
+      "predict_pka",
+      "find_notes",
+      "gather_evidence"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a predicted degradation rate or extent",
+      "a stability, shelf-life or storage-condition conclusion",
+      "a claim that the calculation replaces the study"
+    ],
+    "direction": "Should treat calculation as a prior on *where* the molecule is vulnerable and say so explicitly. Oxidation: rank the electron-rich sites, and note that for abstraction chemistry the relevant ranking is C-H homolysis rather than electrophilic attack, because a weak C-H and an electron-rich site are different liabilities. Hydrolysis: a functional-group checklist, not a Fukui question — esters, amides, carbamates, lactones, lactams, imines, nitriles, epoxides — with ionisation noted where it changes rate or mechanism. Photolysis and thermal degradation are largely outside the tools and should be handed to the study rather than guessed. Precedent in the record for the compound class outranks any descriptor. Must state the hard limits: this is not a stability prediction, formulation effects (excipients, trace metals, peroxide impurities, moisture) are invisible, and the solid state is invisible.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-16",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Design me the forced degradation study for this molecule. Which conditions, and which sites should analytics be looking for?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.18,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "7dfb8e03a4664dc888a19c87e14e39a0",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

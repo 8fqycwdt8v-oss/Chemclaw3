@@ -13,7 +13,17 @@ is the wiring: the ledger's unit and the reported unit have to meet somewhere, a
 
 import pytest
 
-from chemclaw.core.units import Measurement, UnitError, parse_unit, reconcile
+from chemclaw.core.units import (
+    ELECTRONVOLT_TO_KJ,
+    HARTREE_TO_KCAL,
+    JOULE_PER_CALORIE,
+    Measurement,
+    UnitError,
+    has_ambiguous_comma,
+    parse_quantity,
+    parse_unit,
+    reconcile,
+)
 
 
 def _same_dimension(first: str, second: str) -> bool:
@@ -35,9 +45,15 @@ def test_a_conversion_is_the_number_a_chemist_would_write() -> None:
     assert Measurement.of(25.0, "degC").to("K").value == pytest.approx(298.15)
     # A kcal is 4.184 kJ by definition.
     assert Measurement.of(1.0, "kcal/mol").to("kJ/mol").value == pytest.approx(4.184)
-    # A hartree is ~627.5 kcal/mol — the figure a computational chemist knows by heart, which is
-    # why it is the one asserted rather than the 2625.5 kJ/mol the table stores.
-    assert Measurement.of(1.0, "hartree").to("kcal/mol").value == pytest.approx(627.5, rel=1e-3)
+    # A hartree is 627.5 kcal/mol — the figure a computational chemist knows by heart, which is
+    # why it is the one asserted rather than the 2625.5 kJ/mol the table stores. **Asserted to the
+    # full value, not to `rel=1e-3`**: that tolerance was a band of [626.87, 628.13], so a drift of
+    # ±0.63 kcal/mol per hartree — a whole reaction ΔG — passed the guard that exists to catch it.
+    # `test_the_energy_ladder_carries_the_full_codata_value_and_one_definition` is where the
+    # precision and the single-definition rule are actually pinned.
+    assert Measurement.of(1.0, "hartree").to("kcal/mol").value == pytest.approx(
+        627.5094740631, rel=1e-12
+    )
     assert Measurement.of(2.0, "h").to("min").value == pytest.approx(120.0)
 
 
@@ -245,17 +261,19 @@ def test_no_prefix_is_registered_on_one_ladder_and_not_the_other() -> None:
     `reconcile(154, "pm", "M")` returned 1.54e-10 where `origin/main` had refused it outright. Both
     times the test enumerated spellings by hand and stopped one rung short.
 
-    So this asks the registry. `_EXEMPT_FOLDS` is two entries and each states why the other reading
-    is not a unit anybody writes — an allowlist that short is readable, which is the condition
-    `CLAUDE.md` puts on one.
+    So this asks the registry. The allowlist is one entry now, and the entry it lost is the point:
+    see the comment on it.
     """
     from chemclaw.core.units import _UNITS
 
-    #: Folds that exist on one ladder because the other reading is not a real unit. `cM`
-    #: (centimolar) and an "angstrom-molar" are not written by anybody; every other rung of both
-    #: ladders has a counterpart a chemist does use, which is why the pairing is the rule and these
-    #: are the exceptions rather than the other way round.
-    exempt_folds = {"cm", "angstrom"}
+    #: Folds that exist on one ladder because the other reading is not a real unit. An
+    #: "angstrom-molar" is not written by anybody; every other rung of both ladders now has a
+    #: counterpart, because the two ladders are prefixed from one tuple rather than from two lists.
+    #: **`cm` used to be the second entry here** and is not any more: centimolar is indeed not
+    #: written by anybody, but its absence is what made `parse_unit("cM")` answer *centimetre* —
+    #: a fourth instance of this module's one defect, sitting inside the allowlist written to
+    #: excuse it. A rung that costs nothing to generate is cheaper than an argument for omitting it.
+    exempt_folds = {"angstrom"}
 
     def folds(dimension: str) -> set[str]:
         return {
@@ -287,3 +305,233 @@ def test_reconcile_refuses_a_basis_mismatch_the_way_compare_does() -> None:
     # An unstated basis on either side is "nobody said" and must not block an ordinary conversion.
     assert reconcile(0.15, "area%", "%") == pytest.approx(0.15)
     assert reconcile(0.15, "%", "area%") == pytest.approx(0.15)
+
+
+def test_the_energy_ladder_carries_the_full_codata_value_and_one_definition() -> None:
+    """The guard this replaces admitted ±0.63 kcal/mol per hartree, which is a whole reaction ΔG.
+
+    `approx(627.5, rel=1e-3)` is an admissible band of [626.87, 628.13]: every drift a wrong
+    hartree could introduce fits inside it, so the assertion that exists to pin the conversion
+    could not have failed for any error a chemist would notice. A conversion factor is a defined
+    constant, not a measurement, so the tolerance on it is the tolerance of the arithmetic —
+    exact equality against the one definition, and full CODATA precision against a figure written
+    independently of the table it checks.
+
+    Independent references, CODATA 2018 / SI 2019 (none of them read off `core/units.py`):
+    E_h = 4.3597447222071e-18 J, N_A = 6.02214076e23 /mol, e = 1.602176634e-19 C (the last two
+    exact), and the thermochemical calorie is 4.184 J exactly.
+    """
+    hartree_kj_per_mol = 4.3597447222071e-18 * 6.02214076e23 / 1000.0  # 2625.4996394798...
+    electronvolt_kj_per_mol = 1.602176634e-19 * 6.02214076e23 / 1000.0  # 96.4853321233...
+
+    assert Measurement.of(1.0, "hartree").to("kJ/mol").value == pytest.approx(
+        hartree_kj_per_mol, rel=1e-12
+    )
+    assert Measurement.of(1.0, "hartree").to("kcal/mol").value == pytest.approx(
+        hartree_kj_per_mol / 4.184, rel=1e-12
+    )
+    assert Measurement.of(1.0, "eV").to("kJ/mol").value == pytest.approx(
+        electronvolt_kj_per_mol, rel=1e-12
+    )
+
+    # And **one** definition: the registry's factor is derived from `HARTREE_TO_KCAL` rather than
+    # restating it, so the two cannot drift apart the way three independent literals did. Asserted
+    # on the factor itself rather than on the round trip through `to()`, because `(x*c)/c == x` is a
+    # floating-point coincidence and this is a statement about where the number comes from.
+    assert parse_unit("hartree").factor == HARTREE_TO_KCAL * JOULE_PER_CALORIE
+    assert parse_unit("kcal/mol").factor == JOULE_PER_CALORIE
+    assert Measurement.of(1.0, "hartree").to("kcal/mol").value == pytest.approx(
+        HARTREE_TO_KCAL, rel=1e-15
+    )
+
+
+def test_the_two_ladders_that_differ_only_by_case_are_prefixed_from_one_tuple() -> None:
+    """The mechanism, not another example of it — because examples are what kept missing a rung.
+
+    Every defect in this module's history is one shape: a prefix rung present on the concentration
+    ladder and absent from the length one, or the reverse. `M` and `m` differ only by case, so the
+    ladder that has the rung answers for the spelling of the ladder that does not, and the answer is
+    a plausible number in the wrong dimension.
+
+    The test above this one asks the built registry whether the ladders agree, which is a statement
+    about the current table. This one asks *why they cannot disagree*: both rows hold the same tuple
+    object, so a rung added to one is added to the other in the same keystroke. Identity rather than
+    equality on purpose — two equal tuples written out separately are exactly the arrangement that
+    failed three times, and `is` is what makes copying one of them fail here.
+    """
+    from chemclaw.core.units import _DEFS, _LADDER, _UNITS
+
+    ladders = {row.symbol: row.prefixes for row in _DEFS if row.prefixes is _LADDER}
+    assert ladders.keys() == {"M", "m"}, (
+        "the concentration and length ladders are the pair that differ only by case; "
+        f"_LADDER is shared by {sorted(ladders)} instead"
+    )
+    # And the rungs really are that tuple applied to both symbols, rather than a table that happens
+    # to agree with it today.
+    for symbol, dimension in (("M", "concentration"), ("m", "length")):
+        rungs = {unit.symbol for unit in _UNITS.values() if unit.dimension == dimension}
+        assert {f"{prefix[0]}{symbol}" for prefix in _LADDER} | {symbol} <= rungs
+
+
+def test_the_three_defects_this_registry_was_rebuilt_to_make_impossible() -> None:
+    """`nM`, `pm` and `µm`, each of which once resolved to the other ladder.
+
+    Stated as the three original bug reports rather than as a sweep, because the sweep is the test
+    above and this is the record of what it is sweeping for. Each of these shipped: `nM` folded to
+    the nanometre, `pm` — the unit of a bond length — resolved to picomolar once `pM` was added
+    without its twin, and `µm` was registered as an exact alias of micromolar, so a particle size
+    was accepted as a concentration without even reaching the ambiguity guard.
+    """
+    assert parse_unit("nM").dimension == "concentration"
+    assert parse_unit("nm").dimension == "length"
+    assert parse_unit("pM").dimension == "concentration"
+    assert parse_unit("pm").dimension == "length"
+    for micro in ("µm", "μm", "um"):
+        assert parse_unit(micro).dimension == "length", micro
+    for micro in ("µM", "μM", "uM"):
+        assert parse_unit(micro).dimension == "concentration", micro
+    # The fourth instance, found by generating the ladders instead of listing them: `cM` reached
+    # the *centimetre* through the case fold, because centimolar was the rung nobody wrote down.
+    assert parse_unit("cM").dimension == "concentration"
+    with pytest.raises(UnitError, match="ambiguous"):
+        parse_unit("CM")
+
+
+def test_the_registry_is_this_domains_and_not_the_unit_librarys() -> None:
+    """A chemistry registry, built from a restricted definition list rather than from the default.
+
+    The refusal in `parse_unit` is this module's product. `pint.UnitRegistry()` would accept
+    furlongs, nautical miles and everything else — so the registry is `pint.UnitRegistry(None)`,
+    which starts empty, plus exactly what `_PREFIX_DEFINITIONS` and `_DEFS` say.
+
+    The second half is the one a unit library makes easy to lose: **there is no algebra over derived
+    units here**, because nothing in this system multiplies a mass by a length, and a registry that
+    could would be an abstraction with no caller. `UnitRegistry.Unit("m/g")` builds metre-per-gram
+    and `Unit("m**2")` builds square metres, which is why resolution goes through `get_name` — a
+    prefix-and-alias lookup that builds nothing.
+    """
+    for unknown in ("furlong", "nautical_mile", "psi", "degF", "mol/kg"):
+        with pytest.raises(UnitError, match="unknown unit"):
+            parse_unit(unknown)
+    for expression in ("m/g", "m**2", "2*m", "kg*m", "mol/L/s"):
+        with pytest.raises(UnitError):
+            parse_unit(expression)
+
+
+def test_no_exception_from_the_unit_library_reaches_a_caller() -> None:
+    """Every refusal is `UnitError`, or every caller's `except` clause means something else.
+
+    `pint.UndefinedUnitError` is an **`AttributeError`** and `pint.DimensionalityError` is a
+    `TypeError`; `UnitError` is a `ValueError`, which is the non-retryable bad-data path the rest of
+    this tree takes. Letting either through would not merely change a type — an `AttributeError`
+    escaping into `chemclaw.analytical` is the kind `hasattr` and a bare `except AttributeError`
+    swallow somewhere far away from the wrong unit that caused it.
+    """
+    import pint
+
+    for probe in (lambda: parse_unit("furlong"), lambda: Measurement.of(1.0, "mg").to("mL")):
+        with pytest.raises(UnitError) as caught:
+            probe()
+        assert not isinstance(caught.value, pint.PintError)
+        assert isinstance(caught.value, ValueError)
+
+
+def test_the_three_physical_constants_are_pinned_against_the_codata_release_scipy_ships() -> None:
+    """A sourced constant that can move on a dependency bump needs a pin, or sourcing is the defect.
+
+    `core/units.py` reads these from `scipy.constants` rather than transcribing them, which is the
+    right trade — a literal is what let one hartree be written out three times and disagree twice.
+    But it hands a third party the value: `scipy` 1.17.1 carries CODATA **2022** where this module's
+    comment used to say 2018, and adopting it moved `HARTREE_TO_KCAL` by a relative 3.3e-13 on its
+    own. That move was argued; the next one would arrive inside a lockfile bump with nobody asked.
+
+    So the literals here are the pin, compared with `==` rather than a tolerance: a CODATA release
+    *is* a new number, however small, and the point is to be told. The consequences to weigh when
+    this fails are in `core/units.py`'s comment — measured, none of them reaches the calculation
+    cache, because `CALCULATION_EPOCH` rides in the key and these do not.
+
+    `JOULE_PER_CALORIE` is here for a different reason and cannot fail for the same one: the
+    thermochemical calorie is exact by definition, so this arm is a guard against `scipy.constants`
+    renaming or re-basing the attribute rather than against a measurement improving.
+    """
+    assert JOULE_PER_CALORIE == 4.184
+    assert HARTREE_TO_KCAL == 627.5094740628974
+    assert ELECTRONVOLT_TO_KJ == 96.48533212331002
+
+
+# --- parse_quantity -----------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "value", "symbol"),
+    [
+        ("20 kg", 20.0, "kg"),
+        ("20kg", 20.0, "kg"),
+        ("  500 mg  ", 500.0, "mg"),
+        ("1.5 L", 1.5, "L"),
+        ("2,5 kg", 2.5, "kg"),
+        ("2,5 mmol", 2.5, "mmol"),
+        ("1,25 L", 1.25, "L"),
+        ("1e3 g", 1000.0, "g"),
+        ("0.5 mol", 0.5, "mol"),
+    ],
+)
+def test_parse_quantity_reads_what_a_person_types_in_a_scale_field(
+    text: str, value: float, symbol: str
+) -> None:
+    """Including the comma decimal and the missing space, because both are what people write."""
+    quantity = parse_quantity(text)
+    assert quantity is not None
+    assert quantity.value == pytest.approx(value)
+    assert quantity.unit.symbol == symbol
+
+
+@pytest.mark.parametrize(
+    "text", ["", "   ", "a 96-well plate", "pilot scale", "20 furlongs", "kg", "lots", "20"]
+)
+def test_parse_quantity_returns_none_for_what_is_not_a_quantity(text: str) -> None:
+    """`None` rather than an exception, because most of what reaches it is legitimately prose.
+
+    `ExperimentRequest.scale` holds whatever the chemist said. A parser that raised on "a 96-well
+    plate" would put the same `try` in every caller, and the second caller would write it
+    differently — which is the whole reason this returns an answer instead of a failure.
+    """
+    assert parse_quantity(text) is None
+
+
+def test_parse_quantity_refuses_a_number_inside_a_sentence() -> None:
+    """Anchored at both ends: this reads a field, not prose that mentions a number.
+
+    "run it at 20 °C in 500 mL" parsing as a 20 °C *scale* is the failure the anchors prevent, and
+    `quantities.labelled_values` is the tool for the other job.
+    """
+    assert parse_quantity("run it at 20 C in 500 mL") is None
+
+
+@pytest.mark.parametrize(
+    "text", ["1,000 g", "1,500 mL", "12,345 mg", "-1,000 g", "1,500e3 g", "+1,500E-3 mol"]
+)
+def test_parse_quantity_refuses_a_comma_that_may_be_a_thousands_separator(text: str) -> None:
+    """A comma and exactly three digits is refused, not read as a decimal.
+
+    "1,500 g" read as 1.5 g scales a protocol a thousand times too small while its recorded basis
+    still says "1,500 g", so the caller's "write it as a number and a unit" refusal is the answer.
+    An exponent does not hide the group: "1,500e3" is 1.5e3 or 1.5e6.
+    """
+    assert parse_quantity(text) is None
+    assert has_ambiguous_comma(text)
+
+
+@pytest.mark.parametrize(
+    ("text", "value", "unit"),
+    [("0,500 g", 0.5, "g"), ("-0,250 mol", -0.25, "mol"), ("1,5 g", 1.5, "g")],
+)
+def test_parse_quantity_reads_a_comma_that_cannot_be_a_thousands_separator(
+    text: str, value: float, unit: str
+) -> None:
+    """No thousands group starts with 0 or has fewer than three digits: those are decimals."""
+    parsed = parse_quantity(text)
+    assert parsed is not None
+    assert parsed.value == pytest.approx(value)
+    assert parsed.unit.symbol == unit
+    assert not has_ambiguous_comma(text)

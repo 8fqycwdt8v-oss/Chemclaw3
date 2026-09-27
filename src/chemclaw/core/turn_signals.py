@@ -130,7 +130,75 @@ class ToolFailureSignal(BaseModel):
     reason: RefusalReason | None = None
 
 
-Signal = JobSignal | NoteRecordedSignal | QuestionSignal | ToolFailureSignal
+class SkillLoadedSignal(BaseModel):
+    """A skill whose body this turn actually read — the join key a counter cannot be.
+
+    **It exists for the self-confirmation guard and for nothing else yet, and that is stated
+    rather than hidden.** Nothing distilled may count evidence it itself produced: a trajectory
+    that happened *because* a skill was already shaping that turn is not independent evidence for
+    proposing that skill. The predicate is one line; what it had nothing to read was a per-turn
+    record of which skills were loaded, and `chemclaw_skill_loads_total{skill}` cannot be it —
+    a Prometheus counter says a skill was read, never in which turn, and is not a join key.
+
+    **Not rendered to the chemist**, unlike every other member of this union. The others exist
+    because something happened that the person should see; this one is bookkeeping the turn's own
+    cost row absorbs. It rides the same channel anyway because the channel is what carries a fact
+    from a backend three layers down to the runner without the model being able to author it —
+    which is this module's whole subject — and a second mechanism for one field would be the
+    `job_events` duplication D-091 folded back in.
+
+    Both tiers, deliberately: a personal skill shapes a turn exactly as a reviewed one does, and a
+    guard blind to the personal tier would be blind to the tier most likely to be
+    self-confirming, since that is the one the agent can propose into.
+    """
+
+    # The name alone, because the name alone is what any consumer of this asks about.
+    #
+    # **A `tier` field stood here, carried by nothing.** Its comment said it was for the question
+    # "which of my turns loaded judgment I wrote myself" — which is a question about
+    # `turn_costs.skills_loaded`, and that column never held it: `_TurnLedger` folds both tiers into
+    # one set on purpose, so the field was written by two producers and read by no line in `src/`.
+    # A field justified by a row it does not reach is the shape this repository deletes on sight.
+    skill: str
+
+
+class HandoffSignal(BaseModel):
+    """Control moved from one peer agent to another, raised by the handoff tool itself.
+
+    **A signal rather than something the stream reads off the update, and both attempts at the
+    latter were wrong.** The obvious producer scans a completed node's `tool_calls` for a transfer,
+    which fails twice over: a handoff carries its agent's *whole* message list into the parent (it
+    must, or the `AIMessage` holding the call is dropped and the thread keeps an orphan
+    `ToolMessage`), so every later update replays every earlier hop — measured, a two-hop turn
+    announced **seven** handoffs. And the peer's name is not recoverable from the tool's name,
+    because a tool name cannot carry `-`: `transfer_to_evidence_peer` reads back as
+    `evidence_peer` for a profile called `evidence-peer`, so a surface would print a name no
+    profile has.
+
+    Raised from the tool, both problems are gone rather than mitigated: it fires once per call
+    because a call happens once, and it carries the peer's real name because the name is what the
+    tool closed over. That is the same argument every other member of this union rests on — a
+    signal comes from the act itself, never from anything a model can author or a reader can
+    reconstruct.
+    """
+
+    #: The peer giving up control.
+    from_agent: str
+    #: The peer receiving it, and the author of what the chemist reads next.
+    to_agent: str
+    #: The handing model's own stated reason, written for the agent it hands to. Prose for a
+    #: human; nothing branches on it.
+    reason: str
+
+
+Signal = (
+    JobSignal
+    | NoteRecordedSignal
+    | QuestionSignal
+    | SkillLoadedSignal
+    | ToolFailureSignal
+    | HandoffSignal
+)
 
 
 # The key a signal rides under in the graph's custom stream. Namespaced because the channel is
@@ -208,6 +276,18 @@ def record_note_written(note_id: str, reference: str) -> None:
     _emit(NoteRecordedSignal(note_id=note_id, reference=reference))
 
 
+def record_skill_loaded(skill: str) -> None:
+    """Note that this turn read one skill's body. A no-op where nothing is streaming.
+
+    Called from the two backends that deliver a skill body, rather than from the tool that asks for
+    one: `read_file` is a general verb and the decision that a given path *is* a skill body lives in
+    the backend, beside the counter that already books it. One producer per tier, both of them the
+    same call the counter is taken on, so the array and the counter cannot disagree about what a
+    load is.
+    """
+    _emit(SkillLoadedSignal(skill=skill))
+
+
 def record_question(question: str, options: list[str]) -> None:
     """Note that the agent asked the chemist to disambiguate. A no-op where nothing streams."""
     _emit(QuestionSignal(question=question, options=options))
@@ -223,3 +303,21 @@ def record_tool_failure(
     gate to name: the gates refuse by raising.
     """
     _emit(ToolFailureSignal(tool=tool, message=message, call_id=call_id, reason=reason))
+
+
+def record_handoff(from_agent: str, to_agent: str, reason: str) -> None:
+    """Announce that control moved to `to_agent`, from inside the tool that moved it.
+
+    **This name existed before and was deleted for having no caller**
+    (`D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution`): the specialist team
+    that was supposed to call it never did, and a function kept alive by a test that calls it
+    directly is a claim that a control exists. It returns with a caller in the same commit —
+    `agent/handoff.py`'s transfer tool — which is the condition that ADR set and the one
+    `tests/test_event_producers.py` now enforces one layer out.
+
+    Args:
+        from_agent: The peer giving up control; empty only if the turn graph could not name it.
+        to_agent: The peer receiving it.
+        reason: The handing model's own account of why.
+    """
+    _emit(HandoffSignal(from_agent=from_agent, to_agent=to_agent, reason=reason))

@@ -17,19 +17,26 @@ agent testing could reach.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import logging
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 import httpx
 import pytest
 import yaml
+from pydantic import SecretStr
 
 from chemclaw.agent.chemclaw_agent import available_tool_names
+from chemclaw.cli import live_probes
 from chemclaw.core.config import settings
 from chemclaw.core.errors import SubsystemUnavailableError
 from chemclaw.evals.live import ProbeOutcome, _score_citations, load_probes, run_probe
 from chemclaw.evals.probe import Probe, ProbeSet
 from chemclaw.kg.note import mentioned_ids
+from tests.test_probe_coverage import fleet_expected_tools
 
 PROBE_DIR = Path(__file__).resolve().parent.parent / "data" / "evals" / "probes"
 
@@ -57,9 +64,69 @@ def _probe(**overrides: object) -> Probe:
     return Probe.model_validate(payload)
 
 
+SSE_HEADERS = {"content-type": "text/event-stream"}
+"""What the front door actually answers a turn with, and what the client refuses without.
+
+`sse_starlette` sets it on every stream, and `decoded_events` checks it before decoding a byte: a
+JSON error body served at 200 is not a stream, and a harness that scanned it for `data:` prefixes
+would find none and report a broken front door as a turn that said nothing. It is still a turn that
+emitted nothing — see
+`test_a_response_that_is_not_an_event_stream_yields_nothing_rather_than_raising` for why the reader
+names it in the log rather than raising — but a fixture that omits this header is asserting against
+a response the service cannot produce.
+"""
+
+
 def _sse(*events: dict[str, object]) -> bytes:
     """Exactly the wire shape the front door emits: one `data:` line per event."""
     return "".join(f"data: {json.dumps(e)}\n\n" for e in events).encode()
+
+
+#: One turn's stream written in the parts of the SSE grammar the hand-written readers did not have.
+#:
+#: Every line here is legal and three of the four shapes were unreadable before `httpx_sse`:
+#: sse-starlette's keepalive **comment**, the `event:` name `api/events.sse_frame` sets on every
+#: real frame and no fixture in this suite used to send, `id:`/`retry:` fields, and a `data:` field
+#: **split over two lines**, which the grammar says is joined with a newline before it is parsed.
+#: The three old readers each took one `data:` line as a whole payload, so the split frame decoded
+#: as two JSONDecodeErrors and the event simply disappeared — an answer the harness would have
+#: recorded as the system going silent.
+#:
+#: **The split frame is latent, not live**, and the distinction is the point of writing it down:
+#: `sse_starlette` serialises with `model_dump_json()`, which emits no raw newline, so this system
+#: has never sent one. It is here because the reader's job is the wire format rather than this
+#: server's current habits, and because a harness that misreads a legal frame reports the *system*
+#: as broken.
+#:
+#: Defined once and read by `tests/test_live_storm.py` and `tests/test_live_benchmark.py` as well,
+#: because "the three call sites agree" is the claim, and three copies of the fixture would be
+#: three chances for them to stop agreeing.
+AWKWARD_STREAM = (
+    b": ping - 2026-09-16T00:00:00+00:00\n\n"
+    b"event: tool_call\n"
+    b'data: {"type": "tool_call", "tool": "gather_evidence", "arguments": "{}"}\n\n'
+    b"event: answer\n"
+    b"id: 7\n"
+    b"retry: 3000\n"
+    b'data: {"type": "answer",\n'
+    b'data:  "text": "the corpus says ethanol."}\n\n'
+)
+
+#: A turn whose stream stops after the answer's `data:` line, with no blank line to terminate it.
+#:
+#: This is not an exotic frame — it is what every *interrupted* turn looks like on the wire, and
+#: `cli/live_storm` is a chaos harness whose whole subject is producing them: a cancelled turn, a
+#: worker killed mid-answer, a connection cut by a proxy. The SSE grammar dispatches an event on
+#: the blank line that follows it, so a reader that only dispatches there drops the last frame of
+#: every such stream — the frame *nearest the fault the storm was run to observe*.
+#:
+#: Read by `tests/test_live_storm.py` as well, for the same reason `AWKWARD_STREAM` is: the claim
+#: is that the three call sites share one reader, and three copies of a fixture are three chances
+#: for that to stop being true.
+TRUNCATED_STREAM = (
+    b'data: {"type": "token", "text": "the corpus "}\n\n'
+    b'data: {"type": "answer", "text": "says ethanol."}\n'
+)
 
 
 def _transport(*events: dict[str, object]) -> httpx.MockTransport:
@@ -68,7 +135,7 @@ def _transport(*events: dict[str, object]) -> httpx.MockTransport:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/sessions":
             return httpx.Response(200, json={"session_id": "s1"})
-        return httpx.Response(200, content=_sse(*events))
+        return httpx.Response(200, content=_sse(*events), headers=SSE_HEADERS)
 
     return httpx.MockTransport(handler)
 
@@ -151,6 +218,106 @@ def test_expected_tools_is_any_of_not_all_of() -> None:
     assert outcome.expected_tools_met is True
 
 
+def test_a_legal_frame_the_old_readers_could_not_parse_is_read() -> None:
+    """The grammar, not the habit: a split `data:`, a comment, an `event:`, an `id:` and a `retry:`.
+
+    Driven through `run_probe` rather than through the decoder alone, because what broke before was
+    a whole event vanishing from an outcome rather than a function returning the wrong thing: the
+    `tool_call` has to reach `tools_called` and the split `answer` has to reach `answer`, out of
+    one stream that also contains a keepalive comment nothing may turn into an event.
+
+    Every assertion here failed before `httpx_sse` — the split frame decoded as two parse errors
+    and was dropped, so this probe recorded an unanswered turn, which is the silent-death signal
+    this harness exists to report. `AWKWARD_STREAM` says why that is latent against this system's
+    own server and why the test is worth having anyway.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/sessions":
+            return httpx.Response(200, json={"session_id": "s1"})
+        return httpx.Response(200, content=AWKWARD_STREAM, headers=SSE_HEADERS)
+
+    async def go() -> ProbeOutcome:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="http://front-door"
+        ) as client:
+            return await run_probe(client, _probe())
+
+    outcome = asyncio.run(go())
+    assert outcome.tools_called == ["gather_evidence"]
+    assert outcome.answer == "the corpus says ethanol."
+    assert outcome.transport_error is None
+    # The keepalive is a comment, which carries no fields — it must not arrive as an event at all,
+    # or every idle second of a long turn would show up in the counts as something that happened.
+    assert outcome.event_counts == {"tool_call": 1, "answer": 1}
+
+
+def _run_bytes(body: bytes, headers: dict[str, str]) -> ProbeOutcome:
+    """Drive one probe against exact wire bytes rather than against `_sse`'s well-formed frames."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/sessions":
+            return httpx.Response(200, json={"session_id": "s1"})
+        return httpx.Response(200, content=body, headers=headers)
+
+    async def go() -> ProbeOutcome:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="http://front-door"
+        ) as client:
+            return await run_probe(client, _probe())
+
+    return asyncio.run(go())
+
+
+def test_the_final_event_of_a_stream_that_ends_without_a_blank_line_still_arrives() -> None:
+    """A truncated stream keeps its last frame, which is the one worth having.
+
+    The SSE grammar dispatches an event when the decoder sees a **blank line**, so a driver that
+    does nothing at end-of-stream silently drops the final frame of every stream that is cut off
+    — and a cut-off stream is exactly what `cli/live_storm` exists to produce. Measured on this
+    fixture, `EventSource.aiter_sse` yielded **1** event where all three hand-written readers it
+    replaced yielded **2**; `decoded_events` supplies the blank line the stream owed it.
+
+    Asserted through `run_probe` rather than against the decoder alone, because what a dropped
+    frame costs is an *outcome*: the answer vanishes, `answered` goes False, and the probe books a
+    silent death against the system under test. That is the signal this whole harness exists to
+    report, so a decoder defect and the defect it reports are one character apart.
+    """
+    outcome = _run_bytes(TRUNCATED_STREAM, SSE_HEADERS)
+    assert outcome.answer == "says ethanol."
+    assert outcome.answered is True
+    assert outcome.event_counts == {"token": 1, "answer": 1}
+    assert outcome.transport_error is None
+
+
+def test_a_response_that_is_not_an_event_stream_yields_nothing_rather_than_raising(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A 200 carrying JSON is an empty turn and a named warning, never an exception.
+
+    A proxy in front of the front door answering an error as JSON at 200 is the realistic way to
+    get one. `httpx_sse` refuses that content type by raising `SSEError` from inside the iterator,
+    which sounds stricter and is worse placed: whether the misconfiguration is *recorded* or
+    *fatal* then depends on which caller happens to hold a handler. `run_probe` holds one, so this
+    probe would be recorded — but `cli/live_benchmark._ask` holds none, and there the same response
+    ends the whole benchmark run with every already-answered question collected and lost.
+
+    So the turn reads as the turn that emitted nothing, which is what it was, and the finding the
+    old assertion was written for is kept where it costs nobody a run: the log names the content
+    type that arrived. A `transport_error` here would be a claim about the *network*, which was
+    fine.
+    """
+    with caplog.at_level(logging.WARNING, logger="chemclaw.evals.live"):
+        outcome = _run_bytes(
+            b'{"detail": "a proxy answered instead"}', {"content-type": "application/json"}
+        )
+    assert outcome.transport_error is None
+    assert outcome.answered is False
+    assert outcome.event_counts == {}
+    assert "application/json" in caplog.text
+    assert "text/event-stream" in caplog.text
+
+
 def test_no_expected_tools_leaves_the_check_unscored_rather_than_failed() -> None:
     """A probe that names no tool skips the check; `None` must not read as a miss."""
     outcome = _run(_probe(), {"type": "answer", "text": "ok"})
@@ -185,6 +352,89 @@ def test_a_citation_counts_only_when_a_tool_result_actually_returned_it() -> Non
     assert _score_citations("see [[rxn-suzuki-biaryl]]", returned) == []
     assert _score_citations("see [[evidence-for:rxn-suzuki-biaryl]]", returned) == []
     assert _score_citations("see [[rxn-never-retrieved]]", returned) == ["rxn-never-retrieved"]
+
+
+def _notes_event(tool: str, note_ids: list[str]) -> dict[str, object]:
+    """A `tool_result` frame that returned these note ids, which is what a gold set grades."""
+    return {"type": "tool_result", "tool": tool, "preview": "", "note_ids": note_ids, "numbers": []}
+
+
+def test_the_gold_set_scores_what_retrieval_returned_and_not_what_the_answer_cited() -> None:
+    """The recall arithmetic, and the choice of denominator, neither of which had a test.
+
+    `expects_notes` grades **retrieval**: `expected & returned_ids` over `expected`. Scoring the
+    answer's citations instead would fold two different failures into one number — a turn handed
+    the right note and failing to cite it is a citation defect, and `uncited_note_ids` is where it
+    belongs. The fixture makes the two disagree on purpose: the answer cites one note it was never
+    given and omits one it was, so a scorer reading citations would produce 0.5 with a different
+    numerator and a different denominator.
+    """
+    outcome = _run(
+        _probe(expects_notes=["opt-a", "opt-b", "opt-c"]),
+        _notes_event("gather_evidence", ["opt-a", "opt-b", "unexpected-d"]),
+        {"type": "answer", "text": "see [[opt-a]] and [[never-returned]]"},
+    )
+
+    assert outcome.expected_notes_recall == pytest.approx(2 / 3)
+    assert outcome.expected_notes_missing == ["opt-c"]
+    # The two axes stay apart: retrieval got 2 of 3, and the answer invented a citation.
+    assert outcome.uncited_note_ids == ["never-returned"]
+
+
+def test_a_probe_expecting_notes_that_got_none_scores_zero_rather_than_nothing() -> None:
+    """`0.0` and `None` are different findings, and one line of the report depends on it.
+
+    `cli/live_probes` filters on `expected_notes_recall is not None` to decide which probes are in
+    the gold-set mean, then reads `o.expected_notes_recall or 0.0` — so a real zero that arrived as
+    `None` would leave the failing probe out of its own denominator and raise the reported mean.
+    The distinction is the same one `expected_tools_met` already keeps.
+    """
+    missed = _run(
+        _probe(expects_notes=["opt-a"]),
+        _notes_event("gather_evidence", ["something-else"]),
+        {"type": "answer", "text": "nothing relevant came back"},
+    )
+    ungraded = _run(_probe(), {"type": "answer", "text": "nothing was expected"})
+
+    assert missed.expected_notes_recall == 0.0
+    assert missed.expected_notes_missing == ["opt-a"]
+    assert ungraded.expected_notes_recall is None, (
+        "a probe declaring no expected notes must stay out of the gold-set mean entirely"
+    )
+    assert ungraded.expected_notes_missing == []
+
+
+def test_the_report_counts_a_zero_scoring_probe_in_the_gold_set_mean() -> None:
+    """The reporting half, which is where the `None`-versus-`0.0` distinction is spent.
+
+    Driven through the real `_summary` rather than re-deriving the arithmetic: one probe at 1.0,
+    one at 0.0 and one that declares no notes must read as a mean of **0.50 over 2 probes**. A
+    reader of that line is asking "how much of what the questions are about did retrieval reach",
+    and a mean that silently dropped its failures would answer 1.00.
+    """
+    probes = [_probe(id=f"t-0{i}") for i in (1, 2, 3)]
+
+    def _outcome(probe: Probe, **scored: object) -> ProbeOutcome:
+        """One outcome for `probe`, carrying only the gold-set fields a case varies."""
+        return ProbeOutcome(
+            probe_id=probe.id,
+            section=probe.section,
+            persona=probe.persona,
+            bucket=probe.bucket,
+            question=probe.question,
+            **scored,  # type: ignore[arg-type]
+        )
+
+    outcomes = [
+        _outcome(probes[0], expected_notes_recall=1.0),
+        _outcome(probes[1], expected_notes_recall=0.0, expected_notes_missing=["opt-a"]),
+        _outcome(probes[2]),
+    ]
+
+    report = live_probes._summary(probes, outcomes, [], "provenance: a test")
+
+    assert "mean recall over 2 probes) | 0.50" in report
+    assert "probes missing at least one expected note | 1" in report
 
 
 def test_a_citation_past_the_preview_budget_is_still_grounded() -> None:
@@ -340,10 +590,21 @@ def test_every_expected_tool_in_the_shipped_corpus_exists_on_the_agent_surface()
 
     The same declaration-versus-surface check `skill-validate` and `template-validate` already
     apply, for the same reason: without it a typo in the corpus reports as a defect in the system.
+
+    **The fleet exemption is imported rather than restated**, from the file whose whole subject is
+    this check in both directions. This assertion and
+    `tests/test_probe_coverage.py::test_no_probe_expects_a_tool_that_does_not_exist` are one
+    invariant written twice, and the second copy had already drifted into being the weaker: it
+    reads `load_probes`, which does not recurse, so it covers 336 probes where the other covers 338
+    (the `m12/` suites are outside it). Keeping the *exemption* in one place is what stops that gap
+    widening into a disagreement — a probe naming a tool `Chemclaw3-mcp` serves is legitimate under
+    `needs_bundle:`, and a rule about it that lives in two files will shortly mean two things.
     """
     surface = available_tool_names()
     unknown = {t for p in load_probes(str(PROBE_DIR)) for t in p.expects_tools if t not in surface}
-    assert unknown == set(), f"probes expect tools that do not exist: {sorted(unknown)}"
+    assert unknown - fleet_expected_tools() == set(), (
+        f"probes expect tools that do not exist: {sorted(unknown - fleet_expected_tools())}"
+    )
 
 
 def test_a_bucket_c_probe_expects_no_tool() -> None:
@@ -647,10 +908,60 @@ def test_a_run_where_every_judgement_is_ungraded_is_not_a_pass() -> None:
 
     ungraded = Judgement(probe_id="an-01", verdict="ungraded")
     served = Judgement(probe_id="an-02", verdict="served")
+    answered = [_answered("an-01"), _answered("an-02")]
 
-    assert _grading_status([]) == 2
-    assert _grading_status([ungraded]) == 2
-    assert _grading_status([ungraded, served]) == 0
+    assert _grading_status([], [], scripted=False) == 2
+    assert _grading_status([ungraded], answered, scripted=False) == 2
+    assert _grading_status([ungraded, served], answered, scripted=False) == 0
+
+
+def _answered(probe_id: str, *, answered: bool = True) -> ProbeOutcome:
+    """An outcome that did (or did not) produce an answer event — all `_grading_status` reads."""
+    return ProbeOutcome(
+        probe_id=probe_id,
+        section=1,
+        persona="lab_technician",
+        bucket="A",
+        question="q",
+        answer="an answer" if answered else "",
+        answered=answered,
+    )
+
+
+def test_an_unserved_turn_that_never_answered_is_not_a_graded_verdict() -> None:
+    """The mock run of 2026-09-27: one broken stream, every other probe ungraded, exit **0**.
+
+    `judge_outcome` returns `unserved` for a turn with no answer *without asking the judge*, so it
+    records a transport failure, not a grade — and `_grading_status` counted it as one, under the
+    very warning that said the run "will exit non-zero". The same verdict from a judge that read a
+    real answer is a grade and still counts.
+    """
+    from chemclaw.cli.live_probes import _grading_status
+    from chemclaw.evals.live_judge import Judgement
+
+    grades = [
+        Judgement(probe_id="an-01", verdict="ungraded"),
+        Judgement(probe_id="an-02", verdict="unserved", reason="no answer event was produced"),
+    ]
+    broken = [_answered("an-01"), _answered("an-02", answered=False)]
+    assert _grading_status(grades, broken, scripted=False) == 2
+
+    judged = [_answered("an-01"), _answered("an-02")]
+    assert _grading_status(grades, judged, scripted=False) == 0
+
+
+def test_a_run_against_the_scripted_mock_exits_non_zero_whatever_it_graded() -> None:
+    """`_gateway_line` promises a mock run "will exit non-zero"; this is the promise kept.
+
+    A judge on the mock's gateway is the mock, so even a clean `served` is a script grading a
+    script — evidence about the double, never about the system.
+    """
+    from chemclaw.cli.live_probes import _grading_status
+    from chemclaw.evals.live_judge import Judgement
+
+    grades = [Judgement(probe_id="an-01", verdict="served")]
+    assert _grading_status(grades, [_answered("an-01")], scripted=True) == 2
+    assert _grading_status(grades, [_answered("an-01")], scripted=False) == 0
 
 
 def test_a_run_that_reached_nothing_is_not_a_pass() -> None:
@@ -981,3 +1292,82 @@ def test_the_corpus_fidelity_run_writes_under_its_own_directory_too(
     assert written.is_file(), "the report must land in this run's own directory"
     assert written.parent.parent.parent == tmp_path, "one suite dir, one run dir, then the file"
     assert not (tmp_path / "corpus-fidelity.md").exists(), "never over the record"
+
+
+def test_the_probe_client_does_not_hand_its_bearer_to_an_ambient_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The one live-lane client carrying a credential, driven rather than scanned.
+
+    `tests/test_netguard.py::test_every_served_http_client_refuses_the_ambient_proxy` is a ratchet
+    over the *tree*: it reads `trust_env=False` out of the source and cannot say what httpx then
+    does with it. This drives the real `_client()` against a loopback recorder standing in as the
+    proxy, with the probe token set, and asserts the recorder saw nothing at all — not merely that
+    it saw no `Authorization` header, because a proxy that receives the request receives the
+    credential on the next hop whatever this one carried.
+
+    The control arm is the same request through a client built without the keyword, which must
+    reach the recorder; otherwise a recorder that was never wired up would prove the property by
+    being broken.
+    """
+    received: list[str] = []
+
+    class _Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.0"
+
+        def do_POST(self) -> None:
+            received.append(self.headers.get("Authorization", "<no bearer>"))
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *args: object) -> None:
+            """Silence the handler; `received` is the record."""
+
+    server = HTTPServer(("127.0.0.1", 0), _Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    proxy = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        for name in ("http_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY"):
+            monkeypatch.setenv(name, proxy)
+        monkeypatch.setenv("no_proxy", "")
+        monkeypatch.setenv("NO_PROXY", "")
+        monkeypatch.setattr(settings, "live_probe_token", SecretStr("probe-secret"))
+
+        async def post(client: httpx.AsyncClient) -> None:
+            with contextlib.suppress(httpx.HTTPError, OSError):
+                await client.post("/sessions", json={})
+            await client.aclose()
+
+        control = httpx.AsyncClient(base_url="http://front-door.invalid", timeout=5.0)
+        asyncio.run(post(control))
+        assert received, "the control arm reached no recorder, so this test proves nothing"
+        received.clear()
+
+        asyncio.run(post(live_probes._client("http://front-door.invalid")))
+        assert received == [], (
+            f"the probe client went through the ambient proxy ({received}) — the bearer it carries "
+            "reaches whoever set the variable"
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_the_plan_gate_suite_refuses_to_stage_against_the_scripted_mock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exit 3, before a probe is asked — not the 0/5 FAIL the mock used to earn.
+
+    `cli.mock_llm` never writes a plan, so every approval POST is a 409 and each check failed on a
+    scenario that was never staged. "Could not reach it" is this harness's exit 3.
+    """
+    from chemclaw.cli.mock_llm import MOCK_BASE_URL
+
+    def no_front_door(base_url: str | None) -> httpx.AsyncClient:
+        raise AssertionError("the suite dialled the front door against a gateway that cannot plan")
+
+    monkeypatch.setattr(settings, "llm_base_url", MOCK_BASE_URL)
+    monkeypatch.setattr(live_probes, "_client", no_front_door)
+    args = live_probes._parse_args(["--suite", "plan-gate"])
+    assert asyncio.run(live_probes._run_plan_gate(args)) == 3

@@ -492,9 +492,10 @@ def test_a_streamed_plan_carries_the_hash_a_decision_must_be_posted_against() ->
     from chemclaw.api.graph_stream import _from_update
 
     titles = ["screen the reagents", "compute the barrier", "write it up"]
-    update = {
-        "agent": {"todos": [{"content": title, "status": "pending"} for title in titles]},
-    }
+    steps = [
+        {"content": title, "status": "pending", "tools": ["gather_evidence"]} for title in titles
+    ]
+    update = {"agent": {"todos": steps}}
 
     async def _collect() -> list[Any]:
         trace = ToolCallTrace()
@@ -506,17 +507,23 @@ def test_a_streamed_plan_carries_the_hash_a_decision_must_be_posted_against() ->
     plans = [event for event in asyncio.run(_collect()) if event.type == "plan"]
     assert len(plans) == 1
     assert plans[0].plan_hash, "an empty hash is not something a client can post back"
-    assert plans[0].plan_hash == plan_identity(titles)
+    assert plans[0].plan_hash == plan_identity(steps)
 
-    # **The displayed list and the hashed list are different strings, and that is the trap.**
+    # **The displayed list and the hashed list are different values, and that is the trap.**
     # `todos` carries `_todo_titles`'s checkbox rendering — status is a thing a surface must not
-    # have to infer — while the gate and the decision route hash `content` alone
-    # (`plan_state.session_todos`). The first version of this hashed `plan` and produced a
+    # have to infer — while the gate and the decision route hash each step's `content` beside its
+    # declaration (`plan_state.session_plan`). The first version of this hashed `plan` and
+    # produced a
     # `plan_hash` no decision could ever match: authoritative-looking and wrong on every plan,
     # which is worse than the missing field it replaces. Asserting both here is what keeps them
     # from being quietly collapsed into one.
     assert plans[0].todos == [f"[ ] {title}" for title in titles]
-    assert plans[0].plan_hash != plan_identity(plans[0].todos)
+    assert plans[0].plan_hash != plan_identity(
+        [
+            {"content": line, "status": "pending", "tools": ["gather_evidence"]}
+            for line in plans[0].todos
+        ]
+    )
 
 
 @pytest.mark.parametrize("streamed", [False, True])
@@ -765,7 +772,7 @@ def test_an_unparseable_tool_call_reaches_the_stream_as_a_real_tool_failed_event
     )
 
 
-def test_a_mid_turn_resume_continues_the_turns_caps_instead_of_restarting_them(
+async def test_a_mid_turn_resume_continues_the_turns_caps_instead_of_restarting_them(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """One turn, two graph invocations, one allowance.
@@ -788,26 +795,134 @@ def test_a_mid_turn_resume_continues_the_turns_caps_instead_of_restarting_them(
     usage = _Usage()
     carry: dict[str, Any] = {}
 
-    async def _run() -> None:
-        graph = build_langgraph_agent(
-            ScriptedChatModel(["first", "second"]),
-            audit_sink=NullAuditSink(),
-        )
-        config = {"configurable": {"thread_id": "t-resume-caps"}}
-        for message in ("hello", "and the job results"):
-            async for _event in graph_events(
-                graph,
-                message,
-                config=config,
-                trace=trace,
-                on_signal=lambda _signal: None,
-                usage=usage,
-                carry=carry,
-            ):
-                pass
+    graph = build_langgraph_agent(
+        ScriptedChatModel(["first", "second"]),
+        audit_sink=NullAuditSink(),
+    )
+    config = {"configurable": {"thread_id": "t-resume-caps"}}
+    for message in ("hello", "and the job results"):
+        async for _event in graph_events(
+            graph,
+            message,
+            config=config,
+            trace=trace,
+            on_signal=lambda _signal: None,
+            usage=usage,
+            carry=carry,
+        ):
+            pass
 
-    asyncio.run(_run())
     assert carry.get("model_calls") == 2, (
         "the resume restarted the turn's model-call count, so one turn got two allowances of "
         f"both in-graph caps; the carry reads {carry}"
+    )
+
+
+def test_every_per_turn_counter_survives_a_mid_turn_resume() -> None:
+    """`_CARRIED_CHANNELS` names every accumulating per-turn channel, derived rather than listed.
+
+    The test above drives the two that existed when it was written. This is the guard on the
+    *membership*, and it exists because the list is exactly the shape that goes stale: a
+    `TurnTotal` is by construction a counter that accumulates across a turn and resets between
+    turns, so every one of them has the same reason to be carried — and a new one added three
+    modules away is carried only if somebody remembers this tuple.
+
+    That is not hypothetical. `handoffs` arrived with
+    `D-2026-09-19-a-handoff-redistributes-the-turns-authority-it-cannot-extend-it` and was omitted
+    from the carry in its first draft, which would have handed a turn a fresh chain allowance every
+    time it came back from a job result — the bound not existing for precisely the turns long
+    enough to need one, which is the defect `_CARRIED_CHANNELS` was created to fix, one channel
+    over.
+
+    `active_agent` is deliberately not here and is not a `TurnTotal`: it is checkpointed, so a
+    resume restores it rather than carrying it.
+    """
+    from typing import get_type_hints
+
+    from chemclaw.agent.state import ChemclawState, TurnTotal
+    from chemclaw.api.graph_stream import _CARRIED_CHANNELS
+
+    accumulating = {
+        name
+        for name, annotation in get_type_hints(ChemclawState, include_extras=True).items()
+        if any(isinstance(marker, TurnTotal) for marker in getattr(annotation, "__metadata__", ()))
+        or "TurnTotal" in repr(annotation)
+    }
+
+    assert accumulating <= set(_CARRIED_CHANNELS), (
+        f"{sorted(accumulating - set(_CARRIED_CHANNELS))} accumulate across a turn but are not "
+        "carried across a mid-turn resume, so a turn that comes back from a job result gets a "
+        "fresh allowance of whatever they bound"
+    )
+
+
+def test_the_carry_is_the_channels_own_total_across_a_fan_out() -> None:
+    """A fan-out's carry is the turn's total, not one branch's — driven through the real stream.
+
+    **The guard has to run the stream, because the defect lived in the stream's shape.** Every
+    aggregation `_carry_forward` could do over the `updates` mode was wrong for the same reason, and
+    the reason is invisible from inside the function: with `subgraphs=True` this LangGraph version
+    yields **one node per `updates` payload**, never a superstep dict, so `base` has already
+    advanced past every writer after the first and each later one contributes nothing. Both shapes
+    that shipped here — `max` over the payload's values, and the `TurnTotal` fold over them —
+    answered 2 where the channel held 5, which is 23 calls of fresh allowance on a resumed turn
+    that had spent 25.
+
+    So the assertion is a comparison against the graph's **own** channel value, obtained from a
+    second run of the same graph on a fresh thread rather than written down here: a constant
+    expectation would be satisfiable by a carry that happens to agree at this width, and the number
+    under test is precisely one nobody may re-derive by hand. The fan-out is four wide because one
+    writer is the degenerate case both shapes get right — `base + (value - base) == value` — which
+    is why the defect survived a suite with no fan-out in it.
+    """
+    from langgraph.graph import END, START, StateGraph
+
+    from chemclaw.agent.state import ChemclawState
+
+    width = 4
+
+    def _fan_out() -> Any:
+        graph: Any = StateGraph(ChemclawState)
+
+        def bump(state: dict[str, Any]) -> dict[str, Any]:
+            return {"model_calls": int(state.get("model_calls", 0)) + 1}
+
+        graph.add_node("start", bump)
+        graph.add_edge(START, "start")
+        for index in range(width):
+            graph.add_node(f"w{index}", bump)
+            graph.add_edge("start", f"w{index}")
+            graph.add_edge(f"w{index}", END)
+        return graph.compile()
+
+    async def _run() -> tuple[dict[str, Any], Any]:
+        graph = _fan_out()
+        carry: dict[str, Any] = {}
+        async for _event in graph_events(
+            graph,
+            "go",
+            config={"configurable": {"thread_id": "carry-fan-out"}},
+            trace=ToolCallTrace(),
+            on_signal=lambda _signal: None,
+            usage=_Usage(),
+            carry=carry,
+        ):
+            pass
+        truth = await graph.ainvoke(
+            {"messages": []}, {"configurable": {"thread_id": "carry-truth"}}
+        )
+        return carry, truth.get("model_calls")
+
+    carry, channel_total = asyncio.run(_run())
+
+    assert channel_total == width + 1, (
+        "the fixture no longer stages a fan-out the reducer folds — "
+        f"{width} parallel writers plus one should total {width + 1}, the channel holds "
+        f"{channel_total}, so this test is not about the defect any more"
+    )
+    assert carry.get("model_calls") == channel_total, (
+        f"the carry reads {carry.get('model_calls')} where the turn's own channel holds "
+        f"{channel_total}: a mid-turn resume seeded from this dict would hand the turn "
+        f"{channel_total - int(carry.get('model_calls') or 0)} model calls of allowance it has "
+        "already spent"
     )

@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from chemclaw.agent.profiles import _REGISTRY, AgentProfile, registered_profile_names
 from chemclaw.cli.validate_skills import main, validate_skills
 from chemclaw.core.config import settings
 
@@ -124,6 +125,76 @@ def test_an_invented_tool_is_still_rejected() -> None:
     assert "no_such_tool" in problems[0]
 
 
+def test_a_required_tool_outside_the_declaration_is_reported() -> None:
+    """`requires` is a subset of `tools`, and an entry outside it is held by nothing else.
+
+    The asymmetry is the reason this rule exists at all. A `tools` typo is caught twice — against
+    the live surface here, and by the taught-⇒-declared direction if the body names it — and its
+    run-time effect is to leave the skill visible. A `requires` typo is caught by neither, and its
+    run-time effect is the opposite: `ToolScopedSkills._permits` hides the skill wherever that name
+    is absent from the surface, which for a name no tool has is *everywhere*. So the one that fails
+    silently and removes a skill from every deployment is the one with no check, until this.
+    """
+    from chemclaw.agent.skill_manifest import SkillManifest
+    from chemclaw.cli.validate_skills import _requires_problems
+
+    problems = _requires_problems(
+        Path("probe/SKILL.md"),
+        SkillManifest(
+            name="probe",
+            description="probe",
+            tools=["gather_evidence"],
+            requires=["gather_evidenc"],
+        ),
+    )
+
+    assert len(problems) == 1
+    assert "gather_evidenc" in problems[0] and "does not declare it" in problems[0]
+
+
+def test_a_real_tool_still_has_to_be_declared_to_be_required() -> None:
+    """Existing is not enough: the two lists must describe one capability, not two.
+
+    Stated separately from the typo case because the failure it prevents is not a misspelling. A
+    `requires` naming a tool that really exists but is missing from `tools` passes every existence
+    check in this module and still means the skill's declared surface and its required surface
+    disagree — and `ToolScopedSkills` reads both, for the same skill, in the same call.
+    """
+    from chemclaw.agent.skill_manifest import SkillManifest
+    from chemclaw.cli.validate_skills import _requires_problems
+
+    problems = _requires_problems(
+        Path("probe/SKILL.md"),
+        SkillManifest(
+            name="probe",
+            description="probe",
+            tools=["gather_evidence"],
+            # A real tool — `test_a_declared_tool_resolves_wherever_the_capability_lives` proves it.
+            requires=["predict_pka"],
+        ),
+    )
+
+    assert len(problems) == 1
+    assert "predict_pka" in problems[0]
+
+
+def test_a_requires_entry_inside_the_declaration_passes(tmp_path: Path) -> None:
+    """The satisfiable half, driven end to end through `validate_skills` rather than the helper.
+
+    Through the whole gate because `requires` is a new frontmatter key: `SkillManifest` forbids
+    extras, so a rule added to this module without the field reaching the model would fail every
+    skill that uses it, and a helper-level test cannot see that.
+    """
+    root = _skill(
+        tmp_path,
+        "probe",
+        "Call gather_evidence first, then read what it cites.",
+        tools="tools:\n  - gather_evidence\nrequires:\n  - gather_evidence\n",
+    )
+
+    assert validate_skills([str(root)]) == []
+
+
 def _skill(directory: Path, name: str, body: str, tools: str = "") -> Path:
     """Write one SKILL.md with an optional `tools:` block, and return the directory it lives in."""
     skill = directory / name / "SKILL.md"
@@ -220,3 +291,100 @@ def test_an_unknown_skill_role_gate_key_is_reported(
     # it lists the discovered names so the operator can see the spelling they meant.
     assert len(problems) == 1
     assert "porbe" in problems[0] and "gates nothing" in problems[0]
+
+
+def test_an_unknown_skill_name_in_a_profile_is_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The third map that names skills, failing the same quiet way the other two do.
+
+    `ProfileScopedSkills` narrows rather than raising — a turn must not break because a profile
+    file has a typo in it — so a misspelled name removes a skill the profile's author meant to keep
+    and the profile simply offers one fewer than the file reads. A profile is discovered from disk,
+    so this is a deployment's typo as readily as a shipped one.
+    """
+    root = _skill(tmp_path, "probe", "Guidance.")
+    # `load_profiles` too, not only the two readers: it registers the six shipped profiles into a
+    # module-global registry and this test has no cleanup, which is the leak
+    # `tests/test_profile_discovery.py`'s own fixture exists to prevent.
+    monkeypatch.setattr("chemclaw.cli.validate_skills.load_profiles", lambda: None)
+    monkeypatch.setattr("chemclaw.cli.validate_skills.registered_profile_names", lambda: ["narrow"])
+    monkeypatch.setattr(
+        "chemclaw.cli.validate_skills.get_profile",
+        lambda _name: AgentProfile(name="narrow", skill_names=frozenset({"probe", "porbe"})),
+    )
+
+    problems = validate_skills([str(root)])
+
+    assert len(problems) == 1
+    assert "porbe" in problems[0] and "narrow" in problems[0]
+
+
+def test_a_profile_naming_only_real_skills_is_clean(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The negative arm: the check must not fire on the configuration it exists to permit."""
+    root = _skill(tmp_path, "probe", "Guidance.")
+    monkeypatch.setattr("chemclaw.cli.validate_skills.load_profiles", lambda: None)
+    monkeypatch.setattr("chemclaw.cli.validate_skills.registered_profile_names", lambda: ["narrow"])
+    monkeypatch.setattr(
+        "chemclaw.cli.validate_skills.get_profile",
+        lambda _name: AgentProfile(name="narrow", skill_names=frozenset({"probe"})),
+    )
+
+    assert validate_skills([str(root)]) == []
+
+
+def test_a_profile_file_on_disk_is_read_rather_than_assumed_registered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The check loads profiles itself, so a *deployment's* profile file is what it sees.
+
+    This is the arm the two above cannot be: they patch the registry, so a version of
+    `_profile_skill_problems` that never called `load_profiles()` would satisfy both and still be
+    green against every real tree forever — `validate_skills` runs in a CLI process where nothing
+    else has registered a profile, so the registry holds `default` alone and `default` declares no
+    `skill_names`. Driving it from a file is what distinguishes "looked and found nothing wrong"
+    from "did not look".
+    """
+    root = _skill(tmp_path / "tree", "probe", "Guidance.")
+    profiles = tmp_path / "profiles"
+    profiles.mkdir()
+    (profiles / "narrow.yaml").write_text(
+        "instructions: narrow agent\nskill_names:\n  - porbe\n", encoding="utf-8"
+    )
+    monkeypatch.setattr("chemclaw.core.config.settings.profiles_dir", str(profiles))
+    before = set(registered_profile_names())
+    try:
+        problems = validate_skills([str(root)])
+    finally:
+        for name in set(registered_profile_names()) - before:
+            _REGISTRY.pop(name, None)
+
+    assert len(problems) == 1
+    assert "porbe" in problems[0] and "narrow" in problems[0]
+
+
+def test_a_malformed_profile_is_reported_rather_than_raised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gate lists problems; it does not traceback about a profile out of the skill validator.
+
+    Same treatment `_problems_for` gives a malformed `SKILL.md`, and for the same reason: CI goes
+    red either way, and what differs is whether the operator is told what to fix.
+    """
+    root = _skill(tmp_path / "tree", "probe", "Guidance.")
+    profiles = tmp_path / "profiles"
+    profiles.mkdir()
+    # `extra="forbid"`, so a singular `instruction:` is a validation error rather than a no-op.
+    (profiles / "broken.yaml").write_text("instruction: oops\n", encoding="utf-8")
+    monkeypatch.setattr("chemclaw.core.config.settings.profiles_dir", str(profiles))
+    before = set(registered_profile_names())
+    try:
+        problems = validate_skills([str(root)])
+    finally:
+        for name in set(registered_profile_names()) - before:
+            _REGISTRY.pop(name, None)
+
+    assert len(problems) == 1
+    assert "could not be loaded" in problems[0] and "broken.yaml" in problems[0]

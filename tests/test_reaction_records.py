@@ -21,10 +21,12 @@ import sys
 from collections.abc import Sequence
 from datetime import UTC, date, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from chemclaw.agent.condense import Protocol
+from chemclaw.agent.framing import SYSTEM_SPEECH_MARK
 from chemclaw.agent.graph_tools import expand_note
 from chemclaw.agent.protocol_tools import _from_record
 from chemclaw.cli.validate_kg import main as _validate_kg_main
@@ -45,7 +47,7 @@ from chemclaw.ingest.eln.records import (
     UnreadableConditions,
     default_record_store,
 )
-from chemclaw.ingest.eln.sync import sync_entries
+from chemclaw.ingest.eln.sync import IngestSummary, sync_entries
 from chemclaw.kg.note import Note, note_id_for_reaction
 from chemclaw.kg.validate import external_citations, unresolved_citations, validate
 from chemclaw.retrieval.retrievers import FingerprintReactionRetriever
@@ -131,7 +133,7 @@ def test_ingesting_a_reaction_opens_no_pull_request(monkeypatch: pytest.MonkeyPa
     assert record.reaction_id == "no-pr"
 
 
-def test_a_sync_run_does_not_read_the_corpus_it_is_not_replaying() -> None:
+async def test_a_sync_run_does_not_read_the_corpus_it_is_not_replaying() -> None:
     """Cost is bounded by the page, not by how much has already been ingested.
 
     The old loop answered "is this entry unchanged?" by parsing every merged note on disk, once
@@ -153,30 +155,28 @@ def test_a_sync_run_does_not_read_the_corpus_it_is_not_replaying() -> None:
             asked.append(len(reaction_ids))
             return await super().bodies(reaction_ids, source)
 
-    async def _run() -> None:
-        cursor = datetime(2026, 1, 2, tzinfo=UTC)
-        rxn, mol = InMemoryFingerprintStore(), InMemoryFingerprintStore()
-        rec = _CountingStore()
-        # A corpus far larger than the batch: none of it may be read.
-        await rec.record(
-            [
-                ReactionRecord(reaction_id=f"old-{i}", body=f"body {i}", source="eln:test")
-                for i in range(500)
-            ],
-            "test-eln",
-        )
-        replayed = _entry("replayed", cursor - datetime.resolution)
-        await sync_entries(
-            _ListAdapter([replayed]),
-            rxn,
-            mol,
-            rec,
-            cursor,
-            label_index=InMemoryLabelIndex(),
-            source="test-eln",
-        )
+    cursor = datetime(2026, 1, 2, tzinfo=UTC)
+    rxn, mol = InMemoryFingerprintStore(), InMemoryFingerprintStore()
+    rec = _CountingStore()
+    # A corpus far larger than the batch: none of it may be read.
+    await rec.record(
+        [
+            ReactionRecord(reaction_id=f"old-{i}", body=f"body {i}", source="eln:test")
+            for i in range(500)
+        ],
+        "test-eln",
+    )
+    replayed = _entry("replayed", cursor - datetime.resolution)
+    await sync_entries(
+        _ListAdapter([replayed]),
+        rxn,
+        mol,
+        rec,
+        cursor,
+        label_index=InMemoryLabelIndex(),
+        source="test-eln",
+    )
 
-    asyncio.run(_run())
     assert asked == [1], (
         f"the unchanged-entry lookup asked for {asked}; it must be keyed on the batch (1 id), "
         "never on the 500-record corpus — that is the growth this tier exists to remove"
@@ -258,7 +258,11 @@ def test_a_structural_hit_still_expands_into_its_recipe(monkeypatch: pytest.Monk
         return cited, view.body
 
     cited, body = asyncio.run(_run())
-    assert cited == [note_id_for_reaction("rxn-recipe")]
+    # The literal rather than `note_id_for_reaction(...)`, because deriving the expectation from
+    # the function under test moves both sides together: a retriever that stopped naming the
+    # source it matched in would still pass. The round trip is what makes this a citation and not
+    # a string — `expand_note` below resolves this exact id.
+    assert cited == ["reaction-test-eln.rxn-recipe"]
     assert "80.0 °C" in body and "Ethanol and acetic acid" in body, (
         "a structural hit must expand into the run's conditions and procedure; a citation with no "
         "readable body is the D-018 failure this change was supposed to remove"
@@ -304,7 +308,7 @@ def test_a_reaction_cited_by_a_campaign_still_expands(
     )
 
 
-def test_expanding_a_citation_to_an_unknown_record_says_so(
+async def test_expanding_a_citation_to_an_unknown_record_says_so(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A missing record is a clear error, not a silently empty view."""
@@ -312,11 +316,8 @@ def test_expanding_a_citation_to_an_unknown_record_says_so(
         "chemclaw.agent.graph_tools.default_record_store", lambda: InMemoryReactionRecordStore()
     )
 
-    async def _run() -> None:
-        with pytest.raises(ChemclawError, match="no reaction record"):
-            await expand_note("reaction-never-ingested")
-
-    asyncio.run(_run())
+    with pytest.raises(ChemclawError, match="no reaction record"):
+        await expand_note("reaction-never-ingested")
 
 
 def test_condense_protocols_resolves_a_reaction_reference(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -412,61 +413,57 @@ def test_a_citation_to_a_missing_record_is_still_caught() -> None:
     assert len(problems) == 1 and "reaction-typo" in problems[0]
 
 
-def test_the_postgres_store_and_the_in_memory_one_answer_alike() -> None:
+async def test_the_postgres_store_and_the_in_memory_one_answer_alike() -> None:
     """The two backends must agree, or the ingest tests prove something the deployment does not.
 
     Exercises the durable store against a real database: the upsert (including the amendment
     overwrite), the body lookup, and every arm of the eligibility filter — which is the one piece
     written twice, once as `ReactionRecord.passes` and once as SQL.
     """
+    await migrated_db_or_skip()
+    durable = PostgresReactionRecordStore()
+    memory = InMemoryReactionRecordStore()
+    records = [
+        ReactionRecord(
+            reaction_id="pg-alpha",
+            body="alpha body",
+            project="prj-alpha",
+            performed_at=date(2026, 3, 1),
+            source="eln:test",
+        ),
+        ReactionRecord(
+            reaction_id="pg-undated", body="undated body", project=None, source="eln:test"
+        ),
+    ]
+    for store in (durable, memory):
+        await store.record(records, "pg-eln")
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        durable = PostgresReactionRecordStore()
-        memory = InMemoryReactionRecordStore()
-        records = [
-            ReactionRecord(
-                reaction_id="pg-alpha",
-                body="alpha body",
-                project="prj-alpha",
-                performed_at=date(2026, 3, 1),
-                source="eln:test",
-            ),
-            ReactionRecord(
-                reaction_id="pg-undated", body="undated body", project=None, source="eln:test"
-            ),
-        ]
-        for store in (durable, memory):
-            await store.record(records, "pg-eln")
+    ids = ["pg-alpha", "pg-undated", "pg-absent"]
+    cases: list[dict[str, object]] = [
+        {},
+        {"type": "reaction"},
+        {"type": "playbook"},
+        {"tag": "prj-alpha"},
+        {"tag": "prj-nope"},
+        {"since": date(2026, 1, 1)},
+        {"since": date(2026, 6, 1)},
+        {"until": date(2026, 6, 1)},
+        {"since": date(2026, 1, 1), "until": date(2026, 6, 1)},
+    ]
+    for filters in cases:
+        assert await durable.eligible(ids, filters) == await memory.eligible(ids, filters), (
+            f"the SQL filter and `ReactionRecord.passes` disagree on {filters}"
+        )
 
-        ids = ["pg-alpha", "pg-undated", "pg-absent"]
-        cases: list[dict[str, object]] = [
-            {},
-            {"type": "reaction"},
-            {"type": "playbook"},
-            {"tag": "prj-alpha"},
-            {"tag": "prj-nope"},
-            {"since": date(2026, 1, 1)},
-            {"since": date(2026, 6, 1)},
-            {"until": date(2026, 6, 1)},
-            {"since": date(2026, 1, 1), "until": date(2026, 6, 1)},
-        ]
-        for filters in cases:
-            assert await durable.eligible(ids, filters) == await memory.eligible(ids, filters), (
-                f"the SQL filter and `ReactionRecord.passes` disagree on {filters}"
-            )
+    assert await durable.bodies(ids, "pg-eln") == await memory.bodies(ids, "pg-eln")
+    assert await durable.known(ids) == {"pg-alpha", "pg-undated"}
 
-        assert await durable.bodies(ids, "pg-eln") == await memory.bodies(ids, "pg-eln")
-        assert await durable.known(ids) == {"pg-alpha", "pg-undated"}
-
-        # An amendment overwrites in place — no second row, no versioning scheme.
-        amended = records[0].model_copy(update={"body": "alpha body, yield corrected to 31%"})
-        await durable.record([amended], "pg-eln")
-        stored = await durable.read("pg-alpha")
-        assert stored is not None and stored.body == amended.body
-        assert await durable.known(["pg-alpha"]) == {"pg-alpha"}
-
-    asyncio.run(_run())
+    # An amendment overwrites in place — no second row, no versioning scheme.
+    amended = records[0].model_copy(update={"body": "alpha body, yield corrected to 31%"})
+    await durable.record([amended], "pg-eln")
+    stored = await durable.read("pg-alpha")
+    assert stored is not None and stored.body == amended.body
+    assert await durable.known(["pg-alpha"]) == {"pg-alpha"}
 
 
 async def _index_behind(statement: str, params: tuple[object, ...]) -> str:
@@ -597,7 +594,7 @@ def _sited(reaction_id: str, site: str, body: str) -> ReactionRecord:
     return ReactionRecord(reaction_id=reaction_id, body=body, source=f"{site}:{reaction_id}")
 
 
-def test_two_sources_sharing_an_entry_id_do_not_overwrite_each_other() -> None:
+async def test_two_sources_sharing_an_entry_id_do_not_overwrite_each_other() -> None:
     """`EXP-1001` at two sites is two runs, and the row key has to be able to say so.
 
     `ingest_reaction`'s own docstring names the collision — "two ELNs may legitimately use one entry
@@ -608,53 +605,41 @@ def test_two_sources_sharing_an_entry_id_do_not_overwrite_each_other() -> None:
     site. `kg-validate` still passed — the citation resolves, to the wrong record. The label index
     put `(source, reaction_id)` in its key for exactly this reason; this tier did not.
     """
+    store = InMemoryReactionRecordStore()
+    await store.record([_sited("EXP-1001", "site-a", "82% Suzuki")], source="eln-a")
+    await store.record([_sited("EXP-1001", "site-b", "nitration, failed")], source="eln-b")
 
-    async def _run() -> None:
-        store = InMemoryReactionRecordStore()
-        await store.record([_sited("EXP-1001", "site-a", "82% Suzuki")], source="eln-a")
-        await store.record([_sited("EXP-1001", "site-b", "nitration, failed")], source="eln-b")
-
-        assert len(await store.all_records()) == 2, "one site's transcription was destroyed"
-        assert await store.bodies(["EXP-1001"], source="eln-a") == {"EXP-1001": "82% Suzuki"}
-        assert await store.bodies(["EXP-1001"], source="eln-b") == {"EXP-1001": "nitration, failed"}
-
-    asyncio.run(_run())
+    assert len(await store.all_records()) == 2, "one site's transcription was destroyed"
+    assert await store.bodies(["EXP-1001"], source="eln-a") == {"EXP-1001": "82% Suzuki"}
+    assert await store.bodies(["EXP-1001"], source="eln-b") == {"EXP-1001": "nitration, failed"}
 
 
-def test_a_citation_that_two_sources_could_answer_is_refused_rather_than_guessed() -> None:
+async def test_a_citation_that_two_sources_could_answer_is_refused_rather_than_guessed() -> None:
     """`reaction-EXP-1001` names no source, so with two rows behind it there is no right answer.
 
     Returning either is a coin flip that reads as a fact — the failure mode this whole finding is
     about — so the read refuses and names both sources. An operator can then scope the sources or
     the site can re-key its export; what they cannot do is not find out.
     """
+    store = InMemoryReactionRecordStore()
+    await store.record([_sited("EXP-1001", "site-a", "82% Suzuki")], source="eln-a")
+    await store.record([_sited("EXP-1001", "site-b", "nitration, failed")], source="eln-b")
 
-    async def _run() -> None:
-        store = InMemoryReactionRecordStore()
-        await store.record([_sited("EXP-1001", "site-a", "82% Suzuki")], source="eln-a")
-        await store.record([_sited("EXP-1001", "site-b", "nitration, failed")], source="eln-b")
-
-        with pytest.raises(ChemclawError, match="eln-a"):
-            await store.read("EXP-1001")
-
-    asyncio.run(_run())
+    with pytest.raises(ChemclawError, match="eln-a"):
+        await store.read("EXP-1001")
 
 
-def test_the_postgres_store_keys_transcriptions_by_source_too() -> None:
+async def test_the_postgres_store_keys_transcriptions_by_source_too() -> None:
     """The `ON CONFLICT` clause and the primary key are the deployment's half of the same rule."""
+    await migrated_db_or_skip()
+    durable = PostgresReactionRecordStore()
+    await durable.record([_sited("pg-shared", "site-a", "a body")], source="pg-eln-a")
+    await durable.record([_sited("pg-shared", "site-b", "b body")], source="pg-eln-b")
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        durable = PostgresReactionRecordStore()
-        await durable.record([_sited("pg-shared", "site-a", "a body")], source="pg-eln-a")
-        await durable.record([_sited("pg-shared", "site-b", "b body")], source="pg-eln-b")
-
-        assert await durable.bodies(["pg-shared"], source="pg-eln-a") == {"pg-shared": "a body"}
-        assert await durable.bodies(["pg-shared"], source="pg-eln-b") == {"pg-shared": "b body"}
-        with pytest.raises(ChemclawError, match="pg-eln-a"):
-            await durable.read("pg-shared")
-
-    asyncio.run(_run())
+    assert await durable.bodies(["pg-shared"], source="pg-eln-a") == {"pg-shared": "a body"}
+    assert await durable.bodies(["pg-shared"], source="pg-eln-b") == {"pg-shared": "b body"}
+    with pytest.raises(ChemclawError, match="pg-eln-a"):
+        await durable.read("pg-shared")
 
 
 async def _write_raw_conditions(reaction_id: str, conditions: object) -> None:
@@ -747,3 +732,93 @@ def test_a_conditions_payload_that_is_not_an_object_is_refused_by_name() -> None
 
     message = asyncio.run(_run())
     assert "rxn-array-conditions" in message, "the refusal does not name the row to act on"
+
+
+def test_one_entry_reporting_a_non_finite_number_does_not_wedge_every_later_run() -> None:
+    """The wedge the reject-and-continue arm exists to prevent, driven against the real column.
+
+    `conditions` is `jsonb`, and `NaN` is not JSON. Postgres says so at the wall, as
+    `psycopg.errors.InvalidTextRepresentation` naming a *token* — an exception that is neither
+    `ChemclawError` nor `ValidationError`, so it walked past `sync_entries`' per-entry guard,
+    aborted the pass and returned no summary. Nothing advanced the cursor, the input is
+    deterministic, and the source is re-fetched from the same `since` every run: **one entry holds
+    an entire corpus at a fixed date forever**, while the ELN looks to a chemist as though it
+    stopped producing.
+
+    Driven end to end rather than at the model, because the whole defect is *which layer* the
+    refusal happens in: a `ValidationError` from `ProcessConditions` is one rejected entry with its
+    reason in the ledger, and the identical value one layer later is an outage.
+
+    In-memory stores would prove nothing here — they take a NaN happily, so this needs the column.
+    """
+
+    def _with_temperature(entry_id: str, celsius: float) -> RawEntry:
+        raw = _entry(entry_id, datetime(2026, 5, 4, tzinfo=UTC))
+        raw.payload["temperature_c"] = celsius
+        return raw
+
+    async def _run() -> IngestSummary:
+        await migrated_db_or_skip()
+        entries = [
+            _with_temperature("nan-before", 25.0),
+            _with_temperature("nan-poison", float("nan")),
+            _with_temperature("nan-after", 30.0),
+        ]
+        return await sync_entries(
+            _ListAdapter(entries),
+            InMemoryFingerprintStore(),
+            InMemoryFingerprintStore(),
+            PostgresReactionRecordStore(),
+            _EPOCH,
+            label_index=InMemoryLabelIndex(),
+            source="eln:nan",
+        )
+
+    summary = asyncio.run(_run())
+    assert summary.ingested == ["nan-before", "nan-after"], (
+        "the entries either side of the bad one did not survive it"
+    )
+    assert [r.entry_id for r in summary.rejected] == ["nan-poison"]
+    assert "temperature_c" in summary.rejected[0].reason, (
+        f"the rejection does not name the field to correct: {summary.rejected[0].reason!r}"
+    )
+    assert summary.next_cursor > _EPOCH, "the cursor did not advance, so the next run repeats this"
+
+
+def test_expanding_a_withdrawn_record_resolves_and_says_it_was_withdrawn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A retraction a chemist cannot see is a withdrawn run answering as a precedent.
+
+    The fifth reader of `retracted_at`, and the one that must *not* stop serving. `read()` keeps
+    answering for a retracted row while `eligible()` stops, deliberately: a row is the only
+    readable form of an ELN run, so a campaign note that already cites a withdrawn one has to
+    expand into "this was withdrawn" rather than into "no note with that id", which is
+    indistinguishable from a typo.
+
+    Both halves are asserted. The notice carries `SYSTEM_SPEECH_MARK` and sits *outside* the framed
+    source body, because it is this system speaking and not the ELN; and `valid_to` carries the
+    same fact in the structured half, where every other reader of a `NoteRef` looks for "this
+    stopped being current".
+    """
+    withdrawn = datetime(2026, 3, 4, tzinfo=UTC)
+
+    async def _run() -> Any:
+        store = InMemoryReactionRecordStore()
+        adapter = _ListAdapter([_entry("rxn-pulled", datetime(2026, 3, 1, tzinfo=UTC))])
+        record = record_from_ord_reaction(adapter.map_to_ord(adapter._entries[0]))
+        await store.record([record.model_copy(update={"retracted_at": withdrawn})], "eln-json")
+        monkeypatch.setattr("chemclaw.agent.graph_tools.default_record_store", lambda: store)
+        return await expand_note(note_id_for_reaction("rxn-pulled"))
+
+    view = asyncio.run(_run())
+
+    assert "Ethanol and acetic acid" in view.body, "the transcription stopped being served at all"
+    assert "withdrew this ELN entry on 2026-03-04" in view.body, (
+        "a withdrawn run expanded with nothing saying it was withdrawn"
+    )
+    assert SYSTEM_SPEECH_MARK in view.body.split("Ethanol")[0], (
+        "the withdrawal notice is not marked as system speech, so it reads as something the ELN "
+        "said about itself"
+    )
+    assert view.note.valid_to == withdrawn.date()

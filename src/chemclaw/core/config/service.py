@@ -43,21 +43,33 @@ class ServiceSettings(BaseSettings):
     # list at all and there is no deployment that needs it — a same-origin embedded UI needs none,
     # and a browser client that does need access has an origin to name.
     service_cors_origins: str = ""
-    # How many uvicorn worker *processes* the container starts (`deploy/entrypoint.sh`). One
-    # asyncio event loop saturates one CPU, and a load test measured throughput flat at
-    # ~1.18 turns/s from 10 to 50 concurrent users on a 4-CPU box — a single-loop ceiling.
+    # **A field with one legal value, whose whole job is to refuse the other ones.** Every value
+    # above 1 is rejected unconditionally by `_guards_that_the_comments_already_demand`, and
+    # `deploy/entrypoint.sh` passes no `--workers` flag at all — so this starts no second process
+    # and cannot be made to. It exists so that an operator who sets it is told *why* at startup,
+    # by name, instead of finding out from behaviour.
     #
-    # The per-session turn guard is no longer among the reasons to keep this at 1: under
+    # The reason is unchanged and is worth keeping. One asyncio event loop saturates one CPU, and
+    # a load test measured throughput flat at ~1.18 turns/s from 10 to 50 concurrent users on a
+    # 4-CPU box, so a second process is the obvious lever — and pulling it silently breaks five
+    # per-process guarantees: the rate limiter, the budget tracker, the attachment store, the
+    # live-session LRU and the metrics registry all live in one process's memory and are invisible
+    # to a sibling worker. A chemist who uploads a file and then asks about it needs both requests
+    # on the same process, and no ingress can pin below the pod. The supported way to use more CPU
+    # is `replicas` with session affinity at the Route.
+    #
+    # The sixth guarantee is the one that *was* fixed and is therefore no longer a reason: under
     # `session_store="postgres"` a turn takes a leased row in `session_turns`, so two turns on one
-    # session cannot be admitted by two processes (D-121). What is still per-process is
-    # *capability*, not correctness — the admission semaphore (so the deployment's real cap is
-    # this many times `service_max_concurrent_turns`), the event-stream caps, uploaded attachments
-    # and harness todos, all of which live in one process's memory and are therefore invisible to
-    # a sibling worker. A chemist who uploads a file and then asks about it needs both requests on
-    # the same process, and no ingress can pin below the pod. So the supported way to use more
-    # CPU is still `replicas` with session affinity at the Route; raise this only for a
-    # deployment that does not use attachments or the harness. Under `session_store="memory"`
-    # there is no shared claim at all and this must stay 1.
+    # session cannot be admitted by two processes (D-121). That fix is why this comment used to end
+    # by advising the reader to "raise this only for a deployment that does not use attachments or
+    # the harness" — advice for a configuration the refusal has never permitted. Nor is the refusal
+    # store-specific: measured, `session_store="memory"` and `session_store="postgres"` are both
+    # refused identically at 2 and at 4, because the guard reads this field alone.
+    #
+    # Still read rather than inert: it is the middle factor in the fleet turn-ceiling product
+    # (`replicas × workers × cap`) that the same validator checks a few statements later. Pinned
+    # at 1 it contributes nothing there, so no configuration can reach that guard through this
+    # field — which is the shape a knob takes on its way out, not a second meaning.
     service_uvicorn_workers: int = Field(default=1, gt=0)
     # How long a turn's claim on its session (`session_turns`, D-121) stays valid before another
     # process may take it. A lease rather than a lock because a lock would have to be held on a
@@ -136,6 +148,29 @@ class ServiceSettings(BaseSettings):
     # will actually take.
     service_max_concurrent_turns: int = Field(default=12, gt=0)
     service_turn_admission_timeout_seconds: float = Field(default=5.0, gt=0)
+    # **The cap above is actor-blind, and this is its missing half.** One principal opening
+    # `service_max_concurrent_turns` sessions holds every permit on the replica and every other
+    # chemist is shed `at_capacity` — the measurement is in `chemclaw.api.detach`, one hang-up per
+    # permit. The per-actor *rate* limit below does not reach it, and not because it is set too
+    # high — it meters a *rate* while this counts *simultaneous* turns, so a principal holds the
+    # whole replica on twelve requests. (It is also 0.0 here; 120/min is the chart's value.)
+    # `src/chemclaw/api/routes/streams.py` already bounds its own resource twice, per user and per
+    # process, on the argument that one bound does not imply the other;
+    # turns had only the second. Counted across an actor's *other* sessions, since one turn per
+    # session is already a 409.
+    #
+    # **0 disables, and off is right as a code default** (D-142/REV-16), here for a reason that is
+    # measured rather than doctrinal: `chemclaw.cli.live_storm`'s family A sweeps the *admission*
+    # cap end to end, driving 48 concurrent turns from one credential at each value — an
+    # on-by-default per-actor cap turns those sheds into 429s and breaks the one instrument that
+    # validates admission control. The chart carries the posture.
+    #
+    # Per process, like `service_max_concurrent_turns`, and with the same caveat: `maxReplicas`
+    # multiplies the real ceiling, so an actor spread over the fleet holds that multiple, and a
+    # fleet-wide per-actor limit belongs at the ingress (SCALE-1). A value at or above
+    # `service_max_concurrent_turns` enforces nothing while reading as protection, which the
+    # cross-field validator in `core/config/__init__.py` now refuses outright.
+    service_max_concurrent_turns_per_actor: int = Field(default=0, ge=0)
     # Threads kept *above* whatever this process's own admission caps can occupy, in the one
     # `asyncio.to_thread` pool they all share (`core/executor.py`). They exist for the calls that
     # are microseconds long and must never wait behind a corpus parse or an embedding: bearer-token
@@ -292,6 +327,19 @@ class ServiceSettings(BaseSettings):
     budget_max_tokens_per_session: int = Field(default=2_000_000, ge=0)
     budget_max_turns_per_user: int = Field(default=1000, ge=0)
     budget_max_tokens_per_user: int = Field(default=20_000_000, ge=0)
+    # The largest conversation a turn may be admitted onto, in bytes of the stored `messages` blob
+    # (`agent/checkpointer.stored_thread_bytes`). **A memory bound, not a cost one**, so it binds
+    # whether or not `budget_enabled` is on: every turn loads its whole thread — compaction trims
+    # only what is sent — so the front door's working set per admitted turn grows with this number
+    # times the pod's bytes per stored byte, and twelve permits on long threads OOM-killed a 1Gi
+    # front door at turn 76 with nothing else in flight
+    # (`D-2026-09-24-a-turn-costs-the-thread-it-loads`). The turn caps above cannot stand in for
+    # it: they count in process, so a restart or a second replica hands a thread a fresh 100.
+    #
+    # Derived downwards from the pod rather than chosen: `tests/test_deploy_chart.py` holds
+    # `resources.service`'s limit against `service_max_concurrent_turns` permits each loading a
+    # thread of this size, and raising it fails there. 0 disables it.
+    session_max_thread_bytes: int = Field(default=1536 * 1024, ge=0)
     # Cap on distinct users the in-process budget tracker keeps counters for. The tracker lives
     # for the pod's lifetime, so without a bound its per-user map grows with every principal
     # ever seen (a slow leak); past the cap the least-recently-active user's counters are
@@ -299,6 +347,42 @@ class ServiceSettings(BaseSettings):
     # a conscious deferral. The per-session map is bounded by `service_max_live_sessions` (the
     # session lifecycle bound).
     budget_max_tracked_users: int = Field(default=10_000, gt=0)
+    # The rolling window the *durable* per-user counters reset on
+    # (`D-2026-09-15-a-budget-a-restart-resets-is-not-a-quota`, `api/budget_store.py`). The
+    # in-process counters above have no window at all — they run until the process restarts or the
+    # LRU evicts the scope, which is a reset on an operational event rather than on a policy, and
+    # is what made `budget_max_tokens_per_user` mean "per pod, between restarts". A window makes
+    # the cap mean what a deployment reads it as.
+    #
+    # There is deliberately **no** `budget_durable` flag: the durable half engages exactly where
+    # `session_store == "postgres"`, the same switch the audit sink and the turn-cost ledger read
+    # (`agent/turn_cost.default_turn_cost_sink`). A second flag could only restate that or
+    # contradict it, which is the argument `durable/schedules.py` makes three times over for asking
+    # the manifests rather than adding an enable switch beside them.
+    #
+    # Rolling rather than calendar-aligned, anchored at a principal's first turn in the window —
+    # `api/budget_store.py` carries that argument and what it costs.
+    budget_window_hours: float = Field(default=24.0, gt=0)
+    # Warn a deployment *before* the cap refuses a turn, rather than only at the refusal. A budget
+    # whose first observable signal is a 429 gives an operator no lead time and a chemist no
+    # explanation: the turn that reports the problem is the turn that was lost to it. At this
+    # fraction of any cap, `chemclaw_budget_warnings_total` increments and a WARNING names the
+    # scope — once per turn, from `record`, because `check` runs twice per turn (a fast path before
+    # the admission permit and the binding one after it) and would double every count.
+    #
+    # **It reaches a metric and a log, not the chemist.** Putting it on the wire means a new member
+    # of the SSE `Event` union in `api/events.py`, which is a coordinated change across
+    # `Chemclaw3_ui` and `Chemclaw3_mock` — the same reason `AnswerEvent.challenged` is still
+    # declared. Stated here rather than left to be discovered, because "the user is warned at 80%"
+    # is what this setting's name suggests and is not what it does.
+    #
+    # 0 disables the warning, on the convention `agent.py` states for numeric ceilings. The upper
+    # bound is exclusive because 1.0 is the one value whose plain reading ("warn only at the cap")
+    # is not what it does: `_near` is `used >= cap * fraction and used < cap`, so at 1.0 it is
+    # `used >= cap and used < cap` — never true, the warning silently off. This line used to say
+    # 1.0 "fires only on the turn that also refuses, which is legal and pointless"; it fires never,
+    # and a bound that rejects it says so where a comment nobody reads did not.
+    budget_warn_fraction: float = Field(default=0.8, ge=0, lt=1)
     # Job→session push-back (plan F3-T2/T3): a finished Temporal job writes a `session_events`
     # row; the front door tails the table and wakes the owning session (appending the result,
     # flipping the `awaiting` todo) instead of the user polling. This is the tailer's poll

@@ -1,0 +1,62 @@
+{
+  "probe": {
+    "id": "kn-20",
+    "section": 15,
+    "persona": "manager",
+    "bucket": "B",
+    "question": "I need an onboarding package for new process chemists on this programme: modules, the order to do them in, and something that records they've been signed off.",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "find_knowledge_gaps",
+      "record_knowledge_note"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a training record, completion status or sign-off entry",
+      "a course, curriculum, module catalogue or LMS entity",
+      "a programme, project or portfolio record",
+      "a note id that was not retrieved"
+    ],
+    "direction": "Splits the request explicitly. The content half it can do from the graph: an ordered reading list of playbooks, failure modes and reports, cited by id, with a rationale per item, and optionally offered as a recorded note. The tracking half it cannot: there is no training record, curriculum or sign-off store, and no programme entity to hang one on. It must name which half is missing rather than producing a plausible-looking completion tracker or an invented module numbering.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "kn-20",
+    "section": 15,
+    "persona": "manager",
+    "bucket": "B",
+    "question": "I need an onboarding package for new process chemists on this programme: modules, the order to do them in, and something that records they've been signed off.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 2.46,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "62e76839b4b340888cab1a7b5a94c291",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

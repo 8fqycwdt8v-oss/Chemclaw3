@@ -3,7 +3,18 @@
 **Responsibility:** measuring whether the system still answers the way it should. `metric.py` is the
 metric interface and registry, `metrics.py` the seed metrics (importing the package registers them,
 so callers resolve by name), `harness.py` runs a case-set, `retrieval.py` scores retrieval quality,
-`baseline.py` compares a run against the committed baseline, `ab.py` is the tool-utility A/B.
+`baseline.py` compares a run against the committed baseline, `ab.py` is the tool-utility A/B, and
+`delegation.py` is the three-arm delegation comparison built on it — quality through `ab.py`'s own
+noise floor, billed tokens and wall clock reported beside it rather than folded in, because
+"cheaper but worse" and "better but slower" are different answers that one number hides.
+
+`hypothesis_tournament.py` is the odd one out and says so: it measures an **instrument** rather
+than the system's answers. Given a judge of a stated accuracy, does Swiss pairing plus the
+Bradley-Terry fit recover a known ordering, and by how much does it beat not ranking at all? The
+ground truth is constructed, so it needs no model and no credential and runs in CI
+(`make hypothesis-recovery`) — and so it cannot say whether a *language model* judging real
+chemistry is an accurate judge. `backtest_shape()` states the corpus backtest that would settle
+that and records that it has never run, for `delegation.py`'s reason.
 
 ## Code here, cases in `data/evals/`
 

@@ -17,12 +17,14 @@ Postgres-backed and skipped where no database is reachable, like every other sto
 import asyncio
 import contextlib
 import io
+import math
 import re
 from pathlib import Path
 
 import pytest
 from psycopg.types.json import Jsonb
 
+from chemclaw.agent import leaver
 from chemclaw.agent.leaver import (
     _BEYOND_REACH,
     _ERASE,
@@ -31,6 +33,7 @@ from chemclaw.agent.leaver import (
     ErasureError,
     _residue_columns,
     _residue_for,
+    _sessions_held,
     erase_actor,
     finish_erasure,
     finish_leaves,
@@ -158,61 +161,49 @@ async def _count(table: str, column: str, value: str) -> int:
     return int(row[0]) if row else 0
 
 
-def test_a_dry_run_reports_real_counts_and_writes_nothing() -> None:
+async def test_a_dry_run_reports_real_counts_and_writes_nothing() -> None:
     """The number an operator signs off on is the number that will be deleted.
 
     The dry run really executes the deletes and rolls back, rather than running a second counting
     query that hopes to predict them — a preview computed a different way from the thing it
     previews is a preview of something else.
     """
-
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await _seed(_ANNA, "sess-dry")
-        report = await erase_actor(_ANNA)
-        assert report.applied is False
-        assert report.erased["session_messages"] >= 1
-        assert report.erased["user_preferences"] >= 1
-        assert report.erased_total >= 3
-        # Nothing was committed.
-        assert await _count("session_owners", "owner", _ANNA) >= 1
-        assert await _count("user_preferences", "owner", _ANNA) >= 1
-
-    asyncio.run(_run())
+    await migrated_db_or_skip()
+    await _seed(_ANNA, "sess-dry")
+    report = await erase_actor(_ANNA)
+    assert report.applied is False
+    assert report.erased["session_messages"] >= 1
+    assert report.erased["user_preferences"] >= 1
+    assert report.erased_total >= 3
+    # Nothing was committed.
+    assert await _count("session_owners", "owner", _ANNA) >= 1
+    assert await _count("user_preferences", "owner", _ANNA) >= 1
 
 
-def test_applying_removes_the_conversation() -> None:
+async def test_applying_removes_the_conversation() -> None:
     """Sessions, their messages and events, preferences and watches all go."""
-
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await _seed(_ANNA, "sess-apply")
-        report = await erase_actor(_ANNA, apply=True)
-        assert report.applied is True
-        assert await _count("session_owners", "owner", _ANNA) == 0
-        assert await _count("user_preferences", "owner", _ANNA) == 0
-        assert await _count("session_messages", "session_id", "sess-apply") == 0
-        assert await _count("session_events", "session_id", "sess-apply") == 0
-
-    asyncio.run(_run())
+    await migrated_db_or_skip()
+    await _seed(_ANNA, "sess-apply")
+    report = await erase_actor(_ANNA, apply=True)
+    assert report.applied is True
+    assert await _count("session_owners", "owner", _ANNA) == 0
+    assert await _count("user_preferences", "owner", _ANNA) == 0
+    assert await _count("session_messages", "session_id", "sess-apply") == 0
+    assert await _count("session_events", "session_id", "sess-apply") == 0
 
 
-def test_one_persons_erasure_leaves_another_persons_data_alone() -> None:
+async def test_one_persons_erasure_leaves_another_persons_data_alone() -> None:
     """The failure that would be discovered far too late: an over-broad WHERE clause."""
-
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await _seed(_ANNA, "sess-anna")
-        await _seed(_BEN, "sess-ben")
-        await erase_actor(_ANNA, apply=True)
-        assert await _count("session_owners", "owner", _BEN) == 1
-        assert await _count("user_preferences", "owner", _BEN) == 1
-        assert await _count("session_messages", "session_id", "sess-ben") == 1
-
-    asyncio.run(_run())
+    await migrated_db_or_skip()
+    await _seed(_ANNA, "sess-anna")
+    await _seed(_BEN, "sess-ben")
+    await erase_actor(_ANNA, apply=True)
+    assert await _count("session_owners", "owner", _BEN) == 1
+    assert await _count("user_preferences", "owner", _BEN) == 1
+    assert await _count("session_messages", "session_id", "sess-ben") == 1
 
 
-def test_the_audit_trail_survives_an_erasure_and_is_reported() -> None:
+async def test_the_audit_trail_survives_an_erasure_and_is_reported() -> None:
     """The retained half of the rule, and the half a caller must not be able to miss.
 
     An attributable record that can be deleted on request is not an attributable record, and for a
@@ -220,46 +211,38 @@ def test_the_audit_trail_survives_an_erasure_and_is_reported() -> None:
     row stays — and the report *names it and counts it*, because a partial erasure that looks
     complete is worse than one that refuses out loud.
     """
+    await migrated_db_or_skip()
+    await _seed(_ANNA, "sess-audit")
+    async with await connect(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "INSERT INTO audit_events "
+                "(correlation_id, actor, tool, arguments, outcome, detail, latency_ms) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                ("conv-leaver", _ANNA, "predict_pka", "{}", "ok", "", 1.0),
+            )
+        await conn.commit()
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await _seed(_ANNA, "sess-audit")
-        async with await connect(settings.postgres_dsn) as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    "INSERT INTO audit_events "
-                    "(correlation_id, actor, tool, arguments, outcome, detail, latency_ms) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s)",
-                    ("conv-leaver", _ANNA, "predict_pka", "{}", "ok", "", 1.0),
-                )
-            await conn.commit()
-
-        report = await erase_actor(_ANNA, apply=True)
-        assert report.retained["audit_events"] >= 1
-        assert report.retained_total >= 1
-        assert await _count("audit_events", "actor", _ANNA) >= 1
-
-    asyncio.run(_run())
+    report = await erase_actor(_ANNA, apply=True)
+    assert report.retained["audit_events"] >= 1
+    assert report.retained_total >= 1
+    assert await _count("audit_events", "actor", _ANNA) >= 1
 
 
-def test_a_blank_actor_is_refused() -> None:
+async def test_a_blank_actor_is_refused() -> None:
     """A blank id matches every un-attributed row of a dev deployment, not one person's data.
 
     `unverified:` on its own is the same refusal wearing a disguise: it is a non-empty string, but
     the id behind the marker is blank, and matching it would sweep every row any writer ever marked
     — everyone's, from a single stray paste.
     """
-
-    async def _run() -> None:
-        for blank in ("   ", "unverified:", "unverified:  "):
-            try:
-                await erase_actor(blank)
-            except ValueError as exc:
-                assert "non-empty" in str(exc)
-            else:  # pragma: no cover - the refusal is the behavior under test
-                raise AssertionError(f"{blank!r} must be refused before any statement runs")
-
-    asyncio.run(_run())
+    for blank in ("   ", "unverified:", "unverified:  "):
+        try:
+            await erase_actor(blank)
+        except ValueError as exc:
+            assert "non-empty" in str(exc)
+        else:  # pragma: no cover - the refusal is the behavior under test
+            raise AssertionError(f"{blank!r} must be refused before any statement runs")
 
 
 async def _seed_shared_blob(hash_: str, sessions: tuple[str, ...]) -> None:
@@ -280,7 +263,7 @@ async def _seed_shared_blob(hash_: str, sessions: tuple[str, ...]) -> None:
         await conn.commit()
 
 
-def test_erasing_one_person_leaves_a_shared_tool_result_readable_for_the_other() -> None:
+async def test_erasing_one_person_leaves_a_shared_tool_result_readable_for_the_other() -> None:
     """A blob two sessions link is not one person's to take away.
 
     **Measured before the fix**, against a live database: two sessions link one blob, erasing the
@@ -290,39 +273,35 @@ def test_erasing_one_person_leaves_a_shared_tool_result_readable_for_the_other()
     it" arm since the single-session delete was written; this is the same rule reaching the same
     table through the other door.
     """
+    await migrated_db_or_skip()
+    shared = "sha-shared-blob"
+    await _seed(_ANNA, "s-anna-shared")
+    await _seed(_BEN, "s-ben-shared")
+    await _seed_shared_blob(shared, ("s-anna-shared", "s-ben-shared"))
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        shared = "sha-shared-blob"
-        await _seed(_ANNA, "s-anna-shared")
-        await _seed(_BEN, "s-ben-shared")
-        await _seed_shared_blob(shared, ("s-anna-shared", "s-ben-shared"))
+    await erase_actor(_ANNA, apply=True)
 
-        await erase_actor(_ANNA, apply=True)
+    async with await connect(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT count(*) FROM tool_result_blobs WHERE content_hash = %s", (shared,)
+            )
+            blobs = (await cur.fetchone() or (0,))[0]
+            await cur.execute(
+                "SELECT count(*) FROM tool_result_links WHERE content_hash = %s "
+                "AND session_id = %s",
+                (shared, "s-ben-shared"),
+            )
+            bens_link = (await cur.fetchone() or (0,))[0]
 
-        async with await connect(settings.postgres_dsn) as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    "SELECT count(*) FROM tool_result_blobs WHERE content_hash = %s", (shared,)
-                )
-                blobs = (await cur.fetchone() or (0,))[0]
-                await cur.execute(
-                    "SELECT count(*) FROM tool_result_links WHERE content_hash = %s "
-                    "AND session_id = %s",
-                    (shared, "s-ben-shared"),
-                )
-                bens_link = (await cur.fetchone() or (0,))[0]
-
-        assert blobs == 1, "erasing one reader deleted a tool result another session still links"
-        assert bens_link == 1, (
-            "the surviving session's link row was cascaded away with the blob — that session's "
-            "transcript now points at a result nothing can fetch"
-        )
-
-    asyncio.run(_run())
+    assert blobs == 1, "erasing one reader deleted a tool result another session still links"
+    assert bens_link == 1, (
+        "the surviving session's link row was cascaded away with the blob — that session's "
+        "transcript now points at a result nothing can fetch"
+    )
 
 
-def test_an_unread_digest_does_not_survive_its_owners_erasure() -> None:
+async def test_an_unread_digest_does_not_survive_its_owners_erasure() -> None:
     """The mailbox is a session id no ownership row backs, so the reachability join never saw it.
 
     A digest lands in `digest-<oid>` (`durable/digest.digest_channel`), deliberately without a
@@ -331,38 +310,34 @@ def test_an_unread_digest_does_not_survive_its_owners_erasure() -> None:
     already produced — reporting `session_events: 0`, which reads as complete. The row here is
     unconsumed on purpose: that is the population nothing else in the system ever drains.
     """
+    await migrated_db_or_skip()
+    await _seed(_CARLA, "s-carla-digest")
+    async with await connect(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "INSERT INTO session_events (session_id, kind) VALUES (%s, %s)",
+                (digest_channel(_CARLA), "digest"),
+            )
+        await conn.commit()
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await _seed(_CARLA, "s-carla-digest")
-        async with await connect(settings.postgres_dsn) as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    "INSERT INTO session_events (session_id, kind) VALUES (%s, %s)",
-                    (digest_channel(_CARLA), "digest"),
-                )
-            await conn.commit()
+    report = await erase_actor(_CARLA, apply=True)
 
-        report = await erase_actor(_CARLA, apply=True)
+    async with await connect(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT count(*) FROM session_events WHERE session_id = %s",
+                (digest_channel(_CARLA),),
+            )
+            left = (await cur.fetchone() or (0,))[0]
 
-        async with await connect(settings.postgres_dsn) as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    "SELECT count(*) FROM session_events WHERE session_id = %s",
-                    (digest_channel(_CARLA),),
-                )
-                left = (await cur.fetchone() or (0,))[0]
-
-        assert left == 0, "the departed person's unread digests survived their erasure"
-        assert report.erased["session_events"] >= 2, (
-            "the report did not count the mailbox row it deleted; a count that omits a table's "
-            "rows is the same false completeness by another route"
-        )
-
-    asyncio.run(_run())
+    assert left == 0, "the departed person's unread digests survived their erasure"
+    assert report.erased["session_events"] >= 2, (
+        "the report did not count the mailbox row it deleted; a count that omits a table's "
+        "rows is the same false completeness by another route"
+    )
 
 
-def test_a_publication_naming_a_person_is_reported_rather_than_silently_kept() -> None:
+async def test_a_publication_naming_a_person_is_reported_rather_than_silently_kept() -> None:
     """The one actor this schema holds inside a payload is counted, not omitted.
 
     `result_publications.document` carries `publications[].actor`, `.session_id` and a free-text
@@ -371,49 +346,42 @@ def test_a_publication_naming_a_person_is_reported_rather_than_silently_kept() -
     over a row holding the person's id and their own words. It is retained rather than erased, by
     the same line as every other record: a publication says who asked for a result and why.
     """
+    await migrated_db_or_skip()
+    document = {
+        "publications": [
+            {"actor": _ERIK, "session_id": "s-erik-pub", "rationale": "erik asked for this"}
+        ]
+    }
+    async with await connect(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "INSERT INTO result_publications (sink, calc_ref, document) VALUES (%s, %s, %s)",
+                ("test-sink", "calc-erik-1", Jsonb(document)),
+            )
+        await conn.commit()
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        document = {
-            "publications": [
-                {"actor": _ERIK, "session_id": "s-erik-pub", "rationale": "erik asked for this"}
-            ]
-        }
+    # Cleaned up in a `finally`, because `result_publications` is not in the erase tier and so
+    # nothing in this run removes it: without this the row outlived the test and the next
+    # assertion about `_ERIK`'s retained count in this file saw it. A fixture that survives its
+    # own test is a fixture the next test is measuring.
+    try:
+        report = await erase_actor(_ERIK)
+
+        assert report.retained.get("result_publications") == 1, (
+            "a publication naming this person was neither erased nor reported as retained"
+        )
+        assert dict(retention_reasons())["result_publications"], (
+            "the retained tier must say why a row stays; this one had no reason to print"
+        )
+        # The bystander check every count in this file carries: an id that merely *contains*
+        # another must not be counted as it.
+        lookalike = await erase_actor(_ERIK_LOOKALIKE)
+        assert lookalike.retained.get("result_publications") == 0
+    finally:
         async with await connect(settings.postgres_dsn) as conn:
             async with conn.cursor() as cur:
-                await cur.execute(
-                    "INSERT INTO result_publications (sink, calc_ref, document) "
-                    "VALUES (%s, %s, %s)",
-                    ("test-sink", "calc-erik-1", Jsonb(document)),
-                )
+                await cur.execute("DELETE FROM result_publications WHERE sink = %s", ("test-sink",))
             await conn.commit()
-
-        # Cleaned up in a `finally`, because `result_publications` is not in the erase tier and so
-        # nothing in this run removes it: without this the row outlived the test and the next
-        # assertion about `_ERIK`'s retained count in this file saw it. A fixture that survives its
-        # own test is a fixture the next test is measuring.
-        try:
-            report = await erase_actor(_ERIK)
-
-            assert report.retained.get("result_publications") == 1, (
-                "a publication naming this person was neither erased nor reported as retained"
-            )
-            assert dict(retention_reasons())["result_publications"], (
-                "the retained tier must say why a row stays; this one had no reason to print"
-            )
-            # The bystander check every count in this file carries: an id that merely *contains*
-            # another must not be counted as it.
-            lookalike = await erase_actor(_ERIK_LOOKALIKE)
-            assert lookalike.retained.get("result_publications") == 0
-        finally:
-            async with await connect(settings.postgres_dsn) as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute(
-                        "DELETE FROM result_publications WHERE sink = %s", ("test-sink",)
-                    )
-                await conn.commit()
-
-    asyncio.run(_run())
 
 
 @pytest.mark.parametrize(
@@ -421,7 +389,7 @@ def test_a_publication_naming_a_person_is_reported_rather_than_silently_kept() -
     [None, {"actor": _ERIK}, "not-a-list", 3, True],
     ids=["json-null", "object", "string", "number", "boolean"],
 )
-def test_a_publication_payload_it_cannot_read_counts_zero_rather_than_ending_the_erasure(
+async def test_a_publication_payload_it_cannot_read_counts_zero_rather_than_ending_the_erasure(
     publications: object,
 ) -> None:
     """One unreadable row must not make erasure impossible for the whole deployment.
@@ -437,37 +405,30 @@ def test_a_publication_payload_it_cannot_read_counts_zero_rather_than_ending_the
     `JSONB NOT NULL` with no CHECK and the table carries a `schema_version` precisely because the
     record shape is expected to change, so these are reachable rather than hypothetical.
     """
-
-    async def _run() -> None:
-        await migrated_db_or_skip()
+    await migrated_db_or_skip()
+    async with await connect(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("DELETE FROM result_publications WHERE sink = %s", ("erasure-test",))
+            await cur.execute(
+                "INSERT INTO result_publications (sink, calc_ref, document) VALUES (%s, %s, %s)",
+                ("erasure-test", "calc-shape", Jsonb({"publications": publications})),
+            )
+        await conn.commit()
+    try:
+        report = await erase_actor(_ERIK)
+        assert report.retained.get("result_publications") == 0, (
+            "a payload this predicate cannot read must count zero, not match"
+        )
+    finally:
         async with await connect(settings.postgres_dsn) as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
                     "DELETE FROM result_publications WHERE sink = %s", ("erasure-test",)
                 )
-                await cur.execute(
-                    "INSERT INTO result_publications (sink, calc_ref, document) "
-                    "VALUES (%s, %s, %s)",
-                    ("erasure-test", "calc-shape", Jsonb({"publications": publications})),
-                )
             await conn.commit()
-        try:
-            report = await erase_actor(_ERIK)
-            assert report.retained.get("result_publications") == 0, (
-                "a payload this predicate cannot read must count zero, not match"
-            )
-        finally:
-            async with await connect(settings.postgres_dsn) as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute(
-                        "DELETE FROM result_publications WHERE sink = %s", ("erasure-test",)
-                    )
-                await conn.commit()
-
-    asyncio.run(_run())
 
 
-def test_a_session_the_leaver_deleted_themselves_does_not_spare_their_own_blob() -> None:
+async def test_a_session_the_leaver_deleted_themselves_does_not_spare_their_own_blob() -> None:
     """An orphan link is not another person, and treating it as one left the leaver's data behind.
 
     `delete_session` deliberately leaves the link row when its blob is shared. The first version of
@@ -480,39 +441,34 @@ def test_a_session_the_leaver_deleted_themselves_does_not_spare_their_own_blob()
     the whole point: that one proves another *person* still spares the blob, this one proves an
     orphan does not. A fix that satisfies only one of the two is the defect in the other direction.
     """
+    await migrated_db_or_skip()
+    shared = "sha-self-orphan"
+    await _seed(_CARLA, "s-carla-keep")
+    await _seed(_CARLA, "s-carla-drop")
+    await _seed_shared_blob(shared, ("s-carla-keep", "s-carla-drop"))
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        shared = "sha-self-orphan"
-        await _seed(_CARLA, "s-carla-keep")
-        await _seed(_CARLA, "s-carla-drop")
-        await _seed_shared_blob(shared, ("s-carla-keep", "s-carla-drop"))
+    await SessionOwnerStore().delete_session("s-carla-drop")
+    report = await erase_actor(_CARLA, apply=True)
 
-        await SessionOwnerStore().delete_session("s-carla-drop")
-        report = await erase_actor(_CARLA, apply=True)
+    async with await connect(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT count(*) FROM tool_result_blobs WHERE content_hash = %s", (shared,)
+            )
+            blobs = (await cur.fetchone() or (0,))[0]
+            await cur.execute(
+                "SELECT count(*) FROM tool_result_links WHERE content_hash = %s", (shared,)
+            )
+            links = (await cur.fetchone() or (0,))[0]
 
-        async with await connect(settings.postgres_dsn) as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    "SELECT count(*) FROM tool_result_blobs WHERE content_hash = %s", (shared,)
-                )
-                blobs = (await cur.fetchone() or (0,))[0]
-                await cur.execute(
-                    "SELECT count(*) FROM tool_result_links WHERE content_hash = %s", (shared,)
-                )
-                links = (await cur.fetchone() or (0,))[0]
-
-        assert blobs == 0, "the leaver's own orphaned link spared their own stored tool result"
-        assert links == 0, "the link rows should have cascaded away with the blob"
-        assert report.erased["tool_result_blobs"] == 1, (
-            "the report said zero over a blob it should have deleted, which reads as 'there were "
-            "none'"
-        )
-
-    asyncio.run(_run())
+    assert blobs == 0, "the leaver's own orphaned link spared their own stored tool result"
+    assert links == 0, "the link rows should have cascaded away with the blob"
+    assert report.erased["tool_result_blobs"] == 1, (
+        "the report said zero over a blob it should have deleted, which reads as 'there were none'"
+    )
 
 
-def test_every_actor_bearing_column_in_the_schema_is_accounted_for() -> None:
+async def test_every_actor_bearing_column_in_the_schema_is_accounted_for() -> None:
     """No column may name a person without this module having a position on it.
 
     **The test the hand-written list needed.** The first version of `_RETAINED` enumerated six
@@ -526,119 +482,107 @@ def test_every_actor_bearing_column_in_the_schema_is_accounted_for() -> None:
     test with the column named, and the author has to decide which tier it belongs to — which is the
     decision, and it should never be made by omission.
     """
+    await migrated_db_or_skip()
+    async with await connect(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT table_name, column_name FROM information_schema.columns "
+                "WHERE table_schema = current_schema() "
+                "AND (column_name = ANY(%s) OR column_name LIKE %s) "
+                "ORDER BY table_name, column_name",
+                (sorted(_ACTOR_COLUMN_NAMES), _LIKE_A_PERSON),
+            )
+            found = {(t, c) for t, c in await cur.fetchall()}
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        async with await connect(settings.postgres_dsn) as conn:
-            async with conn.cursor() as cur:
+    retained = {(table, col) for table, cols, _ in _RETAINED for col in cols}
+    # The scan has to be able to *see* every column this module already has a position on,
+    # or the completeness check below is a completeness check over whatever the predicate
+    # happens to match. A retained column the scan misses is a spelling the vocabulary does
+    # not know, and the next column with that spelling would be accounted for by nobody.
+    invisible = sorted(retained - found)
+    assert not invisible, (
+        f"the scan does not match {invisible}, which `_RETAINED` already names as person "
+        "columns — so a *new* column spelled that way would sit in no tier with this test "
+        "green. Add the spelling to `_ACTOR_COLUMN_NAMES`."
+    )
+    # The erase tier is matched by table: its statements reach rows through `session_owners`
+    # rather than always naming the actor column directly, so the column-level assertion that
+    # fits the retain tier would be wrong here.
+    erased_tables = {table for table, _ in _ERASE}
+    # Two further answers, both of which have to be *given* rather than assumed: a table whose
+    # person sits inside a payload (`_RETAINED_IN_PAYLOAD`, where the column is `document` and
+    # the vocabulary above can never match it), and one this command can neither clear nor
+    # count (`_BEYOND_REACH`). Both are accounted-for positions; neither is silence.
+    payload_tables = {table for table, *_ in _RETAINED_IN_PAYLOAD}
+    # The declared column has to exist, or the predicate over it matches nothing in silence —
+    # which is exactly how this tier's table came to be missing in the first place.
+    async with await connect(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            for table, column, _predicate, _why in _RETAINED_IN_PAYLOAD:
                 await cur.execute(
-                    "SELECT table_name, column_name FROM information_schema.columns "
-                    "WHERE table_schema = current_schema() "
-                    "AND (column_name = ANY(%s) OR column_name LIKE %s) "
-                    "ORDER BY table_name, column_name",
-                    (sorted(_ACTOR_COLUMN_NAMES), _LIKE_A_PERSON),
+                    "SELECT count(*) FROM information_schema.columns "
+                    "WHERE table_schema = current_schema() AND table_name = %s "
+                    "AND column_name = %s",
+                    (table, column),
                 )
-                found = {(t, c) for t, c in await cur.fetchall()}
-
-        retained = {(table, col) for table, cols, _ in _RETAINED for col in cols}
-        # The scan has to be able to *see* every column this module already has a position on,
-        # or the completeness check below is a completeness check over whatever the predicate
-        # happens to match. A retained column the scan misses is a spelling the vocabulary does
-        # not know, and the next column with that spelling would be accounted for by nobody.
-        invisible = sorted(retained - found)
-        assert not invisible, (
-            f"the scan does not match {invisible}, which `_RETAINED` already names as person "
-            "columns — so a *new* column spelled that way would sit in no tier with this test "
-            "green. Add the spelling to `_ACTOR_COLUMN_NAMES`."
-        )
-        # The erase tier is matched by table: its statements reach rows through `session_owners`
-        # rather than always naming the actor column directly, so the column-level assertion that
-        # fits the retain tier would be wrong here.
-        erased_tables = {table for table, _ in _ERASE}
-        # Two further answers, both of which have to be *given* rather than assumed: a table whose
-        # person sits inside a payload (`_RETAINED_IN_PAYLOAD`, where the column is `document` and
-        # the vocabulary above can never match it), and one this command can neither clear nor
-        # count (`_BEYOND_REACH`). Both are accounted-for positions; neither is silence.
-        payload_tables = {table for table, *_ in _RETAINED_IN_PAYLOAD}
-        # The declared column has to exist, or the predicate over it matches nothing in silence —
-        # which is exactly how this tier's table came to be missing in the first place.
-        async with await connect(settings.postgres_dsn) as conn:
-            async with conn.cursor() as cur:
-                for table, column, _predicate, _why in _RETAINED_IN_PAYLOAD:
-                    await cur.execute(
-                        "SELECT count(*) FROM information_schema.columns "
-                        "WHERE table_schema = current_schema() AND table_name = %s "
-                        "AND column_name = %s",
-                        (table, column),
-                    )
-                    assert (await cur.fetchone() or (0,))[0] == 1, (
-                        f"{table}.{column} is declared as where a person sits in a payload and "
-                        "does not exist; the predicate over it would match nothing, silently"
-                    )
-        accounted_tables = erased_tables | payload_tables | set(_BEYOND_REACH)
-        unaccounted = sorted(
-            (t, c) for t, c in found if (t, c) not in retained and t not in accounted_tables
-        )
-        assert not unaccounted, (
-            f"these columns name a person and belong to no tier: {unaccounted}. "
-            "Add each to `_ERASE` (the conversation), `_RETAINED` (the record) or "
-            "`_BEYOND_REACH` (out of this command's reach, with the reason) in "
-            "chemclaw.agent.leaver — deciding by omission is what this test exists to prevent"
-        )
-
-    asyncio.run(_run())
+                assert (await cur.fetchone() or (0,))[0] == 1, (
+                    f"{table}.{column} is declared as where a person sits in a payload and "
+                    "does not exist; the predicate over it would match nothing, silently"
+                )
+    accounted_tables = erased_tables | payload_tables | set(_BEYOND_REACH)
+    unaccounted = sorted(
+        (t, c) for t, c in found if (t, c) not in retained and t not in accounted_tables
+    )
+    assert not unaccounted, (
+        f"these columns name a person and belong to no tier: {unaccounted}. "
+        "Add each to `_ERASE` (the conversation), `_RETAINED` (the record) or "
+        "`_BEYOND_REACH` (out of this command's reach, with the reason) in "
+        "chemclaw.agent.leaver — deciding by omission is what this test exists to prevent"
+    )
 
 
-def test_a_proposal_someone_wrote_and_reviewed_is_counted_once() -> None:
+async def test_a_proposal_someone_wrote_and_reviewed_is_counted_once() -> None:
     """Two columns of one row are one retained record, not two.
 
     `note_proposals` names a person twice, and the count an operator reads is a count of *records*
     they still appear in. Summing per column would inflate exactly the table whose retention is
     hardest to explain.
     """
+    await migrated_db_or_skip()
+    async with await connect(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "INSERT INTO note_proposals "
+                "(note_id, note_type, content_hash, content, branch, actor, decided_by) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                ("note-lv-1", "reaction", "h1", "body", "b1", _ANNA, _ANNA),
+            )
+        await conn.commit()
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        async with await connect(settings.postgres_dsn) as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    "INSERT INTO note_proposals "
-                    "(note_id, note_type, content_hash, content, branch, actor, decided_by) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s)",
-                    ("note-lv-1", "reaction", "h1", "body", "b1", _ANNA, _ANNA),
-                )
-            await conn.commit()
-
-        report = await erase_actor(_ANNA)
-        assert report.retained["note_proposals"] == 1
-
-    asyncio.run(_run())
+    report = await erase_actor(_ANNA)
+    assert report.retained["note_proposals"] == 1
 
 
-def test_a_reviewers_signoff_is_retained_even_when_they_proposed_nothing() -> None:
+async def test_a_reviewers_signoff_is_retained_even_when_they_proposed_nothing() -> None:
     """The case the hand-written list got wrong: `decided_by` with an empty `actor`."""
+    await migrated_db_or_skip()
+    async with await connect(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "INSERT INTO note_proposals "
+                "(note_id, note_type, content_hash, content, branch, actor, decided_by) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                ("note-lv-2", "reaction", "h2", "body", "b2", "someone-else", _BEN),
+            )
+        await conn.commit()
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        async with await connect(settings.postgres_dsn) as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    "INSERT INTO note_proposals "
-                    "(note_id, note_type, content_hash, content, branch, actor, decided_by) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s)",
-                    ("note-lv-2", "reaction", "h2", "body", "b2", "someone-else", _BEN),
-                )
-            await conn.commit()
-
-        report = await erase_actor(_BEN)
-        assert report.retained["note_proposals"] >= 1, (
-            "a reviewer's sign-off must be reported as retained, not silently missed"
-        )
-
-    asyncio.run(_run())
+    report = await erase_actor(_BEN)
+    assert report.retained["note_proposals"] >= 1, (
+        "a reviewer's sign-off must be reported as retained, not silently missed"
+    )
 
 
-def test_a_claim_marked_unverified_is_the_same_person_and_is_counted() -> None:
+async def test_a_claim_marked_unverified_is_the_same_person_and_is_counted() -> None:
     """The regression: one chemist, two spellings, and a report that saw only one of them.
 
     `connectors/bo` declares `auth: mode: none`, so its synchronous MCP path cannot authenticate the
@@ -650,25 +594,21 @@ def test_a_claim_marked_unverified_is_the_same_person_and_is_counted() -> None:
 
     Either spelling may be named, because an operator pastes what they read out of the column.
     """
+    await migrated_db_or_skip()
+    await _seed_campaign("camp-carla-durable", _CARLA)
+    await _seed_campaign("camp-carla-inline", f"unverified:{_CARLA}")
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await _seed_campaign("camp-carla-durable", _CARLA)
-        await _seed_campaign("camp-carla-inline", f"unverified:{_CARLA}")
+    report = await erase_actor(_CARLA)
+    assert report.retained["bo_campaigns"] == 2, (
+        "a campaign opened under an unverified claim of this person's id still names them"
+    )
+    assert report.retained["bo_suggestions"] == 2
 
-        report = await erase_actor(_CARLA)
-        assert report.retained["bo_campaigns"] == 2, (
-            "a campaign opened under an unverified claim of this person's id still names them"
-        )
-        assert report.retained["bo_suggestions"] == 2
-
-        marked = await erase_actor(f"unverified:{_CARLA}")
-        assert marked.retained == report.retained, "the two spellings name one person"
-
-    asyncio.run(_run())
+    marked = await erase_actor(f"unverified:{_CARLA}")
+    assert marked.retained == report.retained, "the two spellings name one person"
 
 
-def test_erasing_one_person_spares_another_whose_id_contains_theirs() -> None:
+async def test_erasing_one_person_spares_another_whose_id_contains_theirs() -> None:
     """The dangerous way to have fixed the above, caught before it can be shipped.
 
     `LIKE '%' || actor || '%'` sees the `unverified:` form in one line — and also sees `oid-erik-2`
@@ -677,48 +617,40 @@ def test_erasing_one_person_spares_another_whose_id_contains_theirs() -> None:
     `_actor_forms` enumerates, and this test is what says so: the bystander keeps every row, in both
     of *their* spellings, and appears in nobody else's report.
     """
+    await migrated_db_or_skip()
+    await _seed(_ERIK, "sess-erik")
+    await _seed_campaign("camp-erik-inline", f"unverified:{_ERIK}")
+    await _seed(_ERIK_LOOKALIKE, "sess-erik-lookalike")
+    await _seed_campaign("camp-lookalike-durable", _ERIK_LOOKALIKE)
+    await _seed_campaign("camp-lookalike-inline", f"unverified:{_ERIK_LOOKALIKE}")
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await _seed(_ERIK, "sess-erik")
-        await _seed_campaign("camp-erik-inline", f"unverified:{_ERIK}")
-        await _seed(_ERIK_LOOKALIKE, "sess-erik-lookalike")
-        await _seed_campaign("camp-lookalike-durable", _ERIK_LOOKALIKE)
-        await _seed_campaign("camp-lookalike-inline", f"unverified:{_ERIK_LOOKALIKE}")
+    report = await erase_actor(_ERIK, apply=True)
+    assert report.retained["bo_campaigns"] == 1, "only the leaver's own campaign is theirs"
+    assert report.retained["bo_suggestions"] == 1
 
-        report = await erase_actor(_ERIK, apply=True)
-        assert report.retained["bo_campaigns"] == 1, "only the leaver's own campaign is theirs"
-        assert report.retained["bo_suggestions"] == 1
-
-        assert await _count("session_owners", "owner", _ERIK_LOOKALIKE) == 1
-        assert await _count("user_preferences", "owner", _ERIK_LOOKALIKE) == 1
-        assert await _count("subscriptions", "owner", _ERIK_LOOKALIKE) == 1
-        assert await _count("session_messages", "session_id", "sess-erik-lookalike") == 1
-        assert await _count("bo_campaigns", "opened_by", _ERIK_LOOKALIKE) == 1
-        assert await _count("bo_campaigns", "opened_by", f"unverified:{_ERIK_LOOKALIKE}") == 1
-
-    asyncio.run(_run())
+    assert await _count("session_owners", "owner", _ERIK_LOOKALIKE) == 1
+    assert await _count("user_preferences", "owner", _ERIK_LOOKALIKE) == 1
+    assert await _count("subscriptions", "owner", _ERIK_LOOKALIKE) == 1
+    assert await _count("session_messages", "session_id", "sess-erik-lookalike") == 1
+    assert await _count("bo_campaigns", "opened_by", _ERIK_LOOKALIKE) == 1
+    assert await _count("bo_campaigns", "opened_by", f"unverified:{_ERIK_LOOKALIKE}") == 1
 
 
-def test_a_departed_persons_turn_lease_is_released() -> None:
+async def test_a_departed_persons_turn_lease_is_released() -> None:
     """A lease names its holder, and offboarding must not leave one held by a leaver."""
+    await migrated_db_or_skip()
+    async with await connect(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "INSERT INTO session_turns (session_id, holder, expires_at) "
+                "VALUES (%s, %s, now() + interval '1 hour') "
+                "ON CONFLICT (session_id) DO UPDATE SET holder = EXCLUDED.holder",
+                ("sess-not-theirs", _ANNA),
+            )
+        await conn.commit()
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        async with await connect(settings.postgres_dsn) as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    "INSERT INTO session_turns (session_id, holder, expires_at) "
-                    "VALUES (%s, %s, now() + interval '1 hour') "
-                    "ON CONFLICT (session_id) DO UPDATE SET holder = EXCLUDED.holder",
-                    ("sess-not-theirs", _ANNA),
-                )
-            await conn.commit()
-
-        await erase_actor(_ANNA, apply=True)
-        assert await _count("session_turns", "holder", _ANNA) == 0
-
-    asyncio.run(_run())
+    await erase_actor(_ANNA, apply=True)
+    assert await _count("session_turns", "holder", _ANNA) == 0
 
 
 def test_every_retained_table_states_why() -> None:
@@ -729,7 +661,7 @@ def test_every_retained_table_states_why() -> None:
     assert "audit_events" in reasons
 
 
-def test_the_erase_statements_are_valid_sql() -> None:
+async def test_the_erase_statements_are_valid_sql() -> None:
     """Parse every statement against the real schema, so a typo'd column fails here.
 
     Runs each delete inside a rolled-back transaction on an actor nobody has: the statements must
@@ -758,27 +690,29 @@ def test_the_erase_statements_are_valid_sql() -> None:
     the failure it is really guarding against is the silent shrink, because a table that stops being
     reported is a departing person's data nobody knows is still there.
     """
-
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        report = await erase_actor("oid-nobody-at-all")
-        assert report.erased_total == 0
-        assert set(report.erased) == {
-            "session_messages",
-            "tool_result_blobs",
-            "checkpoints",
-            "checkpoint_blobs",
-            "checkpoint_writes",
-            "store",
-            "store_vectors",
-            "session_events",
-            "session_turns",
-            "subscriptions",
-            "user_preferences",
-            "session_owners",
-        }
-
-    asyncio.run(_run())
+    await migrated_db_or_skip()
+    report = await erase_actor("oid-nobody-at-all")
+    assert report.erased_total == 0
+    assert set(report.erased) == {
+        "session_messages",
+        "tool_result_blobs",
+        "checkpoints",
+        "checkpoint_blobs",
+        "checkpoint_writes",
+        "store",
+        "store_vectors",
+        "session_events",
+        "session_turns",
+        "subscriptions",
+        "user_preferences",
+        "budget_usage",
+        # The departing person's own composed workflows. Erased rather than retained for the
+        # reason the preference row above it is: a working procedure names no result and cites
+        # no evidence, so it is part of their conversation with this system rather than part of
+        # the record of what they did to the science.
+        "composed_workflows",
+        "session_owners",
+    }
 
 
 def test_the_cli_reports_a_statement_level_database_error_instead_of_raising() -> None:
@@ -797,11 +731,10 @@ def test_the_cli_reports_a_statement_level_database_error_instead_of_raising() -
     Reproduced here by pointing the search path at a schema with no tables, which raises
     `UndefinedTable` from the same family, against a database that is reachable and healthy.
     """
-
-    async def _run() -> None:
-        await migrated_db_or_skip()
-
-    asyncio.run(_run())
+    # Synchronous on purpose, where every other test in this file is a coroutine: the subject is
+    # `erase_actor_main`, a console entry point that owns an `asyncio.run` of its own, and a nested
+    # one refuses outright. So the skip check gets its own loop and the CLI gets the loop it builds.
+    asyncio.run(migrated_db_or_skip())
 
     original = settings.postgres_dsn
     separator = "&" if "?" in original else "?"
@@ -827,7 +760,7 @@ async def _claim(session_id: str, holder: str) -> bool:
     return await SessionTurnClaims().claim(session_id, holder, 60.0)
 
 
-def test_an_erasure_refuses_while_a_turn_holds_one_of_the_persons_sessions() -> None:
+async def test_an_erasure_refuses_while_a_turn_holds_one_of_the_persons_sessions() -> None:
     """The guard both single-session paths had and the fleet-wide sweep did not.
 
     Measured before this guard existed, against a real graph on a real checkpointer: the sweep
@@ -840,65 +773,53 @@ def test_an_erasure_refuses_while_a_turn_holds_one_of_the_persons_sessions() -> 
 
     So the run is refused, and the refusal names the session an operator has to deal with.
     """
-
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await _seed(_FRAN, "sess-fran-live")
-        assert await _claim("sess-fran-live", "some-other-worker")
-        try:
-            with pytest.raises(ErasureError) as caught:
-                await erase_actor(_FRAN, apply=True)
-            assert "sess-fran-live" in str(caught.value)
-            # And it refused *before* deleting anything, rather than part-way through.
-            assert await _count("session_owners", "owner", _FRAN) == 1
-            assert await _count("session_messages", "session_id", "sess-fran-live") == 1
-        finally:
-            await SessionTurnClaims().release("sess-fran-live", "some-other-worker")
-
-    asyncio.run(_run())
+    await migrated_db_or_skip()
+    await _seed(_FRAN, "sess-fran-live")
+    assert await _claim("sess-fran-live", "some-other-worker")
+    try:
+        with pytest.raises(ErasureError) as caught:
+            await erase_actor(_FRAN, apply=True)
+        assert "sess-fran-live" in str(caught.value)
+        # And it refused *before* deleting anything, rather than part-way through.
+        assert await _count("session_owners", "owner", _FRAN) == 1
+        assert await _count("session_messages", "session_id", "sess-fran-live") == 1
+    finally:
+        await SessionTurnClaims().release("sess-fran-live", "some-other-worker")
 
 
-def test_a_refused_erasure_gives_back_every_claim_it_took() -> None:
+async def test_a_refused_erasure_gives_back_every_claim_it_took() -> None:
     """A refusal must leave the fleet exactly as it found it, or it locks out the sessions it read.
 
     The sweep claims every one of the person's sessions before it touches a table, so a refusal on
     the last one has already taken the others. Releasing them is what keeps a refused erasure from
     costing a chemist a whole lease of 409s on conversations that were never busy.
     """
-
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await _seed(_FRAN, "sess-fran-a")
-        await _seed(_FRAN, "sess-fran-b")
-        assert await _claim("sess-fran-b", "some-other-worker")
-        try:
-            with pytest.raises(ErasureError):
-                await erase_actor(_FRAN, apply=True)
-            # The quiet session is claimable again by somebody else, so the erasure kept nothing.
-            assert await _claim("sess-fran-a", "a-later-turn")
-            await SessionTurnClaims().release("sess-fran-a", "a-later-turn")
-        finally:
-            await SessionTurnClaims().release("sess-fran-b", "some-other-worker")
-
-    asyncio.run(_run())
+    await migrated_db_or_skip()
+    await _seed(_FRAN, "sess-fran-a")
+    await _seed(_FRAN, "sess-fran-b")
+    assert await _claim("sess-fran-b", "some-other-worker")
+    try:
+        with pytest.raises(ErasureError):
+            await erase_actor(_FRAN, apply=True)
+        # The quiet session is claimable again by somebody else, so the erasure kept nothing.
+        assert await _claim("sess-fran-a", "a-later-turn")
+        await SessionTurnClaims().release("sess-fran-a", "a-later-turn")
+    finally:
+        await SessionTurnClaims().release("sess-fran-b", "some-other-worker")
 
 
-def test_a_quiet_session_is_erased_and_the_sweep_holds_no_claim_afterwards() -> None:
+async def test_a_quiet_session_is_erased_and_the_sweep_holds_no_claim_afterwards() -> None:
     """The ordinary path still erases, and the claim it took to do so does not outlive it."""
-
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await _seed(_FRAN, "sess-fran-quiet")
-        report = await erase_actor(_FRAN, apply=True)
-        assert report.erased["session_messages"] >= 1
-        assert await _count("session_owners", "owner", _FRAN) == 0
-        assert await _count("session_turns", "session_id", "sess-fran-quiet") == 0
-        assert report.residue == {}, "a clean run leaves nothing behind and must say so"
-
-    asyncio.run(_run())
+    await migrated_db_or_skip()
+    await _seed(_FRAN, "sess-fran-quiet")
+    report = await erase_actor(_FRAN, apply=True)
+    assert report.erased["session_messages"] >= 1
+    assert await _count("session_owners", "owner", _FRAN) == 0
+    assert await _count("session_turns", "session_id", "sess-fran-quiet") == 0
+    assert report.residue == {}, "a clean run leaves nothing behind and must say so"
 
 
-def test_a_row_that_comes_back_under_an_erased_session_is_counted_not_missed() -> None:
+async def test_a_row_that_comes_back_under_an_erased_session_is_counted_not_missed() -> None:
     """The half the claims cannot cover: a write this sweep could not have refused.
 
     A lease that lapsed under a sweep wider than one lease, a session created between the
@@ -908,28 +829,24 @@ def test_a_row_that_comes_back_under_an_erased_session_is_counted_not_missed() -
     the remedy, because that is exactly what cannot find it, so the count is the remedy: it turns
     an unreachable residue into a report that says so.
     """
-
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await _seed(_FRAN, "sess-fran-residue")
-        await erase_actor(_FRAN, apply=True)
-        # What a turn that outlived the sweep leaves behind: a row keyed by the session, with no
-        # ownership row to find it by.
-        async with await connect(settings.postgres_dsn) as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    "INSERT INTO session_messages (session_id, message) VALUES (%s, %s)",
-                    ("sess-fran-residue", '{"role": "assistant", "content": "after the sweep"}'),
-                )
-            await conn.commit()
-        residue, holding = await _residue_for(["sess-fran-residue"])
-        assert residue.get("session_messages") == 1, residue
-        assert holding == ["sess-fran-residue"], (
-            "the probe counted the residue and did not say which session it is under; the count "
-            "alone names no remedy, because `session_owners` no longer answers that question"
-        )
-
-    asyncio.run(_run())
+    await migrated_db_or_skip()
+    await _seed(_FRAN, "sess-fran-residue")
+    await erase_actor(_FRAN, apply=True)
+    # What a turn that outlived the sweep leaves behind: a row keyed by the session, with no
+    # ownership row to find it by.
+    async with await connect(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "INSERT INTO session_messages (session_id, message) VALUES (%s, %s)",
+                ("sess-fran-residue", '{"role": "assistant", "content": "after the sweep"}'),
+            )
+        await conn.commit()
+    residue, holding = await _residue_for(["sess-fran-residue"])
+    assert residue.get("session_messages") == 1, residue
+    assert holding == ["sess-fran-residue"], (
+        "the probe counted the residue and did not say which session it is under; the count "
+        "alone names no remedy, because `session_owners` no longer answers that question"
+    )
 
 
 def test_the_residue_probe_asks_about_every_table_a_session_delete_names() -> None:
@@ -1202,3 +1119,186 @@ def test_the_cli_refuses_an_actor_and_a_finish_in_one_run() -> None:
     with pytest.raises(SystemExit) as empty:
         erase_actor_main([])
     assert empty.value.code == 2
+
+
+# The scale half of the guard: a person with thousands of sessions, and a lease short enough that
+# the test costs seconds rather than the three and a half minutes the full reproduction takes.
+#
+# **A shortened lease is the same defect, not a smaller one.** What lapses a claim is the ratio
+# between how long the sweep holds it and how long the lease lasts — measured at the shipped
+# 60 s lease and ~56 claims/s, the first claims expire at ~3,500 sessions and 40% of a
+# 6,000-session fleet is unprotected before the claim loop even finishes. Both tests below hold the
+# ratio and shrink the wall clock.
+_HOLGER = "oid-holger"
+
+
+async def _seed_many(actor: str, session_ids: list[str]) -> None:
+    """Give `actor` a session apiece, in two statements rather than five per session.
+
+    `tests/test_leaver.py::_seed` writes a preference, a watch and an event as well, which is what
+    a *behavioural* test of the two tiers needs. These two want a fleet, and a fleet seeded row by
+    row costs more than the thing under test.
+    """
+    async with await connect(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "INSERT INTO session_owners (session_id, owner) "
+                "SELECT s, %s FROM unnest(%s::text[]) AS s "
+                "ON CONFLICT (session_id) DO UPDATE SET owner = EXCLUDED.owner",
+                (actor, session_ids),
+            )
+            await cur.execute(
+                "INSERT INTO session_messages (session_id, message) "
+                'SELECT s, \'{"role": "user"}\'::jsonb FROM unnest(%s::text[]) AS s',
+                (session_ids,),
+            )
+        await conn.commit()
+
+
+async def _claims_state(session_ids: list[str]) -> tuple[int, int]:
+    """`(claims this sweep still holds, claims of its own that have lapsed)`."""
+    async with await connect(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT count(*) FILTER (WHERE expires_at > now()), "
+                "       count(*) FILTER (WHERE expires_at <= now()) "
+                "FROM session_turns "
+                "WHERE session_id = ANY(%s) AND left(holder, 6) = 'erase:'",
+                (session_ids,),
+            )
+            row = await cur.fetchone()
+    return (int(row[0]), int(row[1])) if row else (0, 0)
+
+
+def test_a_sweep_that_outlasts_its_lease_still_holds_every_claim() -> None:
+    """The claim has to survive the erasure, not the first minute of it.
+
+    `_sessions_held` took every claim and **nothing refreshed it**, while the sweep it guards runs
+    for as long as the deletion takes — measured, 85 s for 400k rows, on top of a claim loop that
+    ran at ~56 sessions/s. So the guard expired under its own sweep and
+    `_TURN_CLAIM`'s `WHERE session_turns.expires_at <= now()` made every lapsed slot re-takeable
+    by anyone. Reproduced at 600 sessions against a 10 s lease: 37 claims expired before the loop
+    finished, 113 by the time the erase transaction would have run, and a second pod took
+    `sess-000001` at t+10.3 s while the sweep was still going — which is exactly the live turn
+    this whole guard exists to refuse, admitted by the guard itself.
+
+    Watched failing against the unfixed loop: `pod-2 claimed 20 of the sessions this sweep is
+    holding` and `20 of this sweep's own claims have lapsed while it holds them`.
+
+    Driven with a short lease rather than a large fleet, because what lapses a claim is the ratio
+    of hold time to lease and not the row count.
+    """
+    sessions = [f"sess-holger-{index:03d}" for index in range(20)]
+
+    async def _run() -> tuple[int, int, int]:
+        await migrated_db_or_skip()
+        await _seed_many(_HOLGER, sessions)
+        patch = pytest.MonkeyPatch()
+        patch.setattr(settings, "service_turn_claim_lease_seconds", 2.0)
+        claims = SessionTurnClaims()
+        try:
+            async with _sessions_held(sessions):
+                # Longer than the lease, and short beside the 85 s an erase transaction measured.
+                #
+                # The margin is deliberate rather than tight: the heartbeat refreshes three times
+                # per lease, so the last one before this check lands ~0.7 s before it and pushes
+                # the claims 2 s past that — a test that asserted at 1.05 leases would be asking
+                # whether the machine was busy, not whether the claims are held.
+                await asyncio.sleep(3.0)
+                stolen = [
+                    session_id
+                    for session_id in sessions
+                    if await claims.claim(session_id, "pod-2", 60.0)
+                ]
+                held, lapsed = await _claims_state(sessions)
+            for session_id in stolen:
+                await claims.release(session_id, "pod-2")
+            return len(stolen), held, lapsed
+        finally:
+            patch.undo()
+
+    stolen, held, lapsed = asyncio.run(_run())
+
+    assert stolen == 0, (
+        f"pod-2 claimed {stolen} of the sessions this sweep is holding; a turn can start on a "
+        "session the erasure is about to delete, which is the residue the guard exists to prevent"
+    )
+    assert lapsed == 0, (
+        f"{lapsed} of this sweep's own claims have lapsed while it holds them; nothing refreshes "
+        "them, so the guard covers the first lease of an erasure and not the rest of it"
+    )
+    assert held == len(sessions), f"{held} of {len(sessions)} claims are still live"
+
+
+async def test_the_claim_sweep_does_not_pay_a_round_trip_per_session() -> None:
+    """One statement per session is what makes the lease lapse in the first place.
+
+    The two halves are one defect: at ~56 claims/s a fleet of 6,000 takes 104 s to claim, which is
+    longer than the 60 s lease before the sweep has deleted anything — so refreshing alone would be
+    a heartbeat racing a loop that never needed to be a loop. Counted as *connections borrowed*,
+    because that is the round trip: `SessionTurnClaims.claim` and `.release` each open one, so the
+    unfixed loop borrows 2N.
+
+    Driven with `CLAIM_BATCH` shrunk to 50 over 200 sessions, so the batching is exercised as four
+    statements rather than as the one a real fleet of this size would be — a loop that happens to
+    fit in a single batch proves the statement and not the loop around it.
+
+    Watched failing against the unfixed loop: `400 connection borrows for 200 sessions`.
+    """
+    sessions = [f"sess-hilde-{index:03d}" for index in range(200)]
+    batch = 50
+    borrows: list[str] = []
+
+    class _Counting(SessionTurnClaims):
+        """The same claims, counting how many times the sweep goes to the database."""
+
+        def _connection(self):  # type: ignore[no-untyped-def]
+            borrows.append("borrow")
+            return super()._connection()
+
+    await migrated_db_or_skip()
+    await _seed_many("oid-hilde", sessions)
+    patch = pytest.MonkeyPatch()
+    patch.setattr(leaver, "SessionTurnClaims", _Counting)
+    patch.setattr(leaver, "CLAIM_BATCH", batch)
+    try:
+        async with _sessions_held(sessions):
+            pass
+    finally:
+        patch.undo()
+
+    # Claim and release, one statement each per batch, plus headroom for a refresh tick landing
+    # inside a sweep this short.
+    ceiling = 4 * math.ceil(len(sessions) / batch) + 2
+    assert len(borrows) <= ceiling, (
+        f"{len(borrows)} connection borrows for {len(sessions)} sessions (ceiling {ceiling}): the "
+        "sweep still claims one session per round trip, so its first claims lapse before its last "
+        "one is taken"
+    )
+
+
+def test_an_erasure_does_not_take_the_organisations_judgment() -> None:
+    """The org skills tier is nobody's data, so the sweep must not reach it.
+
+    **An absence is not a decision until something asserts it.**
+    `D-2026-09-20-a-behaviour-change-is-gated-by-its-blast-radius` states that a departing person's
+    words inside an organisation skill are a *content* question for an administrator — a revert or a
+    retire — rather than a prefix sweep, because the document is the organisation's judgment and
+    other people's turns depend on it. Without this test that rule is indistinguishable from
+    somebody having forgotten to add a third prefix beside the two in `store_prefixes`.
+
+    Asserted through `store_prefixes`, the function `erase_actor` really calls, and against the
+    namespace the tier really writes under — so a later change that starts keying org rows by actor
+    turns this red rather than quietly making the tier erasable by whoever leaves next.
+    """
+    from chemclaw.agent.leaver import store_prefixes
+    from chemclaw.agent.org_skills import org_skills_namespace, org_versions_namespace
+
+    prefixes = store_prefixes(["alice-oid", "unverified:alice"])
+    org = ".".join(org_skills_namespace())
+
+    assert org not in prefixes, "an organisation skill is not one person's data to erase"
+    assert not any(prefix.startswith(f"{org}.") for prefix in prefixes), prefixes
+    assert not any(
+        prefix.startswith(org_versions_namespace("house-workup")[0]) for prefix in prefixes
+    ), "the version history went with a departing chemist"

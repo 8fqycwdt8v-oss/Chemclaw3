@@ -31,19 +31,28 @@ serves it rewrite the sentence in the same change.
 """
 
 from contextlib import AbstractAsyncContextManager
-from datetime import datetime
-from typing import Any
 
 import psycopg
-from psycopg.rows import TupleRow
-from pydantic import BaseModel
+from psycopg.rows import TupleRow, class_row
+from pydantic import BaseModel, ConfigDict
 
 from chemclaw.core import db
 from chemclaw.core.config import settings
+from chemclaw.core.db import IsoStamp
 
 
 class EffectRecord(BaseModel):
-    """One attempt to change something outside this deployment."""
+    """One attempt to change something outside this deployment.
+
+    Read back by `class_row`, so every field name here is a column name in `_COLUMNS` and the two
+    are one declaration rather than two that agree by inspection.
+    """
+
+    #: `extra="forbid"` because this model is built by `class_row` straight out of a SELECT: with
+    #: pydantic's default a column nobody added a field for is *ignored*, so the read that was
+    #: supposed to catch the SELECT and the model drifting apart would silently drop it. Forbidding
+    #: makes the drift an error naming the column, which is the whole reason for the row factory.
+    model_config = ConfigDict(extra="forbid")
 
     effect_id: str
     connector: str
@@ -57,8 +66,8 @@ class EffectRecord(BaseModel):
     state: str = "attempting"
     external_ref: str = ""
     detail: str = ""
-    attempted_at: str = ""
-    settled_at: str = ""
+    attempted_at: IsoStamp = ""
+    settled_at: IsoStamp = ""
 
 
 def _connect() -> AbstractAsyncContextManager[psycopg.AsyncConnection[TupleRow]]:
@@ -151,34 +160,19 @@ async def settle_effect(
         await conn.execute(_SETTLE, (state, external_ref, external_ref, detail, effect_id, state))
 
 
-def _row(values: tuple[Any, ...]) -> EffectRecord:
-    """One database row as its model."""
-    stamps = [value.isoformat() if isinstance(value, datetime) else "" for value in values[12:14]]
-    return EffectRecord(
-        effect_id=str(values[0]),
-        connector=str(values[1]),
-        job=str(values[2]),
-        system=str(values[3]),
-        reversal=str(values[4]),
-        requested_by=str(values[5]),
-        session_id=str(values[6]),
-        correlation_id=str(values[7]),
-        approved_by=str(values[8]),
-        state=str(values[9]),
-        external_ref=str(values[10]),
-        detail=str(values[11]),
-        attempted_at=stamps[0],
-        settled_at=stamps[1],
-    )
-
-
 async def get_effect(effect_id: str) -> EffectRecord | None:
-    """One effect by id, whatever state it is in."""
+    """One effect by id, whatever state it is in.
+
+    Raises:
+        pydantic.ValidationError: `_COLUMNS` and `EffectRecord` have stopped describing the same
+            row. The fourteen positional subscripts this replaced could not raise that — they
+            renamed the columns by position, so an edit to `_COLUMNS` moved every value one field
+            along and returned a record that looked like a record.
+    """
     async with _connect() as conn:
-        async with conn.cursor() as cur:
+        async with conn.cursor(row_factory=class_row(EffectRecord)) as cur:
             await cur.execute(f"SELECT {_COLUMNS} FROM effects WHERE effect_id = %s", (effect_id,))
-            row = await cur.fetchone()
-    return _row(tuple(row)) if row else None
+            return await cur.fetchone()
 
 
 async def unsettled(limit: int = 50) -> list[EffectRecord]:
@@ -202,10 +196,10 @@ async def unsettled(limit: int = 50) -> list[EffectRecord]:
             unbounded read of a table nothing prunes is not what a person under pressure wants.
     """
     async with _connect() as conn:
-        async with conn.cursor() as cur:
+        async with conn.cursor(row_factory=class_row(EffectRecord)) as cur:
             await cur.execute(
                 f"SELECT {_COLUMNS} FROM effects WHERE state = 'attempting' "
                 "ORDER BY attempted_at LIMIT %s",
                 (max(1, min(limit, 200)),),
             )
-            return [_row(tuple(row)) for row in await cur.fetchall()]
+            return await cur.fetchall()

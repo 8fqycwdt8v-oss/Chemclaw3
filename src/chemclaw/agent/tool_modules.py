@@ -19,6 +19,7 @@ interpreter* that the production entrypoint alone advertises tools — the only 
 that can fail, since any test importing the agent first would pass either way.
 """
 
+from chemclaw.agent import analytical_tools as _analytical_tools  # noqa: F401
 from chemclaw.agent import attachments as _attachments  # noqa: F401
 from chemclaw.agent import commitment_tools as _commitment_tools  # noqa: F401
 from chemclaw.agent import dialogue_tools as _dialogue_tools  # noqa: F401
@@ -29,7 +30,9 @@ from chemclaw.agent import memory_tools as _memory_tools  # noqa: F401
 from chemclaw.agent import operations_tools as _operations_tools  # noqa: F401
 from chemclaw.agent import pending_tools as _pending_tools  # noqa: F401
 from chemclaw.agent import preferences as _preferences  # noqa: F401
+from chemclaw.agent import proposal_tools as _proposal_tools  # noqa: F401
 from chemclaw.agent import protocol_design_tools as _protocol_design_tools  # noqa: F401
 from chemclaw.agent import protocol_tools as _protocol_tools  # noqa: F401
 from chemclaw.agent import research_tools as _research_tools  # noqa: F401
 from chemclaw.agent import subscriptions as _subscriptions  # noqa: F401
+from chemclaw.agent import workflow_tools as _workflow_tools  # noqa: F401

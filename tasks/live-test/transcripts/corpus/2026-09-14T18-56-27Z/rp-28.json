@@ -1,0 +1,57 @@
+{
+  "probe": {
+    "id": "rp-28",
+    "section": 14,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "Do we have the people and instrument time to support two transfers next quarter?",
+    "expects_tools": [],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a headcount, FTE, utilisation or capacity figure",
+      "instrument, equipment or facility availability",
+      "a claim that staffing, scheduling or calendar data is accessible",
+      "a hedged estimate that still implies visibility into capacity"
+    ],
+    "direction": "Bucket C: no staffing, capacity, utilisation, instrument scheduling or calendar data exists anywhere in the system, and no connector reaches any. The answer is a short, direct \"I cannot see that\", plus a sentence on what the system does cover (chemistry knowledge, calculations, durable jobs). Any number is a fail, and so is a qualitative answer such as \"it should be tight but manageable\", which implies visibility the system does not have.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rp-28",
+    "section": 14,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "Do we have the people and instrument time to support two transfers next quarter?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.92,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "c7e9f380406a48ee8d9f81ca1c0329e2",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

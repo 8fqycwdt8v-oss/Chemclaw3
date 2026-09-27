@@ -1,6 +1,6 @@
 """Tests for the BO recommendation → knowledge-graph bridge (plan step 1d.5)."""
 
-import asyncio
+import pathlib
 from collections.abc import Callable, Sequence
 from typing import Any
 
@@ -9,7 +9,7 @@ from temporalio.client import Client
 from temporalio.worker import Worker
 
 import chemclaw.durable.memory_jobs as memory_jobs
-from chemclaw.connectors.bo import activities as _bo_activities  # noqa: F401 — registers below
+from chemclaw.connectors.bo import activities as _bo_activities  # noqa: F401 (registers them)
 from chemclaw.connectors.bo.knowledge import note_from_campaign_result
 from chemclaw.connectors.bo.workflows import BoCampaignWorkflow
 from chemclaw.connectors.queues import bundle_queue
@@ -194,7 +194,7 @@ def test_note_id_is_stable_for_the_same_recommendation() -> None:
     )
 
 
-def test_campaign_publishes_recommendation_to_graph(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_campaign_publishes_recommendation_to_graph(monkeypatch: pytest.MonkeyPatch) -> None:
     """With publish_to_graph, a finished campaign proposes a bo-candidate note (bg queue).
 
     This test carried `@pytest.mark.timeout(600)` on the reasoning that it is "slow, not hung"
@@ -213,56 +213,53 @@ def test_campaign_publishes_recommendation_to_graph(monkeypatch: pytest.MonkeyPa
     # The gate is core's now, so the submitter is patched where core publishes from.
     monkeypatch.setattr(memory_jobs, "default_writer", lambda: fake)
 
-    async def _run() -> None:
-        from chemclaw.science.bo.benchmarks.reizman_suzuki import build_problem, load_dataset
+    from chemclaw.science.bo.benchmarks.reizman_suzuki import build_problem, load_dataset
 
-        spec = CampaignSpec(
-            problem=build_problem(load_dataset()),
-            objective_name="reizman_suzuki",
-            n_initial=3,
-            n_rounds=1,
-        )
-        async with await start_env_or_skip() as env:
-            client: Client = pydantic_client(env)
-            async with (
-                Worker(
-                    client,
+    spec = CampaignSpec(
+        problem=build_problem(load_dataset()),
+        objective_name="reizman_suzuki",
+        n_initial=3,
+        n_rounds=1,
+    )
+    async with await start_env_or_skip() as env:
+        client: Client = pydantic_client(env)
+        async with (
+            Worker(
+                client,
+                task_queue="test-bo-pub",
+                workflows=[BoCampaignWorkflow],
+                activities=_BO_ACTIVITIES,
+            ),
+            # Core's wrapper runs HERE, so this worker must register it. Registering only
+            # the activity is what hung: Temporal keeps redelivering a workflow task whose
+            # type no worker knows, and the caller waits on a result that can never arrive.
+            Worker(
+                client,
+                task_queue=settings.background_task_queue,
+                workflows=[ConnectorJobWorkflow],
+                activities=[publish_memory_note_activity, record_job],
+            ),
+        ):
+            # The campaign now *builds* the note and core *publishes* it, so this drives the
+            # whole path: the connector's workflow as a child of core's wrapper, which PR-gates
+            # whatever note the envelope carries (D-093).
+            await client.execute_workflow(
+                ConnectorJobWorkflow.run,
+                ConnectorJobInput(
+                    connector="bo",
+                    job="start_optimization_campaign",
+                    workflow="BoCampaignWorkflow",
                     task_queue="test-bo-pub",
-                    workflows=[BoCampaignWorkflow],
-                    activities=_BO_ACTIVITIES,
+                    payload=spec.model_dump(mode="json"),
+                    requested_by="tester",
+                    rationale="find a higher-yielding condition set for the teaching example",
+                    publish_to_graph=True,
                 ),
-                # Core's wrapper runs HERE, so this worker must register it. Registering only
-                # the activity is what hung: Temporal keeps redelivering a workflow task whose
-                # type no worker knows, and the caller waits on a result that can never arrive.
-                Worker(
-                    client,
-                    task_queue=settings.background_task_queue,
-                    workflows=[ConnectorJobWorkflow],
-                    activities=[publish_memory_note_activity, record_job],
-                ),
-            ):
-                # The campaign now *builds* the note and core *publishes* it, so this drives the
-                # whole path: the connector's workflow as a child of core's wrapper, which PR-gates
-                # whatever note the envelope carries (D-093).
-                await client.execute_workflow(
-                    ConnectorJobWorkflow.run,
-                    ConnectorJobInput(
-                        connector="bo",
-                        job="start_optimization_campaign",
-                        workflow="BoCampaignWorkflow",
-                        task_queue="test-bo-pub",
-                        payload=spec.model_dump(mode="json"),
-                        requested_by="tester",
-                        rationale="find a higher-yielding condition set for the teaching example",
-                        publish_to_graph=True,
-                    ),
-                    id="bo-publish-test",
-                    task_queue=settings.background_task_queue,
-                )
-        assert len(fake.writes) == 1  # the recommendation was proposed as a note
-        assert fake.writes[0].files[0].path.startswith("knowledge/bo-candidate/bo-")
-
-    asyncio.run(_run())
+                id="bo-publish-test",
+                task_queue=settings.background_task_queue,
+            )
+    assert len(fake.writes) == 1  # the recommendation was proposed as a note
+    assert fake.writes[0].files[0].path.startswith("knowledge/bo-candidate/bo-")
 
 
 def test_a_library_campaigns_note_stays_readable(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -369,3 +366,98 @@ def test_the_recommended_value_survives_the_excerpt_a_reader_actually_sees() -> 
     excerpt = _excerpt(body)
     assert "98.7" in excerpt, "the excerpt quotes conditions without the value they achieved"
     assert "surrogate posterior sd" in excerpt
+
+
+#: What a model-facing description must never say about this bundle's note, one phrase per claim.
+#:
+#: Narrow on purpose. "These are proposals a human runs" is *true* and must survive — a candidate
+#: is a suggestion, and the skill says so at length. What is forbidden is the claim that a
+#: **reviewer stands between the note and the graph**, because none does.
+_REPO = pathlib.Path(__file__).resolve().parents[1]
+
+_GATE_CLAIMS = ("pr-gated", "pr gate", "pull request", "human review", "before it enters the graph")
+
+#: Lines in the corpus below that name the gate in order to say it is **gone**.
+#:
+#: Keyed by `path:line-text` rather than by path, so a file cannot pick up a *second*, live claim
+#: under an exemption granted for a historical one. The phrase list above cannot tell the two
+#: apart — "the PR gate … was deleted" contains "pr gate" exactly as a live claim would — and a
+#: negation-aware scan over model-facing prose is a worse trade than one named row: this repository
+#: keeps the reasoning that led to a decision on purpose, so these lines are the point rather than
+#: residue.
+#:
+#: The phrase is a fragment of the *matching line*, not of the sentence's point — this one's
+#: "was deleted (`D-2026-09-05-…`)" is on the line after the one the scan flags, and an exemption
+#: that has to hold a sentence across a wrap would break on a reflow rather than on a claim.
+_GATE_CLAIM_HISTORICAL = {
+    "safety-screening/SKILL.md": "and the PR gate over agent-written knowledge",
+}
+
+
+def test_no_model_facing_bo_text_claims_a_recommendation_is_reviewed_before_it_lands() -> None:
+    """`connector.yaml`'s description is the tool description the model reads on every turn.
+
+    It said `start_optimization_campaign` "opens its recommendation as a PR-gated note for human
+    review". `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` removed that gate and the
+    proposal queue behind it: `ConnectorJobWorkflow` now writes the note straight into the graph,
+    carrying `created_by: agent`. So the agent was telling a chemist their recommendation would be
+    checked by a person before it landed, and it landed immediately — a claim about a control that
+    does not exist, in the direction that overstates safety.
+
+    An absence test rather than a rewrite, in the shape
+    `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution` established: whoever
+    re-adds the claim has to add the producer too.
+    """
+    corpus = _model_facing_text()
+    assert len(corpus) > 1, (
+        f"this scan found {len(corpus)} model-facing file(s); the globs below have stopped "
+        "resolving, and an absence test over an empty corpus passes by saying nothing"
+    )
+    offenders = []
+    for path in corpus:
+        for number, line in enumerate(path.read_text().splitlines(), start=1):
+            if not any(claim in line.lower() for claim in _GATE_CLAIMS):
+                continue
+            if _GATE_CLAIM_HISTORICAL.get(f"{path.parent.name}/{path.name}", "\0") in line:
+                continue
+            offenders.append(f"{path.relative_to(_REPO)}:{number}: {line.strip()}")
+    assert not offenders, "model-facing text claims a review gate that no longer exists:\n" + (
+        "\n".join(offenders)
+    )
+
+
+def test_no_historical_gate_exemption_is_unspent() -> None:
+    """An exemption whose line has gone is a permission nobody spends — the register's other half.
+
+    `_GATE_CLAIM_HISTORICAL` silences a line; a row whose line has been reworded or deleted goes on
+    silencing whatever lands at that path next. This is the same second half
+    `test_no_exemption_outlives_its_migration` gives the migration registers and
+    `test_no_retired_test_citation_is_unspent` gives the ADR one.
+    """
+    corpus = {f"{path.parent.name}/{path.name}": path.read_text() for path in _model_facing_text()}
+    unspent = sorted(
+        key for key, phrase in _GATE_CLAIM_HISTORICAL.items() if phrase not in corpus.get(key, "")
+    )
+    assert not unspent, (
+        f"exemption(s) naming a line that is no longer there: {unspent}. Delete the row — the file "
+        "either stopped mentioning the gate or now mentions it differently, and in the second case "
+        "the new wording has to be read before it is exempted."
+    )
+
+
+def _model_facing_text() -> list[pathlib.Path]:
+    """Every file whose words reach the model: a tool description, or an injected skill.
+
+    **Scoped to the BO bundle until 2026-09-11, which made it a rule about one directory.** The
+    claim it refuses — that a recommendation is reviewed before it lands — is not a BO-specific
+    thing to say, and mutation testing put the identical sentence into a root `skills/*/SKILL.md`
+    and watched this pass. There are 28 skills under that root, every one of them injected into the
+    prompt by `SkillsMiddleware`, and every `connector.yaml` description is read on every turn.
+    So the corpus is the whole model-facing surface, and this test's name says "model-facing"
+    rather than "BO" because that is what it now means.
+    """
+    return [
+        *sorted(_REPO.glob("src/chemclaw/connectors/*/connector.yaml")),
+        *sorted(_REPO.glob("src/chemclaw/connectors/*/skills/**/SKILL.md")),
+        *sorted(_REPO.glob("skills/**/SKILL.md")),
+    ]

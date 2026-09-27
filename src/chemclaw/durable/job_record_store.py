@@ -30,15 +30,14 @@ one. Which of the two a failure is depends on the failure — see `_says_nothing
 """
 
 from contextlib import AbstractAsyncContextManager
-from typing import Any
 
 import psycopg
-from psycopg.rows import TupleRow
+from psycopg.rows import TupleRow, class_row
 from psycopg.types.json import Jsonb
 
 from chemclaw.core import db
 from chemclaw.core.config import settings
-from chemclaw.durable.job_record import JobRecord, JobRecordSummary
+from chemclaw.durable.job_record import JobRecord, JobRecordSearch, JobRecordSummary
 
 _COLUMNS = (
     "job_id, connector, job, rationale, requested_by, session_id, correlation_id, "
@@ -145,12 +144,31 @@ _SELECT_ONE = f"SELECT {_COLUMNS}, completed_at FROM job_records WHERE job_id = 
 # other thing that removes the scan — would have changed what the tool matches, from the substring
 # search its docstring promises to stems and boolean widening, and `core/fulltext.py` exists to
 # keep *that* rule identical across the two hybrid indexes rather than to be a second answer here.
+#
+# **The keyset and the tiebreak are one change, not two.** The order was `completed_at DESC` alone,
+# which is not a total order: `completed_at` is the database's own `now()` and a batch of runs
+# recorded inside one transaction shares it, so two pages of the same listing could repeat a row
+# and skip another. `job_id` is the primary key, so ordering by the pair is total, and the pair is
+# what the anchor below compares against.
+#
+# **The anchor is a `job_id`, and there is nothing to decode.** `GET /sessions` mints an opaque
+# base64 cursor because its sort key (last activity + id) is not otherwise on the row; here the
+# whole key is derivable from a row the caller already holds, so the token is that row's id and the
+# subquery reads its position. That also survives the ordering gaining a third component, which a
+# spelled-out cursor does not. It relies on the anchor row still existing, which is a property this
+# table has and `session_messages` does not: `job_records` is never pruned
+# (`durable/retention.py`), by decision.
 _SEARCH = """
     SELECT job_id, connector, job, rationale, summary, note_id, plan_step, state, completed_at
     FROM job_records
     WHERE (%s = '' OR connector = %s)
       AND (%s = '' OR rationale ILIKE %s OR summary ILIKE %s OR job ILIKE %s)
-    ORDER BY completed_at DESC
+      AND (
+        %s = ''
+        OR (completed_at, job_id)
+           < (SELECT completed_at, job_id FROM job_records WHERE job_id = %s)
+      )
+    ORDER BY completed_at DESC, job_id DESC
     LIMIT %s
 """
 
@@ -186,9 +204,9 @@ class PostgresJobRecordSink:
                     record.plan_hash,
                     # psycopg adapts a mapping to `jsonb` only through its `Jsonb` wrapper — a bare
                     # dict is rejected by the adapter, not silently stringified.
-                    _json(record.payload),
+                    Jsonb(record.payload),
                     record.summary,
-                    _json(record.result),
+                    Jsonb(record.result),
                     record.note_id,
                     record.calc_refs,
                     record.runtime_seconds,
@@ -201,61 +219,57 @@ class PostgresJobRecordSink:
 
 
 async def read_job_record(job_id: str) -> JobRecord | None:
-    """The full record for one job, or None when the table has no row for it."""
+    """The full record for one job, or None when the table has no row for it.
+
+    **Built by name, not by position.** This was nineteen `row[n]` subscripts restating the order of
+    `_SELECT_ONE` a second time in Python, on a projection of nine adjacent `TEXT` columns — so
+    editing the SELECT list swapped fields silently, type-checked, and produced a record that reads
+    as a record. `class_row` passes each selected column as a keyword argument, which makes the
+    column list and the model one declaration instead of two that agree by inspection.
+
+    Raises:
+        pydantic.ValidationError: The SELECT and the model no longer describe the same row —
+            `JobRecord` is `extra="forbid"`, so a column that is not a field of it is an error at
+            the read rather than a value silently landing in the wrong field. Deliberately not
+            caught: every caller of this is a tool or a route that reports an exception, and there
+            is no answer to give instead of the record.
+    """
     async with _connect() as conn:
-        cursor = await conn.execute(_SELECT_ONE, (job_id,))
-        row = await cursor.fetchone()
-    if row is None:
-        return None
-    return JobRecord(
-        job_id=row[0],
-        connector=row[1],
-        job=row[2],
-        rationale=row[3],
-        requested_by=row[4],
-        session_id=row[5],
-        correlation_id=row[6],
-        plan_step=row[7],
-        plan_hash=row[8],
-        payload=row[9],
-        summary=row[10],
-        result=row[11],
-        note_id=row[12],
-        calc_refs=list(row[13] or []),
-        runtime_seconds=row[14],
-        payload_kind=row[15],
-        state=row[16],
-        failure_reason=row[17],
-        completed_at=row[18],
-    )
+        async with conn.cursor(row_factory=class_row(JobRecord)) as cursor:
+            await cursor.execute(_SELECT_ONE, (job_id,))
+            return await cursor.fetchone()
 
 
 async def read_job_record_summaries(
-    text: str, connector: str, limit: int
-) -> list[JobRecordSummary]:
-    """Past runs matching the (optional) text and connector filters, newest first."""
+    text: str, connector: str, limit: int, after: str = ""
+) -> JobRecordSearch:
+    """Past runs matching the (optional) text and connector filters, newest first.
+
+    **One row beyond `limit` is fetched and dropped**, which is what makes `hits_truncated`
+    evidence rather than a guess. Inferring it from a full page — the cheaper answer, and the one
+    `GET /sessions` takes for its own listing — reports a corpus of exactly `limit` matches as
+    truncated, and this flag is read by the model as "an older run may exist": a false positive on
+    the one tool whose job is to say whether a run already happened costs a duplicate expensive
+    run, which is the whole thing being avoided. One extra row on a query already bounded by an
+    index is the cheaper side of that trade.
+
+    Args:
+        text: Substring to look for in the reason, the summary or the job name; empty matches all.
+        connector: Restrict to one bundle; empty searches all.
+        limit: The page size.
+        after: The `job_id` of the previous page's last row — the keyset anchor. Empty starts at
+            the newest run.
+
+    Returns:
+        The page, and whether more matched than it holds.
+    """
     pattern = f"%{text}%"
     async with _connect() as conn:
-        cursor = await conn.execute(
-            _SEARCH, (connector, connector, text, pattern, pattern, pattern, limit)
-        )
-        rows = await cursor.fetchall()
-    return [
-        JobRecordSummary(
-            job_id=row[0],
-            connector=row[1],
-            job=row[2],
-            rationale=row[3],
-            summary=row[4],
-            note_id=row[5],
-            plan_step=row[6],
-            state=row[7],
-            completed_at=row[8],
-        )
-        for row in rows
-    ]
-
-
-def _json(value: dict[str, Any]) -> Jsonb:
-    """Wrap a mapping for a `jsonb` column (psycopg needs the explicit adapter)."""
-    return Jsonb(value)
+        async with conn.cursor(row_factory=class_row(JobRecordSummary)) as cursor:
+            await cursor.execute(
+                _SEARCH,
+                (connector, connector, text, pattern, pattern, pattern, after, after, limit + 1),
+            )
+            rows = await cursor.fetchall()
+    # The extra row is dropped here rather than in SQL — see the docstring for why it is fetched.
+    return JobRecordSearch(hits=rows[:limit], hits_truncated=len(rows) > limit)

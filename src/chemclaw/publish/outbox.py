@@ -6,7 +6,8 @@ succeeded — and must not lose it either. Publishing inline forces a choice bet
 both answers are wrong. An outbox is what refuses the choice: the record is written locally in the
 same act that produces it, and a Temporal job drains it with retries.
 
-**Projection happens here, at enqueue, not at drain.** Turning a payload into a record is the step
+**Projection happens here, at enqueue, not at drain** — in `project_payload`, which
+`enqueue_payload` is the count-only shorthand for. Turning a payload into a record is the step
 that can fail on a shape this release cannot read, and failing at enqueue means failing beside the
 calculation that produced it, where the context to diagnose it exists. A drain that projected would
 surface the same defect hours later inside a background worker, detached from its cause.
@@ -22,22 +23,60 @@ things that happen after a result is durable.
 
 import logging
 import time
+from collections.abc import Sequence
 from contextlib import AbstractAsyncContextManager
 from datetime import datetime
-from typing import Any
+from typing import Any, NamedTuple
 
 import psycopg
 from psycopg.rows import TupleRow
-from psycopg.types.json import Jsonb
 
 from chemclaw.core import db
 from chemclaw.core.config import settings
+from chemclaw.core.jsonb import json_column
 from chemclaw.core.logging import log_event
 from chemclaw.core.metrics_bridge import degraded, record_metric
 from chemclaw.publish.record import CONTRACT_VERSION, Publication, ResultRecord
 from chemclaw.publish.registry import enabled_names, publishing_enabled
 
 logger = logging.getLogger(__name__)
+
+
+class Lease(NamedTuple):
+    """One claimed row's fence: which row, and the attempt number the claim spent on it.
+
+    **The reason marking takes this rather than a bare id.** A lease is a timestamp
+    (`claimed_at`), which says a row is in somebody's hands but not *whose* — so both marks keyed on
+    `id` alone, and a superseded pass's `mark_failed` released the live pass's lease and put the row
+    back in the queue at the cost of one attempt out of eight. `attempts` is the fencing token
+    because `_CLAIM` increments it in the same statement that takes the lease: it is monotonic
+    per row, so the number a pass held names that pass's claim and cannot name a later one. Passing
+    it from `claim` to `mark_*` as one value is what stops the two halves drifting apart, which is
+    how the fence would be forgotten on one of the four call sites in the drain.
+    """
+
+    row_id: int
+    #: The value of `attempts` *after* the claim that handed this row out.
+    attempt: int
+
+
+class ClaimedRow(NamedTuple):
+    """A leased row: what to deliver, and the fence that says this pass still owns it."""
+
+    lease: Lease
+    calc_ref: str
+    document: dict[str, Any]
+
+
+def _lease_columns(leases: Sequence[Lease]) -> tuple[list[int], list[int]]:
+    """Split leases into the two parallel arrays `unnest(bigint[], integer[])` takes.
+
+    Two arrays rather than one array of composites: psycopg adapts a `list[int]` to a Postgres array
+    without a registered composite type, and `unnest` over two arrays is the standard join shape for
+    a pairwise `IN`.
+    """
+    return [lease.row_id for lease in leases], [lease.attempt for lease in leases]
+
 
 # `ON CONFLICT DO NOTHING` on the identity index is what makes every enqueue path idempotent: the
 # three call sites need no coordination, a retried Temporal activity cannot double-queue, and the
@@ -87,6 +126,16 @@ _UNLEASED = "(claimed_at IS NULL OR claimed_at < now() - make_interval(secs => %
 #
 # Oldest first, so a backlog drains in the order it accumulated and a burst of fresh results cannot
 # starve what was already waiting.
+#
+# **`attempts` comes back with the row, and it is the fence.** `claimed_at` says *that* a row is
+# leased; it does not say *whose* lease it is, and both marks keyed on `id` alone — so a superseded
+# pass reporting an old outage set `claimed_at = NULL` on a row a live pass was mid-delivery on,
+# putting it straight back in the queue. Driven against real Postgres: one row, a claim, one stale
+# `mark_failed`, and the next claim took the same row again — each stale mark costs one attempt out
+# of eight and delivers nothing, so a budget sized for eight destination outages empties on a
+# release nobody intended. `attempts` is the token that fixes it because `_CLAIM` increments it in
+# the same statement: it is monotonic per row, so the value a pass was handed identifies that pass's
+# claim and no later one. No column and no migration — see `_MARK_DELIVERED`.
 _CLAIM = f"""
     UPDATE result_publications
     SET attempts = attempts + 1, claimed_at = now()
@@ -98,7 +147,7 @@ _CLAIM = f"""
         LIMIT %s
         FOR UPDATE SKIP LOCKED
     )
-    RETURNING id, calc_ref, document
+    RETURNING id, calc_ref, document, attempts
 """
 
 # **The fourth state the three-state contract does not name, and how a row leaves it.** `_CLAIM`
@@ -140,10 +189,24 @@ _REAP_EXHAUSTED = f"""
 
 # Releases the lease as well as recording the outcome: `claimed_at = NULL` is what "nobody is
 # working on this row" means, and a delivered row is nobody's.
+#
+# **Matched on the lease, not on the id, and guarded on `pending`.** Both were missing and each is
+# its own defect. Without the fence a pass could release a lease it no longer held (see `_CLAIM`).
+# Without the state guard this statement could walk a row *backwards*: driven against real Postgres,
+# a row already at `state='failed'` with its budget spent — dead-lettered, counted on
+# `chemclaw_results_dead_lettered_total`, listed by `backfill_publications --requeue` — became
+# `'delivered'` on a stale `mark_delivered`, so the queue reported a publication that never happened
+# and the dead-letter count and the table disagreed permanently. A claimed row is `pending` by
+# construction, exactly as `_MARK_FAILED` already argued for itself.
+#
+# `RETURNING id` is what makes `chemclaw_results_published_total` a count of transitions rather than
+# of call arguments — the same correction `_MARK_FAILED`'s `RETURNING state` is.
 _MARK_DELIVERED = """
-    UPDATE result_publications
+    UPDATE result_publications AS p
     SET state = 'delivered', delivered_at = now(), last_error = '', claimed_at = NULL
-    WHERE id = ANY(%s)
+    FROM unnest(%s::bigint[], %s::integer[]) AS lease(id, attempt)
+    WHERE p.id = lease.id AND p.attempts = lease.attempt AND p.state = 'pending'
+    RETURNING p.id
 """
 
 # Records why an attempt failed, and retires the row once its budget is gone. **It does not
@@ -169,13 +232,18 @@ _MARK_DELIVERED = """
 # back into the queue, and a row that is still leased is not in the queue — so without the release
 # a destination's outage would cost one retry per *lease period* rather than one per drain pass,
 # which at the shipped numbers is the difference between the next pass and two minutes of nothing.
+#
+# **Matched on the lease rather than on the id, for the reason `_CLAIM` gives.** Setting
+# `claimed_at = NULL` is the release a stale pass must not perform, so the row it lands on has to
+# be one this pass still holds — `p.attempts = lease.attempt` is that check, and it costs no column.
 _MARK_FAILED = """
-    UPDATE result_publications
+    UPDATE result_publications AS p
     SET last_error = %s,
         claimed_at = NULL,
-        state = CASE WHEN attempts >= %s THEN 'failed' ELSE 'pending' END
-    WHERE id = ANY(%s) AND state = 'pending'
-    RETURNING state
+        state = CASE WHEN p.attempts >= %s THEN 'failed' ELSE 'pending' END
+    FROM unnest(%s::bigint[], %s::integer[]) AS lease(id, attempt)
+    WHERE p.id = lease.id AND p.attempts = lease.attempt AND p.state = 'pending'
+    RETURNING p.state
 """
 
 # The backlog, per sink, in the two numbers that are actually a backlog. `count(*)` and
@@ -278,6 +346,20 @@ async def enqueue(records: list[ResultRecord]) -> int:
 
     With no sink enabled this costs one list lookup and no database round trip at all — which is
     what keeps the cost of this subsystem at zero for a deployment that has not turned it on.
+
+    **One record's failure costs one record.** The loop used to run inside a single transaction
+    with one `except Exception` around the whole of it, so a document the column refused rolled
+    back every good document beside it — and `records_for` decomposes one payload into several, so
+    those siblings are one calculation's own facts, not an unrelated grouping. All the log line
+    could then say was "could not queue 3 record(s)", which is silent about how many of the three
+    were fine.
+
+    **A savepoint per record, not a bare `try`**, because the failures are on both sides of the
+    wire and only one of them is survivable without one: psycopg refuses a NUL in its own dumper
+    and leaves the transaction healthy, while Postgres refusing a value aborts the transaction, so
+    every later `INSERT` fails with `InFailedSqlTransaction` and the final `COMMIT` takes the good
+    rows with it anyway. `conn.transaction()` nested inside the outer one is a `SAVEPOINT`, which
+    contains both.
     """
     if not records or not publishing_enabled():
         return 0
@@ -292,15 +374,12 @@ async def enqueue(records: list[ResultRecord]) -> int:
 
     written = 0
     try:
-        async with _connect("outbox_enqueue") as conn:
+        # The outer transaction is explicit so that the inner ones are savepoints rather than
+        # transactions of their own: without it the first `conn.transaction()` would open — and
+        # commit — a transaction per record, turning one batch into N commits.
+        async with _connect("outbox_enqueue") as conn, conn.transaction():
             for record in records:
-                document = Jsonb(record.model_dump(mode="json"))
-                for sink in sinks:
-                    cursor = await conn.execute(
-                        _ENQUEUE, (sink, record.calc_ref, document, record.contract_version)
-                    )
-                    written += cursor.rowcount if cursor.rowcount > 0 else 0
-            await conn.commit()
+                written += await _enqueue_one(conn, record, sinks)
     except Exception:
         logger.warning(
             "publish[enqueue:write]: could not queue %d record(s) for %s",
@@ -314,7 +393,43 @@ async def enqueue(records: list[ResultRecord]) -> int:
     return written
 
 
-async def enqueue_payload(
+async def _enqueue_one(
+    conn: psycopg.AsyncConnection[TupleRow], record: ResultRecord, sinks: list[str]
+) -> int:
+    """Queue one record for every sink, or none of them; return the rows it wrote.
+
+    A refused document is logged and counted **by `calc_ref`**, and costs only itself: that is the
+    number an operator needs and the batch-wide line could not give.
+
+    `json_column` rather than a bare `Jsonb` for the reason `chemclaw.core.jsonb` states — a
+    non-finite float is not JSON, and letting it travel turns a value this process could have named
+    into an `InvalidTextRepresentation` naming a *token*. `publish.record`'s models refuse one at
+    projection now, where it is counted as the permanent shape problem it is; this is the boundary
+    behind that, for a document those models do not own end to end.
+    """
+    rows = 0
+    try:
+        async with conn.transaction():
+            document = json_column(record.model_dump(mode="json"))
+            for sink in sinks:
+                cursor = await conn.execute(
+                    _ENQUEUE, (sink, record.calc_ref, document, record.contract_version)
+                )
+                rows += cursor.rowcount if cursor.rowcount > 0 else 0
+    except Exception:
+        logger.warning(
+            "publish[enqueue:write]: %s could not be queued for %s; the rest of its batch is "
+            "unaffected",
+            record.calc_ref,
+            ", ".join(sinks),
+            exc_info=True,
+        )
+        record_metric(lambda m: m.increment("chemclaw_result_publish_failures_total"))
+        return 0
+    return rows
+
+
+def project_payload(
     *,
     calc_ref: str,
     calc_type: str,
@@ -328,32 +443,27 @@ async def enqueue_payload(
     computed_at: datetime | None = None,
     depends_on: list[str] | None = None,
     publication: Publication | None = None,
-) -> int:
-    """Project one stored payload and queue what it becomes.
+) -> list[ResultRecord] | None:
+    """The records one stored payload becomes, or **None** when the projector raised.
 
-    Never raises — see the module docstring. Returns how many rows were written, which is **not
-    always one**: a shape that decomposes queues the aggregate and its parts (`records_for`), so a
-    solvent screen is three rows rather than one.
+    Never raises. Three states, and the third is why this exists apart from `enqueue_payload`: a
+    list is "queue these", `[]` is "nothing to queue", and `None` is "this release has a projector
+    for the row and it could not read it". An `int` cannot carry that distinction —
+    `enqueue_payload` returned 0 for all three, and `backfill.py` added that 0 to its `queued`
+    counter and touched nothing else, so a row whose projection failed landed in **no bucket at
+    all**: measured on a four-row corpus holding one
+    `xtb.scan` row from a calculator that wrote `energy` where this release reads
+    `energy_hartree`, the dry run reported `(seen=4, queued=3, skipped=1)` and the real pass
+    `(seen=4, queued=2, skipped=1)`. The operator-facing line said "4 row(s) seen, 2 queued, 1
+    skipped" over a corpus of four, and nothing named the fourth.
 
-    The single entry point every hook uses, so "what gets published" is decided in one place rather
-    than three. A payload this release has no projector for is skipped with a debug line, not an
-    error: `calculation_results` is never pruned, so a deployment legitimately holds rows from
-    calculators that no longer ship.
-
-    `payload_kind` is the model's own name and is what routes a *composite*: its `calc_type` is
-    `<connector>.<job>`, a route, and no projector prefix matches one. Empty falls back to the
-    prefix inference, which is right for a cached primitive whose `calc_type` is its calculator.
+    Callers that only need the count keep using `enqueue_payload`, which is this plus the write.
     """
-    if not publishing_enabled():
-        return 0
     # Imported inside the function, deliberately: with no sink configured the projection machinery
     # and RDKit's canonicalization are never imported at all, so the hot cache path pays nothing
     # for a subsystem that is off.
-    from chemclaw.publish.project import projector_for, records_for
+    from chemclaw.publish.project import records_for
 
-    if projector_for(calc_type, payload_kind) is None:
-        logger.debug("publish: no projector for %s; not queued", calc_type)
-        return 0
     try:
         records = records_for(
             calc_ref=calc_ref,
@@ -391,14 +501,76 @@ async def enqueue_payload(
         # own declaration for the case that proved it.
         logger.exception("publish: could not project %s (%s)", calc_ref, calc_type)
         record_metric(lambda m: m.increment("chemclaw_result_projection_failures_total"))
-        return 0
+        return None
     if publication is not None:
         records = [record.model_copy(update={"publications": [publication]}) for record in records]
+    return records
+
+
+async def enqueue_payload(
+    *,
+    calc_ref: str,
+    calc_type: str,
+    payload: dict[str, Any],
+    payload_kind: str = "",
+    calc_version: str = "",
+    input_hash: str = "",
+    params_hash: str = "",
+    structure_id: str = "",
+    compute_seconds: float | None = None,
+    computed_at: datetime | None = None,
+    depends_on: list[str] | None = None,
+    publication: Publication | None = None,
+) -> int:
+    """Project one stored payload and queue what it becomes.
+
+    Never raises — see the module docstring. Returns how many rows were written, which is **not
+    always one**: a shape that decomposes queues the aggregate and its parts (`records_for`), so a
+    solvent screen is three rows rather than one.
+
+    The single entry point every hook uses, so "what gets published" is decided in one place rather
+    than three. A payload this release has no projector for is skipped with a debug line, not an
+    error: `calculation_results` is never pruned, so a deployment legitimately holds rows from
+    calculators that no longer ship.
+
+    `payload_kind` is the model's own name and is what routes a *composite*: its `calc_type` is
+    `<connector>.<job>`, a route, and no projector prefix matches one. Empty falls back to the
+    prefix inference, which is right for a cached primitive whose `calc_type` is its calculator.
+
+    **The count this returns cannot say why it is zero**, which is what `project_payload` is for —
+    a caller that must distinguish "nothing to queue" from "could not read the row" calls that and
+    `enqueue` instead. Kept `int` here because the three hooks behind a finished calculation
+    genuinely do not care: the science is already persisted either way.
+    """
+    if not publishing_enabled():
+        return 0
+    # Imported inside the function for the reason `project_payload` states.
+    from chemclaw.publish.project import projector_for
+
+    if projector_for(calc_type, payload_kind) is None:
+        logger.debug("publish: no projector for %s; not queued", calc_type)
+        return 0
+    records = project_payload(
+        calc_ref=calc_ref,
+        calc_type=calc_type,
+        payload=payload,
+        payload_kind=payload_kind,
+        calc_version=calc_version,
+        input_hash=input_hash,
+        params_hash=params_hash,
+        structure_id=structure_id,
+        compute_seconds=compute_seconds,
+        computed_at=computed_at,
+        depends_on=depends_on,
+        publication=publication,
+    )
+    if records is None:
+        return 0
     return await enqueue(records)
 
 
-async def claim(sink: str, limit: int) -> list[tuple[int, str, dict[str, Any]]]:
-    """Claim up to `limit` pending rows for `sink`, as `(id, calc_ref, document)`.
+async def claim(sink: str, limit: int) -> list[ClaimedRow]:
+    """Claim up to `limit` pending rows for `sink`, each with the lease that fences its mark.
 
     **Claiming spends the attempt** — see `_CLAIM` for why that has to happen in the same statement
     rather than after the delivery.
@@ -474,55 +646,100 @@ async def claim(sink: str, limit: int) -> list[tuple[int, str, dict[str, Any]]]:
             sink=sink,
             dead_lettered=reaped,
         )
-    return [(int(row[0]), str(row[1]), row[2]) for row in rows]
+    return [ClaimedRow(Lease(int(row[0]), int(row[3])), str(row[1]), row[2]) for row in rows]
 
 
-async def mark_delivered(ids: list[int]) -> None:
-    """Record that these rows reached their sink."""
-    if not ids:
+async def mark_delivered(leases: Sequence[Lease]) -> None:
+    """Record that these rows reached their sink, for the leases this pass still holds.
+
+    A row whose lease has moved on is *not* marked — see `Lease` and `_MARK_DELIVERED`. That is
+    at-least-once delivery working as designed rather than a loss: the record reached the
+    destination, every write on the far side is an upsert onto a content hash, and the pass that now
+    holds the lease will deliver and mark it. What must not happen is this pass releasing that lease
+    or overwriting an outcome another pass recorded.
+
+    `chemclaw_results_published_total` counts the rows that actually changed state, not the
+    arguments: a re-run of the same mark books nothing, which is what makes the counter a count of
+    publications.
+    """
+    if not leases:
         return
     async with _connect("outbox_mark_delivered") as conn:
-        await conn.execute(_MARK_DELIVERED, (ids,))
+        cursor = await conn.execute(_MARK_DELIVERED, _lease_columns(leases))
+        marked = len(await cursor.fetchall())
         await conn.commit()
-    record_metric(lambda m: m.increment("chemclaw_results_published_total", len(ids)))
+    if marked:
+        record_metric(lambda m: m.increment("chemclaw_results_published_total", marked))
+    _log_fenced_off("delivered", len(leases) - marked)
 
 
-async def mark_failed(ids: list[int], reason: str) -> None:
+async def mark_failed(leases: Sequence[Lease], reason: str) -> None:
     """Record a failed attempt, retiring a row only once it has spent its attempt budget.
 
     A retired row is never deleted: it is the record that something was *not* published, and an
     operator re-queues it with the backfill CLI once the cause is fixed. Deleting it would turn an
     outage into a silent gap.
+
+    Fenced on the lease, which is the half this had to grow: `claimed_at = NULL` is a *release*, and
+    a pass whose lease has expired releasing a row a live pass is delivering is how one destination
+    outage spent several attempts for one real try. See `Lease`.
     """
-    if not ids:
+    if not leases:
         return
     async with _connect("outbox_mark_failed") as conn:
         cursor = await conn.execute(
-            _MARK_FAILED, (reason[:2000], settings.result_publish_max_attempts, ids)
+            _MARK_FAILED,
+            (reason[:2000], settings.result_publish_max_attempts, *_lease_columns(leases)),
         )
         states = [str(row[0]) for row in await cursor.fetchall()]
         await conn.commit()
     retired = sum(1 for state in states if state == "failed")
+    _log_fenced_off("failed", len(leases) - len(states))
     # **This is one delivery attempt per row, and it is not the only thing on this counter.**
     # `chemclaw_result_publish_failures_total` also carries a sink-resolution failure, a local
     # queue-write failure and the enqueue activity's own failure — four unrelated events on one
     # series, which is exactly the argument this module makes for keeping projection failures
     # apart. The counter cannot be split without a label it does not declare, so every site says
     # which stage it is in its log line instead; `stage=delivery` is this one.
-    record_metric(lambda m: m.increment("chemclaw_result_publish_failures_total", len(ids)))
+    record_metric(lambda m: m.increment("chemclaw_result_publish_failures_total", len(states)))
     if retired:
         record_metric(lambda m: m.increment("chemclaw_results_dead_lettered_total", retired))
     log_event(
         logger,
         "publish.attempt_failed",
         "publish[delivery]: %d row(s) failed an attempt, %d retired to dead-letter: %s",
-        len(ids),
+        len(states),
         retired,
         reason[:200],
         level=logging.WARNING if retired else logging.INFO,
         stage="delivery",
-        rows=len(ids),
+        rows=len(states),
         dead_lettered=retired,
+    )
+
+
+def _log_fenced_off(outcome: str, fenced: int) -> None:
+    """Say when a mark reached no row, because silence there is indistinguishable from success.
+
+    A fence miss means this pass no longer holds the lease — its rows were re-claimed after its
+    lease expired, which is a pass that ran longer than `result_publish_lease_seconds` and is worth
+    an operator knowing about. It is not an error: the row is somebody else's now and will be
+    delivered and marked by them.
+    """
+    if fenced <= 0:
+        return
+    log_event(
+        logger,
+        "publish.mark_fenced_off",
+        "publish[delivery]: %d row(s) could not be marked %s — this pass no longer holds their "
+        "lease, so another drain re-claimed them after %.0fs and owns their outcome",
+        fenced,
+        outcome,
+        settings.result_publish_lease_seconds,
+        level=logging.WARNING,
+        stage="delivery",
+        rows=fenced,
+        outcome=outcome,
     )
 
 

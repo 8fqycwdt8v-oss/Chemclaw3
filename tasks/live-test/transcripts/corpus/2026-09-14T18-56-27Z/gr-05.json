@@ -1,0 +1,60 @@
+{
+  "probe": {
+    "id": "gr-05",
+    "section": 1,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Where are the holes in what we know about the benzamide coupling onto 3-bromopyridine?",
+    "expects_tools": [
+      "find_knowledge_gaps",
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a gap list with no reference to what the existing records do cover",
+      "an implied dataset, assay or study that is not in the corpus"
+    ],
+    "direction": "96 records exist and their mean yield is around 8% with a maximum in the forties — a screen that mostly failed is a real and useful thing to say. Naming the absence is the deliverable here: what was never varied, what has no replicate, what has no observation attached.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-05",
+    "section": 1,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Where are the holes in what we know about the benzamide coupling onto 3-bromopyridine?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 2.12,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "170b69b94f964519bc9678bde27c39bb",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

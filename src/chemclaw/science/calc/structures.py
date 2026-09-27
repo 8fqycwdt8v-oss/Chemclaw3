@@ -98,10 +98,20 @@ class UnknownStructureError(ValueError):
 async def require_structure(store: StructureStore, structure_id: str) -> Structure:
     """Resolve `structure_id`, or raise a message a model can act on.
 
-    One function rather than a `get`-then-check at each of the six call sites, because the message
-    is the interesting part: a handle that does not resolve is almost always a handle from a
-    conversation older than the deployment's data, and the remedy is to re-run the search rather
-    than to retry the id.
+    One function rather than a `get`-then-check at each call site, because the message is the
+    interesting part: a handle that does not resolve is almost always a handle from a conversation
+    older than the deployment's data, and the remedy is to re-run the search rather than to retry
+    the id.
+
+    **There are two call sites in `src/`, not the six this said, which puts the extraction under
+    the Rule of Three it was invoking rather than over it** — `connectors/calc/server/tools.py`
+    (the MCP face) and `connectors/calc/activities.py` (the Temporal face). Said plainly because
+    the honest reading changes: with six callers the count carried the argument on its own, and
+    with two it does not. What keeps this a function is the other half of the sentence, and it is
+    the stronger half: the two callers are in two *processes*, answering the same handle to the
+    same model, and a message that told a chemist to re-run a search in one and not the other
+    would be a difference in the system's behaviour produced by a copy-paste. Inline it and the
+    sentence above has to be written twice.
 
     Args:
         store: Where geometries are kept.

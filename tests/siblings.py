@@ -35,6 +35,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import yaml
+
 #: The head of every skip message a missing companion checkout produces, so one reporter can find
 #: them all. Defined here rather than restated in `tests/conftest.py` because a marker that is
 #: transcribed is a marker that drifts, and the whole subject of this module is one fact declared
@@ -145,6 +147,29 @@ def fleet_published_bundles(root: Path) -> dict[str, Path]:
         manifest.parent.name: manifest
         for manifest in sorted((root / "manifests").glob("*/connector.yaml"))
     }
+
+
+def fleet_published_tool_names(root: Path) -> dict[str, frozenset[str]]:
+    """Every tool each published fleet bundle declares, by bundle name.
+
+    The *declared* surface rather than the served one, and that is the whole reason this is cheap
+    enough to run in CI: it reads YAML off a shallow clone, where measuring what a server actually
+    answers needs the sibling's built `.venv` (`sibling_python`, and the schema measurement in
+    `tests/test_context_floor.py` that uses it). The two are held to each other on the fleet's own
+    side, by `mcp_server_kit.testing.assert_manifest_matches` against a running server, so a name
+    declared here and not served there fails over there rather than silently here.
+
+    Reads `endpoint.tools`, which is the key `tests/test_sibling_manifest_agreement.py` already
+    compares under the name `"tools"`. A bundle with no `endpoint:` contributes an empty set rather
+    than being dropped, so a manifest that loses its endpoint reads as "declares nothing" instead of
+    "is not in the fleet" — those are different failures and only the first is this function's.
+    """
+    declared: dict[str, frozenset[str]] = {}
+    for name, path in fleet_published_bundles(root).items():
+        document = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        endpoint = document.get("endpoint") or {}
+        declared[name] = frozenset(str(tool) for tool in endpoint.get("tools") or ())
+    return declared
 
 
 def bundles_declared_here() -> dict[str, Path]:

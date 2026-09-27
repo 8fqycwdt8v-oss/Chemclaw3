@@ -1,0 +1,99 @@
+{
+  "probe": {
+    "id": "an-18",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "The des-methyl impurity Oc1ccc(-c2ccccc2C(=O)O)cc1 is at 0.4% and QA wants to know which process step forms it. Give me a mechanism and point at the step.",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "similar_reactions",
+      "expand_note",
+      "predict_site_reactivity"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "asserting the mechanism as established rather than as the best-supported hypothesis",
+      "an invented ELN entry, batch record or process parameter",
+      "a claimed rate, activation energy or formation percentage per step",
+      "naming a step the retrieved record does not actually contain"
+    ],
+    "direction": "Retrieves what the graph and the ELN records actually say about the route's steps and known failure modes rather than reasoning from memory alone, and grounds the mechanistic story (demethylation of an aryl methyl ether — acid, nucleophile or oxidative) in a specific step of the retrieved route. Where the record does not identify the step, says so and gives a discriminating experiment (spiking, step-wise sampling) instead of asserting one. Cites its sources.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "an-18",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "The des-methyl impurity Oc1ccc(-c2ccccc2C(=O)O)cc1 is at 0.4% and QA wants to know which process step forms it. Give me a mechanism and point at the step.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [
+      "resolve_compound",
+      "gather_evidence",
+      "similar_molecules",
+      "gather_evidence",
+      "gather_evidence",
+      "substructure_matches"
+    ],
+    "tool_results": [
+      {
+        "tool": "resolve_compound",
+        "preview": "<retrieved-note-802678ad5c37acd3 id=\"chem:resolve_compound\">\n{\n  \"query\": \"Oc1ccc(-c2ccccc2C(=O)O)cc1\",\n  \"smiles\": \"O=C(O)c1ccccc1-c1ccc(O)cc1\",\n  \"name\": \"Oc1ccc(-c2ccccc2C(=O)O)cc1\",\n  \"source\": \"s"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "chunks=[EvidenceChunk(content='<retrieved-note-802678ad5c37acd3 id=\"playbook-route-scoring-is-not-per-step\">\\n…are the objectives; a process route is judged on cost, safety,\\nthroughput and impurity c"
+      },
+      {
+        "tool": "similar_molecules",
+        "preview": "<retrieved-note-802678ad5c37acd3 id=\"molfp:similar_molecules\">\n{\n  \"subject\": \"molecule\",\n  \"hits\": [],\n  \"approximate\": false,\n  \"index_empty\": false,\n  \"index_partial\": false,\n  \"scan_truncated\": fa"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "chunks=[EvidenceChunk(content='<retrieved-note-802678ad5c37acd3 id=\"rxn-suzuki-biaryl\">\\nSuzuki-Miyaura coupling of 4-bromoanisole with phenylboronic acid.\\n\\n- aryl halide: compound-4-bromoanisole\\n-"
+      },
+      {
+        "tool": "substructure_matches",
+        "preview": "<retrieved-note-802678ad5c37acd3 id=\"molfp:substructure_matches\">\n{\n  \"subject\": \"molecule\",\n  \"hits\": [],\n  \"approximate\": false,\n  \"index_empty\": false,\n  \"index_partial\": false,\n  \"scan_truncated\":"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "chunks=[EvidenceChunk(content='<retrieved-note-802678ad5c37acd3 id=\"compound-phenylboronic-acid\">\\n…partner. Prone to protodeboronation in protic solvent at high temperature,\\nwhich is the failure mod"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 17.48,
+    "event_counts": {
+      "token": 46,
+      "tool_call": 6,
+      "tool_result": 6,
+      "evidence_source": 3,
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "fbd76553dd094392be8e867815facd29",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

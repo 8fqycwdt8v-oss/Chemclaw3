@@ -21,6 +21,8 @@ import yaml
 from chemclaw.connectors.bo.server import tools as bo_tools
 from chemclaw.connectors.bo.server.tools import ObjectiveScale, suggest_next_experiment
 from chemclaw.connectors.manifest import ConnectorManifest
+from chemclaw.core.config import settings
+from chemclaw.science.bo.engine import initial_candidates, propose_candidates
 from chemclaw.science.bo.problem import (
     Candidate,
     CategoricalParameter,
@@ -305,10 +307,31 @@ def _trade_off_runs() -> list[Observation]:
     ]
 
 
-def test_a_two_objective_ask_returns_a_front_of_the_runs_supplied() -> None:
+@pytest.fixture(scope="module")
+def trade_off_suggestion() -> bo_tools.ExperimentSuggestion:
+    """One acquisition over `_trade_off_problem()`/`_trade_off_runs()`, read by four tests.
+
+    A multi-objective acquisition — a GP fit plus a multi-start optimizer — is the expensive half
+    of this file, and the four tests below asked for it with byte-identical constant inputs, each
+    to assert a different field of the same answer: the front, the summary sentence, the
+    per-objective scales, the per-objective predictions on a candidate. None of them is about
+    repeatability or about the optimizer's run-to-run variance, so one answer serves all four.
+
+    The tests either side of this block are *not* on it and must not be: each supplies a different
+    problem or a different run list, and what they assert is a consequence of that difference.
+    """
+    # Annotated on the way out because the served tool's signature reaches mypy as `Any`.
+    suggestion: bo_tools.ExperimentSuggestion = asyncio.run(
+        suggest_next_experiment(_trade_off_problem(), _trade_off_runs())
+    )
+    return suggestion
+
+
+def test_a_two_objective_ask_returns_a_front_of_the_runs_supplied(
+    trade_off_suggestion: bo_tools.ExperimentSuggestion,
+) -> None:
     """The front is what turns "here is the trade-off" from a sentence into a computation."""
-    suggestion = asyncio.run(suggest_next_experiment(_trade_off_problem(), _trade_off_runs()))
-    on_front = {(o.values["yield"], o.values["impurity"]) for o in suggestion.front}
+    on_front = {(o.values["yield"], o.values["impurity"]) for o in trade_off_suggestion.front}
     assert on_front == {(55.0, 1.0), (78.0, 4.0), (64.0, 2.0)}
     assert (50.0, 3.0) not in on_front, "a run beaten on both axes is not on the front"
 
@@ -328,27 +351,30 @@ def test_a_single_objective_ask_draws_no_front() -> None:
     assert len(suggestion.scales) == 1
 
 
-def test_the_summary_says_there_is_no_single_best_point() -> None:
+def test_the_summary_says_there_is_no_single_best_point(
+    trade_off_suggestion: bo_tools.ExperimentSuggestion,
+) -> None:
     """The caveat has to reach the model composing the answer, not just this file."""
-    suggestion = asyncio.run(suggest_next_experiment(_trade_off_problem(), _trade_off_runs()))
-    assert "trade-off over 2 objectives" in suggestion.summary
-    assert "no single best point" in suggestion.summary
-    assert "summary" in suggestion.model_dump(mode="json")
+    assert "trade-off over 2 objectives" in trade_off_suggestion.summary
+    assert "no single best point" in trade_off_suggestion.summary
+    assert "summary" in trade_off_suggestion.model_dump(mode="json")
 
 
-def test_each_objective_gets_its_own_scale() -> None:
+def test_each_objective_gets_its_own_scale(
+    trade_off_suggestion: bo_tools.ExperimentSuggestion,
+) -> None:
     """An sd is read against its own objective's spread; yield's spread says nothing about ppm."""
-    suggestion = asyncio.run(suggest_next_experiment(_trade_off_problem(), _trade_off_runs()))
-    by_name = {scale.name: scale for scale in suggestion.scales}
+    by_name = {scale.name: scale for scale in trade_off_suggestion.scales}
     assert by_name["yield"].spread == pytest.approx(28.0)
     assert by_name["impurity"].spread == pytest.approx(3.0)
     assert by_name["impurity"].direction == "minimize"
 
 
-def test_candidates_carry_a_prediction_per_objective() -> None:
+def test_candidates_carry_a_prediction_per_objective(
+    trade_off_suggestion: bo_tools.ExperimentSuggestion,
+) -> None:
     """M-1 measured `<objective>_pred`/`_sd` per objective; this is that reaching the caller."""
-    suggestion = asyncio.run(suggest_next_experiment(_trade_off_problem(), _trade_off_runs()))
-    candidate = suggestion.candidates[0]
+    candidate = trade_off_suggestion.candidates[0]
     assert set(candidate.predicted_values) == {"yield", "impurity"}
     assert set(candidate.predicted_sds) == {"yield", "impurity"}
     # The scalars keep the lead objective, which is what every persisted row already holds.
@@ -736,3 +762,36 @@ def test_a_problem_using_every_narrowed_model_still_round_trips_as_wire_dicts(
         <= 4.0 + 1e-6
     )
     assert suggestion.calc_refs
+
+
+def test_a_batch_beyond_the_ceiling_is_refused_before_the_optimizer_runs() -> None:
+    """`count` was the one model-supplied size in this bundle with no bound above it.
+
+    Measured on an unconstrained two-parameter problem, the acquisition cost is linear in the
+    batch: 1.3 s at 2 candidates and 2.6 s at 4, ~0.65 s each. `suggest_next_experiment`'s own
+    docstring puts a *constrained* problem at roughly nine seconds per further candidate. Behind a
+    `request_timeout: 120`, that makes a three-digit `count` a request the client abandons while
+    the pod keeps computing it — and every sibling size here (`bo_max_design_runs`,
+    `bo_max_evaluations`, `bo_max_enumerated_cells`) is bounded by config already.
+
+    Bounded in the engine rather than in the tool signature, for the reason
+    `_require_design_fits_the_ceiling` states in full: a bound in the transport is a bound the
+    in-process callers do not get. So the durable campaign's per-round batch is held to the same
+    number, and it is checked *before* the strategy runs rather than after the batch exists.
+    """
+    problem = OptimizationProblem(
+        parameters=[ContinuousParameter(name="t", lower=20.0, upper=120.0)],
+        objectives=[Objective(name="yield", direction="maximize")],
+    )
+    over = settings.bo_max_candidates_per_ask + 1
+    with pytest.raises(ValueError, match=str(settings.bo_max_candidates_per_ask)):
+        initial_candidates(problem, over)
+    with pytest.raises(ValueError, match=str(settings.bo_max_candidates_per_ask)):
+        propose_candidates(
+            problem,
+            [
+                Observation(params={"t": 40.0}, value=50.0),
+                Observation(params={"t": 80.0}, value=70.0),
+            ],
+            over,
+        )

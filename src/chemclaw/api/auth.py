@@ -17,13 +17,14 @@ apply here — this is a user-scoped resource access, so it is fully Entra-scope
 import asyncio
 import logging
 import time
-from typing import Any
+from typing import Annotated, Any
 
+import httpx
 import jwt
 from fastapi import HTTPException, Request
 from jwt import PyJWKClient
-from jwt.exceptions import PyJWKClientConnectionError, PyJWKClientError
-from pydantic import BaseModel, Field
+from jwt.exceptions import PyJWKClientError
+from pydantic import BaseModel, StringConstraints
 
 from chemclaw.api.middleware import (
     AT_CAPACITY,
@@ -35,6 +36,7 @@ from chemclaw.api.middleware import (
 from chemclaw.api.rate_limit import RateLimited, enforce_request_budget
 from chemclaw.api.state import state
 from chemclaw.core.config import settings
+from chemclaw.core.http import default_ssl_context
 from chemclaw.core.identity_context import GROUP_ROLE_PREFIX
 from chemclaw.core.metrics_bridge import record_metric
 
@@ -48,13 +50,24 @@ __all__ = ["GROUP_ROLE_PREFIX", "AuthError", "Principal", "require_principal", "
 
 # The dev stand-in used only when `entra_required` is False (local, no tenant). Never reached in a
 # real deployment, where every request is a validated Entra token.
-_DEV_PRINCIPAL_OID = "dev-user"
+DEV_PRINCIPAL_OID = "dev-user"
+# The private spelling is kept because this module and its tests use it throughout; the public one
+# exists because a guard that divides a pod *per actor* has to be able to recognise the one
+# principal that is not an actor. See `chemclaw.api.routes.turns`.
+_DEV_PRINCIPAL_OID = DEV_PRINCIPAL_OID
 
 
 class Principal(BaseModel):
-    """An authenticated Entra user: the identity every backend action is attributed to."""
+    """An authenticated Entra user: the identity every backend action is attributed to.
 
-    oid: str = Field(min_length=1)
+    **`oid` is stripped at construction**, because the turn reads the actor stripped
+    (`core/identity_context.get_current_actor`) and the skills and proposals routes key on this
+    field raw: a whitespace-bearing oid (a dev or configured principal) saved a skill under
+    `' alice '` that turns mounting `'alice'` never read. Normalising at the source is what makes
+    the two spellings one; a blank one is refused rather than stripped to an empty identity.
+    """
+
+    oid: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
     upn: str = ""
     roles: frozenset[str] = frozenset()
 
@@ -72,6 +85,109 @@ class IdentityProviderUnavailable(Exception):
     """
 
 
+class _HttpxJwkClient(PyJWKClient):
+    """PyJWT's JWKS client with its one network call moved onto `httpx`.
+
+    **`fetch_data` is not a documented extension point** — it is a method of a concrete upstream
+    class, and PyJWT promises nothing about it staying the single place the key set is fetched.
+    That dependency is pinned in `tests/test_upstream_surface.py` rather than believed here,
+    because the failure if upstream restructures is silent: a `urlopen` would come back, and the
+    proxy posture below would quietly stop holding.
+
+    **Why it is worth the coupling.** `PyJWKClient.fetch_data` reaches the tenant through
+    `urllib.request.urlopen`, which resolves proxies from the process-global default opener and
+    takes no `trust_env` — so on a pod with `HTTPS_PROXY` set, the fetch of *the key set every
+    bearer token is validated against* went to the proxy, which could answer it with a key set of
+    its own choosing. Measured with a loopback recorder standing in for the proxy: it received
+    `GET http://<tenant-host>/…/discovery/v2.0/keys`.
+
+    What stood here before was `no_proxy` surgery: append the tenant host to both spellings of a
+    **process-global** environment variable on every client build, under a lock, because that
+    read-modify-write races on the `asyncio.to_thread` validation pool (measured with the window
+    widened: five concurrent writers of five distinct hosts left one of the five in `no_proxy`).
+    `trust_env=False` is the same decision taken on this one request instead of on the process, so
+    there is no shared state to race over, nothing left behind for the next `urlopen` caller in the
+    process, and no dependence on `proxy_bypass` agreeing with `getproxies_environment` about what
+    a host suffix is. It is the flag every other httpx client in this tree that reaches a real
+    dependency already carries, and this endpoint is the one where following the environment is a
+    *trust* decision rather than a routing one.
+
+    `verify=` is the process's one trust store (`core/http.default_ssl_context`) rather than
+    httpx's per-client default, for the reason that function measures: httpx parses the whole
+    certifi bundle into a fresh `SSLContext` per client, and `httpx.get` is a client per fetch.
+    It is also the same trust store every connector call uses, which is what makes "the tenant" and
+    "a bundle" one decision about CAs instead of two.
+    """
+
+    def fetch_data(self) -> Any:
+        """The tenant's key set, fetched off the environment's proxy and mapped onto our split.
+
+        **The 401/503 split is decided here, at the raise**, because this is the frame that knows
+        the difference between "the caller's `kid` is unknown" (not reachable from this method at
+        all) and "we could not get a usable key set to decide with". Every failure of the *fetch*
+        is `IdentityProviderUnavailable` — a 503 — for the reason that class exists: answering 401
+        would tell a user holding a perfectly good token that it was rejected. Three arms, because
+        httpx's taxonomy distinguishes three things the operator reads differently:
+
+        * `httpx.TransportError` — refused, blackholed, DNS-less, or past `timeout`; also the
+          malformed-endpoint case, since `UnsupportedProtocol` is one of these.
+        * `httpx.HTTPStatusError` — the tenant answered, and said no. A 404 from a wrong tenant id
+          and a 500 from the IdP are both deployment faults, and neither is a bad credential.
+        * `ValueError` — a 200 whose body is not JSON, which is what an intercepting proxy's error
+          page looks like. This is the arm that used to live in `_signing_key` as a workaround for
+          PyJWT letting `json.load`'s `ValueError` escape `PyJWKClientError`; it is not a
+          workaround any more, it is this method's own decode failing.
+
+        **A redirect is refused rather than followed, and that is the one behaviour this move
+        changes.** `urlopen` followed 3xx by default and httpx does not, so the choice had to be
+        made rather than inherited — and refused is the right way round for exactly the reason
+        `trust_env=False` is: a redirect moves the key set's origin out of the address the
+        deployment declared, past `core/netguard.py`'s allowlist, which is derived from
+        `entra_jwks_endpoint` and cannot see where a `Location` header points. Real Entra does not
+        redirect this endpoint. Said explicitly, and *before* `raise_for_status`, because httpx
+        raises on 3xx as well: without this arm the refusal is the generic "answered 302", which
+        names a status where the operator needs to be told the address moved. (This paragraph
+        first shipped claiming an unfollowed 3xx would fall through to the decode as "unusable" —
+        driven against a real 302, it does not.)
+
+        Raising this module's own exception rather than `PyJWKClientConnectionError` is deliberate:
+        PyJWT catches nothing around `fetch_data`, so the type that reaches `require_principal` is
+        the one chosen here, and a second translation in `_signing_key` could only lose fidelity.
+
+        The cache write is upstream's, reproduced rather than inherited: `get_jwk_set` reads
+        `jwk_set_cache` before it calls this, so skipping the `put` would turn PyJWT's five-minute
+        key-set cache off and make every validation a fetch. Pinned in
+        `tests/test_upstream_surface.py` beside the method itself.
+        """
+        try:
+            response = httpx.get(
+                self.uri,
+                headers=self.headers,
+                timeout=self.timeout,
+                # Never inherit an ambient proxy — the whole reason this class exists.
+                trust_env=False,
+                verify=default_ssl_context(),
+            )
+            if response.is_redirect:
+                raise IdentityProviderUnavailable(
+                    f"tenant JWKS endpoint redirected ({response.status_code}); the key set must "
+                    "come from the declared address"
+                )
+            response.raise_for_status()
+            jwk_set = response.json()
+        except httpx.HTTPStatusError as exc:
+            raise IdentityProviderUnavailable(
+                f"tenant JWKS endpoint answered {exc.response.status_code}"
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise IdentityProviderUnavailable(f"tenant JWKS unreachable: {exc}") from exc
+        except ValueError as exc:
+            raise IdentityProviderUnavailable(f"tenant JWKS unusable: {exc}") from exc
+        if self.jwk_set_cache is not None:
+            self.jwk_set_cache.put(jwk_set)
+        return jwk_set
+
+
 # One JWKS client per endpoint, cached: `PyJWKClient` keeps its own key cache, so rebuilding it per
 # request would re-fetch the tenant JWKS on the hot path and amplify under a token flood (review
 # finding). Keyed by endpoint so a config change is still picked up.
@@ -86,11 +202,23 @@ _last_forced_refresh: dict[str, float] = {}
 
 
 def _client_for(endpoint: str) -> PyJWKClient:
-    """The cached `PyJWKClient` for `endpoint`, built on first use with our configured timeout."""
+    """The cached JWKS client for `endpoint`, built on first use with our configured timeout.
+
+    **No lock, and that is a change rather than an omission.** This runs on the validation thread
+    pool — `validate_token` is dispatched through `asyncio.to_thread`, so two requests bearing
+    tokens from two tenants genuinely build their clients at the same moment — and the body used to
+    be a read-modify-write of `os.environ` (the `no_proxy` bypass `_HttpxJwkClient` replaced) that
+    lost four writers in five when it raced. What is left is a check-then-insert into a dict, which
+    cannot lose data: `setdefault` is atomic, so a race builds a second client and then discards
+    it, and every caller leaves with the *stored* one rather than with a private copy whose key
+    cache nobody else would warm. The constructor performs no I/O — the key set is fetched lazily
+    on the first `get_signing_key` — so a discarded client costs nothing.
+    """
     client = _jwks_clients.get(endpoint)
     if client is None:
-        client = PyJWKClient(endpoint, timeout=settings.entra_http_timeout_seconds)
-        _jwks_clients[endpoint] = client
+        client = _jwks_clients.setdefault(
+            endpoint, _HttpxJwkClient(endpoint, timeout=settings.entra_http_timeout_seconds)
+        )
     return client
 
 
@@ -98,8 +226,11 @@ def _match_kid(signing_keys: list[Any], kid: str) -> Any | None:
     """The key in `signing_keys` whose id is `kid`, or `None`.
 
     Written here rather than borrowed from `PyJWKClient.match_kid` so key resolution does not
-    depend on a class attribute — the lookup is three lines of pure data matching, and reaching
-    into the client for it couples this module to a surface it does not otherwise use.
+    depend on a class attribute — the lookup is one line of pure data matching over two attributes
+    of a `PyJWK`, and calling upstream's static method for it would be a second undocumented
+    dependency to pin. That reason is *narrower* than the one it replaced, which said this module
+    does not otherwise use the client's surface: since `_HttpxJwkClient` it plainly does. One
+    override that has to exist is a coupling; a convenience wrapper around `next()` is a choice.
     """
     return next((key for key in signing_keys if key.key_id == kid), None)
 
@@ -120,10 +251,10 @@ def _forced_refresh_allowed(endpoint: str, now: float) -> bool:
 def _signing_key(token: str) -> Any:
     """Resolve the RSA signing key for `token` from the tenant JWKS (indirected for tests).
 
-    The JWKS fetch is synchronous network I/O (PyJWT's urllib), so callers on the event loop must
-    run validation in a worker thread (`require_principal` does); the client is built with the
-    configured `entra_http_timeout_seconds` so a slow/blackholed IdP is bounded by our config, not
-    PyJWT's 30s default.
+    The JWKS fetch is synchronous network I/O (`_HttpxJwkClient`'s `httpx.get`), so callers on the
+    event loop must run validation in a worker thread (`require_principal` does); the client is
+    built with the configured `entra_http_timeout_seconds` so a slow/blackholed IdP is bounded by
+    our config, not PyJWT's 30s default.
 
     A `kid` that matches the cached key set costs no network at all. A `kid` that does not is
     rate-limited by `entra_jwks_refresh_cooldown_seconds` rather than refetching per request, and
@@ -144,22 +275,31 @@ def _signing_key(token: str) -> Any:
         if not _forced_refresh_allowed(endpoint, time.monotonic()):
             raise AuthError(f"no signing key matches kid {kid!r} (refresh on cooldown)")
         return client.get_signing_key(kid).key
-    # Order matters: the connection error is a subclass of the general client error.
-    except PyJWKClientConnectionError as exc:
-        raise IdentityProviderUnavailable(f"tenant JWKS unreachable: {exc}") from exc
     except PyJWKClientError as exc:
         # Not an `InvalidTokenError` — this is the class that used to escape every handler here
-        # and surface as a 500.
+        # and surface as a 500. **There is no `PyJWKClientConnectionError` arm above it any
+        # more**, and the ordering note that used to be here went with it: upstream raises that
+        # class in exactly one place, `fetch_data`, which `_HttpxJwkClient` overrides — so after
+        # the httpx move nothing in this process can produce one, and a handler for it would be a
+        # claim that a control exists. An unreachable tenant is now `IdentityProviderUnavailable`
+        # raised at the fetch, and it passes through this frame untouched.
         raise AuthError(f"no signing key matches kid {kid!r}: {exc}") from exc
     except (ValueError, jwt.PyJWTError) as exc:
-        # **The IdP answered, and what it said is unusable.** The two arms above cover a refused
-        # connection and a key set we could read but not match; neither covers a *successful* HTTP
-        # response carrying something other than a JWKS — an intercepting proxy's HTML error page
-        # (`json.load` raises `json.JSONDecodeError`, a `ValueError`, which PyJWT's client does not
-        # convert) or a tenant answering JSON that is not a key set (`PyJWKSet.from_dict` raises
-        # `PyJWKSetError`, a `PyJWTError` that is neither a `PyJWKClientError` nor an
-        # `InvalidTokenError`). Both escaped every handler in this module and became HTTP 500s for
-        # callers holding perfectly valid tokens.
+        # **The IdP answered, and what it said is unusable.** The arm above covers a key set we
+        # could read but not match; it does not cover a *successful* HTTP response carrying
+        # something other than a JWKS — a tenant answering JSON that is not a key set, where
+        # `PyJWKSet.from_dict` raises `PyJWKSetError`, a `PyJWTError` that is neither a
+        # `PyJWKClientError` nor an `InvalidTokenError`. That escaped every handler in this module
+        # and became an HTTP 500 for callers holding perfectly valid tokens.
+        #
+        # **Only half of what this arm was written for is still reached here**, and saying so is
+        # the point: the other half — an intercepting proxy's HTML error page, where PyJWT let
+        # `json.load`'s `ValueError` escape `PyJWKClientError` — is now decoded and refused inside
+        # `_HttpxJwkClient.fetch_data`, because that is where the decode happens.
+        # `PyJWKSet.from_dict` runs in `get_jwk_set` on data that was fetched perfectly well, so
+        # moving the fetch did nothing for it and the class still escapes; measured on PyJWT 2.13.0,
+        # `PyJWKSet.from_dict({"error": "tenant not found"})` raises `PyJWKSetError`. `ValueError`
+        # is kept beside it for the same fail-into-503 reason rather than for a named shape.
         #
         # `IdentityProviderUnavailable`, not `AuthError`, for the reason that class exists: we
         # could not reach a usable tenant to decide, so it is our outage and a 503 — answering 401
@@ -203,10 +343,14 @@ def _principal_from_claims(claims: dict[str, Any]) -> Principal:
     the places it was written.
     """
     oid = claims.get("oid")
-    if not oid:
+    # Checked as `Principal` will check it (a string, non-empty once stripped), so a malformed
+    # claim is a 401 here rather than a pydantic `ValidationError` escaping as a 500.
+    if not isinstance(oid, str) or not oid.strip():
         raise AuthError("token has no 'oid' claim")
     upn = claims.get("preferred_username") or claims.get("upn") or ""
-    entitlements = list(claims.get("roles", []))
+    if not isinstance(upn, str):
+        raise AuthError("token's 'preferred_username'/'upn' claim is not a string")
+    entitlements = _string_list_claim(claims, "roles")
     if settings.entra_group_claims_as_roles:
         # Entra emits `_claim_names`/`_claim_sources` instead of `groups` for a user in more
         # groups than the token can carry (~150+). That is an *overage*, not an empty membership,
@@ -232,8 +376,27 @@ def _principal_from_claims(claims: dict[str, Any]) -> Principal:
         # `cloud_displayname` instead, at which point a group named like a privileged app role
         # silently grants it. One flag meant to hand a file share its read entitlement must not be
         # able to widen the write-tool gates.
-        entitlements += [f"{GROUP_ROLE_PREFIX}{group}" for group in claims.get("groups", [])]
+        entitlements += [
+            f"{GROUP_ROLE_PREFIX}{group}" for group in _string_list_claim(claims, "groups")
+        ]
     return Principal(oid=oid, upn=upn, roles=frozenset(entitlements))
+
+
+def _string_list_claim(claims: dict[str, Any], name: str) -> list[str]:
+    """The claim `name` as a list of strings — absent is empty, any other shape is an `AuthError`.
+
+    **Checked rather than coerced, because both coercions were wrong.** `list(...)` over a claim
+    that is a string split it into one-character entitlements — `"ab"` granted roles `a` and `b` —
+    and over `null` raised a `TypeError`, while a list carrying a non-string reached `Principal` as
+    a pydantic `ValidationError`. Neither exception is one `require_principal` answers, so a signed
+    but malformed token was a 500 rather than the 401 it is.
+    """
+    if name not in claims:
+        return []
+    value = claims[name]
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise AuthError(f"token's {name!r} claim is not a list of strings")
+    return value
 
 
 async def require_principal(request: Request) -> Principal:

@@ -1,251 +1,89 @@
-# Multi-wave re-review — waves 10-15
+# Wave 11 — what a worker holds between tasks
 
-**What came before.** Nine waves are merged (#331-#339). Waves 1-3 *read* the tree, 4 **ran**
-it, 5 **attacked** it, 6 **interrupted** it, 7 **measured** it, 8 audited **the doctrine**, and 9
-worked the register down. Their plan and closing review are at `git show aa7a3b28:tasks/todo.md`;
-they are not restated here, because a ticked item that outlives its closure reads as live state
-(lesson 16, and the reason `DEFERRED.md` grew nine sections describing each other).
+## Items
 
-**What is left is what those nine waves treated as given.** That is the axis these six take, and
-each entry below names the thing not to assume:
+- [x] **Bound the workflow cache, from a measurement.** `durable/background_worker.py` set
+      `max_concurrent_activities` and stopped there, and a **child workflow is not an activity** —
+      so the one ceiling this repository chose never reached the bundle children core starts. Two
+      of the facts needed were wrong in the obvious reading: the SDK default is **100**, not the
+      500 its own constructor docstring names (that is the resource-based tuner), and the
+      workflow-task ceiling is not what holds memory. `max_cached_workflows` is.
+      `worker_max_cached_workflows` ships at 750, held as an inequality against the chart's
+      memory request rather than as a literal, with a second test reading the `Worker(` call so a
+      declared-but-unarmed setting reds. ADR + ledger + topic row; the old row replaced by what is
+      left of it.
+- [x] Fresh-context subagent review; five blockers, three of them factual and all three reproduced
+      independently before acting: the `1.35` multiplier's arithmetic, the falsified "replay
+      history" mechanism, the 500 (it is `workflow_task_executor`'s thread pool and it *does*
+      apply, because the task ceiling is deliberately unset), `connectors/worker.py` never getting
+      the ceiling at all, and an `ast` assertion that checked a keyword's name rather than its
+      value. All five fixed; the ceiling moved 1,000 → 750 as a consequence of the third term.
+- [ ] Full serial `make cov`, PR, merge on green CI.
 
-- Waves 1-9 read, ran and attacked **this repository**. Three others complete the system, and
-  every claim about the seam between them was made from this side of it. — W10
-- Every wave measured *plumbing*. Nothing checked whether a **number this system computes about
-  chemistry is right** — units, magnitudes, or whether a cache key names everything that changes
-  its value. — W11
-- Everything ran on **one generation of code against one generation of schema**, migrated forward
-  from empty, once. — W12
-- Everything ran on a **fixture-sized deployment**: a corpus of tens, a thread of forty turns, a
-  fresh database. Wave 9's `read_corpus` returning 5 of 12 entries with `complete=True` is that
-  blindness caught once, by accident. — W13
-- Wave 8 asked of every control *does it exist and is it called*. It did not ask **whether the
-  human on the other end can act on what it produces** — which is the whole of the argument
-  `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` rests on. — W14
-- And waves 4-9 each found that **the review had reproduced, inside its own repair, the defect it
-  exists to find**. Assume waves 10-14 did it again. — W15
+## Measurements this wave rests on
 
-## Rules (carried forward — they were earned, and two are new)
+Against the broker `make up` runs — the downloaded dev server is not fetchable here, which
+`tests/temporal_env.py` already records. N workflows parked in `wait_condition`, RSS from
+`/proc/self/status` against a 65.8 MiB idle baseline:
 
-- No agent runs `git checkout --`, `git stash`, or `git reset`. A/B by hand-edit, `cp f f.bak` /
-  `mv f.bak f`, and clear `__pycache__` inside a mutation loop.
-- Fix agents get **disjoint file sets**, checked for duplicates before launch. Cross-scope
-  residuals come back to the orchestrator.
-- Every fix reproduces the defect first, checks `docs/decisions/` for an ADR making the behaviour
-  intentional, and ships a test **watched failing** against unfixed source — per fix, not per batch.
-- `rm -rf .mypy_cache` before the gate whenever agents ran in parallel.
-- Prose is evidence about what its author believed, never about what the code does. No wave writes
-  a current number into prose; the test holds it.
-- Never edit a merged ADR. A changed decision gets a new one.
-- **New, from wave 9:** a reviewer must state the premise it was handed and whether measurement
-  upheld it. Three of four premises in wave 9 were false, and each disproof was worth more than the
-  fix would have been. "The row is wrong" is a finding, not a failure to deliver.
-- **New, from wave 8:** a guard this review adds is mutation-tested **in its own wave**, not
-  deferred. Wave 8 found three of the review's own new guards vacuous, and the orchestrator's own
-  assertion accepted exactly what it was written to refuse. Also: before building a check, confirm
-  the data it reads exists — a control that always passes is worse than a missing one.
-- A gate that has never been watched refusing is a claim that a gate exists. Every validator,
-  guard or probe touched must be driven to a **red** as well as a green.
+| cached | RSS | over idle | each |
+|---|---|---|---|
+| 50 | 72.5 MiB | +6.7 | 137 KiB |
+| 100 | 76.9 | +11.2 | 114 |
+| 250 | 85.7 | +20.0 | 82 |
+| 500 | 101.5 | +35.7 | 73 |
+| 1,000 | 135.1 | +69.4 | **71** |
 
----
+And at 200 cached, scaling the workflow's own state: 16 KiB → 91 KiB each, 64 → 142, 256 → 347.
 
-## Wave 10 — The fleet seam: the three repositories this one talks to
+**The two-term model those numbers were first fitted to was wrong twice**, and the fresh-context
+review caught both. `~75 KiB plus 1.35x state` took `1.35` as `347 / 256` — the *total* per-workflow
+cost over the state — so the fixed overhead sat inside the quotient and was then added again.
+Against this table's own figures the state coefficient is `(91−75)/16 = 1.00`, `(142−75)/64 = 1.05`,
+`(347−75)/256 = 1.06`: **~1.05**, not 1.35. The bad model overstates a 256 KiB workflow by ~18%
+(411 MiB per 1,000 against 339 measured) — safe-direction, and still a number nothing produced.
 
-All three siblings are checked out (`/home/user/8fqycwdt8v-oss/chemclaw3-mcp`,
-`/home/user/chemclaw3_mock`, `/home/user/chemclaw3_ui`). Fixes there ship as **their own PR in
-that repo**, per CLAUDE.md — never proxied through this one.
+And "the excess being the replay history beside it" is falsified by this table: the excess over
+state is *flat* in state, so it cannot be the state term's residual. History is its own axis, and
+measuring it on its own at zero state and 200 cached:
 
-- [x] W10.1 `connector.yaml` in both directions: this repo's loader against every manifest the
-      fleet actually serves. A field this side ignores, a field that side needs and this side
-      drops, a bundle that loads here and fails there. Same for `datasource.yaml` and the sink
-      manifest against any real consumer.
-- [x] W10.2 The calc seam (`CHEMCLAW_CALC_SERVER_URL`): request/response shapes, error and timeout
-      semantics, and the item wave 5 deferred as needing the other repo — **a wrong value under a
-      right cache key**. Does D-011's key name every input that changes the answer (method,
-      solvent model, charge/multiplicity, server version)? Drive it: change an input the key omits
-      and see whether the stale value comes back.
-- [x] W10.3 `SERVED_ELSEWHERE_ALLOWANCE`: run the sibling's own servers against the ratchet,
-      measure today's real bound-tool prefix with connectors bound, and check the skip path is
-      honest about what it did not look at.
-- [x] W10.4 The mock's fidelity. Every green test resting on `Chemclaw3_mock` or
-      `chemclaw.cli.mock_llm` is evidence about **the mock**. Diff the mock's surface against the
-      real one it stands for: usage fields, streaming/tool-call shapes, JWKS/OIDC claims, error
-      bodies. Where they diverge, that divergence is the size of the untested gap.
-- [x] W10.5 The UI contract: every SSE event name and field the front door emits against what
-      `Chemclaw3_ui` consumes, and its e2e/full-stack config against what this repo actually
-      serves. A renamed field is a silent break in the direction no test here can see.
-- [x] W10 fix stage (per repo), gate, PR, merge on green
+| signals per workflow | each | signals delivered |
+|---|---|---|
+| 0 | 69.1 KiB | 0 |
+| 20 | 198.9 | 4,000 |
+| 100 | 245.9 | 20,000 |
 
-## Wave 11 — The science: units, magnitudes, and identity
+Slopes 6.5 and 1.77 KiB/signal here against the reviewer's 0.95, so **the axis is established and
+its coefficient is not** — which is why the third constant is named an allowance.
 
-The first wave whose subject is whether a computed number is *right*. Lessons 20, 24, 25 and 26
-are all science-side defect classes, and no wave has swept for them.
+Three terms, then: `85 + 1.05×state + history`. At the asserted shape (256 KiB of state, a hundred
+signals) that is ~529 KiB, so the SDK's 1,000 comes to ~516 MiB — over half the worker's 1Gi
+request. **The ceiling ships at 750**, ~387 MiB. Lowering it beats raising a request every worker
+Deployment shares, and an evicted workflow replays rather than fails.
 
-- [ ] W11.1 Unit and constant audit across `science/`, `connectors/`, `publish/` and the wire
-      models: hartree/kcal/eV, bohr/Å, K/°C, ppm, molarity. Each conversion traced to **one**
-      definition — two branches nearly inflated every geometry by 1.8897 for want of this.
-- [ ] W11.2 The arithmetic that stayed here after the physics left: RRHO thermochemistry, Crippen,
-      the calibration ledger's fit, the `dft` backfill projector. Each against a **reference
-      value**, not against itself; split the class before judging a bad fit.
-- [ ] W11.3 Cache identity in this repo (the in-process half of W10.2): `key` derivation, its
-      normalisation, and the round trip through `result JSONB` — does a float, a null or a unit
-      survive it unchanged?
-- [ ] W11.4 Fingerprints and similarity: ECFP4/DRFP parameters, bit collisions, the metric's
-      actual semantics, and `standardize()`'s class of defects re-swept beyond the three instances
-      already named.
-- [ ] W11.5 BO: objective sign conventions, constraint handling, whether the benchmark corpus
-      exercises what its registration claims, and whether any documented ceiling bounds the thing
-      it is documented as bounding.
-- [ ] W11.6 Labels, safety projections and reaction records: does a value keep its meaning across
-      every store round-trip and every projection into the result store?
-- [ ] W11 fix stage, gate, PR, merge on green
+## The measurement that was wrong first
 
-## Wave 12 — Lifecycle: upgrade, rollback, two generations at once
+The state-scaling arm initially read 0 KiB per workflow at every size — "state is free". The
+fixture was `["y" * 1024 for _ in range(n)]`, which CPython constant-folds into *n* references to
+**one** string, so 200 workflows "holding 256 KiB" held 1 KiB between them. A live-instance count
+found it: 200 instances, 51,200 entries, 15 MiB of RSS — three numbers that cannot all be true.
+The figure only became a measurement once the fixture allocated what it claimed.
 
-- [ ] W12.1 All 89 migrations replayed from empty against the live database, in order, **twice**
-      (idempotency), and against a database that already holds the objects.
-- [ ] W12.2 Grants: reconciled on every deploy rather than applied once (lesson 22). Does a table
-      added by a late migration arrive with its grant, and does the reconciliation notice a drift?
-- [ ] W12.3 Rolling update, both directions: old code against new schema, new code against old.
-      Every persisted shape read by both — the `session_messages` stamp, checkpoint blobs,
-      `turn_costs`' new columns, the outbox lease, `reaction_records`.
-- [ ] W12.4 Rollback: does the previous image run against the migrated database, and is the
-      failure **loud** where it does not?
-- [ ] W12.5 Backfills and projectors run against a mixed-shape table, not a uniform one: the `dft`
-      backfill, the message migration, the record backfill.
-- [ ] W12 fix stage, gate, PR, merge on green
-
-## Wave 13 — Day one and day one thousand
-
-- [ ] W13.1 Cold start: empty database, no corpus, no connectors, no sinks, no skills, no
-      `SERVED_ELSEWHERE` sibling. Every read path at zero rows — does each answer *honestly*, or
-      silently emptily? (Lesson 18: the obvious implementation returns a silently empty answer.)
-- [ ] W13.2 **The silent-truncation sweep.** ~50 default `limit=` parameters and every unpaginated
-      scan in `src/`: which return one page while the caller believes it holds everything? This
-      generalises wave 9's `read_corpus` (5 of 12 with `complete=True`) from an accident into a
-      class, per lesson 20.
-- [ ] W13.3 Aged state: synthesise a deployment with years of rows — a large corpus, thousands of
-      sessions and turns, a big graph — and measure what degrades that was fine at wave-7 scale.
-- [ ] W13.4 What is implicitly single-site: ids, namespaces, caches, metric labels, the knowledge
-      graph's git repository, the checkpointer's thread space. A second tenant is a question this
-      tree has never been asked.
-- [ ] W13.5 Ceilings at rest under the aged tree: disk, WAL, index bloat, and whether the retention
-      posture actually holds it bounded.
-- [ ] W13 fix stage, gate, PR, merge on green
-
-## Wave 14 — The chemist's view: what actually reaches the human
-
-`D-2026-09-05-the-gate-follows-behaviour-not-knowledge` deleted the PR gate and named three
-existing things as the control that replaced it: provenance on every chunk, citations checked at
-the point of use, and contradiction. Wave 8 asked whether those exist. This asks whether they
-**work for the reader**, which is the only form in which they are a control at all.
-
-- [ ] W14.1 Drive an agent-written note end to end: does it land carrying `created_by: agent`,
-      reach a reader beside its citations, and can a chemist tell it from a reviewed one?
-- [ ] W14.2 Contradiction and supersede, driven: write a note that contradicts a held one and
-      check what a later retrieval actually returns — including bi-temporal `valid_to`.
-- [ ] W14.3 Retrieval quality measured rather than asserted: a probe set, recall and precision, and
-      a re-check that the cap still does not starve a source (D-2026-08-01).
-- [ ] W14.4 The answer surface: SSE, CLI, report harness, evidence pack. Does an error tell the
-      truth, and is a **degraded** answer distinguishable from a complete one?
-- [ ] W14.5 `explain` and the audit trail read back on a current session, end to end — the
-      reconstruction that was silently blank once already.
-- [ ] W14.6 What the model is told about its own controls versus what is true (the withdrawn-claim
-      shape): every present-tense sentence in the system prompt and the skills listing, checked.
-- [ ] W14 fix stage, gate, PR, merge on green
-
-## Wave 15 — Residue, and the operator's incident
-
-- [ ] W15.1 Everything waves 10-14 leave open, worked down as wave 9 did: closed, or **decided**
-      with the trade stated. A row nobody revisits is not a decision.
-- [ ] W15.2 Mutation sweep over every guard waves 10-14 added, and over the modules they touched.
-- [ ] W15.3 Incident rehearsal: inject three real failures — a connector serving wrong data, a
-      wedged durable job, a poisoned checkpoint — and diagnose each using **only** logs, metrics,
-      traces and the dashboards. What cannot be diagnosed is the finding.
-- [ ] W15.4 Re-derive every number waves 10-14 wrote into prose, at HEAD, one last time.
-- [ ] W15.5 Final gate incl. `make cov`, PR, merge on green
+That is the third time this session a measurement's *instrument* was the defect rather than its
+logic: a tokenizer that matched quotes and missed YAML scalars, a sweep that never reached the leg
+it was about, and now a fixture that allocated one object and reported 51,200.
 
 ## Review
 
-*(the closing review is written at the end of wave 15; each wave adds its own section)*
+Wave 13 shipped three things: Row A (Postgres identity), Row B (turn memory -> a durable thread-size
+cap, `resources.service` 768Mi/1536Mi), and a background worker that could not boot at all
+(`regex` imported outside the sandbox pass-through since #434) — found only because the lane was
+started for Row B's measurement. A fresh-context review found seven issues in Row B's first cut
+(wrong counter/alert, no entry refusal, SQL reading an older copy, YAML-0 fallback, a false ADR
+claim, unstated gaps); all fixed. The full suite also caught that Row A had broken
+`test_db_pool`'s split-gauge test, whose premise was the defect Row A fixed.
 
-### Wave 10 — the fleet seam (MERGED: mock #12, fleet #51, UI #70)
+Gate: serial `make cov` 10,627 passed, 11 skipped (3 need `promtool`), 89.93% coverage.
 
-Four repositories, four PRs, and the thing worth recording is that **the seam was
-wrong in the direction no single-repo review can see**: every defect below was a
-name, a number or a shape that one repository wrote down about another and nothing
-ever read back.
-
-**The chart dialled five hostnames that do not exist.** `chemclaw3-mcp-*` against
-the fleet's `chemclaw-mcp-*` — one character, five NXDOMAINs, one of them the
-address every calculation uses with no second tier behind it. What makes it a
-defect rather than a preference is that `values.yaml` *stated the correct rule*
-("whatever Service the sibling repo's chart gives its server") in the comment
-directly above the wrong name. The same mismatch stood a third time in the release
-descriptor, patching a Deployment and a container that both do not exist.
-
-**A wrong value under a right cache key was real**, and it was the item wave 5
-deferred as unsettleable from this side. `xtb_bond_order_threshold` was read inside
-the payload constructor, outside any spec: acetic acid at 0.5 → 7 bonds, at 0.05 →
-9 bonds, **identical key**, and driven through this repo's cache seam the second
-pod received the first's answer. It is a *filter*, so it breaks the fleet's own
-written rule that an unkeyed argument may permute an answer and may not remove
-from it — and those bonds are projected into a published record that is never
-pruned.
-
-**The cross-repo bound had never been checked by a machine.** The ratchet searched
-one path in one casing under one variable; `infra/live/siblings.sh` searched four
-under two, and its own header describes fixing that bug — the same day, in another
-PR. So on the one machine with the fleet checked out, the live lanes resolved it
-and the ratchet skipped.
-
-**Every mock-driven lane was reporting a fully metered turn that a real gateway
-would not.** The mock published `usage` unasked, so `llm_stream_usage=False` books
-zero tokens on every turn — a failure this repository has shipped once already —
-and its constant bill clamped the estimator ratio to 1.0 forever, leaving the
-tightening branch two merged budget decisions rest on exercised by nothing.
-
-### Where measurement overturned the brief — four times in six agents
-
-The rule added for this wave paid for itself immediately:
-
-1. The fleet publishes **five** connectors, not six: `calc` and `rxnlabel` declare
-   a `mount:` key this repository's manifest model refuses outright.
-2. `SERVED_ELSEWHERE` was **not** widened as briefed — that would have raised
-   `PREFIX_BOUND` and both compaction defaults for every deployment on account of
-   two bundles only the mock-LLM lane binds. The fleet's whole published directory
-   got its own bound instead, and the e2e lane's 2,560-token excess is stated
-   rather than absorbed.
-3. The 403 Retry button does not exist: `retryable` drives exactly one banner, and
-   the endpoint behind it has no 403 source. The mapping was still wrong and was
-   fixed; the refusal UI was not built for a banner that cannot appear.
-4. The 503 "at capacity" copy is not a defect — the JWKS outage carries its own
-   `detail` and the mapper prefers it.
-
-Two more were declined with the measurement: 401/404 request-level mock branches
-(both land on the same `error` label an injected status already reaches, so they
-unlock nothing), and keying `crest_perceive_max_atoms` (a CREST ensemble is
-already not a function of its key, so keying a deterministic field on a
-non-deterministic payload buys nothing and re-addresses the most expensive rows in
-the system — recorded for a maintainer rather than taken silently).
-
-### What the review did to itself, again
-
-Two of this wave's own repairs contained the defect the wave exists to find. The
-orchestrator shipped a stray line into a behaviour catalogue and a lint-red guard;
-and the first A/B of the "no behaviour goes undriven" guard *passed* against a
-mutation, because the guard is a substring scan and the renamed name still
-contained the original. The real removal then failed it correctly. A guard whose
-own prose satisfies it is worth knowing about.
-
-### Deliberately open, with the reason
-
-- **CI does not clone the fleet**, so the new cross-repo checks skip there. The
-  skip is loud and the suite epilogue now names it, and the tests do run wherever
-  a checkout exists. Cloning a sibling in CI needs a token the workflow may not
-  have; attempting it blind risks red CI for an access reason rather than a code
-  one. What would change the answer: confirming the runner can read the sibling.
-- **`check-openapi.mjs` sends no bearer token**, so now that the schema is served
-  behind `require_principal` it can run against a dev deployment and not an
-  enforced one. Not a break — it could reach nothing at all before.
-
+Lesson worth keeping: `pkill -f <pattern>` inside a Bash call kills the calling shell when the
+pattern appears in its own command line — use `pgrep` on a pattern the shell does not contain.

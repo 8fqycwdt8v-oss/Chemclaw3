@@ -18,6 +18,10 @@ Beyond that shape check, this gate closes the loop between a skill's *judgment* 
   skill would be hidden from an agent that can do exactly what it teaches. The body is read with
   `chemclaw.cli.validate_prose_contract.taught_tool_names`, which lives beside the prose gate's own
   extractor and shares its patterns, so the two cannot disagree about what a skill says.
+- **Required ⇒ declared.** Every name in `requires:` must also appear in `tools:`. `requires` is by
+  definition a subset of `tools`, and nothing else checks it: an entry outside the list is held by
+  neither direction above, while `ToolScopedSkills` still *hides* the skill wherever that name is
+  absent from the agent's surface.
 
 Two configured maps are checked the same way, because both name skills and neither fails loudly at
 run time:
@@ -27,6 +31,9 @@ run time:
   that matters: `RoleScopedSkills` reads "absent from the map" as "ungated", so a typo'd key
   leaves the skill it was meant to restrict visible to every caller. A gate that fails open is
   worth a CI failure.
+- every registered profile's `skill_names` — an unknown name silently removes a skill the profile's
+  author meant to keep, and a profile is a file a deployment may drop in
+  (`chemclaw.agent.profile_discovery`), so the typo is as likely to be a site's as a shipped one.
 
 This is the `make skill-validate` gate: it exits non-zero listing the problems, so CI catches skill
 drift like `kg-validate` catches note drift. Read-only; touches nothing.
@@ -43,10 +50,12 @@ from pydantic import ValidationError
 # registration side effect `build_langgraph_agent` relies on), so the declared-tool check sees the
 # real set.
 from chemclaw.agent import chemclaw_agent as _agent  # noqa: F401 — imported for tool registration
-from chemclaw.agent.chemclaw_agent import available_tool_names
+from chemclaw.agent.chemclaw_agent import declared_tool_names
+from chemclaw.agent.profile_discovery import ProfileError, load_profiles
+from chemclaw.agent.profiles import get_profile, registered_profile_names
 from chemclaw.agent.skill_manifest import SKILL_FILENAME, SkillManifest
 from chemclaw.cli.validate_prose_contract import taught_tool_names
-from chemclaw.connectors.registry import skills_dirs as connector_skills_dirs
+from chemclaw.connectors.registry import declared_skills_dirs as connector_skills_dirs
 from chemclaw.core.config import settings
 
 
@@ -78,6 +87,7 @@ def validate_skills(skills_dirs: list[str]) -> list[str]:
             problems.extend(_problems_for(skill_file))
     problems.extend(_enable_list_problems(found_names))
     problems.extend(_role_gate_problems(found_names))
+    problems.extend(_profile_skill_problems(found_names))
     return problems
 
 
@@ -105,6 +115,7 @@ def _problems_for(skill_file: Path) -> list[str]:
             f"does not match directory {directory_name!r}"
         )
     problems.extend(_dependency_problems(skill_file, manifest))
+    problems.extend(_requires_problems(skill_file, manifest))
     problems.extend(_undeclared_problems(skill_file, manifest, post.content))
     return problems
 
@@ -117,15 +128,45 @@ def _dependency_problems(skill_file: Path, manifest: SkillManifest) -> list[str]
     resolves means the skill is teaching a capability that is gone, which is exactly the stale
     judgment this gate should refuse to ship.
 
-    The known set spans both halves of the tool surface: the in-process registry and everything the
-    enabled connectors advertise (their endpoints' allow-listed tools and their generated job
+    The known set spans both halves of the tool surface: the in-process registry and everything
+    every *discovered* bundle declares (their endpoints' allow-listed tools and their generated job
     launchers). One set, because a skill's author does not care which side of the process boundary a
     tool lives on — only that it exists.
+
+    **Declared rather than enabled**, since `ConnectorManifest.default_enabled` exists: a skill
+    bundled with an opt-in connector names that connector's tools, and validating it against one
+    checkout's enable-list would fail it everywhere the bundle is off — which is everywhere by
+    default. `declared_tool_names` is the basis that answers "does this tool exist in this tree",
+    which is the question a validator is asking.
     """
-    known_tools = available_tool_names()
+    known_tools = declared_tool_names()
     return [
         f"{skill_file}: declares unknown tool {tool!r}; available tools: {sorted(known_tools)}"
         for tool in sorted(set(manifest.tools) - known_tools)
+    ]
+
+
+def _requires_problems(skill_file: Path, manifest: SkillManifest) -> list[str]:
+    """Check that every `requires:` entry is also declared in `tools:` — the subset rule.
+
+    `requires` is defined as *the subset of `tools` the skill is centrally about*, and the subset is
+    load-bearing rather than tidy. The two keys are checked by different things: a `tools` entry is
+    held against the live surface by `_dependency_problems` above, so it cannot name a tool that no
+    longer exists, while a `requires` entry appearing nowhere in `tools` would be held by nothing —
+    and the run-time rule it feeds (`needed <= available` in `ToolScopedSkills._permits`) *hides*
+    the skill, so a typo there removes a skill from every deployment and reports it nowhere.
+
+    A subset check rather than a second existence check on purpose: `tools` already carries the
+    existence half, so re-deriving it here would turn one renamed tool into two CI failures — and a
+    `requires` entry outside `tools` is a defect even when the tool does exist, because the two
+    lists would then describe different capabilities under one skill's name.
+    """
+    undeclared = sorted(set(manifest.requires) - set(manifest.tools))
+    return [
+        f"{skill_file}: requires {tool!r} but does not declare it in `tools:` — `requires` is a "
+        "subset of `tools`, and an entry outside it is checked by nothing while still hiding the "
+        "skill wherever that tool is absent"
+        for tool in undeclared
     ]
 
 
@@ -146,14 +187,14 @@ def _undeclared_problems(skill_file: Path, manifest: SkillManifest, body: str) -
     token, and a whole backticked span (`` `predict_pka` ``) — the last of which the prose gate's
     own `referenced_tool_names` deliberately cannot: over this corpus half the spans it matches are
     result-field names, which is fatal to a rule reporting *unknown* names and harmless to this
-    one, where `available_tool_names()` is the filter. Leaving it out was not a floor but a hole:
+    one, where `declared_tool_names()` is the filter. Leaving it out was not a floor but a hole:
     the backticked form is the one skills actually use, and 35 taught tools across 11 shipped
     skills were undeclared while this gate reported none.
 
     Names the extractor finds that are not tools at all are ignored here rather than reported —
     that is the prose gate's rule 1/2, and reporting it twice would make one typo two CI failures.
     """
-    taught = taught_tool_names(body, available_tool_names())
+    taught = taught_tool_names(body, declared_tool_names())
     undeclared = sorted(taught - set(manifest.tools))
     return [
         f"{skill_file}: teaches {tool!r} but does not declare it in `tools:` — an incomplete "
@@ -198,6 +239,49 @@ def _role_gate_problems(found_names: set[str]) -> list[str]:
     ]
 
 
+def _profile_skill_problems(found_names: set[str]) -> list[str]:
+    """Every name in a registered profile's `skill_names` must be a skill some directory provides.
+
+    The third configured map, and it fails the same quiet way the other two do:
+    `ProfileScopedSkills`
+    narrows rather than raising, so a typo removes a skill the profile's author meant to keep and
+    nothing at run time can say so — the profile simply offers one fewer skill than its author
+    reads in the file. A profile is discovered from disk (`agent/profile_discovery.py`), so this is
+    a deployment's typo as readily as a shipped one, and this gate is where a deployment finds it.
+
+    **Profiles are loaded here rather than assumed registered.** `validate_skills` is a CLI, not a
+    turn, so nothing else in this process has called `load_profiles()`; without it the registry
+    holds `default` alone and this check would pass by having looked at nothing — the shape of
+    failure this gate exists to prevent, inside the gate (see `main`'s own docstring for the last
+    time that happened here).
+
+    **And a malformed profile is a problem to report, not a traceback**, which is the same
+    treatment `_problems_for` already gives a malformed `SKILL.md`. `load_profiles` raises
+    `ProfileError` on an `extra="forbid"` typo or two files claiming one name, and uncaught it
+    would replace this gate's promised list of problems with a stack trace about a *profile* file
+    out of the *skill* validator. CI still goes red either way; what differs is whether the
+    operator is told what to fix.
+    """
+    try:
+        load_profiles()
+    except ProfileError as error:
+        return [
+            f"agent profiles could not be loaded, so no profile's skill_names was checked: {error}"
+        ]
+    problems: list[str] = []
+    for name in registered_profile_names():
+        declared = get_profile(name).skill_names
+        if declared is None:
+            continue
+        for unknown in sorted(declared - found_names):
+            problems.append(
+                f"agent profile {name!r} names unknown skill {unknown!r} in skill_names, so that "
+                f"profile silently offers one fewer skill than it declares; "
+                f"discovered: {sorted(found_names)}"
+            )
+    return problems
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Validate every skill; print problems and exit non-zero if any (the CI gate).
 
@@ -213,8 +297,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         description="Validate every discovered SKILL.md. Set CHEMCLAW_SKILLS_DIR "
         "(a PATH-style list) to point this at another tree.",
     ).parse_args(argv)
-    # The same dirs `build_langgraph_agent` discovers from: the configured tree plus every enabled
-    # connector bundle's own `skills/`, so a bundled skill is validated exactly like a shipped one.
+    # The configured tree plus every *discovered* bundle's own `skills/` — one step wider than the
+    # dirs `build_langgraph_agent` binds, because an opt-in bundle's skill that no validation run
+    # ever reads is a check whose condition never occurs. A bundled skill is validated exactly
+    # like a shipped one whether or not this checkout turns its capability on.
     problems = validate_skills([*settings.skills_dirs, *connector_skills_dirs()])
     if problems:
         print("SKILL.md validation failed:")

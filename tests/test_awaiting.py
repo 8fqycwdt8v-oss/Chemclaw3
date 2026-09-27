@@ -24,10 +24,12 @@ with workflow.unsafe.imports_passed_through():
     from temporalio.workflow import ParentClosePolicy
 
     from chemclaw.core.config import settings
+    from chemclaw.durable import awaiting as awaiting_module
     from chemclaw.durable.awaiting import (
         AwaitAnswerWorkflow,
         AwaitOutcome,
         AwaitRequest,
+        open_wait,
         request_id_for,
     )
     from tests.temporal_env import (
@@ -124,6 +126,39 @@ class _ParentOfAWait:
         )
 
 
+@workflow.defn(name="_ParentOfAWaitWithASession", sandboxed=False)
+class _ParentOfAWaitWithASession:
+    """`_ParentOfAWait` under `REQUEST_CANCEL`, with a session so the push-back actually runs.
+
+    A separate definition rather than another argument on the first, because the two measure
+    different things and sharing one would make each arm's fixture read as the other's: that one
+    varies the *close policy* over a sessionless wait, this one fixes the policy at the only one
+    that reaches the cleanup clause and varies where in the wait the cancellation lands. The session
+    is the whole point — `_push` returns early without one, so the push-back window this opens does
+    not exist for a sessionless wait.
+    """
+
+    @workflow.run
+    async def run(self, session_id: str) -> str:
+        """Open the wait as a `REQUEST_CANCEL` child and block until it answers."""
+        return str(
+            await workflow.execute_child_workflow(
+                AwaitAnswerWorkflow.run,
+                AwaitRequest(
+                    kind="approval",
+                    subject="approve the thing",
+                    asked_of="qa-team",
+                    requested_by="oid-asker",
+                    session_id=session_id,
+                    deadline_days=7.0,
+                ).model_dump(mode="json"),
+                id=workflow.info().workflow_id + ":approval",
+                task_queue=settings.background_task_queue,
+                parent_close_policy=ParentClosePolicy.REQUEST_CANCEL,
+            )
+        )
+
+
 def _worker(client: Client, projection: _Projection) -> Worker:
     """A worker serving the wait, with the projection activities replaced by recorders."""
 
@@ -174,39 +209,33 @@ def _worker(client: Client, projection: _Projection) -> Worker:
     )
 
 
-def test_a_wait_returns_the_answer_that_arrives() -> None:
+async def test_a_wait_returns_the_answer_that_arrives() -> None:
     """A signal releases the wait, and the outcome carries who answered and what they said."""
+    async with await start_env_or_skip() as env:
+        client = pydantic_client(env)
+        projection = _Projection()
+        async with _worker(client, projection):
+            request = AwaitRequest(
+                kind="measurement", subject="run four conditions", deadline_days=7
+            )
+            handle = await client.start_workflow(
+                AwaitAnswerWorkflow.run,
+                request.model_dump(mode="json"),
+                id="await-answered",
+                task_queue=settings.background_task_queue,
+            )
+            await handle.signal("provide", {"answered_by": "u-lab-1", "payload": {"yield": 0.71}})
+            outcome = AwaitOutcome.model_validate(await handle.result())
 
-    async def _run() -> None:
-        async with await start_env_or_skip() as env:
-            client = pydantic_client(env)
-            projection = _Projection()
-            async with _worker(client, projection):
-                request = AwaitRequest(
-                    kind="measurement", subject="run four conditions", deadline_days=7
-                )
-                handle = await client.start_workflow(
-                    AwaitAnswerWorkflow.run,
-                    request.model_dump(mode="json"),
-                    id="await-answered",
-                    task_queue=settings.background_task_queue,
-                )
-                await handle.signal(
-                    "provide", {"answered_by": "u-lab-1", "payload": {"yield": 0.71}}
-                )
-                outcome = AwaitOutcome.model_validate(await handle.result())
-
-        assert outcome.state == "answered"
-        assert outcome.answered_by == "u-lab-1"
-        assert outcome.payload == {"yield": 0.71}
-        # The projection is opened once and settled once, as `answered`, by the actor who signalled.
-        assert projection.opened == ["await-answered"]
-        assert projection.settled == [("await-answered", "answered", "u-lab-1")]
-
-    asyncio.run(_run())
+    assert outcome.state == "answered"
+    assert outcome.answered_by == "u-lab-1"
+    assert outcome.payload == {"yield": 0.71}
+    # The projection is opened once and settled once, as `answered`, by the actor who signalled.
+    assert projection.opened == ["await-answered"]
+    assert projection.settled == [("await-answered", "answered", "u-lab-1")]
 
 
-def test_the_first_answer_wins_and_later_ones_are_ignored() -> None:
+async def test_the_first_answer_wins_and_later_ones_are_ignored() -> None:
     """A second signal cannot overwrite a delivered answer.
 
     Ignored rather than rejected, and the reason is structural: a signal has no reply channel, so
@@ -214,98 +243,86 @@ def test_the_first_answer_wins_and_later_ones_are_ignored() -> None:
     `POST /pending/{id}/answer`, which reads the store — this asserts the half that has to hold even
     when somebody reaches the broker directly.
     """
+    async with await start_env_or_skip() as env:
+        client = pydantic_client(env)
+        projection = _Projection()
+        async with _worker(client, projection):
+            handle = await client.start_workflow(
+                AwaitAnswerWorkflow.run,
+                AwaitRequest(subject="approve the route change").model_dump(mode="json"),
+                id="await-twice",
+                task_queue=settings.background_task_queue,
+            )
+            await handle.signal("provide", {"answered_by": "first", "payload": {"ok": True}})
+            await handle.signal("provide", {"answered_by": "second", "payload": {"ok": False}})
+            outcome = AwaitOutcome.model_validate(await handle.result())
 
-    async def _run() -> None:
-        async with await start_env_or_skip() as env:
-            client = pydantic_client(env)
-            projection = _Projection()
-            async with _worker(client, projection):
-                handle = await client.start_workflow(
-                    AwaitAnswerWorkflow.run,
-                    AwaitRequest(subject="approve the route change").model_dump(mode="json"),
-                    id="await-twice",
-                    task_queue=settings.background_task_queue,
-                )
-                await handle.signal("provide", {"answered_by": "first", "payload": {"ok": True}})
-                await handle.signal("provide", {"answered_by": "second", "payload": {"ok": False}})
-                outcome = AwaitOutcome.model_validate(await handle.result())
-
-        assert outcome.answered_by == "first"
-        assert outcome.payload == {"ok": True}
-
-    asyncio.run(_run())
+    assert outcome.answered_by == "first"
+    assert outcome.payload == {"ok": True}
 
 
-def test_a_deadline_that_passes_is_an_outcome_and_not_a_failure() -> None:
+async def test_a_deadline_that_passes_is_an_outcome_and_not_a_failure() -> None:
     """An unanswered question ends `expired` — reported, not raised, and never retried.
 
     This is the property a project leader's world depends on: "nobody answered" is an answer, and a
     wait that raised would be retried by Temporal rather than reported to the person who asked.
     """
-
-    async def _run() -> None:
-        async with await start_env_or_skip() as env:
-            client = pydantic_client(env)
-            projection = _Projection()
-            async with _worker(client, projection):
-                outcome = AwaitOutcome.model_validate(
-                    await client.execute_workflow(
-                        AwaitAnswerWorkflow.run,
-                        AwaitRequest(
-                            subject="report the stability pull",
-                            # One day, chased every six hours: the time-skipping server runs this
-                            # in milliseconds, and the numbers are what a real ask looks like.
-                            deadline_days=1.0,
-                            reminder_hours=6.0,
-                        ).model_dump(mode="json"),
-                        id="await-expired",
-                        task_queue=settings.background_task_queue,
-                    )
+    async with await start_env_or_skip() as env:
+        client = pydantic_client(env)
+        projection = _Projection()
+        async with _worker(client, projection):
+            outcome = AwaitOutcome.model_validate(
+                await client.execute_workflow(
+                    AwaitAnswerWorkflow.run,
+                    AwaitRequest(
+                        subject="report the stability pull",
+                        # One day, chased every six hours: the time-skipping server runs this
+                        # in milliseconds, and the numbers are what a real ask looks like.
+                        deadline_days=1.0,
+                        reminder_hours=6.0,
+                    ).model_dump(mode="json"),
+                    id="await-expired",
+                    task_queue=settings.background_task_queue,
                 )
+            )
 
-        assert outcome.state == "expired"
-        assert outcome.answered_by == ""
-        # Chased on the way: four six-hour intervals inside one day, the last of which reaches the
-        # deadline rather than escalating again.
-        assert outcome.reminders == 3
-        assert projection.reminders == ["await-expired"] * 3
-        assert projection.settled == [("await-expired", "expired", "")]
-
-    asyncio.run(_run())
+    assert outcome.state == "expired"
+    assert outcome.answered_by == ""
+    # Chased on the way: four six-hour intervals inside one day, the last of which reaches the
+    # deadline rather than escalating again.
+    assert outcome.reminders == 3
+    assert projection.reminders == ["await-expired"] * 3
+    assert projection.settled == [("await-expired", "expired", "")]
 
 
-def test_an_answer_arriving_mid_interval_is_seen_immediately() -> None:
+async def test_an_answer_arriving_mid_interval_is_seen_immediately() -> None:
     """The reminder interval is a timeout on the wait, not a polling tick.
 
     Written because the obvious implementation — sleep for the interval, then check — would hold a
     delivered answer for up to a day before acting on it, and would look correct in every test that
     only asserted the final state.
     """
+    async with await start_env_or_skip() as env:
+        client = pydantic_client(env)
+        projection = _Projection()
+        async with _worker(client, projection):
+            handle = await client.start_workflow(
+                AwaitAnswerWorkflow.run,
+                AwaitRequest(
+                    subject="confirm the assignment",
+                    deadline_days=30.0,
+                    reminder_hours=24.0,
+                ).model_dump(mode="json"),
+                id="await-midinterval",
+                task_queue=settings.background_task_queue,
+            )
+            await handle.signal("provide", {"answered_by": "u-2", "payload": {}})
+            outcome = AwaitOutcome.model_validate(await handle.result())
 
-    async def _run() -> None:
-        async with await start_env_or_skip() as env:
-            client = pydantic_client(env)
-            projection = _Projection()
-            async with _worker(client, projection):
-                handle = await client.start_workflow(
-                    AwaitAnswerWorkflow.run,
-                    AwaitRequest(
-                        subject="confirm the assignment",
-                        deadline_days=30.0,
-                        reminder_hours=24.0,
-                    ).model_dump(mode="json"),
-                    id="await-midinterval",
-                    task_queue=settings.background_task_queue,
-                )
-                await handle.signal("provide", {"answered_by": "u-2", "payload": {}})
-                outcome = AwaitOutcome.model_validate(await handle.result())
-
-        assert outcome.state == "answered"
-        # Answered before the first daily chase, over a thirty-day deadline.
-        assert outcome.reminders == 0
-        assert projection.reminders == []
-
-    asyncio.run(_run())
+    assert outcome.state == "answered"
+    # Answered before the first daily chase, over a thirty-day deadline.
+    assert outcome.reminders == 0
+    assert projection.reminders == []
 
 
 def test_asking_the_same_question_of_the_same_people_is_one_wait() -> None:
@@ -382,7 +399,7 @@ def test_the_migration_refuses_an_unattributed_answer() -> None:
     assert "answered_at IS NOT NULL AND answered_by <> ''" in sql
 
 
-def test_the_deadline_ceiling_is_applied_by_the_activity_every_caller_goes_through() -> None:
+async def test_the_deadline_ceiling_is_applied_by_the_activity_every_caller_goes_through() -> None:
     """`awaiting_max_days` had no test, which is why the clamp reached two of three launch sites.
 
     It was first applied at each caller. `agent/pending_tools.py` and `connectors/jobs.py` got it;
@@ -401,45 +418,42 @@ def test_the_deadline_ceiling_is_applied_by_the_activity_every_caller_goes_throu
     )
     from tests.pg import migrated_db_or_skip
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        started = datetime(2026, 1, 1, tzinfo=UTC)
-        opened = await open_pending_request_activity(
-            _OpenInput(
-                request_id="req-clamp-probe",
-                request=AwaitRequest(
-                    kind="measurement",
-                    subject="a wildly optimistic deadline",
-                    requested_by="u-1",
-                    deadline_days=3650.0,
-                ),
-                started_at=started.isoformat(),
-                run_id="run-clamp",
-            )
+    await migrated_db_or_skip()
+    started = datetime(2026, 1, 1, tzinfo=UTC)
+    opened = await open_pending_request_activity(
+        _OpenInput(
+            request_id="req-clamp-probe",
+            request=AwaitRequest(
+                kind="measurement",
+                subject="a wildly optimistic deadline",
+                requested_by="u-1",
+                deadline_days=3650.0,
+            ),
+            started_at=started.isoformat(),
+            run_id="run-clamp",
         )
-        capped = datetime.fromisoformat(opened) - started
-        assert capped <= timedelta(days=settings.awaiting_max_days), (
-            f"a caller asked for 3650 days and got {capped.days}; the ceiling is "
-            f"{settings.awaiting_max_days}"
-        )
+    )
+    capped = datetime.fromisoformat(opened) - started
+    assert capped <= timedelta(days=settings.awaiting_max_days), (
+        f"a caller asked for 3650 days and got {capped.days}; the ceiling is "
+        f"{settings.awaiting_max_days}"
+    )
 
-        # And a deadline inside the ceiling is passed through untouched.
-        modest = await open_pending_request_activity(
-            _OpenInput(
-                request_id="req-clamp-probe-2",
-                request=AwaitRequest(
-                    kind="measurement",
-                    subject="an ordinary deadline",
-                    requested_by="u-1",
-                    deadline_days=2.0,
-                ),
-                started_at=started.isoformat(),
-                run_id="run-clamp",
-            )
+    # And a deadline inside the ceiling is passed through untouched.
+    modest = await open_pending_request_activity(
+        _OpenInput(
+            request_id="req-clamp-probe-2",
+            request=AwaitRequest(
+                kind="measurement",
+                subject="an ordinary deadline",
+                requested_by="u-1",
+                deadline_days=2.0,
+            ),
+            started_at=started.isoformat(),
+            run_id="run-clamp",
         )
-        assert datetime.fromisoformat(modest) - started == timedelta(days=2)
-
-    asyncio.run(_run())
+    )
+    assert datetime.fromisoformat(modest) - started == timedelta(days=2)
 
 
 def test_a_wait_started_as_a_child_settles_when_its_parent_dies() -> None:
@@ -564,6 +578,131 @@ def test_a_wait_started_as_a_child_settles_when_its_parent_dies() -> None:
     )
 
 
+def test_a_cancellation_arriving_before_the_timer_still_settles_the_row() -> None:
+    """The wait's cleanup must cover every `await` it makes, not only the one it spends its life in.
+
+    `D-2026-09-13-a-cancellation-arriving-before-the-timer-leaves-the-row-waiting`. The sibling test
+    above establishes that `REQUEST_CANCEL` is the only policy that reaches `run`'s
+    `except` clause at all. What it does not establish — and said out loud it was not asserting — is
+    that the clause is reachable from wherever the wait happens to be. It was not, in two ways, and
+    both leave the permanent ghost that test's docstring describes: a `pending_requests` row stuck
+    `waiting`, in every entitled person's inbox, unanswerable because the run it names is gone, and
+    never collected because `pending_requests` is in `retention._NOT_PRUNED`.
+
+    **The `try` started at the wait, and the row is written before it.**
+    `open_pending_request_activity` is what creates the `waiting` row, and it sat *above* the
+    `try` — so a cancellation landing while it was in flight committed the row and attempted no
+    settle. Measured against a real broker with 12 parents terminated the instant their children
+    existed: 12 rows opened, **10** settled, every child `CANCELED`. The deterministic form is the
+    first arm here — the open activity blocks on an event, the parent is terminated while it is
+    held, and the settle is asserted.
+
+    **A cancellation does not always arrive as `asyncio.CancelledError`.** Blocked on
+    `wait_condition` it does, which is why the loss looked like a dispatch race — it was measured at
+    0 in six runs of 12 and 39 children once every child was *past* the open. Blocked inside an
+    activity it is `ActivityError(cause=CancelledError)`, which the clause did not name.
+
+    **And `notify_session_best_effort` caught exactly that pair and carried on**, which is worse
+    than losing a settle: the child went back to waiting on its seven-day timer and was still
+    `RUNNING` 30 s after its parent was terminated, with a live, answerable question about work that
+    no longer exists. That is the second arm, and it asserts the status as well as the settle,
+    because "cancelled but unsettled" and "never cancelled at all" are different failures.
+
+    The two arms share one environment and one worker, for the reason the sibling gives: three
+    environments paid the startup three times over. Real-time rather than time-skipping, because the
+    subject is a wall-clock broker event on runs that must still be `RUNNING` when it arrives.
+    """
+    from temporalio import activity
+
+    held = {"open": asyncio.Event(), "notify": asyncio.Event()}
+    release = asyncio.Event()
+    settled: list[str] = []
+
+    async def _open(payload: object) -> str:
+        request_id = _field(payload, "request_id")
+        if request_id.startswith("cancel-in-open"):
+            # Held, not slept: a sleep makes the arm a race against the box's speed, and the whole
+            # point is that the cancellation arrives *while this activity is in flight*.
+            held["open"].set()
+            await release.wait()
+        request: Any = payload["request"] if isinstance(payload, dict) else payload.request  # type: ignore[attr-defined]
+        days = request["deadline_days"] if isinstance(request, dict) else request.deadline_days
+        started = datetime.fromisoformat(_field(payload, "started_at"))
+        return (started + timedelta(days=float(days))).isoformat()
+
+    async def _settle(payload: object) -> bool:
+        settled.append(_field(payload, "request_id"))
+        return True
+
+    async def _remind(request_id: str, count: int = 0) -> None: ...
+
+    async def _notify(payload: object) -> None:
+        if _field(payload, "session_id") == "sess-cancel-in-notify":
+            held["notify"].set()
+            await release.wait()
+
+    async def _run() -> tuple[dict[str, str], list[str]]:
+        async with await start_local_env_or_skip() as env:
+            client = pydantic_client(env)
+            async with Worker(
+                client,
+                task_queue=settings.background_task_queue,
+                workflows=[AwaitAnswerWorkflow, _ParentOfAWaitWithASession],
+                workflow_runner=UnsandboxedWorkflowRunner(),
+                activities=[
+                    activity.defn(name="open_pending_request_activity")(_open),
+                    activity.defn(name="settle_pending_request_activity")(_settle),
+                    activity.defn(name="record_reminder_activity")(_remind),
+                    activity.defn(name="record_session_event_activity")(_notify),
+                ],
+            ):
+                parents = {
+                    arm: await client.start_workflow(
+                        _ParentOfAWaitWithASession.run,
+                        f"sess-cancel-in-{arm}",
+                        id=f"cancel-in-{arm}",
+                        task_queue=settings.background_task_queue,
+                    )
+                    for arm in ("open", "notify")
+                }
+                children = {
+                    arm: client.get_workflow_handle(f"{parent.id}:approval")
+                    for arm, parent in parents.items()
+                }
+                # Each child must actually be *inside* its activity before its parent dies, or the
+                # arm measures the ordinary timer case the old clause already covered.
+                for arm in ("open", "notify"):
+                    await asyncio.wait_for(held[arm].wait(), timeout=60)
+                for parent in parents.values():
+                    await parent.terminate("the parent died while the child was in an activity")
+                for child in children.values():
+                    await _cancelled(child)
+                described = {arm: await c.describe() for arm, c in children.items()}
+                statuses = {
+                    arm: d.status.name if d.status else "NO_STATUS" for arm, d in described.items()
+                }
+                # Released only now: the activities are held for the duration of the measurement,
+                # so nothing finishes by outrunning the terminate.
+                release.set()
+                return statuses, list(settled)
+
+    statuses, rows = asyncio.run(_run())
+
+    assert "cancel-in-open:approval" in rows, (
+        "a cancellation arriving while the open activity was in flight attempted no settle, so the "
+        f"row it had just written stays `waiting` for ever; settled: {rows}"
+    )
+    assert "cancel-in-notify:approval" in rows, (
+        "a cancellation arriving while the push-back activity was in flight attempted no settle; "
+        f"settled: {rows}"
+    )
+    assert statuses["notify"] == "CANCELED", (
+        f"the child whose push-back was cancelled is {statuses['notify']}: the cancellation was "
+        "swallowed as a delivery failure and the wait went back to its seven-day timer, so the "
+        "question is still live and still answerable about work that no longer exists"
+    )
+
+
 def test_every_wait_started_as_a_child_names_a_parent_close_policy() -> None:
     """The policy above is only worth measuring if the call sites actually carry it.
 
@@ -607,24 +746,28 @@ def test_every_wait_started_as_a_child_names_a_parent_close_policy() -> None:
     )
 
 
-def test_a_wait_refused_by_the_projection_fails_instead_of_waiting_blind() -> None:
-    """A wait whose projection belongs to somebody else's answer must not open at all.
+def test_a_re_ask_of_an_answered_question_opens_through_the_activity() -> None:
+    """The same question again is an ordinary act, and it used to fail the workflow.
 
-    `_OPEN` refuses one case deliberately: a re-ask of an already-**answered** question, because
-    reopening would blank the attribution `retention._NOT_PRUNED` keeps this table for. The refusal
-    is right and its silence was not. `request_id_for` keys on (kind, subject, asked_of) alone and
-    `request_external_input` sets `WorkflowIDReusePolicy.ALLOW_DUPLICATE`, so re-asking the same
-    standing question is an ordinary act that mints the same id — and the workflow, told nothing,
-    went on to wait against a row reading `answered`: absent from `open_requests`, refused 409 by
-    the answer route, and unable to settle itself at the end, for the ninety days
-    `awaiting_max_days` allows.
+    `D-2026-09-13-an-answer-is-archived-so-the-question-can-be-asked-again`. `request_id_for` keys
+    on `(kind, subject, asked_of)` alone and `durable/awaiting.open_wait` sets
+    `WorkflowIDReusePolicy.ALLOW_DUPLICATE` — named here as the launcher rather than as
+    `request_external_input`, which is one of its two callers and has not owned that decision since
+    the launch idiom moved into one function — so re-asking a standing question — the monthly
+    stability pull, the next campaign round's measurement, a re-launched approval — mints the same
+    id on purpose. Meeting an `answered` row, `pending_store._OPEN` wrote nothing and this activity
+    raised a **non-retryable** `ApplicationError`: the ask failed, and with it the workflow that
+    made it (`ConnectorJobWorkflow._approve_effect` turns a failed approval into a refused job).
 
-    Non-retryable, because no number of attempts changes whose answer is in that row. Failing here
-    is what makes the conflict reach somebody — `ConnectorJobWorkflow._approve_effect` turns a
-    failed approval into a refused job, which is the correct reading of "this could not be asked".
+    The answer is archived now, so the reopen is allowed and the activity returns the deadline it
+    was asked for. **Driven through the activity rather than the store**, because the store's own
+    test covers the five shapes of the upsert and what this adds is that nothing between the two
+    still refuses: the raise was here, not there.
+
+    What the old test asserted — that the previous cycle's attribution survives — is asserted here
+    too, in its new place.
     """
-    from temporalio.exceptions import ApplicationError
-
+    from chemclaw.core.db import connect
     from chemclaw.durable import pending_store
     from chemclaw.durable.awaiting import _OpenInput, open_pending_request_activity
     from tests.pg import migrated_db_or_skip
@@ -647,26 +790,118 @@ def test_a_wait_refused_by_the_projection_fails_instead_of_waiting_blind() -> No
                 run_id=run_id,
             )
 
+        async with await connect(settings.postgres_dsn) as conn:
+            await conn.execute("DELETE FROM pending_requests WHERE request_id = %s", (request_id,))
+            await conn.execute(
+                "DELETE FROM pending_request_answers WHERE request_id = %s", (request_id,)
+            )
+            await conn.commit()
+
         await open_pending_request_activity(_input("run-1"))
         await pending_store.settle_request(
             request_id, state="answered", answered_by="u-2", answer={"reading": 4}
         )
 
-        # The same question again, as a new run. The projection cannot become this run's.
-        try:
-            await open_pending_request_activity(_input("run-2"))
-        except ApplicationError as exc:
-            assert exc.non_retryable, "retrying cannot change whose answer is in the row"
-            assert request_id in str(exc)
-        else:
-            raise AssertionError(
-                "the wait opened against a projection that still reads `answered`, so it is "
-                "invisible in every inbox and unanswerable for its whole deadline"
-            )
+        # The same question again, as a new run.
+        due_at = await open_pending_request_activity(_input("run-2"))
+        assert due_at == (started + timedelta(days=7.0)).isoformat(), (
+            f"the re-ask did not come back with the deadline it asked for: {due_at}"
+        )
 
-        # And the previous cycle's answer is exactly where it was.
-        stored = await pending_store.get_request(request_id)
-        assert stored is not None
-        assert (stored.state, stored.answered_by) == ("answered", "u-2")
+        reopened = await pending_store.get_request(request_id)
+        assert reopened is not None and reopened.state == "waiting", (
+            "the wait opened against a projection that still reads `answered`, so it is invisible "
+            "in every inbox and unanswerable for its whole deadline"
+        )
+
+        # And the previous cycle's answer is where nothing can overwrite it.
+        async with await connect(settings.postgres_dsn) as conn:
+            cur = await conn.execute(
+                "SELECT run_id, answered_by, answer FROM pending_request_answers "
+                "WHERE request_id = %s",
+                (request_id,),
+            )
+            archived = [(str(r[0]), str(r[1]), dict(r[2])) for r in await cur.fetchall()]
+        assert archived == [("run-1", "u-2", {"reading": 4})], (
+            f"the previous cycle's attribution is not in the archive: {archived}"
+        )
+
+    asyncio.run(_run())
+
+
+def test_the_launch_idiom_joins_an_open_wait_and_reopens_a_settled_one(
+    monkeypatch: Any,
+) -> None:
+    """`open_wait`'s three coupled decisions, run rather than described.
+
+    **This function had no test at all.** Every caller's test patches `open_wait` away — the
+    runner's escalation suite says so in its own fixture docstring ("patched at `runner.open_wait`
+    rather than at the Temporal client, because the seam under test is the request the runner
+    *builds*"), which is right about that seam and leaves this one unexecuted. So the three
+    decisions its docstring argues for — the deterministic id, `ALLOW_DUPLICATE`, and the
+    already-started catch — were prose over a code path nothing ran.
+
+    The third arm is the one the argument turns on and the one no other test can reach. A wait that
+    nobody answers *expires*, and expiry completes the workflow **normally**, so under
+    `REJECT_DUPLICATE` or `ALLOW_DUPLICATE_FAILED_ONLY` a lapsed question would be unaskable
+    forever — the monthly stability pull, the next campaign round's measurement. Here the wait is
+    settled by an answer rather than by an expiry, which is the same completed state and far
+    cheaper to reach: the re-ask must mint the same id and come back `True`, having genuinely
+    started a second run.
+
+    The second arm is the join: while a wait is open, asking again is the same question, and the
+    `False` is what stops the caller putting a second start notice in front of whoever is already
+    being asked.
+    """
+
+    async def _run() -> None:
+        async with await start_env_or_skip() as env:
+            client = pydantic_client(env)
+
+            async def _client() -> Client:
+                return client
+
+            monkeypatch.setattr(awaiting_module, "connect", _client)
+            projection = _Projection()
+            async with _worker(client, projection):
+                request = AwaitRequest(
+                    kind="measurement", subject="the monthly stability pull", deadline_days=7
+                )
+
+                first_id, opened = await open_wait(request)
+                assert opened is True, "the first ask did not open the wait"
+                assert first_id == request_id_for(request), (
+                    "the launch minted an id `request_id_for` does not agree with, so a second "
+                    "asker joins nothing and the projection keys on a row nobody else can find"
+                )
+
+                joined_id, joined = await open_wait(request)
+                assert joined is False, (
+                    "asking again while the wait is open reported a fresh start; the caller would "
+                    "put a second notice in front of whoever is already being asked"
+                )
+                assert joined_id == first_id
+
+                handle: WorkflowHandle[Any, Any] = client.get_workflow_handle(first_id)
+                await handle.signal("provide", {"answered_by": "u-lab-1", "payload": {"n": 1}})
+                outcome = AwaitOutcome.model_validate(await handle.result())
+                assert outcome.state == "answered", "the fixture's premise: the wait is settled"
+
+                reopened_id, reopened = await open_wait(request)
+                assert reopened is True, (
+                    "a settled question could not be asked again. That is what "
+                    "REJECT_DUPLICATE and ALLOW_DUPLICATE_FAILED_ONLY do here, and it is why "
+                    "`open_wait` states ALLOW_DUPLICATE rather than leaning on the SDK default"
+                )
+                assert reopened_id == first_id, "the re-ask is the same question and the same id"
+                # And a *second run* genuinely exists under that id: the same id was `COMPLETED` a
+                # moment ago, so `RUNNING` is the fact `True` is claiming. Asserted through
+                # `describe` rather than through the projection recorder, because the recorder is
+                # driven by an activity the worker may not have dispatched yet — that is a race
+                # about this test's teardown rather than anything about the launch.
+                described = await client.get_workflow_handle(first_id).describe()
+                assert described.status == WorkflowExecutionStatus.RUNNING, (
+                    f"the re-ask returned True and started nothing: {described.status}"
+                )
 
     asyncio.run(_run())

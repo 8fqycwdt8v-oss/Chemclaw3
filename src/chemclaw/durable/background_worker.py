@@ -19,7 +19,9 @@ could not also do. And the periodic jobs are each one Temporal Schedule under
 pod cannot produce a second concurrent run of one of them however many workers poll.
 
 What a single replica does buy is exclusion over state that lives **in the pod**, and after the
-PR-gate's cluster advisory lock closed the git half there is exactly one such dependency left:
+note writer's cluster advisory lock (`kg/git_writer.py::GitNoteWriter._cluster_lock`, which
+outlived the PR-gate it was built under) closed the git half there is exactly one such dependency
+left:
 `NoteReindexWorkflow`. `retrieval/vector_index.py::reindex_notes` retires index rows for every
 note absent from *this pod's* knowledge checkout, which is an `emptyDir` refreshed by the pod's
 own sidecar — so two pods are two views of the corpus, and a note one has fetched and the other
@@ -38,6 +40,7 @@ from typing import Any
 from temporalio.worker import Worker
 
 from chemclaw.core.config import settings
+from chemclaw.core.llm_gateway import refuse_unconfigured_llm_gateway
 from chemclaw.core.logging import configure_logging, configure_telemetry
 from chemclaw.core.temporal_client import connect
 
@@ -47,26 +50,34 @@ from chemclaw.core.temporal_client import connect
 # to one of these modules is a decorator at its definition site, not an edit here.
 from chemclaw.durable import artifact_eviction as _artifact_eviction  # noqa: F401
 from chemclaw.durable import awaiting as _awaiting  # noqa: F401
+from chemclaw.durable import check_in as _check_in  # noqa: F401
 from chemclaw.durable import commitment_sync as _commitment_sync  # noqa: F401
 from chemclaw.durable import connector_job as _connector_job  # noqa: F401
 from chemclaw.durable import corpus_sync as _corpus_sync  # noqa: F401
+from chemclaw.durable import deliver_message as _deliver_message  # noqa: F401
 from chemclaw.durable import digest as _digest  # noqa: F401
 from chemclaw.durable import document_sync as _document_sync  # noqa: F401
 from chemclaw.durable import eln_sync as _eln_sync  # noqa: F401
 from chemclaw.durable import eval_drift as _eval_drift  # noqa: F401
+from chemclaw.durable import hypothesis_tournament as _hypothesis_tournament  # noqa: F401
 from chemclaw.durable import label_sync as _label_sync  # noqa: F401
 from chemclaw.durable import memory_jobs as _memory_jobs  # noqa: F401
 from chemclaw.durable import note_index as _note_index  # noqa: F401
 from chemclaw.durable import notify as _notify  # noqa: F401
 from chemclaw.durable import observation_jobs as _observation_jobs  # noqa: F401
 from chemclaw.durable import orchestrator as _orchestrator  # noqa: F401
+from chemclaw.durable import orphaned_waits as _orphaned_waits  # noqa: F401
 from chemclaw.durable import publish_results as _publish_results  # noqa: F401
 from chemclaw.durable import report_workflow as _report_workflow  # noqa: F401
 from chemclaw.durable import retention as _retention  # noqa: F401
 from chemclaw.durable import template_activities as _template_activities  # noqa: F401
 from chemclaw.durable import template_job as _template_job  # noqa: F401
 from chemclaw.durable.registry import describe, registered_activities, registered_workflows
-from chemclaw.durable.serve import serve_worker, worker_interceptors
+from chemclaw.durable.serve import (
+    refuse_unauthenticated_worker,
+    serve_worker,
+    worker_interceptors,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -76,9 +87,22 @@ BACKGROUND_ACTIVITIES: Sequence[Callable[..., Any]] = registered_activities("bac
 
 
 async def main() -> None:
-    """Connect and poll the background-jobs queue: graph writes, ELN sync, jobs, templates."""
+    """Connect and poll the background-jobs queue: graph writes, ELN sync, jobs, templates.
+
+    The gateway guard runs here for the same reason it runs in `create_app`, and the reason it did
+    not used to is that it lived in `api/middleware.py`: `template_activities.run_agent_step` builds
+    a LangGraph agent inside an activity, so this process takes turns. Driven against the live
+    broker with this line deleted, an unconfigured worker connects and polls `background-jobs` with
+    `run_agent_step` registered and the mock's loopback address on the settings object; with the
+    line, it refuses before `connect()` is reached. After `configure_logging`, so the refusal and
+    the opt-in warning both go through this process's own handlers rather than the root logger's
+    default. The sign-in posture is checked beside it for the same reason and in the same place
+    (`durable/serve.refuse_unauthenticated_worker`).
+    """
     configure_logging()
     configure_telemetry()
+    refuse_unconfigured_llm_gateway()
+    refuse_unauthenticated_worker()
     client = await connect()
     worker = Worker(
         client,
@@ -96,6 +120,12 @@ async def main() -> None:
         # magnitude smaller — and this queue's work is almost entirely database work (the retention
         # sweep, the reindex, the chain verification, every job record).
         max_concurrent_activities=settings.worker_max_concurrent_activities,
+        # What the worker holds *between* tasks, which the activity ceiling above does not bound:
+        # a cached workflow is a started one kept resident so its next task replays from memory
+        # instead of from history. Set here because the SDK's own default would otherwise be the
+        # choice, and measured rather than adopted — `core/config/temporal.py` carries the numbers
+        # and `tests/test_workers.py` holds them against the chart's memory request.
+        max_cached_workflows=settings.worker_max_cached_workflows,
         # Every activity this worker serves, bound to the turn that asked for it and recorded on
         # its way in and out (`durable/interceptor.py`). Here rather than in `serve_worker` for
         # the reason `graceful_shutdown_timeout` is: it is a property of what the worker *serves*,

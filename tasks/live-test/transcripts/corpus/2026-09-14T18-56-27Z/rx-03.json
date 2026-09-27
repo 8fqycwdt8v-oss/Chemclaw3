@@ -1,0 +1,60 @@
+{
+  "probe": {
+    "id": "rx-03",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Search our reaction record for precedent for COc1ccc(Br)cc1.OB(O)c1ccccc1>>COc1ccc(-c2ccccc2)cc1 — how close is the nearest match and is it close enough to plan from?",
+    "expects_tools": [
+      "similar_reactions",
+      "similar_molecules",
+      "gather_evidence",
+      "find_notes"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a similarity score reported without saying which fingerprint produced it",
+      "an assertion that no precedent exists based on a single zero-hit query"
+    ],
+    "direction": "Should run the reaction-fingerprint search and report the hits with their similarity values and what those values mean (roughly: >=0.7 strong analogue, 0.4-0.7 worth a look, <0.4 weak). The judgement being tested is the DRFP caveat: the indexed HTE corpus encodes ligand/base/additive as reactants, so a two-component query can score far below the floor against a real match. If the query returns little, the answer must say that a zero/low result may mean the query recipe does not match how the corpus was indexed, and either widen the query with plausible reagents or fall back to molecule similarity on the substrates — never conclude flatly that there is no precedent.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-03",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Search our reaction record for precedent for COc1ccc(Br)cc1.OB(O)c1ccccc1>>COc1ccc(-c2ccccc2)cc1 — how close is the nearest match and is it close enough to plan from?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.98,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "4cdc2fc0cc3f4a0aae62b0cbc6a96a98",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

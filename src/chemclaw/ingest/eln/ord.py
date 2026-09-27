@@ -58,6 +58,15 @@ class Component(BaseModel):
     # read by `ingest/eln/record.py` for the charge sheet and the record's scale, which is real.
     amount_mmol: float | None = Field(default=None, ge=0.0)
     mass_mg: float | None = Field(default=None, ge=0.0)
+    # Millilitres, for a species the source charged **by volume** — the ordinary case for a neat
+    # liquid reactant and for every solvent. A third independent field rather than a conversion,
+    # because converting needs a density this record does not carry and inventing one would present
+    # a derived number as a recorded one (`D-2026-08-26-a-transcription-may-not-infer-a-setpoint`).
+    # It exists because the alternative was measured: `ord_adapter._amount` read `mass` and `moles`
+    # only, so a volumetric charge reached the record as no amount at all — a 49.3 g charge whose
+    # `scale:` bullet read "40 g", and a `## Charge` row reading "amount not recorded" for a species
+    # whose amount the source *did* record.
+    volume_ml: float | None = Field(default=None, ge=0.0)
     # Whatever else the source recorded about this species — a lot number, a supplier, an
     # equivalents figure, an assay. See `OrdReaction.attributes` for why this is a bag of strings
     # and not a set of fields.
@@ -129,22 +138,63 @@ class Impurity(BaseModel):
     instructed to answer about "yield, purity, impurities", but the canonical record carried only
     `yield_percent`, so every purity question could only ever be answered "the data is silent".
 
-    All three descriptors are optional because ELNs report impurities inconsistently: sometimes a
+    Every descriptor is optional because ELNs report impurities inconsistently: sometimes a
     structure, often only a chromatographic name/RRT, usually an area%. Requiring any one of them
     would silently drop the rest at ingest, which is the failure this field exists to prevent.
+
+    **`rrt` was named in this docstring for as long as it existed and had nowhere to go.** This
+    paragraph said RRT is how an impurity is "often" identified, and
+    `ingest/eln/warehouse/binding.py` said a site's analytics table carries "a chromatographic name
+    or RRT far more often than a structure" — while the model held name, SMILES and area% and
+    nothing else. So the one identifier a process chemist uses to say *which peak* fell to
+    `attributes`, a `dict[str, str]` whose own docstring says it holds "strings, not values"
+    (`D-2026-09-15-a-relation-with-no-legal-target-is-a-question-nobody-can-answer`). Two
+    unresolved impurities at 0.11% and 0.19% are distinguishable by RRT and by nothing else here.
     """
 
     name: str | None = None
     smiles: str | None = None
     # Chromatographic area percent (HPLC/GC) — the number a process chemist actually tracks.
     area_percent: float | None = Field(default=None, ge=0.0, le=100.0)
+    # Relative retention time: this peak's retention divided by the main peak's, on the method that
+    # ran. Unitless by construction and **method-relative by construction** — an RRT means nothing
+    # without the method it was measured on, which is what the `analytical-method` note type and
+    # the `measured-by` edge are for. Unbounded above (a late-eluting impurity can exceed 1) and
+    # positive: a zero or negative RRT is not a chromatographic observation.
+    rrt: float | None = Field(default=None, gt=0.0)
 
     @model_validator(mode="after")
     def _identifiable(self) -> "Impurity":
-        """An impurity with neither a name nor a structure is not a record of anything."""
+        """An impurity with neither a name nor a structure is not a record of anything.
+
+        **An RRT alone does not identify one**, deliberately. It says where a peak eluted on one
+        method, which is how a chemist *refers* to an unknown — "the RRT 0.94 peak" — and that
+        reference is a name. So a record carrying only `rrt` is asking this model to stand in for a
+        peak nobody has named, and the honest place for it is a name of exactly that form. Letting
+        it through would put rows in the corpus that no query can join and no chemist can read.
+        """
         if not self.name and not self.smiles:
             raise ValueError("an impurity needs at least a name or a SMILES")
         return self
+
+
+def unresolved_peak_name(rrt: float) -> str:
+    """The name an impurity known only by its retention time is recorded under.
+
+    `Impurity._identifiable` refuses a row carrying only `rrt` **and states the remedy**: an RRT is
+    how a chemist refers to an unknown — "the RRT 0.94 peak" — and that reference is a name, so the
+    honest place for it is a name of exactly that form. The decision was taken at the model and the
+    corresponding action was never taken at the adapters, which dropped such a row with a WARNING:
+    measured on a three-row HPLC table, `in=3 out=2`, and on a table of unresolved peaks alone,
+    `in=2 out=0` — a 1.9 area% peak and a 0.42% one gone, and the record reading as though it
+    carried no impurity profile at all. In-entry drops are not written to the rejection ledger, so
+    nothing queryable said those rows had existed.
+
+    One function rather than an f-string per adapter because the *form* is the contract: a corpus in
+    which one source writes `RRT 0.94 peak` and another writes `rrt=0.94` cannot be read by one
+    question. `:g` keeps `0.94` as `0.94` and `1` as `1` rather than `1.0`.
+    """
+    return f"RRT {rrt:g} peak"
 
 
 class OrdReaction(BaseModel):

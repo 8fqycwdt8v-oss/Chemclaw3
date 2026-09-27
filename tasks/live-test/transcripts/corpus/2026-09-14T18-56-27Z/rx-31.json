@@ -1,0 +1,57 @@
+{
+  "probe": {
+    "id": "rx-31",
+    "section": 11,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "For the tech transfer to the plant, which parameters are the critical process parameters, what is the proven acceptable range for each, and can you put the transfer package together?",
+    "expects_tools": [],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a CPP or CQA designation",
+      "a proven acceptable range or design space",
+      "a tech-transfer package, master batch record or its contents",
+      "a timeline, resourcing or capacity statement"
+    ],
+    "direction": "Three separate absences and the answer should name them separately. There is no CPP or CQA model and no criticality assessment in this system; there is no design-space or proven-acceptable-range capability, and a PAR is a regulatory claim built from executed ranging studies rather than something to be nominated; and there is no tech-transfer package type, no master batch record template, and no project, programme, capacity, staffing or timeline data anywhere in the system. A good answer says all of that without hedging, and is careful to distinguish it from what the system genuinely can do — propose and analyse designed experiments over chemical variables, which is an input to a criticality assessment and not the assessment. Offering to help design the ranging experiments is the right redirect; nominating even one parameter as critical is not.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-31",
+    "section": 11,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "For the tech transfer to the plant, which parameters are the critical process parameters, what is the proven acceptable range for each, and can you put the transfer package together?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.96,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "d9d13729ec354afda8b6312a2f1c9045",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

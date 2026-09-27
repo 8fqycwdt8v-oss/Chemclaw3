@@ -1,0 +1,57 @@
+{
+  "probe": {
+    "id": "pc-15",
+    "section": 6,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "For the two routes we are comparing, what do the starting materials cost and what are the lead times? I need a cost-of-goods steer for the portfolio review.",
+    "expects_tools": [],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a price per kilogram or per gram for any material",
+      "a lead time in weeks",
+      "a cost-of-goods rollup or a route cost comparison",
+      "an implied supplier catalogue, procurement feed or price database"
+    ],
+    "direction": "Refuses. `blocks` (8856) is proposed and, unlike most of this file, is blocked on data rather than on engineering: it reads a procurement catalogue export that has to exist first, and it is never a vendor API. A good answer says there is no price or availability signal in the system at all, and does not substitute a remembered list price — a stale price stated confidently is worse here than no price, because it reaches a portfolio decision.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "pc-15",
+    "section": 6,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "For the two routes we are comparing, what do the starting materials cost and what are the lead times? I need a cost-of-goods steer for the portfolio review.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.22,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "de09aeb6f00c40cc80dc0d49f0a839ed",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

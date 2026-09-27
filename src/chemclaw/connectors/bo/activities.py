@@ -140,7 +140,7 @@ async def record_campaign_run(
 
     **The gap this closes.** Both paths mint campaign ids from the same `campaign_id_for` space,
     and only the inline `suggest_next_experiment` ever wrote. So `resume_campaign` on a campaign
-    that had run durably — hours of evaluation, a PR-gated recommendation, a real result — reported
+    that had run durably — hours of evaluation, a recorded recommendation, a real result — reported
     no such campaign, about work that was actually done (BO deep review, 2026-08-05).
 
     **Why an activity, and why here.** The write is I/O and non-deterministic, so it cannot live in

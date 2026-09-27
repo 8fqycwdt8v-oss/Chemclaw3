@@ -16,10 +16,10 @@ from datetime import date
 from pathlib import Path
 
 import networkx as nx
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
 from chemclaw.agent.authz import require_actor
-from chemclaw.agent.framing import frame_untrusted
+from chemclaw.agent.framing import SYSTEM_SPEECH_MARK, frame_untrusted
 from chemclaw.agent.tool_framing import defanged_payload
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
@@ -30,7 +30,7 @@ from chemclaw.ingest.eln.records import RECORD_TYPE, default_record_store
 from chemclaw.kg.analytics import GraphGaps, analyze
 from chemclaw.kg.git_writer import default_writer
 from chemclaw.kg.graph import build_graph, load_notes, neighborhood, note_in
-from chemclaw.kg.note import Note, Relation, external_record_id, resolves_outside_graph
+from chemclaw.kg.note import Note, Relation, external_record_ref, resolves_outside_graph
 from chemclaw.kg.record import record_note
 from chemclaw.kg.relations import DEFAULT_RELATION
 from chemclaw.kg.search import query_terms, term_coverage
@@ -45,6 +45,18 @@ class NoteRef(BaseModel):
     Provenance is surfaced here (KM-6) so the agent can weigh a source — who authored it
     (`created_by`), where it came from (`source`), how sure it is (`confidence`), and its validity
     window — without a second lookup. Fields default so a bare reference is still constructible.
+
+    **The calculations a note rests on are part of that provenance, and were dropped here.**
+    `record_knowledge_note` tells the model to file `calc_refs` from a job's result envelope
+    (D-2026-08-21 built the envelope that carries them) "so a stale calculation can be traced to
+    the conclusions drawn from it" — and this projection is every reader there is: the model
+    through `find_notes`/`expand_note`, and the chemist through `GET /notes/{id}`, which returns
+    this same object. Neither saw one, so the citation on a computed note was write-only, and the
+    control `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` rests on — "the citations a
+    chemist checks at the point of use" — could not be exercised on the notes that most need it.
+
+    Both fields are checked by `Note`'s own validators (`_calc_ref_shape`), which is why they are
+    the only strings added here that `_ref` does not have to defang.
     """
 
     id: str
@@ -56,6 +68,10 @@ class NoteRef(BaseModel):
     confidence: float | None = None
     valid_from: date | None = None
     valid_to: date | None = None
+    # The calculation keys and stored artifacts (`<calc key>#<name>`) this note cites. Empty for
+    # every note that rests on no calculation, which is most of the corpus.
+    calc_refs: list[str] = Field(default_factory=list)
+    artifact_refs: list[str] = Field(default_factory=list)
 
 
 class NeighborRef(NoteRef):
@@ -117,6 +133,10 @@ def _ref(note: Note) -> NoteRef:
         confidence=note.confidence,
         valid_from=note.valid_from,
         valid_to=note.valid_to,
+        # Not defanged, and that is the one exception this function's rule has: both fields are
+        # shape-checked at parse time (`Note._calc_ref_shape`), so neither can carry a delimiter.
+        calc_refs=note.calc_refs,
+        artifact_refs=note.artifact_refs,
     )
 
 
@@ -137,6 +157,64 @@ class NoteSearch(BaseModel):
     # True when no note contained every term and the matches are partial-coverage hits instead,
     # best coverage first — the same fallback `GraphRetriever` applies to the same corpus.
     widened: bool = False
+    # How many *current* notes the search actually looked at — the question a miss cannot answer
+    # without it. Measured, a zero-note corpus and a genuine miss over a real one returned the
+    # identical `{'matches': [], 'total_matches': 0, 'widened': False}`, so "we have no note on
+    # aspirin" and "there is no knowledge graph on this deployment" were the same sentence. The
+    # honest form already existed one module away: `gather_evidence` reports
+    # `sources_skipped={'graph': 'no notes found under <path>'}`.
+    #
+    # **`None` means "this search cannot say"**, not zero — the same distinction
+    # `retrieval.evidence.Hits.found` draws for the legs that push `LIMIT k` into an index. A query
+    # with no searchable term returns before the corpus is opened, and reporting 0 for it would
+    # assert an empty graph nobody looked at.
+    corpus_notes: int | None = None
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def verdict(self) -> str:
+        """The one sentence to read before saying the graph holds nothing on a topic.
+
+        `computed_field` rather than a bare property for the reason `FingerprintSearch.verdict`
+        states in full: a plain property is not serialized, so `model_dump()` would carry the empty
+        list and drop the sentence saying what it means.
+
+        The tool docstring already said the careful thing — "an empty result means not even one
+        term matched; it does not mean the topic is absent from the graph" — and a docstring is
+        read once when the tool is defined, while the payload is what sits in the context window
+        when the answer is written.
+        """
+        if self.corpus_notes is None:
+            return (
+                "NOT SEARCHED: the query held no searchable term, so no note was examined. This "
+                "says nothing whatever about the graph — ask again with a word to search for."
+            )
+        if not self.corpus_notes:
+            return (
+                "NO CORPUS: the knowledge graph holds no current note at all, so this query was "
+                "compared against nothing. This is NOT evidence that the topic is unknown — the "
+                "question was not answered. Say the graph is empty on this deployment."
+            )
+        if not self.matches:
+            return (
+                f"NO MATCH: {self.corpus_notes} current note(s) were searched and none carried "
+                "your terms. The graph is populated, so this is a real miss — but it is a miss on "
+                "these words, and a differently-worded term may still find it."
+            )
+        cut = (
+            f" {self.total_matches} matched and the {len(self.matches)} best are shown, so the "
+            "count is a floor rather than a total."
+            if self.total_matches > len(self.matches)
+            else ""
+        )
+        widened = (
+            " No note carried every term, so these are partial-coverage hits, best coverage first."
+            if self.widened
+            else ""
+        )
+        return (
+            f"FOUND: {len(self.matches)} note(s) out of {self.corpus_notes} searched.{cut}{widened}"
+        )
 
 
 def _scan_notes(notes_dir: Path, terms: Sequence[str], today: date, cap: int) -> NoteSearch:
@@ -158,8 +236,28 @@ def _scan_notes(notes_dir: Path, terms: Sequence[str], today: date, cap: int) ->
 
     It buys latency and jitter, **not throughput**: the scan is pure Python holding the GIL, so a
     thread pool runs eight of these no faster than one (measured elsewhere in this review at 0.91x
-    on four threads). The corpus is markdown in Git rather than rows in Postgres, so there is no
-    database to push the scan into either.
+    on four threads).
+
+    **There is a database to push it into, and this docstring used to deny there was one.** The
+    notes are indexed: `retrieval/vector_index.py` maintains `note_index` with a GIN-indexed
+    `tsvector` (`infra/sql/012_note_index.sql`) and serves `search_lexical` over it. What is true is
+    narrower, and it is two things rather than the one this said.
+
+    The index is *derived*, and only a deployment that reads it keeps it in step:
+    `settings.note_reindex_effective` schedules `NoteReindexWorkflow` exactly where `lexical` or
+    `vector` is in `CHEMCLAW_DATA_SOURCES`, and the shipped default is `graph,eln-json`. Pushing
+    this scan into Postgres would therefore answer `find_notes` on a graph-only deployment out of a
+    table nothing ever writes — a tool that reports "no note on that" about a corpus it never read,
+    which is the failure `NoteSearch.verdict` exists to make impossible.
+
+    And `search_lexical` is a *different* lexical rule, not a faster spelling of this one: stemmed
+    and stop-worded by a Postgres text-search configuration, against the substring rule
+    `term_coverage` applies here and in `GraphRetriever`. Measured on 2026-09-16 against live
+    PostgreSQL 16 over a two-note corpus, `couplings`, `coupled`, `dry` and `films` are hits for the
+    server and not for the substring rule, while `ester` is a hit for the substring rule (inside
+    `polyester`) and not for the server. Moving this reader alone re-opens D-2026-08-05 in its worst
+    direction — the model finds a note `gather_evidence` cannot then cite — so it moves with the
+    graph leg or not at all. `tests/test_note_search.py` pins both directions.
 
     `load_notes`, not `build_graph`: this is a substring sweep over each note's own metadata and
     body, and it never follows an edge. Assembling the graph made a cold call pay node and edge
@@ -178,11 +276,16 @@ def _scan_notes(notes_dir: Path, terms: Sequence[str], today: date, cap: int) ->
         The search result, with `total_matches` counting the hits before the cap.
     """
     scored: list[tuple[int, NoteRef]] = []
+    searched = 0
     for note in sorted(load_notes(notes_dir), key=lambda candidate: candidate.id):
         # Discovery serves current evidence only: a not-yet-valid or expired note is not surfaced
         # as current fact (KM-7). It stays in Git and remains reachable by explicit id.
         if not note.is_current(today):
             continue
+        # Counted *after* the currency filter, because that is the corpus this search can hit: a
+        # graph of a thousand expired notes answers every query with nothing, and reporting the
+        # thousand would call that a real miss.
+        searched += 1
         coverage = term_coverage(note, terms)
         if coverage:
             scored.append((coverage, _ref(note)))
@@ -201,6 +304,7 @@ def _scan_notes(notes_dir: Path, terms: Sequence[str], today: date, cap: int) ->
         matches=[ref for _, ref in chosen[:cap]],
         total_matches=len(chosen),
         widened=widened,
+        corpus_notes=searched,
     )
 
 
@@ -217,11 +321,13 @@ async def find_notes(text: str) -> NoteSearch:
             position, not only one containing that exact run of text.
 
     Returns:
-        The matching note references (id + type + smiles + tags, body omitted) with
-        `total_matches` saying how many there were before the cap, and `widened` marking a
-        result of partial-coverage hits when no current note contained every word. An empty
-        result means not even one term matched — it does not mean the topic is absent from the
-        graph; a differently-worded term may still find it.
+        The matching note references (id + type + smiles + tags, body omitted), `total_matches`
+        before the cap, `widened` for partial-coverage hits, and `corpus_notes` — how many current
+        notes were searched at all.
+
+        **Read `verdict` before saying the graph holds nothing on a topic.** An empty result means
+        one of three things: no searchable term, an empty graph, or a real miss. Only the last is
+        evidence about the topic.
     """
     # The same tokenizer and the same haystack every other note search uses
     # (`chemclaw.kg.search`), so a note this tool finds is one `gather_evidence` can also cite.
@@ -295,10 +401,30 @@ async def _expand_record(note_id: str) -> NoteView:
 
     `created_by` is reported as `agent` because a program rendered the file, which is what that
     field has always meant; it no longer implies anything is waiting for review.
+
+    **A withdrawn entry resolves and says so, rather than disappearing.** `read()` deliberately
+    keeps serving a retracted row while `eligible()` stops, because a row is the only readable form
+    of an ELN run and a citation to a withdrawn one must not become a dangling link — a chemist
+    reading a campaign note that cites it has to be told the run was withdrawn, not that the id is
+    unknown. The notice is prepended as *system* text, outside the framed source body, so it cannot
+    be mistaken for something the ELN said; `valid_to` carries the same fact in the structured half,
+    which is what makes a retracted record fail `is_current` everywhere else.
     """
-    record = await default_record_store().read(external_record_id(note_id))
+    # A qualified citation names the source it was found in, so exactly one row can answer; a bare
+    # one — every citation committed before that spelling existed — reads across sources and is
+    # refused when two hold the id (`D-2026-09-13-a-citation-names-the-source-it-was-found-in`).
+    source, record_id = external_record_ref(note_id)
+    record = await default_record_store().read(record_id, source)
     if record is None:
         raise ChemclawError(f"no reaction record with id {note_id!r}")
+    body = frame_untrusted(record.body, note_id=note_id)
+    if record.retracted_at is not None:
+        notice = (
+            f"The source withdrew this ELN entry on {record.retracted_at:%Y-%m-%d}. It is no "
+            "longer current evidence and must not be cited as a precedent; it is shown because "
+            f"something already cites it. {SYSTEM_SPEECH_MARK}"
+        )
+        body = f"{notice}\n\n{body}"
     return NoteView(
         note=NoteRef(
             id=note_id,
@@ -309,11 +435,14 @@ async def _expand_record(note_id: str) -> NoteView:
             source=record.source,
             confidence=None,
             valid_from=record.performed_at,
-            valid_to=None,
+            # The withdrawal in the structured half, where every other reader of a `NoteRef` already
+            # looks for "this stopped being current". Not a claim that the run expired — `valid_to`
+            # is the field a reader has, and `retracted_at` is why it is set.
+            valid_to=record.retracted_at.date() if record.retracted_at else None,
         ),
         # Source text a chemist typed into an ELN, so it is framed as data for the same reason a
         # note body is: it reaches the model verbatim and must not be read as instruction.
-        body=frame_untrusted(record.body, note_id=note_id),
+        body=body,
         neighbors=[],
     )
 
@@ -335,10 +464,7 @@ async def expand_note(note_id: str, hops: int = 1) -> NoteView:
     A `reaction-<id>` citation the graph does not hold resolves against the transcription store
     instead (D-2026-08-25), so a structure-search hit expands into its recipe — conditions, the
     charge sheet, the impurity profile, the procedure. It has no neighbourhood: it asserts
-    nothing and
-    therefore links to nothing. This is also what retires D-018's failure mode, where the same
-    citation raised "no note with that id" for as long as nobody merged its pull request, and a
-    chemist could not tell that from a typo.
+    nothing and therefore links to nothing.
 
     Args:
         note_id: The id of the entry note.
@@ -349,11 +475,14 @@ async def expand_note(note_id: str, hops: int = 1) -> NoteView:
         to this note.
 
     Raises:
-        ChemclawError: When `note_id` names no current note. A `ChemclawError` is chemclaw's
-            own always-safe "bad input" contract (`chemclaw.core.errors`), so
-            `chemclaw.agent.tool_authz` surfaces this message to the model verbatim instead of an
-            opaque generic failure.
+        ChemclawError: When `note_id` names no current note.
     """
+    # The exception *type*'s rationale is here rather than in the docstring above, because that
+    # docstring is the tool's schema description and is re-sent on every model call: a
+    # `ChemclawError` is this repository's always-safe "bad input" contract
+    # (`chemclaw.core.errors`), so `chemclaw.agent.tool_authz` surfaces the message to the model
+    # verbatim instead of an opaque generic failure. The model cannot act on any of that — it sees
+    # the message either way — and a Python reader of this file needs it.
     graph = await asyncio.to_thread(build_graph, settings.knowledge_path)
     # The graph first, the store second, and in that order deliberately: `reaction-` is a *prefix*,
     # not a reservation, so a human-authored note under that name must still win. Store-first made
@@ -394,9 +523,16 @@ async def find_knowledge_gaps() -> GraphGaps:
     projects — there is no project field on a note. Reporting them as projects is how a live run
     came to state a confident portfolio status the record could not support.
 
+    `undistilled_playbook_ids` is the other half and answers a different question: not "which
+    topics have no playbook" but "which playbooks record a recurrence nobody has generalised".
+    Each is a note id you can open with `expand_note` and whose cited reactions you can read — and
+    the `playbook-distillation` skill is the judgment for turning one into a transferable rule. If
+    a chemist asks what the system has spotted but not yet made sense of, this is the list.
+
     Returns:
         Counts per note type, isolated (unlinked) notes, tags with evidence but no distillation,
-        the most-cited hub notes, and any dangling links in the served graph.
+        the playbooks still awaiting a rule, the most-cited hub notes, and any dangling links in
+        the served graph.
     """
     directory = settings.knowledge_path
     graph = await asyncio.to_thread(build_graph, directory)
@@ -451,8 +587,9 @@ async def record_knowledge_note(
             **Leave it unset when you do not** — an absent confidence means "not stated",
             which retrieval and conflict detection both read correctly; a guessed number
             is read as evidence.
-        calc_refs: Calculation keys this note rests on, so a stale calculation can be traced
-            to the conclusions drawn from it. Get them from a job's result envelope.
+        calc_refs: Calculation keys this note rests on. They ride on every reader of the note, so
+            a chemist reading a computed claim can check the run behind the number. Get them from
+            a job's result envelope.
         artifact_refs: Stored artifacts this note cites, as `<calc key>#<name>`.
         relations: Typed links to other notes — `contradicts`, `supersedes`, `follows` — each
             with its own optional confidence and validity window. Use these rather than prose
@@ -558,12 +695,15 @@ async def record_failure(
             f"be retired on {held_until.isoformat()} — file the refutation without `held_until`, "
             "or correct the existing date first"
         )
-    # Both files ride in one submission, so the reviewer signs off on the refutation and the
-    # retirement as the single decision they are. `superseded`, NOT `dependencies`: a dependency is
-    # written only where the base branch has no copy (`NoteFile.overwrite=False`), and the refuted
-    # note always exists on base — `_require_note` just found it in the merged graph — so passing
-    # the retirement as a dependency silently dropped it every time, leaving the refuted claim with
-    # its validity window intact and still served as current evidence. `superseded` overwrites the
+    # Both files ride in one write, in `record._build_write`'s order, so no reader ever sees the
+    # retirement citing a successor that does not exist yet. The sentence here used to say a
+    # reviewer signed off on the pair as one decision, which stopped being true when
+    # `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` removed the reviewer.
+    # `superseded`, NOT `dependencies`: a dependency is written only where the tree has no copy
+    # (`NoteFile.overwrite=False`), and the refuted note always exists there — `_require_note`
+    # just found it in the graph — so passing the retirement as a dependency silently dropped it
+    # every time, leaving the refuted claim with its validity window intact and still served as
+    # current evidence. `superseded` overwrites the
     # note in place, which is what retiring it means.
     retirement = (
         [close_refuted_note(refuted, note.id, held_until)] if held_until is not None else []

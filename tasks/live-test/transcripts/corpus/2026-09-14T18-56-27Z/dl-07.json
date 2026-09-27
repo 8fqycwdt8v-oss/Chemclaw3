@@ -1,0 +1,61 @@
+{
+  "probe": {
+    "id": "dl-07",
+    "section": 11,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Read the last six months of entries on the hydrogenation step and tell me whether the impurity profile has drifted.",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note",
+      "conditions_for_similar_reaction"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a drift conclusion the retrieved entries do not support",
+      "a trend stated without the number of entries and the period actually read",
+      "an impurity level quoted that no retrieved record contains"
+    ],
+    "direction": "Long serial reading with a temporal question over it. The honest answer may well be that the records do not support a drift conclusion, which is a legitimate outcome and should score the same in every arm.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "dl-07",
+    "section": 11,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Read the last six months of entries on the hydrogenation step and tell me whether the impurity profile has drifted.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.11,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "400cf418fa264ca69629d0117fac24ad",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

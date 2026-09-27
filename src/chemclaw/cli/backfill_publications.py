@@ -16,6 +16,13 @@ row there.
 **Rows this release has no projector for are skipped, not failed.** A deployment legitimately holds
 results from calculators that no longer ship, and a backfill that aborted on the first one would
 never reach the rest.
+
+**A row this release cannot *read* is a fourth number, reported on its own line.** It is neither a
+skip nor a queue: this release has a projector for it and that projector could not read it, so it
+will fail identically on every pass until code changes — while a skip needs no fix and a queue
+needs none either. It used to be added to `queued` as a zero and named nowhere, so "4 row(s) seen,
+2 queued, 1 skipped" was a complete-looking report over a corpus of four. `--dry-run` now projects,
+so the four row counts it prints are the four the real pass will print.
 """
 
 import argparse
@@ -46,17 +53,40 @@ async def _run(args: argparse.Namespace) -> int:
             "would return to" if args.dry_run else "returned to",
         )
 
-    total_queued = 0
+    total_queued = total_failed = 0
     for label, walk in (("calculation cache", backfill_cached), ("job records", backfill_jobs)):
-        seen, queued, skipped = await walk(dry_run=args.dry_run, batch=args.batch)
-        total_queued += queued
+        counts = await walk(dry_run=args.dry_run, batch=args.batch)
+        total_queued += counts.queued
+        total_failed += counts.failed
+        # Row counts and the record count on separate lines, in their own units. One line carrying
+        # both said "4 row(s) seen, 5 queued" whenever the corpus held a shape that decomposes.
         logger.info(
-            "%s: %d row(s) seen, %d %s, %d skipped (no projector in this release)",
+            "%s: %d row(s) seen = %d %s + %d skipped (no projector in this release) + "
+            "%d unreadable by this release's projector",
             label,
-            seen,
-            queued,
+            counts.seen,
+            counts.queued,
             "would be queued" if args.dry_run else "queued",
-            skipped,
+            counts.skipped,
+            counts.failed,
+        )
+        logger.info(
+            "%s: those %d row(s) %s %d scientific record(s)",
+            label,
+            counts.queued,
+            "would produce" if args.dry_run else "produced",
+            counts.records,
+        )
+    if total_failed:
+        # WARNING, not INFO: unlike a skip this is a defect in *this* release, it will recur on
+        # every pass, and it is the one bucket an operator has to act on. `logger.exception` in
+        # `outbox.project_payload` has already named each row and its traceback.
+        logger.warning(
+            "%d row(s) have a projector in this release that could not read them, counted above "
+            "as unreadable and queued nowhere. Nothing is lost — neither source table is ever "
+            "pruned, so a release that reads them re-runs this walk — but no pass will cover them "
+            "until the projector changes. The calc refs are on the projection failures above.",
+            total_failed,
         )
     if args.dry_run:
         logger.info("dry run: nothing was written. %d row(s) would be queued.", total_queued)

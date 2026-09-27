@@ -16,8 +16,14 @@ pass every check against residue.
 
 from __future__ import annotations
 
+import asyncio
 import importlib
+from datetime import UTC, datetime
+from types import SimpleNamespace
 from unittest import mock
+
+import pytest
+from temporalio.client import WorkflowExecutionStatus
 
 from chemclaw.cli import live_jobs
 from chemclaw.cli.live_jobs import SMOKE_PAYLOAD, WEDGE_PAYLOAD, Check, SmokeRun, report
@@ -99,3 +105,75 @@ def test_the_report_names_every_check_and_its_observation() -> None:
     assert "chain broken at row 3" in text
     assert "**FAIL**" in text
     assert "1/2 checks passed" in text
+
+
+class _Broker:
+    """A Temporal stand-in that reports a scripted sequence of states, one per describe."""
+
+    def __init__(self, states: list[WorkflowExecutionStatus]) -> None:
+        self.states = states
+        self.asked = 0
+
+    async def connect(self) -> _Broker:
+        return self
+
+    def get_workflow_handle(self, workflow_id: str) -> _Broker:
+        return self
+
+    async def describe(self) -> SimpleNamespace:
+        state = self.states[min(self.asked, len(self.states) - 1)]
+        self.asked += 1
+        return SimpleNamespace(status=state, start_time=datetime(2026, 9, 27, tzinfo=UTC))
+
+
+def _no_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def instant(seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr("chemclaw.cli.live_jobs.asyncio.sleep", instant)
+
+
+def test_a_launch_that_returned_pending_is_waited_for_before_it_is_judged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The 2026-09-27 false FAIL: a 20.2 s first launch came back pending and read RUNNING.
+
+    The launcher returning a bare id past `inline_wait_seconds` is the designed pending outcome, so
+    the check has to poll the broker to a terminal state before it describes one.
+    """
+    running, done = WorkflowExecutionStatus.RUNNING, WorkflowExecutionStatus.COMPLETED
+    broker = _Broker([running, running, done])
+    monkeypatch.setattr(live_jobs, "temporal_connect", broker.connect)
+    _no_sleep(monkeypatch)
+
+    check = asyncio.run(live_jobs.check_workflow_completed(SmokeRun(workflow_id="wf")))
+    assert check.passed, check.observed
+    assert check.observed.startswith("COMPLETED")
+
+
+def test_the_wait_is_bounded_by_the_setting_and_reports_the_state_it_ended_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A workflow that never finishes is reported stuck, not waited on forever."""
+    from chemclaw.core.config import settings
+
+    broker = _Broker([WorkflowExecutionStatus.RUNNING])
+    monkeypatch.setattr(live_jobs, "temporal_connect", broker.connect)
+    monkeypatch.setattr(settings, "live_jobs_terminal_wait_seconds", 0.05)
+
+    check = asyncio.run(live_jobs.check_workflow_completed(SmokeRun(workflow_id="wf")))
+    assert not check.passed
+    assert "RUNNING after waiting" in check.observed
+
+
+def test_a_terminal_failure_ends_the_wait_rather_than_being_polled_past(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FAILED is an answer: it is reported as itself, at once, not as a timeout."""
+    broker = _Broker([WorkflowExecutionStatus.RUNNING, WorkflowExecutionStatus.FAILED])
+    monkeypatch.setattr(live_jobs, "temporal_connect", broker.connect)
+    _no_sleep(monkeypatch)
+
+    status, _ = asyncio.run(live_jobs._await_terminal("wf"))
+    assert status == WorkflowExecutionStatus.FAILED
+    assert broker.asked == 2

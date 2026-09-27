@@ -13,6 +13,7 @@ Nothing here calls a model. The transcripts are the record; this reads them.
 import argparse
 from pathlib import Path
 
+import httpx
 from phoenix.client import Client
 
 from chemclaw.core.config import settings
@@ -27,7 +28,11 @@ def _publish(args: argparse.Namespace) -> int:
     that quietly did nothing is the failure mode the eval lane already has enough of.
     """
     base_url = args.base_url or settings.phoenix_base_url
-    client = Client(base_url=base_url)
+    # Phoenix's SDK builds its own httpx client, which defaults to reading the environment for a
+    # proxy; handing it one that refuses is the only seam it offers (`http_client` is its whole
+    # transport). Phoenix runs on loopback here, so a proxy variable on the box would divert a
+    # run's transcripts to a host nobody declared.
+    client = Client(base_url=base_url, http_client=httpx.Client(trust_env=False))
     directory = Path(args.directory)
     name = args.name or directory.name
 

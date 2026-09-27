@@ -5,7 +5,9 @@ lexical FTS, structural similarity), `hybrid` (Reciprocal Rank Fusion across the
 `vector_index` (the derived dense + lexical index, in-memory or Postgres). **The report harness**
 (`harness`) is the deep-research pattern turned inward — decompose → fan-out → verify → cite →
 synthesize, over accumulated internal notes instead of the web, producing a sectioned, fully-cited
-draft that is PR-gated like every other agent-generated artifact.
+draft that is written like every other agent-generated artifact: straight through, carrying its
+provenance, and corrected rather than pre-approved
+(D-2026-09-05-the-gate-follows-behaviour-not-knowledge).
 
 `evidence` is what joins them: the harness core knows *only* the retriever contract and no concrete
 source (gate G6), and every `EvidenceChunk` carries a back-reference to its source note, so an

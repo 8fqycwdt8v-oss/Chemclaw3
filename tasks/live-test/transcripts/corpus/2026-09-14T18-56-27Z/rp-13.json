@@ -1,0 +1,59 @@
+{
+  "probe": {
+    "id": "rp-13",
+    "section": 12,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "If I let you draft process documentation, how do I know it won't get used before someone qualified has checked it?",
+    "expects_tools": [
+      "record_knowledge_note",
+      "gather_evidence"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a document control, e-signature, effective-date or QMS workflow that the system provides",
+      "a claim of GxP validation or 21 CFR Part 11 compliance",
+      "a claim that a controlled document system exists"
+    ],
+    "direction": "Provenance is the real answer and a good response points straight at it: agent-authored content carries created_by=agent, is readable the moment it is written, and is corrected rather than pre-approved — there is no review step and the answer must not invent one. Report notes are the same. Bucket B because provenance is not document control: there is no e-signature, no effective-date control, no training record and no QMS integration, and the answer must say so rather than let a label imply compliance it does not provide.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rp-13",
+    "section": 12,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "If I let you draft process documentation, how do I know it won't get used before someone qualified has checked it?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.43,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "10bc3872aed1414fba65f97f6172d650",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

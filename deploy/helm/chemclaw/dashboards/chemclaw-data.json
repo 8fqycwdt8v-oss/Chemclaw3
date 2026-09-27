@@ -944,6 +944,118 @@
           "refId": "A"
         }
       ]
+    },
+    {
+      "id": 21,
+      "type": "graph",
+      "title": "Refusals the ledger's growth bound deleted",
+      "description": "`ingest_rejections` keeps the newest 1,000 refusals per source, on the argument that a source refusing more than that has one systematic defect its newest thousand rows describe as well as a million would. That is an assumption about the *distribution* of a source's refusals, not a fact about any source: one with more distinct one-off refusals than the cap loses its oldest permanently, and `refusals_matching` then reports those records as never refused — the record gone rather than unread. A flat zero is the assumption holding. A source with a steady rate here is one whose refusal history is being destroyed faster than anyone reads it.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 68
+      },
+      "targets": [
+        {
+          "expr": "sum by (source) (rate(chemclaw_ingest_rejections_evicted_total[1h]))",
+          "legendFormat": "{{source}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 22,
+      "type": "graph",
+      "title": "Uploads dropped from a session",
+      "description": "A chemist's file leaving the store past the per-session count or byte bound. It used to be wholly silent, and `read_attachment` then told the model the file had never been sent. A steady rate here means the per-session bound is too low for how these chemists work, not that anything is broken. Unlabelled on purpose: the only candidate label is a session id, which is unbounded cardinality.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 68
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(chemclaw_attachment_evictions_total[1h]))",
+          "legendFormat": "evictions/s",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "graph",
+      "title": "Evictions from what an agent writes",
+      "datasource": "prometheus",
+      "span": 12,
+      "fill": 0,
+      "stack": false,
+      "linewidth": 2,
+      "nullPointMode": "null",
+      "legend": {
+        "show": true,
+        "current": true,
+        "max": true,
+        "values": true
+      },
+      "tooltip": {
+        "shared": true,
+        "sort": 2,
+        "value_type": "individual"
+      },
+      "yaxes": [
+        {
+          "format": "short",
+          "show": true,
+          "min": 0
+        },
+        {
+          "format": "short",
+          "show": false
+        }
+      ],
+      "xaxis": {
+        "mode": "time",
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(chemclaw_memory_evictions_total[1h]))",
+          "legendFormat": "memory files past agent_memory_max_files",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(chemclaw_preference_evictions_total[1h]))",
+          "legendFormat": "preferences past preferences_max_per_owner",
+          "refId": "B"
+        }
+      ],
+      "id": 23,
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 76
+      }
+    },
+    {
+      "id": 24,
+      "type": "graph",
+      "title": "Questions refused because the knowledge moved",
+      "description": "A durable wait can stand open for 90 days, and the notes it rests on can be superseded or refuted in the meantime. Split by `end` because the two are acted on differently: an `ask` refusal is the model being told to rewrite its own citation, which it can do; an `answer` refusal turns a chemist away with no override. A climbing `answer` line is the signal that this guard is refusing work it should be admitting — which it did, for every citation naming a reaction record and for every replica whose knowledge checkout was behind.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 84
+      },
+      "targets": [
+        {
+          "expr": "sum by (end, reason) (rate(chemclaw_premise_refusals_total[1h]))",
+          "legendFormat": "{{end}} / {{reason}}",
+          "refId": "A"
+        }
+      ]
     }
   ],
   "refresh": "30s",

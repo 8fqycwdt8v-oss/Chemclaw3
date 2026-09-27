@@ -1,0 +1,59 @@
+{
+  "probe": {
+    "id": "gr-35",
+    "section": 9,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "Draft the development report for the biaryl campaign - I'll review it before it goes out.",
+    "expects_tools": [
+      "request_development_report",
+      "gather_evidence",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "the report described as final, issued or approved",
+      "a figure or conclusion in the draft with no note id behind it"
+    ],
+    "direction": "Long-running and cited. The asker has said they will review it, so the answer should land as a draft awaiting that review, with every number traceable. Reporting it as done before the job has returned is the failure.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-35",
+    "section": 9,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "Draft the development report for the biaryl campaign - I'll review it before it goes out.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.17,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "550df2d11a2b46da938c311c048b8209",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

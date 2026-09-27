@@ -20,21 +20,41 @@ from chemclaw.agent.profiles import AgentProfile
 from chemclaw.core.config import settings
 from chemclaw.core.config.agent import AgentSettings, HarnessAutonomy
 
+# What pydantic says when a `Literal` arm is missed, up to the value it was handed. Spelled once
+# because it is one sentence pydantic owns, and quoted rather than derived from the annotation:
+# a regex built from `get_args(HarnessAutonomy)` would agree with whatever the field currently
+# says, which is the assertion this table exists to *not* make.
+_LITERAL_ERROR = (
+    r"harness_autonomy\n  Input should be 'plan_only' or 'execute' \[type=literal_error"
+)
+
 
 @pytest.mark.parametrize(
-    "value",
+    ("value", "fires"),
     [
-        "plan-only",  # the hyphen: the exact spelling that shipped this defect
-        "plan only",
-        "planonly",
-        "PLAN_ONLY",  # case matters; the comparison in plan_gate is exact
-        "Execute",
-        "",
-        "yes",
+        # the hyphen: the exact spelling that shipped this defect
+        ("plan-only", _LITERAL_ERROR + r", input_value='plan-only'"),
+        ("plan only", _LITERAL_ERROR + r", input_value='plan only'"),
+        ("planonly", _LITERAL_ERROR + r", input_value='planonly'"),
+        # case matters; the comparison in plan_gate is exact
+        ("PLAN_ONLY", _LITERAL_ERROR + r", input_value='PLAN_ONLY'"),
+        ("Execute", _LITERAL_ERROR + r", input_value='Execute'"),
+        ("", _LITERAL_ERROR + r", input_value=''"),
+        ("yes", _LITERAL_ERROR + r", input_value='yes'"),
     ],
 )
-def test_a_misspelled_autonomy_value_is_refused(value: str) -> None:
-    with pytest.raises(ValidationError):
+def test_a_misspelled_autonomy_value_is_refused(value: str, fires: str) -> None:
+    """A bad value is refused *by the autonomy field*, naming the value it was handed.
+
+    `match=` is what makes this table an assertion about which field refused, and the difference
+    is measured rather than argued. Driven: widening `AgentProfile.harness_autonomy` to a bare
+    `str | None` — the exact regression this file was written against — while narrowing `name` to
+    `min_length=5` so the `"typo"` every row passes in is refused instead. Under a bare
+    `pytest.raises(ValidationError)` all
+    **7** rows stayed green with the guard gone, because a construction that raises for *any*
+    reason satisfies it. Under `match=` all **7** go red, each naming the field that did not fire.
+    """
+    with pytest.raises(ValidationError, match=fires):
         # Deliberately outside the Literal — mypy is right to object, and that it objects is half
         # the point: the annotation now rejects statically what pydantic rejects at runtime. A
         # profile arrives from a YAML file, where neither check has run, which is why both matter.

@@ -1,0 +1,59 @@
+{
+  "probe": {
+    "id": "rx-38",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Find reactions in the corpus whose product contains a secondary aryl amine — SMARTS c1ccccc1[NX3;H1].",
+    "expects_tools": [
+      "reactions_making_substructure",
+      "substructure_matches",
+      "gather_evidence"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a claim that the result set is complete when the screen reported truncation",
+      "a hit described as containing the motif without the exact match having been made"
+    ],
+    "direction": "The product-side substructure search answers this exactly: the corpus is screened on a pattern fingerprint and then verified with RDKit, so a hit genuinely contains the motif and a miss genuinely does not. The graded behaviour is the cap — the screen is bounded, and a bounded screen that found nothing is not a corpus that contains nothing. If the answer reports a count, it must say whether that count is a total or a lower bound.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-38",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Find reactions in the corpus whose product contains a secondary aryl amine — SMARTS c1ccccc1[NX3;H1].",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.75,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "f1d2c18fbcdb44b7bf86ce498dfee135",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

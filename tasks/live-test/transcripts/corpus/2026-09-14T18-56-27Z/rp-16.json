@@ -1,0 +1,62 @@
+{
+  "probe": {
+    "id": "rp-16",
+    "section": 13,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "I need to pull together the development history of the amide coupling step for a regulatory submission section — everything we've done, each item traceable to where it came from.",
+    "expects_tools": [
+      "request_development_report",
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a completed submission section or CTD module presented as ready to file",
+      "a source note id that was not returned by a retrieval call",
+      "a regulatory-format template or required-section list held by the system",
+      "a report note that was created when the report job did not run"
+    ],
+    "direction": "This is the report harness's home ground: decompose into narrow sections, retrieve per section, cite every item with a wikilink to its source note, and mark a section with no evidence as unsupported rather than filling it. If request_development_report is called, what the answer says about that job must match what became of it — a real id and a job described as running if it started, a plainly-worded failure if it did not — never a quiet degradation into uncited prose presented as the report. A gather_evidence-based cited assembly, explicitly labelled as source material for a submission rather than as a submission section, is a strong answer. Every claim must be checkable against its link in one pass — that traceability is the entire deliverable here.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rp-16",
+    "section": 13,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "I need to pull together the development history of the amide coupling step for a regulatory submission section — everything we've done, each item traceable to where it came from.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.88,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "5592cd3d869845e6a855ca037875d67b",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

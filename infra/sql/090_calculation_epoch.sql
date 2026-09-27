@@ -1,0 +1,42 @@
+-- Which `CALCULATION_EPOCH` a stored calculation was written under
+-- (D-2026-09-09-a-contract-checked-at-one-door-is-not-a-contract).
+--
+-- **The failure this closes.** `CALCULATION_EPOCH` is the half of a cache key no `calc_version`
+-- covers: ChemClaw's own arithmetic being wrong and then fixed, or a persisted payload's shape
+-- changing under a stable version. It rides inside `params_hash`, so bumping it re-addresses every
+-- row and `get` correctly misses. `find` does not: it filters on `calc_type`, `calc_version`,
+-- `input_hash`, `structure_id` and the dates, and `calc_version` *not moving* is the entire reason
+-- the epoch exists. Measured on the reference store with the epoch moved between two writes of one
+-- molecule, `find(smiles='CCO', calc_type='thermo')` returned both rows, indistinguishable —
+-- `params_hash` is neither a filter nor invertible. `find_calculations` then tells the model to use
+-- the value instead of recomputing and to cite the `calc_ref` in a knowledge note, and
+-- `durable/retention.py` never prunes this table, so the wrong half is served permanently. The
+-- store's own docstring already said serving it "is the failure this exists to stop".
+--
+-- **A column, because the epoch cannot be recovered from the address.** `params_hash` is a digest;
+-- there is no filter to derive and no row to classify after the fact. So the epoch is recorded at
+-- write time by `cached_compute`, and the browse drops a row whose recorded epoch is not the
+-- current one.
+--
+-- **`''` means "not recorded", never "epoch 0".** Every row written before this migration carries
+-- it, and such a row is *returned and marked* rather than hidden: hiding them would answer
+-- "nothing found" about an entire existing store on the day this is applied, which is exactly the
+-- silent-empty-answer failure `STRUCTURE_KEYED_PREFIXES` and `connectors/calc/remote.py`'s
+-- `structure_id` rule are both written to refuse. Backfilling them to the current epoch was the
+-- alternative and is a lie: this repository does not know which epoch they were written under.
+--
+-- **It records this repository's half only.** The stored `params_hash` folds `CALCULATION_EPOCH`
+-- over a digest the calculation server has already folded *its* constant of the same name into,
+-- and that one never crosses the wire. A row this column calls current may still have been
+-- superseded by a bump in `Chemclaw3-mcp`; what the column gives is a sound "definitely
+-- superseded", not a complete "definitely current".
+--
+-- No index. The two epoch predicates are a low-cardinality filter applied alongside the selective
+-- ones (`input_hash`, `structure_id`, `calc_type`) and under the `created_at DESC` ordering an
+-- index already serves; a second index on a column holding at most a handful of distinct values
+-- would cost every write and save no scan.
+--
+-- Additive and defaulted, so the previous image keeps writing this table unchanged
+-- (`tests/test_migrations_are_additive.py`). Applied by `make db-migrate` (idempotent).
+ALTER TABLE calculation_results
+    ADD COLUMN IF NOT EXISTS epoch TEXT NOT NULL DEFAULT '';

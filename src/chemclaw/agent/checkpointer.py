@@ -89,10 +89,19 @@ this module cannot see them without importing the agent builder that imports it.
 **What is not caught, and where the refusal is deliberately wider than the failure.** Not caught: a
 same-name *type* change (a type repr is not stable enough to hang a session's resumability on); an
 upstream or middleware channel that moves; a first-party channel that is only *removed* (measured
-harmless above). Wider than the failure: an added channel is refused even when every reader of it
-uses `.get()` and the resume would have worked, because the stamp holds names and cannot see how a
-node reads one. That over-refusal lands on a change this repository is itself deploying — which it
-can drain sessions for, and which the paragraph below says it should — never on a dependency's.
+harmless above).
+
+**Only a missing channel that something *indexes* is refused, and which ones do is derived from the
+source** (`D-2026-09-26-a-checkpoint-refuses-only-what-a-node-would-index`, superseding
+`D-2026-08-13-a-checkpoint-says-which-schema-wrote-it`'s name comparison). The stamp still records
+every restorable channel the writing build declared; what changed is which absences the reading
+build refuses. The failure is "a node indexes that channel", which is a property of how the channel
+is *read*, so `channels_read_without_default` reads it: every string constant naming a missing
+channel in this package's own modules, classified by where it sits. `state.get("x")`, a dict key
+and an `in` test cannot raise; `state["x"]` can, and so can **anything the classifier does not
+recognise** — the derivation fails closed, so getting it wrong costs today's over-refusal (a
+drained session, named) and never the bare `KeyError` the guard exists to pre-empt. Adding a channel
+that is read with a default therefore no longer ends every live session on the deploy that adds it.
 
 **Refusing rather than silently starting the thread over**, which is the same call
 `agent/plan_state.py` makes for an unreadable plan and for the same reason: the two are
@@ -126,15 +135,19 @@ because the stamp lives under its own metadata key
 `test_a_stamp_this_build_cannot_read_is_treated_as_absent`).
 """
 
+import ast
 import asyncio
+import functools
 import logging
 import time
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Iterable, Sequence
 from contextlib import asynccontextmanager
-from typing import Any, cast, get_origin, get_type_hints
+from pathlib import Path
+from typing import Annotated, Any, cast, get_args, get_origin, get_type_hints
 
 import psycopg
 from langchain_core.runnables import RunnableConfig
+from langgraph.channels.untracked_value import UntrackedValue
 from langgraph.checkpoint.base import (
     ChannelVersions,
     Checkpoint,
@@ -145,7 +158,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from psycopg import AsyncConnection
-from psycopg.rows import DictRow
+from psycopg.rows import DictRow, tuple_row
 from psycopg_pool import AsyncConnectionPool
 
 from chemclaw.agent.session_store import _session_dsn
@@ -255,18 +268,29 @@ CHECKPOINT_TABLES: tuple[str, ...] = ("checkpoints", "checkpoint_blobs", "checkp
 # One statement, so on this autocommit pool it is one transaction: a concurrent reader sees the
 # thread before it or after it, never mid-prune.
 #
-# **Partitioned by `checkpoint_ns`, which is the caveat that would have been found in production.**
-# A turn that spawns the `task` helper writes a subgraph namespace beside the root one on the *same*
+# **Partitioned by `checkpoint_ns`, and the case that motivated it no longer ships.**
+# A turn that spawned the `task` helper wrote a subgraph namespace beside the root one on the *same*
 # `thread_id` — measured, one `tools:<uuid>` namespace per `task` call, 7 `checkpoints` and 3
-# `checkpoint_blobs` each, and a *new* namespace every call. The review that asked for the partition
+# `checkpoint_blobs` each, and a *new* namespace every call. That is exactly what
+# `D-2026-09-18-a-checkpointer-of-none-is-the-callers-checkpointer` closed: the helper inherited its
+# caller's saver because the call site passed `None`, and it now passes `False`. **That closed the
+# helper, not the class**, which this comment claimed for a day: any subgraph compiled with `None`
+# and invoked inside a turn inherits the same saver, and `retrieval/fanout.py` was doing exactly
+# that — one `gather_evidence` sweep wrote 195 kB of retrieved corpus into its own `n:<uuid>`
+# namespace on the chemist's thread. It passes `False` now too. **The partition stays** — it is
+# generic over namespaces, LangGraph
+# writes one for any subgraph that inherits a saver, and the leak it prevents is silent. What the
+# measurement below is about is therefore history, kept because it is the argument for keeping the
+# clause. The review that asked for the partition
 # expected over-pruning: a thread-wide floor taking a live helper's namespace whole. Measured, that
 # is not this statement's failure — `oldest_kept` groups by `checkpoint_ns`, so a namespace with no
 # row in the global top-K gets no floor and is simply never touched. With the `PARTITION BY` removed
 # and nothing else changed, the root namespace went 52 -> 3 either way while every helper namespace
 # went 7 -> 3 partitioned and stayed at **7** unpartitioned: a leak that grows with helper use
-# rather than a loss. Over-pruning stays possible only in the window where a helper's own
+# rather than a loss. Over-pruning stays possible only in the window where a non-root namespace's
 # checkpoints are the newest on the thread, and one `PARTITION BY` closes both.
-# `tests/test_checkpointer_prune.py` drives a real `task` call rather than asserting either.
+# `tests/test_checkpointer_prune.py` writes a second namespace through the saver to drive it — it
+# used to get one from a real `task` call, which is the thing that changed.
 #
 # **The `EXISTS` is conservative in the safe direction.** A blob whose channel appears in no kept
 # checkpoint's `channel_versions` is *not* deleted: the floor for it does not exist, so the clause
@@ -311,6 +335,50 @@ SELECT (SELECT count(*) FROM pruned_checkpoints),
        (SELECT count(*) FROM pruned_writes),
        (SELECT count(*) FROM pruned_blobs)
 """
+
+
+#: The raw size of the `messages` blob the thread's newest root checkpoint points at — the payload
+#: a turn on this thread deserializes before it does anything else. `octet_length` over a `bytea`
+#: reads the TOAST header rather than the value, so this costs an index probe, not a detoast of
+#: the thread it is measuring. The newest checkpoint is chosen *before* the blob is joined, so a
+#: blob row missing under it reads as 0 rather than as an older copy's size. It reads upstream's
+#: table shape the way `_PRUNE_SUPERSEDED` does, and
+#: is held the same way: `tests/test_thread_size.py` measures it off real saver writes.
+_THREAD_BYTES = """
+SELECT octet_length(b.blob)
+  FROM (SELECT checkpoint FROM checkpoints
+         WHERE thread_id = %(thread)s AND checkpoint_ns = ''
+         ORDER BY checkpoint_id DESC
+         LIMIT 1) AS newest
+  LEFT JOIN checkpoint_blobs b
+    ON b.thread_id = %(thread)s AND b.checkpoint_ns = ''
+   AND b.channel = 'messages' AND b.version = newest.checkpoint -> 'channel_versions' ->> 'messages'
+"""
+
+
+async def stored_thread_bytes(thread_id: str) -> int:
+    """How many bytes of conversation a turn on `thread_id` would load, or 0 if it loads none.
+
+    **Every turn loads the whole thread.** Compaction trims what is *sent* and leaves state intact
+    (`agent/compaction.py`), so the front door's working set per admitted turn grows with the
+    stored thread, which nothing else bounds durably — `budget_max_turns_per_session` is counted
+    in process and reset by a restart or a second replica. This is what
+    `api/budget.check_thread_size` holds against `session_max_thread_bytes`.
+
+    Read on this module's pool directly rather than through the saver, because the saver's
+    `_cursor` takes the process-wide lock every checkpointer statement already queues behind, and
+    an admission check has no business in that queue.
+
+    0 when the deployment keeps no durable turn state (`_turn_checkpointer` returns no saver
+    there, so there is nothing to load) and when the thread has no checkpoint yet.
+    """
+    if settings.session_store != "postgres":
+        return 0
+    pool = await _checkpoint_pool()
+    async with pool.connection() as conn, conn.cursor(row_factory=tuple_row) as cur:
+        await cur.execute(_THREAD_BYTES, {"thread": thread_id})
+        row = await cur.fetchone()
+    return int(row[0] or 0) if row else 0
 
 
 def checkpoint_thread_delete_statements(match: str) -> tuple[tuple[str, str], ...]:
@@ -421,12 +489,207 @@ def _first_party_channels(state: Any) -> tuple[str, ...]:
     `tests/test_checkpointer_schema.py` asserts the result stays disjoint from the upstream base's
     channels, which turns that into a red build rather than a fleet-wide refusal.
 
+    **An untracked channel is excluded, and leaving it in made this guard fire on changes it
+    provably could not protect against.** The refusal below exists for one failure: a checkpoint
+    written before a channel existed is restored, and a node then indexes that channel and raises a
+    bare `KeyError`. That failure needs the channel to be *restorable* — and five of the six names
+    this returned were `UntrackedValue` subclasses (`TurnTotal`, `TurnFlag`), whose whole purpose is
+    that they are **never written to a checkpoint**, as each of their declarations in
+    `agent/state.py` says in so many words ("the channel is never written to a checkpoint, so a new
+    run of the graph on the same `thread_id` starts it empty"). No checkpoint from any build holds
+    one, so no restore can be missing one relative to another build, so the refusal pre-empts
+    nothing for them.
+
+    What it cost instead was the whole fleet. The stamp records the names the *writing* build
+    declared, and the load refuses if any name the *current* build declares is absent from it — so
+    adding a per-turn counter, which this repository does routinely and which cannot affect a
+    resume, refused the **next ordinary turn** of every live Postgres-backed session. Driven: two
+    counters (`handoffs`, plus the checkpointed `active_agent`) took a session whose transcript then
+    resumed perfectly once the comparison was neutralised, and told the chemist to start a new one.
+    Five of the six names the pre-fix stamp carried were of that kind, and at the previous build
+    **all four** were, so the stamp could not have pre-empted anything at all.
+
+    So the derivation now asks what a checkpoint can hold, not what the class declares.
+    `active_agent` stays in the *stamp* — `LastPeer` is a `LastValue` and really is checkpointed —
+    but its absence is not a refusal, because nothing indexes it: its one reader takes it with
+    `.get()` and falls back to the root, and `channels_read_without_default` reads that off the
+    source rather than off a declaration somebody has to keep true.
+
     Args:
         state: The graph state class to read — `ChemclawState` in this process, and stand-in
             classes in the tests that prove what the derivation includes and excludes.
 
     Returns:
-        The names this class adds to its base, sorted, so declaration order cannot move the stamp.
+        The restorable names this class adds to its base, sorted, so declaration order cannot move
+        the stamp.
+    """
+    own = _own_channels(state)
+    return tuple(sorted(name for name, ann in own.items() if not _is_untracked(ann)))
+
+
+def _untracked_channels(state: Any) -> tuple[str, ...]:
+    """The first-party channels the stamp deliberately leaves out, derived the same way.
+
+    The complement of `_first_party_channels` within what this class adds to its base, so the two
+    together are exactly that set. Named rather than left implicit because an exclusion nothing can
+    see is indistinguishable from a channel the derivation lost by accident — and "a channel in
+    neither half" is precisely what `tests/test_checkpointer_schema.py`'s partition exists to catch.
+    With both halves derived from one walk, that test still fails on an accidental drop and passes
+    on the argued one.
+
+    Args:
+        state: The graph state class to read.
+
+    Returns:
+        The names this class adds to its base that no checkpoint can hold, sorted.
+    """
+    own = _own_channels(state)
+    return tuple(sorted(name for name, ann in own.items() if _is_untracked(ann)))
+
+
+#: Where `channels_read_without_default` reads how a channel is consumed: this package's own
+#: modules, which is every place that can name a first-party channel — upstream and middleware code
+#: cannot index a channel it has never heard of. A module-level name so a test can point the
+#: derivation at a fixture tree the way a deploy points it at a new build.
+SOURCE_ROOT = Path(__file__).resolve().parents[1]
+
+# The method calls on a state mapping that cannot raise `KeyError` for an absent key, whatever
+# arguments follow the name. `pop` is not here: with one argument it raises as indexing does.
+_DEFAULTED_READS = frozenset({"get", "setdefault"})
+
+
+def channels_read_without_default(names: Iterable[str], root: Path | None = None) -> frozenset[str]:
+    """Which of `names` some module under `root` reads in a way that raises when it is absent.
+
+    **The question the refusal has always been about, asked of the code instead of of a
+    declaration.** A checkpoint from before a channel existed restores with that channel empty, and
+    the damage is a node that *indexes* it — `state["x"]` raising a bare `KeyError` mid-turn. A
+    channel every reader takes with `.get()` cannot do that, and refusing a session over one drained
+    every live session on the deploy that added `active_agent`, peer mesh on or off. The earlier fix
+    was a `resumes_when_absent` flag on the channel's type, which is a hand declaration of a fact
+    about *other* modules: true when written, and silently false the day someone adds an indexing
+    reader three files away.
+
+    So every string constant equal to one of `names`, in every module under `root`, is classified by
+    what it sits in (`_is_a_safe_use`), and a name with any unsafe occurrence is returned.
+
+    **Fails closed, in three places, because the two ways to be wrong are not symmetric.** Calling a
+    channel indexed when it is not refuses a session that would have resumed — the named,
+    actionable refusal this guard always gave. Calling it safe when it is not is the bare `KeyError`
+    mid-turn the guard exists to pre-empt. So an occurrence the classifier does not recognise counts
+    as an index (a name passed to `itemgetter`, held in a tuple, bound to a variable that is then
+    used as a key); a module that cannot be read or parsed makes every name count; and a root with
+    no modules at all — an install that shipped bytecode only — makes every name count. The residue
+    it cannot see is a name *spelled* at run time (`"active" + "_agent"`), which no reader in this
+    tree does and which a review would ask about anyway.
+
+    Args:
+        names: The channel names to classify — in practice the ones a stored stamp is missing, so
+            the scan runs on a deploy transition and never on an ordinary turn.
+        root: The source tree to read; `SOURCE_ROOT` (this package) when omitted.
+
+    Returns:
+        The subset of `names` some reader indexes, or could, as far as this can tell.
+    """
+    return _indexed(frozenset(names), root if root is not None else SOURCE_ROOT)
+
+
+@functools.cache
+def _indexed(wanted: frozenset[str], root: Path) -> frozenset[str]:
+    """`channels_read_without_default`'s body, cached per (names, tree).
+
+    Cached because the source cannot change under a running build, and a deploy transition asks the
+    same question of every old thread it loads.
+    """
+    if not wanted:
+        return frozenset()
+    modules = sorted(root.rglob("*.py"))
+    if not modules:
+        logger.warning(
+            "no Python source under %s to derive how state channels are read; treating %s as "
+            "indexed, so an older session missing one is refused rather than resumed",
+            root,
+            ", ".join(sorted(wanted)),
+        )
+        return wanted
+    indexed: set[str] = set()
+    for module in modules:
+        try:
+            text = module.read_text(encoding="utf-8")
+            # A substring pre-filter: parsing only the modules that spell a name at all is what
+            # keeps this a few files rather than the whole package.
+            if not any(name in text for name in wanted):
+                continue
+            tree = ast.parse(text, filename=str(module))
+        except (OSError, SyntaxError, UnicodeDecodeError, ValueError):
+            logger.warning(
+                "could not read %s to derive how state channels are read; treating %s as indexed",
+                module,
+                ", ".join(sorted(wanted)),
+            )
+            return wanted
+        # `state["x"] += 1` stores through a Subscript whose ctx is Store, exactly like a write,
+        # but reads the channel first — only the AugAssign above it says so, and the classifier
+        # sees one level. So those targets are collected here and never count as a write.
+        augmented = {id(node.target) for node in ast.walk(tree) if isinstance(node, ast.AugAssign)}
+        for parent in ast.walk(tree):
+            for child in ast.iter_child_nodes(parent):
+                if (
+                    isinstance(child, ast.Constant)
+                    and isinstance(child.value, str)
+                    and child.value in wanted
+                    and not _is_a_safe_use(parent, child, augmented)
+                ):
+                    indexed.add(child.value)
+    return frozenset(indexed)
+
+
+def _is_a_safe_use(parent: ast.AST, name: ast.Constant, augmented: set[int]) -> bool:
+    """Whether this occurrence of a channel name provably cannot raise for an absent channel.
+
+    A closed list of the shapes that cannot, and nothing else — see `channels_read_without_default`
+    for why anything unrecognised is an index:
+
+    - `state.get("x", …)` / `state.setdefault("x", …)`: a defaulted read.
+    - `state["x"] = …` / `del state["x"]`: a write, not a read — unless the subscript is an
+      augmented assignment's target (`state["x"] += 1`), which reads first; `augmented` holds
+      those targets' ids, because only their parent node says so.
+    - `{"x": …}`: a key in a literal — an update a node returns, which writes the channel.
+    - `"x" in state` / `"x" not in state`: a membership test, which is how one guards an index.
+    - a bare expression statement: a docstring or a no-op, which reads nothing.
+    """
+    if isinstance(parent, ast.Subscript):
+        return (
+            parent.slice is name
+            and isinstance(parent.ctx, (ast.Store, ast.Del))
+            and id(parent) not in augmented
+        )
+    if isinstance(parent, ast.Call):
+        return (
+            isinstance(parent.func, ast.Attribute)
+            and parent.func.attr in _DEFAULTED_READS
+            and bool(parent.args)
+            and parent.args[0] is name
+        )
+    if isinstance(parent, ast.Dict):
+        return any(key is name for key in parent.keys)
+    if isinstance(parent, ast.Compare):
+        return parent.left is name and all(isinstance(op, (ast.In, ast.NotIn)) for op in parent.ops)
+    return isinstance(parent, ast.Expr)
+
+
+def _own_channels(state: Any) -> dict[str, Any]:
+    """The channels `state` adds to its base, name onto annotation.
+
+    One walk, two readers — `_first_party_channels` and `_untracked_channels` partition this by
+    whether a checkpoint can hold the channel, and a second copy of the subtraction is a second
+    thing to get wrong about `__orig_bases__`.
+
+    Args:
+        state: The graph state class to read.
+
+    Returns:
+        Each name this class declares beyond its base, mapped to its type hint with extras kept.
     """
     inherited: set[str] = set()
     for base in getattr(state, "__orig_bases__", ()):
@@ -437,10 +700,75 @@ def _first_party_channels(state: Any) -> tuple[str, ...]:
         # both of which also appear in these lists and neither of which declares channels.
         if isinstance(origin, type) and hasattr(origin, "__required_keys__"):
             inherited |= set(get_type_hints(origin, include_extras=True))
-    return tuple(sorted(set(get_type_hints(state, include_extras=True)) - inherited))
+    declared = get_type_hints(state, include_extras=True)
+    return {name: ann for name, ann in declared.items() if name not in inherited}
+
+
+def _is_untracked(annotation: Any) -> bool:
+    """Whether this channel's annotation binds an `UntrackedValue`, so no checkpoint holds it.
+
+    Read off the annotation rather than off a list of class names, so a sixth untracked channel
+    shape is covered the day it is written — the failure this whole module is about is a control
+    that needed somebody to remember to update it.
+
+    The unwrapping is what makes it work on the declarations `agent/state.py` actually writes:
+    a channel arrives as `NotRequired[Annotated[int, TurnTotal(int)]]`, so the `__metadata__`
+    carrying the channel is one `NotRequired` in. Measured on `ChemclawState`: reading
+    `__metadata__` off the outer annotation finds nothing for any of the six, which would have made
+    this predicate answer `False` for every one of them and changed nothing.
+
+    **Both the instance and the class count, and testing only the instance missed the very spelling
+    this module cites as the shape's origin.** LangGraph resolves a bare channel *class* in an
+    annotation by constructing it, so `Annotated[int, UntrackedValue]` is as untracked as
+    `Annotated[int, TurnTotal(int)]` — and `Annotated[int, UntrackedValue]` is exactly how
+    `ModelCallLimitMiddleware` declares `run_model_call_count`, quoted verbatim in
+    `agent/state.py`'s own docstring as where this repository's shape comes from. Driven: one
+    channel added in that spelling landed in the *stamp* instead of in the excluded half, and the
+    next ordinary turn of a session written by the previous build was refused with
+    `CheckpointSchemaMismatch` against a real Postgres, with all 19 tests in
+    `tests/test_checkpointer_schema.py` green — the fleet-wide refusal this predicate exists to
+    close, live again, through the one shape its own docstring had promised was covered.
+
+    A `type` test rather than `issubclass` guarded by `isinstance(bound, type)`, because
+    `issubclass` raises `TypeError` on a channel *instance* and the instance arm has to keep
+    working.
+
+    Args:
+        annotation: The channel's type hint, as `get_type_hints(..., include_extras=True)` gives it.
+
+    Returns:
+        `True` when the channel cannot appear in a checkpoint's `channel_values`.
+    """
+    return any(
+        isinstance(bound, UntrackedValue)
+        or (isinstance(bound, type) and issubclass(bound, UntrackedValue))
+        for bound in _channel_bindings(annotation)
+    )
+
+
+def _channel_bindings(annotation: Any) -> tuple[Any, ...]:
+    """The `Annotated` metadata of a channel annotation, unwrapped from `NotRequired` and kin.
+
+    Its own function for `_is_untracked`'s reason: the channel sits one `NotRequired` in, and
+    reading the outer annotation finds nothing.
+
+    Args:
+        annotation: The channel's type hint, as `get_type_hints(..., include_extras=True)` gives it.
+
+    Returns:
+        What the annotation binds — a channel instance or class, typically — or `()` for none.
+    """
+    inner = annotation
+    while (origin := get_origin(inner)) is not None and origin is not Annotated:
+        args = get_args(inner)
+        if not args:
+            break
+        inner = args[0]
+    return tuple(getattr(inner, "__metadata__", ()))
 
 
 FIRST_PARTY_CHANNELS = _first_party_channels(ChemclawState)
+UNTRACKED_CHANNELS = _untracked_channels(ChemclawState)
 
 
 class CheckpointValuesMissing(RuntimeError):
@@ -794,7 +1122,13 @@ class SchemaStampedSaver(AsyncPostgresSaver):
         stamp = (stored.metadata or {}).get(STATE_CHANNELS_KEY)
         if not isinstance(stamp, list):
             return stored
-        missing = [name for name in FIRST_PARTY_CHANNELS if name not in stamp]
+        absent = [name for name in FIRST_PARTY_CHANNELS if name not in stamp]
+        if not absent:
+            return stored
+        # Only now, on a thread an older build wrote, is it worth asking how the absent channels are
+        # read — the answer is cached, and an ordinary turn never reaches this line.
+        indexed = channels_read_without_default(absent)
+        missing = [name for name in absent if name in indexed]
         if not missing:
             return stored
         held = ", ".join(str(name) for name in stamp) or "none"
@@ -1095,6 +1429,14 @@ async def close_checkpointer() -> None:
     hand the next caller a store over closed connections — the store has to go before what it
     stands on does. This is `close_memory_store`'s only caller, which is what makes the pair a
     lifecycle rather than two functions that happen to exist.
+
+    **It was not, and the sentence above is the reason the second caller was removed rather than
+    the count corrected.** The front door's lifespan called `close_memory_store()` itself and then
+    called this on the next line, so the store was dropped twice and the ordering invariant was
+    enforced in two places — with the argument for it written in only one of them. A rule stated
+    twice is a rule that can be half-changed: reordering the pair in `api/app.py` would have looked
+    local and correct there, against this paragraph nobody reading that file had to see. The pair
+    is one act, so it is one call site, and `api/app.py` now closes the checkpointer alone.
 
     **A pool whose loop has already closed is dropped, not awaited.** `psycopg_pool` schedules its
     workers' shutdown on the loop it was opened in, so closing it from a *different* live loop

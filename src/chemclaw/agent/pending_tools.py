@@ -5,26 +5,26 @@ workflow** and so is state-changing: it authorizes, it requires an actor, and it
 plan gate like every other launcher. `check_pending_requests` reads the projection and is a read.
 
 **Neither of them can answer a question, and that omission is the design.** Answering is
-`POST /pending/{id}/answer`, a route, for the same reason a plan decision and a proposal decision
-are routes (D-005): a model must never be able to authorize its own work. A tool that could settle
+`POST /pending/{id}/answer`, a route, for the same reason a plan decision is one (D-005): a model
+must never be able to authorize its own work. The note decision this named beside it went with the
+PR-gate (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`). A tool that could settle
 a wait would let the agent ask itself for approval and grant it in the next tool call, and the
 audit trail would record a human's question answered by nobody.
 """
 
 from typing import Literal
 
-from temporalio.common import WorkflowIDReusePolicy
-from temporalio.exceptions import WorkflowAlreadyStartedError
+from pydantic import BaseModel, Field, computed_field
 
 from chemclaw.agent.authz import authorize_trigger, require_actor
-from chemclaw.agent.framing import defang
-from chemclaw.core.config import settings
+from chemclaw.agent.tool_framing import defanged_payload
+from chemclaw.core.errors import ChemclawError
 from chemclaw.core.session_context import get_current_session_id
-from chemclaw.core.temporal_client import connect
 from chemclaw.core.tool_registry import tool
 from chemclaw.core.turn_signals import record_job_started
 from chemclaw.durable import pending_store
-from chemclaw.durable.awaiting import AwaitAnswerWorkflow, AwaitRequest, request_id_for
+from chemclaw.durable.awaiting import AwaitRequest, open_wait
+from chemclaw.kg.premise import count_refusals, premise_breaks
 
 #: The kinds a *chemist-facing* ask may take. Narrower than `awaiting.KINDS`, which also carries
 #: `approval` — an approval is raised by the effector seam and by the plan gate, never by the model
@@ -70,6 +70,12 @@ async def request_external_input(
         The request id, which is also how the wait is found in the inbox.
     """
     authorize_trigger("request_external_input")
+    # **The premise is derived, never an argument**, and it is derived by `AwaitRequest` itself
+    # rather than here. A `premise_note_ids` parameter would be a control the model can disable by
+    # forgetting it, which is the `map_to_hpc_identity` shape this repository has deleted twice — a
+    # claim that a check exists. Deriving it at this one call site was a weaker version of the same
+    # thing: two other producers of a wait simply never set the field. The model now lives where
+    # every producer must pass.
     request = AwaitRequest(
         kind=kind,
         subject=subject,
@@ -82,33 +88,85 @@ async def request_external_input(
         # it rather than the two that remembered. See `AwaitAnswerWorkflow.run`.
         deadline_days=deadline_days,
     )
-    request_id = request_id_for(request)
-    client = await connect()
-    try:
-        handle = await client.start_workflow(
-            AwaitAnswerWorkflow.run,
-            request.model_dump(mode="json"),
-            id=request_id,
-            task_queue=settings.background_task_queue,
-            # **The policy the deleted D-032 hold was missing.** `D-2026-08-25` recorded that a
-            # decided hold could be restarted under the same id because no policy was set. Neither
-            # obvious answer works: an *expired* wait completes normally, so both
-            # `REJECT_DUPLICATE` and `ALLOW_DUPLICATE_FAILED_ONLY` would make a lapsed question
-            # unaskable forever. `ALLOW_DUPLICATE` is correct here precisely because expiry is an
-            # ordinary ending — asking again after a deadline passed is a new ask — while the
-            # `WorkflowAlreadyStartedError` below still joins a *running* one.
-            id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
+    # **Refused here, at the ask, and that is what makes the answer-time check mean "since".** This
+    # tree has no arrival signal for a note, so a break found at answer time is indistinguishable
+    # from one that predates the question — unless every wait that exists began with a whole
+    # premise. Refusing the open is what establishes that, by construction rather than by comparing
+    # two readings taken on two pods whose knowledge checkouts drift apart.
+    #
+    # Every break refuses here, including `absent`, which the answer end deliberately does not act
+    # on: the party being told is the model, it gets this text back, and it can rewrite its own
+    # citation. That is a self-correcting loop; the answer-time 409 is a dead end with a chemist in
+    # it. Nothing has been written at this point, so the refusal leaves no half-opened wait.
+    broken = await premise_breaks(request.premise_note_ids)
+    if broken:
+        count_refusals("ask", broken)
+        raise ChemclawError(
+            "this question rests on knowledge that no longer holds, so nobody could answer it "
+            "usefully: " + "; ".join(item.describe() for item in broken) + ". Re-read the current "
+            "evidence and ask again on what it says."
         )
-    except WorkflowAlreadyStartedError:
+    # **The launch itself is `durable/awaiting.py`'s**, including the reuse policy this call site
+    # used to argue for in ten lines of comment: the id, the policy and the already-started catch
+    # are one decision with two callers now (the runner escalates an exhausted review the same
+    # way), and a second copy is how the two would come to disagree about what joins what. What
+    # stays here is what is this tool's own — the authorization, the premise refusal above, and the
+    # launch announcement below.
+    request_id, opened = await open_wait(request)
+    if not opened:
         # The same question is already open. Hand back its id rather than opening a second wait,
         # and announce nothing: this run already existed, so a start signal would be false.
         return request_id
-    record_job_started(handle.id, "awaiting")
-    return handle.id
+    record_job_started(request_id, "awaiting")
+    return request_id
+
+
+class PendingOverview(BaseModel):
+    """What this system is still waiting on, **and whether that is all of it**.
+
+    The bare `list[dict]` this replaced carried its incompleteness in neither channel that matters.
+    Measured against a real database: 35 waiting rows, 20 returned, no field, no log line and no
+    counter naming the fifteen. The tool's own docstring said "everything still waiting" and warned
+    about the *other* incompleteness — that this system knows only the questions it raised itself —
+    so the one caveat present was the one that was not biting.
+    """
+
+    requests: list[dict[str, object]] = Field(default_factory=list)
+    # Everything matching before the page bound, counted in the same transaction as the page.
+    total_waiting: int = Field(default=0, ge=0)
+    # The bound the store actually applied, which is not always the one asked for.
+    limit_applied: int = Field(default=0, ge=0)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def verdict(self) -> str:
+        """The one sentence to read before saying what is outstanding.
+
+        `computed_field` rather than a bare property for the reason `FingerprintSearch.verdict`
+        states: a plain property is not serialized, so the sentence that says the list is a page
+        would never reach the model that writes the answer.
+        """
+        scope = (
+            "This is what is outstanding *in this system* — only the questions this system itself "
+            "raised, never a team's whole open work."
+        )
+        shown = len(self.requests)
+        if self.total_waiting > shown:
+            return (
+                f"PARTIAL: {shown} of {self.total_waiting} open requests are shown, soonest "
+                f"deadline first (page bound {self.limit_applied}). The rest have later deadlines "
+                "and are NOT resolved — narrow with `asked_of` or raise `limit` before saying "
+                f"anything about how much is outstanding. {scope}"
+            )
+        if not shown:
+            return (
+                f"NOTHING WAITING: this system holds no open request matching that query. {scope}"
+            )
+        return f"COMPLETE: every open request matching that query is shown. {scope}"
 
 
 @tool
-async def check_pending_requests(asked_of: str = "", limit: int = 20) -> list[dict[str, object]]:
+async def check_pending_requests(asked_of: str = "", limit: int = 20) -> PendingOverview:
     """Read what this system is still waiting on — questions raised and not yet answered.
 
     Use it before raising a new one (the answer may already be on its way), when a chemist asks
@@ -118,26 +176,41 @@ async def check_pending_requests(asked_of: str = "", limit: int = 20) -> list[di
     has been chased. A request routed to nobody in particular is waiting on whoever is entitled,
     which is why it appears in every query rather than in none.
 
-    This is what is outstanding *in this system*, not what is outstanding in the programme: it
-    knows only the questions this system itself raised. Never present it as a complete list of a
-    team's open work.
+    Incomplete in two ways, both on the answer: it knows only the questions this system raised,
+    and `requests` is a page. Read `verdict` before saying how much is outstanding.
 
     Args:
         asked_of: Narrow to what is routed to one actor or entitlement, plus everything unrouted.
             Empty returns every open request.
-        limit: How many to return, soonest deadline first.
+        limit: How many to return, soonest deadline first (bounded; see `limit_applied`).
 
     Returns:
-        Open requests, soonest deadline first.
+        A page of open requests, `total_waiting`, and a verdict saying which to build on.
     """
-    requests = await pending_store.open_requests(asked_of=asked_of, limit=limit)
-    return [
-        {
-            **request.model_dump(exclude={"subject", "rationale", "answer"}),
-            # `subject` and `rationale` are free text a caller supplied — the request is readable
-            # by anyone entitled, so these arrive here exactly as a retrieved chunk does.
-            "subject": defang(request.subject),
-            "rationale": defang(request.rationale),
-        }
-        for request in requests
-    ]
+    page = await pending_store.open_requests(asked_of=asked_of, limit=limit)
+    return PendingOverview(
+        requests=[
+            # **The whole row, not two fields of it, and the carve-out here was weaker than the one
+            # `commitment_tools` had.** This escaped `subject` and `rationale` on the ground that
+            # they are "free text a caller supplied" and the rest is not. Measured against
+            # `durable/pending_store.PendingRequest`: there is **not one `Literal`** on that model —
+            # `kind`, `state`, `asked_of`, `requested_by`, `session_id`, `answered_by` and
+            # `premise_note_ids` are all unvalidated `str`/`list[str]`, and `request_id` is minted
+            # from them. A request is raised by a *turn* and read by anyone entitled, so every one
+            # of those is text this system did not constrain. Driven with a live closing delimiter
+            # in each: **eight** of them reached the model unescaped.
+            #
+            # `defanged_payload` rather than eight more `defang(...)` entries, for the reason
+            # `commitment_tools` and `protocol_design_tools._readable` use it: a field added to that
+            # model next year is covered without this line being remembered, and a datetime or an
+            # int has no delimiter to spell so escaping it costs nothing.
+            #
+            # `answer` stays excluded rather than escaped, which is unchanged: these are the *open*
+            # requests, so it is empty by construction, and this overview is about what is still
+            # waiting rather than about what was said.
+            defanged_payload(request.model_dump(exclude={"answer"}))
+            for request in page.requests
+        ],
+        total_waiting=page.total_waiting,
+        limit_applied=page.limit_applied,
+    )

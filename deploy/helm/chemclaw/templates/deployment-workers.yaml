@@ -18,19 +18,44 @@ spec:
          for a single replica rounds to `maxSurge: 1, maxUnavailable: 0` — the new pod is started
          and becomes Ready *before* the old one is told to stop, and the old one then gets its whole
          `terminationGracePeriodSeconds` (150) to finish. Two background workers poll
-         `background-jobs` for that window, which is precisely the race
-         `D-2026-08-27-what-a-second-background-worker-would-race-on` pins the count to prevent:
-         `NoteReindexWorkflow` retires `note_index` rows for notes missing from *this pod's*
-         knowledge checkout, the two pods hold two differently-aged clones of the corpus, and a
-         merge-webhook reindex landing on the older one deletes the freshly merged notes' rows while
-         logging that it retired notes that exist.
+         `background-jobs` for that window, which is the race
+         `D-2026-08-27-what-a-second-background-worker-would-race-on` pinned the count to prevent:
+         the two pods hold two differently-aged clones of the corpus. **Both halves of that are now
+         closed** — a prune is bounded by the corpus revision the row was built from
+         (`D-2026-09-14-a-prune-needs-the-corpus-two-pods-disagree-about`), so the older pod no
+         longer deletes the freshly merged notes' rows, and a note's fingerprint is a hash of its
+         bytes rather than the mtime its own checkout wrote
+         (`D-2026-09-16-a-fingerprint-that-names-a-checkout-is-not-a-fingerprint-of-a-note`), so two
+         pods holding one commit no longer re-embed each other's work.
+
+         **So the corpus argument no longer reaches this knob, and `Recreate` stays for the reason
+         below rather than for that one.** Written out because the two were stated together for
+         long enough to read as one: an overlap during a rollout is now a capacity question for
+         the reindex, and a correctness question only for replay. `values.yaml` says what is left
+         before `replicas` itself moves.
 
          `Recreate` rather than `maxSurge: 0`: a singleton worker has no availability to protect —
          Temporal redelivers an activity whose worker went away — so the honest statement is that
          the old process is gone before the new one starts.
 
-The connector workers below keep the default on purpose;
-         nothing on their queues is host-local, so an overlap is only capacity. */}}
+         **What that guarantees, and what it therefore costs.** With no overlap, every unfinished
+         run on `background-jobs` is resumed by exactly one code version: the new one. So the new
+         image must be able to *replay* the histories the old one wrote, and that is a property of
+         `src/chemclaw/durable/`, not of this file — checked against committed histories by
+         `tests/test_workflow_replay.py`
+         (`D-2026-09-09-a-replay-control-needs-an-archived-history-not-a-patch`). Measured there
+         rather than argued here, because prose in a chart template cannot fail.
+
+         Temporal's worker versioning is the alternative that would let the two generations
+         disagree, and it is declined in that ADR for this deployment's own reason: pinning an
+         in-flight run to the build id that started it requires the old worker to stay up until it
+         drains — a `TemplateWorkflow` run lives up to `template_run_timeout_seconds`, 12.6 h at
+         the shipped default — which is a second background worker for half a day, the exact thing
+         the paragraph above pins `replicas: 1` to prevent.
+
+         The connector workers below keep the default on purpose; nothing on their queues is
+         host-local, so an overlap is only capacity — and no bundle workflow has an archived
+         history yet either, which is why the control above is scoped to core's queue. */}}
   strategy:
     type: Recreate
   selector:
@@ -62,6 +87,53 @@ The connector workers below keep the default on purpose;
               value: "background-worker"
             {{- include "chemclaw.otelResourceEnv" (dict "component" "background-worker") | nindent 12 }}
             {{- include "chemclaw.workerMetricsEnv" . | nindent 12 }}
+            {{- /* This pod's own parse allowance, where the fleet-wide one is derived from the
+                   *front door* — 1Gi and two parse slots against this pod's 4Gi and eight, which
+                   is 178.9 MiB a parse may spend there against 332.7 here. Same shape and same
+                   argument as `maxConcurrentActivities` in `deployment-connectors.yaml`: an
+                   explicit `env` entry beats the same key arriving through `envFrom`, which is how
+                   a *stated* fleet-wide value would reach every other component. The shipped
+                   `config` states none, so elsewhere the code default applies. `values.yaml`
+                   carries what this buys and what it still refuses. */}}
+            {{- with .Values.workers.background.documentParseMemoryBytes }}
+            - name: CHEMCLAW_DOCUMENT_PARSE_MEMORY_BYTES
+              {{- /* `int64` and not `| quote`, because Helm parses a nine-digit values entry as a
+                     **float** and `quote` then renders it in scientific notation. Driven:
+                     `335544320` reached the container as `"3.3554432e+08"`, and
+                     `CHEMCLAW_DOCUMENT_PARSE_MEMORY_BYTES=3.3554432e+08` is a pydantic
+                     `int_parsing` error — so every background worker would have crash-looped on
+                     start. The chart test did not see it because it reads `values.yaml` through
+                     `yaml.safe_load`, where the same entry is an `int`; the render is the only place
+                     the defect exists. `test_no_rendered_setting_reaches_a_pod_in_scientific_
+                     notation` is the guard over that class.
+
+                     `int64` rather than `printf "%.0f"`, which was the first fix: a byte count is an
+                     integer, and `float64` cannot hold one past 2^53 — `9007199254740993` renders as
+                     `...992`. `int64` is exact for every value this key can legitimately take.
+
+                     The `fail` is for what `int64` does with the rest: it answers **0** for a
+                     non-numeric string, and `320Mi` is the spelling an operator reaches for here
+                     because it is the one `resources` takes two screens down. A budget of 0 makes
+                     `isolate._bound_allocations` set the ceiling to the resident set, so *every*
+                     document on this pod is refused — counted as `skipped_unreadable`, quieter than
+                     a crash-loop and harder to find. This key takes a plain byte count or nothing.
+                     */}}
+              {{- /* Normalised by *kind* before it is checked, because the two entry paths differ:
+                     a values file gives a `float64` (whose `toString` is the exponent form this
+                     whole comment is about) and `--set` gives an `int64` or a string (whose
+                     `toString` is the exact digits). `%.0f` is exact for every byte count a pod can
+                     hold; the string arm is exact for anything at all. */}}
+              {{- $digits := "" }}
+              {{- if kindIs "float64" . }}
+              {{- if eq (floor .) . }}{{ $digits = printf "%.0f" . }}{{ end }}
+              {{- else }}
+              {{- $digits = toString . }}
+              {{- end }}
+              {{- if not (regexMatch "^[1-9][0-9]*$" $digits) }}
+              {{- fail (printf "workers.background.documentParseMemoryBytes must be a positive whole byte count, got %v. `320Mi` and other resource suffixes are not accepted here — they become 0, and a budget of 0 makes this pod refuse every document rather than fall back. Remove the key to use the fleet-wide value" .) }}
+              {{- end }}
+              value: {{ $digits | quote }}
+            {{- end }}
             {{- include "chemclaw.env" . | nindent 12 }}
           envFrom:
             {{- include "chemclaw.envFrom" . | nindent 12 }}

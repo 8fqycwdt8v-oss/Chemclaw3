@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 from rdkit import Chem
 from rdkit.Chem import Crippen
 from temporalio import activity
@@ -121,11 +122,18 @@ def test_campaign_spec_rejects_insufficient_seed(n_initial: int) -> None:
 
 
 def test_campaign_spec_carries_per_campaign_seed() -> None:
-    """The spec is the per-campaign seed seam; unset means the config default."""
+    """The spec is the per-campaign seed seam; unset means the config default.
+
+    The replicate is *constructed* with the seed rather than copied onto with
+    `model_copy(update={"seed": 7})`. The claim is that a caller can hand `CampaignSpec` a seed —
+    a property of the constructor — and `model_copy` assigns past it, so the old form asserted
+    only that `model_copy` does what `model_copy` does: it would have held with `seed` refused by
+    the model, or absent from it.
+    """
     problem = build_problem(load_dataset())
     spec = CampaignSpec(problem=problem, objective_name="reizman_suzuki")
     assert spec.seed is None  # engine resolves None to settings.bo_seed
-    replicate = spec.model_copy(update={"seed": 7})
+    replicate = CampaignSpec(problem=problem, objective_name="reizman_suzuki", seed=7)
     assert replicate.seed == 7
 
 
@@ -146,36 +154,28 @@ def test_best_of_honors_direction() -> None:
     assert best_of(minimize, observations).value == 1.0
 
 
-def test_activities_seed_and_evaluate() -> None:
+async def test_activities_seed_and_evaluate() -> None:
     """The seed and evaluate activities produce candidates and scored observations."""
-
-    async def _run() -> None:
-        problem = build_problem(load_dataset())
-        seed = await propose_initial(problem, 3)
-        assert len(seed) == 3
-        observations = await evaluate_candidates("reizman_suzuki", seed)
-        assert len(observations) == 3
-        assert all(o.value >= 0 for o in observations)  # yields are non-negative
-
-    asyncio.run(_run())
+    problem = build_problem(load_dataset())
+    seed = await propose_initial(problem, 3)
+    assert len(seed) == 3
+    observations = await evaluate_candidates("reizman_suzuki", seed)
+    assert len(observations) == 3
+    assert all(o.value >= 0 for o in observations)  # yields are non-negative
 
 
-def test_solubility_objective_scores_via_calculator() -> None:
+async def test_solubility_objective_scores_via_calculator() -> None:
     """The calculator-backed objective (1d.3) scores a molecule via the cached calculator."""
+    objective = solubility_objective(_log_s_for)
 
-    async def _run() -> None:
-        objective = solubility_objective(_log_s_for)
+    ethanol = await objective({MOLECULE_KEY: "CCO"})
+    hexadecane = await objective({MOLECULE_KEY: "CCCCCCCCCCCCCCCC"})
 
-        ethanol = await objective({MOLECULE_KEY: "CCO"})
-        hexadecane = await objective({MOLECULE_KEY: "CCCCCCCCCCCCCCCC"})
-
-        # The objective returns exactly the calculator's predicted log S...
-        assert ethanol == _log_s("CCO")
-        assert ethanol > hexadecane  # ethanol far more soluble than the alkane
-        # ...and a repeat is served from the store (same value, no recompute error).
-        assert await objective({MOLECULE_KEY: "CCO"}) == ethanol
-
-    asyncio.run(_run())
+    # The objective returns exactly the calculator's predicted log S...
+    assert ethanol == _log_s("CCO")
+    assert ethanol > hexadecane  # ethanol far more soluble than the alkane
+    # ...and a repeat is served from the store (same value, no recompute error).
+    assert await objective({MOLECULE_KEY: "CCO"}) == ethanol
 
 
 def test_get_objective_resolves_calculator_objective() -> None:
@@ -183,37 +183,33 @@ def test_get_objective_resolves_calculator_objective() -> None:
     assert callable(get_objective("solubility_max", _log_s_for))
 
 
-def test_candidate_set_bo_finds_soluble_molecule() -> None:
+async def test_candidate_set_bo_finds_soluble_molecule() -> None:
     """Candidate-set BO over a molecule library finds a top molecule sub-exhaustively."""
+    # 14 diverse molecules; only a few (glycerol, glycol, water, urea) are very soluble.
+    library = [
+        "CCCCCCCCCCCCCCCC",
+        "c1ccccc1",
+        "CCCCCCCC",
+        "CCCCCCO",
+        "CCO",
+        "O",
+        "OCC(O)CO",
+        "NC(=O)N",
+        "CC(=O)O",
+        "Oc1ccccc1",
+        "CCOCC",
+        "ClCCl",
+        "CCCCCCCCCCCC",
+        "OCCO",
+    ]
+    problem = molecule_library_problem(library)
 
-    async def _run() -> None:
-        # 14 diverse molecules; only a few (glycerol, glycol, water, urea) are very soluble.
-        library = [
-            "CCCCCCCCCCCCCCCC",
-            "c1ccccc1",
-            "CCCCCCCC",
-            "CCCCCCO",
-            "CCO",
-            "O",
-            "OCC(O)CO",
-            "NC(=O)N",
-            "CC(=O)O",
-            "Oc1ccccc1",
-            "CCOCC",
-            "ClCCl",
-            "CCCCCCCCCCCC",
-            "OCCO",
-        ]
-        problem = molecule_library_problem(library)
+    result = await optimize(problem, solubility_objective(_log_s_for), n_initial=4, n_rounds=5)
 
-        result = await optimize(problem, solubility_objective(_log_s_for), n_initial=4, n_rounds=5)
-
-        all_values = sorted(_log_s(s) for s in library)
-        median = all_values[len(all_values) // 2]
-        assert len(result.history) < len(library)  # BO did not evaluate the whole library
-        assert result.best.value > median  # yet steered to a soluble molecule (top half)
-
-    asyncio.run(_run())
+    all_values = sorted(_log_s(s) for s in library)
+    median = all_values[len(all_values) // 2]
+    assert len(result.history) < len(library)  # BO did not evaluate the whole library
+    assert result.best.value > median  # yet steered to a soluble molecule (top half)
 
 
 def test_discrete_candidate_count() -> None:
@@ -240,24 +236,20 @@ def test_molecule_library_collapses_duplicate_spellings() -> None:
     assert parameter.categories == ["CCO", "O"]
 
 
-def test_optimize_stops_gracefully_on_exhausted_discrete_space() -> None:
+async def test_optimize_stops_gracefully_on_exhausted_discrete_space() -> None:
     """A budget exceeding the discrete space stops cleanly instead of crashing in BoFire."""
+    library = ["CCO", "O", "c1ccccc1", "CCCCCCCCCCCCCCCC"]  # only 4 candidates
+    problem = molecule_library_problem(library)
 
-    async def _run() -> None:
-        library = ["CCO", "O", "c1ccccc1", "CCCCCCCCCCCCCCCC"]  # only 4 candidates
-        problem = molecule_library_problem(library)
+    # Budget 2 + 10 far exceeds the 4-candidate space; must not raise.
+    result = await optimize(problem, solubility_objective(_log_s_for), n_initial=2, n_rounds=10)
 
-        # Budget 2 + 10 far exceeds the 4-candidate space; must not raise.
-        result = await optimize(problem, solubility_objective(_log_s_for), n_initial=2, n_rounds=10)
-
-        best_possible = max(_log_s(s) for s in library)
-        assert distinct_candidate_count(result.history) <= len(library)
-        assert result.best.value == pytest.approx(best_possible)
-
-    asyncio.run(_run())
+    best_possible = max(_log_s(s) for s in library)
+    assert distinct_candidate_count(result.history) <= len(library)
+    assert result.best.value == pytest.approx(best_possible)
 
 
-def test_durable_campaign_runs_end_to_end() -> None:
+async def test_durable_campaign_runs_end_to_end() -> None:
     """The workflow runs a small Reizman campaign durably and returns a correct result.
 
     This test's job is the *durable workflow* — that a real campaign seeds, runs its
@@ -268,45 +260,41 @@ def test_durable_campaign_runs_end_to_end() -> None:
     threshold is platform-flaky. Optimization *quality* is covered deterministically by
     `test_bo.py`'s convergence tests and `test_candidate_set_bo_finds_soluble_molecule`.
     """
-
-    async def _run() -> None:
-        spec = CampaignSpec(
-            problem=build_problem(load_dataset()),
-            objective_name="reizman_suzuki",
-            n_initial=4,
-            n_rounds=2,
-        )
-        async with await start_env_or_skip() as env:
-            client: Client = pydantic_client(env)
-            async with Worker(
-                client,
+    spec = CampaignSpec(
+        problem=build_problem(load_dataset()),
+        objective_name="reizman_suzuki",
+        n_initial=4,
+        n_rounds=2,
+    )
+    async with await start_env_or_skip() as env:
+        client: Client = pydantic_client(env)
+        async with Worker(
+            client,
+            task_queue="test-bo",
+            workflows=[BoCampaignWorkflow],
+            activities=_BO_ACTIVITIES,
+        ):
+            # The connector contract: payload in, `ConnectorJobResult` out. The campaign's own
+            # result travels in `data`, which is why it is re-parsed here rather than typed —
+            # core deliberately never knows this shape (D-093).
+            envelope = await client.execute_workflow(
+                BoCampaignWorkflow.run,
+                spec.model_dump(mode="json"),
+                id="bo-campaign-test",
                 task_queue="test-bo",
-                workflows=[BoCampaignWorkflow],
-                activities=_BO_ACTIVITIES,
-            ):
-                # The connector contract: payload in, `ConnectorJobResult` out. The campaign's own
-                # result travels in `data`, which is why it is re-parsed here rather than typed —
-                # core deliberately never knows this shape (D-093).
-                envelope = await client.execute_workflow(
-                    BoCampaignWorkflow.run,
-                    spec.model_dump(mode="json"),
-                    id="bo-campaign-test",
-                    task_queue="test-bo",
-                )
-        result = CampaignResult.model_validate(envelope.data)
-        # Every round ran and every point was actually evaluated by the objective.
-        assert len(result.history) == 6  # 4 seed + 2 rounds x batch 1
-        assert all(o.provenance == "predicted" for o in result.history)
-        # The best that survived serialization is the true optimum of the returned
-        # history — i.e. the durable reduce is correct, not desynced from the history.
-        assert result.best == best_of(spec.problem, result.history)
-        # And the envelope's summary is the one line the chat shows for a finished campaign.
-        assert "reizman_suzuki" in envelope.summary
-
-    asyncio.run(_run())
+            )
+    result = CampaignResult.model_validate(envelope.data)
+    # Every round ran and every point was actually evaluated by the objective.
+    assert len(result.history) == 6  # 4 seed + 2 rounds x batch 1
+    assert all(o.provenance == "predicted" for o in result.history)
+    # The best that survived serialization is the true optimum of the returned
+    # history — i.e. the durable reduce is correct, not desynced from the history.
+    assert result.best == best_of(spec.problem, result.history)
+    # And the envelope's summary is the one line the chat shows for a finished campaign.
+    assert "reizman_suzuki" in envelope.summary
 
 
-def test_a_resumed_run_picks_the_campaign_up_instead_of_re_seeding() -> None:
+async def test_a_resumed_run_picks_the_campaign_up_instead_of_re_seeding() -> None:
     """The continue-as-new carry-over is a real resumption, not a restart.
 
     `_carry_on_if_history_is_filling_up` ends a run mid-campaign and hands the next one a
@@ -318,37 +306,33 @@ def test_a_resumed_run_picks_the_campaign_up_instead_of_re_seeding() -> None:
     A re-seed would be the expensive bug — silently paying for `n_initial` evaluations again every
     time the history filled up, on a campaign long enough to fill it more than once.
     """
-
-    async def _run() -> None:
-        spec = CampaignSpec(
-            problem=build_problem(load_dataset()),
-            objective_name="reizman_suzuki",
-            n_initial=4,
-            n_rounds=5,
-        )
-        carried = await _seed_history(spec)
-        async with await start_env_or_skip() as env:
-            client: Client = pydantic_client(env)
-            async with Worker(
-                client,
+    spec = CampaignSpec(
+        problem=build_problem(load_dataset()),
+        objective_name="reizman_suzuki",
+        n_initial=4,
+        n_rounds=5,
+    )
+    carried = await _seed_history(spec)
+    async with await start_env_or_skip() as env:
+        client: Client = pydantic_client(env)
+        async with Worker(
+            client,
+            task_queue="test-bo-resume",
+            workflows=[BoCampaignWorkflow],
+            activities=_BO_ACTIVITIES,
+        ):
+            envelope = await client.execute_workflow(
+                BoCampaignWorkflow.run,
+                args=[spec.model_dump(mode="json"), carried.model_dump(mode="json")],
+                id="bo-campaign-resume-test",
                 task_queue="test-bo-resume",
-                workflows=[BoCampaignWorkflow],
-                activities=_BO_ACTIVITIES,
-            ):
-                envelope = await client.execute_workflow(
-                    BoCampaignWorkflow.run,
-                    args=[spec.model_dump(mode="json"), carried.model_dump(mode="json")],
-                    id="bo-campaign-resume-test",
-                    task_queue="test-bo-resume",
-                )
-        result = CampaignResult.model_validate(envelope.data)
-        # Three carried observations plus the two rounds still owed — not 4 seed + 5 rounds, and
-        # not 3 + 5: the resumed run honours `rounds_remaining`, not the spec's `n_rounds`.
-        assert len(result.history) == 5
-        assert result.history[:3] == carried.history
-        assert result.best == best_of(spec.problem, result.history)
-
-    asyncio.run(_run())
+            )
+    result = CampaignResult.model_validate(envelope.data)
+    # Three carried observations plus the two rounds still owed — not 4 seed + 5 rounds, and
+    # not 3 + 5: the resumed run honours `rounds_remaining`, not the spec's `n_rounds`.
+    assert len(result.history) == 5
+    assert result.history[:3] == carried.history
+    assert result.best == best_of(spec.problem, result.history)
 
 
 async def _seed_history(spec: CampaignSpec) -> CampaignCarryOver:
@@ -545,6 +529,13 @@ def test_the_manifest_names_a_precondition_that_accepts_the_params_model() -> No
     Every `start_optimization_campaign` call then raised `TypeError` while CI stayed green, so the
     reference connector's flagship job could not be started at all. Pinned here too, because this
     wave renamed the function the manifest points at.
+
+    **The spec is the benchmark's own decision space, and it used to be a one-parameter stand-in
+    named `t`.** That was fine while the precondition only checked arities and counts; it is not
+    once `require_problem_supplies_what_the_objective_reads` compares the space against what
+    `reizman_suzuki` reads, because the stand-in is exactly the incoherent spec that rule refuses.
+    A signature smoke test must not be carried by a spec the system declines to start — it would
+    pass on the refusal instead of on the resolution.
     """
     from chemclaw.connectors.jobs import resolve_precondition
     from chemclaw.connectors.registry import discovered
@@ -554,10 +545,7 @@ def test_the_manifest_names_a_precondition_that_accepts_the_params_model() -> No
     assert job.precondition is not None
     resolve_precondition(job.precondition)(
         CampaignSpec(
-            problem=OptimizationProblem(
-                parameters=[ContinuousParameter(name="t", lower=0.0, upper=1.0)],
-                objectives=[Objective(name="yield", direction="maximize")],
-            ),
+            problem=build_problem(load_dataset()),
             objective_name="reizman_suzuki",
             n_rounds=2,
         )
@@ -752,7 +740,7 @@ async def _left_running(handle: Any, *, tries: int = 400) -> Any:
     raise AssertionError(f"{handle.id} never left RUNNING")
 
 
-def test_a_measured_campaign_outlives_the_ceiling_that_would_have_killed_it(
+async def test_a_measured_campaign_outlives_the_ceiling_that_would_have_killed_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A measured campaign must survive its own wait, and must settle it when it does not.
@@ -785,9 +773,20 @@ def test_a_measured_campaign_outlives_the_ceiling_that_would_have_killed_it(
     the reason `tests/test_awaiting.py` is — the deadline and the queue are read off `settings`
     inside workflow code, and this drives them from the test.
     """
-    ceiling = timedelta(seconds=4)
+    # **The whole arithmetic is scaled, not just the ceiling**, and that became necessary when
+    # `D-2026-09-12-a-ceiling-that-funds-one-attempt-does-not-fund-a-sequence` made a campaign share
+    # its execution budget between the dispatches still to come. Arm one's ceiling used to be 4 s
+    # against the shipped 300 s activity budget, so under that bound the campaign now refuses its
+    # *first* dispatch — correctly, since four seconds cannot fund a five-minute activity — and dies
+    # before opening the wait this arm exists to strand. Scaling the activity budget and the
+    # activity overhead with the ceiling restores the shape being reproduced: three dispatches at
+    # 2.9 s of queue wait plus 3 s of work is 17.7 s, inside the 18 s ceiling, so the campaign
+    # reaches its wait and is then killed by the ceiling exactly as before.
+    ceiling = timedelta(seconds=18)
     queue = "test-bo-measured"
     monkeypatch.setattr(settings, "background_task_queue", queue)
+    monkeypatch.setattr(settings, "bo_activity_timeout_seconds", 3.0)
+    monkeypatch.setattr(settings, "activity_timeout_seconds", 0.1)
     # Long enough that neither arm expires on its own inside the test, so the only thing that can
     # end arm one is the ceiling under test.
     monkeypatch.setattr(settings, "bo_measurement_deadline_days", 300 / 86_400)
@@ -799,70 +798,67 @@ def test_a_measured_campaign_outlives_the_ceiling_that_would_have_killed_it(
         n_rounds=0,
     )
 
-    async def _run() -> None:
-        answer = [
-            Observation(params=candidate.params, value=float(i), provenance="measured")
-            for i, candidate in enumerate(await propose_initial(spec.problem, 4, spec.seed))
-        ]
-        async with await start_local_env_or_skip() as env:
-            client: Client = pydantic_client(env)
-            async with Worker(
-                client,
-                task_queue=queue,
-                workflows=[BoCampaignWorkflow, AwaitAnswerWorkflow],
-                workflow_runner=UnsandboxedWorkflowRunner(),
-                activities=[*_BO_ACTIVITIES, *_projection_stubs()],
-            ):
-                arms = {
-                    name: await client.start_workflow(
-                        BoCampaignWorkflow.run,
-                        spec.model_dump(mode="json"),
-                        id=f"bo-measured-{name}",
-                        task_queue=queue,
-                        execution_timeout=bound,
-                    )
-                    for name, bound in (
-                        ("under-the-old-ceiling", ceiling),
-                        ("under-the-resolved-bound", child_execution_timeout(None, True)),
-                    )
-                }
-                waits = {
-                    name: client.get_workflow_handle(f"{handle.id}:await:seed")
-                    for name, handle in arms.items()
-                }
-                for wait in waits.values():
-                    await _wait_started(wait)
-
-                killed = await _left_running(arms["under-the-old-ceiling"])
-                assert killed.status == WorkflowExecutionStatus.TIMED_OUT, (
-                    "the shipped ceiling did not kill the campaign, so this arm is not the defect "
-                    "it claims to reproduce"
+    answer = [
+        Observation(params=candidate.params, value=float(i), provenance="measured")
+        for i, candidate in enumerate(await propose_initial(spec.problem, 4, spec.seed))
+    ]
+    async with await start_local_env_or_skip() as env:
+        client: Client = pydantic_client(env)
+        async with Worker(
+            client,
+            task_queue=queue,
+            workflows=[BoCampaignWorkflow, AwaitAnswerWorkflow],
+            workflow_runner=UnsandboxedWorkflowRunner(),
+            activities=[*_BO_ACTIVITIES, *_projection_stubs()],
+        ):
+            arms = {
+                name: await client.start_workflow(
+                    BoCampaignWorkflow.run,
+                    spec.model_dump(mode="json"),
+                    id=f"bo-measured-{name}",
+                    task_queue=queue,
+                    execution_timeout=bound,
                 )
-                stranded = await _left_running(waits["under-the-old-ceiling"])
-                assert stranded.status == WorkflowExecutionStatus.CANCELED, (
-                    f"the killed campaign left its wait {stranded.status.name}; only a "
-                    "cancellation reaches `AwaitAnswerWorkflow.run`'s own handler, which is what "
-                    "stops the `pending_requests` row saying `waiting` for the rest of the deadline"
+                for name, bound in (
+                    ("under-the-old-ceiling", ceiling),
+                    ("under-the-resolved-bound", child_execution_timeout(None, True)),
                 )
+            }
+            waits = {
+                name: client.get_workflow_handle(f"{handle.id}:await:seed")
+                for name, handle in arms.items()
+            }
+            for wait in waits.values():
+                await _wait_started(wait)
 
-                await waits["under-the-resolved-bound"].signal(
-                    AwaitAnswerWorkflow.provide,
-                    {"answered_by": "oid-bench", "payload": {"observations": answer}},
-                )
-                envelope = await arms["under-the-resolved-bound"].result()
-                lived = await arms["under-the-resolved-bound"].describe()
+            killed = await _left_running(arms["under-the-old-ceiling"])
+            assert killed.status == WorkflowExecutionStatus.TIMED_OUT, (
+                "the shipped ceiling did not kill the campaign, so this arm is not the defect "
+                "it claims to reproduce"
+            )
+            stranded = await _left_running(waits["under-the-old-ceiling"])
+            assert stranded.status == WorkflowExecutionStatus.CANCELED, (
+                f"the killed campaign left its wait {stranded.status.name}; only a "
+                "cancellation reaches `AwaitAnswerWorkflow.run`'s own handler, which is what "
+                "stops the `pending_requests` row saying `waiting` for the rest of the deadline"
+            )
 
-        result = CampaignResult.model_validate(envelope.data)
-        assert [o.value for o in result.history] == [0.0, 1.0, 2.0, 3.0], (
-            "the campaign did not run on the answer it was given, so surviving the ceiling bought "
-            "nothing"
-        )
-        assert lived.close_time is not None and lived.close_time - lived.start_time > ceiling, (
-            "the surviving arm finished inside the old ceiling, so this test would pass with the "
-            "ceiling restored and is evidence about nothing"
-        )
+            await waits["under-the-resolved-bound"].signal(
+                AwaitAnswerWorkflow.provide,
+                {"answered_by": "oid-bench", "payload": {"observations": answer}},
+            )
+            envelope = await arms["under-the-resolved-bound"].result()
+            lived = await arms["under-the-resolved-bound"].describe()
 
-    asyncio.run(_run())
+    result = CampaignResult.model_validate(envelope.data)
+    assert [o.value for o in result.history] == [0.0, 1.0, 2.0, 3.0], (
+        "the campaign did not run on the answer it was given, so surviving the ceiling bought "
+        "nothing"
+    )
+    assert lived.close_time is not None and lived.close_time - lived.start_time > ceiling, (
+        "the surviving arm finished inside the old ceiling, so this test would pass with the "
+        "ceiling restored and is evidence about nothing"
+    )
 
 
 def _projection_stubs() -> list[Any]:
@@ -948,3 +944,79 @@ def test_a_seed_batch_nobody_reports_ends_the_campaign_instead_of_failing_it(
     assert "seed batch of 4 condition(s) was never reported" in envelope.summary
     assert envelope.data == {}, "there is no best point to report, so none is invented"
     assert envelope.note is None
+
+
+def test_a_failed_secondary_assay_is_refused_rather_than_read_as_no_difference() -> None:
+    """A NaN in a non-lead objective was a wildcard that never lost, and took the whole front.
+
+    `_dominates` compares `gain < -tolerance` and `gain > tolerance`, and **both** are False for a
+    NaN — so an unmeasured axis read as "no difference", i.e. at least as good. Measured before the
+    fix: a run whose impurity was never measured but whose yield was 96% dominated a clean
+    95%/0.5% run and `pareto_front` returned it *alone*. The chemist was shown a one-point
+    trade-off consisting solely of the condition whose assay failed.
+
+    `Observation.value` has refused a non-finite number since it was written, for exactly this
+    reason; `values` is the same field for every other objective and now says so. **A failed
+    measurement is an absent run, not a run with a NaN.**
+    """
+    with pytest.raises(ValidationError, match="impurity"):
+        _point(90.0, 96.0, float("nan"))
+
+
+def test_a_non_finite_value_smuggled_past_the_model_is_refused_where_it_is_read() -> None:
+    """The belt: `values` is a plain dict, so nothing revalidates a mutation after construction.
+
+    `Observation` is not frozen and pydantic does not validate assignment, so
+    `observation.values[name] = nan` writes straight past the field above. `observed_value` is the
+    one function every reader goes through — `_dominates`, the plateau read, and the frame handed
+    to BoFire — so the refusal belongs there rather than at one of the three.
+    """
+    problem = _two_objective_problem()
+    smuggled = _point(90.0, 96.0, 0.5)
+    smuggled.values["impurity"] = float("nan")
+    with pytest.raises(ValueError, match="impurity"):
+        pareto_front(problem, [_point(10.0, 95.0, 0.5), smuggled])
+
+
+def test_a_campaign_over_a_space_its_objective_cannot_read_is_refused_at_launch() -> None:
+    """`reizman_suzuki` reads four named parameters; nothing checked the spec declares them.
+
+    Measured before the fix: `require_campaign_startable` accepted a spec naming `reizman_suzuki`
+    over a decision space of one unrelated parameter, and the failure arrived at *evaluate* time as
+    a bare `KeyError: 'catalyst'` — hours into a durable run, after the seed rounds had been paid
+    for, and as a `KeyError` rather than anything `SurrogateFitError` or `_BAD_DATA_TYPES` reads.
+
+    A registered objective is a function over named parameters, so what it reads is a property of
+    the objective and belongs in the registry beside its direction — which is the argument
+    `RegisteredObjective.direction` already makes about the other half of the same mismatch.
+    """
+    unrelated = OptimizationProblem(
+        parameters=[ContinuousParameter(name="pressure", lower=1.0, upper=10.0)],
+        objectives=[Objective(name="yld", direction="maximize")],
+    )
+    with pytest.raises(ValueError, match="catalyst"):
+        require_campaign_startable(
+            CampaignSpec(objective_name="reizman_suzuki", problem=unrelated, n_rounds=1)
+        )
+
+
+def test_the_molecule_objective_declares_the_one_parameter_it_reads() -> None:
+    """`solubility_objective` reads `params[MOLECULE_KEY]`, so a spec without it is the same bug.
+
+    Stated as a second case rather than left to the benchmark, because the check is only worth
+    having if every registered objective declares what it reads: an entry that declares nothing
+    would pass vacuously and reintroduce the `KeyError` for whatever is registered next.
+    """
+    from chemclaw.science.bo.objectives import _REGISTRY
+
+    assert _REGISTRY and all(entry.requires for entry in _REGISTRY.values()), (
+        "an objective declaring no parameters would pass the check vacuously"
+    )
+    no_molecule = OptimizationProblem(
+        parameters=[ContinuousParameter(name="temperature", lower=20.0, upper=120.0)],
+        objectives=[Objective(name="log_s", direction="maximize")],
+    )
+    with pytest.raises(ValueError, match=MOLECULE_KEY):
+        require_campaign_startable(
+            CampaignSpec(objective_name="solubility_max", problem=no_molecule, n_rounds=1)
+        )

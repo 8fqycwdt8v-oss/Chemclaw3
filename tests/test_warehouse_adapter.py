@@ -8,6 +8,7 @@ schema change is a change to YAML and to nothing else.
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -157,6 +158,202 @@ def _one_reaction(binding: dict[str, Any], tables: dict[str, list[dict[str, Any]
     return adapter.map_to_ord(entries[0])
 
 
+def _filed(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
+    """Capture what the adapter files in the rejection ledger, with no database under it.
+
+    The ledger is the point of these three assertions: a row this fetch loses is a record a chemist
+    will later assume is in the corpus, and a worker log line is not an answer anybody can be given
+    (`D-2026-08-27-a-refused-record-is-a-question-somebody-will-ask`).
+    """
+    filed: dict[str, str] = {}
+
+    async def _spy(source: str, refusals: dict[str, str]) -> None:
+        filed.update(refusals)
+
+    monkeypatch.setattr("chemclaw.ingest.eln.warehouse.adapter.record_refusals", _spy)
+    return filed
+
+
+def test_an_unparseable_amendment_stamp_is_refused_rather_than_read_as_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A present-but-unreadable `modified_at` is bad data, and it read as "never amended".
+
+    The two same-named `_optional_timestamp` functions — this module's and `json_adapter`'s —
+    diverged on **6 of 9** realistic warehouse cell values: `01/09/2026`, `0000-00-00 00:00:00`,
+    `N/A`, `-`, `01-SEP-2026` and a Unix epoch integer all raised there and answered `None` here.
+    The JSON twin's docstring states the rule this restores: treating a present but unparseable
+    value as absent "would reinstate the exact silence this field exists to break".
+
+    What the silence costs is specific to this column: `entry_window` falls back to creation, so
+    the row never re-enters the fetch window and **the correction is never ingested** — which is
+    the failure `test_the_cursor_filters_on_the_later_of_created_and_modified` exists to prevent,
+    arriving through the reader instead of through the SQL.
+    """
+    filed = _filed(monkeypatch)
+    tables = _rows()
+    tables["V_REACTION"][0]["LAST_MODIFIED_TS"] = "01/09/2026"
+
+    _, entries = _fetch(_binding(), tables)
+
+    assert entries == [], "a row whose amendment stamp cannot be read is refused, not ingested"
+    assert "LAST_MODIFIED_TS" in filed["RX-1"] and "01/09/2026" in filed["RX-1"]
+    assert "declare a `transform:`" not in filed["RX-1"], (
+        "the refusal named a `transform:` beside an entry column as the remedy, which the "
+        "binding's `extra='forbid'` refuses — a fix the site cannot apply"
+    )
+    assert "NULLIF" in filed["RX-1"] and "where:" in filed["RX-1"]
+
+
+def test_an_unparseable_withdrawal_stamp_is_refused_rather_than_read_as_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same reader, on the column where the silence keeps a withdrawn record answering.
+
+    `retracted_at` reading `None` means the source's explicit withdrawal is never seen and the row
+    stays live as current knowledge, against
+    `D-2026-09-13-a-withdrawal-is-a-fact-a-source-reports`. Asserted separately from the amendment
+    case because the two call sites are separate and only one of them was covered by anything.
+    """
+    filed = _filed(monkeypatch)
+    binding = _binding()
+    binding["ingest"]["entry"]["retracted_at"] = "WITHDRAWN_TS"
+    tables = _rows()
+    tables["V_REACTION"][0]["WITHDRAWN_TS"] = "N/A"
+
+    _, entries = _fetch(binding, tables)
+
+    assert entries == []
+    assert "WITHDRAWN_TS" in filed["RX-1"]
+
+
+def test_a_blank_amendment_stamp_is_still_simply_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The half that must not become a refusal: an empty cell is a row nobody has amended.
+
+    Pinned beside the two above because the obvious over-fix — refusing anything that does not
+    parse — would refuse every un-amended row in every warehouse, i.e. the whole corpus. `NULL`,
+    `''` and whitespace are the source saying nothing, which is the ordinary state.
+    """
+    filed = _filed(monkeypatch)
+    for blank in (None, "", "   "):
+        tables = _rows()
+        tables["V_REACTION"][0]["LAST_MODIFIED_TS"] = blank
+        _, entries = _fetch(_binding(), tables)
+        assert [entry.entry_id for entry in entries] == ["RX-1"], blank
+        assert entries[0].modified_at is None
+    assert filed == {}
+
+
+def test_a_row_with_no_usable_key_reaches_the_rejection_ledger(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two faults in one assertion's neighbourhood: truthiness, and a WARNING-only loss.
+
+    `keyed = [row for row in rows if row.get(entry.key)]` dropped on **truthiness**, so an integer
+    primary key of `0` and an empty-string key were removed by the same test that removes a NULL.
+    The `0` row now survives; the blank one is refused *into the ledger* rather than counted in a
+    worker log, which is what the third loss path in the same method already did.
+    """
+    filed = _filed(monkeypatch)
+    tables = _rows()
+    header = tables["V_REACTION"][0]
+    tables["V_REACTION"] = [
+        {**header, "REACTION_ID": 0},
+        {**header, "REACTION_ID": "  "},
+    ]
+    tables["V_CHARGE"] = [{**row, "REACTION_ID": 0} for row in tables["V_CHARGE"]]
+
+    _, entries = _fetch(_binding(), tables)
+
+    assert [entry.entry_id for entry in entries] == ["0"], (
+        "an integer key of 0 is a key; truthiness removed a real row from the fetch"
+    )
+    assert "REACTION_ID" in filed["<no REACTION_ID>"]
+
+
+def test_two_rows_sharing_one_key_leave_a_ledger_row_naming_the_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A repeated key collapses two reactions, and the comment beside it says so itself.
+
+    "The reactions it collapses would otherwise vanish with no explanation at all" — and a worker
+    log line is not an explanation a chemist can be given. Both are refused into the ledger under
+    the id they share, which is also the id the survivor is ingested under: that row is what tells a
+    citation of it that it does not name one run.
+    """
+    filed = _filed(monkeypatch)
+    tables = _rows()
+    tables["V_REACTION"].append({**tables["V_REACTION"][0], "YIELD_PCT": "11.0"})
+
+    _, entries = _fetch(_binding(), tables)
+
+    assert [entry.entry_id for entry in entries] == ["RX-1"]
+    assert "2 rows" in filed["RX-1"] and "V_REACTION" in filed["RX-1"]
+
+
+def test_a_warehouse_impurity_known_only_by_its_rrt_is_named_rather_than_dropped() -> None:
+    """The identical hole `json_adapter._impurities` had, in the other adapter.
+
+    `Impurity._identifiable` refuses an RRT-only row and prescribes the remedy — a name of the form
+    "the RRT 0.94 peak" — and both adapters dropped the row instead. A site's analytics table is
+    exactly where unresolved peaks live, and they are routinely the largest ones in the profile.
+    """
+    binding = _binding()
+    binding["ingest"]["impurities"] = [
+        {
+            "from": "peaks",
+            "name": {"path": "PEAK_NAME"},
+            "area_percent": {"path": "AREA_PCT", "transform": [{"number": {}}]},
+            "rrt": {"path": "RRT", "transform": [{"number": {}}]},
+        }
+    ]
+    binding["ingest"]["related"].append(
+        {
+            "name": "peaks",
+            "relation": "V_PEAK",
+            "foreign_key": "REACTION_ID",
+            "order_by": "PEAK_SEQ",
+        }
+    )
+    tables = _rows()
+    tables["V_PEAK"] = [
+        {"REACTION_ID": "RX-1", "PEAK_SEQ": 1, "PEAK_NAME": "des-bromo", "AREA_PCT": "0.31"},
+        {"REACTION_ID": "RX-1", "PEAK_SEQ": 2, "PEAK_NAME": None, "AREA_PCT": "1.9", "RRT": "0.94"},
+    ]
+
+    reaction = _one_reaction(binding, tables)
+
+    assert [impurity.name for impurity in reaction.impurities] == ["des-bromo", "RRT 0.94 peak"]
+
+
+@pytest.mark.parametrize("rrt", [Decimal("0.94"), "0.94"], ids=["numeric-column", "text-column"])
+def test_an_rrt_only_peak_is_named_whatever_type_the_driver_hands_back(rrt: object) -> None:
+    """A NUMERIC RRT is a `Decimal` and a text one a `str`, and neither passed `isinstance(float)`.
+
+    With no `number` transform on the column, the value arrives as the driver typed it, so an
+    RRT-only peak on a NUMERIC(4,2) column was dropped here while `json_adapter`'s `float()` named
+    the same peak. Named from the coerced value, and carried as a float.
+    """
+    binding = _binding()
+    binding["ingest"]["impurities"] = [
+        {"from": "peaks", "name": {"path": "PEAK_NAME"}, "rrt": {"path": "RRT"}}
+    ]
+    binding["ingest"]["related"].append(
+        {
+            "name": "peaks",
+            "relation": "V_PEAK",
+            "foreign_key": "REACTION_ID",
+            "order_by": "PEAK_SEQ",
+        }
+    )
+    tables = _rows()
+    tables["V_PEAK"] = [{"REACTION_ID": "RX-1", "PEAK_SEQ": 1, "PEAK_NAME": None, "RRT": rrt}]
+
+    (impurity,) = _one_reaction(binding, tables).impurities
+
+    assert (impurity.name, impurity.rrt) == ("RRT 0.94 peak", 0.94)
+
+
 def test_the_cursor_filters_on_the_later_of_created_and_modified() -> None:
     """An amended run counts as new, which is the ELN sync's contract and not a nicety.
 
@@ -172,6 +369,40 @@ def test_the_cursor_filters_on_the_later_of_created_and_modified() -> None:
     assert "COALESCE(LAST_MODIFIED_TS, CREATED_TS) >= ?" in statement
     assert "ORDER BY COALESCE(LAST_MODIFIED_TS, CREATED_TS) ASC, REACTION_ID ASC" in statement
     assert params[0] == since
+
+
+def test_a_declared_withdrawal_column_is_in_the_cursor_and_an_undeclared_one_is_not() -> None:
+    """A retraction the cursor cannot see is a tombstone written at the site and fetched by nobody.
+
+    Asserted on the emitted SQL for the same reason the amendment case above is, and because the
+    fake warehouse mirrors the watermark's *semantics* rather than parsing the clause — so only
+    this pins the two together. Both directions: a binding that declares the column filters on it,
+    and one that does not is byte-for-byte unchanged, because every site without a withdrawal
+    column must keep the predicate it had.
+
+    `COALESCE(retracted, W)` inside the `GREATEST` is the load-bearing half: warehouses disagree
+    about `GREATEST` over a NULL, and under the propagating reading the bare form would move every
+    un-retracted row's watermark to NULL and stop the source dead. This module names no vendor, so
+    it may not assume the forgiving one.
+    """
+    binding = _binding()
+    binding["ingest"]["entry"]["retracted_at"] = "RETRACTED_TS"
+    _fetch(binding, _rows())
+    window = "COALESCE(LAST_MODIFIED_TS, CREATED_TS)"
+    withdrawn = f"GREATEST({window}, COALESCE(RETRACTED_TS, {window}))"
+
+    statement, _ = _primed().executed[0]
+    assert f"{withdrawn} >= ?" in statement
+    assert f"ORDER BY {withdrawn} ASC, REACTION_ID ASC" in statement
+
+    # `open_warehouse` memoises per connection block, so the second fetch would otherwise be served
+    # the fake the first one primed and record nothing at all.
+    forget_open_warehouses()
+    _fetch(_binding(), _rows())
+    plain, _ = _primed().executed[0]
+    assert "RETRACTED_TS" not in plain and "GREATEST" not in plain, (
+        "a site with no withdrawal column had its cursor predicate rewritten anyway"
+    )
 
 
 def test_a_source_without_amendments_filters_on_creation_alone() -> None:
@@ -547,7 +778,12 @@ def test_a_page_of_amended_rows_does_not_stall_the_sync_forever() -> None:
 
 
 def _drain(
-    adapter: WarehouseElnAdapter, since: datetime, *, batch: int, chunks: int
+    adapter: WarehouseElnAdapter,
+    since: datetime,
+    *,
+    batch: int,
+    chunks: int,
+    records: InMemoryReactionRecordStore | None = None,
 ) -> tuple[set[str], list[str]]:
     """Run `ElnSyncWorkflow`'s own chunk loop against `adapter`, returning what it ingested.
 
@@ -555,13 +791,17 @@ def _drain(
     when to come back for another chunk (`has_more`), and its wedge guard decides when a source
     that reports more work but no cursor advance is stopped and said out loud. A test that called
     `sync_entries` directly would see neither.
+
+    `records` is supplied by a caller that needs to read what was transcribed rather than only
+    which ids were, and it survives between calls — which is what lets one test drive a first sync
+    and then a withdrawal against the same corpus.
     """
 
     async def _run() -> tuple[set[str], list[str]]:
         rxn, mol, rec = (
             InMemoryFingerprintStore(),
             InMemoryFingerprintStore(),
-            InMemoryReactionRecordStore(),
+            records or InMemoryReactionRecordStore(),
         )
         label_index = InMemoryLabelIndex()
         seen: set[str] = set()
@@ -825,3 +1065,84 @@ def test_a_bounded_chunk_asks_the_warehouse_for_the_chunk_and_not_for_the_page()
     entries, warehouse = _drive(None)
     assert _entry_limits(warehouse) == [150]
     assert len(entries) == 120
+
+
+def test_a_site_that_withdraws_a_row_reaches_the_record_without_touching_its_amendment_column() -> (
+    None
+):
+    """The live connector's producer half, through the wiring a scheduled sync actually runs.
+
+    `RawEntry.retracted_at` is the only thing that may set `reaction_records.retracted_at`, so a
+    binding that cannot name the site's withdrawal column makes the whole five-part retraction
+    change unreachable in every shipped configuration — a producer nobody can write
+    (`D-2026-09-13-a-withdrawal-is-a-fact-a-source-reports`).
+
+    Driven through `_drain`, which is the workflow's own chunk loop over `_BoundedIngest`. That
+    matters twice over: `BACKLOG.md` recorded this half as needing `_BoundedIngest` to expose a
+    public `inner` for a capability walk, and it does not — a field on `RawEntry` rides the wrapper
+    through untouched, which only a run through the wrapper can show.
+
+    The withdrawal deliberately leaves `LAST_MODIFIED_TS` alone, which is the case the watermark
+    exists for: the cursor has passed the row's creation, so a source stamping only its retraction
+    column would never re-export it. `RX-KEPT` is created alongside and never withdrawn, so the
+    assertion is a difference rather than an emptiness.
+    """
+    created = datetime(2026, 5, 1, tzinfo=UTC)
+    pulled = datetime(2026, 8, 1, tzinfo=UTC)
+    binding = _binding()
+    binding["ingest"]["entry"]["retracted_at"] = "RETRACTED_TS"
+    rows = {
+        "RX-PULLED": dict(_reaction_row("RX-PULLED", created), RETRACTED_TS=None),
+        "RX-KEPT": dict(_reaction_row("RX-KEPT", created), RETRACTED_TS=None),
+    }
+    charges = [row for entry in rows for row in _charge_rows(entry)]
+
+    def _prime() -> None:
+        # Memoised per connection block, so a second prime without this is simply ignored and the
+        # run below would be served the first fake's rows.
+        forget_open_warehouses()
+        warehouse_fake.prime_warehouse(
+            warehouse_fake.WatermarkWarehouse(
+                {"V_REACTION": list(rows.values()), "V_CHARGE": charges},
+                entry_relation="V_REACTION",
+                created_at="CREATED_TS",
+                modified_at="LAST_MODIFIED_TS",
+                key="REACTION_ID",
+                retracted_at="RETRACTED_TS",
+            )
+        )
+
+    records = InMemoryReactionRecordStore()
+    _prime()
+    first, _ = _drain(
+        WarehouseElnAdapter(binding=binding, name="eln-test"),
+        created - timedelta(days=1),
+        batch=10,
+        chunks=2,
+        records=records,
+    )
+    assert first == {"RX-PULLED", "RX-KEPT"}, "neither row was ingested, so nothing below is a test"
+    assert asyncio.run(records.retracted([("eln-databricks", "RX-PULLED")])) == set()
+
+    rows["RX-PULLED"] = dict(rows["RX-PULLED"], RETRACTED_TS=pulled)
+    _prime()
+    # The cursor now sits past the creation of both rows and past any amendment, which is exactly
+    # where a scheduled sync is when a site withdraws something a month later.
+    second, _ = _drain(
+        WarehouseElnAdapter(binding=binding, name="eln-test"),
+        created + timedelta(days=1),
+        batch=10,
+        chunks=2,
+        records=records,
+    )
+
+    assert second == {"RX-PULLED"}, (
+        "the withdrawn row was not re-fetched, so its tombstone is written at the site and read "
+        "by nobody — and the row that was not withdrawn must not come back either"
+    )
+    stored = asyncio.run(records.read("RX-PULLED"))
+    assert stored is not None and stored.retracted_at == pulled
+    assert asyncio.run(
+        records.retracted([("eln-databricks", "RX-PULLED"), ("eln-databricks", "RX-KEPT")])
+    ) == {("eln-databricks", "RX-PULLED")}
+    assert asyncio.run(records.eligible(["RX-PULLED", "RX-KEPT"], {})) == {"RX-KEPT"}

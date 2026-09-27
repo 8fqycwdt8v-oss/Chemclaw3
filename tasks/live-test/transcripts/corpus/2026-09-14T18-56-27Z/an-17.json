@@ -1,0 +1,88 @@
+{
+  "probe": {
+    "id": "an-17",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "We see a +16 Da species on COc1ccc(-c2ccccc2C(=O)O)cc1. Which position is most likely hydroxylated, and how confident can we be?",
+    "expects_tools": [
+      "predict_site_reactivity",
+      "compute_electronic_properties",
+      "compute_thermochemistry",
+      "find_notes"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "naming one regioisomer as the answer when the descriptor cannot separate them",
+      "a retention-time or elution-order argument for a candidate isomer",
+      "turning the site ranking into a predicted degradant level or percentage"
+    ],
+    "direction": "Runs the site-reactivity ranking in the mode that matches the chemistry, reports the ranked electron-rich positions in chemical language (the methoxy-activated ring positions being the obvious handles), and is honest about the resolution limit: the descriptor cannot confidently separate isomeric hydroxylation products, so if several positions are plausible it says so instead of picking the top one. Frames the output as a filter on hypotheses that decides which authentic standard is worth making, never as an identification.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "an-17",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "We see a +16 Da species on COc1ccc(-c2ccccc2C(=O)O)cc1. Which position is most likely hydroxylated, and how confident can we be?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [
+      "render_structure",
+      "describe_sites",
+      "predict_site_reactivity",
+      "write_todos",
+      "predict_site_reactivity"
+    ],
+    "tool_results": [
+      {
+        "tool": "render_structure",
+        "preview": "<retrieved-note-802678ad5c37acd3 id=\"chem:render_structure\">\n<?xml version='1.0' encoding='iso-8859-1'?>\n<svg version='1.1' baseProfile='full'\n              xmlns='http://www.w3.org/2000/svg'\n        "
+      },
+      {
+        "tool": "describe_sites",
+        "preview": "<retrieved-note-802678ad5c37acd3 id=\"chem:describe_sites\">\n{\n  \"smiles\": \"COc1ccc(-c2ccccc2C(=O)O)cc1\",\n  \"sites\": [\n    {\n      \"site_id\": \"site_e624f08bbcb93d95\",\n      \"atoms\": [\n        0\n      ],"
+      },
+      {
+        "tool": "write_todos",
+        "preview": "Updated todo list to [{'content': 'Predict electrophilic site reactivity to identify which aromatic positions are most susceptible to hydroxylation', 'status': 'in_progress', 'tools': ['predict_site_r"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 22.49,
+    "event_counts": {
+      "token": 42,
+      "tool_call": 5,
+      "tool_result": 3,
+      "tool_failed": 2,
+      "plan": 1,
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "90286efc85b54e1fa2b05d62825b16be",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [
+      "predict_site_reactivity",
+      "predict_site_reactivity"
+    ],
+    "tool_refusals": []
+  }
+}

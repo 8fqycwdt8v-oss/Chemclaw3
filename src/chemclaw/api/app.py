@@ -26,6 +26,7 @@ route) is layered on in F4.
 """
 
 import asyncio
+import logging
 import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -35,6 +36,7 @@ from typing import Any
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
+from chemclaw.agent.audit import NullAuditSink, default_audit_sink
 from chemclaw.agent.checkpointer import close_checkpointer
 from chemclaw.agent.chemclaw_agent import connector_specs, history_provider
 from chemclaw.agent.durable_tools import cancel_job, job_status
@@ -42,12 +44,15 @@ from chemclaw.agent.graph_tools import expand_note
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
 from chemclaw.agent.plan_approval_store import plan_approval_store
 from chemclaw.agent.profile_discovery import load_profiles
-from chemclaw.agent.scratchpad import close_memory_store
+from chemclaw.agent.profiles import get_profile, registered_profile_names
 from chemclaw.agent.session_events import stream_new_events
+from chemclaw.agent.subagents import refuse_an_unknown_roster
+from chemclaw.agent.turn_graph import refuse_an_unknown_peer_roster
 from chemclaw.agent.verifier import require_verifier_capability
-from chemclaw.api.budget import BudgetTracker
+from chemclaw.api.budget import BudgetTracker, drain_pending
 from chemclaw.api.deps import CurrentUser
 from chemclaw.api.detach import RunningTurns
+from chemclaw.api.events import event_schemas
 from chemclaw.api.middleware import (
     _add_body_size_limit,
     _add_cors,
@@ -55,20 +60,23 @@ from chemclaw.api.middleware import (
     _add_security_headers,
     _database_unavailable,
     _refuse_unauthenticated_exposure,
-    _refuse_unconfigured_llm_gateway,
     _subsystem_unavailable,
 )
 from chemclaw.api.routes import (
     jobs,
     notes,
     ops,
+    org_skills,
     pending,
     plan,
+    proposals,
     protocols,
     results,
     sessions,
+    skills,
     streams,
     turns,
+    workflows,
 )
 from chemclaw.api.schemas import _TRANSCRIPT_ARG_CHARS, _transcript
 from chemclaw.api.state import (
@@ -81,10 +89,12 @@ from chemclaw.api.state import (
 )
 from chemclaw.api.tool_results import fetchable_refs, load_tool_result
 from chemclaw.connectors.health import check_connectors_at_startup, probe_connectors
+from chemclaw.connectors.registry import skills_dirs as connector_skills_dirs
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.core.errors import SubsystemUnavailableError
 from chemclaw.core.executor import front_door_reserved, install_default_executor
+from chemclaw.core.llm_gateway import refuse_unconfigured_llm_gateway
 from chemclaw.core.logging import configure_logging, configure_telemetry
 from chemclaw.core.metrics import METRICS
 from chemclaw.durable.job_record import search_job_records
@@ -118,6 +128,87 @@ __all__ = [
 ]
 
 _STATIC_DIR = Path(__file__).parent / "static"
+
+logger = logging.getLogger(__name__)
+
+
+def startup_inventory() -> list[str]:
+    """What this process is configured to hold, one `subsystem=state` term per subsystem.
+
+    **The gap this closes is that nothing told an operator what was unconfigured.** A cold front
+    door logged exactly one line about its own emptiness — `connectors: none enabled`, from the
+    health sweep — and nothing at all about a log-only audit trail, an unwritten session store, no
+    skills, no ingest source and no result sink. `make ci` is collectively the honest inventory and
+    it is a pre-push gate: it cannot be pointed at a running pod, and `make connector-validate`
+    *fails* on a condition this process happily serves under.
+
+    **Configuration only, and deliberately no counts.** "What it holds" — how many notes, how many
+    indexed structures — is a query per subsystem, and this runs before `db.pooling()` opens the
+    pool: a startup line that queries five subsystems is a startup line that can hang or fail a
+    boot, over facts that change every hour anyway. What is here instead is the set of facts that
+    are *static for the life of the pod* and that each turn silently degrades around. The two
+    filesystem walks are the exception and they are the ones a turn already makes per turn.
+
+    Connectors are not a term here: `check_connectors_at_startup` logs them with their
+    *reachability*, which is strictly more than this could say, and a second line naming the same
+    bundles differently is how two inventories come to disagree.
+    """
+    skills = sum(
+        1
+        for directory in [*settings.skills_dirs, *connector_skills_dirs()]
+        for _ in Path(directory).glob("*/SKILL.md")
+    )
+    notes = sum(1 for _ in settings.knowledge_path.rglob("*.md"))
+    return [
+        f"audit-trail={type(default_audit_sink()).__name__}",
+        f"sessions={settings.session_store}",
+        f"skills={skills}",
+        f"knowledge-notes={notes} in {settings.knowledge_path}",
+        f"data-sources={','.join(settings.data_source_list) or 'none'}",
+        f"result-sinks={','.join(settings.result_sink_list) or 'none (publishing off)'}",
+        f"vector-store={settings.vector_store_provider}",
+    ]
+
+
+def _report_inventory() -> None:
+    """Log the inventory, and warn separately where the trail is not the one the prompt described.
+
+    **The warning is the finding; the inventory is the context for it.** `default_audit_sink()`
+    resolves to `NullAuditSink` whenever `session_store != "postgres"`, and D-122 decided that
+    gate with a *stated* condition — "log-only is the fallback where no database is configured" —
+    that the implementation does not test. `.env.example` ships `CHEMCLAW_SESSION_STORE=memory`
+    beside a `postgres_dsn` default pointing at the `make up` database, which is the configuration
+    `CLAUDE.md` tells a developer to stand up: a database is configured, migrated and reachable,
+    `audit_events` exists, and every row a turn would write is discarded. Measured on that
+    deployment, one completed turn that called a tool left `audit_events` at 0, `session_messages`
+    at 0, `chemclaw_audit_sink_failures_total` at 0, and `explain` printing "no messages, tool
+    calls or jobs recorded".
+
+    **The DSN is deliberately not part of the condition.** "Warn when a Postgres DSN is configured"
+    reads as the narrower check and is not one: `postgres_dsn` has a default value, so it is always
+    configured and the qualifier would be a warning that always fires, dressed as a warning that
+    sometimes does. What is actually being reported is the resolution — this deployment writes no
+    durable trail — and that is worth one line at every front-door boot whether or not a DSN
+    happens to point somewhere.
+
+    The front door only, which is the process a chemist talks to and the one whose prompt makes the
+    claim. A worker's trail is the same sink by the same rule; putting the warning in `Settings`
+    would fire it in every CLI invocation and every test collection, which is how a warning stops
+    being read.
+    """
+    logger.info("inventory: %s", " ".join(startup_inventory()))
+    if isinstance(default_audit_sink(), NullAuditSink):
+        logger.warning(
+            "no durable audit trail: default_audit_sink() resolved to NullAuditSink because "
+            "CHEMCLAW_SESSION_STORE=%s, so no audit_events row and no session_messages row is "
+            "written for any turn this pod serves — `python -m chemclaw.cli.explain <session>` "
+            "will find nothing, whatever the session did. The tool-call log lines are the whole "
+            "record, and they are kept by the log stack rather than by this system. Set "
+            "CHEMCLAW_SESSION_STORE=postgres (Helm: values.yaml already does) to write the trail. "
+            "The agent is told which of the two it has, so it will not describe a trail this "
+            "deployment is not keeping.",
+            settings.session_store,
+        )
 
 
 @asynccontextmanager
@@ -153,6 +244,13 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     reference into the checkpointer's pool (`agent/scratchpad.py`); closing the pool first would
     leave it pointing at dead connections for whatever ran between the two calls.
 
+    **That ordering is `close_checkpointer`'s to keep, and this lifespan no longer repeats it.** It
+    called `close_memory_store()` and then `close_checkpointer()`, which closes the store itself
+    first — so the store was dropped twice and the invariant was written down in two places, only
+    one of which explained it. Two copies of an ordering rule is how the copies come to disagree:
+    whoever reorders the pair here would not be reading the argument for it, which lives beside the
+    pool that argument is about. One call now; the sequence is `agent/checkpointer.py`'s.
+
     **And drains the running turns before any of that**, which is the half that made the closes a
     hazard rather than a courtesy. Since `D-2026-08-27-a-disconnect-is-a-detach-not-a-stop` a turn
     outlives the request that started it, on a pump task nothing outside `RunningTurns` knows
@@ -177,6 +275,22 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # deployment configuration error, and a front door that started anyway would 400 every
     # request naming that profile with no hint as to why.
     load_profiles()
+    # And the `task` roster names profiles, so it is checked here for the same reason the load
+    # above fails here: a misspelled entry is a deployment configuration error, and the only thing
+    # it does at run time is make a helper quietly absent from the menu. `_subagents` skips an
+    # unknown name with a WARNING because a turn must not die for one; that fail-soft is what makes
+    # this loud check necessary rather than redundant, since a capability nobody is told is missing
+    # is one nobody restores.
+    refuse_an_unknown_roster(registered_profile_names(), lambda name: get_profile(name).description)
+    # The **peer** roster is the same class of configuration error one topology over, and it is
+    # worth failing on for a sharper reason than the helper roster's: a misspelled peer does not
+    # make a menu entry absent, it makes the mesh one agent smaller, and a two-name roster with one
+    # typo silently becomes a single agent that behaves exactly like the shipped default. That is
+    # indistinguishable, from the outside, from the feature being off.
+    refuse_an_unknown_peer_roster(registered_profile_names())
+    # After `configure_logging()` so the line is formatted the way the operator asked, and after
+    # the profiles load so a malformed one fails before anything claims the deployment is sound.
+    _report_inventory()
     # Before anything can offload. Every `asyncio.to_thread` in this process — token validation on
     # every request, the retrieval and knowledge-graph legs, embeddings, attachment parses — shares
     # one pool, and the loop's stock default is `min(32, cpu_count + 4)`: 8 on a 4-CPU pod, the
@@ -206,7 +320,14 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             # its checkpoint, its transcript and its cost row through all three.
             running_turns: RunningTurns = app.state.running_turns
             await running_turns.drain(settings.service_turn_timeout_seconds)
-            await close_memory_store()
+            # After the turns, because a draining turn books its own spend on the way out, and
+            # before the pool closes, because the booking needs it. A budget booking is scheduled
+            # off the hot path (`api/budget._schedule`, which is synchronous by D-130), so without
+            # this wait an ordinary rollout cancels the last booking of every in-flight principal
+            # and hands each of them that much allowance back.
+            await drain_pending()
+            # One call, not two. `close_checkpointer` drops the memory store itself, in the order
+            # the store's dependency on its pool requires — see the paragraph above.
             await close_checkpointer()
 
 
@@ -255,7 +376,7 @@ def create_app(
         A configured `FastAPI` application.
     """
     _refuse_unauthenticated_exposure()
-    _refuse_unconfigured_llm_gateway()
+    refuse_unconfigured_llm_gateway()
     # `openapi_url=None` keeps FastAPI from registering the schema on a plain `Route`, which is not
     # an `APIRoute` and therefore carries no dependency tree `require_principal` could sit in — the
     # defect D-2026-08-06 §4 closed, where the full route/parameter/model surface was readable by
@@ -400,6 +521,10 @@ def create_app(
     METRICS.bind_gauge(
         "chemclaw_turn_capacity", lambda: float(settings.service_max_concurrent_turns)
     )
+    METRICS.bind_gauge(
+        "chemclaw_turn_actor_capacity",
+        lambda: float(settings.service_max_concurrent_turns_per_actor),
+    )
     # Per-pod capacity summed across pods is what the fleet admits; this is what it was declared
     # allowed to admit. Config validation refuses the product at startup, but only for the shape the
     # chart rendered — a hand-scaled Deployment or an in-cluster HPA edit never re-reads it, and
@@ -437,6 +562,11 @@ def create_app(
     # the kubelet's first probe answers within one interval, and refusing traffic until then would
     # turn every rollout into a needless gap.
     app.state.database_reachable = True
+    # Whether the schema carries the newest migration this image ships, taken in the same round
+    # trip. `True` before any probe has run for the same reason `database_reachable` is, and
+    # `True` again whenever the question cannot be answered: this verdict gates only on positive
+    # evidence of a mismatch, never on the absence of evidence.
+    app.state.schema_current = True
     app.state.database_probed_at = float("-inf")
     # The probe tasks currently in flight, keyed by probe name. Both readiness probes are
     # single-flight (`chemclaw.api.routes.ops._shared_probe`): the cache window suppresses
@@ -490,10 +620,37 @@ def create_app(
         plan,
         pending,
         notes,
+        skills,
+        org_skills,
+        proposals,
         jobs,
         protocols,
+        workflows,
     ):
         module.register(app)
+
+    # **The turn-event union, merged into the document the client actually reads.**
+    # `D-2026-09-14-a-contract-the-client-cannot-read-is-a-contract-one-side-remembers`: the SSE
+    # body is `text/event-stream`, which FastAPI cannot infer, so measured on 2026-09-14 the
+    # published document declared 2 of the union's 17 members and 0 of its 10 error codes — while
+    # `Chemclaw3_ui/shared/events.ts` mirrors all of it by hand and has been wrong nine times.
+    # The two streaming routes declare `TURN_EVENT_REF` in their 200 response; this is what makes
+    # that `$ref` resolve.
+    #
+    # Wrapped around `app.openapi` rather than done in the handler because FastAPI caches the
+    # generated document on `app.openapi_schema` — a handler-side merge would run per request
+    # against an already-frozen dict, and the first caller to mutate it would be racing the rest.
+    _generate = app.openapi
+
+    def _openapi_with_events() -> dict[str, Any]:
+        """The generated document with the turn-event components merged into it, generated once."""
+        document = _generate()
+        components = document.setdefault("components", {}).setdefault("schemas", {})
+        for name, schema in event_schemas().items():
+            components.setdefault(name, schema)
+        return document
+
+    app.openapi = _openapi_with_events  # type: ignore[method-assign]
 
     # The schema, gated like everything else — and registered here rather than in a `routes/`
     # module because it is not a resource of any domain: it is this app describing itself, and it
@@ -516,7 +673,9 @@ def create_app(
         """The OpenAPI document, for an authenticated caller only.
 
         `app.openapi()` caches into `app.openapi_schema` on the first call, so this is one
-        generation per process rather than per request.
+        generation per process rather than per request — which is also why the turn-event union is
+        merged inside `app.openapi` below rather than here: doing it here would rebuild it per
+        request against a document FastAPI has already frozen.
         """
         return app.openapi()
 

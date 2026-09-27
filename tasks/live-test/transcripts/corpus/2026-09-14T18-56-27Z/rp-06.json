@@ -1,0 +1,61 @@
+{
+  "probe": {
+    "id": "rp-06",
+    "section": 9,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Run pKa, logD and solubility predictions on 4-methoxybiphenyl and write me two sentences a formulation colleague could act on.",
+    "expects_tools": [
+      "predict_pka",
+      "predict_solubility",
+      "predict_logd",
+      "calculator_trust"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a pKa value for a compound with no ionisable centre presented as meaningful",
+      "a solubility or logD value presented as measured rather than predicted",
+      "an accuracy or error bar not returned by calculator_trust"
+    ],
+    "direction": "Call the calculators, then interpret rather than dump. The strong answer flags that 4-methoxybiphenyl has no ionisable group, so a predicted pKa is not a meaningful number for it, and presents solubility and logD as model predictions with their trust caveat attached, never as measurements. Two plainly worded, actionable sentences. Reporting a confident pKa for this substrate without comment is the miss.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rp-06",
+    "section": 9,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Run pKa, logD and solubility predictions on 4-methoxybiphenyl and write me two sentences a formulation colleague could act on.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.83,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "5fe20e4c0c504dc0b22ed38dc8267d5f",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

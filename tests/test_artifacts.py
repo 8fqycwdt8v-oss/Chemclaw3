@@ -34,35 +34,27 @@ from chemclaw.science.calc.store import (
 _HESSIAN = b"$hessian\n" + b"   0.1234567890   -0.0987654321    0.0000000000\n" * 400
 
 
-def test_put_then_open_round_trips_the_exact_bytes() -> None:
+async def test_put_then_open_round_trips_the_exact_bytes() -> None:
     """An artifact read back is byte-identical to what was stored, compression notwithstanding."""
-
-    async def _run() -> None:
-        store = InMemoryArtifactStore()
-        ref = await store.put("xtb.hess@gfn2:a:b", "hessian", _HESSIAN)
-        assert ref is not None
-        assert ref.content_hash == content_address(_HESSIAN)
-        assert ref.byte_size == len(_HESSIAN)
-        assert await store.open(ref.content_hash) == _HESSIAN
-
-    asyncio.run(_run())
+    store = InMemoryArtifactStore()
+    ref = await store.put("xtb.hess@gfn2:a:b", "hessian", _HESSIAN)
+    assert ref is not None
+    assert ref.content_hash == content_address(_HESSIAN)
+    assert ref.byte_size == len(_HESSIAN)
+    assert await store.open(ref.content_hash) == _HESSIAN
 
 
-def test_identical_bytes_from_two_calculations_store_one_blob() -> None:
+async def test_identical_bytes_from_two_calculations_store_one_blob() -> None:
     """Content addressing dedups: two runs, two link rows, one blob — reachable from both."""
-
-    async def _run() -> None:
-        store = InMemoryArtifactStore()
-        first = await store.put("xtb.opt@gfn2:aaa:p", "xtbopt.xyz", b"2\n\nH 0 0 0\nH 0 0 0.74\n")
-        second = await store.put("xtb.opt@gfnff:bbb:p", "xtbopt.xyz", b"2\n\nH 0 0 0\nH 0 0 0.74\n")
-        assert first is not None and second is not None
-        # One content address, so one copy of the bytes...
-        assert first.content_hash == second.content_hash
-        # ...but each calculation still reaches it under its own key.
-        assert [ref.name for ref in await store.list_for("xtb.opt@gfn2:aaa:p")] == ["xtbopt.xyz"]
-        assert [ref.name for ref in await store.list_for("xtb.opt@gfnff:bbb:p")] == ["xtbopt.xyz"]
-
-    asyncio.run(_run())
+    store = InMemoryArtifactStore()
+    first = await store.put("xtb.opt@gfn2:aaa:p", "xtbopt.xyz", b"2\n\nH 0 0 0\nH 0 0 0.74\n")
+    second = await store.put("xtb.opt@gfnff:bbb:p", "xtbopt.xyz", b"2\n\nH 0 0 0\nH 0 0 0.74\n")
+    assert first is not None and second is not None
+    # One content address, so one copy of the bytes...
+    assert first.content_hash == second.content_hash
+    # ...but each calculation still reaches it under its own key.
+    assert [ref.name for ref in await store.list_for("xtb.opt@gfn2:aaa:p")] == ["xtbopt.xyz"]
+    assert [ref.name for ref in await store.list_for("xtb.opt@gfnff:bbb:p")] == ["xtbopt.xyz"]
 
 
 def test_compression_shrinks_a_hessian_and_decodes_identically() -> None:
@@ -91,49 +83,37 @@ def test_unknown_codec_raises_rather_than_returning_deflate_bytes() -> None:
         decode("brotli", b"whatever")
 
 
-def test_artifact_over_the_cap_is_skipped_not_raised(
+async def test_artifact_over_the_cap_is_skipped_not_raised(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """The "optional by construction" contract: over-cap returns None and stores nothing."""
-
-    async def _run() -> None:
-        monkeypatch.setattr(settings, "artifact_max_bytes", 16)
-        store = InMemoryArtifactStore()
-        with caplog.at_level(logging.DEBUG, logger="chemclaw.science.calc.artifacts"):
-            stored = await put_all(store, "k", {"hessian": _HESSIAN})
-        assert stored == []
-        assert await store.list_for("k") == []
-
-    asyncio.run(_run())
+    monkeypatch.setattr(settings, "artifact_max_bytes", 16)
+    store = InMemoryArtifactStore()
+    with caplog.at_level(logging.DEBUG, logger="chemclaw.science.calc.artifacts"):
+        stored = await put_all(store, "k", {"hessian": _HESSIAN})
+    assert stored == []
+    assert await store.list_for("k") == []
 
 
-def test_disabled_store_keeps_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_disabled_store_keeps_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
     """A deployment that wants no artifacts gets none, from one config token."""
-
-    async def _run() -> None:
-        monkeypatch.setattr(settings, "artifact_store_enabled", False)
-        store = InMemoryArtifactStore()
-        assert await store.put("k", "hessian", _HESSIAN) is None
-
-    asyncio.run(_run())
+    monkeypatch.setattr(settings, "artifact_store_enabled", False)
+    store = InMemoryArtifactStore()
+    assert await store.put("k", "hessian", _HESSIAN) is None
 
 
-def test_list_for_is_ordered_and_scoped_to_one_calculation() -> None:
+async def test_list_for_is_ordered_and_scoped_to_one_calculation() -> None:
     """Every by-product of one run, name-ordered; nothing from another run."""
-
-    async def _run() -> None:
-        store = InMemoryArtifactStore()
-        for name in ("vibspectrum", "hessian", "xtbopt.xyz"):
-            await store.put("mine", name, f"{name}-body".encode())
-        await store.put("theirs", "hessian", b"other")
-        assert [ref.name for ref in await store.list_for("mine")] == [
-            "hessian",
-            "vibspectrum",
-            "xtbopt.xyz",
-        ]
-        assert [ref.name for ref in await store.list_for("theirs")] == ["hessian"]
-
-    asyncio.run(_run())
+    store = InMemoryArtifactStore()
+    for name in ("vibspectrum", "hessian", "xtbopt.xyz"):
+        await store.put("mine", name, f"{name}-body".encode())
+    await store.put("theirs", "hessian", b"other")
+    assert [ref.name for ref in await store.list_for("mine")] == [
+        "hessian",
+        "vibspectrum",
+        "xtbopt.xyz",
+    ]
+    assert [ref.name for ref in await store.list_for("theirs")] == ["hessian"]
 
 
 def test_media_types_are_named_for_known_artifacts_and_opaque_otherwise() -> None:
@@ -211,7 +191,7 @@ def _offloading() -> tuple[Any, InMemoryStore, InMemoryArtifactStore]:
     return ArrayOffloadingStore(results, blobs, HESSIAN_ARRAYS), results, blobs
 
 
-def test_the_matrix_does_not_land_in_the_row_it_can_never_be_pruned_from() -> None:
+async def test_the_matrix_does_not_land_in_the_row_it_can_never_be_pruned_from() -> None:
     """The whole point: `calculation_results` keeps an address, the artifact store keeps the bytes.
 
     `durable/retention.py` refuses to prune `calculation_results` because D-011 says a persisted
@@ -220,37 +200,29 @@ def test_the_matrix_does_not_land_in_the_row_it_can_never_be_pruned_from() -> No
     `durable/artifact_eviction.py` and D-124 exist to prevent. So the assertion is on what the
     *underlying* row contains, not on what the caller gets back.
     """
+    store, results, blobs = _offloading()
+    await store.put(StoredResult(key=_KEY, result=dict(_PAYLOAD), compute_seconds=12.0))
 
-    async def _run() -> None:
-        store, results, blobs = _offloading()
-        await store.put(StoredResult(key=_KEY, result=dict(_PAYLOAD), compute_seconds=12.0))
-
-        row = await results.get(_KEY)
-        assert row is not None
-        assert "hessian_npy" not in row.result, "the matrix was stored in the unprunable row"
-        assert "dipole_derivatives_npy" not in row.result
-        assert row.result["hessian_artifact"], "the row does not address the matrix"
-        # And the bytes really are in the store the eviction sweep walks.
-        assert await blobs.open(str(row.result["hessian_artifact"])) is not None
-
-    asyncio.run(_run())
+    row = await results.get(_KEY)
+    assert row is not None
+    assert "hessian_npy" not in row.result, "the matrix was stored in the unprunable row"
+    assert "dipole_derivatives_npy" not in row.result
+    assert row.result["hessian_artifact"], "the row does not address the matrix"
+    # And the bytes really are in the store the eviction sweep walks.
+    assert await blobs.open(str(row.result["hessian_artifact"])) is not None
 
 
-def test_a_hit_comes_back_byte_identical_to_what_was_stored() -> None:
+async def test_a_hit_comes_back_byte_identical_to_what_was_stored() -> None:
     """Offloading is invisible to the caller, or it is not a cache."""
+    store, _, _ = _offloading()
+    await store.put(StoredResult(key=_KEY, result=dict(_PAYLOAD), compute_seconds=12.0))
 
-    async def _run() -> None:
-        store, _, _ = _offloading()
-        await store.put(StoredResult(key=_KEY, result=dict(_PAYLOAD), compute_seconds=12.0))
-
-        hit = await store.get(_KEY)
-        assert hit is not None
-        assert hit.result == _PAYLOAD
-
-    asyncio.run(_run())
+    hit = await store.get(_KEY)
+    assert hit is not None
+    assert hit.result == _PAYLOAD
 
 
-def test_an_evicted_matrix_is_a_miss_to_recompute_from_and_never_an_error() -> None:
+async def test_an_evicted_matrix_is_a_miss_to_recompute_from_and_never_an_error() -> None:
     """The trade D-124 makes: a cold matrix is reclaimed, and the next caller pays a recompute.
 
     Every reason a blob is absent is ordinary — the store disabled, the sweep reclaimed it, a
@@ -258,19 +230,15 @@ def test_an_evicted_matrix_is_a_miss_to_recompute_from_and_never_an_error() -> N
     failed calculation; returning the row without its matrix would be worse still, because the
     caller would validate a payload with no arrays in it.
     """
+    store, results, blobs = _offloading()
+    await store.put(StoredResult(key=_KEY, result=dict(_PAYLOAD), compute_seconds=12.0))
+    blobs._blobs.clear()  # the eviction sweep, or a restore without the artifact table
 
-    async def _run() -> None:
-        store, results, blobs = _offloading()
-        await store.put(StoredResult(key=_KEY, result=dict(_PAYLOAD), compute_seconds=12.0))
-        blobs._blobs.clear()  # the eviction sweep, or a restore without the artifact table
-
-        assert await store.get(_KEY) is None, "an evicted matrix must read as a miss"
-        assert await results.get(_KEY) is not None, "the row itself is untouched by eviction"
-
-    asyncio.run(_run())
+    assert await store.get(_KEY) is None, "an evicted matrix must read as a miss"
+    assert await results.get(_KEY) is not None, "the row itself is untouched by eviction"
 
 
-def test_a_row_is_never_written_addressing_an_artifact_that_did_not_land() -> None:
+async def test_a_row_is_never_written_addressing_an_artifact_that_did_not_land() -> None:
     """Ordering is the design, not an implementation detail.
 
     A row whose `hessian_artifact` points at nothing would be served as a hit forever and rejected
@@ -285,28 +253,21 @@ def test_a_row_is_never_written_addressing_an_artifact_that_did_not_land() -> No
 
     from chemclaw.science.calc.artifacts import HESSIAN_ARRAYS, ArrayOffloadingStore
 
-    async def _run() -> None:
-        results = InMemoryStore()
-        store = ArrayOffloadingStore(results, _Refusing(), HESSIAN_ARRAYS)
-        await store.put(StoredResult(key=_KEY, result=dict(_PAYLOAD), compute_seconds=12.0))
+    results = InMemoryStore()
+    store = ArrayOffloadingStore(results, _Refusing(), HESSIAN_ARRAYS)
+    await store.put(StoredResult(key=_KEY, result=dict(_PAYLOAD), compute_seconds=12.0))
 
-        assert await results.get(_KEY) is None, "a row was written addressing nothing"
-        assert await store.get(_KEY) is None
-
-    asyncio.run(_run())
+    assert await results.get(_KEY) is None, "a row was written addressing nothing"
+    assert await store.get(_KEY) is None
 
 
-def test_a_payload_carrying_no_arrays_is_stored_unchanged() -> None:
+async def test_a_payload_carrying_no_arrays_is_stored_unchanged() -> None:
     """Wrapping a store must never be lossy for a result that has nothing to offload."""
+    store, results, _ = _offloading()
+    plain = {"structure_id": "st_1", "electronic_energy_hartree": -76.4}
+    await store.put(StoredResult(key=_KEY, result=dict(plain), compute_seconds=1.0))
 
-    async def _run() -> None:
-        store, results, _ = _offloading()
-        plain = {"structure_id": "st_1", "electronic_energy_hartree": -76.4}
-        await store.put(StoredResult(key=_KEY, result=dict(plain), compute_seconds=1.0))
-
-        row = await results.get(_KEY)
-        assert row is not None and row.result == plain
-        hit = await store.get(_KEY)
-        assert hit is not None and hit.result == plain
-
-    asyncio.run(_run())
+    row = await results.get(_KEY)
+    assert row is not None and row.result == plain
+    hit = await store.get(_KEY)
+    assert hit is not None and hit.result == plain

@@ -20,6 +20,8 @@ from chemclaw.core.config import settings
 from chemclaw.durable.connector_job import ConnectorJobInput, ConnectorJobResult, job_record_for
 from chemclaw.durable.job_record import (
     JobRecord,
+    JobRecordSearch,
+    JobRecordSummary,
     NullJobRecordSink,
     default_job_record_sink,
     log_record_durability,
@@ -156,9 +158,46 @@ def test_the_sink_is_durable_wherever_a_database_is_configured(
 def test_searching_without_a_store_answers_honestly_rather_than_raising(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`find_past_jobs` on a memory-store deployment reports no history, not an error."""
+    """`find_past_jobs` on a memory-store deployment reports no history, not an error.
+
+    **And says which of the two empties it is.** "No run matches" and "this deployment keeps no
+    record of any run" are the same empty list, and the second is not evidence about the first —
+    the same distinction `FingerprintSearch.index_empty` exists for, on the other tool whose whole
+    job is "have we seen this before".
+    """
     monkeypatch.setattr(settings, "session_store", "memory")
-    assert asyncio.run(search_job_records("suzuki")) == []
+    found = asyncio.run(search_job_records("suzuki"))
+    assert found.hits == []
+    assert found.records_kept is False
+    assert "keeps no" in found.verdict
+
+
+def test_the_verdict_is_serialized_rather_than_only_readable_in_python() -> None:
+    """A plain `property` would never leave this process — the hazard-screen lesson, again.
+
+    `FingerprintSearch.verdict` is a `computed_field` for exactly this reason: a bare property is
+    not in `model_dump()`, so the sentence explaining what an empty (or truncated) result means
+    would be absent from the tool output the model actually reads.
+    """
+    payload = JobRecordSearch(hits=[], hits_truncated=False).model_dump()
+    assert "verdict" in payload
+    assert payload["verdict"]
+
+
+def test_a_full_page_says_the_count_is_a_floor() -> None:
+    """The whole of F2: "have we run this before?" answered over a capped page.
+
+    An unflagged short list reads as the complete answer, so a chemist asking whether a coupling
+    has been optimized before is told "no" by a page that simply ended.
+    """
+    hits = [
+        JobRecordSummary(job_id=f"bo-{i}", connector="bo", job="campaign", rationale="", summary="")
+        for i in range(3)
+    ]
+    complete = JobRecordSearch(hits=hits, hits_truncated=False)
+    partial = JobRecordSearch(hits=hits, hits_truncated=True)
+    assert complete.verdict != partial.verdict
+    assert "floor" in partial.verdict
 
 
 def test_a_worker_that_keeps_no_job_records_says_so_at_boot(
@@ -317,3 +356,49 @@ def test_the_background_worker_actually_serves_the_record_activity() -> None:
     from chemclaw.durable.registry import registered_activities
 
     assert record_job in registered_activities("background")
+
+
+def test_the_jobs_listing_is_a_page_that_says_there_is_more(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`GET /jobs` was bounded by `job_record_search_limit` and nothing on the wire said so.
+
+    The same cap the agent tool hit, reaching a browser: a chemist with more finished runs than the
+    page could not get at the older ones from any client, and the listing looked complete. The body
+    stays a bare JSON array — the companion UI parses it as one — so the cursor goes in a header,
+    exactly as `GET /sessions` does it, and a client that ignores the header sees what it saw
+    before.
+    """
+    from fastapi.testclient import TestClient
+
+    from chemclaw.api.app import create_app
+
+    def _page(truncated: bool) -> JobRecordSearch:
+        return JobRecordSearch(
+            hits=[
+                JobRecordSummary(
+                    job_id="job-2",
+                    connector="bo",
+                    job="start_optimization_campaign",
+                    rationale="the reviewer questioned the reported barrier",
+                    summary="done",
+                )
+            ],
+            hits_truncated=truncated,
+        )
+
+    async def _full(text: str = "", connector: str = "", after: str = "") -> JobRecordSearch:
+        return _page(truncated=True)
+
+    async def _last(text: str = "", connector: str = "", after: str = "") -> JobRecordSearch:
+        return _page(truncated=False)
+
+    client = TestClient(create_app())
+
+    monkeypatch.setattr("chemclaw.api.app.search_job_records", _full)
+    response = client.get("/jobs")
+    assert [item["job_id"] for item in response.json()] == ["job-2"]
+    assert response.headers["X-Next-Cursor"] == "job-2"
+
+    monkeypatch.setattr("chemclaw.api.app.search_job_records", _last)
+    assert "X-Next-Cursor" not in client.get("/jobs").headers

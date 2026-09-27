@@ -41,6 +41,7 @@ from mcp.server.fastmcp import FastMCP
 from chemclaw.agent import tool_modules as _tool_modules  # noqa: F401
 from chemclaw.agent.authz import READ_ONLY_TOOLS
 from chemclaw.connectors.server import connector_app
+from chemclaw.core.asgi import transport_bounds
 from chemclaw.core.config import settings
 from chemclaw.core.tool_registry import registered_tools
 
@@ -90,10 +91,29 @@ WITHHELD: dict[str, str] = {
         "named employee who opened it — the same enumeration `check_pending_requests` is withheld "
         "for, and the discovery path for the ids `read_experiment_protocol` takes"
     ),
+    "experiment_arms_from_campaign": (
+        "the same disclosure as `read_experiment_protocol` one door over: a campaign's objective, "
+        "the parameter space a team is exploring and the exact conditions they are about to run. "
+        "A `campaign_id` is a hash of the decision space, so it is guessable by anyone who knows "
+        "the space — which is the guessability argument that withholds the two entries below"
+    ),
     "read_experiment_protocol": (
         "one chemist's in-flight design: the goal they typed, their `prior_work` and `notes`, and "
         "what they ruled out. A `design-<hash>` id is derived from the ask, which is the same "
         "guessability argument that withholds `get_durable_job_status`"
+    ),
+    "rescale_experiment_protocol": (
+        "the same document `read_experiment_protocol` above is withheld for, reached by the same "
+        "guessable `design-<hash>` id — it returns the whole design, not only its charge table, so "
+        "the chemist's goal, `prior_work` and `notes` ride out with the scaled numbers. Being a "
+        "read that stores nothing is what makes it read-only to the plan gate; it is not an "
+        "argument for exporting it to an unauthenticated face"
+    ),
+    "read_plate_results": (
+        "one team's plate and what it gave: the conditions they ran and the numbers they got, "
+        "reached by the same guessable `design-<hash>` id `read_experiment_protocol` above is "
+        "withheld for. An unreported campaign's results are the most commercially sensitive "
+        "thing this tier holds"
     ),
     "check_pending_requests": (
         "every open request in the deployment with the reasoning a chemist typed, who asked and "
@@ -184,10 +204,16 @@ def main() -> None:
     """
     import uvicorn
 
+    from chemclaw.core.llm_gateway import refuse_unconfigured_llm_gateway
     from chemclaw.core.logging import configure_logging, configure_telemetry
 
     configure_logging()
     configure_telemetry()
+    # This face makes model calls: `condense_protocols` is read-only, is not in `WITHHELD`, and
+    # builds a chat model of its own (`agent/condense.py`). So it is one of the process kinds the
+    # gateway guard has to reach, and it is one of the ones it did not while the guard lived in
+    # `api/middleware.py` beside `create_app`.
+    refuse_unconfigured_llm_gateway()
     logger.info("mcp face starting on %s:%s", settings.service_host, settings.service_port)
     uvicorn.run(
         "chemclaw.api.mcp_face:create_face_app",
@@ -196,6 +222,9 @@ def main() -> None:
         port=settings.service_port,
         # Ours is already applied above; letting uvicorn install its own would replace it.
         log_config=None,
+        # The three bounds D-2026-08-01 established. This face serves the same kind of traffic the
+        # front door does and ran without them until 2026-09-11 — see `core/asgi.transport_bounds`.
+        **transport_bounds(),
     )
 
 

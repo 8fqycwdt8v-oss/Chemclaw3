@@ -38,10 +38,23 @@ ALTER TABLE reaction_fingerprints ADD COLUMN IF NOT EXISTS source TEXT NOT NULL 
 -- could belong to either, so it is left alone rather than assigned to the alphabetically-first.
 --
 -- What stays `''` afterwards is therefore bounded and named: rows ingested before `051` existed,
--- and rows whose id two sources already claim. Both are superseded on the next ingest —
+-- and rows whose id two sources already claim.
+--
+-- This comment used to continue: "Both are superseded on the next ingest —
 -- `PostgresFingerprintStore.add` deletes the unsourced twin when it writes a sourced row, so no
--- entry is ever searchable twice under one label. This index is derived and rebuildable; unlike a
--- transcription there is nothing here a re-sync cannot regenerate.
+-- entry is ever searchable twice under one label." That was never true and is not true now:
+-- `store.py` contains no `DELETE` at all, and the runtime role holds none on either fingerprint
+-- table, which `store.py`'s own constructor explains at length. An unsourced twin is *shelved*
+-- beside its sourced row rather than removed, and `094` made that the key's shape for every
+-- generation. So an entry can be searchable twice under one label, and what stops the two being
+-- read as independent is the definition scoping in the reader, not a delete here.
+--
+-- The statements below are unchanged, and a merged migration's statements are what is immutable:
+-- the runner hashes `_statements`, comments stripped, precisely so a wrong comment can be
+-- corrected without refusing on every database that already applied the file.
+--
+-- This index is derived and rebuildable; unlike a transcription there is nothing here a re-sync
+-- cannot regenerate.
 UPDATE reaction_fingerprints f
 SET source = claimant.source
 FROM (

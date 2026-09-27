@@ -133,6 +133,39 @@ def test_default_preserves_single_graph_retriever(monkeypatch: pytest.MonkeyPatc
     assert [r.name for r in retrievers] == ["graph"]
 
 
+def test_the_three_note_legs_declare_one_corpus(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`graph`, `lexical` and `vector` read one note tree, and the manifests have to say so.
+
+    Without the declaration they are three independent votes in `reciprocal_rank_fusion`, which is
+    the correlated-ranker defect: measured on the shipped corpus their pairwise agreement is 47/55,
+    44/55 and 41/53, because the shipped `embedding_provider` is `hash` and all three are therefore
+    term-overlap rankers.
+
+    Asserted here rather than left to the fusion's own unit tests, because those construct their
+    corpus list by hand — deleting `corpus: knowledge-notes` from all three manifests left every
+    one of them green while restoring the defect in every deployment.
+    """
+    monkeypatch.setattr(settings, "data_sources", "graph,lexical,vector")
+    corpora = registry.active_retrieve_corpora()
+    assert set(corpora) == {"graph", "lexical", "vector"}
+    assert len(set(corpora.values())) == 1, (
+        f"{corpora} — the three legs over the note tree must name one corpus, or RRF counts their "
+        "agreement three times"
+    )
+
+
+def test_a_source_that_declares_no_corpus_is_its_own(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The default, and what keeps every existing deployment's fusion unchanged.
+
+    The other direction of the test above: if `active_retrieve_corpora` answered one corpus for
+    everything, the assertion there would pass while collapsing unrelated sources into one vote.
+    """
+    monkeypatch.setattr(settings, "data_sources", "graph,vendored")
+    corpora = registry.active_retrieve_corpora()
+    assert corpora["vendored"] == "vendored"
+    assert corpora["graph"] != "vendored"
+
+
 def test_a_new_source_is_a_folder_and_a_config_token(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -591,7 +624,7 @@ def test_the_gate_binds_every_half_as_the_registry_actually_calls_it(
         )
         monkeypatch.setattr(settings, "data_sources_dir", str(folder))
         monkeypatch.setattr(settings, "data_sources", "documented")
-        registry.discovered.cache_clear()
+        registry.forget_discovered()
 
         built: Exception | None = None
         try:
@@ -606,3 +639,87 @@ def test_the_gate_binds_every_half_as_the_registry_actually_calls_it(
             f"the {half} half fails to build, and the gate that exists to say so before a deploy "
             f"reported: {problems}"
         )
+
+
+def test_a_quoted_flag_in_a_manifest_is_refused_rather_than_read_as_true(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The half of "the callable's signature is the schema" that checked names and not values.
+
+    `snapshot` on `commitments-json` licenses a **destructive** sweep: it tells the store that every
+    pass reads a complete export, so anything absent from the export may be deleted. Measured
+    before this check, over `yaml.safe_load` and the real factory:
+
+        snapshot: true      -> True   sweep armed
+        snapshot: false     -> False  sweep off
+        snapshot: "false"   -> 'false' sweep ARMED
+        snapshot: "no"      -> 'no'    sweep ARMED
+
+    A manifest value reaches the callable exactly as YAML parsed it, and every non-empty string is
+    truthy — so the quoted spelling of the word that turns the sweep off is the spelling that turns
+    it on. Neither `make datasource-validate` nor `_build_half` could see it: both asked what the
+    callable *accepts*, and `signature_mismatch`'s own docstring says "values are irrelevant here",
+    which is right for a `connection:` block of addresses and wrong for a `config:` block of
+    behaviour.
+
+    Driven through a real manifest rather than through `option_type_mismatch` directly, because the
+    property is that the gate **and** the build agree — a check in one of them is a check an
+    operator can walk past.
+    """
+    folder = tmp_path / "quoted"
+    folder.mkdir()
+    (folder / "datasource.yaml").write_text(
+        textwrap.dedent(
+            """\
+            name: quoted
+            description: A commitments export whose snapshot flag is written as a quoted word.
+            commitments: chemclaw.ingest.commitments.json_export:json_commitment_export
+            config:
+              snapshot: "false"
+            """
+        ),
+    )
+    monkeypatch.setattr(settings, "data_sources_dir", str(folder.parent))
+    monkeypatch.setattr(settings, "data_sources", "quoted")
+    registry.forget_discovered()
+
+    with pytest.raises(registry.DataSourceError) as refused:
+        registry.make_data_source("quoted")
+    message = str(refused.value)
+    assert "snapshot" in message and "bool" in message, message
+
+    problems = validate_datasources()
+    assert [p for p in problems if "quoted" in p and "snapshot" in p], (
+        f"the build refuses this manifest and the gate that exists to say so first did not: "
+        f"{problems}"
+    )
+
+
+def test_a_flag_written_the_way_yaml_spells_one_is_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other direction, so "refuses everything" cannot pass as "checks the type".
+
+    Both spellings of a real boolean, on the same manifest shape the test above rejects.
+    """
+    for written, expected in (("true", True), ("false", False)):
+        name = f"flag-{written}"
+        folder = tmp_path / name
+        folder.mkdir()
+        (folder / "datasource.yaml").write_text(
+            textwrap.dedent(
+                f"""\
+                name: {name}
+                description: A commitments export whose snapshot flag is a real YAML boolean.
+                commitments: chemclaw.ingest.commitments.json_export:json_commitment_export
+                config:
+                  snapshot: {written}
+                """
+            ),
+        )
+        monkeypatch.setattr(settings, "data_sources_dir", str(tmp_path))
+        monkeypatch.setattr(settings, "data_sources", name)
+        registry.forget_discovered()
+        source = registry.make_data_source(name)
+        assert source.commitments is not None
+        assert source.commitments.snapshot is expected

@@ -105,6 +105,13 @@ def test_the_face_is_not_addressable_as_a_connector() -> None:
 #: forgotten — which is precisely how four deployment-wide reads were being served. Only an explicit
 #: list makes adding one a decision somebody has to take.
 _ADVERTISED = {
+    # Exported deliberately, and the question `WITHHELD` is organised around answers it cleanly:
+    # this tool says nothing about this deployment's people and nothing about its corpus either. It
+    # reads no store and opens no session — every number it touches arrives in the call — so what
+    # an external caller learns from it is the arithmetic they already supplied the inputs for.
+    # That makes it the safest tool on this surface rather than a borderline one.
+    "check_against_specification",
+    "estimate_stability_trend",
     "expand_note",
     "find_knowledge_gaps",
     "find_notes",

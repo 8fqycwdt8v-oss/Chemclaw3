@@ -26,6 +26,7 @@ fixtures, and `docs/planning/BACKLOG.md` carries the generated version.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import tempfile
 from datetime import date
@@ -507,7 +508,7 @@ def test_the_budget_refusal_is_permanent_once_a_cap_is_reached(turns: list[int],
         refused = False
         for tokens in turns:
             try:
-                tracker.check("s", None)
+                asyncio.run(tracker.check("s", None))
             except BudgetExceeded:
                 refused = True
             else:

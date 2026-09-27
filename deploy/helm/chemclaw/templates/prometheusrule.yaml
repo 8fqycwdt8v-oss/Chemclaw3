@@ -37,8 +37,13 @@
        claim it did.** `increase(c[10m]) > 0` keeps returning a sample for the whole ten minutes
        after a *single* increment, so any `for:` shorter than the range window is satisfied by one
        blip: the alert is not suppressed, only late. Where a rule means "more than the odd blip",
-       the count is the threshold and `for:` is `0m`. The three `increase(...) > 0` + `for: 0m`
-       alerts are correct as written — their intent *is* the first increment. */ -}}
+       the count is the threshold and `for:` is `0m`. An `increase(...) > 0` rule with `for: 0m` is
+       correct as written wherever its intent *is* the first increment, which is most of them.
+
+       No count of them is written here. The sentence this replaced said "the three", and `main`
+       already carried nineteen `increase(` rules before this branch made it twenty — the same
+       failure the rest of this tree refuses a number in prose for. `grep -c 'expr: increase(' `
+       on this file answers, and the answer is right on the day it is asked. */ -}}
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
@@ -68,6 +73,28 @@ spec:
               The audit sink failed to record at least one tool call in the last 10 minutes, so the
               trail is incomplete. Tool calls keep succeeding, which is why this is invisible
               without an alert. Check the `audit_sink_failure` log marker for the affected trail.
+
+        {{- /* The same hole from the other cause, and the reason it is a second alert rather than
+               a second contributor to the one above: that one means the database refused a batch,
+               this one means it could not keep up with the producer and the oldest buffered rows
+               were dropped to bound memory. Unreachable and cannot-keep-up have different
+               remedies — one is a connection, the other is capacity — and pooled they would read
+               as one incident. This arm also has no exception to log, so an operator following
+               the sink-failure runbook would find no traceback and conclude the alert was wrong. */}}
+        - alert: ChemclawAuditTrailShedding
+          expr: increase(chemclaw_audit_events_shed_total[10m]) > 0
+          for: 0m
+          labels:
+            severity: critical
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawaudittrailshedding
+            summary: Audit records are being dropped because the write buffer is full
+            description: >-
+              The audit write buffer reached `CHEMCLAW_AGENT_AUDIT_BUFFER_MAX_EVENTS` and shed its
+              oldest records, so the trail has a gap. The database is reachable but slower than the
+              producer — check write latency and pool saturation rather than connectivity. Every
+              shed event still reached the stdlib log; the `audit_buffer_full` marker names how
+              many and at what bound.
 
         {{- /* Outbound delivery, which shipped with no signal at all: no logger and no metric
                anywhere in `chemclaw.deliver`, a per-channel failure swallowed so one broken
@@ -445,6 +472,33 @@ spec:
               Turns are being answered without these capabilities and nothing in the answer says
               so.
 
+        {{- /* The *turn's* half of the same question, and it is a different question — which is why
+               it is a second rule rather than a wider selector on the one above. Driven on
+               2026-09-19: a connector answering 200 on `/healthz` and 500 on `/mcp` is reported
+               `healthy` by the readiness sweep (`connectors/health.py` asks the health route and
+               nothing else), so `chemclaw_connectors_unhealthy` measured **0** against a connector
+               that failed every call, and `ChemclawConnectorsUnhealthy` could not fire. The only
+               series that moved was this one, from the per-turn open — and no rule read it, so a
+               capability was silently absent from every answer with nothing alerting and nothing on
+               a dashboard able to name it (the counter was unlabelled too). `for: 0m` and an
+               `increase`, on the same reasoning as ChemclawSubsystemUnavailable: every increment is
+               a turn that has already answered without a capability, so there is nothing to wait
+               to confirm. */}}
+        - alert: ChemclawConnectorsDegradingTurns
+          expr: increase(chemclaw_connectors_unreachable_total[15m]) > 0
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawconnectorsdegradingturns
+            summary: Turns are answering without a connector's tools
+            description: >-
+              This connector did not come up when a turn opened it, so its tools were absent from
+              that answer and the transcript looks like any other. It fires for a connector the
+              readiness sweep calls healthy — a pod whose `/healthz` answers 200 while `/mcp` fails,
+              a missing bearer token, an MCP handshake that never completes — so a flat
+              `chemclaw_connectors_unhealthy` is not evidence against it.
+
         {{- /* The request-path sibling of ChemclawDurableUnreachable, and separate from it on
                purpose (D-2026-08-08-a-rollback-that-is-not-a-schema-step): that alert reads a
                per-turn Temporal probe, this one reads per-request shedding for *any* unavailable
@@ -636,12 +690,77 @@ spec:
               its allowance — read `chemclaw_tokens_total` beside this — or the window is set below
               real traffic. The affected users see a 429, not an explanation.
 
+        {{- /* And the lead time the two rules above cannot give. Both fire on a bound that has
+               already bound: the token-burn rule on a fleet rate with no cap in it, and the refusal
+               rule on the turn that was lost to the cap. `budget_warn_fraction` (0.8) crosses while
+               there is still room, which is the only point at which raising a cap or talking to a
+               user costs nobody a question.
+
+               Not `for: 15m`, unlike its neighbour. A crossing is a **step**, not a rate: a user
+               passes 80% once per window, so a sustained-for clause would wait for a repetition
+               that a single crossing never produces, and the alert would fire only for somebody
+               spending fast enough to cross it again inside the interval — precisely the case the
+               refusal rule already catches. */}}
+        - alert: ChemclawBudgetNearingItsCap
+          expr: sum(increase(chemclaw_budget_warnings_total[1h])) > 0
+          labels:
+            severity: info
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawbudgetnearingitscap
+            summary: A session or user has spent most of its turn or token budget
+            description: >-
+              Somebody crossed `budget_warn_fraction` of a cap and has not been refused yet. The
+              scope is in the WARNING log line, not on this series: the identity is a session id or
+              an Entra `oid`, and `033_cost_attribution.sql` rules those out as label values. Act
+              here or the next rule up is the one that fires.
+
+        {{- /* The revision loop paying for nothing. A revision doubles a flagged turn's model
+               spend, and the deal is that it buys a grounded answer; when most of them exhaust
+               instead, the deployment is paying twice and still shipping the answer marked for
+               review — which is exactly what it shipped before the loop existed.
+
+               A ratio rather than a count, because the count scales with traffic and says nothing
+               on its own: ten exhaustions out of a thousand turns is a working loop, ten out of
+               twelve is a broken one.
+
+               **Both sides count turns.** This divided exhausted *turns* by revision *passes*,
+               which are different units, so the threshold moved with `answer_review_max_rounds`:
+               measured with every flagged turn exhausting, the ratio read 1.00 at 1 round and 0.20
+               at 5 — silent at total failure for every setting but one, while the description
+               below told an operator to raise the rounds, which pushes it further down.
+               `chemclaw_answer_review_turns_total` is the denominator that makes this a fraction
+               of turns that tried.
+
+               **A traffic floor rather than `clamp_min`.** A clamped denominator turns an idle
+               window into a large finite ratio instead of no sample, which is the shape
+               `tests/test_deploy_chart.py::test_every_ratio_alert_has_a_traffic_floor` exists to
+               reject — and it was admitted here only because that guard looked for `rate(` and
+               this rule uses `increase(`. With the feature off both series are absent and the
+               `and` clause leaves the rule empty, which is the same correct silence by a mechanism
+               the guard can see. */}}
+        - alert: ChemclawAnswerRevisionsNotHelping
+          expr: >-
+            sum(increase(chemclaw_answer_review_exhausted_total[6h]))
+            / sum(increase(chemclaw_answer_review_turns_total[6h])) > 0.5
+            and sum(increase(chemclaw_answer_review_turns_total[6h])) > 10
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawanswerrevisionsnothelping
+            summary: Most flagged answers are still unsupported after every allowed revision
+            description: >-
+              More than half the turns that tried a revision ran out of rounds. They still answered and
+              still carry `review_required`, so nothing is lost that was not already lost — but the
+              second model call bought nothing. Raise `answer_review_max_rounds`, or turn it back to
+              0 and treat the verifier's verdict as the signal it was before.
+
     {{- /* The group nothing in this file used to have, and the one whose absence made every rule
            above conditional on something no rule stated: **every one of them alerts on an
            application counter, so a process that is gone emits silence** — and silence is what a
            healthy quiet system also emits. (The sentence here used to say "all sixteen", and by the
-           time it was read the file held thirty-seven rules, of which the two below are the only
-           ones that read anything but a first-party series. `tests/test_deploy_chart.py` derives
+           time it was read the file held thirty-seven rules, of which only the handful in this
+           group read anything but a first-party series. `tests/test_deploy_chart.py` derives
            that split from the rendered rules rather than restating it here, for the reason
            `D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose` gives.) A CrashLooping, evicted, unschedulable or simply un-scraped pod
            produced no alert of any kind. `up` is the only series that inverts that: it is
@@ -699,11 +818,20 @@ spec:
                labels stopped matching all produce *no series*, and `up{...} == 0` over no series is
                an empty vector. `absent()` is the only shape that alerts on nothing being there.
 
-               Pinned to the workers' scrape endpoint because they are the release's one guaranteed
-               population — the front door has an HPA and connectors are enabled per deployment,
-               while `background-worker` always runs. `endpoint` is the port *name* the operator
-               stamps on every sample, and `tests/test_deploy_chart.py` holds it equal to the
-               PodMonitor's own `port:` so the two cannot drift apart silently. */}}
+               Scoped to the `metrics` endpoint, which only worker pods declare — the background
+               worker and every connector worker, through `chemclaw.workerProbes`; the front door,
+               the connector servers and mcp-face do not include it. `endpoint` is the port *name* the operator stamps on every sample, and `tests/test_deploy_chart.py`
+               holds it equal to the PodMonitor's own `port:` so the two cannot drift apart silently.
+
+               **This used to say it was "pinned to the workers' scrape endpoint because they are
+               the release's one guaranteed population", and that was true of the Deployment and
+               false of the expression.** `deployment-connectors.yaml` says in its own comment that
+               a connector worker "serves the same `metrics` port as core's worker" — so this
+               `absent()` is false whenever *any* connector worker is up, and a background worker
+               that cannot schedule is invisible to it. With every connector worker disabled it is
+               background-worker-only. What the
+               sentence described is what the rule below does, by carrying the component label the
+               PodMonitor already stamps. */}}
         - alert: ChemclawNoWorkerIsScraped
           expr: absent(up{namespace="{{ .Release.Namespace }}", endpoint="metrics"})
           for: 10m
@@ -718,6 +846,62 @@ spec:
               scheduled, a PodMonitor whose selector no longer matches, or user-workload monitoring
               having been turned off cluster-wide — in which case every alert in this file is inert
               and this is the only one that says so.
+
+        {{- /* The same failure one component down, and the one `Recreate` makes reachable.
+               `deployment-workers.yaml` is the only Deployment in this chart with a `strategy:`
+               block, and it is `Recreate` — deliberately, because two background workers racing on
+               one corpus clone is the defect `D-2026-08-27-what-a-second-background-worker-would-race-on`
+               pins the replica count to prevent. The cost of that choice is that the old pod is
+               gone *before* the new one is tried, so a background worker that cannot start leaves
+               the release with none at all, and the rule above stays green whenever a connector
+               worker is still scraped on the same endpoint. Every other Deployment here
+               defaults to RollingUpdate, which keeps the old pod serving, so this is scoped to the
+               one component that needs it rather than generalised.
+
+               `app_kubernetes_io_component` is the PodMonitor's own `podTargetLabels` entry, so
+               this needs no new plumbing and no series this Prometheus cannot see — which is the
+               constraint the comment above the fleet group states: kube-state-metrics lives in
+               *platform* monitoring, so `kube_deployment_status_replicas_unavailable`, the obvious
+               expression for "a rollout is stuck", would be permanently empty here and green
+               forever.
+
+               The window is derived, not chosen. `Recreate` first waits out the old pod's whole
+               `chemclaw.workerGracePeriod`, then the new pod gets its startup budget, then the
+               same margin `ChemclawTargetDown` already allows. Stated as arithmetic over the same
+               values so that raising a probe budget or a shutdown budget cannot leave this behind.
+
+               **What it does not catch**: a worker that serves `/metrics` and never passes
+               `/readyz`. A PodMonitor scrapes unready pods, so `up` is 1 and this stays silent.
+               That case is `ChemclawWorkerNotPolling` below, which renders only when the Temporal
+               SDK exporter is enabled — and it ships disabled. */}}
+        {{- $workerStart := mul (int .Values.probes.worker.startup.periodSeconds) (int .Values.probes.worker.startup.failureThreshold) }}
+        {{- $workerGrace := add (int (required "config.CHEMCLAW_WORKER_GRACEFUL_SHUTDOWN_SECONDS must be set: ChemclawNoBackgroundWorkerIsScraped's `for:` is derived from it" .Values.config.CHEMCLAW_WORKER_GRACEFUL_SHUTDOWN_SECONDS)) 30 }}
+        - alert: ChemclawNoBackgroundWorkerIsScraped
+          expr: >-
+            absent(up{namespace="{{ .Release.Namespace }}", endpoint="metrics",
+            app_kubernetes_io_component="background-worker"})
+          for: {{ add $workerGrace $workerStart (int .Values.monitoring.alerts.targetDownMarginSeconds) }}s
+          labels:
+            severity: critical
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawnobackgroundworkerisscraped
+            summary: No background worker pod exists as a scrape target
+            description: >-
+              The background worker is not being scraped at all, so nothing in this release is
+              polling `background-jobs` — sync, re-index, reports and the connector-job wrapper are
+              all stopped, silently, because none of them emits a counter when it is not running.
+              This Deployment uses `Recreate`, so the old pod is already gone. `absent()` is 1 only
+              when *no series matches*, so the cause is a pod that never became a scrape target at
+              all: unschedulable, `workerReplicas: 0`, a selector that stopped matching, or the
+              PodMonitor not selecting it. An image that will not pull and a container that exits
+              are `ChemclawTargetDown`'s — the kubelet assigns a PodIP before either happens, so the
+              target exists and reports `up == 0`, which is a present series rather than an absent
+              one. `ChemclawNoWorkerIsScraped` does not cover this wherever any connector *worker*
+              is enabled: those pods are the other thing in this release that declares a port named
+              `metrics` (`chemclaw.workerProbes`, which the connector *servers*, the front door and
+              the mcp-face do not include), so they keep the unscoped `absent()` satisfied. With
+              every connector disabled the two alerts fire together, and that is accepted: one
+              redundant page beats a release whose only worker is unwatched.
 {{- if .Values.monitoring.temporalSdkMetrics.enabled }}
 
         {{- /* The gap the worker's own probes leave open on purpose, and it is narrower than this
@@ -789,7 +973,14 @@ spec:
               tail, and the cause is upstream of the timeout rather than in it.
 
         {{- /* The quietest bad outcome in the system: the turn succeeded, the stream closed, and
-               the answer was empty. Nothing failed, so nothing else fires. */}}
+               the answer was empty. Nothing failed, so nothing else fires — **and the description
+               used to say that unconditionally, which was measured false.** A spend-capped turn
+               with no prose booked this counter as well as `chemclaw_turn_spend_caps_total`, so
+               this rule fired for a turn whose cause was named one event earlier and whose remedy
+               is a number in a values file, while pointing the operator at "a model that emitted
+               only tool calls". `api/runner._empty_answer_event` now steps aside for a cap, so the
+               series is once again only the unexplained case, and the sentence is once again
+               true. */}}
         - alert: ChemclawTurnsAnsweringEmpty
           expr: increase(chemclaw_turn_empty_answers_total[15m]) > 0
           for: 0m
@@ -799,10 +990,65 @@ spec:
             runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawturnsansweringempty
             summary: Turns are completing with no answer text
             description: >-
-              The turn ended normally and produced nothing for the chemist to read. This is not an
-              error path — no counter above moves — which is exactly why it needs its own rule.
+              The turn ended normally and produced nothing for the chemist to read, and nothing
+              explains it — a turn stopped by either cap is excluded, because those name themselves.
               Usually a model that emitted only tool calls, or a middleware that short-circuited
               after the last one.
+
+        {{- /* `chemclaw_tool_calls_total{tool,outcome}` had panels and no rule, so a connector
+               tool failing every call was a graph nobody was looking at — the request-path twin of
+               ChemclawConnectorsDegradingTurns, which covers a connector that never comes up at all
+               while this covers one that comes up and then fails. **By `tool`**, because that is
+               the whole diagnostic value and a fleet-wide ratio hides one broken tool among forty
+               working ones; `outcome="error"` is a raised exception or a connector answering
+               `isError=True`, never a governance refusal, which is a separate outcome with its own
+               counter. Ratio plus a floor on its own denominator, like the other three
+               (`test_every_ratio_alert_has_a_traffic_floor`): a tool called twice an hour is at
+               100% on its first error otherwise. */}}
+        - alert: ChemclawToolCallsFailing
+          expr: >-
+            sum by (tool) (rate(chemclaw_tool_calls_total{outcome="error"}[15m]))
+            / sum by (tool) (rate(chemclaw_tool_calls_total[15m]))
+            > {{ .Values.monitoring.alerts.toolErrorRatio }}
+            and sum by (tool) (rate(chemclaw_tool_calls_total[15m]))
+            > {{ .Values.monitoring.alerts.toolCallsFloorPerSecond }}
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawtoolcallsfailing
+            summary: Most calls to one tool are failing
+            description: >-
+              Turns are still answering, from whatever this tool would have contributed — so the
+              transcript of a degraded answer looks like any other, which is why this needs a rule
+              rather than a panel. The `tool` label names it. A connector tool points at that
+              connector's pod; an in-process one points at this image.
+
+        {{- /* The two caps, which had every observable except a rule. `values.yaml` tells an
+               operator in as many words that `chemclaw_turn_spend_caps_total` "is what says whether
+               the number you chose is biting" — so the chart pointed at a series neither the alert
+               set nor the runbook carried, which is a claim about a control that does not exist.
+               Read off `chemclaw_turns_finished_total` rather than off the two cap counters, because
+               the outcome is what an operator groups a turn record by and `outcome` is already a
+               label on it: one rule covers both caps and says which. `for: 0m` and an `increase`,
+               like the timeout rule above: a capped turn is a chemist who asked a question and got
+               a partial answer, and the first one is worth knowing about. */}}
+        - alert: ChemclawTurnsHittingACap
+          expr: >-
+            increase(chemclaw_turns_finished_total{outcome=~"spend_capped|loop_capped"}[15m]) > 0
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawturnshittingacap
+            summary: Turns are being stopped by a per-turn cap
+            description: >-
+              A chemist's turn was cut short with work still open and told so, so this is not a
+              silent failure — it is the question of whether the ceiling is right. `outcome`
+              says which cap: `spend_capped` is `CHEMCLAW_AGENT_MAX_TURN_BILLED_TOKENS` and
+              `loop_capped` is `CHEMCLAW_HARNESS_MAX_LOOP_ITERATIONS`. If it moves on turns that
+              were doing real work, the number is too low; if it moves on runaway ones, it is doing
+              its job and the request is what to look at.
 
     {{- /* The durable tier, which **not one rule read** before this group existed. Every alert in
            this file was a front-door alert: a connector whose every job failed, an outbox that
@@ -1019,6 +1265,57 @@ spec:
               rule cannot fire on. Check the Temporal Schedule first; a pod that is gone entirely
               raises `ChemclawTargetDown` beside this.
 
+        {{- if .Values.retention.windows }}
+        {{- /* Disposal happened and nothing anywhere could see it. Twelve Temporal Schedules run in
+               this deployment; before this rule exactly two had a liveness alert, and neither of
+               them was one of the two *disposal* jobs. A retention sweep that silently stops
+               firing — a Schedule paused by hand, a `background-jobs` worker that never came back,
+               an activity failing every attempt — leaves every durable table growing with no
+               signal at all, and arrives as an out-of-disk incident months later.
+
+               Read off `chemclaw_table_bytes` rather than off the two retention counters, and the
+               difference is the whole point: a labelled counter emits no series until it is
+               incremented, so a sweep that runs every night and finds nothing expired would look
+               identical to one that has stopped. The gauge family is republished by *every* pass,
+               whether or not it deleted anything, so its absence means the pass itself did not
+               happen. That is the same shape as `ChemclawOutboxBacklogUnreported` above and for
+               the same reason.
+
+               Rendered only when this release states retention windows: with
+               `retention.unboundedGrowthAccepted` there is no sweep to be absent, and a rule that
+               fires for ever on a stated posture is how an alert channel is taught to be ignored.
+
+               Both durations are multiples of the sweep's own cadence, so a deployment that
+               changes the schedule moves the alert with it. Read with `dig` rather than as a
+               dotted path: `CHEMCLAW_RETENTION_SCHEDULE_MINUTES` is optional inside
+               `retention.windows`, so a dotted reference would name a key `values.yaml` does not
+               ship — which renders empty rather than failing, and is what
+               `tests/test_deploy_chart.py::test_every_values_path_exists` exists to catch. The
+               default is the same 1440 minutes `core/config/memory.py` gives
+               `retention_schedule_minutes`, so the alert and the sweep agree when neither is
+               stated. The hold keeps a fresh install from paging: `absent_over_time` is true from
+               t=0 until the first pass completes. */}}
+        - alert: ChemclawRetentionNotSweeping
+          expr: >-
+            absent_over_time(chemclaw_table_bytes[{{ mul (int (dig "CHEMCLAW_RETENTION_SCHEDULE_MINUTES" 1440 .Values.retention.windows)) (int .Values.monitoring.alerts.silenceWindowPasses) }}m])
+          for: {{ mul (int (dig "CHEMCLAW_RETENTION_SCHEDULE_MINUTES" 1440 .Values.retention.windows)) (int .Values.monitoring.alerts.silenceHoldPasses) }}m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawretentionnotsweeping
+            summary: No retention pass has reported the size of the durable store
+            description: >-
+              `chemclaw_table_bytes` is republished by every retention pass and is absent until one
+              completes, so several missed passes of `CHEMCLAW_RETENTION_SCHEDULE_MINUTES` means
+              the sweep is not running — and nothing is disposing of `session_messages`,
+              `tool_result_blobs` or the three LangGraph checkpoint tables while it is not. Check
+              the `retention` Temporal Schedule first, then the `background-jobs` worker; a pod
+              that is gone entirely raises `ChemclawTargetDown` beside this. What each pass removed
+              is in its own activity result, per table, in rows and in bytes — a sweep that runs
+              and removes nothing is a window left at 0, which this rule stays silent on because
+              the family is still being republished.
+        {{- end }}
+
     {{- /* The counters that exist *because* the system degrades quietly, and which nothing watched.
            `metrics_bridge` and `degraded()` were built so that roughly forty deliberate exception
            swallows become visible — and then no rule read the series they produce, which left the
@@ -1156,8 +1453,14 @@ spec:
               at runtime, or a misconfiguration. The pod's ERROR log names the host. This should be
               zero; a non-zero rate is either an attempted exfiltration path or a destination the
               deployment legitimately needs and must add to `CHEMCLAW_EGRESS_ALLOW`.
+        {{- /* `min`, not `max`, and the difference is the whole alert: `max` over the fleet is 1
+               as soon as **any one** pod is armed, so a single disarmed process — which is exactly
+               the condition this fires for — never alerts. Pinned by
+               `tests/test_deploy_chart.py::test_a_single_disarmed_pod_is_what_these_alerts_are_for`
+               over a two-pod series, because the shipped `max` shape produced no alert there and
+               `min` produced one. */}}
         - alert: ChemclawEgressGuardDisarmed
-          expr: max(chemclaw_egress_guard_armed) < 1
+          expr: min(chemclaw_egress_guard_armed) < 1
           for: 5m
           labels:
             severity: critical
@@ -1168,4 +1471,40 @@ spec:
               A process is running with `CHEMCLAW_EGRESS_GUARD_ENABLED=false`, so outbound calls are
               bounded only by the NetworkPolicy, not by this process — the defence-in-depth layer for
               "only LLM traffic leaves the estate" is off.
+        {{- /* The compiled layer's own pair, and the reason they are not folded into the two
+               above: `chemclaw_egress_guard_armed` reported 1 while grpc's C-core, the OTLP gRPC
+               exporter and Temporal's Rust sdk-core each reached an off-allowlist listener — a
+               signal an operator checks, reading health over the open path. One gauge per layer,
+               one refusal series per *kind* of refusal, because a blocked lookup and a blocked dial
+               want different next steps. */}}
+        - alert: ChemclawEgressPreloadDisarmed
+          expr: min(chemclaw_egress_preload_armed) < 1
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawegresspreloaddisarmed
+            summary: The compiled egress interposer is not loaded
+            description: >-
+              A process is running without `LD_PRELOAD` naming the egress interposer, so gRPC,
+              Temporal and any other compiled client in it are bounded only by the NetworkPolicy.
+              The in-process guard cannot see those calls at all, and `chemclaw_egress_guard_armed`
+              will still read 1.
+        - alert: ChemclawEgressPreloadRefused
+          expr: >-
+            increase(chemclaw_egress_preload_refused_connect[15m]) > 0
+            or increase(chemclaw_egress_preload_refused_resolve[15m]) > 0
+          for: 0m
+          labels:
+            severity: critical
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawegresspreloadrefused
+            summary: A compiled client tried to reach a host outside the egress allowlist
+            description: >-
+              The LD_PRELOAD interposer refused an outbound dial or a name lookup. The pod's stderr
+              carries a `chemclaw-netguard-preload:` line naming the destination and which of the
+              two it was. This should be zero; a non-zero rate is either an attempted exfiltration
+              path or a destination the deployment legitimately needs and must add to
+              `CHEMCLAW_EGRESS_ALLOW` — including a **remote git note repository**, which is
+              reached by a child process and so is bounded by this layer and by nothing else.
 {{- end }}

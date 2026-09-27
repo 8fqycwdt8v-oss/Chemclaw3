@@ -260,7 +260,7 @@ def test_the_ceiling_leaves_room_for_the_envelope_around_an_attachment() -> None
     assert settings.service_max_request_bytes > settings.attachment_max_bytes
 
 
-def test_a_declared_oversize_body_is_refused_without_reading_a_byte() -> None:
+async def test_a_declared_oversize_body_is_refused_without_reading_a_byte() -> None:
     """The `Content-Length` check is not a duplicate of the counting path — it is the cheap one.
 
     The counting path alone already refuses the request, so this looked redundant and a mutation
@@ -285,14 +285,11 @@ def test_a_declared_oversize_body_is_refused_without_reading_a_byte() -> None:
     async def _receive() -> dict[str, object]:  # pragma: no cover - must never be awaited
         raise AssertionError("the body was read despite a declared size over the limit")
 
-    async def _exercise() -> None:
-        scope = {
-            "type": "http",
-            "headers": [(b"content-length", b"999999999")],
-        }
-        await BodySizeLimit(_app, max_bytes=1024)(scope, _receive, _send)  # type: ignore[arg-type]
-
-    asyncio.run(_exercise())
+    scope = {
+        "type": "http",
+        "headers": [(b"content-length", b"999999999")],
+    }
+    await BodySizeLimit(_app, max_bytes=1024)(scope, _receive, _send)  # type: ignore[arg-type]
 
     assert not reached, "the app ran for a request already known to be too large"
     assert sent[0]["status"] == 413
@@ -332,7 +329,7 @@ async def _upload(client: httpx.AsyncClient, session_id: str) -> httpx.Response:
     )
 
 
-def test_a_slow_upload_does_not_stall_every_other_request(
+async def test_a_slow_upload_does_not_stall_every_other_request(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The finding: `upload_attachment` is `async def` and parsed inline, on one uvicorn worker.
@@ -349,31 +346,28 @@ def test_a_slow_upload_does_not_stall_every_other_request(
     the loop blocked, the probe still answers quickly once it finally runs.
     """
     parse = _SlowParse()
-    monkeypatch.setattr(attachments, "parse_attachment", parse)
+    monkeypatch.setattr(attachments, "parse_attachment_isolated", parse)
 
-    async def _drive() -> None:
-        app = create_app()
-        async with asgi_client(app) as client:
-            session_id = (await client.post("/sessions")).json()["session_id"]
-            upload = asyncio.create_task(_upload(client, session_id))
-            await asyncio.to_thread(parse.started.wait, 5)
+    app = create_app()
+    async with asgi_client(app) as client:
+        session_id = (await client.post("/sessions")).json()["session_id"]
+        upload = asyncio.create_task(_upload(client, session_id))
+        await asyncio.to_thread(parse.started.wait, 5)
 
-            # The pod is mid-parse. A liveness probe now decides whether the container is killed.
-            async with asyncio.timeout(2):
-                probe = await client.get("/healthz")
-            assert probe.status_code == 200
-            assert not upload.done(), (
-                "the probe answered only because the parse had already finished — this run does "
-                "not exercise the window at all"
-            )
+        # The pod is mid-parse. A liveness probe now decides whether the container is killed.
+        async with asyncio.timeout(2):
+            probe = await client.get("/healthz")
+        assert probe.status_code == 200
+        assert not upload.done(), (
+            "the probe answered only because the parse had already finished — this run does "
+            "not exercise the window at all"
+        )
 
-            parse.release.set()
-            assert (await upload).status_code == 200
-
-    asyncio.run(_drive())
+        parse.release.set()
+        assert (await upload).status_code == 200
 
 
-def test_uploads_past_the_parse_cap_are_shed_rather_than_queued(
+async def test_uploads_past_the_parse_cap_are_shed_rather_than_queued(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A burst of hostile uploads must not pile threads into the pool that validates tokens.
@@ -394,28 +388,25 @@ def test_uploads_past_the_parse_cap_are_shed_rather_than_queued(
     from chemclaw.core.config import settings
 
     parse = _SlowParse()
-    monkeypatch.setattr(attachments, "parse_attachment", parse)
+    monkeypatch.setattr(attachments, "parse_attachment_isolated", parse)
     monkeypatch.setattr(settings, "attachment_max_concurrent_parses", 1)
     monkeypatch.setattr(settings, "attachment_parse_queue_seconds", 0)
 
-    async def _drive() -> None:
-        app = create_app()
-        async with asgi_client(app) as client:
-            session_id = (await client.post("/sessions")).json()["session_id"]
-            first = asyncio.create_task(_upload(client, session_id))
-            await asyncio.to_thread(parse.started.wait, 5)
+    app = create_app()
+    async with asgi_client(app) as client:
+        session_id = (await client.post("/sessions")).json()["session_id"]
+        first = asyncio.create_task(_upload(client, session_id))
+        await asyncio.to_thread(parse.started.wait, 5)
 
-            shed = [(await _upload(client, session_id)).status_code for _ in range(3)]
-            assert shed == [503, 503, 503], shed
-            assert parse.calls == 1, "a shed upload was parsed anyway"
+        shed = [(await _upload(client, session_id)).status_code for _ in range(3)]
+        assert shed == [503, 503, 503], shed
+        assert parse.calls == 1, "a shed upload was parsed anyway"
 
-            parse.release.set()
-            assert (await first).status_code == 200
-
-    asyncio.run(_drive())
+        parse.release.set()
+        assert (await first).status_code == 200
 
 
-def test_a_burst_inside_the_queue_window_is_served_rather_than_shed(
+async def test_a_burst_inside_the_queue_window_is_served_rather_than_shed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The ordinary case the bare cap got wrong: several files dropped on the UI at once.
@@ -431,23 +422,20 @@ def test_a_burst_inside_the_queue_window_is_served_rather_than_shed(
     from chemclaw.core.config import settings
 
     parse = _SlowParse()
-    monkeypatch.setattr(attachments, "parse_attachment", parse)
+    monkeypatch.setattr(attachments, "parse_attachment_isolated", parse)
     monkeypatch.setattr(settings, "attachment_max_concurrent_parses", 2)
     monkeypatch.setattr(settings, "attachment_parse_queue_seconds", 10)
 
-    async def _drive() -> None:
-        app = create_app()
-        async with asgi_client(app) as client:
-            session_id = (await client.post("/sessions")).json()["session_id"]
-            uploads = [asyncio.create_task(_upload(client, session_id)) for _ in range(4)]
-            await asyncio.to_thread(parse.started.wait, 5)
-            parse.release.set()
-            codes = sorted(response.status_code for response in await asyncio.gather(*uploads))
-            assert codes == [200, 200, 200, 200], codes
-            assert parse.calls == 4, "an upload was answered without being parsed"
-            assert attachments._PARSE_SLOTS.in_flight == 0, "a queued upload kept its slot"
-
-    asyncio.run(_drive())
+    app = create_app()
+    async with asgi_client(app) as client:
+        session_id = (await client.post("/sessions")).json()["session_id"]
+        uploads = [asyncio.create_task(_upload(client, session_id)) for _ in range(4)]
+        await asyncio.to_thread(parse.started.wait, 5)
+        parse.release.set()
+        codes = sorted(response.status_code for response in await asyncio.gather(*uploads))
+        assert codes == [200, 200, 200, 200], codes
+        assert parse.calls == 4, "an upload was answered without being parsed"
+        assert attachments._PARSE_SLOTS.in_flight == 0, "a queued upload kept its slot"
 
 
 def test_a_shed_upload_is_counted(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -462,7 +450,7 @@ def test_a_shed_upload_is_counted(monkeypatch: pytest.MonkeyPatch) -> None:
     from chemclaw.core.metrics import METRICS
 
     parse = _SlowParse()
-    monkeypatch.setattr(attachments, "parse_attachment", parse)
+    monkeypatch.setattr(attachments, "parse_attachment_isolated", parse)
     monkeypatch.setattr(settings, "attachment_max_concurrent_parses", 1)
     monkeypatch.setattr(settings, "attachment_parse_queue_seconds", 0)
 
@@ -481,7 +469,7 @@ def test_a_shed_upload_is_counted(monkeypatch: pytest.MonkeyPatch) -> None:
     assert asyncio.run(_drive()) == 1
 
 
-def test_a_worker_thread_that_never_starts_gives_its_slot_back(
+async def test_a_worker_thread_that_never_starts_gives_its_slot_back(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A slot stands for a running thread, so a thread that never started must not hold one.
@@ -507,55 +495,62 @@ def test_a_worker_thread_that_never_starts_gives_its_slot_back(
     def _executor_is_gone(*_args: object, **_kwargs: object) -> None:
         raise RuntimeError("cannot schedule new futures after shutdown")
 
-    async def _drive() -> None:
-        assert attachments._PARSE_SLOTS.in_flight == 0, "a previous test leaked a slot"
-        loop = asyncio.get_running_loop()
-        monkeypatch.setattr(loop, "run_in_executor", _executor_is_gone)
-        for _ in range(2):
-            with pytest.raises(RuntimeError):
-                await attachments.parse_attachment_off_loop("a.txt", b"hello")
-            assert attachments._PARSE_SLOTS.in_flight == 0, (
-                "the slot for a worker thread that never started was never returned"
-            )
+    assert attachments._PARSE_SLOTS.in_flight == 0, "a previous test leaked a slot"
+    loop = asyncio.get_running_loop()
+    monkeypatch.setattr(loop, "run_in_executor", _executor_is_gone)
+    for _ in range(2):
+        with pytest.raises(RuntimeError):
+            await attachments.parse_attachment_off_loop("a.txt", b"hello")
+        assert attachments._PARSE_SLOTS.in_flight == 0, (
+            "the slot for a worker thread that never started was never returned"
+        )
 
-        # And the replica still parses: the leak's real cost is every upload after it.
-        monkeypatch.undo()
-        parsed = await attachments.parse_attachment_off_loop("b.txt", b"hello")
-        assert parsed.text == "hello"
-
-    asyncio.run(_drive())
+    # And the replica still parses: the leak's real cost is every upload after it.
+    monkeypatch.undo()
+    parsed = await attachments.parse_attachment_off_loop("b.txt", b"hello")
+    assert parsed.text == "hello"
 
 
-def test_a_parse_past_its_timeout_is_refused_and_keeps_its_slot_until_the_thread_ends(
+async def test_a_parse_past_its_timeout_is_refused_to_its_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Two halves of one contract, and the second is what makes the cap true.
+    """The client stops waiting on the deadline and is told which deadline it was.
 
-    The client stops waiting after `attachment_parse_timeout_seconds` and is told so (422 — the
-    file is unreadable *here*, and sending it again would do the same thing). But Python cannot
-    kill the thread, so the slot must stay taken until that thread actually ends: releasing it when
-    the request gives up would let one attacker hold every CPU while the counter reads zero.
+    422 rather than 503: the file is unreadable *here*, and sending it again would do the same
+    thing. The message names the budget because "it failed" and "it was too slow for this pod" send
+    a chemist to different next steps.
+
+    **This test used to assert the wedge as though it were the design.** It read
+    `..._and_keeps_its_slot_until_the_thread_ends` and checked `in_flight == 1` after the refusal,
+    on the reasoning that "Python cannot kill the thread, so the slot must stay taken until that
+    thread actually ends". The first clause is true and the conclusion is a permanent capacity
+    loss: driven at the shipped cap, two such parses took the replica's upload path down for the
+    life of the process. Killing the *work* is what was missing, and it is not something this test
+    could ever have seen, because the fake parse it patches in is a thread that blocks on an
+    `Event` — unkillable by construction, so the old assertion was about the fixture. The real
+    property is driven against a real slow parse in
+    `tests/test_parse_isolation.py::test_a_parse_past_its_deadline_frees_its_slot_for_the_next_upload`.
+
+    What stays here is the bookkeeping either way: the slot is released when the worker thread
+    ends, whatever ends it.
     """
     from chemclaw.core.config import settings
 
     parse = _SlowParse()
-    monkeypatch.setattr(attachments, "parse_attachment", parse)
+    monkeypatch.setattr(attachments, "parse_attachment_isolated", parse)
     monkeypatch.setattr(settings, "attachment_parse_timeout_seconds", 0.2)
+    # No grace: the thread's own deadline is what normally fires, and this fake has none, so the
+    # caller's backstop is the control under test and must not sit through five spare seconds.
+    monkeypatch.setattr(settings, "attachment_parse_reap_grace_seconds", 0.0)
 
-    async def _drive() -> None:
-        app = create_app()
-        async with asgi_client(app) as client:
-            session_id = (await client.post("/sessions")).json()["session_id"]
-            refused = await _upload(client, session_id)
-            assert refused.status_code == 422
-            assert "0.2s" in refused.json()["detail"]
+    app = create_app()
+    async with asgi_client(app) as client:
+        session_id = (await client.post("/sessions")).json()["session_id"]
+        refused = await _upload(client, session_id)
+        assert refused.status_code == 422
+        assert "0.2s" in refused.json()["detail"]
 
-            # The thread is still running, so the slot it stands for is still taken.
-            assert attachments._PARSE_SLOTS.in_flight == 1
-
-            parse.release.set()
-            async with asyncio.timeout(5):
-                while attachments._PARSE_SLOTS.in_flight:
-                    await asyncio.sleep(0.01)
-
-    asyncio.run(_drive())
+        parse.release.set()
+        async with asyncio.timeout(5):
+            while attachments._PARSE_SLOTS.in_flight:
+                await asyncio.sleep(0.01)

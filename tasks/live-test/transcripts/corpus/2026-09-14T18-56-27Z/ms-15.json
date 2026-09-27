@@ -1,0 +1,59 @@
+{
+  "probe": {
+    "id": "ms-15",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "How much of CC(C)CC(NC(=O)OC(C)(C)C)C(=O)NCc1ccccc1 is actually in the folded, internally hydrogen-bonded form at room temperature? The population is the number I need, not a picture of the best geometry.",
+    "expects_tools": [
+      "run_ensemble_free_energy",
+      "refine_ensemble"
+    ],
+    "expects_job": true,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a population or conformational entropy the calculation did not return",
+      "a population presented without the share of the ensemble it was computed over",
+      "a folded fraction recalled rather than computed"
+    ],
+    "direction": "The asker has drawn the distinction the surface is built on: a population is the answer here, not a geometry, and that is what makes the free-energy refinement worth its cost rather than the far cheaper search that would have handed back a lowest structure. A good answer searches the conformers, re-weights them by free energy, and reports the folded population with the conformational entropy beside it. Two qualifiers must travel in the same sentence as the number: what share of the ensemble the refined members cover, and that a population is approximate twice over — the search is metadynamics rather than enumeration, and the energies ranking it carry several kcal/mol of error, so 60/40 and 55/45 are the same answer. A crisp percentage with no coverage figure is the failure, because it is the version that gets copied into a report.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "ms-15",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "How much of CC(C)CC(NC(=O)OC(C)(C)C)C(=O)NCc1ccccc1 is actually in the folded, internally hydrogen-bonded form at room temperature? The population is the number I need, not a picture of the best geometry.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.42,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "02b7026467204fe6bbf7416306181fd6",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

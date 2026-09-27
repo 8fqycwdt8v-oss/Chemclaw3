@@ -444,7 +444,7 @@ def _hangs_until(started: asyncio.Event) -> Callable[[], Awaitable[Any]]:
     return _call
 
 
-def test_a_cancelled_tool_call_still_records_the_attempt() -> None:
+async def test_a_cancelled_tool_call_still_records_the_attempt() -> None:
     """A disconnect or turn deadline mid-tool leaves a `cancelled` row, not silence (D-130).
 
     `CancelledError` is a `BaseException`, so the `except Exception` that records a failure never
@@ -456,21 +456,18 @@ def test_a_cancelled_tool_call_still_records_the_attempt() -> None:
     sink = _RecordingSink()
     middleware = make_audit_middleware(correlation_id="conv-cancel", actor="carol", sink=sink)
 
-    async def _run() -> None:
-        started = asyncio.Event()
-        task = asyncio.ensure_future(
-            run_middleware(
-                middleware,
-                _ctx("compute_xtb_energy", {"smiles": "CCO"}),
-                _as_handler(_hangs_until(started)),
-            )
+    started = asyncio.Event()
+    task = asyncio.ensure_future(
+        run_middleware(
+            middleware,
+            _ctx("compute_xtb_energy", {"smiles": "CCO"}),
+            _as_handler(_hangs_until(started)),
         )
-        await started.wait()
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-
-    asyncio.run(_run())
+    )
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
 
     assert [event.outcome for event in sink.events] == ["cancelled"]
     event = sink.events[0]
@@ -483,7 +480,7 @@ def test_a_cancelled_tool_call_still_records_the_attempt() -> None:
     assert event.latency_ms > 0.0
 
 
-def test_the_cancelled_row_survives_a_second_cancellation() -> None:
+async def test_the_cancelled_row_survives_a_second_cancellation() -> None:
     """The write is shielded, so the teardown that caused it cannot also erase it.
 
     A structured-concurrency teardown does not cancel once: sse-starlette's task group and
@@ -495,24 +492,21 @@ def test_the_cancelled_row_survives_a_second_cancellation() -> None:
     sink = _SlowSink()
     middleware = make_audit_middleware(correlation_id="conv-torn", actor="dave", sink=sink)
 
-    async def _run() -> None:
-        started = asyncio.Event()
-        task = asyncio.ensure_future(
-            run_middleware(
-                middleware,
-                _ctx("gather_evidence", {"query": "biaryl"}),
-                _as_handler(_hangs_until(started)),
-            )
+    started = asyncio.Event()
+    task = asyncio.ensure_future(
+        run_middleware(
+            middleware,
+            _ctx("gather_evidence", {"query": "biaryl"}),
+            _as_handler(_hangs_until(started)),
         )
-        await started.wait()
-        task.cancel()
-        await asyncio.sleep(0)  # let the middleware reach its cancellation handler
-        task.cancel()  # the re-delivery a task group makes while the handler is awaiting
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        await asyncio.wait_for(sink.written.wait(), timeout=5.0)
-
-    asyncio.run(_run())
+    )
+    await started.wait()
+    task.cancel()
+    await asyncio.sleep(0)  # let the middleware reach its cancellation handler
+    task.cancel()  # the re-delivery a task group makes while the handler is awaiting
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.wait_for(sink.written.wait(), timeout=5.0)
 
     assert [event.outcome for event in sink.events] == ["cancelled"]
 
@@ -611,3 +605,72 @@ def test_a_connector_failure_is_recorded_as_an_error_however_it_is_streamed(
         f"a connector failure arriving as a {message_class} was audited as a successful call"
     )
     assert "instrument is offline" in sink.events[0].detail
+
+
+def test_a_log_only_trail_is_announced_at_startup(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The front door says out loud that it is keeping no durable record.
+
+    **The defect: nothing anywhere said it.** `default_audit_sink()` resolves to `NullAuditSink`
+    whenever `session_store != "postgres"`, which is what `.env.example` ships beside a
+    `postgres_dsn` default pointing at the `make up` database — so on the configuration
+    `CLAUDE.md` tells a developer to stand up, the database exists, `audit_events` exists, and
+    every row is discarded. Measured there: one completed turn that called a tool left
+    `audit_events` at 0, `session_messages` at 0 and `chemclaw_audit_sink_failures_total` at 0,
+    with the same process happily warning about `CHEMCLAW_FRAMING_ENVELOPE_SECRET` — so the idiom
+    existed and this condition simply had no line.
+
+    The warning names the setting that fixes it, because a warning an operator cannot act on is a
+    line they learn to skip.
+    """
+    from chemclaw.api.app import _report_inventory
+
+    monkeypatch.setattr(settings, "session_store", "memory")
+    with caplog.at_level(logging.WARNING):
+        _report_inventory()
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert warnings, "a log-only trail was not announced at all"
+    assert "NullAuditSink" in warnings[0].message
+    assert "CHEMCLAW_SESSION_STORE=postgres" in warnings[0].message
+
+
+def test_a_durable_trail_is_not_warned_about(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The other side of the same line: a deployment that writes the trail hears nothing.
+
+    Without this the warning is one that always fires, which is a warning nobody reads.
+    """
+    from chemclaw.api.app import _report_inventory
+
+    monkeypatch.setattr(settings, "session_store", "postgres")
+    with caplog.at_level(logging.WARNING):
+        _report_inventory()
+    assert [r for r in caplog.records if r.levelno == logging.WARNING] == []
+
+
+def test_the_startup_inventory_names_every_subsystem_that_can_be_silently_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cold front door logged one line about its own emptiness; this is the rest of it.
+
+    `connectors: none enabled` was the whole of it — nothing about a log-only trail, an unwritten
+    session store, no skills, no ingest source and no result sink. Each term is one an operator can
+    compare against what they believe they configured, which is the entire point: `make ci` is the
+    honest inventory and cannot be pointed at a running pod.
+    """
+    from chemclaw.api.app import startup_inventory
+
+    monkeypatch.setattr(settings, "result_sinks", "")
+    terms = dict(term.split("=", 1) for term in startup_inventory())
+    assert set(terms) == {
+        "audit-trail",
+        "sessions",
+        "skills",
+        "knowledge-notes",
+        "data-sources",
+        "result-sinks",
+        "vector-store",
+    }
+    assert terms["result-sinks"].startswith("none")

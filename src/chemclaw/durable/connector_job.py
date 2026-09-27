@@ -42,6 +42,7 @@ change"; the 2026-08-05 review measured `task_queue` at zero occurrences in
 `connectors/manifest.py`, so the offer had been false since D-150 landed.
 """
 
+import contextlib
 import logging
 from datetime import datetime, timedelta
 from typing import Any
@@ -53,9 +54,11 @@ from temporalio.exceptions import ActivityError, ApplicationError, ChildWorkflow
 from temporalio.workflow import ParentClosePolicy
 
 with workflow.unsafe.imports_passed_through():
+    from chemclaw.agent.refusal_route import sentence_of
     from chemclaw.core.config import settings
     from chemclaw.core.metrics_bridge import degraded
     from chemclaw.durable.awaiting import AwaitAnswerWorkflow, AwaitOutcome, AwaitRequest
+    from chemclaw.durable.deliver_message import OutboundMessage, deliver_best_effort
     from chemclaw.durable.effect_ledger import EffectRecord, begin_effect, settle_effect
     from chemclaw.durable.job_record import JobRecord, note_with_run_provenance, record_job
     from chemclaw.durable.memory_jobs import publish_memory_note_activity
@@ -126,11 +129,28 @@ def failure_reason(exc: BaseException) -> str:
     payload, or a driver that folds a query into its message, is kilobytes. The cap is the one
     `publish_results.py` already applies to the analogous field, applied once here so no caller
     has to remember.
+
+    **Stripped of a refusal's routing footer, because this string's readers are people.**
+    `agent/refusal_route.routed` appends `(refusal | code: … | who can act: … | sanctioned path: …)`
+    to a gate's sentence so the *model* can route around a wall instead of retrying it. That footer
+    is written in the second person to an agent, and this is not its channel: the reason reaches
+    `JobFailedEvent.reason` on the chemist's stream and `GET /jobs/{id}`'s summary. Measured on the
+    shipped chart posture — `entra_required` on with `entra_privileged_roles` empty, which refuses
+    every `expensive: true` step for everyone — a template job step produced
+
+        user u-alice lacks a privileged role for compare_solvents
+        (refusal | code: expensive_action_role_not_held | boundary: the entitlement gate on
+         expensive actions | who can act: … | sanctioned path: none from here)
+
+    on a chemist's screen. `tool_authz.failure_detail` already strips it for the `ToolFailedEvent`
+    half of the same problem; this is the durable half, and one stripping point covers every reader
+    downstream of it. The model-facing readers of this same string (`agent/job_results.py`,
+    `connectors/jobs.py`) lose only the footer of a refusal they did not raise.
     """
     cause: BaseException = exc
     while isinstance(cause, (ChildWorkflowError, ActivityError)) and cause.__cause__ is not None:
         cause = cause.__cause__
-    return (str(cause) or type(cause).__name__)[:_REASON_MAX_CHARS]
+    return sentence_of(str(cause) or type(cause).__name__)[:_REASON_MAX_CHARS]
 
 
 class ConnectorJobInput(BaseModel):
@@ -231,8 +251,8 @@ class ConnectorJobResult(BaseModel):
     `summary` is the one line the chat shows and the model reads; `data` is the job's own structured
     result, opaque to core (a connector's domain types stay the connector's business); `note` is the
     optional knowledge contribution. Typing `note` as the existing frozen `Note` means a connector's
-    proposal passes the graph's own slug and schema validators on the way in, so a malformed note is
-    rejected at the boundary instead of failing later at branch creation in the PR-gate.
+    contribution passes the graph's own slug and schema validators on the way in, so a malformed
+    note is rejected at the boundary instead of failing later inside the note write.
 
     **`extra="ignore"`, and the asymmetry with `ConnectorJobInput` above is the decision.** Five
     fields on this wire say in as many words that they are "additive and defaulted because it
@@ -363,7 +383,7 @@ def job_record_for(
 
     A module-level function rather than a block inside the workflow because it is pure, and
     because everything around it needs a live Temporal server to exercise — this way "the record
-    carries the arguments, the *whole* result and the note it proposed" is a property the offline
+    carries the arguments, the *whole* result and the note it wrote" is a property the offline
     suite can hold, instead of one that is only ever checked in CI.
     """
     return JobRecord(
@@ -437,10 +457,24 @@ def failed_job_record(
 def finish_headroom() -> timedelta:
     """What the wrapper may still spend *after* its child returns, from the steps' own budgets.
 
-    Five things happen after `_run_child`, and they are why this wrapper is not a pass-through:
+    **Six** things happen after `_run_child`, and they are why this wrapper is not a pass-through:
     settle the effect ledger, write the durable record (D-157), offer the composite to the results
-    store, PR-gate the note, push back to the launching session. Anyone giving the wrapper an
-    execution timeout has to leave room for all of them.
+    store, write the note, push back to the launching session, and send the `job-result` copy out
+    of the building. Anyone giving the wrapper an execution timeout has to leave room for all of
+    them.
+
+    **It said five, and the sixth was added without touching this.**
+    `D-2026-09-14-a-declared-kind-with-no-producer-is-not-a-channel` put `deliver_best_effort` at
+    the end of `_finish` and left the reservation at the five it already summed, so 930 s of
+    permitted spend — `light_write_queue_wait_timeout()` plus one activity — sat outside the
+    ceiling: 6.7% of the real post-child budget, unreserved. The failure it re-opens is the one
+    this docstring's next paragraph measured, a job reaped `TIMED_OUT` before it could write its
+    `job_records` row or tell the chemist.
+
+    Nothing caught it because `tests/test_template_job_step.py` asserts `finish_headroom()` is
+    **at least** the sum of the steps it transcribes. A `>=` against a transcribed list catches a
+    step whose bound *moves*, which is the invariant the paragraph below claims, and is blind to a
+    step being *added* — so the guard held while the thing it guards went stale.
 
     **The room used to be counted rather than measured, and one activity is not what any of these
     costs.** The reservation was `activity_timeout_seconds * 4` — 120 s at the shipped defaults,
@@ -486,12 +520,21 @@ def finish_headroom() -> timedelta:
         # `_publish_result`.
         + queue
         + timedelta(seconds=settings.result_publish_timeout_seconds)
-        # The note's PR-gate.
+        # The note write.
         + queue
         + timedelta(seconds=settings.note_write_timeout_seconds)
         # The session push-back, on either ending.
         + light
         + activity_budget
+        # The outbound `job-result` copy, on either ending: the same light queue wait as the
+        # push-back beside it, and
+        # its own work budget rather than an activity's, because `deliver_message_activity` walks
+        # the enabled channels serially and carries `delivery_timeout_seconds` for that reason.
+        # Reserved even though delivery is off in every shipped deployment, because what the
+        # ceiling has to cover is what the step may *spend*, and a deployment that names a channel
+        # does not also widen this.
+        + light
+        + timedelta(seconds=settings.delivery_timeout_seconds)
     )
 
 
@@ -652,8 +695,16 @@ class ConnectorJobWorkflow:
         a test that runs a workflow and then replays the history it just produced compares code
         against a history that same code wrote, so the two agree by construction — measured, an
         extra `await self._record_run(record)` injected into `_finish` replayed clean. Detecting a
-        code-versus-history mismatch needs an *archived* history, which is a CI job rather than a
-        unit test. What the suite holds instead is the effect
+        code-versus-history mismatch needs an *archived* history — and that turned out to be the
+        whole obstacle, not the runner: a history recorded from a released shape and committed is
+        an ordinary fixture, so `tests/test_workflow_replay.py` now does this inside `make test`
+        with no broker and no CI job of its own
+        (`D-2026-09-09-a-replay-control-needs-an-archived-history-not-a-patch`). This paragraph is
+        left standing because the argument above it is still exactly right and only its conclusion
+        was wrong. **`ConnectorJobWorkflow` is one of the twenty-one that control does not yet
+        cover** — it is named in `UNCOVERED_BACKGROUND_WORKFLOWS`, because recording its history
+        needs a connector bundle's child workflow to actually run. What the suite holds instead is
+        the effect
         (`test_a_run_that_fails_after_recording_is_not_recorded_a_second_time`), which does go red
         when the guard is removed.
         """
@@ -661,7 +712,7 @@ class ConnectorJobWorkflow:
 
     @workflow.run
     async def run(self, job: ConnectorJobInput) -> ConnectorJobResult:
-        """Execute the connector's workflow, PR-gate any note it produced, and wake its session.
+        """Execute the connector's workflow, write any note it produced, and wake its session.
 
         The child runs on the connector's own task queue, so its dependencies and its failure domain
         stay outside this worker. A child failure propagates: the job genuinely failed, and the tool
@@ -970,7 +1021,7 @@ class ConnectorJobWorkflow:
         is itself derived deterministically from the job and its arguments.
 
         Runs through an activity rather than inline: a workflow may not touch a database, and
-        `publish_result_activity` carries the same bounded retry every other best-effort step here
+        `publish_job_result` carries the same bounded retry every other best-effort step here
         uses.
         """
         if not result.data:
@@ -990,6 +1041,10 @@ class ConnectorJobWorkflow:
                     correlation_id=job.correlation_id,
                     job_id=job_id,
                     rationale=job.rationale,
+                    # The same expression `finished_job_record` writes into `job_records.note_id`,
+                    # from the same envelope: the publication row records what this run produced,
+                    # not only that somebody asked for it.
+                    note_id=result.note.id if result.note is not None else "",
                 )
             ],
             label=f"{job.connector}:{job.job}",
@@ -1002,33 +1057,66 @@ class ConnectorJobWorkflow:
         already failing, and a push-back that failed on top would replace one lost message with two.
         The reason is carried as text because that is what the asker needs — the same discipline
         `SubsystemUnavailableError` applies to an outage, one layer out.
+
+        **"Never raising" was a claim about `notify_session_best_effort` and not a property of this
+        function**, and the suppression below is what makes it true. That helper swallows a failed
+        *delivery* and nothing else: a `ValidationError` building the input, or — since
+        `D-2026-09-13-a-cancellation-arriving-before-the-timer-leaves-the-row-waiting` — a
+        cancellation, both left here and replaced the real failure the caller is about to `raise`.
+        `BaseException` is deliberate: a cancelled teardown is the case `Exception` misses, and the
+        caller's `raise` is what puts the original failure back on the wire.
         """
-        if not job.session_id:
-            return
-        await notify_session_best_effort(
-            job.session_id,
-            "job_failed",
-            {
-                "job_id": workflow.info().workflow_id,
-                "connector": job.connector,
-                "job": job.job,
-                "reason": failure_reason(exc),
-            },
-        )
+        reason = failure_reason(exc)
+        if job.session_id:
+            with contextlib.suppress(BaseException):
+                await notify_session_best_effort(
+                    job.session_id,
+                    "job_failed",
+                    {
+                        "job_id": workflow.info().workflow_id,
+                        "connector": job.connector,
+                        "job": job.job,
+                        "reason": reason,
+                    },
+                )
+        # **And out of the building, which the success path did and this one did not.** The
+        # `job-result` copy was added to `_finish` alone, so a job that *finished* travelled and a
+        # job that *failed* did not — while this function's own guard returns early when there is
+        # no session, which is exactly the Schedule- or inbox-started run the outbound copy exists
+        # for. So the half that mattered stayed silent: `_run_child`'s own comment argues the case
+        # in as many words, "an outcome that says nothing is not neutral, it is an invitation to
+        # assume the good one", with a measured incident behind it.
+        #
+        # Not caught by `test_every_declared_delivery_kind_has_a_producer` and could not be:
+        # `Message.kind` has no failure value, so the declared↔produced equality is satisfied by
+        # the success path alone.
+        with contextlib.suppress(BaseException):
+            await deliver_best_effort(
+                OutboundMessage(
+                    recipient=job.requested_by,
+                    subject=f"{job.connector}:{job.job} failed",
+                    body=reason,
+                    kind="job-result",
+                    correlation_id=job.correlation_id,
+                )
+            )
 
     async def _finish(
         self, job: ConnectorJobInput, result: ConnectorJobResult, started_at: datetime
     ) -> ConnectorJobResult:
-        """Record the run, offer its note to the PR-gate, and push the completion back."""
+        """Record the run, write its note into the graph, and push the completion back."""
         record = job_record_for(
             workflow.info().workflow_id,
             job,
             result,
             runtime_seconds=(workflow.now() - started_at).total_seconds(),
         )
-        # Written *before* the note publish, because this is the durable copy: the graph write is a
-        # proposal a human may never merge, while this row is what makes the result survive
-        # Temporal's own history retention. Best-effort for the same reason the publish is — the
+        # Written *before* the note publish, because this is the durable copy: the graph write is
+        # best-effort and may be dropped after its retries, while this row is what makes the result
+        # survive Temporal's own history retention. (This line read "a proposal a human may never
+        # merge" until `D-2026-09-05-the-gate-follows-behaviour-not-knowledge`; the ordering it
+        # argues for is unchanged, because a write that can fail is still not the durable copy.)
+        # Best-effort for the same reason the publish is — the
         # science is finished, so a database that is down must not fail a completed job and send an
         # expensive campaign round the retry loop — but logged at error level, because unlike a
         # failed note this loses data nothing else holds.
@@ -1048,7 +1136,7 @@ class ConnectorJobWorkflow:
         # composite the job assembled from them, which has no cache row of its own by design.
         await self._publish_result(job, result)
         if job.publish_to_graph and result.note is not None:
-            # The same PR-gate activity the memory-synthesis jobs use — one write path into the
+            # The same note-write activity the memory-synthesis jobs use — one write path into the
             # graph, on the light background queue, bounded retries, never failing the job. The
             # note is stamped with the run and its reason on the way through, here rather than in
             # each connector, so no bundle can forget and every recorded note answers "why was this
@@ -1063,7 +1151,16 @@ class ConnectorJobWorkflow:
                 [
                     # A connector job never retires anything — retirement is the synthesis
                     # miners' judgment — so its unit carries the note alone.
-                    SynthesisUnit(note=note_with_run_provenance(result.note, record)),
+                    # `ran_on` is `workflow.now()`, the deterministic clock a workflow may
+                    # read — so it survives replay — and it is what gets an undated
+                    # connector note past `digest._is_new`, which reads no `valid_from` as
+                    # open-ended and therefore as not news. A connector that dated its own
+                    # note keeps that date.
+                    SynthesisUnit(
+                        note=note_with_run_provenance(
+                            result.note, record, ran_on=workflow.now().date()
+                        )
+                    ),
                     job.requested_by,
                 ],
                 label=f"{job.connector}:{job.job}",
@@ -1079,6 +1176,25 @@ class ConnectorJobWorkflow:
                     "summary": result.summary,
                 },
             )
+        # **And out of the building, addressed to whoever launched it** — which is always
+        # somebody, because `ConnectorJobInput.requested_by` is `min_length=1`, so the
+        # `recipient`-empty short circuit in `deliver_best_effort` never fires here. The push-back
+        # above
+        # reaches a *session*, and a durable job is precisely the thing that outlives one: a
+        # CREST search or a BO round finishes hours after the chemist stopped watching, and
+        # `job.session_id` is empty altogether for a run a Schedule or an inbox started. The
+        # `job-result` kind was declared for this and had no producer. Last and best-effort,
+        # after the record, the results store and the note: everything durable is already
+        # written, and a channel outage must not cost an expensive campaign its retry budget.
+        await deliver_best_effort(
+            OutboundMessage(
+                recipient=job.requested_by,
+                subject=f"{job.connector}:{job.job} finished",
+                body=result.summary,
+                kind="job-result",
+                correlation_id=job.correlation_id,
+            )
+        )
         return result
 
     async def _record_run(self, record: JobRecord) -> bool:

@@ -1,0 +1,61 @@
+{
+  "probe": {
+    "id": "an-19",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We have now characterised the RRT 1.32 impurity as the des-methyl analogue Oc1ccc(-c2ccccc2C(=O)O)cc1, confirmed by NMR and an authentic standard. Capture that so the next campaign does not start from zero.",
+    "expects_tools": [
+      "record_knowledge_note",
+      "find_notes",
+      "gather_evidence",
+      "record_confirmed_answer"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "claiming a person has reviewed or approved the note",
+      "adding analytical data the chemist did not supply (retention times, shifts, purity figures)",
+      "silently duplicating an existing note without checking"
+    ],
+    "direction": "Checks for an existing note first, then writes one whose content is exactly what the chemist stated plus retrieved links, and is explicit about what the note now is: recorded and readable by everyone, authored as `agent`, and correctable rather than checked. Names where it landed.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "an-19",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We have now characterised the RRT 1.32 impurity as the des-methyl analogue Oc1ccc(-c2ccccc2C(=O)O)cc1, confirmed by NMR and an authentic standard. Capture that so the next campaign does not start from zero.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 2.21,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "c6fe186cb671473dae6ee9031bd9620e",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

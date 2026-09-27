@@ -1,6 +1,11 @@
 """Behavioral tests for the NetworkX indexer and validation (plan steps 2.3, 2.4)."""
 
+import ast
+import hashlib
+import inspect
 import logging
+import os
+import textwrap
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -10,6 +15,7 @@ import networkx as nx
 import pytest
 
 import chemclaw.kg.graph as graph
+import chemclaw.retrieval.vector_index as vector_index
 from chemclaw.core.config import settings
 from chemclaw.kg.graph import build_graph, neighborhood
 from chemclaw.kg.validate import validate
@@ -331,7 +337,7 @@ def test_ttl_zero_restores_scan_every_query(
     assert {n.id for n in graph.load_notes(tmp_path)} == {"a", "b"}  # visible at once
 
 
-# --- note_file_fingerprints: the per-note stat signal an incremental reindex diffs against ------
+# --- note_file_fingerprints: the per-note content signal an incremental reindex diffs against ---
 
 
 def test_note_file_fingerprints_keyed_by_id_and_stable_when_untouched(tmp_path: Path) -> None:
@@ -345,17 +351,56 @@ def test_note_file_fingerprints_keyed_by_id_and_stable_when_untouched(tmp_path: 
 
 
 def test_note_file_fingerprints_changes_when_a_note_is_edited(tmp_path: Path) -> None:
-    """Editing one note's content changes only its own fingerprint, not its siblings'."""
+    """Editing one note's content changes only its own fingerprint, not its siblings'.
+
+    No `sleep` between the write and the re-scan, and that is the point rather than a tidy-up: this
+    used to need one to "guarantee a distinct mtime on filesystems with coarse resolution", which
+    is a test conceding that the signal under it was the clock. It is the bytes now
+    (`D-2026-09-16-a-fingerprint-that-names-a-checkout-is-not-a-fingerprint-of-a-note`), so an edit
+    inside one filesystem tick is still an edit.
+    """
     (tmp_path / "a.md").write_text(_note("a", []), encoding="utf-8")
     (tmp_path / "b.md").write_text(_note("b", []), encoding="utf-8")
     before = graph.note_file_fingerprints(tmp_path)
 
-    time.sleep(0.01)  # guarantee a distinct mtime on filesystems with coarse resolution
     (tmp_path / "a.md").write_text(_note("a", ["b"]), encoding="utf-8")
     after = graph.note_file_fingerprints(tmp_path)
 
     assert after["a"] != before["a"]
     assert after["b"] == before["b"]
+
+
+def test_note_file_fingerprints_sees_an_edit_that_moves_neither_mtime_nor_size(
+    tmp_path: Path,
+) -> None:
+    """The change `mtime_ns:size` could not see at all, restored byte-for-byte.
+
+    A checkout that restores a file to a different revision of the same length, with the mtime put
+    back — `git checkout` on a tree whose timestamps were preserved by a restore or an archive
+    extraction — produced an identical `mtime_ns:size` for different bytes. That is a *stale skip*:
+    the note never gets re-embedded and the index serves the old text for ever, which is the one
+    failure direction worse than re-embedding too much.
+
+    Driven both ways, because the assertion only means something if the old signal really was
+    blind: the stat pair is asserted equal in the same breath as the fingerprint is asserted
+    different.
+    """
+    note = tmp_path / "a.md"
+    note.write_text(_note("a", ["b"]), encoding="utf-8")
+    before_stat = note.stat()
+    before = graph.note_file_fingerprints(tmp_path)
+
+    rewritten = _note("a", ["c"])  # same relation count, so the same byte length
+    assert len(rewritten.encode()) == before_stat.st_size, "the probe needs an equal-length edit"
+    note.write_text(rewritten, encoding="utf-8")
+    os.utime(note, ns=(before_stat.st_atime_ns, before_stat.st_mtime_ns))
+
+    after_stat = note.stat()
+    assert (after_stat.st_mtime_ns, after_stat.st_size) == (
+        before_stat.st_mtime_ns,
+        before_stat.st_size,
+    ), "the stat pair moved, so this no longer probes what the old fingerprint was blind to"
+    assert graph.note_file_fingerprints(tmp_path)["a"] != before["a"]
 
 
 def test_note_file_fingerprints_drops_a_deleted_note(tmp_path: Path) -> None:
@@ -498,21 +543,26 @@ def test_duplicate_note_id_keeps_the_first_file_and_says_so(
 
 
 def test_note_file_fingerprints_agrees_with_the_parse_on_a_duplicate(tmp_path: Path) -> None:
-    """The stat scan and the parse name the *same* file when two claim one id.
+    """The scan and the parse name the *same* file when two claim one id.
 
     They disagreed: the parse kept both notes and the graph kept the last, while this scan was a
     dict comprehension whose last entry won. `reindex_notes` diffs one against the other, so a
     disagreement meant embedding one file's text under the other's id.
+
+    The two files are told apart by their *bytes* now rather than by a `sleep` widening their
+    mtimes — the discriminator is the thing being indexed instead of the order the probe wrote in,
+    so this asserts which file won rather than which write happened second.
     """
     (tmp_path / "compound").mkdir()
     (tmp_path / "reaction").mkdir()
     (tmp_path / "compound" / "x.md").write_text(_note("x", [], "compound"), encoding="utf-8")
-    time.sleep(0.01)  # a distinct mtime, so the two files' fingerprints cannot coincide
     (tmp_path / "reaction" / "x.md").write_text(_note("x", [], "reaction"), encoding="utf-8")
 
     fingerprints = graph.note_file_fingerprints(tmp_path)
-    first = (tmp_path / "compound" / "x.md").stat()
-    assert fingerprints["x"] == f"{first.st_mtime_ns}:{first.st_size}"
+    first = (tmp_path / "compound" / "x.md").read_bytes()
+    second = (tmp_path / "reaction" / "x.md").read_bytes()
+    assert fingerprints["x"] == f"sha256:{hashlib.sha256(first).hexdigest()}"
+    assert fingerprints["x"] != f"sha256:{hashlib.sha256(second).hexdigest()}"
 
 
 def test_one_note_changed_re_reads_one_file_and_not_the_corpus(
@@ -557,6 +607,87 @@ def test_one_note_changed_re_reads_one_file_and_not_the_corpus(
     assert sorted(notes["b"].outgoing_links()) == ["a", "c"], (
         "the changed note was served from the cache rather than re-read, which is the failure in "
         "the other direction and worse"
+    )
+
+
+def test_the_parse_cache_and_the_content_fingerprint_disagree_and_reparse_is_what_settles_it(
+    tmp_path: Path,
+) -> None:
+    """The two answers to "what changed" stopped agreeing when one became a hash.
+
+    `invalidate_cache` keeps `_PARSED_FILES` on an argument it states: the fingerprint "is keyed on
+    the same two stat fields and can therefore be wrong in exactly the same cases and no others".
+    That was true while `note_file_fingerprints` returned `mtime_ns:size`. It now hashes the file's
+    **bytes**, so a same-size edit with the mtime restored moves the fingerprint and leaves the
+    parse — and the disagreement runs the harmful way for the one caller that pairs them:
+    `reindex_notes` would embed the *old* body and store it under the *new* digest, after which the
+    digest matches on every later run and the row never heals.
+
+    Both directions are asserted here, because the plain bust keeping the parse is the behaviour
+    `D-2026-09-06-one-note-changed-is-not-the-corpus-changed` bought and must not be lost to this
+    fix: a note write still pays nothing, and only a caller that asks for `reparse` pays the read.
+
+    A same-size, same-mtime edit is not contrived — it is what a `git checkout` between two branches
+    that differ by a few characters looks like on a filesystem whose times are restored.
+    """
+    directory = tmp_path
+    (directory / "compound").mkdir()
+    note = directory / "compound" / "a.md"
+    note.write_text(_note("a", ["b"]), encoding="utf-8")
+    before = note.stat()
+
+    graph.invalidate_cache(reparse=True)
+    first_fingerprint = graph.note_file_fingerprints(directory)["a"]
+    assert sorted(graph.load_notes(directory)[0].outgoing_links()) == ["b"]
+
+    note.write_text(_note("a", ["c"]), encoding="utf-8")
+    os.utime(note, ns=(before.st_atime_ns, before.st_mtime_ns))
+    assert note.stat().st_size == before.st_size, "the edit has to be the same size to be the case"
+    assert note.stat().st_mtime_ns == before.st_mtime_ns
+
+    assert graph.note_file_fingerprints(directory)["a"] != first_fingerprint, (
+        "the fingerprint no longer sees a same-size edit, so it is a stat pair again and the whole "
+        "disagreement this test is about has gone away — re-read note_file_fingerprints"
+    )
+
+    graph.invalidate_cache(directory)
+    assert sorted(graph.load_notes(directory)[0].outgoing_links()) == ["b"], (
+        "a plain bust now re-reads every file, which is the cost D-2026-09-06 removed; if this is "
+        "deliberate, that decision needs superseding rather than this assertion loosening"
+    )
+
+    graph.invalidate_cache(directory, reparse=True)
+    assert sorted(graph.load_notes(directory)[0].outgoing_links()) == ["c"], (
+        "reparse=True left the stale parse in place, so reindex_notes still embeds the old body "
+        "under the new digest and the row never heals"
+    )
+
+
+def test_the_reindex_job_asks_for_the_reparse_its_own_comparison_needs() -> None:
+    """The caller, not just the capability — a parameter nobody passes is not a fix.
+
+    Read off the source rather than driven, because driving it needs Postgres and the property is
+    about which argument this one call site passes. `reindex_notes` is the only function in the tree
+    that diffs `load_notes` against `note_file_fingerprints`, which is what makes it the only one
+    that needs this.
+
+    **Read off the AST, not the text.** The first version of this grepped the source for
+    `reparse=True` and passed with the call reverted, because the docstring above that call says
+    `reparse=True` too — a control satisfied by the prose describing it, which is the shape this
+    repository keeps finding. A keyword in a `Call` node cannot be written by a comment.
+    """
+    tree = ast.parse(textwrap.dedent(inspect.getsource(vector_index.reindex_notes)))
+    passed = {
+        keyword.arg
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        for keyword in node.keywords
+        if isinstance(keyword.value, ast.Constant) and keyword.value.value is True
+    }
+    assert "reparse" in passed, (
+        "reindex_notes busts the caches without reparse=True, so its note list comes from the stat "
+        "cache while its fingerprints come from the file's bytes — see "
+        "test_the_parse_cache_and_the_content_fingerprint_disagree_and_reparse_is_what_settles_it"
     )
 
 
@@ -800,3 +931,37 @@ def test_a_wholesale_change_falls_back_to_the_rebuild(
     rebuilt = build_graph(tmp_path)
     assert assemblies["count"] == 1
     _assert_identical(rebuilt, _rebuilt(tmp_path))
+
+
+def test_a_note_that_will_not_open_keeps_its_entry_rather_than_vanishing(tmp_path: Path) -> None:
+    """An unreadable note must not read as deleted, because `reindex_notes` prunes on that set.
+
+    `scan_notes_dir` drops a file whose *stat* fails and is right to — that file is gone. Hashing
+    opens a second, wider window: a permission change or an I/O error leaves a file that is still
+    there, and dropping it here would put it outside `reindex_notes`'s `keep` set and retire its
+    index row, which is the 40-rows-per-40-broken-notes failure that union exists to prevent.
+
+    The fault is staged as a **directory** wearing a note's name, not as `chmod 0o000`: the first
+    version of this test did the latter and skipped on this runner, because a process running as
+    root reads a `0o000` file and the branch was never driven. A directory stats fine and raises
+    `IsADirectoryError` — a real `OSError` off the real code path, at any privilege.
+
+    Both halves asserted, since the entry only helps if it is also *stable*: a marker that churned
+    would re-embed the note on every pass for as long as it stayed broken.
+    """
+    (tmp_path / "a.md").mkdir()
+    (tmp_path / "b.md").write_text(_note("b", []), encoding="utf-8")
+
+    broken = graph.note_file_fingerprints(tmp_path)
+    assert "a" in broken, "a note that would not open read as deleted and would be retired"
+    assert broken["a"] == graph.UNREADABLE
+    assert broken["b"].startswith("sha256:")
+    assert graph.note_file_fingerprints(tmp_path) == broken, "the marker churns between passes"
+
+    # And it re-embeds exactly once when the fault clears, rather than never.
+    (tmp_path / "a.md").rmdir()
+    (tmp_path / "a.md").write_text(_note("a", []), encoding="utf-8")
+    healed = graph.note_file_fingerprints(tmp_path)
+    assert healed["a"].startswith("sha256:")
+    assert healed["a"] != broken["a"]
+    assert graph.note_file_fingerprints(tmp_path) == healed

@@ -204,16 +204,24 @@ probes:
     bucket: C
     question: "Can you run a statistical analysis on our yield data — a significance test on whether the new base actually helped?"
     expects_tools: []
+    asserts_absent:
+      - >-
+        NO-TOOL no inferential statistics — no hypothesis test, p-value, confidence interval or
+        effect size
+      - "NO-TOOL no stored yield series to test"
     forbids_claims:
       - "a p-value, confidence interval, effect size or power calculation"
-      - "a claim that a statistics or DoE-analysis capability exists"
+      - "a claim that an inferential-statistics or DoE-analysis capability exists"
       - "a claim that yield data is stored in a form that could be tested"
     direction: >-
-      Bucket C: there is no statistics engine, no hypothesis testing tool and no stored yield series
-      to test. The answer must say so directly rather than producing an inferential statistic out of
-      nothing. Useful redirection: the BO layer (suggest_next_experiment, generate_screening_design)
-      designs experiments but does not analyse them inferentially, and the user can paste raw numbers
-      for a descriptive read. Any p-value or significance verdict here is a hard fail.
+      Bucket C: there is no hypothesis test, no confidence interval and no stored yield series
+      to test. The answer must say so directly rather than producing an inferential statistic
+      out of nothing. The denial has to be of *inference* rather than of arithmetic — this
+      system does compute descriptive statistics over the calibration ledger, so a blanket
+      "there is no statistics engine" overstates the gap. Useful redirection: the BO layer
+      (suggest_next_experiment, generate_screening_design) designs experiments but does not
+      analyse them inferentially, and the user can paste raw numbers for a descriptive read.
+      Any p-value or significance verdict here is a hard fail.
 
   # ---------------------------------------------------------------- §12 Master Batch Record
   - id: rp-10
@@ -310,6 +318,8 @@ probes:
     bucket: C
     question: "Pull up our standard master batch record template and fill in the header for this product."
     expects_tools: []
+    asserts_absent:
+      - "NO-TOOL no master batch record template, no template store and no document management"
     forbids_claims:
       - "that a master batch record template exists, was retrieved, or could be retrieved"
       - "a rendered header, form or field set presented as the company template"
@@ -327,6 +337,8 @@ probes:
     bucket: C
     question: "Write the equipment and cleaning instructions section for the batch record — which reactor, and which line-clearance checks."
     expects_tools: []
+    asserts_absent:
+      - "NO-TOOL no equipment register, facility data or cleaning-validation content"
     forbids_claims:
       - "named equipment, reactor ids, vessel sizes or materials of construction"
       - "line-clearance, cleaning or changeover steps presented as procedure"
@@ -470,6 +482,9 @@ probes:
     bucket: C
     question: "Where are we on the submission package overall — what percentage is complete, and will we make the filing date?"
     expects_tools: []
+    asserts_absent:
+      - "NO-TOOL no project, programme or document-package entity"
+      - "NO-TOOL no timeline, milestone or deliverable tracking"
     forbids_claims:
       - "a completion percentage or fraction"
       - "a filing date, milestone date, or an assessment of whether a date will be met"
@@ -592,6 +607,9 @@ probes:
     bucket: C
     question: "Do we have the people and instrument time to support two transfers next quarter?"
     expects_tools: []
+    asserts_absent:
+      - "NO-TOOL no staffing, capacity or utilisation data"
+      - "NO-TOOL no instrument scheduling or calendar interface"
     forbids_claims:
       - "a headcount, FTE, utilisation or capacity figure"
       - "instrument, equipment or facility availability"

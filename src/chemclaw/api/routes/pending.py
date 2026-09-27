@@ -5,8 +5,9 @@ anyone who can reach the broker can send one — so `AwaitAnswerWorkflow` treats
 attribution and never as authorization
 (`D-2026-08-28-roles-do-not-cross-the-durable-boundary-unsigned`). Deciding *who may answer*
 therefore has to happen on this side of the wire, before the signal is sent, exactly as
-`POST /sessions/{id}/plan/decision` and `POST /proposals/{id}/decision` are routes for the reason
-that a model must never authorize its own work.
+`POST /sessions/{id}/plan/decision` is a route for the reason that a model must never authorize its
+own work. `POST /proposals/{id}/decision` stood beside it in this sentence until the PR-gate was
+deleted (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`).
 
 **`asked_of` is routing and `_may_answer` is the gate, and they are deliberately not the same
 thing.** A request routed to nobody in particular is answerable by any authenticated caller; one
@@ -25,6 +26,7 @@ from chemclaw.api.deps import CurrentUser
 from chemclaw.api.schemas import PendingAnswerIn, PendingRequestOut, PendingRequestsOut
 from chemclaw.core.temporal_client import connect
 from chemclaw.durable import pending_store
+from chemclaw.kg.premise import count_refusals, premise_breaks
 
 logger = logging.getLogger(__name__)
 
@@ -90,18 +92,30 @@ def _routing_identities(principal: Principal) -> list[str]:
     return [identity for identity in identities if identity]
 
 
-async def list_pending(principal: CurrentUser) -> PendingRequestsOut:
-    """What is waiting on you — every open request you may actually answer.
+async def list_pending(principal: CurrentUser, limit: int = 50) -> PendingRequestsOut:
+    """One page of what is waiting on you — the open requests you may actually answer.
 
     The cross-conversation read, for the reason `GET /plans/pending` exists: a question raised in a
     turn the asker has closed lives only inside that turn otherwise, and the person who has to
     answer it is usually not the person who asked.
+
+    **It has always been a page and nothing said so.** Measured against a real database, 35 waiting
+    rows rendered as 20 with no marker anywhere in the response — the same silence `GET /sessions`
+    was fixed for ("it always bounded the answer, and nothing said so"), on the surface where the
+    consequence is a raised question that ages out because it appeared in nobody's inbox.
+    `total_routed_to_you` and `truncated` say what the page is; `limit` is how a client asks for
+    the rest, bounded by the store.
+
+    A cursor rather than a limit would be the `GET /sessions` answer in full, and it is deliberately
+    not taken here: this list is ordered by *deadline*, so it does not reorder under the reader the
+    way a recency-ordered conversation list does, and the store's own bound is 200 against an inbox
+    a person is expected to empty. What was missing was the statement, not the pagination.
     """
     # The caller's whole routing surface, not just their object id: `_may_answer` accepts a upn and
     # an entitlement, so an inbox that matched only the oid hid every team-routed request from the
     # team it was routed to.
-    requests = await pending_store.open_requests(
-        asked_of=principal.oid, identities=_routing_identities(principal)
+    page = await pending_store.open_requests(
+        asked_of=principal.oid, identities=_routing_identities(principal), limit=limit
     )
     # **Through the gate, not merely through the routing.** `_routing_identities` is the mirror of
     # one branch of `_may_answer` and the store knows nothing of the other: separation of duties
@@ -109,10 +123,15 @@ async def list_pending(principal: CurrentUser) -> PendingRequestsOut:
     # raised and routed to a group Alice is in sat in Alice's inbox and answered 403 when she
     # clicked it. Filtering on the same predicate the answer route applies is what stops the two
     # drifting — an inbox whose rows are unactionable is the failure an inbox exists to prevent.
-    answerable = [request for request in requests if _may_answer(principal, request)]
+    answerable = [request for request in page.requests if _may_answer(principal, request)]
     return PendingRequestsOut(
         requests=[PendingRequestOut(**request.model_dump()) for request in answerable],
         count=len(answerable),
+        total_routed_to_you=page.total_waiting,
+        # The store's own truncation, which is the only one that hides a row: the gate below
+        # removes rows the caller cannot act on, and those are shown as a difference rather than
+        # as a cut. Conflating the two would tell a chemist to page for rows that are not theirs.
+        truncated=page.truncated,
     )
 
 
@@ -121,7 +140,7 @@ async def answer_pending(
 ) -> Response:
     """Answer one held-open question, releasing whatever is waiting on it.
 
-    Four refusals, each a different fact and each with its own status:
+    Five refusals, each a different fact and each with its own status:
 
     - **404** — no such request. Also what an already-settled request returns from the *store*
       check below, but not the same case, so they are separated.
@@ -130,9 +149,22 @@ async def answer_pending(
       one, and a second answer must be told rather than silently ignored. The workflow ignores a
       duplicate signal because a signal has no reply channel; this route is where a caller can
       actually be told.
+    - **409, again, and a different fact** — the knowledge the question rests on has been
+      superseded or refuted while it waited. The request is still `waiting`, so this is not the
+      settled case above; it is an answer that would be applied to a premise that has gone. A wait
+      can stand open for `awaiting_max_days` (90), so this is not a rare window.
     - **503** — the broker is unreachable, so the answer was not delivered. Deliberately not
       written to the store first: a row saying `answered` with nothing released is worse than a
       failed request, because the thing waiting would wait forever while the inbox looked clean.
+
+    **The premise check is here rather than in the workflow**, and that placement is the whole
+    reason it cost one column and no replay risk. A workflow cannot read the corpus — it is
+    deterministic and replayed — so checking there would mean a new activity, which changes the
+    command sequence and needs a `workflow.patched` guard, and a new outcome state, which the
+    `pending_requests_state_known` CHECK would have to be widened to admit. This route already has
+    the authenticated caller, the stored row, permission to do I/O and a reply channel to refuse on.
+    The wait is left `waiting`: the premise moving is not an ending, and the question can still be
+    answered by somebody who re-reads it, or expire on its own deadline.
     """
     stored = await pending_store.get_request(request_id)
     if stored is None:
@@ -141,6 +173,33 @@ async def answer_pending(
         raise HTTPException(status_code=403, detail="this request is not routed to you")
     if stored.state != "waiting":
         raise HTTPException(status_code=409, detail=f"this request is already {stored.state}")
+    # `blocks_an_answer` rather than every break: an `absent` note cannot be told apart from a
+    # checkout this replica has not caught up with, and refusing a chemist on that is both the
+    # wrong failure direction and unappealable — there is no override on this route. See the
+    # method's own docstring for the measurement.
+    #
+    # **A `review` is exempt, because for it the check runs backwards.** Every other kind asks
+    # somebody to *apply* knowledge, so a retired premise means the answer would be applied to
+    # something that no longer holds. A review asks somebody to judge an answer the checks could
+    # not ground — so its premise is the thing under review, and the most natural act after
+    # reading it is to supersede or refute the note it rested on. That act would then lock the
+    # reviewer out of recording the review, on a route with no override and no cancel, leaving the
+    # wait only able to expire. The escalation also opens these automatically from claim text that
+    # routinely carries citations, so it can open one whose premise was *already* broken — and the
+    # 409 would then say the knowledge "has changed since it was asked" when nothing changed,
+    # which is the one thing `request_external_input`'s ask-time refusal exists to make true.
+    breaks = await premise_breaks(stored.premise_note_ids) if stored.kind != "review" else []
+    broken = [item for item in breaks if item.blocks_an_answer()]
+    if broken:
+        count_refusals("answer", broken)
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "the knowledge this question rests on has changed since it was asked: "
+                + "; ".join(item.describe() for item in broken)
+                + ". Re-read it before answering; the question is still open."
+            ),
+        )
 
     try:
         client = await connect()

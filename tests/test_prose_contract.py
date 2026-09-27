@@ -8,24 +8,683 @@ fail at call time. `mypy` cannot see prose, `pytest` did not read it, and `make 
 checks frontmatter.
 """
 
+import re
 from pathlib import Path
 
 import pytest
+import yaml
 
+import chemclaw
 import chemclaw.cli.validate_prose_contract as prose
-from chemclaw.agent.chemclaw_agent import available_tool_names
+from chemclaw.agent.chemclaw_agent import (
+    _INSTRUCTION_BLOCKS,
+    _INSTRUCTIONS,
+    _SAFETY_BLOCKS,
+    PromptBlock,
+    advertised_tool_names,
+    available_tool_names,
+    instructions_for,
+    skill_tool_names,
+    subagent_tool_names,
+)
+from chemclaw.agent.framing import ENVELOPE_TAG
+from chemclaw.agent.profiles import get_profile
 from chemclaw.cli.validate_prose_contract import (
     _ALLOWED_NON_TOOLS,
+    check_instruction_blocks,
     check_metric_citations,
     check_operator_prose,
     check_prose_contract,
 )
+from chemclaw.core.tool_registry import registered_tool_names
 from chemclaw.kg.note import KNOWN_NOTE_TYPES
 
 
 def test_shipped_prose_names_only_real_tools() -> None:
     """The committed skills + instructions pass — the regression guard itself."""
     assert check_prose_contract() == []
+
+
+def _model_facing_descriptions() -> dict[str, str]:
+    """Every text this system ships to a model, by name.
+
+    **Five sources, and each one was added because the guards below were green over it.** The
+    universe started as `registered_tools()` — the in-process agent tools — which left every
+    first-party connector bundle's served tool module outside, and that is the entire `calc`
+    surface: the bundle that *lost* DFT was the one the guards could not see. Driven then: a
+    sentence naming DFT, HPC, Nextflow and `compute_dft_energy` at once, inserted into
+    `connectors/calc/server/tools.py::report_measurement`, left this file green, while the same
+    sentence in a registered tool red it immediately.
+
+    Five more classes were outside until 2026-09-22, and `D-2026-09-15`'s "What keeps it true"
+    had already claimed the guards ran "over the whole model-facing surface, bundles included" —
+    the same error one level out. They are the durable jobs' assembled docstrings (which are *all*
+    of the `results` bundle, since it serves no tool module), every `SKILL.md` a turn can load, the
+    system prompt's own blocks, the deployment profiles' `instructions:` and `description:`, and
+    the template launchers' assembled docstrings. Driven then: every forbidden string at once in
+    `connectors/results/connector.yaml`'s job description left this file green.
+    `test_a_forbidden_sentence_in_any_of_them_is_caught` is that drive kept, one class and one
+    sentence at a time.
+
+    **Two of the five were found by a review of the first widening, which is the point.** It
+    scanned `_INSTRUCTION_BLOCKS` and not `_SAFETY_BLOCKS`, although `instructions_for` appends the
+    latter to *every* profile — so for a profile turn, which skips `_INSTRUCTION_BLOCKS` entirely,
+    the universe held none of the system prompt at all; and it left the profiles' own prose out,
+    which `agent/profiles.py` says **is** the system prompt.
+
+    **The seventh class is prompt text outside `agent/chemclaw_agent.py`**, which was not
+    enumerable until it was declared: it carries `core/model_prose.ModelProse` and `_marked_prose`
+    reads it. `durable/hypothesis_tournament.py` was the live instance that forced it — a prompt
+    saying "There is no DFT and no cluster here", correct text of exactly the exempted kind.
+
+    **What is still outside, so this docstring does not repeat that error a third time**: a marker
+    is only as good as whoever remembers it, and nothing refuses an unmarked prompt constant. A
+    derived rule was measured first and does not work here: following module-level strings into a
+    function that calls a model found six, one of them prompt text, and missed the helper and peer
+    briefs entirely, because those reach the model through middleware arguments rather than a
+    message built beside the call. Prose written inline in a function body — refusal and tool-result
+    sentences, mostly — is outside too, until it is hoisted into a marked constant.
+
+    No count is written here. The one that was said 31 registered tools against a surface of 114,
+    and both had moved; `test_the_universe_reaches_every_class_the_model_reads` asserts that each
+    class contributes *and how much*, because a review showed a class can go half silent while
+    every other test in this file stays green.
+
+    The served bundle tools are read off their own source with `ast`: their `@server.tool()`
+    docstrings ship to the model through a served manifest, and importing them here would drag
+    each bundle's dependency closure into a lane that does not need it.
+
+    **Widening the universe was coupled to the patterns, and that coupling is resolved rather
+    than deferred.** Shipped prose in the added classes legitimately *names* the removed tier and
+    the removed gate in order to say they are gone. Measured: over today's universe the three
+    patterns as they stood before this work produce **ten occurrences across eight texts**, and
+    every one of them is correct text. `_TRUE_ABOUT_WHAT_IS_GONE` and two narrowings below are
+    what resolve it, and the measurement that chose that shape over the one `BACKLOG.md` proposed
+    is recorded there.
+    """
+    import ast
+    import inspect
+    from pathlib import Path
+
+    import chemclaw
+    from chemclaw.core.tool_registry import registered_tools
+
+    described: dict[str, str] = {
+        getattr(fn, "__name__", str(fn)): inspect.getdoc(fn) or "" for fn in registered_tools()
+    }
+    bundles = sorted(Path(chemclaw.__file__).parent.glob("connectors/*/server/tools.py"))
+    assert bundles, "no connector bundle tool modules found; this test is reading the wrong tree"
+    for module in bundles:
+        tree = ast.parse(module.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef):
+                continue
+            served = any(
+                isinstance(one, ast.Call)
+                and isinstance(one.func, ast.Attribute)
+                and one.func.attr == "tool"
+                for one in node.decorator_list
+            )
+            if served:
+                where = f"{module.parent.parent.name}:{node.name}"
+                described[where] = ast.get_docstring(node) or ""
+    described.update(_job_tool_docstrings())
+    described.update(_shipped_skill_bodies())
+    described.update(_instruction_block_texts())
+    described.update(_profile_prose())
+    described.update(_template_launcher_docstrings())
+    described.update(_marked_prose())
+    return described
+
+
+def _job_tool_docstrings() -> dict[str, str]:
+    """The durable-job tools' descriptions — assembled, not read off the manifest.
+
+    `connectors/jobs.py::_docstring` is what the model is actually sent: the job's summary, then
+    its `description:`, then one line per declared parameter. Reading the manifest's
+    `description:` alone would miss the summary and every parameter description, which are the
+    same prose by another route. The `results` bundle ships no served tool module at all, so
+    before this its entire model-facing surface was these entries and nothing else.
+    """
+    from chemclaw.connectors.jobs import _docstring
+    from chemclaw.connectors.registry import discovered
+
+    found: dict[str, str] = {}
+    for connector, (_, manifest) in discovered().items():
+        for job in manifest.jobs:
+            found[f"job:{connector}:{job.name}"] = _docstring(job)
+    assert found, "no connector jobs discovered; this test is reading the wrong tree"
+    return found
+
+
+def _shipped_skill_bodies() -> dict[str, str]:
+    """Every `SKILL.md` a turn can load — the bundle-local ones and the repository's own.
+
+    Both, because the axis that matters is whether the model reads it, and it reads both. The
+    bundle skills reach a turn through `registry.skills_dirs`; `skills/` is architecture layer 3
+    and is loaded on demand by name. A skill is longer than a docstring and is loaded whole, so
+    a sentence about a removed tier costs more here than in the text this guard started on.
+    """
+    import chemclaw
+
+    package = Path(chemclaw.__file__).parent
+    repository = Path(__file__).resolve().parents[1]
+    found = {
+        f"bundleskill:{path.parent.parent.parent.name}:{path.parent.name}": path.read_text(
+            encoding="utf-8"
+        )
+        for path in sorted(package.glob("connectors/*/skills/*/SKILL.md"))
+    }
+    found.update(
+        {
+            f"skill:{path.parent.name}": path.read_text(encoding="utf-8")
+            for path in sorted((repository / "skills").glob("*/SKILL.md"))
+        }
+    )
+    assert found, "no SKILL.md files found; this test is reading the wrong tree"
+    return found
+
+
+def _instruction_block_texts() -> dict[str, str]:
+    """The system prompt's own blocks, which are sent on every turn rather than on demand.
+
+    **Both groups, and leaving `_SAFETY_BLOCKS` out was the gap a review found.** `instructions_for`
+    appends them to *every* profile — including the six that set `instructions:` and therefore skip
+    `_INSTRUCTION_BLOCKS` entirely, so for a profile turn they were the only part of the system
+    prompt this file could have scanned and it scanned none of it. One of the four is itself prose
+    about the removed gate ("records it for everyone at once with no review step"), which is the
+    class these guards police.
+
+    Indexed by position: a `PromptBlock` has no name, and its text is the identity anyway — the
+    assertion messages below quote the match, so the index is only there to keep the keys apart.
+    """
+    found = {f"block:{index}": block.text for index, block in enumerate(_INSTRUCTION_BLOCKS)}
+    found.update({f"safety:{index}": block.text for index, block in enumerate(_SAFETY_BLOCKS)})
+    return found
+
+
+def _profile_prose() -> dict[str, str]:
+    """Every deployment profile's `instructions:` and `description:`.
+
+    `agent/profiles.py` says of the first in as many words that it **is** the system prompt, and
+    `agent/subagents.py` puts the second into the `task` helper's own description, which
+    "lands in the prefix of every model call". Read off `data/profiles/` rather than through
+    `get_profile`, because a profile that fails to load is still a file somebody shipped.
+    """
+    root = Path(__file__).resolve().parents[1] / "data" / "profiles"
+    found: dict[str, str] = {}
+    for path in sorted(root.glob("*.yaml")):
+        loaded = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        found[f"profile:{path.stem}:instructions"] = str(loaded.get("instructions") or "")
+        found[f"profile:{path.stem}:description"] = str(loaded.get("description") or "")
+    assert found, "no deployment profiles found; this test is reading the wrong tree"
+    return found
+
+
+def _template_launcher_docstrings() -> dict[str, str]:
+    """The fixed-procedure launchers, whose docstrings `templates/registry.py` assembles.
+
+    The same shape as the durable jobs one class up — a docstring built from a `data/templates/`
+    manifest and bound onto the agent — and outside the universe for the same reason: nothing here
+    is a Python function anybody wrote.
+
+    **Every enabled launcher, bound or withheld** (`templates.registry.withheld_reason`): a launcher
+    withheld because its capability is off here is bound the day a deployment turns it on, and its
+    docstring is what that deployment's model is sent.
+    """
+    import inspect
+
+    from chemclaw.templates.registry import template_tools
+
+    found = {
+        f"template:{fn.__name__}": inspect.getdoc(fn) or "" for fn in template_tools(declared=True)
+    }
+    assert found, "no template launchers found; this test is reading the wrong tree"
+    return found
+
+
+def _marked_prose() -> dict[str, str]:
+    """Every module-level constant marked `ModelProse` — the prompt text outside the agent module.
+
+    The class this universe could not enumerate until it was declared: a prompt written as a string
+    constant in an ordinary module has no decorator, manifest or directory saying a model reads it.
+    `core/model_prose.py` is the declaration and `validate_prose_contract.marked_prose` the one
+    loader, shared with `make prose-validate`, which also refuses a marker the loader cannot reach.
+    """
+    found = prose.marked_prose()
+    assert found, "no marked prose found; this test is reading the wrong tree"
+    return found
+
+
+#: The tier `D-2026-08-26-semiempirical-is-the-whole-tier` deleted, by the names it went under.
+#:
+#: `conceptual[- ]DFT` is carved out rather than exempted sentence by sentence: it is the name of a
+#: shipped panel (`publish/properties.py`'s `conceptual_dft` group, `project.py`'s Fukui
+#: projection), derived from GFN2-xTB frontier orbitals and reaching no DFT tier at all. A term of
+#: art that happens to contain the word is not the class this guard is about. It appears in
+#: exactly **one** text tree-wide (`skills/reactivity-descriptors`), so the carve-out saves one
+#: exemption and not the three a first draft of this comment claimed — kept as a carve-out anyway,
+#: because it is a rule about a word's meaning rather than a judgement about one sentence.
+_A_REMOVED_TIER = re.compile(
+    r"(?<!conceptual-)(?<!conceptual )\bDFT\b|\bHPC\b|Nextflow|Seqera|compute_dft_energy"
+    r"|agents/job_status"
+)
+
+#: The deleted PR-gate, named by its machinery. Widened 2026-09-22 with the phrasings the
+#: `BACKLOG.md` row measured as missing — `PRs`, the review queue, the knowledge gate — which cost
+#: **zero** new offenders over the widened universe, so that widening is free. The one `\bPRs?\b`
+#: occurrence is the "PR" inside the exempted `PR gate` sentence, at an offset `\bPR[- ]gate\b`
+#: already matched.
+_REVIEW_MACHINERY = re.compile(
+    r"\bPR[- ]gate\b|pull requests?|\bPRs?\b|NoteProposal|review queue|knowledge gate",
+    re.IGNORECASE,
+)
+
+#: A promise that something the model does waits for a person.
+#:
+#: **`propose[sd]? (?:what|it|them|the)` was dropped**, on evidence, and a first draft of this
+#: comment got both of its numbers wrong. Measured over the widened universe: it produced **six**
+#: occurrences across five texts, of which four propose an *experiment* rather than a review
+#: ("propose the next point(s)", "name the limit and propose the experiment that would settle it"),
+#: which is the behaviour `D-2026-08-26-semiempirical-is-the-whole-tier` asks for in as many words.
+#: Against the three shipped `synthesize_memory` defects this guard exists for it caught **one**,
+#: not zero — "propose what it finds for review" — and all three are independently caught by
+#: `for review` and `pull requests?`, which is what makes the drop lossless *on those strings*.
+#:
+#: **It is not lossless on the defect's shape, and widening the vocabulary back is measured to be
+#: worse.** Rename the review object and the original walks through: "propose what it finds to a
+#: reviewer, who accepts or rejects it" passes every pattern here. Driven, the obvious widening —
+#: `reviewers?`, `approve[sd]?`, `sign-off`, `accepts or rejects` — produces **fourteen**
+#: occurrences over nine texts, of which at least twelve are correct, several of them saying that
+#: *nobody* approves (`skills/playbook-distillation`, `skills/knowledge-graph-write`) and three
+#: describing the workflow approval that genuinely exists (`compose_workflow`). That is the
+#: false-positive shape `D-2026-09-11-the-debt-was-in-the-claims-not-in-the-code` measured and
+#: declined. So this is a keyword guard with a recall limit, said here rather than implied: it
+#: catches the machinery and the stock phrase, and a paraphrase gets past it.
+_A_REVIEW_PROMISE = re.compile(
+    r"for (?:review|approval|acceptance)|awaits? review|pending review", re.IGNORECASE
+)
+
+#: Shipped sentences that match a pattern above and are *correct*, each with why.
+#:
+#: **The shape the row proposed is disqualified by the one true positive this file has.** It
+#: suggested "sentence-level with a negation/past-tense exclusion". Driven against the original
+#: defect — `get_durable_job_status`'s "**used to** degrade to a bare status, because the DFT job
+#: returned its own typed result and had its own status tool" — such an exclusion matches it and
+#: turns the guard green over the exact text it was written to catch. History about a removed tier
+#: is *always* past tense; that is what makes it history. So the discriminator cannot be the tense.
+#:
+#: An exemption is therefore a literal quote that **contains** the match, keyed by the one text it
+#: belongs to, and `test_every_exemption_still_quotes_shipped_prose` fails the day one of these
+#: sentences is reworded — so it cannot outlive the text it was written for.
+#:
+#: **Two narrowings a review drove, because the first spelling could swallow real prose.** It
+#: flattened whitespace and then matched a quote anywhere in any of the texts, so a quote could
+#: form across a line break out of words that were never one sentence, and the accidental span
+#: then exempted whatever fell inside it. Driven: *"...never present one as if it were\nDFT runs
+#: are dispatched to the cluster queue..."* went green while the same offence one line later was
+#: caught. So the key is the text name — an exemption reaches one text, not a hundred and
+#: eighty-seven — and a quote has to end at a **clause boundary**: end of text, or punctuation.
+#: The accidental span above ends mid-word and no longer exempts anything.
+_TRUE_ABOUT_WHAT_IS_GONE: dict[tuple[str, str], str] = {
+    ("block:5", "never present one as if it were DFT"): (
+        "The system prompt telling the model not to overclaim the method. Actionable, and the "
+        "opposite of describing a tier as reachable."
+    ),
+    (
+        "skill:computational-evidence",
+        "There is no DFT tier and no cluster to send a calculation to",
+    ): (
+        "`skills/computational-evidence` saying the tier is absent, which is what "
+        "`D-2026-08-26-semiempirical-is-the-whole-tier` asks prose to say."
+    ),
+    (
+        "bundleskill:safety:safety-screening",
+        "the PR gate over agent-written knowledge was deleted",
+    ): (
+        "`connectors/safety/skills/safety-screening` explaining why the screen is a tool and not "
+        "a gate — the reader needs the removed control named to follow it."
+    ),
+    (
+        "prose:chemclaw.durable.hypothesis_tournament:_DERIVE_CHECK",
+        "There is no DFT and no cluster here",
+    ): (
+        "The discriminating-check prompt deciding `kind`: a check that would need a tier this "
+        "system does not have is `physical`, which is the routing "
+        "`D-2026-08-26-semiempirical-is-the-whole-tier` asks for rather than a tier described "
+        "as reachable."
+    ),
+}
+
+#: What may **not** follow an exempted quote: another word. A quote that runs straight on into one
+#: is not a clause, it is a run of words that happened to line up after the whitespace was
+#: flattened — see `_TRUE_ABOUT_WHAT_IS_GONE`. Punctuation of any kind ends a clause, including the
+#: opening bracket of the citation two of the three shipped quotes are followed by.
+_A_WORD_CHARACTER = re.compile(r"\w")
+
+
+def _exempt_spans(name: str, flat: str) -> list[tuple[int, int]]:
+    """Where this text's own exemptions sit in it, clause boundary enforced."""
+    spans = []
+    for (owner, phrase), _ in _TRUE_ABOUT_WHAT_IS_GONE.items():
+        if owner != name:
+            continue
+        for found in re.finditer(re.escape(phrase), flat):
+            after = flat[found.end() :].lstrip()
+            if after and _A_WORD_CHARACTER.match(after[0]):
+                continue
+            spans.append((found.start(), found.end()))
+    return spans
+
+
+def _first_offence(text: str, pattern: re.Pattern[str], name: str = "") -> str | None:
+    """The first match in `name`'s text not covered by one of `name`'s exemptions, or `None`.
+
+    Whitespace is flattened first, so a quote in `_TRUE_ABOUT_WHAT_IS_GONE` does not have to
+    reproduce a `SKILL.md`'s line wrapping — rewrapping a paragraph is not a change in what the
+    model is told, and an exemption that broke on it would teach people to delete exemptions. Two
+    of the three shipped quotes do span a line break in their source, so this is load-bearing
+    rather than a convenience.
+    """
+    flat = " ".join(text.split())
+    exempt = _exempt_spans(name, flat)
+    for match in pattern.finditer(flat):
+        if any(start <= match.start() and match.end() <= end for start, end in exempt):
+            continue
+        return match.group(0)
+    return None
+
+
+#: The three classes the guards could not see before 2026-09-22, each with the loader that reaches
+#: it. Parametrised rather than written out, so a fourth class is a row here and not a fourth copy
+#: of the same driving.
+_THE_CLASSES_THAT_WERE_OUTSIDE = (
+    "_job_tool_docstrings",
+    "_shipped_skill_bodies",
+    "_instruction_block_texts",
+    "_profile_prose",
+    "_template_launcher_docstrings",
+    "_marked_prose",
+)
+
+
+def test_the_universe_reaches_every_class_the_model_reads() -> None:
+    """Each loader contributes, and the bundle that ships no served tools is in it.
+
+    `results` is the case worth naming: it serves no tool module, so its durable job's
+    assembled docstring is its *entire* model-facing surface and the old universe held none of it.
+    """
+    names = set(_model_facing_descriptions())
+    for prefix in (
+        "job:",
+        "bundleskill:",
+        "skill:",
+        "block:",
+        "safety:",
+        "profile:",
+        "template:",
+        "prose:",
+    ):
+        assert any(name.startswith(prefix) for name in names), f"no {prefix} text in the universe"
+    assert any(name.startswith("job:results:") for name in names), (
+        "the `results` bundle serves no tool module, so its job descriptions are the only "
+        "model-facing text it has; the universe must reach them"
+    )
+
+    # **A class that goes *partly* silent is the failure this test was blind to.** Driven by a
+    # review: breaking the repository-skills half of `_shipped_skill_bodies` dropped 36 of 43 skill
+    # texts and every poison parametrisation below stayed green, because the poison is injected
+    # whether or not the loader still returns anything. So each class is counted against the tree
+    # rather than against a number written here.
+    root = Path(__file__).resolve().parents[1]
+    package = Path(chemclaw.__file__).parent
+    expected = {
+        "bundleskill:": len(list(package.glob("connectors/*/skills/*/SKILL.md"))),
+        "skill:": len(list((root / "skills").glob("*/SKILL.md"))),
+        "profile:": 2 * len(list((root / "data" / "profiles").glob("*.yaml"))),
+        "block:": len(_INSTRUCTION_BLOCKS),
+        "safety:": len(_SAFETY_BLOCKS),
+    }
+    short = {
+        prefix: (sum(1 for name in names if name.startswith(prefix)), count)
+        for prefix, count in expected.items()
+        if sum(1 for name in names if name.startswith(prefix)) != count
+    }
+    assert not short, (
+        f"{short} — a loader is returning fewer texts than the tree holds (got, expected). A class "
+        "that goes partly silent scans green everywhere else in this file."
+    )
+
+
+@pytest.mark.parametrize("loader", _THE_CLASSES_THAT_WERE_OUTSIDE)
+@pytest.mark.parametrize(
+    "poison",
+    [
+        "Escalate to the DFT tier when GFN2 is not enough.",
+        "The HPC launcher runs this through Nextflow on Seqera.",
+        "It opens a pull request and the result waits for review.",
+        "The finding is staged behind the knowledge gate until a reviewer accepts it.",
+    ],
+)
+def test_a_forbidden_sentence_in_any_of_them_is_caught(
+    monkeypatch: pytest.MonkeyPatch, loader: str, poison: str
+) -> None:
+    """The measurement in `BACKLOG.md` run again, and now it reds.
+
+    The row drove exactly this and got green: "every forbidden string at once in
+    `connectors/results/connector.yaml`'s job `description:` left both guards green". Poisoning
+    each loader in turn is the same drive, one class and one sentence at a time, so a class that
+    silently stops being scanned fails here rather than going quiet.
+    """
+    real = globals()[loader]
+    guard = (
+        test_no_tool_description_tells_the_model_about_a_tier_that_is_gone
+        if _A_REMOVED_TIER.search(poison)
+        else test_no_tool_description_tells_the_model_to_expect_a_review_gate
+    )
+    guard()  # the control: green before the poison, so the failure below is the poison's.
+    monkeypatch.setitem(globals(), loader, lambda: dict(real(), poisoned=poison))
+    with pytest.raises(AssertionError) as caught:
+        guard()
+    assert str(caught.value).startswith("{'poisoned':"), (
+        f"the guard failed, but not solely on the poison: {caught.value}"
+    )
+
+
+def test_the_marked_class_reaches_its_first_carriers() -> None:
+    """The two constants the row that opened this class named, read through the one loader.
+
+    A prompt template is read as the string it evaluates to, and a mapping of markers contributes
+    one text per member, so a finding names the hint that carried it.
+    """
+    found = _marked_prose()
+    assert "prose:chemclaw.durable.hypothesis_tournament:_DERIVE_CHECK" in found
+    assert (
+        found["prose:chemclaw.durable.hypothesis_tournament:_TEMPLATE_HINTS[bond-strength-survey]"]
+        == "which bond breaks first"
+    )
+
+
+def test_the_shipped_markers_are_all_where_the_loader_reads_them() -> None:
+    """Rule 11 over the tree: every `ModelProse` is a module-level constant `marked_prose` sees."""
+    assert prose.check_marked_prose_is_reachable() == []
+
+
+def test_a_marker_inside_a_function_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A marker the loader cannot read looks applied and guards nothing, so the gate refuses it.
+
+    The control is the same text at module scope, which the loader reads and the rule accepts.
+    """
+    package = tmp_path / "chemclaw"
+    package.mkdir()
+    (package / "stray.py").write_text(
+        "from chemclaw.core.model_prose import ModelProse\n\n"
+        "READ = ModelProse('Escalate to the DFT tier.')\n\n"
+        "def prompt() -> str:\n"
+        "    return ModelProse('Escalate to the DFT tier.')\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(prose, "_PACKAGE", package)
+    monkeypatch.setattr(prose, "_ROOT", tmp_path)
+    problems = prose.check_marked_prose_is_reachable()
+    assert len(problems) == 1, problems
+    assert problems[0].startswith("chemclaw/stray.py:6:"), problems
+
+
+def test_every_exemption_still_quotes_shipped_prose() -> None:
+    """A stale exemption is a hole nobody can see — it covers a span that is no longer there.
+
+    Worse than dead code: rewording an exempted sentence silently leaves the exemption behind to
+    match some *other* sentence later, which is exactly the "a control that is satisfied while the
+    thing it protects is false" shape this file exists to find. The owner is checked too, so an
+    exemption cannot survive its text being renamed and quietly stop applying.
+    """
+    texts = {name: " ".join(text.split()) for name, text in _model_facing_descriptions().items()}
+    orphaned = sorted(
+        f"{owner}: {phrase!r}"
+        for owner, phrase in _TRUE_ABOUT_WHAT_IS_GONE
+        if phrase not in texts.get(owner, "")
+    )
+    assert not orphaned, (
+        f"{orphaned} are exempted but no longer appear in the text they name. Delete the entry: "
+        "the prose it was written for has been reworded, renamed or removed."
+    )
+
+
+def test_every_exemption_is_needed() -> None:
+    """The control for the test above: an exemption that guards nothing is noise with authority.
+
+    Both halves, because a review found the *other* exemption map in this file had quietly become
+    decoration — `_A_LIVE_GATE` exempted `propose_skill` from a pattern that, after the narrowing
+    above, no longer matched its docstring at all, so deleting the map entirely was a no-op. It is
+    deleted. This test is what would have said so.
+    """
+    texts = _model_facing_descriptions()
+    assert texts, "no model-facing text found; this test is reading the wrong tree"
+    for (owner, phrase), reason in _TRUE_ABOUT_WHAT_IS_GONE.items():
+        assert reason.strip(), f"{phrase!r} is exempted without a reason"
+        assert any(
+            pattern.search(phrase)
+            for pattern in (_A_REMOVED_TIER, _REVIEW_MACHINERY, _A_REVIEW_PROMISE)
+        ), (
+            f"{phrase!r} is exempted but matches none of the patterns, so it exempts nothing. "
+            "Either a pattern was narrowed past it, or the entry was never needed."
+        )
+        without = {
+            key: value for key, value in _TRUE_ABOUT_WHAT_IS_GONE.items() if key != (owner, phrase)
+        }
+        restore = dict(_TRUE_ABOUT_WHAT_IS_GONE)
+        _TRUE_ABOUT_WHAT_IS_GONE.clear()
+        _TRUE_ABOUT_WHAT_IS_GONE.update(without)
+        try:
+            still_clean = all(
+                _first_offence(texts[owner], pattern, owner) is None
+                for pattern in (_A_REMOVED_TIER, _REVIEW_MACHINERY, _A_REVIEW_PROMISE)
+            )
+        finally:
+            _TRUE_ABOUT_WHAT_IS_GONE.clear()
+            _TRUE_ABOUT_WHAT_IS_GONE.update(restore)
+        assert not still_clean, (
+            f"removing the exemption for {owner} changes nothing, so it guards nothing. Delete it."
+        )
+
+
+def test_an_exemption_cannot_form_across_a_line_break() -> None:
+    """The attack a review drove, kept: a quote assembled out of words that were never a clause.
+
+    The first spelling flattened whitespace and then matched exemptions anywhere in any text, so
+    the tail of one line plus the head of the next could spell an exempted quote and swallow the
+    offence that followed. The control is the same offence one line later, which was always caught.
+    """
+    owner = "block:5"
+    swallowed = (
+        "Report the method honestly and never present one as if it were\n"
+        "DFT runs are dispatched to the cluster queue when GFN2 is not enough."
+    )
+    control = "Report the method honestly.\nDFT runs are dispatched to the cluster queue."
+    assert _first_offence(swallowed, _A_REMOVED_TIER, owner) == "DFT", (
+        "an exemption formed across a line break and exempted the sentence after it"
+    )
+    assert _first_offence(control, _A_REMOVED_TIER, owner) == "DFT"
+    # And the shipped sentence it is written for is still exempt, line wrapping and all.
+    assert _first_offence(_model_facing_descriptions()[owner], _A_REMOVED_TIER, owner) is None
+
+
+def test_an_exemption_reaches_only_the_text_it_names() -> None:
+    """A quote that is correct in one skill is not a licence in another."""
+    borrowed = "Anywhere else: never present one as if it were DFT."
+    assert _first_offence(borrowed, _A_REMOVED_TIER, "block:5") is None
+    assert _first_offence(borrowed, _A_REMOVED_TIER, "skill:deep-research") == "DFT"
+
+
+def test_no_tool_description_tells_the_model_about_a_tier_that_is_gone() -> None:
+    """A tool's docstring is its schema description, and it is re-sent on every model call.
+
+    `D-2026-08-26-semiempirical-is-the-whole-tier` deleted the DFT tier, the HPC launcher and every
+    tool that reached them. What it could not delete is prose *about* them sitting in a docstring
+    that is still shipped: `get_durable_job_status` carried 184 tokens explaining that a case "used
+    to degrade to a bare status, because the DFT job returned its own typed result and had its own
+    status tool (`agents/job_status.py`)" — on every turn, describing a system the model cannot
+    reach, at the model's expense.
+
+    This is the narrow, checkable half of the wider rule. The wider one — rationale belongs in a
+    `#` comment and guidance in the docstring — is judgment and stays a review rule; naming a
+    removed tier is not judgment.
+    """
+    offenders = {
+        name: found
+        for name, text in _model_facing_descriptions().items()
+        if (found := _first_offence(text, _A_REMOVED_TIER, name))
+    }
+    assert not offenders, (
+        f"{offenders} name a removed tier in text the model is sent on every turn. Move the "
+        "history to a `#` comment in the function body: the model cannot act on it and pays for "
+        "it, and `D-2026-08-26-semiempirical-is-the-whole-tier` deleted what it describes."
+    )
+
+
+def test_no_tool_description_tells_the_model_to_expect_a_review_gate() -> None:
+    """The same failure as the tier above, on the control that was removed instead of the hardware.
+
+    `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` deleted the PR-gate: knowledge lands in
+    `knowledge/` the moment it is learned. `synthesize_memory` went on telling the model it would
+    "propose what it finds for review", that "only this half opens pull requests", and that its
+    result is "the list of pull requests opened" — three present-tense statements about a control
+    that does not exist, in the text the model plans against. A model told its writes are reviewed
+    is a model reasoning about a safety net nobody is holding, which is worse than the wasted
+    tokens the tier check is about.
+
+    Scanned over the same surface and with the same argument: what is asserted is the text, not the
+    binding.
+
+    **One tool proposes for a person to decide, and says so, and that is not this defect.** The ADR
+    above drew an axis rather than banning a word: knowledge is recorded because it does not change
+    what the agent does, and a *skill* is gated because it does. `propose_skill` is the gated side
+    (`D-2026-09-18-a-proposal-is-not-a-skill-and-a-route-is-not-a-tool`), so telling the model its
+    proposal waits for the chemist is the opposite failure to the one here — it is true, and a model
+    that did not know it would report a change that has not happened.
+
+    That used to need a per-tool exemption (`_A_LIVE_GATE`, naming the test that held the gate
+    real). It does not any more, and the reason is worth keeping: narrowing `_A_REVIEW_PROMISE` to
+    require the review *object* — the thing that was deleted — made `propose_skill`'s docstring
+    stop matching, so the exemption became a map that changed no result. A review found it, and it
+    is deleted rather than left as authority over nothing;
+    `test_every_exemption_is_needed` now drives that question for every exemption this file has, by
+    removing each one and requiring the text to red without it.
+    """
+    offenders: dict[str, str] = {}
+    for name, text in _model_facing_descriptions().items():
+        if found := _first_offence(text, _REVIEW_MACHINERY, name):
+            offenders[name] = found
+        elif found := _first_offence(text, _A_REVIEW_PROMISE, name):
+            offenders[name] = found
+    assert not offenders, (
+        f"{offenders} promise the model a review step that "
+        "`D-2026-09-05-the-gate-follows-behaviour-not-knowledge` deleted. A note is recorded, not "
+        "proposed; say what the tool does now."
+    )
 
 
 def test_mcp_tools_count_as_real() -> None:
@@ -475,3 +1134,312 @@ def test_the_prose_gate_refuses_a_corpus_it_could_not_assemble(
     assert problems, "a corpus of zero documents reported nothing wrong"
     assert any("README.md" in problem for problem in problems), problems
     assert any("docs/decisions" in problem for problem in problems), problems
+
+
+def test_the_shipped_blocks_require_exactly_what_they_name() -> None:
+    """Rule 10 over the committed blocks — the regression guard for the declaration itself."""
+    assert check_instruction_blocks() == []
+
+
+def test_a_block_that_names_a_tool_it_does_not_require_is_caught(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The defect rule 10 exists for: a block that names a tool and declares nothing never drops.
+
+    This is the original finding with one extra step. `_assemble` drops a block when the graph does
+    not bind everything in `requires`, so a block whose `requires` is empty is sent to every
+    deployment — and reads, in the declaration, exactly like one that would be dropped. Nothing
+    else in this repository can see the difference: rules 1-2 are satisfied (`screen_hazards` is a
+    real tool), `mypy` sees a `frozenset`, and the prompt is assembled at runtime from whatever is
+    written here.
+    """
+    monkeypatch.setattr(
+        prose,
+        "_INSTRUCTION_BLOCKS",
+        (_INSTRUCTION_BLOCKS[0], PromptBlock("Always call screen_hazards first. ")),
+    )
+    problems = check_instruction_blocks()
+    assert problems, "a block naming a tool it does not require was reported as sound"
+    assert "screen_hazards" in problems[0], problems
+
+
+def test_a_block_requiring_a_tool_it_does_not_name_is_caught(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other direction, which is a defect too — and a silent one.
+
+    A block requiring a tool its text never mentions vanishes from any deployment lacking that
+    tool, and the prose gives a reader no reason why. Equality, not containment, is what makes both
+    directions visible.
+    """
+    monkeypatch.setattr(
+        prose,
+        "_INSTRUCTION_BLOCKS",
+        (PromptBlock("Cite the note id behind every claim. ", frozenset({"gather_evidence"})),),
+    )
+    problems = check_instruction_blocks()
+    assert problems, "a block requiring a tool it never names was reported as sound"
+    assert "gather_evidence" in problems[0], problems
+
+
+def test_a_block_requiring_a_middleware_tool_is_caught(monkeypatch: pytest.MonkeyPatch) -> None:
+    """D-117's shape from the other side: a name space the prompt is never narrowed against.
+
+    `build_langgraph_agent` narrows against the tools it *binds* — registry, connectors, template
+    launchers. The filesystem verbs, `write_todos` and `task` are attached by middleware
+    afterwards, so a block requiring one of them passes rules 1-2 (they are real tools, and
+    `available_tool_names` knows all six name spaces) and is then dropped from every deployment
+    that exists. Loud rather than silent.
+    """
+    monkeypatch.setattr(
+        prose,
+        "_INSTRUCTION_BLOCKS",
+        (PromptBlock("Use read_file on the path shown. ", frozenset({"read_file"})),),
+    )
+    problems = check_instruction_blocks()
+    assert any("read_file" in problem and "middleware" in problem for problem in problems), problems
+
+
+def test_the_prompt_a_graph_is_sent_names_no_tool_that_graph_cannot_call() -> None:
+    """The property the blocks exist for, asserted against two real surfaces.
+
+    Measured before the blocks: the default prompt named **16** tools a cold deployment binds
+    nothing for — every calculator, the structure searches, `resolve_compound`, and
+    `screen_hazards`, whose paragraph told the model to screen every proposed reagent against a
+    hazard screen that was not there.
+
+    **The bound half only, plus the one name space that cannot be absent.** This asserts what
+    `instructions_for` produces, not the whole system message. The filesystem verbs and `task` come
+    from middleware attached to every agent this deployment builds, so they are never in the set the
+    prompt is narrowed against and naming them is not a promise that can fail — the same exemption
+    `validate_prose_contract.check_instruction_blocks` makes, derived from the same two functions so
+    the rule and this test cannot disagree about it.
+
+    The skills *listing* is no longer the caveat this docstring used to carry. It was narrowed by
+    `skill_access`'s advertised names — the manifests — so a deployment whose bundles were declared
+    and unreachable was still offered `safety-screening`; `skills_backend` now takes the bound set
+    (`tests/test_langgraph_agent.py::test_a_listed_skill_always_has_at_least_one_tool_this_turn_binds`).
+    """
+    profile = get_profile("default")
+    always_bound = skill_tool_names() | set(subagent_tool_names())
+    for available in (frozenset(registered_tool_names()), advertised_tool_names(profile)):
+        text = instructions_for(profile, available)
+        named = prose.referenced_tool_names(text) - always_bound
+        assert named <= available, sorted(named - available)
+
+
+def test_the_maximal_prompt_is_what_a_validator_and_a_caller_still_get() -> None:
+    """`available=None` is every block, so nothing that reads the prose sees a narrowed one.
+
+    The validators, `tests/surface.py` and `AgentProfile`'s default all ask "what does this profile
+    say" without a graph to ask about. A narrowed answer there would make the gate check less prose
+    than a deployment is sent, which is this file's own failure mode.
+    """
+    profile = get_profile("default")
+    maximal = instructions_for(profile)
+    assert maximal == _INSTRUCTIONS
+    for block in _INSTRUCTION_BLOCKS:
+        if block.trail in (None, "durable"):
+            assert block.text in maximal, block.text[:60]
+
+
+def test_a_deployment_with_no_durable_trail_is_not_told_it_has_one() -> None:
+    """F1's prompt half: the traceability paragraph follows the sink, not the wish.
+
+    `default_audit_sink()` returns `NullAuditSink` on every deployment that has not set
+    `session_store="postgres"` — the shipped `.env.example` — and the prompt asserted an
+    append-only trail in the present tense regardless. The two texts are a pair rather than one
+    text and its absence, because "how is this number defended" deserves an answer either way.
+    """
+    profile = get_profile("default")
+    durable = instructions_for(profile, durable_trail=True)
+    log_only = instructions_for(profile, durable_trail=False)
+    assert "append-only audit trail" in durable
+    assert "append-only audit trail" not in log_only
+    assert "no durable audit trail here" in log_only
+    assert "reproducibility, which is a different claim from integrity" in durable
+    assert "reproducibility, which is a different claim from integrity" in log_only
+
+
+def test_the_safety_floor_survives_narrowing_to_a_surface_with_no_tools_at_all() -> None:
+    """A block carrying a floor sentence requires nothing — measured, not intended.
+
+    **This caught a regression the blocks themselves introduced.** The envelope rule — half of the
+    two-part prompt-injection defense (`agent/framing.py`) — sat in the same paragraph as the
+    `record_knowledge_note` instruction, so the block required two side-effecting tools, and
+    `agent/subagents.py` subtracts exactly those from the one helper this deployment builds.
+    Measured on the compiled helper graph: 24 tools bound and **no envelope rule in its prompt**,
+    while `tests/test_framing.py` stayed green because it reads the maximal text.
+
+    The empty surface is the right probe: no real profile is that narrow, and a floor that survives
+    it survives every narrowing that can occur. `_SAFETY_BLOCKS` covers the profiles that replace
+    the prose entirely; this covers the ones that keep it and lose tools.
+    """
+    profile = get_profile("default")
+    floor = instructions_for(profile, frozenset())
+    assert f"<{ENVELOPE_TAG}>" in floor, "the envelope rule is behind a tool this graph may lack"
+    assert "'Refused:'" in floor
+    assert "Earlier tool result dropped" in floor
+    assert "What this system does not hold" in floor
+
+
+def test_the_appended_safety_floor_names_no_tool_the_profile_cannot_call() -> None:
+    """F1: the floor appended to a *replacing* profile was never narrowed, so it over-promised.
+
+    `PromptBlock` narrows the default prose against the graph's own surface. A profile that supplies
+    its own `instructions:` never reaches that code — `instructions_for` appends the safety floor as
+    one string — so the floor's `record_knowledge_note` sentence was sent verbatim to every
+    specialist, including the five that cannot call it. Measured against the shipped profiles:
+    `property-lookup` (5 advertised tools), `design` (8), `safety` (6), `evidence` (15) and
+    `computation` (41) were each told to record findings through a tool none of them holds. That is
+    the exact defect the blocks were introduced for, surviving on the one path the fix did not
+    reach.
+
+    **The floor only, and minus the name space that cannot be absent.** A profile's own
+    `instructions:` are text this repository did not write and
+    cannot cut into blocks (`instructions_for`), and the shipped ones do name three identifiers
+    outside their surface — two are result fields (`structure_id`, `artifact_refs`) that rule 2
+    cannot tell from a tool, and `evidence.yaml`'s `compute_thermochemistry` is a real over-promise
+    owned by `data/profiles/`. So this asserts the half this module composes, which is the half a
+    site cannot be answerable for.
+    """
+    from chemclaw.agent.profile_discovery import load_profiles
+    from chemclaw.agent.profiles import registered_profile_names
+
+    load_profiles()
+    # The filesystem verbs are the exemption `check_instruction_blocks` derives, not an escape
+    # hatch: `FilesystemMiddleware` is composed for every agent this deployment builds, so naming
+    # them is not a promise that can fail — and the floor is where the deny-rule around them has to
+    # reach a profile that replaced the prose.
+    always_bound = skill_tool_names() | set(subagent_tool_names())
+    over_promised: dict[str, list[str]] = {}
+    for name in sorted(registered_profile_names()):
+        profile = get_profile(name)
+        if profile.instructions is None:
+            continue
+        available = advertised_tool_names(profile)
+        floor = instructions_for(profile, available).removeprefix(f"{profile.instructions}\n")
+        named = prose.referenced_tool_names(floor) - always_bound
+        if named - available:
+            over_promised[name] = sorted(named - available)
+    assert not over_promised, (
+        "the safety floor names tools these profiles cannot call: "
+        f"{over_promised}. The floor is blocks now — narrow it the way `_INSTRUCTION_BLOCKS` is."
+    )
+
+
+def test_the_prompt_does_not_claim_every_launcher_takes_a_rationale() -> None:
+    """F6: nine of the nine `run_*` step-template launchers take no rationale at all.
+
+    The durable-jobs paragraph opened "every launcher takes a rationale" and went on to call it "the
+    only record of why the run happened". Measured over the shipped surface: all 14 connector-job
+    launchers take one and every one of the 9 template launchers does not — deliberately, because a
+    template run's `job` names a declared procedure whose purpose the template itself states, which
+    `find_past_jobs`' own docstring says in the same words. So the rule is about the *argument*, not
+    about launchers, and a model told otherwise is being asked to supply a field that does not
+    exist.
+    """
+    import inspect
+
+    from chemclaw.connectors.registry import job_tools
+    from chemclaw.templates.registry import template_tools
+
+    def takes_one(tool: object) -> bool:
+        return "rationale" in inspect.signature(tool).parameters  # type: ignore[arg-type]
+
+    templates = list(template_tools())
+    jobs = list(job_tools())
+    assert templates and jobs, "the fixture measured an empty surface"
+    assert not any(takes_one(tool) for tool in templates), "a template launcher grew a rationale"
+    assert all(takes_one(tool) for tool in jobs), "a connector-job launcher lost its rationale"
+    assert "every launcher takes a rationale" not in _INSTRUCTIONS, (
+        f"{len(templates)} of {len(templates)} template launchers take no rationale, so the prompt "
+        "must not promise the model that every launcher does"
+    )
+
+
+def test_the_prompt_does_not_call_every_marked_refusal_an_account_decision() -> None:
+    """F6: five refusal families carry the mark and exactly one is about the caller's account.
+
+    The `Refused:` paragraph said a marked refusal "is an access-control decision this system made
+    about the asking chemist's account" and told the model, unconditionally, to "point them at
+    whoever grants access in their organization". `DryRunRefusal`, `PlanNotApprovedError`,
+    `UndeclaredWriteRefusal` and `SkillsReadOnlyRefusal` are all `AuthorizationError` subclasses
+    reaching the model through the same `_refusal_message(marked=True)`, and none of them is about
+    entitlements: three are modes this deployment is running in and the fourth is a tool this agent
+    was not given. Sending a chemist to request access for a dry-run turn is the same category of
+    wrong answer as calling a refusal a service outage, which the very next sentence forbids.
+    """
+    from chemclaw.agent.authz import AuthorizationError
+    from chemclaw.agent.skill_backend import SkillsReadOnlyRefusal  # noqa: F401  (registers it)
+
+    def subclasses(cls: type) -> set[type]:
+        found = set(cls.__subclasses__())
+        return found | {sub for child in cls.__subclasses__() for sub in subclasses(child)}
+
+    families = subclasses(AuthorizationError)
+    assert len(families) >= 4, f"only {sorted(c.__name__ for c in families)} — re-check the claim"
+    for prompt in (_INSTRUCTIONS, instructions_for(get_profile("safety"))):
+        assert "decision this system made about the asking chemist's account" not in prompt, (
+            f"{len(families)} refusal families reach the model marked "
+            f"({sorted(c.__name__ for c in families)}) and only one is about an account"
+        )
+        assert "the reason the result states" in prompt, (
+            "the model is told to relay a refusal without being told to read its reason"
+        )
+
+
+def test_the_prompt_does_not_call_recall_preferences_the_only_memory_there_is() -> None:
+    """F6: `/memories/**` is a durable per-actor store, so it was never the only one.
+
+    `agent/scratchpad.py` routes `/memories/…` to a `StoreBackend` over Postgres, namespaced by the
+    actor, and that is the one route that outlives the session. The sentence "it is the only memory
+    of them you have" was written before it existed and survived it.
+    """
+    assert "the only memory of them you have" not in _INSTRUCTIONS
+
+
+def test_the_trail_paragraph_says_the_arguments_it_records_are_truncated() -> None:
+    """F6: `bounded_repr` truncates, and only the module docstring said so.
+
+    The traceability paragraph listed "arguments" among what the trail records. `audit.bounded_repr`
+    bounds every recorded argument to `audit_detail_max_chars`, and the module's own docstring
+    already says "truncated arguments" — so the prompt was the one reader making the stronger claim,
+    which is the claim a chemist would rely on when asking what the record proves.
+    """
+    durable = instructions_for(get_profile("default"), durable_trail=True)
+    assert "truncated arguments" in durable
+
+
+def test_a_capability_this_fleet_serves_is_not_denied_in_the_message_that_offers_it() -> None:
+    """F4: "what this system does not hold" denied two capabilities the full fleet binds.
+
+    `requires` drops a block when a tool is *absent*, which is the right shape for a promise and
+    the wrong one for a denial: a "we do not hold X" clause has to drop when X's tool is **bound**.
+    Two of them did not. At full fleet `screen_genotoxic_alerts` and `ich_impurity_limit` are bound
+    and the paragraph went on saying "no mutagenicity, genotoxicity (ICH M7) or nitrosamine rule
+    set; no elemental-impurity or residual-solvent limits" — while the *same system message* carried
+    the `safety-screening` skill's own description saying "three of those now have a table". A model
+    reading both has been told, in one prompt, that a table it can call does not exist.
+
+    So the assertion runs both ways: bound and the clause is gone, absent and the clause stands,
+    because over-stating a limit is the safe direction and dropping one on the wrong side of the
+    test would be the same defect inverted.
+    """
+    profile = get_profile("default")
+    served = {"screen_genotoxic_alerts", "ich_impurity_limit"}
+    base = advertised_tool_names(profile) - served
+
+    for tool, clause in (
+        ("screen_genotoxic_alerts", "genotoxicity (ICH M7)"),
+        ("ich_impurity_limit", "elemental-impurity or residual-solvent limits"),
+    ):
+        assert clause in instructions_for(profile, base), (
+            f"the limit on {tool} is not stated even when nothing binds it"
+        )
+        assert clause not in instructions_for(profile, base | {tool}), (
+            f"{tool} is bound and the prompt still denies the capability it provides"
+        )
+    assert "What this system does not hold" in instructions_for(profile, base | served), (
+        "the whole paragraph was dropped rather than the two clauses inside it"
+    )

@@ -30,6 +30,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
+import chemclaw.durable.digest
 from chemclaw.agent.session_events import claim_unconsumed, record_session_event
 from chemclaw.agent.subscriptions import Subscription, for_owner, watch_for
 from chemclaw.api.app import create_app
@@ -37,10 +38,17 @@ from chemclaw.api.auth import Principal, require_principal
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
-from chemclaw.durable.digest import DIGEST_KIND, _is_new, _matches, collect_digests, digest_channel
+from chemclaw.durable.digest import (
+    DIGEST_KIND,
+    _digest_body,
+    _is_new,
+    _matches,
+    collect_digests,
+    digest_channel,
+)
 from chemclaw.durable.retention import prune_expired_rows
-from chemclaw.kg.graph import invalidate_cache
-from chemclaw.kg.note import Note
+from chemclaw.kg.graph import invalidate_cache, load_notes
+from chemclaw.kg.note import Note, Relation
 from chemclaw.kg.render import render_note
 from chemclaw.kg.search import query_terms
 from tests.pg import migrated_db_or_skip
@@ -100,10 +108,43 @@ def test_a_same_day_note_that_arrives_later_is_still_reported() -> None:
     assert _is_new(arrived_later, _subscription(_TODAY, ["reaction-1"])) is True
 
 
-def test_a_note_with_no_date_is_reported_once_rather_than_never() -> None:
-    """An undated note has no watermark to compare against; silence is the worse answer."""
-    assert _is_new(_note("playbook-1", None), _subscription(_TODAY)) is True
+def test_an_undated_note_is_told_once_and_then_not_again() -> None:
+    """This asserted "silence is the worse answer" and the code delivered the other failure.
+
+    The branch returned `True` unconditionally, and the id memory cannot help because it is scoped
+    to the watermark's date and resets when that rolls over — so an undated note re-qualified on
+    **every** run, forever. Measured on the shipped corpus, 32 of 39 notes carry no `valid_from`,
+    so a subscriber's hourly digest was mostly the same notes over and over, which is the exact
+    promise `agent/subscriptions.py` makes (DARK-7) being broken by the branch written to keep it.
+
+    What `None` means settles it rather than a preference between two failures: `Note.is_current`
+    reads it as *open-ended*, true for as long as anyone has known, so such a note did not become
+    knowledge after a subscriber was last told. A subscriber who has never been told anything still
+    hears it once — that is the first arm below, and it is the whole of "silence is the worse
+    answer" that survives.
+    """
+    undated = _note("playbook-1", None)
+
+    assert _is_new(undated, _subscription(None)) is True
+    assert _is_new(undated, _subscription(_TODAY)) is False
     assert _is_new(_note("playbook-1", date(2026, 7, 31)), _subscription(None)) is True
+
+
+def test_a_distilled_playbook_carries_the_day_it_was_minted() -> None:
+    """The other half of the same fix, and the reason the half above can be strict.
+
+    A playbook is the one note type nobody writes on a day — a miner concludes it — so it shipped
+    with no `valid_from` and therefore, under the rule above, would reach only a subscriber who had
+    never been told anything. `minted_on` is the honest statement that it became knowledge when the
+    corpus first supported it, which is the day the miner ran.
+    """
+    from chemclaw.memory.playbook import playbook_note
+
+    minted = playbook_note("playbook-x", "it holds", ["reaction-1"], minted_on=date(2026, 7, 31))
+
+    assert minted.valid_from == date(2026, 7, 31)
+    assert _is_new(minted, _subscription(datetime(2026, 7, 30, 9, tzinfo=UTC))) is True
+    assert _is_new(minted, _subscription(datetime(2026, 8, 1, 9, tzinfo=UTC))) is False
 
 
 def test_the_digest_reads_the_tree_the_notes_are_actually_written_to(
@@ -203,7 +244,7 @@ async def _consumed_at(channel: str) -> list[object]:
         return [row[0] for row in await cur.fetchall()]
 
 
-def test_a_digest_is_read_by_its_owner_and_by_nobody_else() -> None:
+async def test_a_digest_is_read_by_its_owner_and_by_nobody_else() -> None:
     """`GET /digests` delivers the caller's own mailbox, once, and never another chemist's.
 
     The reproduction this closes (`D-2026-08-27-a-digest-nobody-can-read-is-not-delivered`): the
@@ -212,32 +253,38 @@ def test_a_digest_is_read_by_its_owner_and_by_nobody_else() -> None:
     makes returned `[]` against a real digest row and left it unconsumed, while
     `acknowledge_digest` had already moved the watermark past the notes it named.
     """
+    await migrated_db_or_skip()
+    alice, bob = "digest-alice", "digest-bob"
+    for owner in (alice, bob):
+        await claim_unconsumed(digest_channel(owner))  # start clean
+    await record_session_event(
+        digest_channel(alice), DIGEST_KIND, {"query": "suzuki", "note_ids": ["reaction-1"]}
+    )
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        alice, bob = "digest-alice", "digest-bob"
-        for owner in (alice, bob):
-            await claim_unconsumed(digest_channel(owner))  # start clean
-        await record_session_event(
-            digest_channel(alice), DIGEST_KIND, {"query": "suzuki", "note_ids": ["reaction-1"]}
-        )
+    with _digest_client(bob) as client:
+        assert client.get("/digests").json() == [], "bob read alice's digest"
+    # Not merely filtered out of bob's answer — untouched, so it is still alice's to read.
+    assert await _consumed_at(digest_channel(alice)) == [None]
 
-        with _digest_client(bob) as client:
-            assert client.get("/digests").json() == [], "bob read alice's digest"
-        # Not merely filtered out of bob's answer — untouched, so it is still alice's to read.
-        assert await _consumed_at(digest_channel(alice)) == [None]
+    with _digest_client(alice) as client:
+        first = client.get("/digests")
+        second = client.get("/digests")
+    # The two fields `D-2026-09-15-a-digest-that-names-an-id-names-nothing` added are part
+    # of the answer's shape, not decoration: written absent here, they must come back empty
+    # rather than missing, which is what a client renders against.
+    assert first.json() == [
+        {
+            "query": "suzuki",
+            "note_ids": ["reaction-1"],
+            "disputed": [],
+            "headlines": {},
+        }
+    ]
+    assert second.json() == [], "the claim is the consume; a digest must not re-deliver"
+    assert await _consumed_at(digest_channel(alice)) != [None], "the row was left unconsumed"
 
-        with _digest_client(alice) as client:
-            first = client.get("/digests")
-            second = client.get("/digests")
-        assert first.json() == [{"query": "suzuki", "note_ids": ["reaction-1"]}]
-        assert second.json() == [], "the claim is the consume; a digest must not re-deliver"
-        assert await _consumed_at(digest_channel(alice)) != [None], "the row was left unconsumed"
 
-    asyncio.run(_run())
-
-
-def test_only_the_digest_kind_is_claimed_from_the_mailbox() -> None:
+async def test_only_the_digest_kind_is_claimed_from_the_mailbox() -> None:
     """The claim is destructive, so this route must scope it — job push-back is not its to consume.
 
     A digest mailbox is per *user* and a job's is per *session*, so today no row of another kind
@@ -245,22 +292,20 @@ def test_only_the_digest_kind_is_claimed_from_the_mailbox() -> None:
     here would destroy any future one silently, which is precisely how the mailbox's own docstring
     says a kind-selective consumer must not be written.
     """
+    await migrated_db_or_skip()
+    owner = "digest-mixed"
+    channel = digest_channel(owner)
+    await claim_unconsumed(channel)
+    await record_session_event(channel, DIGEST_KIND, {"query": "q", "note_ids": ["n-1"]})
+    await record_session_event(channel, "job_completed", {"job_id": "j-1"})
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        owner = "digest-mixed"
-        channel = digest_channel(owner)
-        await claim_unconsumed(channel)
-        await record_session_event(channel, DIGEST_KIND, {"query": "q", "note_ids": ["n-1"]})
-        await record_session_event(channel, "job_completed", {"job_id": "j-1"})
+    with _digest_client(owner) as client:
+        assert client.get("/digests").json() == [
+            {"query": "q", "note_ids": ["n-1"], "disputed": [], "headlines": {}}
+        ]
 
-        with _digest_client(owner) as client:
-            assert client.get("/digests").json() == [{"query": "q", "note_ids": ["n-1"]}]
-
-        leftover = await claim_unconsumed(channel)
-        assert [event.kind for event in leftover] == ["job_completed"]
-
-    asyncio.run(_run())
+    leftover = await claim_unconsumed(channel)
+    assert [event.kind for event in leftover] == ["job_completed"]
 
 
 def test_a_read_digest_becomes_prunable_and_an_unread_one_does_not() -> None:
@@ -312,7 +357,7 @@ def test_a_read_digest_becomes_prunable_and_an_unread_one_does_not() -> None:
     assert unread_rows == [None], "an unread digest was destroyed before anyone could read it"
 
 
-def test_a_watch_is_owned_by_the_oid_the_route_reads() -> None:
+async def test_a_watch_is_owned_by_the_oid_the_route_reads() -> None:
     """The two ends of the mailbox address agree, and neither restates the other.
 
     `/digests` derives its channel from `principal.oid`; the digest job addresses one from
@@ -322,20 +367,234 @@ def test_a_watch_is_owned_by_the_oid_the_route_reads() -> None:
     rather than a paragraph, since a mismatch would leave every digest written to a mailbox the
     owner cannot name and would look exactly like the defect this route closes.
     """
+    await migrated_db_or_skip()
+    oid = "digest-oid-8e1f"
+    tokens = set_current_identity(oid, frozenset())
+    try:
+        await watch_for("suzuki biaryl")
+    finally:
+        reset_current_identity(tokens)
+    saved = [s for s in await for_owner(oid) if s.query == "suzuki biaryl"]
+    assert [s.owner for s in saved] == [oid]
+    # And that owner is what the digest job would address, which is what the route reads.
+    assert digest_channel(saved[0].owner) == digest_channel(Principal(oid=oid, upn="x@corp").oid)
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        oid = "digest-oid-8e1f"
-        tokens = set_current_identity(oid, frozenset())
-        try:
-            await watch_for("suzuki biaryl")
-        finally:
-            reset_current_identity(tokens)
-        saved = [s for s in await for_owner(oid) if s.query == "suzuki biaryl"]
-        assert [s.owner for s in saved] == [oid]
-        # And that owner is what the digest job would address, which is what the route reads.
-        assert digest_channel(saved[0].owner) == digest_channel(
-            Principal(oid=oid, upn="x@corp").oid
-        )
 
-    asyncio.run(_run())
+# --- the corpus disagreeing with itself ----------------------------------------------------------
+
+
+def test_a_new_note_that_contradicts_an_existing_one_is_marked_in_the_digest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`kg/conflicts.py` has always known this and only a reader who asked was ever told.
+
+    `retrieval.retrievers._conflict_index` flags a disputed note at *retrieval* time, so a chemist
+    who happens to query is warned and a chemist watching the subject is not — while the corpus
+    starting to disagree with itself on their standing query is the one thing in a digest that
+    changes what they should do next.
+
+    Driven over a real corpus with a real `contradicts` relation, not a stubbed index: the claim is
+    that the sweep and the digest agree about the same notes.
+    """
+    repo = tmp_path / "note-repo"
+    established = Note(
+        id="reaction-thermolysin-9", type="reaction", body="a thermolysin-catalysed coupling"
+    )
+    refutation = Note(
+        id="reaction-thermolysin-10",
+        type="reaction",
+        body="the thermolysin-catalysed coupling did not proceed",
+        relations=[Relation(rel="contradicts", to="reaction-thermolysin-9")],
+    )
+    for note in (established, refutation):
+        path = repo / "knowledge" / note.type / f"{note.id}.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(render_note(note), encoding="utf-8")
+    invalidate_cache()
+
+    monkeypatch.setattr(settings, "note_repo_dir", str(repo))
+    monkeypatch.setattr(settings, "knowledge_dir", "knowledge")
+    watching = Subscription(id=1, owner="chemist-a", query="thermolysin", last_seen_at=None)
+    monkeypatch.setattr("chemclaw.durable.digest.all_subscriptions", lambda: _resolved([watching]))
+
+    item = asyncio.run(collect_digests())[0]
+
+    assert item.note_ids == ["reaction-thermolysin-10", "reaction-thermolysin-9"]
+    assert item.disputed == ["reaction-thermolysin-10", "reaction-thermolysin-9"]
+
+
+def test_an_undisputed_digest_says_nothing_about_disputes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The notice is news, so a corpus that agrees with itself must not carry it.
+
+    A line appended unconditionally would be a warning every reader learns to skip, which is the
+    same harm as not warning them.
+    """
+    repo = tmp_path / "note-repo"
+    note = Note(
+        id="reaction-thermolysin-9", type="reaction", body="a thermolysin-catalysed coupling"
+    )
+    path = repo / "knowledge" / note.type / f"{note.id}.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(render_note(note), encoding="utf-8")
+    invalidate_cache()
+
+    monkeypatch.setattr(settings, "note_repo_dir", str(repo))
+    monkeypatch.setattr(settings, "knowledge_dir", "knowledge")
+    watching = Subscription(id=1, owner="chemist-a", query="thermolysin", last_seen_at=None)
+    monkeypatch.setattr("chemclaw.durable.digest.all_subscriptions", lambda: _resolved([watching]))
+
+    item = asyncio.run(collect_digests())[0]
+
+    assert item.disputed == []
+    # The body is *exactly* the list. Asserting the absence of the word "disputed" was the first
+    # form of this and it did not fire: the appended notice says "disagree with something already
+    # in the graph", so driving the mutation that appends unconditionally left it green. A guard
+    # against an extra line has to be about the line count, not about a word somebody chose.
+    assert _digest_body(item.note_ids, item.disputed) == "- reaction-thermolysin-9"
+
+
+def test_the_body_marks_a_dispute_in_place_and_says_how_many() -> None:
+    """A reader's question is "what is new"; a dispute is a property of an entry in that list.
+
+    The count is the half a reader acts on — `kg/conflicts.py`'s own rule is that a silent
+    truncation reads as completeness, and "two of these nine" is what makes the marks countable
+    without re-reading the list.
+    """
+    body = _digest_body(["note-a", "note-b", "note-c"], ["note-b"])
+
+    assert "- note-b (disputed)" in body
+    assert "- note-a\n" in body and "(disputed)" not in body.split("- note-a")[1].split("\n")[0]
+    assert "1 of 3 disagree" in body
+
+
+def test_every_render_of_one_digest_says_the_same_thing() -> None:
+    """Three call sites render this list and two of them disagreeing would be two answers.
+
+    Asserted against the module's source rather than by calling each: the replay shim exists only
+    to be replayed, so what is claimed is that no site builds the list itself.
+    """
+    source = Path(chemclaw.durable.digest.__file__).read_text(encoding="utf-8").split('"""', 2)[2]
+
+    assert 'f"- {note_id}"' not in source, "a second renderer of the digest list has appeared"
+    # One definition plus the two sites that render a *body*: the session mailbox carries the
+    # two lists as structured fields rather than prose, so it is not a third renderer.
+    assert source.count("_digest_body(") == 3
+
+
+async def test_the_route_carries_the_dispute_flag_the_job_computed() -> None:
+    """`disputed` reached the mailbox and stopped at the API model, on the only default-config path.
+
+    `collect_digests` has computed which matches the corpus now disagrees with since
+    `D-2026-08-27`, and writes them into the payload. Both outbound delivery channels rendered
+    them. `api/routes/streams.Digest` had no such field and `_digest` never read the key — and
+    `CHEMCLAW_DELIVERY_CHANNELS` is empty in every shipped deployment, so the flag existed, was
+    computed on every run, and reached nobody.
+
+    That is the asymmetry `DigestItem`'s own docstring names as the reason the field exists — "a
+    chemist who happens to ask is told, and a chemist watching the subject is not" — reproduced one
+    layer down. Driven here against a row written the way the job writes one, rather than against
+    the model, because a model assertion would have been satisfied by the field being *declared*.
+    """
+    await migrated_db_or_skip()
+    owner = "digest-disputed-route"
+    await claim_unconsumed(digest_channel(owner))
+    await record_session_event(
+        digest_channel(owner),
+        DIGEST_KIND,
+        {
+            "query": "biaryl",
+            "note_ids": ["playbook-a", "reaction-b"],
+            "disputed": ["reaction-b"],
+            "headlines": {"playbook-a": "Change the ligand before the temperature"},
+        },
+    )
+    with _digest_client(owner) as client:
+        answer = client.get("/digests").json()
+
+    assert answer == [
+        {
+            "query": "biaryl",
+            "note_ids": ["playbook-a", "reaction-b"],
+            "disputed": ["reaction-b"],
+            "headlines": {"playbook-a": "Change the ligand before the temperature"},
+        }
+    ], (
+        "the route dropped what the job computed; a subscriber reading this surface cannot "
+        "tell a contradiction from an ordinary find, which is the one thing in a digest that "
+        "changes what they should do next"
+    )
+
+
+def test_a_digest_names_what_it_found_and_not_only_its_id() -> None:
+    """A digest built off a real corpus carries a sentence per match, not just a handle.
+
+    Driven through `_match_corpus` against notes on disk rather than by calling `Note.headline`,
+    because the defect was never in the deriving — there was nothing to derive from, and every
+    surface printed `playbook-<hash>`. What has to hold is that the *job* carries it.
+
+    The id stays beside the headline everywhere it is rendered: it is what a reader passes to
+    `GET /notes/{id}` and what the watermark works in.
+    """
+    corpus = Path(settings.knowledge_path)
+    notes = [note for note in load_notes(corpus) if note.headline()]
+    assert notes, f"no note under {corpus} has a body, so this test proves nothing about headlines"
+
+    subject = notes[0]
+    term = subject.id.split("-")[0]
+    items = chemclaw.durable.digest._match_corpus(
+        [Subscription(id=1, owner="o", query=term, note_type=None, last_seen_at=None)]
+    )
+    assert items, f"no subscription match for {term!r}; the fixture cannot show a headline"
+    item = items[0]
+    named = [note_id for note_id in item.note_ids if item.headlines.get(note_id)]
+    assert named, (
+        f"the digest carried {len(item.note_ids)} matches and named none of them; a subscriber is "
+        "told a list of note ids and has to go and look up their own digest"
+    )
+    for note_id in named:
+        assert "\n" not in item.headlines[note_id]
+        assert item.headlines[note_id] != note_id
+
+    body = chemclaw.durable.digest._digest_body(item.note_ids, item.disputed, item.headlines)
+    for note_id in named:
+        assert item.headlines[note_id] in body
+        assert note_id in body, "the id must survive beside the headline; it is the handle"
+
+
+async def test_a_watch_says_so_when_nothing_will_evaluate_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Off, `watch_for` used to answer "you'll be told" and no schedule existed to tell anyone.
+
+    The two halves are separate failures and this pins the second. `digest_enabled` now defaults
+    **on**, so the shipped deployment evaluates a watch — but a deployment may still turn it off,
+    and `durable/schedules.py` then creates no `digest` Schedule at all. Nothing else in the tree
+    reads that setting, so with it off a chemist's watch was written, confirmed in the first
+    person, and never looked at again.
+
+    Asserted in both directions, because "says so when off" is satisfied by a tool that always
+    warns — which would be a different defect, telling every chemist on every deployment that their
+    watch does not work.
+    """
+    await migrated_db_or_skip()
+    tokens = set_current_identity("watch-truth", frozenset())
+    try:
+        monkeypatch.setattr(settings, "digest_enabled", False)
+        off = await watch_for("biaryl coupling")
+        monkeypatch.setattr(settings, "digest_enabled", True)
+        on = await watch_for("biaryl coupling")
+    finally:
+        reset_current_identity(tokens)
+
+    assert "turned off" in off and "nobody will be told" in off, (
+        "a deployment with digests off answered a watch with a promise it cannot keep; "
+        f"it said: {off!r}"
+    )
+    assert "turned off" not in on, (
+        f"every watch is told its deployment is broken, including working ones: {on!r}"
+    )
+    # The row is saved either way — an operator turning digests on must have something to
+    # deliver against, and `list_watches` must still show it.
+    assert any(w.query == "biaryl coupling" for w in await for_owner("watch-truth"))

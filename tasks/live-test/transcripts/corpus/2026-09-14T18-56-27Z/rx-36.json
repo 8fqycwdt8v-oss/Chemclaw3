@@ -1,0 +1,60 @@
+{
+  "probe": {
+    "id": "rx-36",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Which ligands have actually been used for Buchwald-Hartwig aminations in the corpus, and how often?",
+    "expects_tools": [
+      "reagent_frequency",
+      "gather_evidence",
+      "find_notes"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a recommendation of the most frequent ligand as the best one for a new substrate",
+      "a share or percentage quoted without the number of reactions behind it",
+      "a claim that a ligand was never used, from an unlabelled or capped selection"
+    ],
+    "direction": "`reagent_frequency(named_reaction=..., roles=['ligand'])` is the whole answer, and the graded behaviour is how the table is read. Popularity is the field's default, not a recommendation — the answer must say so. Counts must appear beside the number of reactions in scope, because three of four is not evidence. A null median yield means nobody recorded one and must not render as zero. And the coverage sentence has to reach the reader: a ligand absent from a partly-labelled corpus may simply live in an unlabelled row.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-36",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Which ligands have actually been used for Buchwald-Hartwig aminations in the corpus, and how often?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.5,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "3635e030742a4d4d817464c429a541ca",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

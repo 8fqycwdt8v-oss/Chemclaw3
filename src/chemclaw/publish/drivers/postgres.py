@@ -14,17 +14,18 @@ so both directions are configured the same way and a deployment moving between t
 manifest rather than a mechanism.
 """
 
-from collections.abc import AsyncIterator, Sequence
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Iterator, Sequence
+from contextlib import asynccontextmanager, contextmanager
 from typing import Any
 
 import psycopg
-from psycopg.conninfo import conninfo_to_dict
+from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from chemclaw.core.config import PG_LOOPBACK_HOSTS, require_pg_tls, settings
 from chemclaw.core.connect import check_identifier
+from chemclaw.core.db import register_connection, unregister_connection
 from chemclaw.ingest.eln.warehouse.driver import (
     VectorDialect,
     WarehouseCursor,
@@ -57,6 +58,32 @@ def _refuse_plaintext_connection(dsn: str, host: str) -> None:
         )
 
 
+def _adapted(params: Sequence[Any]) -> list[Any]:
+    """`params` with every JSON document wrapped in `Jsonb`, the one way psycopg adapts one.
+
+    Shared by `execute` and `executemany` so an adaptation added for one reaches the other: the
+    batched drain falling back to row-by-row replay because only the single form knew a type would
+    be a silent five-second pass rather than an error.
+    """
+    return [Jsonb(value) if isinstance(value, dict | list) else value for value in params]
+
+
+@contextmanager
+def _mapped_errors() -> Iterator[None]:
+    """Re-raise a server programming error as `WarehouseQueryError`; let a connection loss through.
+
+    `durable/publish.py` marks `WarehouseQueryError` non-retryable by class name, which is right for
+    an undefined column (it fails identically forever) and wrong for a server that went away — so
+    `OperationalError` passes through as itself, retryable.
+    """
+    try:
+        yield
+    except psycopg.OperationalError:
+        raise
+    except psycopg.Error as exc:
+        raise WarehouseQueryError(f"{exc.__class__.__name__}: {exc}") from exc
+
+
 class _PostgresCursor:
     """One in-flight statement, returning column-keyed dicts."""
 
@@ -80,14 +107,36 @@ class _PostgresCursor:
         is DDL rather than a wait. A *connection* failure passes through as itself, because that
         one genuinely is worth retrying.
         """
-        adapted = [Jsonb(value) if isinstance(value, dict | list) else value for value in params]
-        try:
-            await self._cursor.execute(sql, adapted)
-        except psycopg.OperationalError:
-            # The server went away. Retryable, so it must not be flattened into a query error.
-            raise
-        except psycopg.Error as exc:
-            raise WarehouseQueryError(f"{exc.__class__.__name__}: {exc}") from exc
+        with _mapped_errors():
+            await self._cursor.execute(sql, _adapted(params))
+
+    async def executemany(self, sql: str, params_seq: Sequence[Sequence[Any]]) -> None:
+        """Run `sql` once per parameter set in psycopg's pipeline mode — one round trip, not N.
+
+        The optional half of the cursor seam (`warehouse.driver.BatchingCursor`), and the reason a
+        publication drain is nine statements per pass rather than fifteen hundred. Measured against
+        a live server over a full `result_publish_batch_size` pass of 100 records: **1,500 round
+        trips and 5.6 s row-at-a-time against 9 and 0.41 s here**, with identical stored rows.
+
+        **Optional on purpose, and this method is why the seam needed a second Protocol rather than
+        a wider one.** `D-2026-08-26-the-driver-s-signature-is-the-schema` lets a site bring its own
+        driver, and `runtime_checkable` `isinstance` tests member *presence* — so requiring this on
+        `WarehouseCursor` would have made every site-written driver fail the check `_connect`
+        already does, for what is only an optimisation. A driver without it takes the loop.
+
+        The adaptation and the error mapping are `execute`'s — one `_adapted` and one
+        `_mapped_errors` — for its reasons.
+
+        **One property moved, and it is narrower than the seam's docstrings have promised.**
+        psycopg wraps the whole parameter set in a single implicit transaction *even here, where the
+        connection is autocommit* — driven, a four-row set failing on its third leaves **none** of
+        the four, and the connection stays usable. So "a batch that fails halfway leaves a partial
+        but correct state" still holds in kind, but the grain of "partial" is now a statement rather
+        than a row. `SqlResultSink` relies on exactly that when it replays a refused group singly to
+        recover which row the server objected to.
+        """
+        with _mapped_errors():
+            await self._cursor.executemany(sql, [_adapted(params) for params in params_seq])
 
     async def fetchall(self) -> list[dict[str, Any]]:
         """Every remaining row, keyed by column name."""
@@ -202,7 +251,15 @@ class PostgresWarehouse:
         return None
 
     async def _connection(self) -> psycopg.AsyncConnection[Any]:
-        """The live connection, opened on first use and reopened if it was closed."""
+        """The live connection, opened on first use and reopened if it was closed.
+
+        **Registered with `core/db` while it is held**, because a bare connection occupies a backend
+        exactly as a pool slot does and the process's own reading could only see pools
+        (`D-2026-09-13-a-connection-counted-where-the-budget-applies`). It counts against
+        `chemclaw_pg_pool_max_size` only when its endpoint is `postgres_dsn`'s: a sink pointed at
+        a warehouse of its own is on a ceiling this deployment does not declare, and charging it to
+        the primary's would be the under-count's mirror image.
+        """
         if self._conn is None or self._conn.closed:
             # **Not passed when the site's own connection string already sets one.** A keyword wins
             # over a conninfo key in psycopg, so passing it unconditionally would silently overrule
@@ -233,7 +290,21 @@ class PostgresWarehouse:
                     **self._parts,
                     **timeout,
                 )
+            # The conninfo is passed rather than read back off the connection: psycopg keeps no
+            # attribute carrying it, and a driver built from `connection:` parts has no single
+            # string at all until `make_conninfo` builds one from them.
+            register_connection(self._conn, self._conninfo())
         return self._conn
+
+    def _conninfo(self) -> str:
+        """The connection string this driver dials, in libpq's own keyword form.
+
+        One spelling for the endpoint comparison `core/db` makes, whichever of the two ways this
+        driver was configured: a site's own `dsn`, or the `connection:` block's keyword arguments.
+        Built through `make_conninfo` rather than concatenated, so a part carrying a space or an
+        equals sign is quoted the way libpq quotes it.
+        """
+        return self._dsn or make_conninfo(**{k: str(v) for k, v in self._parts.items()})
 
     async def aclose(self) -> None:
         """Release the held connection. Safe to call twice, and on one never opened.
@@ -247,6 +318,7 @@ class PostgresWarehouse:
         the publish.
         """
         if self._conn is not None and not self._conn.closed:
+            unregister_connection(self._conn)
             await self._conn.close()
         self._conn = None
 

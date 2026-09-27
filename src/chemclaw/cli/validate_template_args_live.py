@@ -41,11 +41,11 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import Collection, Iterable, Mapping, Sequence
-from typing import Any, NamedTuple
+from typing import NamedTuple
 
 from langchain_core.tools import BaseTool
-from pydantic import BaseModel
 
+from chemclaw.agent.template_surface import normalise_tool_schema
 from chemclaw.cli.chat import resolve_identity
 from chemclaw.cli.validate_templates import ToolArguments, argument_problems
 from chemclaw.connectors.registry import enabled, mcp_connections, open_connector_specs
@@ -77,29 +77,6 @@ class LiveReport(NamedTuple):
     checked: list[str]
     unreached: dict[str, list[str]]
     """Connector name -> the template steps it owed an answer for and did not give one."""
-
-
-def _live_arguments(tool: BaseTool) -> ToolArguments:
-    """Read what a *running* tool accepts, off the schema its session advertised.
-
-    `tool_call_schema` rather than `args_schema`, because it is the shape the model is offered:
-    injected arguments are already removed from it. MCP tools arrive with a plain JSON-schema dict
-    (`langchain_mcp_adapters` converts the server's declaration); an in-process `@tool` arrives as a
-    pydantic model. Both are handled, and both reduce to the same three facts.
-    """
-    schema: Any = tool.tool_call_schema
-    if isinstance(schema, type) and issubclass(schema, BaseModel):
-        schema = schema.model_json_schema()
-    properties: dict[str, Any] = schema.get("properties", {})
-    required: list[str] = schema.get("required", [])
-    return ToolArguments(
-        accepted=frozenset(properties),
-        required=frozenset(required),
-        # An open schema absorbs any key, so the unknown-key half is vacuous — the same reduction
-        # `**kwargs` gets offline. Only a literal `True` counts: a schema saying nothing about it
-        # is closed, which is what `additionalProperties` absent means for a tool declaration.
-        takes_any_key=schema.get("additionalProperties") is True,
-    )
 
 
 def connector_owners() -> dict[str, str]:
@@ -171,7 +148,8 @@ def check_live_arguments(
                     f"connector {connector!r} declares and its running server does not serve"
                 )
                 continue
-            problems.extend(argument_problems(template, step, _live_arguments(live)))
+            accepts = ToolArguments.of_schema(normalise_tool_schema(live) or {})
+            problems.extend(argument_problems(template, step, accepts))
             checked.append(f"{where} ({connector})")
     return LiveReport(problems=problems, checked=checked, unreached=unreached)
 

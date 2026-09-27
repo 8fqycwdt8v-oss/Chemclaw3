@@ -6,6 +6,10 @@
 # related to a query that share no substring with it, which the agent then expands via
 # `expand_note`. Reads the derived note index that `report.vector_index.reindex_notes` populates.
 name: vector
+# One corpus, one vote: `graph`, `lexical` and `vector` are three rankers over the same note
+# tree, so they fuse between themselves before meeting any other source. See
+# `retrieval.hybrid.reciprocal_rank_fusion` and the manifest field's own description.
+corpus: knowledge-notes
 description: >-
   Semantic search over the knowledge graph by embedding similarity. Finds notes related in meaning
   rather than wording; requires the note index to have been built.

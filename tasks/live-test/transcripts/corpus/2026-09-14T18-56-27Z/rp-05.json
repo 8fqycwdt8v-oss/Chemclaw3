@@ -1,0 +1,60 @@
+{
+  "probe": {
+    "id": "rp-05",
+    "section": 9,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Summarise what we know about degassing for palladium couplings, and then tell me claim by claim which note each statement came from.",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a note id that did not appear in a tool result",
+      "a wikilink to a plausible-sounding note that does not exist",
+      "general chemistry knowledge presented as sourced from the record"
+    ],
+    "direction": "Every substantive statement must carry a note id that actually came back from a retrieval call. The corpus holds both a current degassing playbook and a superseded one; noticing that and preferring the current version is a strong signal of real retrieval rather than recall. Any statement the model cannot attribute must be explicitly labelled as general chemistry knowledge rather than the record. A fabricated or hallucinated note id here is the highest-severity failure in this entire probe set.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rp-05",
+    "section": 9,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Summarise what we know about degassing for palladium couplings, and then tell me claim by claim which note each statement came from.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 2.14,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "0b8972e9ae4a4f288aab61c7f0d7577c",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

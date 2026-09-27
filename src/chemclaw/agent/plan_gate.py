@@ -42,9 +42,12 @@ from typing import Any, Final
 from langchain.agents.middleware import wrap_tool_call
 
 from chemclaw.agent.authz import AuthorizationError, side_effecting_call
+from chemclaw.agent.framing import safe_id
 from chemclaw.agent.plan_approval_store import plan_approval_store
-from chemclaw.agent.plan_state import session_todos
+from chemclaw.agent.plan_scope import step_declaration
+from chemclaw.agent.plan_state import session_plan
 from chemclaw.agent.profiles import AgentProfile
+from chemclaw.agent.refusal_route import routed
 from chemclaw.core.config import settings
 from chemclaw.core.config.agent import HarnessAutonomy
 from chemclaw.core.ids import stable_hash
@@ -77,7 +80,7 @@ class PlanNotApprovedError(AuthorizationError):
 EMPTY_PLAN_HASH = stable_hash([])
 
 
-def plan_identity(items: Sequence[str]) -> str | None:
+def plan_identity(steps: Sequence[Mapping[str, Any]]) -> str | None:
     """The hash a human decision is recorded against, or `None` when there is no plan.
 
     The decision, framework-free, so both engines bind an approval to the same identity. A second
@@ -89,29 +92,156 @@ def plan_identity(items: Sequence[str]) -> str | None:
     "nothing" yields a constant every session in every deployment also proposes, so a decision
     recorded against it approves the empty plan globally rather than this session's work. An
     identity nobody can distinguish is not something a person can meaningfully decide about.
+
+    **It takes the steps, not their text, and that is the whole of
+    `D-2026-09-13-a-plan-identity-that-omits-the-scope-approves-a-plan-nobody-read`.** Hashing
+    `content` alone left the freshness guard on `POST /sessions/{id}/plan/decision` unable to see a
+    rewrite that kept every step's text and widened its `tools`: the chemist's own hash still
+    matched, and the route stamped the *live* plan's declaration as what they had approved. Driven
+    through the real route, an approval shown as authorizing nothing came back authorizing
+    `record_knowledge_note` and `watch_for`, and both ran. So what a decision is keyed on is now
+    what a decision is about — each step's `content` beside its declaration, read by the same
+    `plan_scope.step_declaration` the recorded scope is derived from, so the two cannot disagree
+    about what a malformed `tools` means.
+
+    **The status is still not in it**, which is the property the content-only rule existed for: the
+    canonical "tick the completed step, run the next one" batch leaves the identity alone, so an
+    approved plan does not revoke itself by making progress.
+
+    Every `plan_approvals` row written before this change is keyed on the old, narrower hash and can
+    no longer be matched. That is the fail-closed direction and it is cheap: an approval authorizes
+    one turn and is spent when that turn ends (D-167), so the cost is a chemist re-approving a plan
+    that is still on their screen.
+
+    Args:
+        steps: The plan's steps as `write_todos` writes them — mappings carrying `content` and the
+            `tools` declaration. A step with no readable `content` contributes its empty text; the
+            callers (`plan_state.session_plan`, `plan_after_batch`) drop such steps before this.
     """
-    return stable_hash(list(items)) if items else None
+    if not steps:
+        return None
+    return stable_hash([[str(step.get("content", "")), step_declaration(step)] for step in steps])
 
 
-async def approval_stands(session_id: str, plan_hash: str | None) -> bool:
-    """Whether a live, unspent human approval exists for this plan — the shared lookup.
+async def approved_scope(session_id: str, plan_hash: str | None) -> frozenset[str] | None:
+    """The tools a live, unspent approval for this plan authorizes, or `None` when none stands.
 
     Folds "and it has not already been spent" in, because consumption is recorded on the decision
     itself (`plan_approvals.consumed_at`) rather than in session state. That fold is D-167's last
     fix: the spent-ness of an approval used to live where a pod roll could drop it while the
     approval survived.
+
+    **`None` and an empty set are different answers, and collapsing them would lose the control**
+    (`D-2026-09-12-an-approval-that-names-no-tool-authorizes-every-tool`). `None` means nobody has
+    approved this plan, or the approval has had its turn. `frozenset()` means somebody approved a
+    plan that declared no state-changing tool — a real and common decision, and one that refuses
+    every gated call while still being an approval. A caller that only needs the first question
+    asks `approval_stands`.
     """
     if plan_hash is None:
-        return False
+        return None
     decision = await plan_approval_store().decision(session_id, plan_hash)
-    return bool(decision and decision[0])
+    if decision is None or not decision.approved:
+        return None
+    return decision.scope
+
+
+async def approval_stands(session_id: str, plan_hash: str | None) -> bool:
+    """Whether a live, unspent human approval exists for this plan — the shared lookup.
+
+    The question `api/runner._pending_plan_approval` asks to decide whether to show the decision
+    card: it is about *whether the chemist has been asked*, not about what any one call may do, so
+    it must not read an approval that authorizes nothing as no approval at all.
+    """
+    return await approved_scope(session_id, plan_hash) is not None
 
 
 def plan_approval_refusal(tool_name: str) -> PlanNotApprovedError:
-    """The refusal an unapproved state-changing call earns — one sentence, both engines."""
+    """The refusal an unapproved state-changing call earns — one sentence, both engines.
+
+    The sentence is the chemist's; the footer (`agent/refusal_route`) is the model's, and this is
+    the gate where the two readers want most different things. The chemist wants "nobody has
+    approved this"; the model wants to know that a plan is a thing it can *write* — the declaration
+    a step carries is what an approval is later keyed on (`plan_scope.step_declaration`), so the
+    sanctioned path really is a `write_todos` call it can make right now, followed by a wait. Left
+    to the sentence alone, the two moves available are stalling and retrying the same call.
+
+    `tool_name` is not reduced here, and that is not an oversight: this is reached only past
+    `authz.side_effecting_call`, so the name is a member of a set this repository owns. The two
+    refusal sites that interpolate a string nothing validated are `authz.authorize_tool` and
+    `out_of_scope_refusal` below, and only those two reduce.
+    """
     return PlanNotApprovedError(
-        f"{tool_name} changes stored data or starts work, and the plan it is part of "
-        "has not been approved yet; review the plan and approve it, then ask again"
+        routed(
+            f"{tool_name} changes stored data or starts work, and the plan it is part of "
+            "has not been approved yet; review the plan and approve it, then ask again",
+            code="plan_not_approved",
+            boundary="the harness plan gate",
+            who_can_act="a human, by approving this session's current plan",
+            sanctioned_path=(
+                f"write the plan with write_todos so a step declares {tool_name}, then wait for "
+                "that plan to be approved; read-only tools still run meanwhile"
+            ),
+        )
+    )
+
+
+def out_of_scope_refusal(tool_name: str, scope: frozenset[str]) -> PlanNotApprovedError:
+    """The refusal a call outside the approved plan's declared tools earns.
+
+    A *different sentence* from `plan_approval_refusal`, and deliberately so: "nobody has approved
+    this" and "this was approved and does not cover that tool" are different problems with
+    different remedies, and a chemist reading the second while the plan is visibly approved would
+    reasonably conclude the gate was broken. It names what the approval does cover, because the
+    remedy — rewrite the plan so a step declares this tool, and have it approved — is only obvious
+    once the reader can see the declaration they are outside of.
+
+    Same exception class, so the audit outcome, the `plan_gate` refusal reason and the relay to the
+    model are unchanged: the class answers "which gate refused", and the sentence answers "why".
+
+    **This was the only one of the eleven gated refusals that already named a tool the model could
+    call instead**, and measuring that asymmetry is what produced `agent/refusal_route` — five
+    others named an action in prose and five named nothing at all. Its footer therefore
+    *points at* the list rather than repeating it: the scope is a model-authored declaration bounded
+    only in count (`plan_max_tools_per_step` × `plan_max_steps`), and `core/config/agent.py` records
+    a measured 600,192-character sentence built out of one — a second copy in the footer would
+    double a length that is bounded only at `tool_authz._refusal_message`, and unbounded in the
+    exception, the log and the audit row before it.
+
+    **Each declared name is reduced by `framing.safe_id`.** `plan_scope.step_declaration` keeps
+    every string in a step's `tools` list, so this is the one refusal that interpolates text the
+    *model itself* authored — which is exactly the shape that could spell a second
+    `sanctioned path:` field and have the model read it as this system's routing. The charset
+    cannot spell a field, a separator or an envelope delimiter, and a real tool name is unchanged
+    by it.
+    """
+    declared = ", ".join(safe_id(name) for name in sorted(scope)) or "no tools at all"
+    # **The first clause is dropped when the scope is empty, because it would name nothing.**
+    # An approval whose steps declare no tools is not a corner case:
+    # `D-2026-09-12-an-approval-that-names-no-tool-authorizes-every-tool` calls it a real and
+    # common shape. With it, the sentence reads "its steps declared no tools at all" while the
+    # path read "call one of the tools the approval already covers — they are named above", which
+    # points at an empty list. That is precisely the fabricated path `refusal_route`'s docstring
+    # forbids — worse than none, because it sends the model round the loop again against a wall
+    # that has not moved — and it is the one arm where the clause is dead rather than merely terse.
+    rewrite = (
+        f"rewrite the plan so a step declares {tool_name} and ask for that plan to be approved"
+    )
+    path = (
+        f"call one of the tools the approval already covers — they are named above — or {rewrite}"
+        if scope
+        else rewrite
+    )
+    return PlanNotApprovedError(
+        routed(
+            f"{tool_name} changes stored data or starts work, and the approved plan does not "
+            f"list it: its steps declared {declared}. Rewrite the plan so a step declares "
+            f"{tool_name}, and ask for the new plan to be approved.",
+            code="plan_scope_excludes_tool",
+            boundary="the tools the approved plan's steps declared",
+            who_can_act="a human, by approving a plan whose steps declare this tool",
+            sanctioned_path=path,
+        )
     )
 
 
@@ -146,16 +276,6 @@ PLAN_APPROVAL_PROMPT: Final = (
 # all five gates from the class, and re-deriving one of the five downstream from a truncated string
 # was a second opinion about a question the audit trail had already answered.
 PLAN_GATE_REASON: Final[RefusalReason] = "plan_gate"
-
-
-def gated_call(tool_name: str, arguments: Mapping[str, Any]) -> bool:
-    """Whether this call is one the plan gate governs at all.
-
-    The call rather than the tool, for the reason `authz.side_effecting_call` gives: `write_file`
-    is durable under `/memories/` and turn-local under `/scratch/`, and refusing both would deny an
-    unapproved turn the scratchpad it needs in order to produce a plan worth approving.
-    """
-    return side_effecting_call(tool_name, arguments)
 
 
 # The autonomy setting that asks for the approval-first posture — the value `harness_autonomy`
@@ -224,9 +344,10 @@ async def consume_turn_approval(session_id: str) -> None:
     **Not from the runner's `finally`, and that is not a style preference.** `run_turn` is an async
     generator whose `finally` also runs on the disconnect path — which production reaches through
     `CancelledError`, not `aclose()` (D-130). An `await` there re-raises the cancellation
-    immediately and *everything after it in the block is skipped*: the budget booking, the turn
-    metrics, `end_turn`, and all five context-var resets. Leaking the ambient identity of a
-    disconnected turn into the next turn on that worker is a worse defect than the one this
+    immediately and *everything after it in the block is skipped*: the budget booking and the
+    `turn_costs` row it writes, and the contextvar resets `chemclaw.api.runner._unstamp`
+    performs. Leaking the ambient identity of a disconnected turn into the next turn on that
+    worker is a worse defect than the one this
     function exists to fix. So it is called on the two paths where awaiting is safe, and a turn torn
     down *before* it answered deliberately does not spend the approval: a turn that was undone has
     not used its authorization.
@@ -333,9 +454,10 @@ def rewrite_todos_in_batch(request: Any) -> Any:
 
     The raw half of `plan_after_batch` — the batch-scoped lookup both it and
     `plan_link.plan_link_from_todos` need, extracted so the two readings cannot drift on what
-    counts as "this batch's rewrite". `plan_after_batch` reduces the result to bare `content`
-    strings for the identity hash, which is all *it* needs; `plan_link`'s caller needs `status`
-    too, to find the step the batch marks `in_progress`, so this returns the items unreduced.
+    counts as "this batch's rewrite". `plan_after_batch` checks the items are readable and hands
+    them to the identity hash; `plan_link`'s caller reads `status` off them as well, to find the
+    step the batch marks `in_progress`. Either way the items travel unreduced, which is what lets
+    the identity cover each step's declaration as well as its text.
 
     The batch is read off the *message*, not the state, because that is the only place the other
     calls in it are visible: `ToolNode` hands each call a runtime built from one pre-batch
@@ -375,8 +497,9 @@ def plan_after_batch(request: Any) -> Any:
     the step's tool call — and the blanket refusal denied it on *every* step of a plan: the model
     retried, an identical retry then tripped `refuse_repeated_calls`, and a fully approved
     multi-step plan could burn its whole loop allowance making no progress. A status flip does not
-    perturb `plan_identity` (the hash reads `content` only, which is what lets an approved plan
-    start a job without revoking itself), so judging the call against the plan the batch *writes*
+    perturb `plan_identity` (the hash covers each step's `content` and its declaration, never its
+    `status` — which is what lets an approved plan start a job without revoking itself), so judging
+    the call against the plan the batch *writes*
     lets the canonical shape through — while the DARK-1 batch (`write_todos(plan B)` beside a
     write, under plan A's approval) still refuses, because plan B has no approval. Fails closed on
     anything unanswerable: two rewrites in one message, or arguments the middleware itself would
@@ -385,17 +508,23 @@ def plan_after_batch(request: Any) -> Any:
     Returns `None` when the message cannot be found rather than guessing. That is not a hole: the
     approval check then runs against the pre-batch plan, which is the behaviour this function's
     predecessor was added to tighten, not a new one.
+
+    **It returns the steps, not their text.** It returned the text for as long as `plan_identity`
+    took text, and the two changed together in
+    `D-2026-09-13-a-plan-identity-that-omits-the-scope-approves-a-plan-nobody-read`: a batch whose
+    rewrite keeps every step's content and widens its declaration is now a *different* plan here,
+    so it is refused for having no approval at all rather than being checked against the standing
+    one. `enforce_plan_approval`'s docstring records why that is the same answer by a shorter route.
     """
     items = rewrite_todos_in_batch(request)
     if items is None or items is _UNANSWERABLE:
         return items
-    contents = [item.get("content") for item in items]
-    if not all(isinstance(c, str) for c in contents):
+    if not all(isinstance(item.get("content"), str) for item in items):
         return _UNANSWERABLE
-    return contents
+    return items
 
 
-async def _plan_behind(request: Any, session_id: str) -> list[str] | None:
+async def _plan_behind(request: Any, session_id: str) -> list[dict[str, Any]] | None:
     """The plan this call is being judged against, or `None` when there is none to judge against.
 
     Normally the turn's own state: `TodoListMiddleware` owns `todos` and `request.state` is this
@@ -415,8 +544,8 @@ async def _plan_behind(request: Any, session_id: str) -> list[str] | None:
     """
     state = request.state or {}
     if "todos" in state:
-        return [todo["content"] for todo in state.get("todos") or []]
-    return await session_todos(session_id)
+        return [todo for todo in state.get("todos") or [] if isinstance(todo, dict)]
+    return await session_plan(session_id)
 
 
 @wrap_tool_call
@@ -448,10 +577,11 @@ async def enforce_plan_approval(request: Any, handler: Callable[[Any], Any]) -> 
     whole shape outright, which failed closed and also failed the canonical harness pattern:
     "tick the completed step, do the next one" batches a status-flip `write_todos` beside every
     step's tool call, and refusing it livelocked approved multi-step plans against the repeat
-    guard. A status flip hashes identically (`plan_identity` reads `content` only), so the
-    canonical shape passes on its standing approval; a genuine rewrite is approved or refused on
-    *its own* hash, which is exactly D-167's question. Anything unanswerable — two rewrites in one
-    batch, unparseable arguments — still refuses without asking the store.
+    guard. A status flip hashes identically (`plan_identity` reads `content` and the declaration,
+    not `status`), so the canonical shape passes on its standing approval; a genuine rewrite is
+    approved or refused on *its own* hash, which is exactly D-167's question. Anything
+    unanswerable — two rewrites in one batch, unparseable arguments — still refuses without asking
+    the store.
 
     **Waiting jobs need no exclusion here.** Under MAF a todo waiting on a durable job was marked by
     prefixing its description, and the identity had to filter those out or an approved plan revoked
@@ -459,24 +589,83 @@ async def enforce_plan_approval(request: Any, handler: Callable[[Any], Any]) -> 
     — a launched job is a `job_records` row and a `session_events` push-back — so the list this
     hashes is the plan and only the plan, and there is nothing to filter.
 
+    **An approval authorizes the tools its plan declared, and nothing else**
+    (`D-2026-09-12-an-approval-that-names-no-tool-authorizes-every-tool`). Until that decision this
+    function asked one question — does an approval stand for this plan — so an approval recorded
+    against a one-line, read-only plan authorized every name in `authz.side_effecting_tools()`.
+    Each step now declares the tools it will call (`agent/plan_scope.py`), the decision stamps the
+    union of those declarations onto the row (`plan_approvals.scope`), and the scope is read back
+    from **there** rather than from the live plan — so a rewrite cannot widen an approval that has
+    already been given.
+
+    **That direction was necessary and not sufficient**
+    (`D-2026-09-13-a-plan-identity-that-omits-the-scope-approves-a-plan-nobody-read`). This
+    paragraph used to close by noting that `plan_identity` hashed `content` only, so a widening
+    rewrite "gains nothing, because the model's declaration is never what is consulted" — true of
+    this gate, and false of the route that writes the row it consults, which derives the scope from
+    the *live* plan once the chemist's hash has matched. The identity covers each step's declaration
+    now, so such a rewrite is a plan with no approval at all: this gate refuses it with
+    `plan_approval_refusal` rather than `out_of_scope_refusal`, one step earlier than before and for
+    the stronger reason.
+
     Raises:
-        PlanNotApprovedError: The plan behind this call has no live approval. The body never runs;
-            the audit middleware records the refusal and `surface_authorization_denials` relays
-            the reason to the model.
+        PlanNotApprovedError: The plan behind this call has no live approval, or has one that does
+            not name this tool. The body never runs; the audit middleware records the refusal and
+            `surface_authorization_denials` relays the reason to the model. The two cases carry
+            different sentences (`plan_approval_refusal`, `out_of_scope_refusal`) because they have
+            different remedies.
     """
     name = request.tool_call["name"]
-    if not gated_call(name, request.tool_call.get("args") or {}):
+    # The *call* rather than the tool, for the reason `authz.side_effecting_call` gives:
+    # `write_file` is durable under `/memories/` and turn-local under `/scratch/`, and refusing
+    # both would deny an unapproved turn the scratchpad it needs in order to produce a plan worth
+    # approving. This is what "the plan gate governs this call at all" means.
+    if not side_effecting_call(name, request.tool_call.get("args") or {}):
         return await handler(request)
     session_id = get_current_session_id()
-    # No session means no plan to approve and no autonomous loop to gate — a template activity's
-    # tool step, or a one-shot CLI call. Not a hole: those paths still pass through
-    # `enforce_tool_authz` and `authorize_trigger`, which is what governs them.
+    # No session means no plan to approve and no autonomous loop to gate. **What governs
+    # those calls instead is not what this comment used to say.** It named `enforce_tool_authz`
+    # and `authorize_trigger` "which is what governs them", and measured against a role-less
+    # authenticated actor under `entra_required` with `entra_privileged_roles` configured, the
+    # two of them together reach 6 of the 15 side-effecting tools in the registry: three by
+    # `DEFAULT_WRITE_TOOL_GATES` membership and three more by `expensive_actions()`. For the
+    # other **nine** — `compose_workflow`, `draft_experiment_protocol`, `forget_preference`,
+    # `propose_skill`, `remember_preference`, `run_composed_workflow`, `stop_watching`,
+    # `structure_experiment_request`, `watch_for` — neither gate refuses anything, so naming
+    # them was naming a control that is not there. `tests/test_plan_gate.py`'s
+    # `test_what_governs_a_session_less_write_is_registered_rather_than_asserted` holds that
+    # residual as a set, so it cannot grow in silence.
+    #
+    # The two paths are also not the two this comment named, and each is governed by something
+    # real:
+    #
+    # - **A template `agent` step never reaches this line at all.** `step_profile`
+    #   (`durable/template_activities.py`) returns the profile with `harness_enabled=False`, so
+    #   `gate_applies` is `False` and this middleware is not in the chain — measured. What
+    #   governs it is stronger than a gate: that function subtracts every side-effecting tool
+    #   the step did not declare from the surface *before the graph is built*, so an undeclared
+    #   write is not a refused call, it is a tool the step's agent never held.
+    # - **A template `tool` step does reach it**, through `invoke_governed` with
+    #   `profile=get_profile(None)` — the default profile, which is gated. What governs *it* is
+    #   the artefact: the tool is named in a git-committed, reviewed template file, which
+    #   `templates/manifest.AgentStep` argues is the pre-approved plan ("human-authored,
+    #   git-committed, reviewed, and uncreatable at run time"), and an **agent**-authored
+    #   composed workflow may name no side-effecting tool at all (`templates/composed.py`).
+    #   Reaching this line with an unreviewed write therefore needs the ability to enqueue a
+    #   `TemplateWorkflow`, i.e. broker write access.
+    # - **The CLI reaches it too**, and that one is a posture rather than a control:
+    #   `cli/chat.py` never stamps a session id although it has one, so `/plan` and `/approve`
+    #   write rows no execution path there reads. Its own docstring records that; it is the
+    #   operator's own terminal, running with the process's own credentials.
     if not session_id:
         return await handler(request)
     rewritten = plan_after_batch(request)
     if rewritten is _UNANSWERABLE:
         raise plan_approval_refusal(name)
-    lines = rewritten if rewritten is not None else await _plan_behind(request, session_id)
-    if lines is not None and await approval_stands(session_id, plan_identity(lines)):
-        return await handler(request)
-    raise plan_approval_refusal(name)
+    steps = rewritten if rewritten is not None else await _plan_behind(request, session_id)
+    scope = None if steps is None else await approved_scope(session_id, plan_identity(steps))
+    if scope is None:
+        raise plan_approval_refusal(name)
+    if name not in scope:
+        raise out_of_scope_refusal(name, scope)
+    return await handler(request)

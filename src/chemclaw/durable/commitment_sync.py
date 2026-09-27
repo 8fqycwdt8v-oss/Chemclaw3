@@ -10,11 +10,15 @@ is the truth. A mirror that started deriving dates would give the deployment two
 does this land", and the second one would be wrong more often — see
 `D-2026-08-29-a-mirror-is-not-a-plan`.
 
-**And no Schedule here opens a pull request**, which is why this is safe to run on a timer at all.
+**And no Schedule here asserts anything**, which is why this is safe to run on a timer at all.
 `D-2026-08-25-an-eln-transcription-is-data-not-a-claim` established the rule: a deterministic
-transcription is data and is not gated, while anything agent-*asserted* waits for a person. A
-portfolio row copied from an export asserts nothing, so it lands like an ELN transcription rather
-than like a note.
+transcription is data, and a claim the agent *made* is knowledge somebody has to be able to
+contradict. A portfolio row copied from an export asserts nothing, so it lands like an ELN
+transcription rather than like a note. The rule's second half used to read "anything
+agent-*asserted* waits for a person", which
+`D-2026-09-05-the-gate-follows-behaviour-not-knowledge` falsified — nothing waits; an assertion
+lands beside its citations and is corrected. What still holds here, and is the whole point of the
+paragraph, is that this mirror asserts nothing at all.
 """
 
 from datetime import datetime, timedelta

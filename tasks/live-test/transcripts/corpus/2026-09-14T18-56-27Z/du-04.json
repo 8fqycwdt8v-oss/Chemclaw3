@@ -1,0 +1,60 @@
+{
+  "probe": {
+    "id": "du-04",
+    "section": 9,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "What long-running work has this system actually done for us, and who asked for it? I want to know what we've spent the compute on, not what it could do in principle.",
+    "expects_tools": [
+      "find_past_jobs",
+      "get_durable_job_status",
+      "gather_evidence"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a job, requester or date that is not in the job record",
+      "a compute cost, core-hour or spend figure",
+      "that no durable work has ever been run, when the record holds some"
+    ],
+    "direction": "Deliberately the one probe here that must *not* start a job: the question is about the record of past runs, and launching a new one to answer it would be the wrong instinct. Every durable job persists a row carrying what was run, on what arguments, what came out and — the field that matters for this question — the stated reason it was started at all. So the answer is a retrieval: which jobs ran, who requested each and why. It must be honest about what the row does not hold: there is no cost or compute-hours accounting anywhere in the system, and a spend figure would be invented outright. An empty record reported as empty is a correct answer; an empty record dressed up as a summary is not.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "du-04",
+    "section": 9,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "What long-running work has this system actually done for us, and who asked for it? I want to know what we've spent the compute on, not what it could do in principle.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.68,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "455334f17bf645dbb833a645115abe78",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

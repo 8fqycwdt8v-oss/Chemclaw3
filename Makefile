@@ -13,8 +13,37 @@ KUBE_VERSION ?= 1.29.0
 # whenever the case-set itself changes — the mismatch is the tripwire that says you forgot.
 # Bumped when the case set itself changes, because a baseline is only comparable to the set it was
 # recorded on — `eval-baseline-check` refuses to compare two versions rather than reporting a drift
-# between different quantities. 2026-08-25 added `autonomy-turn-cost`.
-EVAL_CASE_SET_VERSION ?= retrieval-2026-09-05
+# between different quantities. 2026-09-14 added the two demonstration cases that make `runaway_rate`
+# and `prediction_error` gates that can fire (`EvalReport.gates_no_demonstration_can_fire`).
+EVAL_CASE_SET_VERSION ?= live-cost-2026-09-14
+
+# How many pytest worker processes `test` and `cov` run across
+# (`D-2026-09-13-a-stable-failure-set-is-not-two-green-runs`).
+#
+# **0 — serial — because the gate's answer has to mean one thing, and in parallel it does not.**
+# Four workers are genuinely much faster: measured on this 4-core box, `make test` 18:13 -> 09:30 and
+# `make cov` 27:25 -> 12:28, with coverage unchanged at 90.53%. What they are not is *stable*. Over
+# five full parallel runs, `tests/test_context_budget.py::test_a_burst_of_cold_prefix_measurements_`
+# `leaves_the_loop_schedulable` failed in **2** and
+# `tests/test_retention.py::test_a_pass_reports_bytes_beside_rows_and_stops_the_table_growing` in
+# **1**; both pass serially, every time. A gate that reds about 40% of the time for a reason that is
+# not a finding is worse than a slow one — the first spurious red teaches everybody to re-run, and
+# then a real red teaches them the same thing.
+#
+# **So this is an opt-in and the plugin stays installed**, because the speedup is real and a local
+# iteration loop is the right place to spend it: `make test PYTEST_WORKERS=4`. When something fails
+# under it, re-run that test serially before believing it — a test that fails only in parallel is
+# evidence about the scheduler.
+#
+# **Not `auto` even when opting in, and the difference is a resource nobody counts.** `-n auto` takes
+# `os.cpu_count()`, and every worker is its own process that draws its own Postgres pool — at
+# `CHEMCLAW_PG_POOL_MAX_SIZE`'s default of 16 that is up to 16 backends per worker against one
+# server, so a 16-core developer box would ask a stock `max_connections` of 100 for four times what
+# it has while a 4-core runner sits inside it.
+PYTEST_WORKERS ?= 0
+# Empty when serial is asked for, so the flag is absent rather than `-n 0` (which xdist reads as
+# "no workers" and then still installs its plugin machinery).
+PYTEST_XDIST := $(if $(filter-out 0,$(PYTEST_WORKERS)),-n $(PYTEST_WORKERS),)
 
 # The two patterns that classify `deps-audit`'s output. Named here rather than inlined in the
 # recipe so `tests/test_deploy_chart.py` can assert the classification against the same strings
@@ -74,7 +103,7 @@ SHELL := bash
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install lint type test cov check ci chat db-migrate db-grants schedules-apply kg-validate synthesize eval eval-strict eval-baseline eval-baseline-check eln-validate skill-validate connector-validate datasource-validate sink-validate channel-validate sink-schema template-validate connectors prose-validate helm-validate explain user-erase reindex reindex-full up down phoenix-up phoenix-down phoenix-publish deps-audit live-infra live-infra-down live-up live-down live-status live-jobs live-probes live-template-args live-verifier-margin trajectory-census live-data live-plan-gate live-degradation live-storm live-soak live-soak-report leak-probe mutants mutant-results mutant-stats upstream-check share-estimate share-sync live-ab live-e2e-full-stack live-e2e-full-stack-down live-e2e-full-stack-status
+.PHONY: help install lint type test cov check ci chat db-migrate db-grants schedules-apply kg-validate synthesize eval eval-strict eval-baseline eval-baseline-check eln-validate skill-validate connector-validate datasource-validate sink-validate channel-validate sink-schema template-validate connectors prose-validate helm-validate explain user-erase reindex reindex-full up down phoenix-up phoenix-down phoenix-publish deps-audit live-infra live-infra-down live-up live-down live-status live-jobs live-probes live-turn-cost live-benchmark live-template-args live-verifier-margin trajectory-census distill propose-profile live-data live-plan-gate live-degradation live-storm live-soak live-soak-report leak-probe mutants mutant-results mutant-stats upstream-check share-estimate share-sync live-ab live-delegation hypothesis-recovery live-e2e-full-stack live-e2e-full-stack-down live-e2e-full-stack-status
 
 help:  ## List every target with its one-line description (the default).
 	@# Reads the `## ` comments beside each target, so a new target documents itself the day it is
@@ -93,11 +122,11 @@ lint:  ## Ruff lint + format check (no writes; use `uv run ruff format` to fix).
 type:  ## Static type check, strict (the whole package, plus examples and tests).
 	uv run mypy src examples tests
 
-test:  ## Run the test suite.
-	uv run pytest
+test:  ## Run the test suite (serial; `PYTEST_WORKERS=4` for ~2x, see the variable).
+	uv run pytest $(PYTEST_XDIST)
 
 cov:  ## Run the test suite with coverage (first-party packages; report missing lines).
-	uv run pytest --cov --cov-report=term-missing
+	uv run pytest --cov --cov-report=term-missing $(PYTEST_XDIST)
 
 leak-probe:  ## Drive real turns in one process and report what each one retains (needs `make live-up`).
 	uv run python -m chemclaw.cli.leak_probe $(ARGS)
@@ -132,7 +161,13 @@ check: lint type test  ## The fast inner-loop gate: lint + type + test (no cover
 ci: lint type cov kg-validate eval-strict eval-baseline-check eln-validate skill-validate connector-validate datasource-validate sink-validate channel-validate template-validate prose-validate helm-validate deps-audit  ## The full pre-push gate: lint + type + coverage + all validators + the dependency audit (what CI runs).
 
 chat:  ## Chat with the agent from the terminal (admin/testing; needs CHEMCLAW_LLM_BASE_URL up).
-	uv run chemclaw --admin
+	@# The shipped gateway is `chemclaw.cli.mock_llm` on loopback, and every process that makes model
+	@# calls refuses that unless the posture is stated
+	@# (`core/llm_gateway.refuse_unconfigured_llm_gateway`). Stated here rather than in `.env.example`,
+	@# which ships the code defaults: this target *is* the local-dev lane, and a deployment never runs
+	@# `make`. Harmless when a real gateway is configured — the guard only looks at loopback
+	@# addresses — and an operator's own value wins.
+	CHEMCLAW_LLM_ALLOW_LOOPBACK_GATEWAY=$${CHEMCLAW_LLM_ALLOW_LOOPBACK_GATEWAY:-true} uv run chemclaw --admin
 
 db-migrate:  ## Apply infra/sql migrations to the configured database.
 	uv run python -m chemclaw.core.migrate
@@ -226,6 +261,14 @@ helm-validate:  ## Render the Helm chart and validate it against the Kubernetes 
 	@# neither destinations nor windows to enumerate, so it takes both escape hatches explicitly —
 	@# the same sentences an operator has to write, which is why the flags are visible here.
 	@#
+	@# `--set temporal.namespace=chemclaw` is the third, and it is not an escape hatch: it is the
+	@# value itself, because there is no safe default for it. The chart used to ship the constant
+	@# `"chemclaw"` against an address naming a *cluster-shared* broker, so two releases landed on
+	@# one namespace, one task queue and one schedule-id space — measured, a peer's `helm upgrade`
+	@# rewrote `eln-sync` to another workflow type and interval and `_prune` deleted its
+	@# `eval-drift` outright. `chemclaw` is what a validation render passes because it reproduces
+	@# the old behaviour exactly; a real release states its own.
+	@#
 	@# Twice, and the second render is the point: every switch this chart ships **off** was
 	@# validated by nobody. `mcpFace.enabled` rendered a Deployment mounting a volume the pod did
 	@# not declare and `monitoring.temporalSdkMetrics.enabled` rendered a container port name one
@@ -244,11 +287,17 @@ helm-validate:  ## Render the Helm chart and validate it against the Kubernetes 
 	@# shipped covering three of six; `secrets.create` and `mcpFace.route.enabled` were rendered by
 	@# nothing in `tests/`, this file or `.github/`. The two `--set`s after `alertmanager.enabled`
 	@# are its prerequisites, not extra coverage: that template refuses to render with no receivers.
+	@# `mcpFace.ingressNamespaces` is the same kind of prerequisite for `mcpFace.route.enabled`, and
+	@# it was added *by* this render failing: publishing the face with an empty peer list renders a
+	@# Route to an address the chart's own `mcp-face-ingress` policy drops, which the template now
+	@# refuses. That refusal landing here first is the union arm working — it is the only thing in
+	@# the tree that had ever set that switch.
 	@set -e; \
-	  for flags in "" "--set mcpFace.enabled=true --set mcpFace.route.enabled=true --set documentShare.enabled=true --set monitoring.temporalSdkMetrics.enabled=true --set secrets.create=true --set monitoring.alertmanager.enabled=true --set-json monitoring.alertmanager.receivers=[{\"name\":\"chemclaw-oncall\"}] --set monitoring.alertmanager.defaultReceiver=chemclaw-oncall"; do \
+	  for flags in "" "--set mcpFace.enabled=true --set mcpFace.route.enabled=true --set-json mcpFace.ingressNamespaces=[{\"network.openshift.io/policy-group\":\"ingress\"}] --set documentShare.enabled=true --set monitoring.temporalSdkMetrics.enabled=true --set secrets.create=true --set monitoring.alertmanager.enabled=true --set-json monitoring.alertmanager.receivers=[{\"name\":\"chemclaw-oncall\"}] --set monitoring.alertmanager.defaultReceiver=chemclaw-oncall"; do \
 	    helm template chemclaw deploy/helm/chemclaw \
 	      --set networkPolicy.allowAnyDestination=true \
-	      --set retention.unboundedGrowthAccepted=true $$flags \
+	      --set retention.unboundedGrowthAccepted=true \
+	      --set temporal.namespace=chemclaw $$flags \
 	    | kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version $(KUBE_VERSION) \
 	        -schema-location default -schema-location \
 	        'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'; \
@@ -268,6 +317,7 @@ helm-validate:  ## Render the Helm chart and validate it against the Kubernetes 
 	  render=$$(helm template chemclaw deploy/helm/chemclaw \
 	    --set networkPolicy.allowAnyDestination=true \
 	    --set retention.unboundedGrowthAccepted=true \
+	    --set temporal.namespace=chemclaw \
 	    --set connectors.molfp.url=https://model.invalid/mcp); \
 	  case "$$render" in *chemclaw-connector-molfp*) \
 	    echo "FAIL: an externally hosted connector still gets a Deployment/Service"; exit 1;; esac; \
@@ -282,9 +332,15 @@ helm-validate:  ## Render the Helm chart and validate it against the Kubernetes 
 	@# it. That failure is silent from the cluster's side: the object exists and is `Valid` by every
 	@# check this repo ran, and the alerts in it simply never evaluate.
 	@#
-	@# Both renders, because a rule behind a flag is a rule nothing else parses: the shipped
-	@# defaults, and the one with the Temporal SDK exporter on, which is the only shape that renders
-	@# `ChemclawWorkerNotPolling`. The dashboards go through the same check for the same reason at
+	@# Three renders, because a rule behind a flag is a rule nothing else parses: the shipped
+	@# defaults, the one with the Temporal SDK exporter on (the only shape that renders
+	@# `ChemclawWorkerNotPolling`), and one that *states retention windows* rather than accepting
+	@# unbounded growth — `ChemclawRetentionNotSweeping` renders only on that arm, because with the
+	@# growth accepted there is no sweep to be absent, so the two renders above parse every rule in
+	@# the file except that one. It is a separate invocation rather than a third arm of the loop,
+	@# because the chart refuses a release that states *both* postures — which is the guard
+	@# working — so the two arms cannot share a prefix with it.
+	@# The dashboards go through the same check for the same reason at
 	@# one remove — over a hundred panel queries that no other gate reads, where a mistyped one is a
 	@# blank panel rather than an error.
 	@set -e; \
@@ -293,11 +349,20 @@ helm-validate:  ## Render the Helm chart and validate it against the Kubernetes 
 	  for flag in "" "--set monitoring.temporalSdkMetrics.enabled=true"; do \
 	    helm template chemclaw deploy/helm/chemclaw \
 	      --set networkPolicy.allowAnyDestination=true \
-	      --set retention.unboundedGrowthAccepted=true $$flag \
+	      --set retention.unboundedGrowthAccepted=true \
+	      --set temporal.namespace=chemclaw $$flag \
 	      > "$$work/render.yaml"; \
 	    uv run python "$$work/extract.py" < "$$work/render.yaml" > "$$work/rules.yaml"; \
 	    promtool check rules "$$work/rules.yaml"; \
-	  done
+	  done; \
+	  helm template chemclaw deploy/helm/chemclaw \
+	    --set networkPolicy.allowAnyDestination=true \
+	    --set retention.windows.CHEMCLAW_RETENTION_SESSION_MESSAGES_DAYS=365 \
+	    --set retention.artifactGrowthAccepted=true \
+	    --set temporal.namespace=chemclaw \
+	    > "$$work/render.yaml"; \
+	  uv run python "$$work/extract.py" < "$$work/render.yaml" > "$$work/rules.yaml"; \
+	  promtool check rules "$$work/rules.yaml"
 
 upstream-check:  ## Re-check every upstream shape this repo borrows (run on any langchain/langgraph/deepagents bump).
 	@# The whole point of `tests/test_upstream_surface.py` is that a dependency bump becomes one
@@ -450,6 +515,29 @@ live-jobs:  ## Run a real durable job end to end (Temporal + connector worker + 
 live-probes:  ## Ask the running front door the live probe set (exit 3 unreached, 2 ungraded).
 	uv run python -m chemclaw.cli.live_probes $(ARGS)
 
+.PHONY: retrieval-arms
+retrieval-arms:  ## Score retrieval configurations against the labelled gold set (needs `make up`).
+	uv run python -m chemclaw.cli.retrieval_arms $(ARGS)
+
+# The cost half of what `live-probes` asks. `make eval` scores `turn_cost_ratio` over committed
+# literals, so no change to the agent can move it; this drives a fixed three-turn workload through
+# the running front door, scores the `turn_costs` rows it actually produced with the same metric,
+# and fails on a worsening drift against the recorded case. Live-lane, never `ci`: it needs a front
+# door and a database. `ARGS="--emit"` re-records the case, deliberately, like `make eval-baseline`.
+live-turn-cost:  ## Score `turn_cost_ratio` over turns this system really ran (exit 3 unreached).
+	uv run python -m chemclaw.cli.live_turn_cost $(ARGS)
+
+# The first number in this repository somebody else can also produce. Everything `make eval` gates
+# is first-party; this asks 100 expert-written, keyed ChemBench questions of a running front door
+# and scores them by comparison rather than by a judge. `ARGS="--profile tools-removed"` is the arm
+# that varies only the tools and `ARGS="--profile skills-removed"` the one that varies only the
+# skills; `ARGS="--profile no-tools"` swaps the system prompt as well and so
+# answers a different question (`D-2026-09-14-tools-were-never-the-variable`).
+# Live-lane, never `ci`: it needs a front door and a model gateway, and it is not a gate —
+# a closed-book chemistry score is a property of the deployment's model, not of a commit.
+live-benchmark:  ## Score this system on the vendored ChemBench subset (exit 3 unreached).
+	uv run python -m chemclaw.cli.live_benchmark $(ARGS)
+
 # The half of `template-validate` that needs a session. `make template-validate` reads a tool's
 # parameters out of this tree and cannot answer for a bundle we declare and do not run — seven
 # shipped steps, reported by name as `unchecked_arguments` and unchecked. This opens the real
@@ -465,6 +553,20 @@ live-verifier-margin:  ## Re-roll the raw judge and measure its margin at the th
 
 trajectory-census:  ## Count recurring tool-call trajectories over the stored sessions (the distiller's trigger).
 	uv run python -m chemclaw.cli.trajectory_census $(ARGS)
+
+# The consumer that census never had. Mines the same corpus, applies the self-confirmation guard
+# — a trajectory that recurs only where a skill of that name was already acting is not evidence
+# for proposing it — and files what survives into the proposal queue for its owner to decide.
+#
+# **On demand and never on a timer**, the rule `CLAUDE.md` states and the campaign and playbook
+# miners already follow. Dry by default: `ARGS="--propose"` is what writes.
+distill:  ## Distil recurring trajectories into skill proposals (dry; ARGS="--propose" to file).
+	uv run python -m chemclaw.cli.distill $(ARGS)
+
+# The other proposer, and the honest one to read the help for: an accepted profile proposal is a
+# *record* that somebody wants one, because a profile is git-resident and no route can commit.
+propose-profile:  ## Propose an agent profile from observed tool co-occurrence (dry; ARGS="--propose").
+	uv run python -m chemclaw.cli.propose_profile $(ARGS)
 
 # The corpus half of the same question `live-probes` asks of the model: not "did a tool answer"
 # but "is the number in the answer the number in the paper". Checks every published measurement
@@ -488,14 +590,38 @@ live-data:  ## Check the seeded corpus against the published factor tables, valu
 # D-2026-08-15 deleted the team, the challenge panel and that measurement together. The target
 # outlived its suite and failed at argparse — `invalid choice: 'routing'` — so it is gone too.
 
-# The one measurement that asks whether the tools are worth what they cost, by asking the same
-# questions twice. The control arm is a *profile*, so it is the front door that needs
-# `data/evals/profiles` on its profile path, not this client — `infra/live/processes.sh` puts it
-# there, and the suite checks the front door accepted the profile before it spends anything,
-# because a run whose control arm quietly fell back to the default agent would produce a report
-# comparing one agent with itself.
-live-ab:  ## Ask the probe corpus with and without tools and compare (needs a real model gateway).
+# The measurement that asks what the control arm costs, by asking the same questions twice. The
+# control arm is a *profile*, so it is the front door that needs `data/evals/profiles` on its
+# profile path, not this client — `infra/live/processes.sh` puts it there, and the suite checks the
+# front door accepted the profile before it spends anything, because a run whose control arm
+# quietly fell back to the default agent would produce a report comparing one agent with itself.
+#
+# **It is not yet a tools measurement.** `_AB_BASELINE_PROFILE` is `no-tools`, which swaps the
+# system prompt as well as emptying the tool set, so a delta from this target is a prompt-and-tools
+# delta (`D-2026-09-14-tools-were-never-the-variable`). Re-running it against `tools-removed` is
+# the open row in `docs/planning/BACKLOG.md`.
+live-ab:  ## Ask the probe corpus against the prompt-swapping control arm and compare (real gateway).
 	uv run python -m chemclaw.cli.live_probes --suite ab $(ARGS)
+
+# The delegation experiment's run half (issue #359). Four arms over `data/evals/probes/delegation.
+# yaml`, `MINIMUM_REPEATS` repeats each, one report per arm against the `no-helper` baseline.
+#
+# **Two of the four arms need the front door started a particular way and no flag here can do it**:
+# `helper-routed` needs `CHEMCLAW_MODEL_ROUTES='{"helper": "<a smaller model>"}'` and `peer` needs
+# `CHEMCLAW_AGENT_PEER_ROSTER` naming another profile, because a helper's model route and a peer
+# roster are read by the process that builds the agent. The suite prints what each arm needs and
+# reports an arm that could not have complied as `undelegated` rather than as a pass.
+#
+# Against `chemclaw.cli.mock_llm --catalogue delegation` this proves the runner and nothing else:
+# the double supplies the decision to delegate, which is the one thing a credential-free lane cannot
+# get from a model. Answering "does delegation pay" needs a gateway.
+live-delegation:  ## The delegation experiment: drive every arm and compare (real gateway).
+	uv run python -m chemclaw.cli.live_probes --suite delegation $(ARGS)
+
+# Needs no gateway and no credential: the judge is simulated, which is what makes the ground truth
+# constructed and the null controllable. It measures the ranking machinery, not a model's judgement.
+hypothesis-recovery:  ## Reproduce the ADR's tournament-recovery table against a null control.
+	uv run python -m chemclaw.cli.hypothesis_recovery $(ARGS)
 
 live-plan-gate:  ## M12: plan -> approve -> execute -> re-gate, live (needs harness_autonomy=plan_only).
 	uv run python -m chemclaw.cli.live_probes --suite plan-gate $(ARGS)

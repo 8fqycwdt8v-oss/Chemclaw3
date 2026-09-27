@@ -1,0 +1,61 @@
+{
+  "probe": {
+    "id": "pc-27",
+    "section": 11,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "The 100 g batch gave 71% but the 2 kg batch gave 54%. What changed?",
+    "expects_tools": [
+      "gather_evidence",
+      "conditions_for_similar_reaction",
+      "find_notes",
+      "record_failure"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a mixing, heat-transfer or mass-transfer explanation presented as diagnosed",
+      "a computed comparison of the two batches' conditions that the records do not support",
+      "a single confident cause"
+    ],
+    "direction": "Partial, and the interesting part is epistemic. If both batches are in the ELN, comparing their recorded conditions is real and valuable. Explaining the gap is not: scale-dependent yield loss is usually mixing, heat transfer, addition rate or hold time, and this system can model none of them, so a good answer offers those as *hypotheses to test* with what would distinguish them, rather than as a diagnosis. Offering to record the finding once the chemist knows the cause is the right close.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "pc-27",
+    "section": 11,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "The 100 g batch gave 71% but the 2 kg batch gave 54%. What changed?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.8,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "8aaad7f8aa5d4a63ada9545036930af6",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

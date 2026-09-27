@@ -33,18 +33,36 @@ class JsonCommitmentExport:
     both shapes an export tool produces are readable without a per-site flag.
     """
 
-    #: Declared `False` even though `fetch_commitments` does return the whole export every time,
-    #: and the two are not the same claim: `snapshot` licenses a *destructive* sweep that deletes
-    #: every commitment this pass did not see, so it is the operator's statement that the export is
+    #: The protocol default, and the instance attribute below is what actually answers.
+    #:
+    #: `False` even though `fetch_commitments` does return the whole export every time, because the
+    #: two are not the same claim: `snapshot` licenses a *destructive* sweep that deletes every
+    #: commitment this pass did not see, so it is the operator's statement that the export is
     #: complete rather than this class's statement that it read all of it. A directory this adapter
     #: is pointed at mid-write, or one an export tool half-filled, returns "everything" and means
-    #: nothing. Turning it on for the shipped adapter is a behaviour change and a `BACKLOG.md` row.
+    #: nothing.
+    #:
+    #: **So it is the manifest's to set, not this class's to decide.** Which of those a given
+    #: site's export is cannot be known here — it is a property of the tool writing the directory
+    #: and of whether it writes atomically. A `snapshot: true` in that site's `datasource.yaml` is
+    #: the operator saying so, and it costs no core edit: `registry._build_half` calls
+    #: `factory(**manifest.config)`, so the constructor's signature *is* the config schema and
+    #: `make datasource-validate` binds the key against it.
     snapshot: bool = False
 
-    def __init__(self, name: str, path: str) -> None:
-        """Bind the source's name and the file or directory its export lands in."""
+    def __init__(self, name: str, path: str, *, snapshot: bool = False) -> None:
+        """Bind the source's name, the file or directory its export lands in, and its completeness.
+
+        Args:
+            name: The data source's name, as the manifest declares it.
+            path: The file or directory the export lands in.
+            snapshot: Whether this export is complete every pass, which licenses the destructive
+                sweep in `durable/commitment_sync.py`. Default `False`, so a deployment that does
+                not say otherwise keeps today's behaviour exactly.
+        """
         self.name = name
         self.path = Path(path)
+        self.snapshot = snapshot
 
     async def fetch_commitments(self, since: datetime | None) -> list[Commitment]:
         """Every commitment in the export.
@@ -189,11 +207,29 @@ class JsonCommitmentExport:
         return found
 
 
-def json_commitment_export(name: str, path: str = "") -> JsonCommitmentExport:
+def json_commitment_export(
+    name: str, path: str = "", *, snapshot: bool = False
+) -> JsonCommitmentExport:
     """Build a `JsonCommitmentExport` — the `module:callable` a manifest names.
 
     `path` defaults to the configured `commitment_export_dir` rather than being required in the
     manifest, the same way `eln-json` leaves its directory to `eln_export_dir`: a path in a manifest
     is CWD-relative and a deployment cannot override it without editing a shipped file.
+
+    `snapshot` goes the other way and is deliberately *not* a setting: it is a statement about one
+    site's export tool — whether it writes the directory completely and atomically — so it belongs
+    beside that site's source rather than in a process-wide field two sources would share. It
+    defaults `False`, so the shipped `commitments-json` manifest needs no `config:` block and
+    nothing changes for a deployment that does not ask for the sweep.
+
+    Args:
+        name: The data source's name, as the manifest declares it.
+        path: The export's file or directory; empty means `commitment_export_dir`.
+        snapshot: Whether every pass reads a complete export, which licenses the destructive sweep.
+
+    Returns:
+        The adapter the commitments half of the source seam calls.
     """
-    return JsonCommitmentExport(name=name, path=path or settings.commitment_export_dir)
+    return JsonCommitmentExport(
+        name=name, path=path or settings.commitment_export_dir, snapshot=snapshot
+    )

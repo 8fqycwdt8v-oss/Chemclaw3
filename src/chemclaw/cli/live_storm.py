@@ -23,7 +23,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
-import json
 import logging
 import os
 import shutil
@@ -36,6 +35,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from httpx_sse import aconnect_sse
 from temporalio.client import WorkflowExecutionStatus
 
 from chemclaw.connectors.jobs import build_job_tool, job_workflow_id
@@ -44,7 +44,9 @@ from chemclaw.core.config import settings
 from chemclaw.core.db import _redact
 from chemclaw.core.db import connection as db_connection
 from chemclaw.core.logging import configure_logging
+from chemclaw.core.markdown import render_table
 from chemclaw.core.temporal_client import connect as temporal_connect
+from chemclaw.evals.live import decoded_events
 
 logger = logging.getLogger(__name__)
 
@@ -155,20 +157,20 @@ async def run_turn(client: httpx.AsyncClient, message: str) -> TurnResult:
         created.raise_for_status()
         result.session_id = str(created.json()["session_id"])
 
-        async with client.stream(
-            "POST", f"/sessions/{result.session_id}/messages", json={"message": message}
-        ) as response:
-            result.status = response.status_code
-            if response.status_code != 200:
-                await response.aread()
+        # `evals.live.decoded_events` rather than a fourth reading of the wire format — see its
+        # docstring for why there were three and what they each got wrong. The status is taken off
+        # the response before the stream is touched, because a refused turn has a JSON body rather
+        # than an event stream, and the reader answers a body that is not a stream by yielding
+        # nothing: right for a 200 that is not a stream, and indistinguishable from a silent turn
+        # for a 429, which this harness has to record as a *status*. So the status is read first.
+        async with aconnect_sse(
+            client, "POST", f"/sessions/{result.session_id}/messages", json={"message": message}
+        ) as source:
+            result.status = source.response.status_code
+            if result.status != 200:
+                await source.response.aread()
                 return result
-            async for line in response.aiter_lines():
-                if not line.startswith("data: "):
-                    continue
-                try:
-                    event = json.loads(line[6:])
-                except ValueError:
-                    continue
+            async for event in decoded_events(source):
                 kind = str(event.get("type", ""))
                 if kind == "tool_call":
                     result.announced += 1
@@ -214,7 +216,7 @@ async def storm(
     limits = httpx.Limits(max_connections=concurrency + 16, max_keepalive_connections=concurrency)
 
     async with httpx.AsyncClient(
-        base_url=FRONT_DOOR, timeout=httpx.Timeout(timeout), limits=limits
+        base_url=FRONT_DOOR, timeout=httpx.Timeout(timeout), limits=limits, trust_env=False
     ) as client:
 
         async def one(index: int) -> TurnResult:
@@ -256,7 +258,7 @@ async def _scalar(sql: str, params: tuple[Any, ...] = ()) -> Any:
 
 async def mock_requests() -> int:
     """How many requests the mock actually served — the storm's proof no real model was called."""
-    async with httpx.AsyncClient(timeout=10.0) as client:
+    async with httpx.AsyncClient(timeout=10.0, trust_env=False) as client:
         try:
             response = await client.get(MOCK_STATS)
             return int(response.json()["requests"])
@@ -464,6 +466,11 @@ async def family_f_adversarial() -> list[Finding]:
             _bad_call_was_reported,
         ),
         (
+            "f-cut-off",
+            "a call cut off at the output limit is refused, not run on upstream's completion",
+            _bad_call_was_reported,
+        ),
+        (
             "f-wrong-argument",
             "LOAD-1's own shape is visible rather than counted as a call",
             _bad_call_was_reported,
@@ -530,7 +537,7 @@ async def family_g_limits() -> list[Finding]:
     of them tells an operator what to change.
     """
     findings: list[Finding] = []
-    async with httpx.AsyncClient(base_url=FRONT_DOOR, timeout=30.0) as client:
+    async with httpx.AsyncClient(base_url=FRONT_DOOR, timeout=30.0, trust_env=False) as client:
         oversized = "x" * (settings.service_max_message_chars + 1_000)
         created = await client.post("/sessions", json={})
         session_id = str(created.json()["session_id"])
@@ -647,7 +654,7 @@ async def _chaos_client_disconnect() -> Finding:
     released and a session that answers are different statements and only the second one is what a
     chemist experiences.
     """
-    async with httpx.AsyncClient(base_url=FRONT_DOOR, timeout=60.0) as client:
+    async with httpx.AsyncClient(base_url=FRONT_DOOR, timeout=60.0, trust_env=False) as client:
         created = await client.post("/sessions", json={})
         created.raise_for_status()
         session_id = str(created.json()["session_id"])
@@ -872,6 +879,50 @@ async def family_e_chaos() -> list[Finding]:
     return findings
 
 
+#: The gauge the estimator calibration publishes (`agent/context_budget.py` binds it).
+ESTIMATOR_RATIO_GAUGE = "chemclaw_context_estimator_ratio"
+
+
+def metric_sample(exposition: str, name: str) -> float | None:
+    """The value of an unlabelled series in a Prometheus text exposition, or `None` if absent."""
+    for line in exposition.splitlines():
+        head, _, value = line.partition(" ")
+        if head == name and value:
+            return float(value.split()[0])
+    return None
+
+
+async def _front_door_gauge(name: str) -> float | None:
+    """One gauge as the front door's own `/metrics` reports it — `None` if it cannot say."""
+    try:
+        async with httpx.AsyncClient(base_url=FRONT_DOOR, timeout=10.0, trust_env=False) as client:
+            response = await client.get("/metrics")
+    except httpx.HTTPError:
+        return None
+    return metric_sample(response.text, name) if response.status_code == 200 else None
+
+
+def _calibration_finding(status: int, billed: int, ratio: float | None) -> Finding:
+    """H's calibration check: a billed, request-sized turn left the published ratio above 1.
+
+    Above 1 and not merely equal, because 1.0 is the clamp every untightened process reads —
+    so equality is indistinguishable from the branch never running.
+    """
+    return Finding(
+        family="H",
+        name="a request-sized bill drives the estimator ratio above 1",
+        ok=status == 200 and billed > 0 and ratio is not None and ratio > 1.0,
+        observed=(
+            f"turn_costs billed={billed} for this session; "
+            f"{ESTIMATOR_RATIO_GAUGE}={'unreadable' if ratio is None else f'{ratio:.3f}'}"
+        ),
+        detail=(
+            "every other behaviour bills a constant, which clamps the ratio to 1.0 and leaves "
+            "the tightening branch two budget decisions rest on unexercised by any lane"
+        ),
+    )
+
+
 async def family_h_edges() -> list[Finding]:
     """H · data a chemist could plausibly send that nothing in the corpus resembles.
 
@@ -912,27 +963,23 @@ async def family_h_edges() -> list[Finding]:
     # lane anywhere, only by unit tests with hand-fed numbers. `h-size-billed` bills the serialized
     # request at 0.5 tokens per character, roughly twice the chars/4 estimator, so the ratio this
     # asserts is the one direction that can only tighten a budget and never loosen it.
+    #
+    # **Asked of the ratio itself, not of `turn_costs`.** This compared `input_tokens` against
+    # `turn_costs.estimated_tokens` and wanted `billed > estimated > 0` — but `estimated_tokens` is
+    # by design only what nobody was billed *through* (`agent/turn_usage.InFlightPrompts`: a
+    # cancelled or in-flight prompt), so on a turn that completes it is 0 every time and the check
+    # could never pass. The quantity the property is about is
+    # `agent/context_budget.estimator_ratio`, which the front door publishes as
+    # `chemclaw_context_estimator_ratio`. Every other behaviour bills the mock's constant 900
+    # against a request estimated in the tens of thousands, which is below `_Calibration._SANE`'s
+    # floor and dropped, so this turn's samples are what move it.
     (sized,) = await storm("h-size-billed", turns=1, concurrency=1)
     billed = await _scalar(
         "select coalesce(sum(input_tokens), 0) from turn_costs where session_id = %s",
         (sized.session_id,),
     )
-    estimated = await _scalar(
-        "select coalesce(sum(estimated_tokens), 0) from turn_costs where session_id = %s",
-        (sized.session_id,),
-    )
-    findings.append(
-        Finding(
-            family="H",
-            name="a request-sized bill drives the estimator ratio above 1",
-            ok=sized.status == 200 and billed > estimated > 0,
-            observed=f"turn_costs billed={billed} estimated={estimated} for this session",
-            detail=(
-                "every other behaviour bills a constant, which clamps the ratio to 1.0 and leaves "
-                "the tightening branch two budget decisions rest on unexercised by any lane"
-            ),
-        )
-    )
+    ratio = await _front_door_gauge(ESTIMATOR_RATIO_GAUGE)
+    findings.append(_calibration_finding(sized.status, billed, ratio))
 
     # The one request-level refusal that unlocks a label nothing else reaches.
     # `Behaviour.http_status` injects a failure per behaviour and every such injection classifies
@@ -1234,11 +1281,20 @@ def report(
             "about whatever they would have measured."
         )
     lines.append("")
-    lines.append("| family | what it covers | checks |")
-    lines.append("| --- | --- | ---: |")
-    for letter in planned:
-        count = sum(1 for finding in findings if finding.family == letter)
-        lines.append(f"| {letter} | {FAMILIES.get(letter, '?')} | {count or '**0**'} |")
+    lines.append(
+        render_table(
+            ["family", "what it covers", "checks"],
+            [
+                [
+                    letter,
+                    FAMILIES.get(letter, "?"),
+                    str(count) if (count := sum(f.family == letter for f in findings)) else "**0**",
+                ]
+                for letter in planned
+            ],
+            align="llr",
+        )
+    )
     lines.append("")
 
     if sweep:
@@ -1248,14 +1304,31 @@ def report(
             f"{sweep[0]['turns']} turns per step; the front door restarted at each cap.\n"
         )
         lines.append(
-            "| cap | accepted | shed/error | p50 s | p95 s | answered/s | offered drained/s |"
-        )
-        lines.append("| ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
-        for row in sweep:
-            lines.append(
-                f"| {row['cap']} | {row['accepted']} | {row['failed']} | "
-                f"{row['p50']:.1f} | {row['p95']:.1f} | {row['goodput']:.2f} | {row['drain']:.2f} |"
+            render_table(
+                [
+                    "cap",
+                    "accepted",
+                    "shed/error",
+                    "p50 s",
+                    "p95 s",
+                    "answered/s",
+                    "offered drained/s",
+                ],
+                [
+                    [
+                        str(row["cap"]),
+                        str(row["accepted"]),
+                        str(row["failed"]),
+                        f"{row['p50']:.1f}",
+                        f"{row['p95']:.1f}",
+                        f"{row['goodput']:.2f}",
+                        f"{row['drain']:.2f}",
+                    ]
+                    for row in sweep
+                ],
+                align="rrrrrrr",
             )
+        )
         lines.append(
             "\nThe last column is not throughput — it counts a shed turn as a drained one, so "
             "refusing fast reads as going fast. `answered/s` is the measurement."
@@ -1263,11 +1336,20 @@ def report(
         lines.append("")
 
     lines.append("## Findings\n")
-    lines.append("| family | check | result | observed |")
-    lines.append("| --- | --- | --- | --- |")
-    for finding in findings:
-        verdict = "PASS" if finding.ok else "**FAIL**"
-        lines.append(f"| {finding.family} | {finding.name} | {verdict} | {finding.observed} |")
+    lines.append(
+        render_table(
+            ["family", "check", "result", "observed"],
+            [
+                [
+                    finding.family,
+                    finding.name,
+                    "PASS" if finding.ok else "**FAIL**",
+                    finding.observed,
+                ]
+                for finding in findings
+            ],
+        )
+    )
     passed = sum(1 for f in findings if f.ok)
     lines.append(f"\n**{passed}/{len(findings)} checks passed**, over the families that ran.")
     return "\n".join(lines) + "\n"
@@ -1290,7 +1372,7 @@ async def _require_mock_lane() -> None:
         RuntimeError: The mock is not serving, with the setting that would fix it.
     """
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
+        async with httpx.AsyncClient(timeout=5.0, trust_env=False) as client:
             response = await client.get(MOCK_STATS)
         reachable = response.status_code == 200
     except httpx.HTTPError:

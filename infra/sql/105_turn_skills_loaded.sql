@@ -1,0 +1,46 @@
+-- Which skills a turn actually loaded — the dimension the self-confirmation guard reads.
+--
+-- `082_turn_knowledge.sql` added the three dimensions this row had every other dimension of: did
+-- the turn consult the record, did the answer cite it, was anything written back. This is a fourth
+-- of the same kind, and it exists because a distiller cannot be written without it.
+--
+-- **The guard the distiller needs is one predicate and it had nothing to read.** Nothing distilled
+-- may count evidence it itself produced: a trajectory that happened *because* a skill was already
+-- shaping that turn is not independent evidence for proposing that skill. Without a per-turn record
+-- of which skills were loaded, that predicate is a function reading something nobody writes — which
+-- is `map_to_hpc_identity` and the empty `audit_events.agent` column exactly, a claim that a
+-- control exists.
+--
+-- **Why the existing counter is not this.** `chemclaw_skill_loads_total{skill}` says a skill was
+-- read; it cannot say in which turn, and a Prometheus counter is not a join key. The same is true
+-- of `chemclaw_local_skill_loads_total`, which is deliberately bare.
+--
+-- **Names, not a count.** A count would answer "did this turn load anything", which is not the
+-- question — the guard asks whether *this particular* skill was acting, and a superset would
+-- discard evidence that is genuinely independent while a subset would admit evidence that is not.
+-- Both tiers land in the same array: a personal skill shapes a turn exactly as a shared one does,
+-- and a guard that saw only the reviewed tree would be blind to the tier most likely to be
+-- self-confirming, since that is the one the agent can propose into.
+--
+-- **This column holds fingerprints, not names** (`agent/skill_fingerprint.py`). A chemist's own
+-- skill name is a person's words, and this row is retained through erasure
+-- (`agent/leaver.py::_RETAINED`) and refused by `durable/retention.py` — so a name written here
+-- would be immortal and un-erasable, which is the opposite of what the personal tier's licence
+-- promises. The guard's question is equality ("was *this* skill acting"), which a digest answers
+-- exactly as well. `chemclaw_local_skill_loads_total` is bare for the neighbouring reason: a
+-- Prometheus label is a shared exposition no erasure reaches at all.
+--
+-- An earlier draft of this header said the row "is erased with that person by `agent/leaver.py`".
+-- It is not, and it never was — measured, a private skill name survived `erase_actor(apply=True)`
+-- reporting success.
+--
+-- Additive and defaulted, per `infra/sql/README.md`: every existing row keeps its meaning and the
+-- previous image can still write.
+ALTER TABLE turn_costs ADD COLUMN IF NOT EXISTS skills_loaded TEXT[] NOT NULL DEFAULT '{}';
+
+-- This index is dropped again by `106_drop_the_index_nobodys_query_uses.sql`, which measured that
+-- the containment read it was written for was never implemented: the one reader unions the whole
+-- corpus in Python, and `EXPLAIN` sequential-scans either way. Left here rather than removed
+-- because a deployment that has run this file already has the index, and a migration edited after
+-- it ships is a migration two sites disagree about.
+CREATE INDEX IF NOT EXISTS turn_costs_skills_loaded_idx ON turn_costs USING GIN (skills_loaded);

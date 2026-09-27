@@ -62,6 +62,16 @@ _EXPECTED_SUBSYSTEMS = {
     # a declared context window would then be subtracted from nothing, and the budget would quietly
     # be the configured constant again.
     "context_budget",
+    # `api/budget.py`, both halves of the durable spend window. A meter that cannot be read or
+    # written degrades to this pod's own counters rather than refusing the turn, which is the
+    # right direction and is silent: the cap then binds per-process again, which is precisely
+    # the behaviour `D-2026-09-15-a-budget-a-restart-resets-is-not-a-quota` removed. Counted so
+    # a deployment can see it has silently gone back to it.
+    "budget_window",
+    # `api/budget.check_thread_size`, whose read of a thread's stored size admits the turn when the
+    # database cannot answer — the load that follows reads the same database. Silent otherwise: the
+    # memory bound it enforces would simply stop binding.
+    "thread_size",
     "cost_ledger",
     # A retrieval source that could not be asked. Added when `fanout._sweep`'s swallow was moved
     # onto `degraded()` — it had been a bare `logger.exception` plus a private counter, so the one
@@ -80,15 +90,23 @@ _EXPECTED_SUBSYSTEMS = {
     # probe surface — down with it. Counted because the alternative is a gauge that quietly stops
     # moving, which reads as "no durable work" rather than as "nobody asked".
     "jobs_in_flight",
+    # `agent/protocol_design_tools.recorded_failures`, on a corpus that cannot be read. The check
+    # it feeds reports "no recorded failure bears on this design" either way, so a lookup that has
+    # silently stopped working returns every draft clean — which is the one state a chemist would
+    # read as reassurance. Swallowed deliberately (a corpus outage must not refuse a design), and
+    # counted for exactly that reason.
+    "failure_memory",
     "log_redaction",
-    # `durable/digest.deliver_digest_activity`. Outbound delivery shipped with no signal of any
-    # kind: `deliver()` swallows a per-channel failure so one broken webhook is not everyone's
-    # outage, the caller discarded the return value, and nothing in `chemclaw.deliver.registry` held
-    # a logger
-    # or a metric — so every digest being dropped and every digest being delivered produced
-    # identical observations. Swallowed deliberately (the mailbox is the durable handover and the
-    # watermark turns on it), which is exactly why it has to be counted.
-    "digest_delivery",
+    # `durable/deliver_message.deliver_message_activity`. Outbound delivery shipped with no signal
+    # of any kind: `deliver()` swallows a per-channel failure so one broken webhook is not
+    # everyone's outage, the caller discarded the return value, and nothing in
+    # `chemclaw.deliver.registry` held a logger or a metric — so every digest being dropped and
+    # every digest being delivered produced identical observations. Swallowed deliberately (the
+    # mailbox is the durable handover and the watermark turns on it), which is exactly why it has
+    # to be counted. Named for the seam rather than for the digest since
+    # `D-2026-09-14-a-declared-kind-with-no-producer-is-not-a-channel` gave the report, the
+    # finished job and the open question the same path.
+    "message_delivery",
     # `deliver/message._connector_secret_envs`. The half of the redaction inventory that leaves the
     # cluster: if the connector bearer-token names cannot be resolved, tokens quoted inside a tool
     # error stop being scrubbed from outbound webhook bodies for the life of the process. Its
@@ -114,7 +132,22 @@ _EXPECTED_SUBSYSTEMS = {
     # it parsed" need different operator actions, and both had a bare `logger.warning` and no
     # counter, so from outside they were the same silence as a genuinely empty portfolio.
     "commitment_export",
+    # `api/runner.py::_escalate_exhausted_review`, on a review request that could not be opened —
+    # no broker, a refusing task queue, anything. The answer still ships, exactly as it did before
+    # the escalation existed, which is what makes this a degradation rather than an error: nothing
+    # a chemist waited for is lost. What *is* lost is silent and is the whole point of the
+    # feature — the rounds were spent, `chemclaw_answer_review_exhausted_total` moved, and the
+    # answer went out marked for review with nobody asked to read it, which from outside is
+    # indistinguishable from a deployment that never turned the escalation on.
+    "answer_review_escalation",
     "plan_approval",
+    # `agent/protocol_design_tools.uncited_precedent`, on a reaction index that cannot be reached.
+    # The same shape as `failure_memory` one function over and counted for the same reason, with
+    # one addition: this search reaches Postgres, so "cannot be reached" is the ordinary condition
+    # of a laptop rather than a rare fault — and `precedent_consulted`'s passing text therefore
+    # says nothing was *offered* rather than that no precedent exists. A silent version of this
+    # would leave every draft looking like a corpus that had been consulted and found nothing.
+    "precedent_lookup",
     "preferences",
     # `publish/outbox`, on a row wave 6 found had no name: the claim spends its attempt and commits
     # before delivery, so an interruption mid-delivery leaves the row `pending` at the attempt
@@ -129,6 +162,14 @@ _EXPECTED_SUBSYSTEMS = {
     # record it does not hold. Per (sink, table) rather than per row, because a lagging schema is a
     # deployment fact and one row's worth of it is not news.
     "result_sink_schema_lag",
+    # `publish/drivers/sql`, when a whole `executemany` group is refused and the sink falls back to
+    # sending that group a row at a time so the error can name the row. The fast path having failed
+    # is the degradation — the delivery itself still either lands or raises `SinkRejectedError`
+    # naming the table and the `calc_ref`, which is the granularity the batching would otherwise
+    # have cost. WARNING rather than ERROR because the answer is unchanged; what is lost is the
+    # round-trip saving, and a site whose store refuses a statement this release writes should see
+    # it counted rather than inferred from the drain taking longer.
+    "result_sink_batch_replayed",
     # `agent.condense`, added with the protocol condenser. Two degradations share it and both
     # are per protocol rather than per turn: no reachable `"protocol-digest"` route (the comparison
     # still renders from every record's own figures), and one extraction that failed or timed out
@@ -143,6 +184,16 @@ _EXPECTED_SUBSYSTEMS = {
     "session_transcript",
     "skill_manifest",
     "spend_cap",
+    # `agent/stored_skill_tools._unreadable`, the stored tiers' door into the same degradation
+    # `skill_manifest` counts for the filed trees — a `SKILL.md` whose frontmatter cannot be read,
+    # so the skill is scoped to nothing rather than left visible. A **separate** label rather than
+    # the same one, because what an operator does about it differs: a filed occurrence is an
+    # authoring fault in a corpus `make skill-validate` gates, while a stored one is a body somebody
+    # saved before a rule tightened, reachable only through a route and fixable only by its owner or
+    # an administrator. The message deliberately carries the exception *type* and never its text,
+    # since a parser quotes what it choked on and that would be a person's own words in a shared
+    # log.
+    "stored_skill_manifest",
     # `science/calc/geometry.check_server_address`, added with the geometry store
     # (D-2026-08-21-a-geometry-is-an-address-not-a-payload). It is the one degradation in this
     # system that is *only* visible as a counter: a `structure_id` the calculation server and this
@@ -162,6 +213,10 @@ _EXPECTED_SUBSYSTEMS = {
     # is told to mark a real chemist constraint `inferred`, which is the mislabelling that check
     # exists to prevent.
     "stated_quote_history",
+    # `api/runner.run_turn`'s review-revision loop, around the two checkpointer reads and the one
+    # write that keep the thread ending on the answer that ships. The answer is already in hand, so
+    # a checkpointer error there costs the thread its tidiness (or the round), never the turn.
+    "review_revision_thread",
     "tool_result_store",
     "transcript_projection",
 }

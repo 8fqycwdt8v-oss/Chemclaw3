@@ -10,7 +10,7 @@ of the stream. That event has since gone with the hold behind it
 question has a producer.
 
 The dry-run turn flag (IDEA-4) used to live here too, since it started as a sibling interaction
-primitive; it moved to `chemclaw.agent.turn_flags` because this module's import has a side effect
+primitive; it moved to `chemclaw.core.turn_flags` because this module's import has a side effect
 — registering `ask_clarifying_question` into the model-facing tool registry — that a plain flag
 reader (`chemclaw.agent.tool_authz`, `chemclaw.connectors.identity`) has no business triggering.
 This module now keeps only its tool.

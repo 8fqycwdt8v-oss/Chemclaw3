@@ -157,6 +157,7 @@ async def stream_new_events(
     max_polls: int | None = None,
     claim: Callable[[str], Awaitable[list[SessionEvent]]] | None = None,
     kinds: Sequence[str] | None = None,
+    collapse: Callable[[list[SessionEvent]], list[SessionEvent]] | None = None,
 ) -> AsyncIterator[SessionEvent]:
     """Yield a session's push-back events as they arrive, each already claimed atomically.
 
@@ -182,10 +183,18 @@ async def stream_new_events(
         kinds: Claim only these event kinds (None = all). The claim is destructive (at-most-once),
             so a kind-selective consumer must scope the claim itself: other kinds then stay
             unconsumed for their own consumer instead of being silently destroyed.
+        collapse: Fold one claim's rows before any of them is yielded, for a consumer to whom
+            several rows of a batch are one fact. **The batch is the only thing this function knows
+            and the caller does not**, which is why the reduction is a parameter rather than the
+            caller's own loop: the claim returns a list and this yields row by row, so a consumer
+            collapsing as it goes can only ever keep the *first* row of a run and never the last
+            (`D-2026-09-13-a-collapse-without-the-batch-keeps-the-oldest-frame`). Rows it drops are
+            consumed and deliberately not restored — the caller has declared them redundant. `None`
+            delivers the claim unchanged.
 
     Yields:
-        Each `SessionEvent` in arrival order, at most once across tailers (a claimed row is never
-        re-delivered — the atomic claim is the concurrency guard, COR-4).
+        Each surviving `SessionEvent` in arrival order, at most once across tailers (a claimed row
+        is never re-delivered — the atomic claim is the concurrency guard, COR-4).
     """
     interval = poll_seconds if poll_seconds is not None else settings.session_event_poll_seconds
     do_claim: Callable[[], Awaitable[list[SessionEvent]]] = (
@@ -195,7 +204,8 @@ async def stream_new_events(
     )
     polls = 0
     while max_polls is None or polls < max_polls:
-        for event in await do_claim():
+        batch = await do_claim()
+        for event in collapse(batch) if collapse is not None else batch:
             delivered = False
             try:
                 yield event

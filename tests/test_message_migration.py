@@ -774,3 +774,45 @@ def test_the_erased_table_list_is_derived_from_upstream_not_asserted_against_its
         "the checkpointer creates a table the erasure sweep does not clear (or clears one it does "
         "not create): " + str(sorted(created ^ set(CHECKPOINT_TABLES)))
     )
+
+
+def test_a_pass_reports_the_rows_it_converted_not_the_rows_it_attempted() -> None:
+    """Two overlapping passes must report three conversions over three rows, not six.
+
+    The pass counted `len(updates)` — how many rows it *tried* — while the `AND message_shape =
+    'maf'` predicate on the UPDATE means a row a peer converted first matches nothing. Measured
+    over three convertible rows: `3 + 3 = 6` reported against three rows actually converted.
+
+    Reachable in the configuration this module's own docstring names, which is why it is worth a
+    test rather than an argument: this pass takes no advisory lock, and two things can start it
+    (`make db-migrate` and the chart's post-upgrade Job). The data was never wrong — the predicate
+    is what makes that true — but `converted 6 stored message(s)` over a table of three is a report
+    an operator cannot reconcile against the only check available to them, `SELECT count(*) …
+    WHERE message_shape`.
+    """
+    _run(_seeded("sess-m6-double-count"))
+
+    async def _still_maf() -> int:
+        """How many rows in the whole table are still MAF-shaped."""
+        async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT count(*) FROM session_messages WHERE message_shape = %s", (MAF_SHAPE,)
+            )
+            row = await cur.fetchone()
+            assert row is not None
+            return int(row[0])
+
+    async def _both() -> tuple[int, int]:
+        # Counted over the whole table rather than one session, because the pass converts the
+        # whole table — the same reason `test_a_real_stored_conversation_converts_whole` asserts
+        # its shapes per session. A refused row keeps its `maf` stamp, so the drop in MAF-shaped
+        # rows is exactly what the two passes converted between them.
+        before = await _still_maf()
+        first, second = await asyncio.gather(convert_stored_messages(), convert_stored_messages())
+        return first.converted + second.converted, before - await _still_maf()
+
+    reported, actually_converted = _run(_both())
+    assert reported == actually_converted, (
+        f"two passes reported {reported} conversions over {actually_converted} rows — the count "
+        "is attempts, not rows the UPDATE matched"
+    )

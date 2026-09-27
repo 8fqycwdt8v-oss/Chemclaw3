@@ -1,0 +1,59 @@
+{
+  "probe": {
+    "id": "gr-21",
+    "section": 17,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "How much do you trust your own solubility numbers on molecules like these?",
+    "expects_tools": [
+      "calculator_trust",
+      "calculator_outliers",
+      "find_calculations"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a confidence statement with no reference to recorded calculations or measurements",
+      "a validation study, benchmark or error statistic that was not retrieved"
+    ],
+    "direction": "Introspects over what has actually been computed and measured rather than describing the method's reputation. \"There are no measurements to compare against\" is a strong answer if it is true; a confident accuracy claim with nothing behind it is the failure.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-21",
+    "section": 17,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "How much do you trust your own solubility numbers on molecules like these?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.63,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "7da63ed4f5b6425b9171937065d44634",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

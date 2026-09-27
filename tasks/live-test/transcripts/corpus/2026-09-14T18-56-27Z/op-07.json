@@ -1,0 +1,63 @@
+{
+  "probe": {
+    "id": "op-07",
+    "section": 2,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We keep losing boronic acid on the bigger runs and I think it's protodeboronation. Plan me the experiments that would actually settle whether it is, and what fixes it if so.",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note",
+      "similar_reactions",
+      "predict_pka",
+      "record_knowledge_note"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "this is definitely protodeboronation",
+      "kinetic data or rate constants that are not in a cited note",
+      "a literature study of this decomposition"
+    ],
+    "direction": "Pulls the aqueous-protodeboronation failure-mode note and the degassing playbook and uses them to state the hypothesis precisely enough to be refuted — what protodeboronation predicts that other losses do not. Proposes a small diagnostic sequence, each run isolating one factor (water content, base, temperature, order of addition, boronic acid held without catalyst), with the expected observation if the hypothesis holds and if it does not. Does not adopt the chemist's diagnosis as established. Any calculated input (a pKa, say) is labelled predicted. Recording the plan as a machine-written note is right; asserting the cause is not.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "op-07",
+    "section": 2,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We keep losing boronic acid on the bigger runs and I think it's protodeboronation. Plan me the experiments that would actually settle whether it is, and what fixes it if so.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.6,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "a2b1a676c2fb427894ff397209d068cc",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

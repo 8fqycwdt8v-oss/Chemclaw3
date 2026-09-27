@@ -7,13 +7,15 @@ graph traversal (D-004), so this indexer is the substrate the query skill walks
 """
 
 import contextlib
+import hashlib
 import logging
 import os
+import subprocess
 import threading
 import time
 from collections import defaultdict
 from collections.abc import Iterator
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import networkx as nx
@@ -24,6 +26,10 @@ from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.kg.note import Note, NoteError, Relation, read_note, resolves_outside_graph
 
 log = logging.getLogger(__name__)
+
+# One `git log -1` on a local checkout. A bound rather than a setting: this is not a knob anybody
+# would tune, and a hung `git` on the scheduled reindex path must not hold the pass open.
+_GIT_REVISION_TIMEOUT_SECONDS = 10
 
 # A directory's stat fingerprint: (path, mtime_ns, size) per note file. Cheap *per file* (stat only,
 # no read/parse) and busts on any add, edit, or delete — so the cache below skips the expensive
@@ -73,10 +79,18 @@ _NOTES_CACHE: dict[str, tuple[NotesFingerprint, list[Note]]] = {}
 # reused entry re-emits exactly the warning, the metric and the summary count a fresh parse would:
 # the log's denominator is a property of the corpus, not of what this process happened to re-read.
 #
-# **Not cleared by `invalidate_cache`, which is the whole point.** It holds no aggregate — every
-# entry is independently keyed on the file's own stat — so it cannot serve a stale corpus the way
-# `_NOTES_CACHE` can. Entries for files that are gone are dropped by the scan that no longer
+# **Not cleared by `invalidate_cache` by default, which is the whole point.** It holds no aggregate
+# — every entry is independently keyed on the file's own stat — so it cannot serve a stale corpus
+# the way `_NOTES_CACHE` can. Entries for files that are gone are dropped by the scan that no longer
 # mentions them. Memory is dict overhead over `Note` objects `_NOTES_CACHE` is holding anyway.
+#
+# **"By default" is new, and the exception is a caller that pairs this cache against a *content*
+# hash** (`D-2026-09-16-a-stat-cache-and-a-content-hash-do-not-agree-about-what-changed`). The
+# argument above turns on the two being wrong in the same cases: a write invisible to `(mtime_ns,
+# size)` was invisible to both. `note_file_fingerprints` stopped being a stat pair and became a
+# hash of the file's bytes, so it now sees a same-size, same-mtime edit that this cache does not —
+# measured, the fingerprint moves and `load_notes` returns the previous body. Anyone diffing the
+# two must ask for `reparse=True`.
 _PARSED_FILES: dict[str, dict[str, tuple[int, int, Note | str | None]]] = {}
 
 # Assembled-graph cache, same key and same fingerprint as `_NOTES_CACHE`. The notes cache spares the
@@ -138,7 +152,7 @@ def _corpus_lock(key: str) -> Iterator[None]:
         yield
 
 
-def invalidate_cache(notes_dir: Path | None = None) -> None:
+def invalidate_cache(notes_dir: Path | None = None, *, reparse: bool = False) -> None:
     """Drop cached notes/age so the next read re-scans immediately (the explicit bust hook).
 
     The TTL window trades a little freshness for latency, but a change this process *makes* should
@@ -159,19 +173,39 @@ def invalidate_cache(notes_dir: Path | None = None) -> None:
     It adds no class of staleness that is not already accepted: after this call a file whose
     `(mtime_ns, size)` has not moved is served from `_PARSED_FILES` unchanged
     (`D-2026-09-06-one-note-changed-is-not-the-corpus-changed`), so a write invisible to the
-    fingerprint is already invisible to the parse. The graph is keyed on the same two stat fields
-    and can therefore be wrong in exactly the same cases and no others.
+    *stat* is already invisible to the parse. The graph is keyed on the same two stat fields and can
+    therefore be wrong in exactly the same cases and no others.
+
+    **That was a claim about `note_file_fingerprints` too, and it stopped being true when that
+    function became a content hash** — which is what `reparse` is for
+    (`D-2026-09-16-a-stat-cache-and-a-content-hash-do-not-agree-about-what-changed`). A caller that
+    diffs a *hash* against the notes this returns is comparing two answers to "what changed" that
+    no longer agree, and the direction of the disagreement is the harmful one: the hash says
+    changed, the parse hands back the old body, and whatever is derived from the pair is written
+    under a digest that will match for ever. `reparse=True` drops the per-file parses as well, at
+    the cost of a full re-parse — which only the re-index job pays, because it is about to
+    re-embed the corpus anyway.
+
+    Args:
+        notes_dir: The corpus to drop, or `None` for every one this process has read.
+        reparse: Also drop the per-file parse cache, so the next read comes off disk. Needed only
+            by a caller that pairs the result against a content hash; a note write does not, and
+            paying it there is the cost `D-2026-09-06` measured and removed.
     """
     with _CACHE_LOCK:
         if notes_dir is None:
             _NOTES_CACHE.clear()
             _LAST_SCAN.clear()
             _NEWEST_MTIME.clear()
+            if reparse:
+                _PARSED_FILES.clear()
             return
         key = str(notes_dir)
         _NOTES_CACHE.pop(key, None)
         _LAST_SCAN.pop(key, None)
         _NEWEST_MTIME.pop(key, None)
+        if reparse:
+            _PARSED_FILES.pop(key, None)
 
 
 def scan_notes_dir(notes_dir: Path) -> Iterator[tuple[Path, os.stat_result]]:
@@ -202,28 +236,230 @@ def _dir_fingerprint(notes_dir: Path) -> NotesFingerprint:
     )
 
 
-def note_file_fingerprints(notes_dir: Path) -> dict[str, str]:
-    """A cheap per-note change signal: `note id -> "mtime_ns:size"`, stat-only (no read/parse).
+#: The fingerprint of a note file that is on disk and would not open. Never equal to a `sha256:`
+#: digest, so the note re-embeds once when it becomes readable again; constant, so it does not
+#: re-embed every pass while it stays broken. Its real job is to keep the note inside
+#: `reindex_notes`'s `keep` set, which is what stops a transient I/O fault retiring an index row.
+UNREADABLE = "unreadable"
 
-    Same stat-only scan `_dir_fingerprint` does for the whole-tree cache (KM-14), but keyed per note
-    id (the file's stem — `note.type/note.id.md` is the one filename shape a note is written under,
-    `chemclaw.kg.record.NoteFile`) rather than folded into one aggregate. A single fingerprint
-    can
-    only answer "did anything change"; this answers "which ones", which is what an incremental
-    rebuild needs — `chemclaw.retrieval.vector_index.reindex_notes` re-embeds a note only when its
-    entry here differs from what was stored at the last index run, instead of the whole corpus on
-    every scheduled pass (D-2026-08-02-embed-only-what-changed).
+
+def note_file_fingerprints(notes_dir: Path) -> dict[str, str]:
+    """A per-note change signal: `note id -> "sha256:<hex>"` over the file's own bytes.
+
+    Keyed per note id (the file's stem — `note.type/note.id.md` is the one filename shape a note is
+    written under, `chemclaw.kg.record.NoteFile`) rather than folded into the single aggregate
+    `_dir_fingerprint` builds for the whole-tree cache. One aggregate can only answer "did anything
+    change"; this answers "which ones", which is what an incremental rebuild needs —
+    `chemclaw.retrieval.vector_index.reindex_notes` re-embeds a note only when its entry here
+    differs from what was stored at the last index run, instead of the whole corpus on every
+    scheduled pass (D-2026-08-02-embed-only-what-changed).
+
+    **It hashes the content rather than reading `mtime_ns:size`, because the thing it is
+    compared against is shared between pods and an mtime is not**
+    (`D-2026-09-16-a-fingerprint-that-names-a-checkout-is-not-a-fingerprint-of-a-note`).
+    `note_index` is one table; the checkout under it is an `emptyDir` each pod's sidecar clones,
+    and a checkout sets a file's mtime when it *writes* the file. So two pods holding the identical
+    commit produce entirely disjoint fingerprint sets, and each pod's pass reads every note the
+    other just indexed as changed. Driven over two real clones of one commit against one index, the
+    incremental rebuild degenerated to a full one: 3 of 3 notes re-embedded on every pass after the
+    first, for ever. A hash of the bytes is a property of the content, which is the thing the two
+    pods actually share.
+
+    The cost is one read per note per scan where a stat costs none — the trade D-2026-08-02 declined
+    when the alternative was an embedding call, and now the cheaper side of that same trade by
+    orders of magnitude. `_dir_fingerprint` keeps the stat deliberately: its cache is *per process*,
+    so one checkout's mtimes are all it ever compares, and it is paid on interactive query latency
+    (DA-5) rather than once an hour.
+
+    The digest carries its algorithm as a prefix so the format change is visible in a stored row
+    rather than inferred: no `mtime_ns:size` string can equal a `sha256:` one, so every row written
+    before this reads as changed exactly once and the corpus is re-embedded one final time on
+    upgrade — the same one-time cost migration 035 paid to introduce the column.
 
     Two files claiming one id resolve **first in path order**, the same way `_parse_notes` and
     `chemclaw.kg.validate` resolve one. It used to be a dict comprehension, where the *last* file
     won — so the served corpus held one note and the reindex diffed the other, and `reindex_notes`
     could embed one file's text under the other's id. Two scans of one tree disagreeing about which
     file is a note is worse than either answer.
+
+    **A file that cannot be read keeps an entry, and that is not the same choice `scan_notes_dir`
+    makes one function up.** That one drops a file whose *stat* fails, because a file that vanished
+    between the listing and the stat is a file that is gone. Reading opens a second, wider window —
+    a permission change or an I/O error leaves a file that is still very much there — and dropping
+    those would quietly widen a hole `reindex_notes` deliberately closed: it builds its `keep` set
+    from this dict precisely so a note it cannot *parse* is not retired from the index, measured at
+    40 rows lost per 40 broken notes. A note that will not open is a stricter case of the same
+    thing, so it gets the same protection: `UNREADABLE` keeps it in `keep`, and being a constant it
+    does not churn an embedding either — the note is absent from `load_notes` too, so it is never
+    in `changed`. When the file opens again its bytes are compared against what was indexed, so it
+    is re-embedded only if they actually differ. **That last clause is measured rather than
+    reasoned**: this docstring first claimed "re-embeds it exactly once", and driving it showed a
+    fault that heals to the same content costs *nothing*, because the stored digest was never wrong
+    in the first place. A stat-based signal could not have said that — the repair would have moved
+    the mtime.
     """
     fingerprints: dict[str, str] = {}
-    for path, stat in scan_notes_dir(notes_dir):
-        fingerprints.setdefault(path.stem, f"{stat.st_mtime_ns}:{stat.st_size}")
+    for path, _stat in scan_notes_dir(notes_dir):
+        if path.stem in fingerprints:
+            continue
+        try:
+            fingerprints[path.stem] = f"sha256:{hashlib.sha256(path.read_bytes()).hexdigest()}"
+        except OSError:
+            fingerprints[path.stem] = UNREADABLE
     return fingerprints
+
+
+def _git_stdout(notes_dir: Path, *args: str) -> str | None:
+    """One `git` read on the corpus checkout, or `None` for any of the ordinary reasons it fails."""
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(notes_dir), *args],
+            capture_output=True,
+            text=True,
+            timeout=_GIT_REVISION_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return completed.stdout if completed.returncode == 0 else None
+
+
+def corpus_revision(notes_dir: Path) -> int | None:
+    """How many commits this corpus's checkout has behind it, or `None` if unknowable.
+
+    **The one comparable fact two pods holding differently-aged clones of one corpus share.**
+    `note_index` is shared; the checkout under it is an `emptyDir` each pod's own sidecar
+    refreshes, so a pod cannot tell "this note was deleted" from "my sidecar has not run yet" by
+    looking at its own disk — and `reindex_notes` retiring on the second reading is
+    `D-2026-09-14-a-prune-needs-the-corpus-two-pods-disagree-about`.
+
+    `git rev-list --count HEAD`, not a commit timestamp and not a commit id. A timestamp was the
+    first attempt and it does not work: `%cI` has second resolution, so two commits made in the
+    same second compare equal and the lagging pod retires the newer note anyway — a guard that
+    passes its own probe while doing nothing. A commit *id* is not orderable by a pod that has not
+    fetched the other side. A commit **count** is monotone under ancestry (a descendant reaches
+    strictly more commits than its ancestor), is one number, and involves no clock.
+
+    What it cannot order is two genuinely divergent branches with equal counts. That is not this
+    deployment — every pod's sidecar fetches one remote — and the failure there is the one the
+    prune already had, not a new one.
+
+    `None` is returned for every case where the answer is not knowable, and each is ordinary rather
+    than exceptional: a corpus that is not a git work tree (a tarball deploy, a developer's scratch
+    directory, every offline test), no `git` on PATH, or a repository with no commits. Callers must
+    read `None` as "no constraint" and behave as they did before this existed — a prune that
+    refuses without evidence would make a fresh deployment unable to ever remove a note.
+
+    One `git rev-list` per reindex pass, not per note.
+    """
+    out = _git_stdout(notes_dir, "rev-list", "--count", "HEAD")
+    if out is None:
+        return None
+    try:
+        return int(out.strip())
+    except ValueError:
+        return None
+
+
+#: `notes_dir -> (HEAD commit, note id -> the date its file was first committed)`, per process.
+#: Kept so a later call scans only the commits since the one it remembers: measured on a 10,000-note
+#: corpus written one commit per note, the full scan is ~2.9 s and the scan of the last 100
+#: commits 78 ms, so the hourly digest pays the full cost once per worker process.
+_ARRIVALS: dict[Path, tuple[str, dict[str, date]]] = {}
+_ARRIVALS_LOCK = threading.Lock()
+
+
+def _added_since(notes_dir: Path, since: str | None) -> dict[str, date] | None:
+    """Note id -> date of the commit that added its file, over `since..HEAD` (or all of history).
+
+    `--no-renames`, so a file's arrival is the commit that put *that path* there: a note moved
+    between type directories reads as arriving on the day it moved. That is the one false positive
+    this has, and it is the right direction for a digest — told once more, rather than never.
+
+    `--first-parent -m`, so a note is dated by the commit that brought it onto *this* branch. A
+    note arriving through a `--no-ff` merge (a merge-commit pull request into the knowledge repo)
+    was otherwise dated by its side-branch commit — measured, a note committed on a branch on
+    01-02 and merged on 02-01 read as 01-02 — so a subscriber told of everything up to 01-15
+    was never told of it at all. Walking first parents only, the merge commit's diff against the
+    branch it joined is where the file appears, with the merge's own date.
+    """
+    revisions = [f"{since}..HEAD"] if since else []
+    out = _git_stdout(
+        notes_dir,
+        "log",
+        "--first-parent",
+        "-m",
+        "--no-renames",
+        "--diff-filter=A",
+        "--name-only",
+        "--relative",
+        "--format=%x00%ct",
+        *revisions,
+        "--",
+        ".",
+    )
+    if out is None:
+        return None
+    added: dict[str, date] = {}
+    day: date | None = None
+    # `log` is newest first and the first date seen for a path is kept, so a note deleted and
+    # re-added arrives on its re-add — it is new again to anyone who was told it was gone.
+    for line in out.splitlines():
+        if line.startswith("\x00"):
+            # `%ct`, a Unix timestamp, rather than `%cs`: the latter is the date in the committer's
+            # own offset, so a note committed at 23:30 -05:00 read as a day earlier than the UTC
+            # watermark it is compared with, and was never reported.
+            day = datetime.fromtimestamp(int(line[1:].strip()), UTC).date()
+        elif line.endswith(".md") and day is not None:
+            added.setdefault(Path(line).stem, day)
+    return added
+
+
+def note_arrivals(notes_dir: Path) -> dict[str, date]:
+    """When each note *arrived* in this corpus: the date the commit that added its file was made.
+
+    **A signal separate from `valid_from`, which answers a different question.** `valid_from` is
+    when a fact became true, and a note the model could not date carries none — correctly, because
+    defaulting it to today would be a false claim about chemistry. But a digest asks "what is new
+    to this subscriber", and for that the arrival is the answer; before this, `durable/digest`
+    read an undated note as never new, and 34 of the shipped corpus's 41 notes are undated.
+
+    Read from the notes repository's own history rather than stored anywhere, because every write
+    already goes through `kg/record.py`'s commit and every pod's clone carries the same commits:
+    a commit date is a property of the corpus, where a file mtime is a property of one checkout.
+
+    Empty where the corpus is not a git work tree or `git` cannot answer — the same "no constraint"
+    reading `corpus_revision` takes — so a caller behaves exactly as it did before this existed.
+    """
+    head = _git_stdout(notes_dir, "rev-parse", "HEAD")
+    if head is None:
+        return {}
+    head = head.strip()
+    with _ARRIVALS_LOCK:
+        cached = _ARRIVALS.get(notes_dir)
+    if cached is not None and cached[0] == head:
+        return cached[1]
+    since = None
+    if (
+        cached is not None
+        and _git_stdout(notes_dir, "merge-base", "--is-ancestor", cached[0], head) is not None
+    ):
+        since = cached[0]
+    added = _added_since(notes_dir, since)
+    if added is None:
+        # `rev-parse` answered, so this is a work tree and the scan itself failed — a timeout on a
+        # large cold corpus, an unsafe-directory refusal. Said, because the result reads exactly
+        # like a corpus with nothing new in it, and the next run pays the full scan again.
+        log.warning(
+            "kg.note_arrivals_unreadable: could not read when notes arrived in %s; undated notes "
+            "are judged as they were before arrivals existed until this succeeds",
+            notes_dir,
+        )
+        return cached[1] if cached is not None else {}
+    arrivals = {**cached[1], **added} if since is not None and cached is not None else added
+    with _ARRIVALS_LOCK:
+        _ARRIVALS[notes_dir] = (head, arrivals)
+    return arrivals
 
 
 def note_in(graph: "nx.DiGraph[str]", note_id: str) -> Note | None:

@@ -17,13 +17,13 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 
-from chemclaw.agent.plan_state import session_todos
+from chemclaw.agent.plan_state import session_plan
 
 
 class _State(TypedDict):
     """Just the field `TodoListMiddleware` owns, which is all this read looks at."""
 
-    todos: list[dict[str, str]]
+    todos: list[dict[str, Any]]
 
 
 def _graph(saver: Any) -> Any:
@@ -32,8 +32,16 @@ def _graph(saver: Any) -> Any:
     async def node(state: _State, config: RunnableConfig) -> dict[str, Any]:
         return {
             "todos": [
-                {"content": "screen the species", "status": "pending"},
-                {"content": "compute the barrier", "status": "pending"},
+                {
+                    "content": "screen the species",
+                    "status": "pending",
+                    "tools": ["gather_evidence"],
+                },
+                {
+                    "content": "compute the barrier",
+                    "status": "pending",
+                    "tools": ["run_xtb_energy"],
+                },
             ]
         }
 
@@ -47,17 +55,24 @@ def _graph(saver: Any) -> Any:
 def test_a_plan_written_in_a_turn_is_readable_after_it() -> None:
     """The whole point: the read happens between turns, so the plan has to outlive one.
 
-    Asserted through a *separate* `session_todos` call rather than off the invoke's return value,
+    Asserted through a *separate* `session_plan` call rather than off the invoke's return value,
     which is the difference that matters — the return value proves the node ran, the checkpointer
     read proves the plan is still there when the chemist asks for it.
+
+    The steps come back whole, declaration included, because that is what an identity and a
+    decision are taken over
+    (`D-2026-09-13-a-plan-identity-that-omits-the-scope-approves-a-plan-nobody-read`).
     """
     saver = InMemorySaver()
 
-    async def _run() -> list[str] | None:
+    async def _run() -> list[dict[str, Any]] | None:
         await _graph(saver).ainvoke({"todos": []}, {"configurable": {"thread_id": "sess-plan-1"}})
-        return await session_todos("sess-plan-1", saver=saver)
+        return await session_plan("sess-plan-1", saver=saver)
 
-    assert asyncio.run(_run()) == ["screen the species", "compute the barrier"]
+    assert asyncio.run(_run()) == [
+        {"content": "screen the species", "status": "pending", "tools": ["gather_evidence"]},
+        {"content": "compute the barrier", "status": "pending", "tools": ["run_xtb_energy"]},
+    ]
 
 
 def test_a_session_that_never_took_a_turn_reads_as_unreadable_not_as_an_empty_plan() -> None:
@@ -66,10 +81,10 @@ def test_a_session_that_never_took_a_turn_reads_as_unreadable_not_as_an_empty_pl
     The two displays are the same to a chemist, and the two *authorizations* are not. `[]` hashes
     to a real plan identity that a decision row can match; `None` cannot, and the caller that spends
     a one-shot approval has to tell them apart or it leaves a live approval unspent for every later
-    turn (`plan_state.session_todos` records what that cost). The read-only callers coalesce with
+    turn (`plan_state.session_plan` records what that cost). The read-only callers coalesce with
     `or []`, which is why the route still renders "no plan yet".
     """
-    assert asyncio.run(session_todos("sess-never-used", saver=InMemorySaver())) is None
+    assert asyncio.run(session_plan("sess-never-used", saver=InMemorySaver())) is None
 
 
 def test_an_unreadable_checkpointer_reads_as_no_plan_rather_than_failing() -> None:
@@ -85,7 +100,7 @@ def test_an_unreadable_checkpointer_reads_as_no_plan_rather_than_failing() -> No
         async def aget_tuple(self, config: dict[str, Any]) -> Any:
             raise ConnectionError("Postgres unreachable at postgresql://h/db")
 
-    assert asyncio.run(session_todos("sess-broken", saver=_BrokenSaver())) is None
+    assert asyncio.run(session_plan("sess-broken", saver=_BrokenSaver())) is None
 
 
 def test_a_todo_without_content_is_skipped_rather_than_crashing_the_read() -> None:
@@ -112,4 +127,6 @@ def test_a_todo_without_content_is_skipped_rather_than_crashing_the_read() -> No
 
             return _Tuple()
 
-    assert asyncio.run(session_todos("sess-junk", saver=_SaverWithJunk())) == ["a real item"]
+    assert asyncio.run(session_plan("sess-junk", saver=_SaverWithJunk())) == [
+        {"content": "a real item"}
+    ]

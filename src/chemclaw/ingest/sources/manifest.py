@@ -71,6 +71,20 @@ class DataSourceManifest(BaseModel):
             "What corpus this source carries, for the operator choosing whether to enable it."
         ),
     )
+    corpus: str | None = Field(
+        default=None,
+        pattern=r"^[a-z][a-z0-9-]*$",
+        description=(
+            "The body of evidence this source reads, when it is one several sources share. "
+            "Sources naming the same corpus are fused **once** between them before they meet the "
+            "others, so a corpus read by three legs gets one vote rather than three "
+            "(`retrieval.hybrid.reciprocal_rank_fusion`). Absent — the ordinary case — a source "
+            "is its own corpus and nothing changes. It exists because `graph`, `lexical` and "
+            "`vector` are three rankers over one note tree and RRF assumes independent ones: "
+            "measured on the shipped corpus their pairwise agreement is 47/55, 44/55 and 41/53, "
+            "so the agreement term decides the order and the rank term barely participates."
+        ),
+    )
     ingest: str | None = Field(
         default=None,
         description=(

@@ -108,11 +108,20 @@ def test_profile_attenuates_but_audit_and_authz_always_attach() -> None:
         "enforce_tool_authz",
         "refuse_writes_on_dry_run",
         "refuse_repeated_calls",
-        # Innermost, and the position is the mechanism rather than a preference: a call the model
-        # mis-serialised is promoted onto `tool_calls` precisely so it reaches this chain, so
-        # everything above must see it before it is refused
+        # Innermost of the *deciding* gates, and the position is the mechanism rather than a
+        # preference: a call the model mis-serialised is promoted onto `tool_calls` precisely so it
+        # reaches this chain, so everything above must see it before it is refused
         # (`D-2026-08-30-an-unparseable-tool-call-is-an-ordinary-tool-failure`).
         "refuse_unparsed_arguments",
+        # The harness pair, here since D-2026-09-13 made the gate the default — so this list is now
+        # the shipped chain rather than one only an opting-in deployment ran. Both nest *inside*
+        # the guard above, which is deliberate and is why that comment no longer says "innermost":
+        # `refuse_unparsed_arguments` raises before calling its handler, so a promoted call never
+        # reaches the plan gate, and arguments that did not parse are not a well-formed request for
+        # a gate to decide about. Pinned as a relation rather than an index in
+        # `tests/test_invalid_tool_calls.py`.
+        "enforce_plan_approval",
+        "stamp_plan_link",
     ]
     assert enforce_tool_authz in middleware
     assert refuse_writes_on_dry_run in middleware

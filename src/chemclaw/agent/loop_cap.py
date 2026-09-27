@@ -41,6 +41,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from langchain.agents.middleware import before_model
+from langchain_core.messages import AIMessage, HumanMessage
 
 from chemclaw.core.config import settings
 
@@ -49,9 +50,41 @@ logger = logging.getLogger(__name__)
 
 @dataclass(slots=True)
 class _LoopWatch:
-    """One turn's cap mark — `True` once the loop was stopped by its iteration cap."""
+    """One turn's cap mark and its live call count, shared by every branch of the turn.
+
+    `capped` is `True` once the loop was stopped by its iteration cap. `calls` is what the state
+    channel cannot be: a number every concurrent branch of one turn reads and advances.
+
+    **Why the count has to live here as well as in the channel.** `model_calls` is a `TurnTotal`,
+    and
+    `SubAgentMiddleware` hands every helper in a `task` batch the *same pre-superstep* value — so
+    each
+    of `W` branches compared the cap against its own private copy of that base and each
+    independently
+    spent the whole remaining allowance. The channel then folded them additively, which makes the
+    recorded count right and the *bound* wrong: the parent only learns the total once every branch
+    has
+    finished spending it. Measured at a cap of 4 over 8 helpers: **25 model calls**, following
+    `1 + W·(cap − 1)`; at shipped defaults (cap 25, `agent_max_parallel_tool_calls` 8) that is 193
+    calls in one turn. CLAUDE.md's "counted in a `TurnTotal` channel so a fan-out shares one budget"
+    was true of the counting and false of the sharing.
+
+    This is the same shape `agent/spend_cap.py` already relies on for the cost half — `TurnUsage` is
+    one mutable object every branch books into, which is why the spend cap was only partly exposed
+    where this one was fully exposed — and the same shape `tool_result_size.batch_siblings` uses for
+    the file budget (`D-2026-09-18-a-pre-batch-snapshot-cannot-see-its-own-superstep`). A contextvar
+    is *copied* into each branch's task, but the object it points at is not, so a mutation is
+    visible
+    to every sibling; that is the property `record_loop_cap` already depends on and says so.
+
+    The floor is only as wide as the watch: off the request path there is no watch, and the cap
+    falls
+    back to the channel and the thread, which is the pre-existing behaviour rather than a new hole.
+    `docs/planning/BACKLOG.md` carries the row for the two paths that do not open one.
+    """
 
     capped: bool = False
+    calls: int = 0
 
 
 _watch: ContextVar[_LoopWatch | None] = ContextVar("chemclaw_loop_watch", default=None)
@@ -151,7 +184,38 @@ def enforce_loop_cap(state: Mapping[str, Any], runtime: Any) -> dict[str, Any] |
     a surface marks it partial (`chemclaw.api.runner` does this off `loop_hit_cap`). A raised error
     would discard work a chemist is entitled to see.
     """
-    calls = int(state.get("model_calls", 0))
+    # **The channel is `UntrackedValue`, so a resumed turn reads 0 here and gets a fresh cap.**
+    # `agent/state.py` says the channel "starts empty on every run of the graph", which was the
+    # per-turn guarantee for as long as one turn was one run. A turn can now be resumed after a pod
+    # death (`D-2026-09-14-a-turn-outlives-its-request-already-and-nothing-can-pick-it-up`), and
+    # measured, a turn that dies *n* times got *n+1* full allowances.
+    #
+    # So the thread itself is the floor: this turn's assistant messages since the last human one.
+    # The same `max` shape `enforce_spend_cap` already uses against `metered_turn_tokens`, for the
+    # same *shape* — but not for the same reason, and the sentence claiming it did was wrong in
+    # the reassuring direction. `enforce_spend_cap` reads `metered_turn_tokens()`, which is a
+    # **contextvar** defaulting to `None`, and `billed_tokens` is an untracked `TurnTotal`: in a
+    # resuming process both are 0, so the billed-token budget still resets on every resume while
+    # this counter no longer does. Only the model-call half of that parity exists.
+    #
+    # On an ordinary turn the floor changes nothing, and again not for the reason first written
+    # here: the increment writes `calls + 1` but the comparison runs before the write, so the two
+    # are equal on every call rather than the channel leading by one. Measured at a cap of 4:
+    # 0/0, 1/1, 2/2, 3/3, 4/4.
+    # **The turn-wide count is the third floor, and it is the only one a sibling branch can move.**
+    # The two below are this branch's own: the channel is the pre-superstep snapshot every helper in
+    # a
+    # `task` batch was handed, and the thread is this branch's messages. See `_LoopWatch` for the
+    # measurement — without this term a fan-out of width `W` spends `W` allowances.
+    watch = _watch.get()
+    # **Two numbers, and folding them into one inflates the channel.** `own` is this branch's own
+    # count and is what the channel advances to, so `TurnTotal`'s `max(value - base, 0)` still folds
+    # to one advance per real call. `turn` is what the *cap* compares against. Writing `turn + 1` to
+    # the channel instead would have every sibling advance past every other sibling's advance and
+    # report a fan-out of 2 calls as 3.
+    own = max(int(state.get("model_calls", 0)), calls_already_made(state.get("messages")))
+    turn = max(own, watch.calls if watch is not None else 0)
+    calls = turn
     if calls >= settings.harness_max_loop_iterations:
         logger.warning("the model loop hit its %d-iteration cap", calls)
         record_loop_cap()
@@ -162,7 +226,14 @@ def enforce_loop_cap(state: Mapping[str, Any], runtime: Any) -> dict[str, Any] |
         # complete answer was marked partial. A comparison on the count is a guess either way round;
         # a flag set by the branch that fires is the fact.
         return {"jump_to": "end", "loop_capped": True}
-    return {"model_calls": calls + 1}
+    # Advanced here rather than where the channel is written, because this is the hook that
+    # *authorises* the call — and mutated rather than rebound, so every branch sharing this object
+    # sees it. `max` rather than `+= 1`: two branches that both read `base` must not each add one to
+    # a number the other has already advanced past, and an absolute write is what `TurnTotal`'s own
+    # docstring says a delta cannot be.
+    if watch is not None:
+        watch.calls = turn + 1
+    return {"model_calls": own + 1}
 
 
 def record_loop_cap() -> None:
@@ -215,3 +286,48 @@ def loop_capped(state: Mapping[str, Any]) -> bool:
         Whether the run reached the configured iteration cap.
     """
     return bool(state.get("loop_capped", False))
+
+
+def calls_already_made(messages: Any) -> int:
+    """How many model calls this turn has already made, read off the thread itself.
+
+    **The caps are `UntrackedValue` on purpose and that is not a defect to undo.** `agent/state.py`
+    says what the channel guarantees — it "starts empty on every run of the graph because there is
+    nothing for the checkpoint to restore" — and per-turn-ness comes from exactly that. The design
+    assumed one turn is one run, which was true until a turn could be resumed: measured, a turn that
+    dies *n* times gets *n+1* fresh `harness_max_loop_iterations` and
+    `agent_max_turn_billed_tokens` allowances.
+
+    So the count is re-derived rather than persisted, from state that already survives a pod death.
+    A turn's model calls are its assistant messages since the last human one — the whole thread's
+    count would bound the *conversation* rather than the turn, which is a different and much
+    tighter control than the one intended.
+
+    It is read as a floor rather than a replacement (`enforce_loop_cap` takes the `max`), and on an
+    ordinary turn it changes nothing. **The reason is not the one written here first.** That said
+    the channel "always leads this by one and wins the `max`", which sounded like a safety margin
+    and is not: the increment writes `calls + 1` but the comparison happens *before* the write, so
+    at the comparison point the two are equal. Instrumented over a real default-profile turn at a
+    cap of 4: `channel=0 floor=0`, `1/1`, `2/2`, `3/3`, `4/4` — a tie on every call, never a lead.
+    So the `max` is a floor and nothing more, and if this function ever over-counted by one, healthy
+    turns would cap an iteration early rather than being absorbed by a margin. On a resume the
+    channel is 0 and this is the answer.
+
+    **It cannot recover the call that was in flight when the pod died**, because that call produced
+    no message — so a resumed turn is still permitted one more call than it should be. One, once
+    per death, against a cap of 25; stated rather than papered over, and the alternative is a
+    durable per-call write on the hot path.
+
+    Args:
+        messages: The thread, oldest first, as the checkpoint holds it.
+
+    Returns:
+        Assistant messages since the last human message, or over the whole list when there is none.
+    """
+    history = list(messages or [])
+    start = 0
+    for index in range(len(history) - 1, -1, -1):
+        if isinstance(history[index], HumanMessage):
+            start = index
+            break
+    return sum(1 for message in history[start:] if isinstance(message, AIMessage))

@@ -63,12 +63,22 @@ class ObservabilitySettings(BaseSettings):
     # what it refused, for the reason stated one field up: a silent truncation reads as
     # completeness, which is what `_capped_numbers` exists to avoid.
     #
-    # 128 KiB against a largest-measured real result of ~20,000 characters (a 40-chunk evidence
-    # sweep), so it is far out of reach of normal traffic and exists only so a pathological result
-    # cannot put megabytes per call into Postgres. 0 disables storing entirely — one knob rather
-    # than a cap plus an on/off flag, because "store nothing" is the cap at its floor and two
-    # settings would be two ways to say one thing.
-    stream_max_result_bytes: int = Field(default=131072, ge=0)
+    # **1 MiB, because the store now also keeps the full text of a result the model was shown a
+    # cut of** (`D-2026-09-27-a-cut-result-is-kept-for-the-chemist-not-the-model`). It was 128 KiB,
+    # sized against what the model reads — a largest-measured real result of ~20,000 characters,
+    # and nothing the model reads can exceed `agent_max_tool_result_chars` anyway. A *cut* result
+    # is by construction over that ceiling, and the measured case that motivated the cut, a
+    # `read_document` at its own `document_read_max_chars` of 200,000 characters, is 200,000 bytes
+    # of ASCII: at 128 KiB the one result the feature exists for would have been refused. The floor
+    # is derived, not chosen — four UTF-8 bytes per character times the largest first-party
+    # per-tool ceiling — and `tests/test_full_tool_results.py` pins it against those settings, so
+    # raising one of them without this fails there rather than silently un-keeping its results.
+    # A connector has no such ceiling, and over this cap its full text is refused (never trimmed —
+    # a trimmed "full" result reads as whole); the stream then stores the model's cut, which says
+    # in-band that it is one. 0 disables storing entirely — one knob rather than a cap plus an
+    # on/off flag, because "store nothing" is the cap at its floor and two settings would be two
+    # ways to say one thing.
+    stream_max_result_bytes: int = Field(default=1_048_576, ge=0)
     # How large one tool result may be, in UTF-8 bytes, and still ride along on its own
     # `ToolResultEvent` as `result_inline` instead of costing a surface a second round trip.
     #
@@ -163,9 +173,15 @@ class ObservabilitySettings(BaseSettings):
     # NetworkPolicy for the invariant that only LLM traffic (and declared infrastructure) leaves the
     # estate: a library fetching model weights, a usage ping, a DNS licence check is caught here,
     # though a static scan cannot see it. On by default; `false` is the loud, stated opt-out for
-    # a deployment that has an equivalent network control and wants the process out of the way. It
-    # cannot cover a child process, a `ctypes` call into libc, or a compiled extension's own
-    # syscalls — the NetworkPolicy is the layer that does.
+    # a deployment that has an equivalent network control and wants the process out of the way.
+    #
+    # **It governs two layers, not one.** The socket patching cannot see a child process, a `ctypes`
+    # call into libc, or a compiled extension's own syscalls — and grpc's C-core and Temporal's Rust
+    # sdk-core are in that last class, measurably. `chemclaw.core.netguard_preload` is the
+    # `LD_PRELOAD` interposition that refuses them at libc, armed by `deploy/entrypoint.sh` from the
+    # same derived allowlist, and this setting turns it off too: `false` gives a deployment neither
+    # guard rather than a compiled layer refusing what the patched one was told to allow. What is
+    # left over after both — a statically linked binary, a direct syscall — is the NetworkPolicy's.
     egress_guard_enabled: bool = True
     # Extra hosts the guard permits, comma-separated, on top of the destinations derived from the
     # other settings. Empty by default and empty in the shipped chart; each entry is a deliberate,
@@ -178,7 +194,21 @@ class ObservabilitySettings(BaseSettings):
     # attaches one must name its host here, or the guard refuses its own configured database. That
     # is a real limit of "derived from the settings the process dials", written down because
     # `netguard`'s docstring reads as though nothing needs naming by hand.
+    #
+    # **A *remote* git note repository needs no entry, although its host is not on this object
+    # either.** `kg/git_writer.py` shells out to `git`, a child inherits `LD_PRELOAD`, and
+    # `git_remote` is the string `"origin"` — so `netguard._push_hosts` derives the host with
+    # `git remote get-url` inside the checkout, and resolves an ssh alias to the host ssh dials
+    # with `ssh -G`. What it cannot follow is an ssh invocation git is told to use instead
+    # (`core.sshCommand`, or `GIT_SSH_COMMAND` with its own `-F`); such a deployment names the real
+    # host here.
     egress_allow: str = ""
+    # How long `ssh -G <alias>` may take when the note remote is an ssh URL
+    # (`netguard._ssh_hostname`). It reads the ssh configuration and opens no socket, so this bounds
+    # a wedged filesystem or a slow `Match exec` in that configuration, not the network. It runs at
+    # config import in every process, so it is a bound on start-up; on timeout the alias itself is
+    # kept, which is what was derived before ssh was asked at all.
+    egress_ssh_resolve_timeout_seconds: float = Field(default=5.0, gt=0)
     # The OTLP collector endpoint (plan F6-T5). Bridged into `OTEL_EXPORTER_OTLP_ENDPOINT` when
     # set, so the exporter's own precedence still applies; empty in dev (no collector). Config, so
     # the in-cluster collector address is one value like every other endpoint.

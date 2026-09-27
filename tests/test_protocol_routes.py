@@ -8,8 +8,8 @@ check does not refuse a human edit**, which is the one place this surface delibe
 intermediate states and can see the verdict, and a model cannot.
 
 Authentication is not re-asserted per route here — `tests/test_route_auth_coverage.py` walks every
-`APIRoute` the app declares and requires `require_principal` in its dependency tree, so these five
-are covered the moment they are registered. What this file pins instead is that they *are*
+`APIRoute` the app declares and requires `require_principal` in its dependency tree, so these are
+covered the moment they are registered. What this file pins instead is that they *are*
 registered as gatable routes and are not on that file's probe allowlist, which is the only way they
 could slip out of that sweep.
 """
@@ -17,6 +17,7 @@ could slip out of that sweep.
 import asyncio
 from collections.abc import Iterator
 from typing import Any
+from urllib.parse import quote
 
 import pytest
 from fastapi.routing import APIRoute
@@ -32,7 +33,9 @@ from chemclaw.protocols.models import (
     ExperimentDesign,
     ExperimentRequest,
     ProtocolArm,
+    RecordedFailure,
     Setpoints,
+    UncitedPrecedent,
 )
 from chemclaw.protocols.store import InMemoryDesignStore
 from tests.test_route_auth_coverage import _PROBE_ALLOWLIST
@@ -40,7 +43,7 @@ from tests.test_route_auth_coverage import _PROBE_ALLOWLIST
 _OID = "chemist-a"
 _DESIGN_ID = "design-http"
 
-# The five routes this module registers, as the pair `test_route_auth_coverage` keys its sweep on.
+# Every route this module registers, as the pair `test_route_auth_coverage` keys its sweep on.
 _ROUTES: frozenset[tuple[str, str]] = frozenset(
     {
         ("/protocols", "GET"),
@@ -48,6 +51,7 @@ _ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("/protocols/{design_id}/revisions", "POST"),
         ("/protocols/{design_id}/diff", "GET"),
         ("/protocols/{design_id}/status", "POST"),
+        ("/protocols/{design_id}/run-sheet.csv", "GET"),
     }
 )
 
@@ -105,7 +109,9 @@ def test_an_empty_listing_is_an_empty_list_and_not_a_404(client: TestClient) -> 
     """The policy the client's own `orEmpty()` expects of every listing here."""
     response = client.get("/protocols")
     assert response.status_code == 200
-    assert response.json() == {"designs": []}
+    # ...and the empty list says it is the whole of what matched, rather than only being empty:
+    # this route bounds its answer and, until now, the body could not say so.
+    assert response.json() == {"designs": [], "total": 0, "truncated": False}
 
 
 def test_the_listing_reports_the_header_row_of_each_design(
@@ -119,6 +125,30 @@ def test_the_listing_reports_the_header_row_of_each_design(
     assert (row["head_revision"], row["arms"], row["status"]) == (1, 3, "draft")
     # `evidence_present` is the blocker an uncited design fails, and it is counted on the row.
     assert row["blockers"] == 1
+
+
+def test_the_listing_says_it_is_a_page_when_it_is_one(
+    client: TestClient, store: InMemoryDesignStore
+) -> None:
+    """`designs` was the response's only key, and the route has always bounded it.
+
+    Driven: 60 designs stored, `GET /protocols?limit=20` served 20, and a client had nothing to
+    read that would have told it forty more existed — so the newest twenty rendered as the corpus.
+    `GET /sessions` in this same package carries a `X-Next-Cursor` for exactly that reason; the
+    sibling listing route carried nothing at all.
+    """
+    for index in range(60):
+        asyncio.run(store.append(f"design-page-{index:02d}", _design(), [], author_kind="agent"))
+
+    page = client.get("/protocols", params={"limit": 20}).json()
+    assert len(page["designs"]) == 20
+    assert page["total"] == 60
+    assert page["truncated"] is True
+
+    # The marker means something, because a page that reaches the end does not set it.
+    whole = client.get("/protocols", params={"limit": 200}).json()
+    assert len(whole["designs"]) == 60
+    assert whole["truncated"] is False
 
 
 def test_the_listing_refuses_a_status_that_is_not_a_status(client: TestClient) -> None:
@@ -753,11 +783,11 @@ def test_the_diff_route_404s_on_a_revision_that_does_not_exist(
 # --- the authentication sweep -------------------------------------------------------------
 
 
-def test_all_five_routes_are_inside_the_apps_authentication_sweep() -> None:
+def test_every_route_here_is_inside_the_apps_authentication_sweep() -> None:
     """Not a second copy of `test_route_auth_coverage`.
 
     That file already requires `require_principal` in every `APIRoute`'s dependency tree. What is
-    asserted here is the two ways these five could fall *outside* that sweep and look gated anyway:
+    asserted here is the two ways these could fall *outside* that sweep and look gated anyway:
     being registered as something other than an `APIRoute` (a `Mount` or a bare `Route` carries no
     dependency tree to inspect), or appearing on the probe allowlist that sweep waives.
     """
@@ -769,3 +799,134 @@ def test_all_five_routes_are_inside_the_apps_authentication_sweep() -> None:
     }
     assert _ROUTES <= registered
     assert _ROUTES.isdisjoint(_PROBE_ALLOWLIST)
+
+
+# --- the run sheet ------------------------------------------------------------------------------
+
+
+def test_the_run_sheet_comes_back_as_a_downloadable_csv(
+    client: TestClient, store: InMemoryDesignStore
+) -> None:
+    """The one route here whose consumer is a file reader rather than a document renderer.
+
+    Both halves of the header matter: `text/csv` is what makes a browser hand it to a spreadsheet
+    instead of rendering it, and the filename is what makes a sheet saved to a laptop matchable
+    back to the revision it was taken from.
+    """
+    _seed(store, _design(arms=2))
+
+    response = client.get(f"/protocols/{_DESIGN_ID}/run-sheet.csv")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/csv")
+    assert "run-sheet.csv" in response.headers["content-disposition"]
+    assert "-r1-" in response.headers["content-disposition"]
+    rows = response.text.strip().splitlines()
+    assert rows[0].startswith("arm_id,")
+    assert len(rows) == 3
+
+
+def test_an_older_revision_sheets_that_revision_and_says_so_in_the_filename(
+    client: TestClient, store: InMemoryDesignStore
+) -> None:
+    """A sheet is printed and carried to a bench, where the design has already moved on.
+
+    A filename naming only the design would put two different plates under one name on the same
+    laptop — and the arm counts differing is exactly the case where it matters.
+    """
+    _seed(store, _design(arms=1))
+    _seed(store, _design(arms=4), parent_revision=1)
+
+    first = client.get(f"/protocols/{_DESIGN_ID}/run-sheet.csv", params={"revision": 1})
+    head = client.get(f"/protocols/{_DESIGN_ID}/run-sheet.csv")
+
+    assert len(first.text.strip().splitlines()) == 2
+    assert len(head.text.strip().splitlines()) == 5
+    assert "-r1-" in first.headers["content-disposition"]
+    assert "-r2-" in head.headers["content-disposition"]
+
+
+def test_a_design_id_cannot_write_its_own_response_headers(
+    client: TestClient, store: InMemoryDesignStore
+) -> None:
+    """The path parameter reaches a response header, and it is an arbitrary string.
+
+    `design_id_for` mints `design-<12 hex>`, but nothing between the URL and the header enforces
+    that — and "the store 404s an unknown id" bounds *which* ids resolve, not which characters a
+    resolving one holds, because `POST /protocols/{id}/revisions` files a design under whatever the
+    path said. So a stored id carrying a CRLF is reachable, and a filename built out of it verbatim
+    is a response-splitting site.
+    """
+    hostile = 'design-x"\r\nX-Injected: yes'
+    asyncio.run(store.append(hostile, _design(), [], author_kind="agent"))
+
+    # Percent-encoded, because that is the only way it travels: `httpx` refuses a raw CR in a URL,
+    # while Starlette unquotes the path before binding the parameter — so the handler sees the CRLF
+    # and the client never had to send one.
+    escaped = quote(hostile, safe="")
+    disposition = client.get(f"/protocols/{escaped}/run-sheet.csv").headers["content-disposition"]
+
+    # **The delimiters, not the injected name.** Its letters survive as filename characters, which
+    # is the point of sanitising rather than rejecting — an id is not the chemist's to get right.
+    # And `"x-injected" not in response.headers` would pass either way: ASGI carries headers as a
+    # list of pairs, so the CRLF never splits in-process and an assertion about the split outcome
+    # is vacuous here. What a real server splits on is the character, so that is what is asserted.
+    assert "\r" not in disposition and "\n" not in disposition and disposition.count('"') == 2
+
+
+def test_a_run_sheet_of_a_design_that_does_not_exist_is_a_404(client: TestClient) -> None:
+    """A 200 carrying a header row alone would read as "this design has no arms"."""
+    assert client.get("/protocols/design-nope/run-sheet.csv").status_code == 404
+
+
+def test_a_human_edit_is_graded_against_the_corpus_the_agent_was_graded_against(
+    client: TestClient, store: InMemoryDesignStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The verdict a chemist's typo fix must not silently overwrite.
+
+    `post_revision`'s own docstring says the checks are re-run here "rather than trusted from the
+    caller", so that "an edit that breaks the charge table has to say so with the same verdict the
+    draft got, or the two halves of the surface would grade the same document differently depending
+    on who wrote it". It shipped calling `run_checks` with neither `failures=` nor `precedent=`,
+    while both agent call sites pass them — measured, the agent reported "the corpus records 1
+    failure(s) bearing on this design" where the route reported "no recorded failure bears on this
+    design", and the chemist's edit republished the clean bill.
+
+    **Driven, because the call-site scan beside this cannot see it.** That guard asserts the
+    keyword *names* appear, which is cause (e) in `tasks/lessons.md` — the assertion this whole
+    programme keeps re-committing. Restoring the defect as `failures=[], precedent=[]` keeps both
+    keywords and left 190 tests green, this file included. The lookups are stubbed rather than
+    driven off a real corpus on purpose: what is asserted is the *wiring* — that whatever the
+    corpus says reaches the verdict — and a fixture that built a corpus would prove the fixture.
+    """
+
+    async def _one_failure(design: object) -> list[RecordedFailure]:
+        return [RecordedFailure(id="failure-abc123", summary="the catalyst dies above 60 C")]
+
+    async def _one_precedent(design: object) -> list[UncitedPrecedent]:
+        return [UncitedPrecedent(id="ord-9f2", similarity=0.91, label="a near-identical run")]
+
+    monkeypatch.setattr(routes, "recorded_failures", _one_failure)
+    monkeypatch.setattr(routes, "uncited_precedent", _one_precedent)
+    _seed(store, _design())
+
+    response = client.post(
+        f"/protocols/{_DESIGN_ID}/revisions",
+        json={
+            "document": _design(arms=2).model_dump(mode="json"),
+            "parent_revision": 1,
+            "change_note": "fixed a typo in the title",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    verdicts = {check["check_id"]: check for check in response.json()["checks"]}
+    assert not verdicts["no_documented_failure"]["passed"], (
+        "the route graded a design the corpus records a failure against as clean, so a chemist's "
+        "edit overwrote the verdict the agent's draft carried"
+    )
+    assert "failure-abc123" in verdicts["no_documented_failure"]["detail"]
+    assert not verdicts["precedent_consulted"]["passed"], (
+        "the route offered no precedent over a record that holds an uncited similar run"
+    )
+    assert "ord-9f2" in verdicts["precedent_consulted"]["detail"]

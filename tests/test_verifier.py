@@ -28,6 +28,7 @@ from chemclaw.agent.verifier import (
     _verifier_prompt,
     promised_uncalled_tools,
     require_verifier_capability,
+    score_answer,
     turn_evidence,
     ungrounded_parameter_shapes,
     verify_answer,
@@ -429,13 +430,15 @@ def test_a_fabricated_residual_solvent_limit_is_scanned_like_an_elemental_one() 
     assert ungrounded_parameter_shapes("The PDE for THF is 7.2 mg/day.", ["Q3C: 7.2 mg/day"]) == []
 
 
-def test_the_scan_over_fires_on_a_chemists_own_figures_which_is_why_it_defaults_off() -> None:
+def test_the_scan_over_fires_on_a_chemists_own_figures_which_is_the_cost_the_default_pays() -> None:
     """Pin the false positives rather than claim they are rare — the docstring reasons about a rate.
 
     Every answer below is legitimate: the chemist supplied the number and the turn called no tool,
     so the scan has nothing to match against and marks it for review. This is the documented cost
-    of a shape heuristic, and it is the whole argument for `answer_shape_gate_enabled` defaulting
-    to off. A test that only showed the true positives would let that cost drift unnoticed.
+    of a shape heuristic. It was the whole argument for `answer_shape_gate_enabled` defaulting to
+    off; the default is now on, so this file is where that cost is *paid* rather than avoided —
+    which makes the rate more worth pinning, not less. A test that only showed the true positives
+    would let it drift unnoticed.
     """
     over_fires = {
         "Your 7.26 ppm singlet is residual CHCl3, not product.": ["ppm limit: 7.26 ppm"],
@@ -811,7 +814,7 @@ def test_a_verdict_omitting_claims_no_longer_validates() -> None:
     assert VerificationResult.model_validate({"claims": [], "confidence": 1.0}).claims == []
 
 
-def test_the_judge_is_bound_with_json_schema_enforcement(
+async def test_the_judge_is_bound_with_json_schema_enforcement(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """`verify_answer` asks for strict schema enforcement, so a malformed verdict never validates.
@@ -828,10 +831,8 @@ def test_the_judge_is_bound_with_json_schema_enforcement(
     monkeypatch.setattr(settings, "verifier_enabled", True)
     client = _FakeVerifierClient(VerificationResult(claims=[], confidence=0.9, verified_by="judge"))
 
-    async def _run() -> None:
-        await verify_answer("an answer", [_chunk("a tool result")], client=client)
+    await verify_answer("an answer", [_chunk("a tool result")], client=client)
 
-    asyncio.run(_run())
     assert client.methods == ["json_schema"], client.methods
 
 
@@ -1071,7 +1072,13 @@ def test_a_degraded_openai_compatible_judge_is_still_routed_to_a_human_by_score_
     assert review.verified_by == "citation-gate"
     assert review.confidence == 1.0
     assert review.review_required is True
-    assert "verified by the citation gate only; the judge did not run" in review.unsupported
+    # `review_notes`, not `unsupported`: this is a statement about which check produced the
+    # verdict, not a claim the answer made — and `api/runner.py`'s revision loop reads the second
+    # list as claims to quote back at the model. Here the gate resolved the citation, so it found
+    # nothing wrong with the answer itself: the whole verdict is the note, and the loop therefore
+    # has nothing to send back.
+    assert review.unsupported == []
+    assert review.review_notes == ["verified by the citation gate only; the judge did not run"]
 
 
 class _MeteredJudge(GenericFakeChatModel):
@@ -1349,3 +1356,108 @@ def test_the_bands_rerolls_are_counted(monkeypatch: pytest.MonkeyPatch) -> None:
     client = _SequencedVerifierClient([_judged(0.7), _judged(0.7), _judged(0.7)])
     asyncio.run(verify_answer("An answer [[n1]].", [_chunk("n1")], client=client))
     assert METRICS.value("chemclaw_verifier_band_rerolls_total") == before + 2
+
+
+def test_an_ungated_answer_is_distinguishable_from_a_cleared_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unchecked answer and a checked-and-clean one must not be the same bytes.
+
+    Both honesty gates ship off, and with them off every scored field is at its `None`/`False`
+    default. That is right for the verifier — `confidence`/`verified_by` are its own null — and
+    the shape gate has no field of its own at all, so an answer it scanned and cleared serialized
+    byte-for-byte identically to one nothing looked at. A surface flagging on `review_required`
+    renders both as an unflagged answer, which is the honest half; what it cannot say is which one
+    it is looking at.
+
+    Measured before `checks_run` existed: `model_dump_json()` of the two was identical, character
+    for character.
+    """
+    from chemclaw.api.runner_answer import build_answer_event
+
+    monkeypatch.setattr(settings, "verifier_enabled", False)
+    monkeypatch.setattr(settings, "answer_shape_gate_enabled", False)
+    ungated, _ = asyncio.run(build_answer_event("Ethanol's pKa is 15.9.", ['{"pka": 15.9}']))
+
+    monkeypatch.setattr(settings, "answer_shape_gate_enabled", True)
+    cleared, _ = asyncio.run(build_answer_event("Ethanol's pKa is 15.9.", ['{"pka": 15.9}']))
+
+    assert ungated.review_required is False and cleared.review_required is False
+    assert ungated.model_dump_json() != cleared.model_dump_json(), (
+        "an unchecked answer and a checked-and-clean one are the same bytes on the wire"
+    )
+    assert ungated.checks_run == []
+    assert cleared.checks_run == ["answer-shape"]
+
+
+def test_every_gate_that_ran_names_itself(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`checks_run` names the checks, in the order `score_answer` runs them.
+
+    A check that was configured on and *crashed* still ran: it flags the answer, and a reader that
+    saw no name beside a flag would have to guess which gate spoke.
+    """
+    monkeypatch.setattr(settings, "verifier_enabled", True)
+    monkeypatch.setattr(settings, "answer_shape_gate_enabled", True)
+
+    async def _boom(*_: object, **__: object) -> object:
+        raise RuntimeError("judge unreachable and the citation gate too")
+
+    monkeypatch.setattr("chemclaw.agent.verifier.verify_turn_answer", _boom)
+    review = asyncio.run(score_answer("An answer.", [], []))
+    assert review.checks_run == ["verifier", "answer-shape"]
+    assert review.review_required is True
+
+
+def test_the_scan_does_not_read_ordinary_english_as_a_promised_tool() -> None:
+    """The shape gate scans for a bare token, so its name space must hold no English words.
+
+    `available_tool_names()` is the validators' union and includes three spaces that are the agent's
+    own scaffolding rather than a capability: the subagent spawner (`task`), the harness todo writer
+    and the backend filesystem verbs (`ls`, `grep`, `glob`). Scanning over that union, *"the first
+    task is to degas the solvent"* and *"use grep to find it"* both came back as an answer promising
+    a tool it never called.
+
+    That is not a stray log line at the shipped defaults. `answer_shape_gate_enabled` is on and
+    `answer_review_max_rounds` is 2, so a false positive here costs two full graph runs and then
+    files a durable review request asking a person to read a correct answer.
+
+    Both arms are asserted: the scaffolding words must not fire, and a real capability promise must
+    still fire — a narrowing that silenced the gate entirely would pass the first arm alone.
+    """
+    for prose in (
+        "The first task is to degas the solvent thoroughly.",
+        "Use grep to find it in the notebook.",
+        "That is a big task for one afternoon.",
+        "I will ls the directory of prior runs.",
+    ):
+        assert promised_uncalled_tools(prose, []) == [], (
+            f"ordinary English read as a promised tool: {prose!r}"
+        )
+
+    promised = promised_uncalled_tools("I could run predict_pka for that number.", [])
+    assert promised == ["promised but not called: predict_pka"], (
+        "the narrowing must not silence the gate on a real capability the answer promised"
+    )
+
+
+def test_no_capability_tool_is_short_enough_to_collide_with_english() -> None:
+    """What makes the bare-token match safe, asserted rather than assumed.
+
+    The scan is safe over the capability name spaces because none of those names is an English
+    word — which is a property of the *surface*, not of the scan, and a bundle enabled next year
+    could break it. This is the assertion that fails on the day one does, rather than the day a
+    chemist's answer is sent to a reviewer for saying "task".
+    """
+    from chemclaw.agent.chemclaw_agent import available_tool_names, capability_tool_names
+
+    capability = capability_tool_names()
+    assert capability < available_tool_names(), (
+        "the capability spaces must stay a strict subset of the union the validators resolve; if "
+        "they are equal, the narrowing this test protects has been undone"
+    )
+    assert capability, "the premise: there are capability tools to scan for"
+    short = sorted(name for name in capability if len(name) < 7 or "_" not in name)
+    assert not short, (
+        f"capability tool name(s) a bare-token scan could read out of ordinary prose: {short}. "
+        "Either rename, or narrow `promised_uncalled_tools` further."
+    )

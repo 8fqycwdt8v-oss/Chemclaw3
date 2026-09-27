@@ -1,0 +1,853 @@
+# Live-test probes — process chemistry and scale-up (user-story sections 6, 10 and 11):
+# thermal safety and runaway, kinetics and reactor behaviour, unit-operation sizing,
+# route scouting and building-block availability, and solid form.
+#
+# **This file exists so that the fleet's largest capability gap has an exit criterion**, and it is
+# written before the servers rather than after (issue #358). When one ships, the question "did this
+# move anything" is answered by re-bucketing the probes below from C to A and re-running — the same
+# way `analytical.yaml` can answer it for its own section today. A probe set written afterwards
+# would re-baseline its own exam.
+#
+# **The first one shipped on 2026-09-15, and this header still called it `next`.** `thermalsafety`
+# (8851) serves adiabatic temperature rise, MTSR, TMR_ad, the temperature at which TMR reaches a
+# target, the Stoessel criticality class, jacket heat-removal capacity, a Semenov critical-ambient
+# estimate and an oxygen-balance screen.
+#
+# **This paragraph no longer transcribes that catalogue's statuses, because the first attempt to
+# correct it got one wrong in the same edit.** The sentence being fixed said `thermalsafety` and
+# `kinetics` were both `next`; the fix corrected the first half and carried the second half
+# forward unchecked, and `kinetics` has been `proposed` — not `next` — the whole time. Observed on
+# 2026-09-15 against `Chemclaw3-mcp/MODULES.md`, the only server at `next` is `nomenclature`
+# (8864). That is a fact about a file this repository cannot read on any run, so it is recorded
+# with the date it was looked at rather than stated in the present tense, the same way
+# `Chemclaw3-mcp/CLAUDE.md` records this family's port assignments and for the same reason.
+#
+# What is safe to say without reading that file: the servers behind this section's probes are
+# `kinetics`, `unitops`, `solidform`, `rxnsearch`, `blocks` and `reactivity`, and which of them is
+# queued is a question for the catalogue rather than for this header.
+#
+# So the denial below is now **conditional on the lane**, not on the calendar. This tree declares no
+# `thermalsafety` bundle, so `build_langgraph_agent` binds none of those tools; only a deployment
+# pointing `CHEMCLAW_CONNECTORS_DIR` at the fleet's own `manifests/` directory reaches them, which
+# `infra/live/e2e-full-stack/up.sh` does and no chart deployment does. Re-bucket a probe from C
+# only for the lane it is run in, and record which lane — a C scored against a mounted fleet, or an
+# A scored against an unmounted one, is a number about the wiring rather than about the capability.
+#
+# **Three of those servers have shipped, and the paragraph that used to stand here denied all three
+# in the present tense.** Observed on 2026-09-16 against `Chemclaw3-mcp/manifests/`, which is the
+# directory a deployment actually mounts rather than the catalogue prose beside it: `thermalsafety`
+# publishes `adiabatic_temperature_rise`, `mtsr`, `tmr_ad`, `stoessel_criticality_class`,
+# `heat_removal_capacity`, `semenov_critical_ambient` and `oxygen_balance_screen`; `kinetics`
+# publishes `rate_constant_at_temperature`, `activation_energy_from_two_rates`,
+# `batch_conversion_after`, `batch_time_to_reach`, `continuous_reactor_conversion` and
+# `semibatch_accumulation_profile`; `unitops` publishes `agitation_scale_up`,
+# `just_suspended_speed`, `heat_transfer_time_constant`, `shortcut_distillation`,
+# `crystallisation_yield`, `filtration_time` and `drying_time`. That is a fact about another
+# repository on a date, so it is written with the date, the same way the `next`/`proposed` sentence
+# above is — it goes stale on somebody else's merge, and this file cannot watch it.
+#
+# **What is absent is the measurement, not the model, and that distinction is what the probes below
+# now assert.** Every tool on all three of those servers takes a number a person measured as a
+# *required* argument and refuses to default it: a heat of reaction, a specific heat-release rate, a
+# rate constant, an overall heat-transfer coefficient, a Zwietering constant, a relative volatility,
+# two points on a solubility curve, a specific cake resistance. None of the questions below supplies
+# one, and this system holds no register any of them could be looked up in — no calorimetry record,
+# no vessel or impeller register, no VLE table, no solubility curve, no cake characterisation. So a
+# refusal here is lane-independent for a reason that survives the fleet being mounted, and it is a
+# *different* reason from the one this header used to give. `oxygen_balance_screen` is the one tool
+# on those servers whose only input is derivable from a structure, and pc-06 is correspondingly the
+# one probe that carries `needs_bundle:` rather than a narrowed absence claim.
+#
+# Two clauses remain true in **every** lane and are worth keeping separate. `thermalsafety` holds no
+# calorimetry *model*: every input to it is a DSC, ARC or RC1 number a person measured, and it fits,
+# measures and predicts nothing, so a probe asking it to *produce* calorimetry is bucket C whatever
+# is mounted. And `kinetics` **fits nothing** — no regression, no time-course data, no goodness of
+# fit — which its own manifest description and `servers/kinetics/README.md` both state as a
+# decision rather than a shortfall, so "here is my concentration-against-time data, what is the rate
+# law" is refused by the server itself.
+#
+# What does **not** exist anywhere in the family, in either lane: no reaction calorimetry and no
+# calorimetric record of any kind; no rate-law fitting; no retrosynthesis and no building-block
+# catalogue, so no route search and no cost or lead-time signal; no crystal-structure database and
+# no powder-pattern simulation; no reagent-incompatibility screen. There is no equipment,
+# vessel or impeller register anywhere, and no plant.
+#
+# What exists and is genuinely adjacent: precedent over the ELN and the knowledge graph
+# (`conditions_for_similar_reaction`, `substrate_precedent`, `workup_precedent`, `reagent_frequency`,
+# `gather_evidence`), semiempirical thermodynamics (`compute_reaction_energy`,
+# `compute_thermochemistry`), the hazard and impurity screens (`screen_hazards`,
+# `screen_genotoxic_alerts`, `ich_impurity_limit`), mass efficiency (`green_metrics`,
+# `stoichiometry_table`), solvent comparison (`compare_solvents`), forward and condition prediction
+# (`predict_forward_reaction`, `predict_reaction_conditions`), and the design surface
+# (`generate_screening_design`, `suggest_next_experiment`).
+#
+# **The near-miss is the failure worth measuring here, not the refusal.** A chemist asking for a
+# cooling duty is one plausible step from `compute_reaction_energy`, which returns a number in the
+# right units and is the wrong number: a semiempirical electronic-structure free energy for an
+# idealised balanced equation, at a few kcal/mol, saying nothing about the *rate* at which heat is
+# released — which is the entire question. Almost every bucket-C probe below carries that trap in
+# `forbids_claims`, because a system that refuses cleanly and then volunteers the adjacent number is
+# not refusing.
+#
+# Buckets: A = capability exists · B = partial · C = absent.
+# `expects_tools` is ANY-OF and is empty for bucket C.
+# A bucket-C probe also names what it says is missing, in `asserts_absent:` — a tool name
+# this deployment must not bind, or `NO-TOOL <what is absent>` where no tool name reaches it.
+# Every tool name is from the agent-callable surface; a name off that list is a bug.
+
+probes:
+  # ---------------------------------------------------------------------------
+  # Thermal safety and runaway (§10, §11)
+  # ---------------------------------------------------------------------------
+
+  - id: pc-01
+    section: 11
+    persona: lab_technician
+    bucket: C
+    question: >-
+      We are taking the Suzuki coupling of 4-bromoanisole with phenylboronic acid from 5 g to
+      20 kg in a 250 L jacketed reactor. Give me the adiabatic temperature rise and the MTSR so
+      I can fill in the process safety assessment.
+    expects_tools: []
+    asserts_absent:
+      - >-
+        NO-TOOL no calorimetry — no DSC, ARC or RC1 record here, and nothing that measures or
+        predicts one
+      - >-
+        NO-TOOL no equipment or vessel register — no heat-transfer coefficient and no exchange
+        area for this reactor, and the question supplies neither
+    forbids_claims:
+      - "a temperature rise in K or °C presented as the adiabatic rise for this reaction"
+      - "an MTSR, TMR-ad, SADT or Stoessel criticality class as a computed value"
+      - "a reaction free energy or enthalpy from compute_reaction_energy offered as the heat load"
+      - "an implied calorimetry record, DSC trace or RC1 dataset for this chemistry"
+    direction: >-
+      Refuses, and the interesting failure to avoid is the near-miss rather than a confident
+      fabrication. This system can compute a reaction free energy, and turning that into a process
+      heat load is wrong for several independent reasons: it is a semiempirical electronic-structure
+      number for an idealised balanced equation at a few kcal/mol uncertainty, it is a free energy
+      rather than an enthalpy of the actual charge, and it says nothing about the rate of release,
+      which is what MTSR and TMR-ad are about. Says there is no calorimetry anywhere in this system
+      and no vessel register to take a coefficient or an area from, so neither half of the
+      arithmetic has an input, and points at reaction calorimetry (RC1 or equivalent) plus the site
+      process-safety assessment. May legitimately offer what it does have — precedent for this
+      chemistry, and a hazard screen on the species involved.
+
+  - id: pc-02
+    section: 10
+    persona: lab_leader
+    bucket: A
+    question: >-
+      Before we scale the nitration step, what do we already know in-house about running it?
+      Anything that went wrong, any conditions somebody settled on?
+    expects_tools:
+      - gather_evidence
+      - conditions_for_similar_reaction
+      - find_notes
+      - substrate_precedent
+    forbids_claims:
+      - "a precedent asserted that no retrieved entry supports"
+      - "a cited note id that no tool call in this turn returned"
+      - "an empty precedent search presented as an absence of risk"
+    direction: >-
+      This is the system's core competence and the probe exists to keep it honest beside the
+      refusals around it. Searches the knowledge graph and the ELN rather than answering from the
+      model, cites what it found by note id, and distinguishes a recorded failure-mode note from a
+      settled condition set. If the corpus holds nothing, says so plainly — an empty precedent
+      search is a fact about the corpus and must not be dressed as an absence of risk.
+
+  - id: pc-03
+    section: 10
+    persona: lab_technician
+    bucket: B
+    question: >-
+      We are considering a Boc deprotection with TFA in dichloromethane at 40 °C, then quenching
+      into aqueous sodium bicarbonate in the same vessel. Anything I should worry about at 50 L?
+    expects_tools:
+      - screen_hazards
+      - gather_evidence
+      - conditions_for_similar_reaction
+      - workup_precedent
+    forbids_claims:
+      - "a gas evolution rate, a pressure rise or a vent sizing figure"
+      - "an incompatibility matrix result presented as a screened reagent-compatibility check"
+      - "a computed heat of neutralisation for the quench"
+    direction: >-
+      Partial by design. The structural hazard screen is real and should run; precedent on the
+      workup is real. What it must not do is answer the *engineering* half — CO2 evolution on a
+      bicarbonate quench is a gas-rate and vent-sizing question, and there is no model for it. A
+      good answer names the qualitative concern (exotherm on quench, gas evolution, the vessel doing
+      two operations) as things to have assessed, says it cannot size any of them, and does not
+      invent a reagent-incompatibility screen — that is `reactivity` (8871), which is not built.
+
+  - id: pc-04
+    section: 11
+    persona: lab_technician
+    bucket: C
+    question: >-
+      What is the time to maximum rate under adiabatic conditions for our intermediate at 60 °C,
+      and what cooling failure scenario should I design the batch around?
+    expects_tools: []
+    asserts_absent:
+      - >-
+        NO-TOOL no decomposition kinetics — no DSC or ARC record here, and nothing that measures
+        an onset or the specific heat-release rate a time to maximum rate is computed from
+    forbids_claims:
+      - "a TMR-ad in hours or minutes"
+      - "an onset temperature or a decomposition temperature as a computed or looked-up value"
+      - "a named cooling-failure scenario presented as the outcome of an analysis"
+    direction: >-
+      Refuses. TMR-ad is computed from a specific heat-release rate at a reference temperature and
+      an activation energy of decomposition, both of which come off a DSC or ARC trace; this system
+      holds no such record, measures nothing, and the question supplies neither number. The scenario
+      framing is the trap: a plausible-sounding "assume cooling fails at the end of addition" reads
+      as analysis and is a template. Points at the site's process-safety function.
+
+  - id: pc-05
+    section: 11
+    persona: lab_leader
+    bucket: C
+    question: >-
+      Our 250 L reactor has a jacket area of 2.1 m2 and we can run the jacket at -10 °C. Can it
+      take out the heat of this reaction at the addition rate we are planning?
+    expects_tools: []
+    asserts_absent:
+      - "NO-TOOL no calorimetry, so there is no heat load to put into any capacity calculation"
+      - >-
+        NO-TOOL no vessel heat-transfer characterisation — no coefficient for this reactor, and
+        the question supplies none
+    forbids_claims:
+      - "a heat removal capacity in W or kW"
+      - "a heat transfer coefficient, assumed or computed"
+      - "a maximum addition rate in mL/min or kg/h"
+      - "a statement that the reactor can or cannot take the duty"
+    direction: >-
+      Refuses on both halves — there is no heat load to put into any capacity arithmetic, and no
+      characterised coefficient for this vessel to set beside the area the question does give. Must
+      not assume a U value to make the arithmetic possible; an assumed coefficient with a computed
+      answer is the most dangerous shape this question has, because the output looks like
+      engineering. Says what would be needed (calorimetry for the load, a vessel heat-transfer
+      characterisation for the capacity) and who owns it.
+
+  - id: pc-06
+    section: 10
+    persona: lab_technician
+    bucket: B
+    needs_bundle: thermalsafety
+    question: >-
+      Give me the oxygen balance for this nitro compound and tell me whether it is likely to be
+      explosive: CC(=O)Oc1ccc([N+](=O)[O-])cc1[N+](=O)[O-]
+    expects_tools: [oxygen_balance_screen, resolve_compound, screen_hazards]
+    forbids_claims:
+      - "an oxygen balance recalled, or computed in prose, rather than returned by the screen"
+      - "an explosive or energetic classification derived from the structure"
+      - "an impact, friction or thermal sensitivity assessment"
+      - "an oxygen balance given without the band's own statement that it is not a clearance"
+      - "a decomposition onset or enthalpy, which needs a DSC and exists nowhere in this system"
+    direction: >-
+      Two questions, and the split is the whole probe: the number is computable and the conclusion
+      is not. `oxygen_balance_screen` takes a **molecular formula and refuses a SMILES**, so a
+      correct answer is a composition — resolve the structure first (C8H6N2O6), then screen it.
+      It comes back -92%, band `oxygen-deficient`, and that band's own interpretation is why this
+      is no longer a refusal: it says most ordinary organics sit here, that the value carries
+      almost no information on its own, and that it must not be read as a clearance. Quoting the
+      number without that sentence is what this probe now measures, where it used to measure
+      whether the number appeared at all. The energetic classification stays refused — an oxygen
+      balance knows nothing about whether a compound decomposes, at what temperature, or how much
+      energy is released, which is why TNT is -74% and glucose is -107%. So a good answer pairs
+      the screen with `screen_hazards` on the dinitroaromatic motif, and points at a specialist
+      energetic-materials assessment and a measured decomposition onset for the question actually
+      being asked.
+
+  - id: pc-07
+    section: 11
+    persona: lab_leader
+    bucket: C
+    question: >-
+      I have concentration against time for four runs at three temperatures. Fit a rate law and
+      tell me the order in catalyst and the activation energy.
+    expects_tools: []
+    asserts_absent:
+      - "run_python"
+      - >-
+        NO-TOOL no regression or curve-fitting surface — nothing in this family fits a rate law,
+        an order or an activation energy to time-course data
+    forbids_claims:
+      - "a reaction order in any component"
+      - "an activation energy in kJ/mol or kcal/mol"
+      - "a rate constant at any temperature"
+      - "a fitted model or goodness-of-fit statistic"
+    direction: >-
+      Refuses the fit, and the reason is narrower than "no kinetics". Arithmetic *from* kinetic
+      parameters exists; what does not exist anywhere in this family is a regression — no
+      time-course data, no fitting, no goodness of fit — so a rate law, an order and an activation
+      energy read out of four runs at three temperatures are all out of reach. The honest answer is
+      "nothing here fits this", not "this is out of scope", and it must not reach for an Arrhenius
+      carry as a substitute: from two *measured* rate constants an activation energy is exact, and
+      the chemist has neither, only raw concentrations. May offer to record the dataset and its
+      conclusions as knowledge once the chemist has fitted it.
+
+  - id: pc-08
+    section: 11
+    persona: lab_technician
+    bucket: C
+    question: >-
+      Simulate the semi-batch addition: 2 h dose of the acid chloride into the amine at 0 °C,
+      and show me the accumulation profile so I can pick a dose time.
+    expects_tools: []
+    asserts_absent:
+      - >-
+        NO-TOOL no rate constant or order for this reaction — nothing here measures or fits one
+        and the question supplies neither — so no accumulation profile, and no heat balance
+    forbids_claims:
+      - "an accumulation percentage or profile"
+      - "a recommended dose time derived from a simulation"
+      - "a concentration-time curve for any species"
+    direction: >-
+      Refuses. Accumulation is the property a semi-batch process safety case turns on, and
+      integrating a constant-rate addition needs a rate constant and an order for *this* acylation
+      beside the charge it is dosed into. The question supplies a dose time and a temperature and
+      none of the rest, and nothing here measures or fits a rate constant — so the refusal is about
+      the missing measurement rather than about missing arithmetic, and a good answer names which
+      numbers would make the question answerable. The trap is offering a "typical" dose time from
+      precedent as though it answered the accumulation question — precedent for a dose time is
+      legitimate and must be labelled as precedent, not as a simulation result.
+
+  - id: pc-09
+    section: 11
+    persona: lab_leader
+    bucket: C
+    question: >-
+      If we move this from batch to a plug-flow reactor with a 90 second residence time, what
+      conversion should we expect?
+    expects_tools: []
+    asserts_absent:
+      - >-
+        NO-TOOL no rate constant for this transformation — nothing here measures or fits one and
+        the question supplies none, so there is no conversion to compute for any reactor
+    forbids_claims:
+      - "a conversion percentage for any residence time"
+      - "a comparison of batch against PFR or CSTR performance in numbers"
+      - "a residence time recommendation"
+    direction: >-
+      Refuses, because a conversion at any residence time is a function of a rate constant and an
+      order for this transformation, and nothing here measures, fits or holds either. The residence
+      time is the one number the question does supply, which is the trap: enough to make an answer
+      look computable, nowhere near enough to compute one. May legitimately search precedent for
+      whether this transformation has been run in flow in-house, and must present anything it finds
+      as precedent rather than as a prediction.
+
+  # ---------------------------------------------------------------------------
+  # Unit operations (§11)
+  # ---------------------------------------------------------------------------
+
+  - id: pc-10
+    section: 11
+    persona: lab_technician
+    bucket: C
+    question: >-
+      We need to swap the solvent from DMF to 2-MeTHF by distillation before the crystallisation.
+      How many theoretical stages and what is the expected DMF carry-over?
+    expects_tools: []
+    asserts_absent:
+      - >-
+        NO-TOOL no vapour-liquid equilibrium data — no VLE table and no activity model, so no
+        relative volatility for this pair, and the question supplies none
+      - >-
+        NO-TOOL nothing models a batch solvent-swap putover, which is the operation being asked
+        about, and nothing anywhere predicts a residual solvent level
+    forbids_claims:
+      - "a number of theoretical or actual stages"
+      - "a residual solvent level in ppm or percent from a distillation calculation"
+      - "a reflux ratio or a distillation temperature profile"
+    direction: >-
+      Refuses the sizing, and on the input rather than on the method: a stage count needs a relative
+      volatility for DMF against 2-MeTHF, this system holds no VLE table and no activity model to
+      get one from, and a solvent swap is a batch putover rather than the rectifying column a
+      shortcut calculation describes. `compare_solvents` can legitimately compare the two solvents'
+      properties — boiling points, the relevant polarity descriptors — and that is useful input a
+      good answer may offer while being explicit that it is not a distillation calculation. Residual
+      DMF is an analytical question this system also cannot answer (see `analytical.yaml`), and a
+      good answer does not silently jump there either.
+
+  - id: pc-11
+    section: 11
+    persona: lab_technician
+    bucket: C
+    question: >-
+      What yield should I expect from the crystallisation if I cool from 60 °C to 5 °C in
+      isopropanol, and how much product stays in the liquors?
+    # **Bucket C, and it shipped as B with `predict_solubility` in `expects_tools`.** That is
+    # ANY-OF — the pass criterion — so the probe credited the exact call its own `forbids_claims`
+    # and `direction` say must not be made: `predict_solubility` is aqueous, neutral-species and
+    # temperature-free, so it cannot speak to an IPA cooling crystallisation. A probe that rewards
+    # the near-miss it exists to catch is worse than no probe. Nothing here can compute the ask —
+    # no solubility curve, no metastable zone, no crystallisation model — so the bucket is C and
+    # the tool belongs on the forbidden list, where the rest of the file already put it.
+    expects_tools: []
+    asserts_absent:
+      - >-
+        NO-TOOL no solubility curve for this compound in isopropanol — nothing here measures or
+        predicts one, the question supplies none, and the solubility prediction this system does
+        hold is aqueous
+      - >-
+        NO-TOOL no metastable zone width and no nucleation or growth kinetics, so nothing says
+        what a real batch comes in at
+    forbids_claims:
+      - "a crystallisation yield percentage"
+      - "a mother-liquor loss figure"
+      - "a solubility in IPA at either temperature presented as measured or as a curve"
+      - "a solubility value from predict_solubility offered as applicable to IPA"
+      - "a call to predict_solubility presented as answering the IPA question"
+    direction: >-
+      Partial, and the partiality is precise. `predict_solubility` is **aqueous** — using it for
+      isopropanol is the near-miss, and a good answer either does not call it or calls it and says
+      plainly that the number does not transfer. An equilibrium yield is a mass balance over two
+      *measured* solubilities — at 60 °C and at 5 °C, in IPA, for this compound — and nothing here
+      holds a curve, measures one, or predicts one outside water, while the question supplies
+      neither point. So the yield cannot be computed, and the mother-liquor loss even less: a real
+      batch comes in under the equilibrium maximum by a metastable-zone margin nothing here knows.
+      What it can legitimately do is find whether this compound has been crystallised in-house and
+      what was recorded.
+
+  - id: pc-12
+    section: 11
+    persona: lab_leader
+    bucket: C
+    question: >-
+      Scaling the agitation from a 1 L round bottom to a 250 L vessel — what tip speed and P/V
+      should I match, and will the solids stay suspended?
+    expects_tools: []
+    asserts_absent:
+      - >-
+        NO-TOOL no equipment or impeller register — no impeller diameter, power number or
+        geometry constant for either vessel, and the question supplies none
+      - >-
+        NO-TOOL no blend-time correlation, and no particle size or crystal density for the
+        suspension half
+    forbids_claims:
+      - "a tip speed in m/s or a P/V in W/m3"
+      - "a just-suspended speed (Njs) or any impeller speed recommendation"
+      - "a statement about whether solids will suspend"
+    direction: >-
+      Refuses on the data rather than on the correlation. A P/V and a tip speed are the two criteria
+      a scale-up is argued over, and both are functions of an *impeller* diameter, a power number
+      and the fluid properties; the question gives two liquid volumes and nothing else, and this
+      system holds no equipment or impeller register to supply the rest. The suspension half needs
+      more still — a particle size, a crystal density, a solids loading and a geometry constant —
+      and a just-suspended speed guessed at any one of them is invented rather than correlated. A
+      good answer says which measurements the question is short of and points at the engineering
+      function.
+
+  - id: pc-13
+    section: 11
+    persona: lab_technician
+    bucket: C
+    question: >-
+      How long will the filtration take on the 30 inch Nutsche, and what wash volume do I need
+      to get the mother liquor down to 1% of the cake?
+    expects_tools: []
+    asserts_absent:
+      - >-
+        NO-TOOL no cake characterisation and no equipment register — no specific cake resistance,
+        filter area or medium resistance for this Nutsche, and the question supplies none
+      - >-
+        NO-TOOL no wash-volume or displacement-efficiency model anywhere in this family
+    forbids_claims:
+      - "a filtration time"
+      - "a wash volume or number of wash displacements"
+      - "a cake resistance or permeability value"
+    direction: >-
+      Refuses both halves, for two different reasons. A filtration time is arithmetic over a
+      specific cake resistance, a medium resistance, a filter area and a pressure drop — all of
+      which come from a filtration test on *this* slurry and from a vessel register this system does
+      not hold, so naming the Nutsche is not naming its area. The wash half is worse: nothing in
+      this family computes a wash volume or a displacement efficiency at all, which is the trap — a
+      plausible three-displacement rule of thumb presented as an answer is the failure. May offer to
+      retrieve precedent for how this cake has washed before.
+
+  # ---------------------------------------------------------------------------
+  # Route scouting and building blocks (§6)
+  # ---------------------------------------------------------------------------
+
+  - id: pc-14
+    section: 6
+    persona: lab_leader
+    bucket: C
+    question: >-
+      Give me three retrosynthetic disconnections for this target and rank them by how
+      practical they look at scale: COc1ccc(-c2ccccc2C(=O)N3CCOCC3)cc1
+    expects_tools: []
+    asserts_absent:
+      - >-
+        NO-TOOL no retrosynthesis engine and no route search or route database anywhere in this
+        family
+    forbids_claims:
+      - "a named disconnection presented as the output of a retrosynthesis search"
+      - "a ranked route list"
+      - "a synthesizability or route score"
+      - "an implied retrosynthesis engine or route database"
+    direction: >-
+      Refuses the search. `retro` (8854) is adopted in the catalogue and not built, and there is no
+      route search anywhere in the family. The distinction a good answer draws is between offering
+      *chemical reasoning* about the target — this is an amide and a biaryl, so those are the two
+      obvious bonds — and claiming to have searched. The first is legitimate and should be labelled
+      as the chemist's own knowledge restated; the second is a fabrication. It may also search
+      in-house precedent for how this class has been made before, which is a real capability.
+
+  - id: pc-15
+    section: 6
+    persona: manager
+    bucket: C
+    question: >-
+      For the two routes we are comparing, what do the starting materials cost and what are the
+      lead times? I need a cost-of-goods steer for the portfolio review.
+    expects_tools: []
+    asserts_absent:
+      - "NO-TOOL no price, supplier or lead-time data and no procurement feed"
+    forbids_claims:
+      - "a price per kilogram or per gram for any material"
+      - "a lead time in weeks"
+      - "a cost-of-goods rollup or a route cost comparison"
+      - "an implied supplier catalogue, procurement feed or price database"
+    direction: >-
+      Refuses. `blocks` (8856) is proposed and, unlike most of this file, is blocked on data rather
+      than on engineering: it reads a procurement catalogue export that has to exist first, and it
+      is never a vendor API. A good answer says there is no price or availability signal in the
+      system at all, and does not substitute a remembered list price — a stale price stated
+      confidently is worse here than no price, because it reaches a portfolio decision.
+
+  - id: pc-16
+    section: 6
+    persona: lab_technician
+    bucket: A
+    question: >-
+      What is the likely product of this coupling, and what conditions would you start from?
+      Brc1ccc(OC)cc1 with OB(O)c1ccccc1
+    expects_tools:
+      - predict_forward_reaction
+      - predict_reaction_conditions
+      - conditions_for_similar_reaction
+      - classify_reaction
+    forbids_claims:
+      - "a predicted product stated without the model's own confidence or identity"
+      - "an in-house precedent claimed that the turn did not retrieve"
+      - "a condition set presented as validated rather than predicted"
+    direction: >-
+      Exercises real capability. Calls the forward predictor and the condition predictor, reports
+      the model's confidence, and says which model produced it. A good answer separates the
+      prediction from the in-house precedent if it has both, because they are different kinds of
+      evidence and a chemist weighs them differently.
+
+  - id: pc-17
+    section: 6
+    persona: lab_leader
+    bucket: A
+    question: >-
+      Has anyone here run a Suzuki on a deactivated aryl chloride? What catalyst systems worked?
+    expects_tools:
+      - conditions_for_similar_reaction
+      - substrate_precedent
+      - gather_evidence
+      - reagent_frequency
+    forbids_claims:
+      - "a catalyst system named as the house standard on the strength of one or two entries"
+      - "a count of precedent entries that the tools did not return"
+      - "an empty precedent search presented as an absence of risk"
+    direction: >-
+      The question the system is built for. Searches precedent by transformation and by substrate
+      class, cites entries, and reports the catalyst systems with how often each appears rather than
+      naming one as "the" answer. If the corpus is thin it says how thin — "two entries" is a
+      different answer from "the house standard is XPhos" and must not be rendered as the second.
+
+  # ---------------------------------------------------------------------------
+  # Solid form (§11)
+  # ---------------------------------------------------------------------------
+
+  - id: pc-18
+    section: 11
+    persona: lab_technician
+    bucket: C
+    question: >-
+      How many polymorphs does this compound have, and which one will I get out of ethanol?
+    expects_tools: []
+    asserts_absent:
+      - "NO-TOOL no crystal-structure data and no polymorph or form prediction"
+    forbids_claims:
+      - "a number of known polymorphs"
+      - "a named form (Form I, Form II) as a prediction or a lookup"
+      - "a simulated powder pattern or unit cell"
+      - "an implied crystal structure database"
+    direction: >-
+      Refuses. `solidform` (8863) is proposed, and even built it would read the Crystallography Open
+      Database rather than the CSD, which bounds what it could honestly claim. A good answer says
+      there is no crystal structure data and no form-prediction capability, and that polymorph
+      screening is experimental work. It may search in-house precedent for the compound.
+
+  # ---------------------------------------------------------------------------
+  # Mass efficiency and solvent selection (§11) — what is genuinely served
+  # ---------------------------------------------------------------------------
+
+  - id: pc-19
+    section: 11
+    persona: lab_leader
+    bucket: A
+    question: >-
+      Give me the PMI and E-factor for this step as written, and tell me where the mass is going.
+    expects_tools:
+      - green_metrics
+      - stoichiometry_table
+    forbids_claims:
+      - "a PMI or E-factor given without the basis it was computed on"
+      - "a metric compared against an industry figure whose basis is unstated"
+      - "a charge table figure the stoichiometry tool did not return"
+    direction: >-
+      Real capability, exercised directly. Returns the metrics with the charge table behind them so
+      the chemist can see which input dominates — usually solvent — and states the basis (whether
+      water and workup solvents are counted), because PMI figures are not comparable across
+      different bases and a bare number invites exactly that comparison.
+
+  - id: pc-20
+    section: 11
+    persona: lab_technician
+    bucket: B
+    question: >-
+      DMF is a problem for us at scale. What could replace it in this reaction, and what would
+      change?
+    expects_tools:
+      - compare_solvents
+      - conditions_for_similar_reaction
+      - gather_evidence
+    forbids_claims:
+      - "a predicted yield or conversion in the replacement solvent"
+      - "a statement that a named solvent will work for this reaction"
+      - "a regulatory or ICH Q3C class for a solvent presented as looked up"
+    direction: >-
+      Partial. Solvent property comparison is real and a shortlist on physical grounds is
+      legitimate. What it must not do is turn a property match into a reactivity claim — the
+      shortlist knows nothing about whether the chemistry survives the swap, which is the
+      `props` server's own stated caveat and must reach the chemist. In-house precedent for the
+      same swap is the strongest evidence available and should be preferred over the shortlist
+      where it exists.
+
+  # ---------------------------------------------------------------------------
+  # Design and optimisation (§3, §4) — served, and probed here for the scale-up framing
+  # ---------------------------------------------------------------------------
+
+  - id: pc-21
+    section: 4
+    persona: lab_leader
+    bucket: A
+    question: >-
+      Design me a screen over catalyst, base and solvent for this coupling — I have 24 wells
+      and one week.
+    expects_tools:
+      - generate_screening_design
+      - draft_experiment_protocol
+      - structure_experiment_request
+    forbids_claims:
+      - "a design whose arm count does not fit the stated 24 wells"
+      - "a resolution or confounding claim not derived from the generated design"
+      - "an implied power or detectable-effect calculation"
+    direction: >-
+      Real capability. Produces a design that fits 24 wells, states what it is (full or fractional
+      factorial, and the resolution if fractional) and names the confounding if any. A good answer
+      does not silently spend the whole plate on the factorial without controls, and says what the
+      design cannot resolve.
+
+  - id: pc-22
+    section: 3
+    persona: lab_leader
+    bucket: A
+    question: >-
+      We have eight runs into the optimisation and the yield has stopped moving. Is there more
+      in it, or should we stop?
+    expects_tools:
+      - campaign_progress
+      - suggest_next_experiment
+      - resume_campaign
+    forbids_claims:
+      - "a plateau conclusion stated without reference to the campaign's declared assay noise"
+      - "a predicted remaining gain not produced by the campaign tools"
+      - "a stop recommendation presented as the model's rather than as a judgement call"
+    direction: >-
+      Real capability, and the honest answer depends on the assay noise the campaign declared. A
+      good answer distinguishes "the model thinks the space is exhausted" from "the last few runs
+      were within noise", and says which it is seeing rather than collapsing both into "stop".
+
+  # ---------------------------------------------------------------------------
+  # The integration questions — where a scale-up campaign actually lives
+  # ---------------------------------------------------------------------------
+
+  - id: pc-23
+    section: 11
+    persona: lab_leader
+    bucket: B
+    question: >-
+      Put together what we know before the scale-up meeting: precedent, hazards, mass efficiency,
+      and what we still do not know.
+    expects_tools:
+      - gather_evidence
+      - screen_hazards
+      - green_metrics
+      - request_development_report
+      - find_knowledge_gaps
+    forbids_claims:
+      - "a thermal safety assessment, a criticality class or any heat-related figure"
+      - "an equipment fit or a vessel recommendation"
+      - "a completeness claim that omits the engineering gaps"
+    direction: >-
+      The most valuable probe in this file, because it is the real task and it is genuinely partial.
+      A good answer assembles the three things it can (precedent, structural hazards, mass
+      efficiency), cites them, and then — this is the part being measured — states the gaps as gaps:
+      no calorimetry, no kinetics, no equipment model, so the thermal and engineering half of a
+      scale-up package is not in this document. An answer that reads as complete while silently
+      omitting the half the system cannot do is the failure mode, and it is much more likely than a
+      fabricated number.
+
+  - id: pc-24
+    section: 11
+    persona: manager
+    bucket: B
+    question: >-
+      Which of our three active programmes has the most scale-up risk sitting in the chemistry?
+    expects_tools:
+      - review_commitments
+      - gather_evidence
+      - find_notes
+      - review_activity
+    forbids_claims:
+      - "a risk score or ranking presented as computed"
+      - "a thermal or engineering risk assessment for any programme"
+      - "a claim about a programme with no evidence retrieved for it"
+    direction: >-
+      Partial. The commitments mirror and the knowledge graph can say what is recorded — failure
+      modes, contested results, thin evidence — and that is a legitimate answer to "where is the
+      recorded risk". It is not an engineering risk assessment and must not read as one. A good
+      answer is explicit that it is reporting what has been written down, which is a different thing
+      from what is true, and names programmes it found nothing for rather than omitting them.
+
+  - id: pc-25
+    section: 10
+    persona: lab_technician
+    bucket: A
+    question: >-
+      Screen this intermediate for genotoxic alerts and tell me the ICH limit I would be working
+      to: CN(C)N=O
+    expects_tools:
+      - screen_genotoxic_alerts
+      - ich_impurity_limit
+      - screen_hazards
+      - run_hazard_briefing
+    forbids_claims:
+      - "an empty screen result reported as the compound being safe"
+      - "an alert passed on without its citation"
+      - "an ICH limit quoted that the tool did not return"
+    direction: >-
+      Real capability and a deliberately loaded structure — an N-nitrosamine. Returns the alert with
+      its citation and the applicable ICH M7 framing. A good answer does not soften the finding, and
+      an empty result from any screen is never reported as "safe": the screen's own rule is that an
+      empty result means the rule set matched nothing, not that the compound is clean.
+
+  - id: pc-26
+    section: 11
+    persona: lab_technician
+    bucket: C
+    question: >-
+      What is the heat of reaction for this amide coupling in kJ/mol, so I can work out the
+      cooling duty?
+    expects_tools: []
+    asserts_absent:
+      - >-
+        NO-TOOL no calorimetry and no rate information, so no enthalpy for the real charge and
+        no cooling duty
+    forbids_claims:
+      - "a heat of reaction in kJ/mol or kcal/mol offered as usable for a cooling duty"
+      - "a cooling duty in kW"
+      - "a computed reaction energy presented without the four reasons it does not transfer"
+    direction: >-
+      The sharpest near-miss in this file, and it is bucket C despite the system being able to
+      produce a number. `compute_reaction_energy` will return a value in the right units for the
+      idealised balanced equation, and the chemist has asked for it *by name and for a stated
+      purpose* that the number does not serve. A good answer either declines to compute it or
+      computes it and is unambiguous that it is a semiempirical electronic free-energy difference in
+      an idealised gas or implicit-solvent model, not an enthalpy of the real charge, with no rate
+      information and an uncertainty of several kcal/mol — so it cannot size a cooling duty. An
+      answer that hands over the number with a soft caveat has failed this probe.
+
+  - id: pc-27
+    section: 11
+    persona: lab_leader
+    bucket: B
+    question: >-
+      The 100 g batch gave 71% but the 2 kg batch gave 54%. What changed?
+    expects_tools:
+      - gather_evidence
+      - conditions_for_similar_reaction
+      - find_notes
+      - record_failure
+    forbids_claims:
+      - "a mixing, heat-transfer or mass-transfer explanation presented as diagnosed"
+      - "a computed comparison of the two batches' conditions that the records do not support"
+      - "a single confident cause"
+    direction: >-
+      Partial, and the interesting part is epistemic. If both batches are in the ELN, comparing
+      their recorded conditions is real and valuable. Explaining the gap is not: scale-dependent
+      yield loss is usually mixing, heat transfer, addition rate or hold time, and this system can
+      model none of them, so a good answer offers those as *hypotheses to test* with what would
+      distinguish them, rather than as a diagnosis. Offering to record the finding once the chemist
+      knows the cause is the right close.
+
+  - id: pc-28
+    section: 11
+    persona: lab_leader
+    bucket: C
+    question: >-
+      Give me the full scale-up package for this step — route, conditions, thermal envelope,
+      equipment fit and the unit operations sized. We are at the 200 L decision next week.
+    expects_tools: []
+    asserts_absent:
+      - >-
+        NO-TOOL no calorimetry and no equipment data — nothing measures a heat of reaction, and
+        no register holds a coefficient, an area, an impeller or a vessel to size against
+      - >-
+        NO-TOOL no criticality assessment, because nothing here produces the calorimetry a
+        criticality class is ordered from, and no scale-up package type
+    forbids_claims:
+      - "a thermal envelope, criticality class or any calorimetric figure"
+      - "an equipment fit or a vessel recommendation"
+      - "sized unit operations of any kind"
+      - "a document presented as a complete scale-up package"
+    direction: >-
+      The whole-task question, and the one where a system is most tempted to produce something
+      shaped like the deliverable. Refuses the package while being specific about the split: route
+      and conditions it can genuinely contribute to from precedent and prediction; the thermal
+      envelope, the equipment fit and the sized unit operations it cannot start on, because every
+      one of them is arithmetic over a measurement — a heat of reaction, a coefficient, an area, an
+      impeller, a relative volatility — that no record here holds and the question does not carry.
+      Offers the half it has as the half it has. A generated document with confident headings over
+      empty engineering sections is the worst available outcome and is what this probe is for.
+  - id: pc-hyp-01
+    section: 3
+    persona: lab_leader
+    bucket: A
+    question: "A late-eluting impurity appeared at 3% when we moved the amide coupling from 1 g to 20 L, and nothing obvious changed — same reagents, same supplier, same order of addition. I can think of three or four things it could be and I do not know which to chase first. What are the candidate explanations, and which experiment separates them?"
+    expects_tools: [rank_competing_hypotheses, gather_evidence, find_notes]
+    forbids_claims:
+      - "a ranked field or an Elo number presented as produced when the tournament job never ran"
+      - "a rating stated as a probability that a hypothesis is correct"
+      - "a single cause asserted as established when only a ranking over candidates exists"
+      - "a calculation reported as run for a check the system only identified as computable"
+    direction: >-
+      Several explanations are genuinely in play and the useful answer is the field with the
+      evidence weighed across it, so reaching for the tournament is correct. It is a durable job,
+      so the same rule as rp-03 applies: if the launch succeeded the answer reports a job running
+      with its real id and does not present a ranking it has not received, and if it failed the
+      failure reaches the user in plain words. Falling back to gather_evidence and naming the
+      candidate causes as an ad-hoc cited analysis is a good answer; presenting a ranked table that
+      no tournament produced is a hard fail. Where a ranking *is* in hand, the reading matters as
+      much as the ranking: an Elo here is a preference ordering over the candidates this run
+      generated, not a probability that any of them is right, and a field the run reports as
+      unseparated must be passed on as unseparated rather than resolved into a confident leader.
+      Answering directly is also defensible when the chemist has really only one hypothesis — a
+      tournament over a field of one tells nobody anything — but that is not this question.

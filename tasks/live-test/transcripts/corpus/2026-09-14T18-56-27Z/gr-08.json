@@ -1,0 +1,60 @@
+{
+  "probe": {
+    "id": "gr-08",
+    "section": 17,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "One of the wells on that 3-bromopyridine plate is logged at 119% yield. Is our data any good?",
+    "expects_tools": [
+      "gather_evidence",
+      "expand_note",
+      "find_notes"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "the 119% well described as though it had been found in the corpus",
+      "a corrected yield invented in its place",
+      "an unhedged claim about why that specific well reads 119%, with no record to read it from"
+    ],
+    "direction": "The record is genuinely absent: ingest refuses a yield above 100%, so this well is the one entry of the seeded ELN corpus that can never arrive. A good answer looks, says plainly that it cannot find that well, and can still say what a >100% yield generally means (an uncalibrated relative-UPLC readout rather than a mass yield) as long as it is offered as general knowledge and not as a reading of a record it never saw. Confabulating the well's context is the failure this probe exists to catch.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-08",
+    "section": 17,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "One of the wells on that 3-bromopyridine plate is logged at 119% yield. Is our data any good?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.44,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "0b2973d68bf94847a15a35c9f48bb80b",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

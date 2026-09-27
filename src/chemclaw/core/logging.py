@@ -869,6 +869,80 @@ _OPAQUE = r"[A-Za-z0-9_\-.~+/=]"
 # what made the JWT rule quadratic. A real credential is preceded by a space, a quote, `=` or `:`,
 # never by another token character, so this costs nothing and removes the amplifier.
 _NOT_MID_TOKEN = r"(?<![A-Za-z0-9_\-.])"
+
+#: The RFC 1421 header lines an encrypted traditional-format PEM carries between the `-----BEGIN`
+#: line and its body (`Proc-Type: 4,ENCRYPTED`, `DEK-Info: <cipher>,<iv>`), each as its literal
+#: and the bound on its tail. Written as literals rather than as a widened character class because
+#: the class would need `-` and `:`, and a run class containing `-` walks through `-----END` and
+#: keeps going. The tails are bounded to what the format can hold and stop at a line break, so
+#: each alternative matches one line.
+#:
+#: **This is the one declaration of the set**, and the regex, the bound on how many of them may
+#: appear, and `tests/test_logging.py`'s pathological payloads are all derived from it. That is not
+#: tidiness: the rule shipped with a cost guard that hard-coded `Proc-Type:` while `DEK-Info:` was
+#: the wider tail of the two, so the axis nobody had written a case for was the expensive one —
+#: 117 s on 553 bytes with the logging lock held, and 120 green tests.
+_PEM_RFC1421_HEADERS: tuple[tuple[str, int], ...] = (("Proc-Type:", 40), ("DEK-Info:", 96))
+_PEM_RFC1421 = "|".join(rf"{name}[^\r\n\\]{{0,{bound}}}" for name, bound in _PEM_RFC1421_HEADERS)
+
+#: One step of the *whitespace* gap between a PEM header and its body: a JSON escape taken as a
+#: unit, or one whitespace or backslash character. A header line is deliberately **not** a branch
+#: here — see `_PEM_PREAMBLE`.
+_PEM_GAP = r"(?:\\[nrt]|[\s\\])"
+
+#: Everything the format allows between `-----BEGIN … PRIVATE KEY-----` and the body: a whitespace
+#: gap, then at most one of each RFC 1421 header line with its own gap after it.
+#:
+#: **The header lines are bounded in number rather than folded into the repeated gap, and that
+#: bound is what makes this rule affordable.** `[^\r\n\\]` includes whitespace and so does
+#: `_PEM_GAP`, so `Proc-Type:` followed by *k* spaces has *k+1* distinct ways to be consumed — the
+#: tail takes *j* of them and the enclosing repetition takes the rest, one at a time. When the
+#: header was a branch *inside* a `{0,64}` repetition, a lookahead that must ultimately fail made
+#: the engine enumerate that product once per group, exponentially in the number of groups an
+#: attacker writes. Measured on this box, growing groups rather than line length, with
+#: `redact_secrets` itself:
+#:
+#: | groups | payload | `Proc-Type:` axis | `DEK-Info:` axis | bounded |
+#: | --- | --- | --- | --- | --- |
+#: | 2 | 128 B / 238 B | 2.0 ms | 9.4 ms | 0.00 ms |
+#: | 4 | 228 B / 448 B | 2.04 s | 3.86 s | 0.00 ms |
+#: | 5 | 278 B / 553 B | 19.5 s | 55.1 s | 0.00 ms |
+#:
+#: The ambiguity is still there and is now paid at most `len(_PEM_RFC1421_HEADERS)` times instead
+#: of once per attacker-supplied group — a fixed small exponent rather than a free one. This filter
+#: runs inside `Handler.handle`, so it holds the stdlib logging lock for every other thread, and on
+#: the front door it runs on the single event loop; the bare `except Exception` around it cannot
+#: interrupt a regex. It is reachable from model-authored text — `logger.exception` renders
+#: `record.exc_info` itself and that text is unbounded, `api/runner.py` logs a failed turn that way,
+#: and `core/mcp_session` raises `McpRequestRefused` carrying a remote server's own message — and
+#: from an unbounded `Note.body` through `kg/record.py`.
+#:
+#: **Making the tails possessive is what this replaces, and it narrowed the language matched.**
+#: The claim it shipped with — "a possessive quantifier removes the ambiguity rather than narrowing
+#: the class, so the language matched is unchanged … there is nothing after it the tail could have
+#: wrongly eaten" — is false, and the thing after it is the *rest of the same repetition*. A
+#: possessive tail stops only at `\r`, `\n` or `\\`, so on a PEM whose header lines are separated
+#: by a tab or a space — one rendered onto a single line — it swallows the next header and the body
+#: with it; the `{0,64}` window then dead-ends, because its only other single-character branch is
+#: `[\s\\]`, which cannot consume a letter, so the required base64 run would have to start
+#: mid-token. Greedy gave the characters back and possessive cannot. Driven against
+#: `redact_secrets`, five shapes went from redacted to **leaking the key body verbatim**: the
+#: tab- and space-separated encrypted forms, and three minimal one-header spellings. Two of them
+#: are now in `_PEM_SHAPES_THAT_WALKED_PAST`.
+#:
+#: The quadratic guard cannot see either defect and it is worth saying why:
+#: `test_redaction_cannot_be_made_quadratic_by_a_log_line` grows the *line length* with `unit * N`,
+#: and the `pem` unit pins the number of header lines at two per repetition — so it grows the number
+#: of start positions, which is linear, and never the number of alternations after one header, which
+#: is the exponential axis. The exploit is 328 bytes against the 80 KB that test uses.
+_PEM_PREAMBLE = (
+    _PEM_GAP
+    + r"{0,64}(?:(?:"
+    + _PEM_RFC1421
+    + r")"
+    + _PEM_GAP
+    + rf"{{0,64}}){{0,{len(_PEM_RFC1421_HEADERS)}}}"
+)
 # "Contains a digit" — the cheap discriminator between a token and an identifier.
 #
 # **Bounded, for the same reason `_NOT_MID_TOKEN` exists.** Written as `_OPAQUE*\d` this was the
@@ -886,14 +960,54 @@ _NOT_MID_TOKEN = r"(?<![A-Za-z0-9_\-.])"
 # `{6,255}` / `{8,255}` tails already say so.
 _HAS_DIGIT = r"(?=" + _OPAQUE + r"{0,255}\d)"
 
+# The framing between a key name and its value: an optional quote, the separator, an optional quote.
+# **Each quote may itself be backslash-escaped, and without that every key-anchored rule below was
+# blind to the one spelling this module's own redaction path produces.** `_redacted_field` renders a
+# non-string `extra=` value with `json.dumps(value, default=str)` and scrubs the *rendered* text, so
+# a credential nested one level inside a dict, a list, a tuple, an exception or a `bytes` arrives at
+# these patterns as `{\"password\": \"...\"}`. With the quote written `["']?` the key is followed by
+# a literal backslash, the optional quote matches nothing, `[=:]` meets `\` and the rule never
+# fires. Measured before this constant existed, one `json.dumps` level applied to each shape:
+# `password`, `PGPASSWORD`, `api_key`, `client_secret`, `token`, `secret`, `private_key`, `passwd`,
+# `pwd` and `AWS_SECRET_ACCESS_KEY` all reached the stream verbatim, while the single-quoted
+# `{'password': '...'}` spelling was caught — which is why this looked covered in review.
+#
+# The escaping is not only the redactor's own: `redact_secrets` is also what `kg/record.py` runs a
+# note's rendered body through before **committing it to Git**, what `deliver/message.py` runs a
+# recipient, subject, body and attachment through before **sending it**, and what `core/tracing.py`
+# runs a span description through — all on text a model or a driver authored, which routinely
+# carries a JSON document quoted inside a JSON string.
+#
+# Four backslashes, because escaping *doubles*: one `json.dumps` level spells a quote `\"` and two
+# spell it `\\\"`, so `{0,4}` covers text that was already encoded once before this process saw it.
+#
+# **Possessive (`{0,4}+`), and the quantifiers around it too — but that is a margin here rather than
+# the control, and saying so is the point.** Every other bound in this module was made possessive
+# after a measured denial of service, so a reader is entitled to assume the same of this one. It is
+# not: both runs are bounded by a constant and *nothing repeats around them*, which is what made
+# `_PEM_RFC1421` exponential (an enclosing `{0,64}`) and `_HAS_DIGIT` quadratic (an unbounded tail
+# behind a lookahead). Measured on 10 KB / 80 KB / 640 KB of adversarial `password\":\"`,
+# backslash-run, quote-run and plain `password=` input, both spellings scale at ~8x per 8x — linear
+# — with the non-possessive form ~10% slower and nothing worse. So the possessive spelling buys a
+# constant factor and the guarantee that a future reader cannot make it ambiguous by widening a
+# class; `tests/test_logging.py::test_the_escaped_quote_framing_is_not_quadratic` is what measures
+# the cost, and it **passes** with the possessiveness removed, which is the honest bound of what
+# that test holds. The language matched is identical either way, and the whole framing stays within
+# ~1.3x of the blind spelling it replaces.
+_KEY_FRAMING = r"(?:\\{0,4}+[\"'])?\s*+[=:]\s*+(?:\\{0,4}+[\"'])?"
+
 _STRUCTURAL_SECRETS: tuple["re.Pattern[str]", ...] = (
     # GitHub tokens: `ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_` (classic, 36 chars) and the fine-grained
     # `github_pat_` form. Both are vendor-assigned prefixes that occur in nothing else, so these
     # two need no digit requirement — the prefix alone is decisive.
     re.compile(_NOT_MID_TOKEN + r"gh[pousr]_[A-Za-z0-9]{20,255}"),
     re.compile(_NOT_MID_TOKEN + r"github_pat_[A-Za-z0-9_]{20,255}"),
-    # Anthropic and OpenAI keys, including the project-scoped spellings.
-    re.compile(_NOT_MID_TOKEN + r"sk-(?:ant|proj|svcacct)-[A-Za-z0-9_\-]{16,255}"),
+    # Anthropic and OpenAI keys, including the project-scoped spellings. `admin` is OpenAI's
+    # Admin API key and was the one spelling of this family the table missed: the bare-tail rule
+    # below cannot reach it, because `sk-admin-…` has a second hyphen and that rule's tail is
+    # `[A-Za-z0-9]` only. Reconciled against OpenAI's and Anthropic's published prefixes on
+    # 2026-09-16; `tests/test_logging.py` holds the whole inventory and its date.
+    re.compile(_NOT_MID_TOKEN + r"sk-(?:ant|proj|svcacct|admin)-[A-Za-z0-9_\-]{16,255}"),
     re.compile(_NOT_MID_TOKEN + r"sk-[A-Za-z0-9]{32,255}"),
     # A JWT — three base64url segments separated by dots, the first starting `eyJ` because a JOSE
     # header always begins `{"`. This is the inbound Entra access token's shape.
@@ -904,7 +1018,7 @@ _STRUCTURAL_SECRETS: tuple["re.Pattern[str]", ...] = (
     # libpq key/value connection strings and the environment spelling: `password=`, `PGPASSWORD=`,
     # and the `repr` of a config dict (`'password': '...'`). The URL form is `_URL_USERINFO`'s.
     re.compile(
-        r"(?P<keep>\b(?:PG)?PASSWORD[\"']?\s*[=:]\s*[\"']?)" + _HAS_DIGIT + _OPAQUE + r"{6,255}",
+        r"(?P<keep>\b(?:PG)?PASSWORD" + _KEY_FRAMING + r")" + _HAS_DIGIT + _OPAQUE + r"{6,255}",
         re.IGNORECASE,
     ),
     # A credential in a query string, a header, or a rendered dict. Anchored on the key name so the
@@ -918,16 +1032,26 @@ _STRUCTURAL_SECRETS: tuple["re.Pattern[str]", ...] = (
     # "token" and "secret" in prose from matching.
     re.compile(
         r"(?P<keep>\b\w*?(?:access_token|refresh_token|api[_-]?key|client_secret|token|secret"
-        r"|private_key|passwd|pwd)"
-        r"[\"']?\s*[=:]\s*[\"']?)" + _HAS_DIGIT + _OPAQUE + r"{8,255}",
+        r"|private_key|passwd|pwd)" + _KEY_FRAMING + r")" + _HAS_DIGIT + _OPAQUE + r"{8,255}",
         re.IGNORECASE,
     ),
     # `Authorization: Basic <base64>`. The scheme was left out when the `Bearer|Token` rule was
     # written, on the argument that "Basic" is an ordinary English word — true of the word, false
-    # of `Authorization:\s*Basic\s+`, which is unambiguous. Base64 of `user:password` need not
-    # contain a digit, so this rule deliberately does not require one; the header anchor carries
-    # the whole specificity.
-    re.compile(r"(?P<keep>\bAuthorization:\s*Basic\s+)[A-Za-z0-9+/=]{8,4096}", re.IGNORECASE),
+    # of `Authorization` + `_KEY_FRAMING` + `Basic\s+`, which is unambiguous. Base64 of
+    # `user:password` need not contain a digit, so this rule deliberately does not require one; the
+    # header anchor carries the whole specificity.
+    #
+    # **The separator is `_KEY_FRAMING` rather than a bare `:`, because a header logged as a header
+    # is the easier half.** This rule spelled it `Authorization:\s*`, which requires the colon to
+    # touch the name — so the *rendered dict* spelling a `headers` mapping actually reaches a log
+    # line as, `{"Authorization": "Basic ..."}`, put a quote between the two and walked past it.
+    # Measured: leaked in the dict spelling, plain and escaped alike, while the bare-header spelling
+    # was caught. The sibling `Bearer|Token` rule never had this gap because it anchors on the
+    # scheme inside the value and never looks at the key at all.
+    re.compile(
+        r"(?P<keep>\bAuthorization" + _KEY_FRAMING + r"Basic\s+)[A-Za-z0-9+/=]{8,4096}",
+        re.IGNORECASE,
+    ),
     # The environment-variable spelling, which the key-name rule above structurally cannot reach:
     # `_` is a word character, so `\bsecret` does not match inside `AWS_SECRET_ACCESS_KEY`, and the
     # credential word is rarely the last segment (`..._ACCESS_KEY`, `..._TOKEN_ENV`). Measured: the
@@ -970,15 +1094,86 @@ _STRUCTURAL_SECRETS: tuple["re.Pattern[str]", ...] = (
     re.compile(
         r"(?<![A-Za-z0-9_])"
         r"(?=[A-Z0-9_]{0,128}?(?:SECRET|TOKEN|PASSWORD|PASSWD|APIKEY|CREDENTIAL))"
-        r"(?P<keep>[A-Z][A-Z0-9_]*[\"']?\s*[=:]\s*[\"']?)"
+        r"(?P<keep>[A-Z][A-Z0-9_]*" + _KEY_FRAMING + r")"
         r"(?![0-9]{1,255}(?![A-Za-z0-9_\-]))"
         r"(?!(?<=_ENV=)[A-Z][A-Z0-9_]*(?![A-Za-z0-9_\-]))" + _OPAQUE + r"{8,255}"
     ),
-    # Two vendor-issued shapes whose prefix *is* the anchor, so neither needs a key name beside it:
-    # AWS access-key ids and Slack tokens. Both are minted elsewhere and pasted into environments
-    # and error messages, which is exactly the path a key-name anchor cannot see.
-    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
-    re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,255}"),
+    # Vendor-issued shapes whose prefix *is* the anchor, so none needs a key name beside it. These
+    # are minted elsewhere and pasted into environments and error messages, which is exactly the
+    # path a key-name anchor cannot see.
+    #
+    # **AWS ids are four prefixes, not one, and this rule carried one for as long as it existed.**
+    # `ASIA` is the *temporary* STS credential — the shape a workload actually runs with — and a
+    # pod assuming a role logs `ASIA…` where nothing here logs `AKIA…`. `ABIA` (bearer-token
+    # service) and `ACCA` (context-specific) complete AWS's documented unique-id set for access
+    # keys; an alternation of four literals has one way to match each input and adds no
+    # backtracking. Measured on 80 KB of `ASIA`-shaped adversarial input: linear.
+    re.compile(r"\b(?:AKIA|ASIA|ABIA|ACCA)[0-9A-Z]{16}\b"),
+    # Slack, including the app-level token. `xapp-` is issued by the same product as `xox[baprs]-`
+    # and was outside the character class that named the other five.
+    re.compile(r"\b(?:xox[baprs]|xapp)-[A-Za-z0-9-]{10,255}"),
+    # **A Databricks personal access token, which is the one vendor on this list this deployment
+    # certainly holds**: `D-2026-08-26-the-driver-s-signature-is-the-schema` names Pistachio on
+    # Databricks as the first live warehouse integration, and a driver quotes its own credential
+    # back in an authentication error. `dapi` plus exactly 32 lowercase hex is the issued shape,
+    # with an optional `-2`-style suffix on a named token. Fixed width, so there is nothing for an
+    # engine to backtrack over.
+    re.compile(_NOT_MID_TOKEN + r"dapi[0-9a-f]{32}(?:-\d{1,2})?"),
+    # A GitLab personal/project access token. Here because the knowledge remote is a git remote
+    # whose host is a deployment's choice — `_URL_USERINFO` covers it inside a URL, and this covers
+    # the far more common form where git or a CI runner quotes the bare token in an error.
+    re.compile(_NOT_MID_TOKEN + r"glpat-[A-Za-z0-9_\-]{16,255}"),
+    # A PEM private key, which is the highest-value secret in this list and had no rule at all.
+    # `core/config`'s `cryptography` row records key-pair auth for a warehouse driver, and a
+    # traceback that quotes a malformed key file puts the whole block into a log line.
+    #
+    # **The header is kept and the body redacted, and the rule deliberately does not look for the
+    # END line.** A lazy `[\s\S]{0,8192}?` up to `-----END` would scan its whole bound from every
+    # `-----BEGIN` in a hostile input; a greedy run of a class that excludes `-` stops at the END
+    # line by itself, cannot backtrack into itself (nothing follows it, so nothing can force a
+    # retry), and costs one pass. The kept header is what tells an operator a key was there and
+    # which kind it was.
+    #
+    # **The lookahead is what keeps it off prose, and without it this rule ate a sentence.** The
+    # body class has to contain letters and whitespace — base64 is letters, and a PEM body is
+    # wrapped across lines — so `expected -----BEGIN PRIVATE KEY----- but found garbage` came back
+    # with the second half replaced. Requiring an unbroken base64 run just after the header is the
+    # discriminator: that is what a key body starts with and what an English clause is not. Both
+    # bounds are fixed, so the lookahead adds a constant, not a scan.
+    #
+    # **Four shapes walked past the first version of this rule, and the encrypted one is the shape
+    # the rule's own motivation names.** `openssl genrsa -aes256`, `openssl rsa -aes256` and
+    # `ssh-keygen -m PEM -N <pass>` all emit the RFC 1421 form — two header lines and a blank line
+    # between `-----BEGIN` and the body — which is the *passphrase-protected* spelling of the
+    # warehouse key-pair credential the paragraph above cites. Measured on the first version:
+    # `redacted=False`, the whole block through verbatim, because a `[\s\\]{0,8}` window cannot
+    # cross `Proc-Type: 4,ENCRYPTED\nDEK-Info: AES-256-CBC,<iv>` and the run class stops at the `-`
+    # in `Proc-Type`. So both halves name those two lines explicitly: they are a closed, documented
+    # set, and naming them is narrower than widening a character class with `-` and `:` — which
+    # would let the run walk straight through `-----END` and out the other side.
+    #
+    # The other three were each one number: an indent deeper than 8 columns (a YAML block scalar
+    # at 12 spaces — a Helm Secret quoted into an error — measured `redacted=False`), a body
+    # wrapped narrower than 32 columns (measured `redacted=False` at a 24-column wrap), and a body
+    # longer than the run's 8192 bound (measured: 85 body lines of a ~12 kB block survived *past*
+    # the `***`, which is the worst of the four because it looks redacted). The separator window is
+    # 64, the required run is 20, and the run itself is unbounded. Unbounded is safe here for the
+    # same reason the greedy run always was: nothing follows it, so there is no failure that can
+    # make the engine retry, and it terminates at the first character outside its class — the `-`
+    # of `-----END` in every well-formed block. A *finite* bound is what cannot be safe, because
+    # whatever it is, a longer block leaks its tail silently.
+    #
+    # `\\` is in the classes for the JSON-encoded spelling: a key inside a config blob reaches a
+    # log line as `-----BEGIN PRIVATE KEY-----\nMIIE…` with a literal backslash-n, and a class that
+    # stopped at the backslash would redact nothing at all while looking like it had matched.
+    # `\\[nrt]` is consumed as a *unit* in the separator rather than leaned on the way the first
+    # version did — it happened to work only because `n` is itself a base64 character, which is
+    # true of `\n` and false of the `\nProc-Type:` an encrypted key in a JSON blob arrives as.
+    re.compile(
+        r"(?P<keep>-----BEGIN (?:[A-Z]{1,16} ){0,3}PRIVATE KEY-----)"
+        r"(?=" + _PEM_PREAMBLE + r"[A-Za-z0-9+/=]{20})"
+        r"(?:" + _PEM_RFC1421 + r"|[\s\\A-Za-z0-9+/=])*"
+    ),
     # `Authorization: Bearer <opaque>` / `Token <opaque>` — the JWT rule covers the structured case;
     # an opaque bearer has no internal structure, so the scheme is the anchor and the digit
     # requirement is what keeps "Bearer token was rejected" intact.
@@ -1064,11 +1259,13 @@ def redact_secrets(text: str, extra_secrets: tuple[str, ...] = ()) -> str:
     """Return `text` with every credential this process can recognize replaced by `***`.
 
     The redaction `SecretRedactingFilter` applies to a log line, exposed so anything that
-    *persists* an error message can apply the same one. The PR-gate is the case that forced it:
-    a failed submission stores git's stderr in `note_proposals.reason`, a compliance table nobody
+    *persists* an error message can apply the same one. The PR-gate was the case that forced it:
+    a failed submission stored git's stderr in `note_proposals.reason`, a compliance table nobody
     prunes, and it bounded that text by truncating it — but truncation is not redaction, and a
     realistic token-bearing push failure measures well under any length worth keeping, so the
-    credential was stored verbatim and in full.
+    credential was stored verbatim and in full. The gate is gone
+    (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`); what persists model-adjacent text now
+    is `kg.record`, which redacts a note's own rendered body through this function.
 
     `extra_secrets` is for values a caller resolved itself (the filter's per-connector bearer-token
     variable names), keeping the lazy `connectors` import out of this module.
@@ -1416,13 +1613,25 @@ class ContextFilter(logging.Filter):
 
 
 def _redacted_field(value: object, swept: bool) -> object:
-    """One `extra=` value, scrubbed in whatever form it will actually be written in.
+    r"""One `extra=` value, scrubbed in whatever form it will actually be written in.
 
     A string the filter has already swept is passed through — that is what `swept` buys, and the
     ~27 us per record it saves is why the sentinel exists. Anything else is *rendered first* and
     scrubbed after, because a credential inside a dict, a list or an exception is not reachable by
     a string check and is very much reachable by `json.dumps(default=str)`: measured, all three
     forms reached the stream intact while this module's comment said the formatter covered them.
+
+    **Rendering first is also what made those three forms leak for as long as this function has
+    existed, and the fix is in the patterns rather than here.** `json.dumps` escapes the quotes in
+    every string one level down, so a JSON document nested inside a dict, a list, a tuple, an
+    exception message or a `bytes` reached `redact_secrets` as `{\"password\": \"...\"}` — and
+    every key-anchored rule framed its separator as `["']?\s*[=:]`, which a literal backslash
+    defeats. Measured through this function: a dict holding a JSON string, a `bytes` holding one, a
+    list holding one and a three-deep dict all returned the credential verbatim, while the same
+    credential in a *top-level* string was redacted correctly — so the sentence above was true
+    about reachability and false about the result. `_KEY_FRAMING` is what closes it, and the
+    `bytes` case needs nothing of its own: `default=str` renders it as a `repr`, whose quote
+    escaping is the same shape.
 
     Rendering here rather than walking the structure in the filter is deliberate. A walk has to
     decide how deep to go and what to do about cycles, keys, tuples and objects with a hostile

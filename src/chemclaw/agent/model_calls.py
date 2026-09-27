@@ -88,8 +88,10 @@ output, and for which tool — and they are counted at the emission, once, becau
 attempt any more.
 """
 
+import json
 import logging
 import time
+from bisect import bisect_right
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
@@ -127,6 +129,22 @@ _UNPARSED_ARGUMENTS = "__unparsed_arguments__"
 # `_empty_answer_event` count more refusals than attempts. Distinct from anything a provider mints,
 # and stable within the reply, which is the only scope that can collide.
 _UNPARSED_CALL_ID = "unparsed-call-"
+
+# Set beside `_UNPARSED_ARGUMENTS` on a call that parsed only because upstream completed it: the
+# provider stopped at its output limit mid-document, and `parse_partial_json` closed the string and
+# the brace it was cut inside. Its own key so the refusal can say *why* the call did not run — the
+# arguments are valid JSON, so "not valid JSON" would send the model to fix a document it wrote
+# correctly as far as it got.
+_CUT_OFF = "__cut_off_at_output_limit__"
+
+# The `finish_reason` values that mean the provider stopped because it ran out of output budget,
+# not because the model finished. `length` is the OpenAI-compatible spelling every gateway here
+# speaks; `max_tokens` is the Anthropic-native one a gateway may pass through unchanged.
+_OUTPUT_LIMIT_REASONS = frozenset({"length", "max_tokens"})
+
+# The `error` a demoted call carries, and what the promotion recognises it by — not its id, which a
+# provider may omit.
+_CUT_OFF_ERROR = "the reply stopped at the output-token limit mid-call"
 
 
 def model_call_middleware() -> list[Any]:
@@ -299,24 +317,30 @@ def _bounded_reason(value: object) -> str:
     # Slice the *text* and quote the slice, never the other way round. Slicing `quoted` is what the
     # first version did, and it cuts an escape sequence in half: a trailing newline is `\n` in the
     # quoted form, so a cut landing between the two characters left the letter `n` in the reason a
-    # chemist reads — a corruption that reads as content. Binary search because `repr` expands by
-    # up to four characters per input character, so no fixed slice width is both safe and tight.
-    lo, hi = 0, len(text)
-    while lo < hi:
-        mid = (lo + hi + 1) // 2
-        if len(repr(text[-mid:])) <= limit:
-            lo = mid
-        else:
-            hi = mid - 1
-    # **`text[-0:]` is the whole string, not the empty one**, so the search failing to fit even one
-    # character has to be answered here rather than by the slice. It was not, and the bound was
-    # then lost completely: measured at a budget of 0, 1 or 2 against a 100 kB parse error, this
-    # returned **100,024** characters — the exact failure the function exists to prevent, at
-    # exactly the tightening an operator would make to be safer. `agent_audit_max_arg_chars` is
-    # `ge=0` with no floor, and `repr` of a single character is already three characters wide, so
-    # any budget under 3 reaches this branch. The ellipsis alone is the honest answer: the budget
-    # says there is no room, and something was still cut.
-    return "…" + repr(text[-lo:]) if lo else "…"
+    # chemist reads — a corruption that reads as content. A search rather than a fixed width
+    # because `repr` expands by up to four characters per input character, so no fixed slice is
+    # both safe and tight.
+    #
+    # **The search space starts at 1, and that is the whole of what used to be a guard.**
+    # `text[-0:]` is the whole string, not the empty one, so a hand-rolled bisection that can
+    # settle on 0 hands the slice a length that means "everything": measured at a budget of 0, 1
+    # or 2 against a 100 kB parse error, the version before the guard returned **100,024**
+    # characters — the exact failure this function exists to prevent, at exactly the tightening an
+    # operator would make to be safer. `agent_audit_max_arg_chars` is `ge=0` with no floor, and
+    # `repr` of a single character is already three characters wide, so every budget under 3 fits
+    # nothing. Bisecting `range(1, …)` makes that value unrepresentable instead of guarded: the
+    # index 0 that `bisect_right` returns when nothing fits is a *count*, never a slice length,
+    # and it is answered below.
+    #
+    # `bisect_right` needs its keys non-decreasing, which they are: prepending a character can
+    # only add to the quoted body, and the quote flip `repr` makes when the string gains a `'` or
+    # a `"` only ever re-prices existing characters upward. Checked over 20,000 random strings
+    # drawn from quotes, backslashes, newlines, NUL and non-ASCII — no inversion, and the index
+    # agrees with the old loop and with a linear scan on every one of them.
+    longest = bisect_right(range(1, len(text) + 1), limit, key=lambda n: len(repr(text[-n:])))
+    # The ellipsis alone is the honest answer when nothing fits: the budget says there is no room,
+    # and something was still cut.
+    return "…" + repr(text[-longest:]) if longest else "…"
 
 
 @dataclass(frozen=True, slots=True)
@@ -513,6 +537,7 @@ def _promote(request: ModelRequest[Any], response: Any) -> Any:
     things nothing here has an opinion about. The message is this call's own, freshly returned and
     not yet in state.
     """
+    _demote_cut_off_calls(response)
     failures = invalid_tool_calls(response)
     if not failures:
         return response
@@ -553,13 +578,70 @@ def _promote(request: ModelRequest[Any], response: Any) -> Any:
                     # printed "1 tool call(s) attempted, 2 refused by a gate" — an impossible count.
                     # The index makes it unique within the reply, which is the scope that collides.
                     "id": str(call.get("id") or "") or f"{_UNPARSED_CALL_ID}{index}",
-                    "args": {_UNPARSED_ARGUMENTS: bounded_repr(call.get("args"))},
+                    "args": {
+                        _UNPARSED_ARGUMENTS: bounded_repr(call.get("args")),
+                        **({_CUT_OFF: True} if call.get("error") == _CUT_OFF_ERROR else {}),
+                    },
                     "type": "tool_call",
                 }
             )
         message.tool_calls = promoted
         message.invalid_tool_calls = []
     return response
+
+
+def _finish_reason(message: AIMessage) -> str:
+    """Why the provider stopped emitting this message, as `response_metadata` names it.
+
+    **Read by containment, not equality, by whoever compares it.** Streamed chunks merge their
+    metadata with `merge_dicts`, which *concatenates* strings — so a gateway that repeats
+    `finish_reason` on a trailing usage chunk leaves `"lengthlength"` on the merged message, and an
+    equality test would let exactly the cut-off call this exists to stop run on upstream's guess.
+    """
+    metadata = message.response_metadata or {}
+    return str(metadata.get("finish_reason") or metadata.get("stop_reason") or "")
+
+
+def _demote_cut_off_calls(response: Any) -> None:
+    """Move every tool call of a reply cut off at the output limit onto `invalid_tool_calls`.
+
+    **A cut-off document is not a finished one, and upstream makes the two look alike.** LangChain
+    runs a streamed call's argument fragments through `parse_partial_json`, which closes an
+    unterminated string and an unclosed brace — so `'{"smiles": "CC'` arrives as a valid call
+    reading `{"smiles": "CC"}`, and the tool ran on a truncated molecule with nothing anywhere
+    saying the document was incomplete. The call cannot tell, but the response can:
+    `finish_reason` is `length` when the provider stopped because the budget ran out.
+
+    **Every call in such a reply, not only the last.** A stream is cut once, at its end, so strictly
+    only the final call is truncated — but which call was being written when the budget ran out is
+    not something the merged message records, and running the earlier ones while refusing the last
+    would act on half of a plan the model was still stating. Refused together, the model re-issues
+    them together, inside its own loop and under every bound the loop has.
+
+    Demoted rather than refused here, so the one mechanism that already makes an unusable call
+    visible — `_promote` then `refuse_unparsed_arguments` — makes this one visible too, with the
+    audit row, the `tool_failed` and the `ToolMessage` it already produces
+    (`D-2026-09-25-a-call-cut-off-at-the-output-limit-does-not-run`).
+
+    Marked with `_CUT_OFF_ERROR`, so the promotion can say "cut off" rather than "malformed".
+    """
+    for message in _messages_of(response):
+        if not isinstance(message, AIMessage) or not message.tool_calls:
+            continue
+        reason = _finish_reason(message)
+        if not any(limit in reason for limit in _OUTPUT_LIMIT_REASONS):
+            continue
+        for call in message.tool_calls:
+            message.invalid_tool_calls.append(
+                {
+                    "name": call.get("name"),
+                    "args": json.dumps(call.get("args"), default=str),
+                    "id": call.get("id"),
+                    "error": _CUT_OFF_ERROR,
+                    "type": "invalid_tool_call",
+                }
+            )
+        message.tool_calls = []
 
 
 class UnparsedArguments(ChemclawError):
@@ -609,6 +691,15 @@ async def refuse_unparsed_arguments(request: Any, handler: Callable[[Any], Any])
     document = arguments.get(_UNPARSED_ARGUMENTS) if isinstance(arguments, dict) else None
     if document is None:
         return await handler(request)
+    if arguments.get(_CUT_OFF):
+        raise UnparsedArguments(
+            f"Your reply stopped at the output-token limit while this call was being written, so "
+            f"its arguments may be incomplete and it did not run. Completed by the client from the "
+            f"cut-off document, they read {defang(str(document))} — which may not be what you "
+            f"meant. Re-issue the call with its complete arguments — fewer or "
+            f"shorter calls in one reply if the limit is what cut it — rather than answering as "
+            f"though the tool had returned."
+        )
     raise UnparsedArguments(
         f"The arguments for this call were not valid JSON, so it did not run. What was received "
         f"was {defang(str(document))}. Re-issue the call with complete, valid JSON arguments; if "

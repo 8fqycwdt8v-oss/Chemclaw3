@@ -70,16 +70,22 @@ advertising a mechanism after the mechanism is gone.
 
 import logging
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping, Sequence
+from functools import partial
 from pathlib import Path
 from typing import Annotated, Any, NotRequired, cast
 
 from deepagents import create_deep_agent
 from deepagents.backends import CompositeBackend, StateBackend
 from deepagents.middleware.filesystem import FilesystemMiddleware
-from deepagents.middleware.skills import SkillMetadata, SkillsMiddleware, SkillsState
-from langchain.agents.middleware import TodoListMiddleware
+from deepagents.middleware.skills import (
+    SKILLS_SYSTEM_PROMPT,
+    SkillMetadata,
+    SkillsMiddleware,
+    SkillsState,
+)
 from langchain.agents.middleware.types import PrivateStateAttr
+from langchain_core.runnables import RunnableLambda
 from langgraph.channels.untracked_value import UntrackedValue
 
 # `_capability_tools` keeps its underscore deliberately. It is named in six merged ADRs (D-040,
@@ -89,35 +95,55 @@ from langgraph.channels.untracked_value import UntrackedValue
 # and `durable/template_activities.py` — and within one package that is the established idiom here.
 # (Unnumbered deliberately: this said "three tests", and it was six importers including a
 # production one, which is what a count in a comment does.)
-from chemclaw.agent.audit import AuditSink, make_audit_middleware
+from chemclaw.agent import audit as audit_module
+from chemclaw.agent.audit import (
+    AuditSink,
+    NullAuditSink,
+    make_audit_middleware,
+)
 from chemclaw.agent.chemclaw_agent import (
     _advertised_names,
     _capability_tools,
     instructions_for,
 )
 from chemclaw.agent.compaction import context_compaction_middleware, disabled_summarizer
+from chemclaw.agent.handoff import PEER_BRIEF
 from chemclaw.agent.llm_provider import build_chat_model
+from chemclaw.agent.local_skills import (
+    LOCAL_SKILLS_LABEL,
+    LOCAL_SKILLS_ROOT,
+    PERSONAL_TIER_TOOLS,
+    personal_skills_available,
+)
 from chemclaw.agent.loop_cap import enforce_loop_cap
 from chemclaw.agent.model_calls import model_call_middleware, refuse_unparsed_arguments
+from chemclaw.agent.org_skills import ORG_SKILLS_LABEL, ORG_SKILLS_ROOT
 from chemclaw.agent.plan_gate import enforce_plan_approval, gate_applies, harness_enabled_for
 from chemclaw.agent.plan_link import stamp_plan_link
-from chemclaw.agent.profiles import AgentProfile, get_profile
+from chemclaw.agent.plan_scope import ScopedTodoListMiddleware
+from chemclaw.agent.profile_discovery import ProfileError, load_profiles
+from chemclaw.agent.profiles import AgentProfile, get_profile, registered_profile_names
 from chemclaw.agent.repeat_guard import refuse_repeated_calls
 from chemclaw.agent.scratchpad import (
+    expire_stale_scratch,
     filesystem_permissions,
     scratchpad_backend,
     scratchpad_tools,
 )
-from chemclaw.agent.skill_access import skill_permits
+from chemclaw.agent.skill_access import SkillNarrowing, skill_permits
 from chemclaw.agent.skill_backend import NarrowedSkillsBackend
-from chemclaw.agent.skill_manifest import declared_tools
+from chemclaw.agent.skill_manifest import declared_tools, required_tools
 from chemclaw.agent.spend_cap import MeterTurnSpend, enforce_spend_cap
 from chemclaw.agent.state import ChemclawState
+from chemclaw.agent.stored_skill_tools import StoredSkillTools
 from chemclaw.agent.subagents import (
     HELPER_BRIEF,
+    describe_helper,
     general_purpose_helper,
     governed_roster,
+    helper_connectors,
     helper_profile,
+    specialist_override,
 )
 from chemclaw.agent.tool_authz import (
     announce_tool_failures,
@@ -130,11 +156,44 @@ from chemclaw.agent.tool_authz import (
 from chemclaw.agent.tool_framing import frame_connector_results
 from chemclaw.agent.tool_result_size import bound_tool_results
 from chemclaw.agent.tool_schema import as_structured_tool
-from chemclaw.connectors.registry import skills_dirs
+from chemclaw.connectors.registry import ConnectorError, skills_dirs
 from chemclaw.core.config import settings
 from chemclaw.core.logging import log_event
+from chemclaw.core.model_prose import ModelProse
 
 logger = logging.getLogger(__name__)
+
+
+def bindable_capability_tools(prof: AgentProfile) -> list[Any]:
+    """The in-process tools a graph built for `prof` binds — its capability tools, less the dead.
+
+    One function for the graph builder and for `turn_graph.root_surface`, because the latter
+    *predicts* what the root binds so every peer's `transfer_to_<root>` description can say what
+    the root holds. Predicting from `_capability_tools` alone advertised `propose_skill` on a
+    deployment whose root never bound it — the over-promising menu `D-2026-08-12` exists to
+    prevent — and two copies of the filter are how the prediction and the graph drift.
+
+    Args:
+        prof: The resolved profile.
+
+    Returns:
+        The tool functions, in `_capability_tools`' order.
+    """
+    tools = _capability_tools(prof)
+    # **A tool whose only outcome is unreachable is not a capability, so it is not bound.**
+    # `propose_skill` writes a `behaviour_proposals` row for a person to accept through
+    # `POST /proposals/...`, and both the durable row and that route need the personal tier. That
+    # tier is on by default since `D-2026-09-20-a-behaviour-change-is-gated-by-its-blast-radius`,
+    # so this filter no longer fires on the shipped configuration — it fires on a deployment that
+    # sets `CHEMCLAW_AGENT_MEMORY_ENABLED=false`, or on an in-memory session store, and it is kept
+    # for exactly that case. When the predicate was false and this filter did not exist, the model
+    # spent the schema on every request and told the chemist to go accept something the route
+    # answers 503 to. Filtered here rather than gated inside the tool because a refusal the model
+    # can only discover by calling is still paid for in the prefix, every call, forever — and
+    # `tests/test_context_floor.py` charges its 462 tokens now that it is bound.
+    if not personal_skills_available():
+        tools = [fn for fn in tools if fn.__name__ not in PERSONAL_TIER_TOOLS]
+    return tools
 
 
 def build_langgraph_agent(
@@ -148,7 +207,11 @@ def build_langgraph_agent(
     connectors: list[Any] | None = None,
     response_format: Any | None = None,
     store: Any | None = None,
+    stored_skills: StoredSkillTools | None = None,
     helper: bool = False,
+    specialist: AgentProfile | None = None,
+    handoffs: list[Any] | None = None,
+    peer: str = "",
 ) -> Any:
     """Compile the LangGraph conversation agent for one profile.
 
@@ -179,6 +242,12 @@ def build_langgraph_agent(
             with no durable memory — which is every turn under the default configuration. A
             parameter rather than something built here for the reason `checkpointer` is one:
             creating it is `await`, and this builder is sync because all four of its callers are.
+        stored_skills: What the two stored tiers declare about tools
+            (`agent/stored_skill_tools.stored_skill_declarations`), so `ToolScopedSkills` can narrow
+            them as it narrows a filed tree. A parameter for the same reason `store` is one and read
+            off the same store: the walk is `await` and this builder is sync. Omitted — every caller
+            that mounts no stored tier — the stored tiers declare nothing to scope by, which is
+            exactly what "no stored tier is mounted" should mean.
         response_format: A pydantic model the agent must finish by producing, surfaced on the
             returned state's `structured_response`. `None` — the conversational default — leaves the
             agent answering in prose. This exists for callers whose *whole* output is a datum rather
@@ -192,9 +261,35 @@ def build_langgraph_agent(
             thing it changes is that a helper gets no helpers of its own, which is the recursion
             guard: `_subagents` builds its spec by calling this function, so a graph that handed its
             helper a helper would not terminate. It is a parameter rather than a depth counter
-            because one level is the whole design — `agent/subagents.py` says why the roster is one
-            name and why a helper holds no connector tools — so a counter would be a knob for a
-            depth nobody has asked for.
+            because one level is the whole design — `agent/subagents.py` says why — so a counter
+            would be a knob for a depth nobody has asked for. It also
+            narrows: a helper gets `helper_profile`'s in-process subtraction and
+            `helper_connectors`' matching one over the caller's open connector tools, so "a helper
+            reads, it does not act" travels with this switch rather than with a call site.
+        specialist: The rostered profile this helper is named for, or `None` for the unnamed one.
+            Ignored unless `helper`, since a specialist is a narrowing *of* a helper. It only ever
+            intersects — the surface stays what the caller holds ∩ what the specialist names, minus
+            everything that acts — so a roster entry cannot reach past the agent that spawned it and
+            `D-2026-08-10-a-subagent-is-an-attenuation-not-a-new-actor` needs no revisiting. What it
+            *does* replace is the instructions and the model route, which are the two dimensions
+            that carry no authority.
+        handoffs: The `transfer_to_<peer>` tools this graph may call, from
+            `agent/handoff.handoff_tools`, or `None` for an agent that is not a peer in a turn
+            graph — which is every agent under the shipped configuration, since
+            `agent_peer_roster` is empty by default.
+
+            **A parameter rather than something read from a registry, and that is the whole
+            containment argument.** `_subagents` does not pass it, so a `task` helper cannot hold a
+            handoff tool: there is no set to subtract from and therefore no name anybody can forget
+            to subtract. `SPEAKS_TO_THE_CHEMIST` is the other shape — a name removed from a set —
+            and it works only as long as the next person remembers the name.
+        peer: This agent's name as a node of a turn graph, or `""` for an agent that is not one.
+            It reaches exactly one place: the audit middleware's `agent=`, so every row a peer
+            writes says which peer wrote it. **Empty stops meaning "the agent the chemist talks
+            to" once a turn graph exists**, because then several agents talk to the chemist and a
+            blank column could not tell them apart; under the shipped configuration no turn graph
+            is built, nothing passes this, and the convention
+            `D-2026-09-06-the-one-agent-that-exists-is-named-in-the-trail` states is unchanged.
 
     Returns:
         A compiled graph. No network call happens here; construction only, exactly as
@@ -215,10 +310,10 @@ def build_langgraph_agent(
     prof = profile if isinstance(profile, AgentProfile) else get_profile(profile)
     # Resolved before the skills, because the skills are narrowed by them: a skill is judgment
     # *about* tools, so which tools this profile advertises decides which judgment is worth
-    # offering (`skills_middleware`). A helper's skills therefore narrow with its tools, at no extra
-    # cost and by the mechanism that already existed — which is D-2026-08-10's fourth invariant
-    # ("skills do not inherit") arriving as a consequence rather than as a second gate.
-    tools = _capability_tools(prof)
+    # offering (`_skills_middleware`). A helper's skills therefore narrow with its tools, at no
+    # extra cost and by the mechanism that already existed — which is D-2026-08-10's fourth
+    # invariant ("skills do not inherit") arriving as a consequence rather than as a second gate.
+    tools = bindable_capability_tools(prof)
     # **The helper's narrowing is applied here rather than in `_subagents`, and both the position
     # and the second call are the point.** `helper=True` is the one switch that says "this graph is
     # behind the `task` tool", so everything a helper is — no side-effecting tool, no tool that
@@ -233,13 +328,37 @@ def build_langgraph_agent(
     # right answer today (they are side-effecting, so they are subtracted anyway) for a reason that
     # stops being true the first time a generated tool is a read. Filtering the registry twice is a
     # dict comprehension over a value already computed; being right by construction is worth it.
+    #
+    # **The connector half is narrowed here too, and it has to be a second operation.**
+    # `helper_profile` narrows `tool_names`, which governs `_capability_tools` — the in-process
+    # half. A connector tool is a `BaseTool` that arrives on `connectors` already open and goes
+    # straight into `_bound_surface`, so `tool_names` never sees it and the subtraction one line
+    # above cannot reach it. Applying `side_effecting_tools()` to both is what keeps "a helper
+    # reads, it does not act" one property of `helper=True` rather than two half-properties that
+    # can drift apart; `tests/test_subagents.py` compares the two *compiled* graphs, so a connector
+    # bundle whose manifest declares a `state_changing` tool is out of a helper's reach on the day
+    # it is enabled.
     if helper:
-        prof = helper_profile(prof, frozenset(fn.__name__ for fn in tools))
+        prof = helper_profile(prof, frozenset(fn.__name__ for fn in tools), specialist)
         tools = _capability_tools(prof)
+        connectors = helper_connectors(connectors, specialist)
+    # **Resolved once, here, because two things now depend on which sink this graph got.** The
+    # middleware writes the rows and the prompt tells the chemist what the trail is
+    # (`instructions_for(durable_trail=…)`), and the two disagreeing is precisely the defect that
+    # made this necessary: the prompt asserted an append-only trail in the present tense while
+    # `default_audit_sink()` resolved to `NullAuditSink` on every deployment that has not set
+    # `session_store="postgres"`. Passing the same *object* to both makes them one fact rather than
+    # two readings of one setting.
+    # Resolved through the module rather than the name imported above, and that is not style:
+    # seven test sites patch `chemclaw.agent.audit.default_audit_sink` and none patch a
+    # re-export, so a from-import here is a second lookup path that the established patch
+    # point silently misses — measured, three template-step tests recorded no audit rows at
+    # all while asserting over them.
+    sink = audit_sink if audit_sink is not None else audit_module.default_audit_sink()
     audit = make_audit_middleware(
         correlation_id=correlation_id if correlation_id is not None else uuid.uuid4().hex,
         actor=actor,
-        sink=audit_sink,
+        sink=sink,
         # Which of the two graphs in a turn wrote the row. Taken from `prof` *after* the narrowing
         # above, so it is the derived `<caller>-helper` name rather than a literal — a caller that
         # resolved `property-lookup` gets `property-lookup-helper`, and a profile added next year
@@ -247,7 +366,12 @@ def build_langgraph_agent(
         # `AuditEvent.agent` states: the trail names the human always and the agent only when it is
         # not the one being spoken to
         # (`D-2026-09-06-the-one-agent-that-exists-is-named-in-the-trail`).
-        agent=prof.name if helper else "",
+        # A peer names itself for the reason the `peer` argument's docstring gives: with several
+        # agents talking to one chemist, a blank column cannot tell them apart. A helper still
+        # wins the precedence, because a helper spawned *by* a peer is a helper first — its calls
+        # were made on a brief the chemist never saw, which is the distinction this column exists
+        # to draw, and `<peer>-helper` says both things at once anyway.
+        agent=prof.name if helper else peer,
     )
     # One walk of the skills trees per build, shared by the backend that routes them and the
     # middleware that labels them. They used to derive it independently — two `_skill_dirs()`
@@ -257,11 +381,6 @@ def build_langgraph_agent(
     # own docstring says the single definition is for. It matters twice as much now: `_subagents`
     # compiles a second graph through this same function, so an un-shared walk is four.
     labelled = _labelled(_skill_dirs())
-    skills = skills_backend(prof, tools, labelled=labelled)
-    # The scratchpad wraps the skills routes rather than replacing them: the skills middleware and
-    # the filesystem tools must read the *same* backend object, or the role narrowing computed for
-    # one would not apply to the other.
-    backend = scratchpad_backend(skills, store)
     # The profile's effort, falling back to `llm_effort` inside `build_chat_model`. Resolved from
     # the profile here rather than read from settings there, because effort is a property of *this
     # agent* — a property-lookup profile and a campaign-design profile want different answers from
@@ -276,7 +395,36 @@ def build_langgraph_agent(
     # that conversion is per-*process* work happening per turn: `agent/tool_schema.py` says why a
     # first-party tool's schema cannot vary between turns, and what it measured. The connector
     # tools are already `BaseTool`s belonging to this turn's sessions and pass through untouched.
-    bound = [*(as_structured_tool(fn) for fn in tools), *(connectors or [])]
+    bound = _bound_surface(tools, connectors, handoffs)
+    # **Built after `bound`, and that is what the capability gate is narrowed by.** `skill_permits`'
+    # third predicate hides a skill whose *every* declared tool is absent, and the set it measured
+    # absence against was `_advertised_names` — the in-process registry plus every enabled bundle's
+    # *manifest* allow-list. A manifest does not move when a server is unreachable, so the listing
+    # did not either: measured, a deployment with its bundles declared and `Chemclaw3-mcp` not
+    # serving offered `safety-screening` and `charge-tables-and-mass-efficiency` with **none** of
+    # their six tools bound — and `safety-screening`'s own description says "three of those now have
+    # a table", against instructions that (correctly, on that surface) deny exactly those three. One
+    # system message, both claims.
+    #
+    # The prose has been narrowed against `bound` since the blocks landed; this is the same
+    # narrowing for the other half of what the model is told, from the same set, so the two cannot
+    # disagree about what this turn can reach.
+    #
+    # **Computed once and handed to both**, because three tiers are mounted on one backend and a
+    # mount deriving its own answer is how a listing and a gate come to disagree. What each mount
+    # binds is not the same predicate — a filed tree and a stored tier are not asked the same
+    # question, and `skill_access.SkillNarrowing` is where that partition and its measurement live.
+    # The stored tiers used to have no predicate at all — see `skill_narrowing`.
+    permits = skill_narrowing(
+        prof, tools, labelled, available={t.name for t in bound}, stored=stored_skills
+    )
+    skills = skills_backend(
+        prof, tools, labelled=labelled, available={t.name for t in bound}, permits=permits
+    )
+    # The scratchpad wraps the skills routes rather than replacing them: the skills middleware and
+    # the filesystem tools must read the *same* backend object, or the role narrowing computed for
+    # one would not apply to the other.
+    backend = scratchpad_backend(skills, store, permits=permits)
     shared: dict[str, Any] = {
         "model": chat_model,
         "tools": bound,
@@ -285,11 +433,52 @@ def build_langgraph_agent(
         # and a helper that has to be told what a knowledge note is would need the whole prompt
         # rewritten anyway. What it adds is the part its caller's prompt cannot be right about —
         # that this graph reads and reports, sees no conversation, and reaches no connector.
-        "system_prompt": instructions_for(prof) + (HELPER_BRIEF if helper else ""),
+        # Narrowed to the tools this graph actually binds, so the prompt cannot promise capability
+        # the model would then fail to find (`chemclaw_agent.PromptBlock`). The names come off
+        # `bound` rather than from the registry for the same reason the helper narrowing above
+        # reads `tools`: `bound` *is* the surface, connectors included, and a connector that was
+        # declared but unreachable is exactly the case the prose must not over-promise.
+        "system_prompt": instructions_for(
+            prof,
+            {tool.name for tool in bound},
+            durable_trail=not isinstance(sink, NullAuditSink),
+        )
+        + (HELPER_BRIEF if helper else "")
+        # A peer is told the one thing its own profile cannot be right about: that it may not
+        # have started this conversation, that the chemist reads it directly with nobody
+        # relaying, and that handing on reaches nothing it could not reach itself. Appended for
+        # `HELPER_BRIEF`'s reason — the domain guidance above is exactly as true of a peer as of
+        # the agent that opened the turn, and a peer that had to be told what a knowledge note is
+        # would need the whole prompt rewritten. Mutually exclusive with the helper brief in
+        # practice: a helper is spawned through `task` and `_subagents` passes no `peer`.
+        + (PEER_BRIEF if peer else "")
+        + (
+            specialist_override(
+                specialist,
+                frozenset(fn.__name__ for fn in tools)
+                | frozenset(tool.name for tool in (connectors or [])),
+            )
+            if helper and specialist is not None
+            else ""
+        ),
         "state_schema": ChemclawState,
         "middleware": _middleware(prof, backend, audit, chat_model, labelled),
         "name": "chemclaw",
-        "checkpointer": checkpointer,
+        # **`False` rather than `None` for a helper, and the difference is 98% of what a spawn
+        # costs.** `None` does not mean "no checkpointer" to LangGraph: a subgraph compiled with
+        # `None` *inherits* its parent's through the run config — LangGraph's own pregel algorithm
+        # module resolves it as
+        # `CONFIG_KEY_CHECKPOINTER: checkpointer or configurable.get(CONFIG_KEY_CHECKPOINTER)`,
+        # so every helper was checkpointing its own thread onto the
+        # caller's saver under a `tools:<uuid>` namespace on the caller's `thread_id`. `False` is
+        # upstream's documented opt-out: `langgraph.types.Checkpointer` says `False` "disables
+        # checkpointing, even if the parent graph has a checkpointer" and `None` "inherits
+        # checkpointer from the parent graph", and `Pregel._defaults` is where that is resolved —
+        # `if self.checkpointer is False` *before* the config lookup. This comment first cited
+        # `find_subgraph_pregel`, which scans node-bound runnables and is never consulted for a
+        # graph invoked from inside a tool, so it could not have been the mechanism either way.
+        # See `D-2026-09-18-a-checkpointer-of-none-is-the-callers-checkpointer`.
+        "checkpointer": False if helper else checkpointer,
         "response_format": response_format,
     }
     if helper:
@@ -316,7 +505,7 @@ def build_langgraph_agent(
         # `skills=` is deliberately absent: it is what would make upstream compose a second skills
         # middleware beside `ReloadingSkillsMiddleware`. `_skills_middleware` says why one is right.
         permissions=filesystem_permissions(),
-        subagents=_subagents(prof, chat_model, audit_sink, correlation_id, actor),
+        subagents=_subagents(prof, chat_model, sink, correlation_id, actor, connectors),
         **shared,
     )
 
@@ -438,12 +627,16 @@ def _middleware(
             tools=list(scratchpad_tools()),
             _permissions=filesystem_permissions(),
         ),
+        # The `files` channel's retention, once per turn before the first model call: a file this
+        # thread has not written for `agent_scratch_retention_days` is removed through the channel's
+        # own reducer (`agent/scratchpad.py` says why that is the only safe place to do it).
+        expire_stale_scratch,
         # The second replacement, and the one that would otherwise have arrived by default rather
         # than by decision: `create_deep_agent` composes a summarizer unconditionally, and this
         # deployment has declined one since D-025 on indirect-prompt-injection grounds that the
         # deepagents variant answers only half of. `agent/compaction.py` carries the whole argument.
         disabled_summarizer(model, backend),
-        _skills_middleware(backend, labelled),
+        _skills_middleware(backend, labelled, profile),
         *tool_call_middleware(audit, profile),
         # Unconditional, unlike the harness middleware above it: an unbounded thread is a property
         # of a session, not of the plan/execute mode, and the single-turn agent accumulates one just
@@ -465,8 +658,9 @@ def _subagents(
     audit_sink: AuditSink | None,
     correlation_id: str | None,
     actor: str,
+    connectors: list[Any] | None,
 ) -> list[Any]:
-    """The helpers this agent may spawn — one, compiled here so it carries this chain.
+    """The helpers this agent may spawn, each compiled here so it carries this chain.
 
     **Not optional, and that is the reason this function exists.** `SubAgentMiddleware` is in
     upstream's `_REQUIRED_MIDDLEWARE` and `_apply_excluded_middleware` raises rather than let a
@@ -478,20 +672,26 @@ def _subagents(
 
     Three things the helper does *not* inherit, each for its own reason:
 
-    - **No connector tools**, which is a lifecycle bound rather than a narrowing — and *not* the
-      concurrency bound this said until
-      `D-2026-08-29-a-helper-reaches-no-connector-because-of-the-lifecycle-not-the-deadlock`. The
-      deadlock measurement above is about two turns **sharing one** MCP tool object; a helper with
-      sessions of its own shares nothing, so it never reached this case. What binds is that
-      connectors are opened by the async caller into an exit stack *before* this synchronous
-      function runs, and the roster is frozen per compiled graph — so a helper cannot open sessions
-      at spawn time, and giving it its own set means opening a second full set eagerly on every
-      turn, spawned or not. It is expressed by omitting `connectors=` below, and asserted against
-      the two *compiled* graphs in `tests/test_subagents.py`, because under a one-name roster any
-      build-time comparison of the caller's profile with the helper's would compare a value with
-      itself.
-    - **No checkpointer.** Upstream's contract is that a helper sees the prompt it was given and
-      returns one report; a thread to resume would be a second conversation nobody addresses.
+    - **The caller's read-only connector tools, and none of its state-changing ones.** This used
+      to be "no connector tools at all", on two bounds that
+      `D-2026-09-15-a-helper-shares-the-session-its-caller-already-opened` drove and found do not
+      reach the case. The concurrency half was measured false: 4 concurrent 1.88 s calls over one
+      open MCP tool object complete in 1.99 s with no error, and 32 fast ones in 348 ms. The
+      lifecycle half was about a helper opening sessions of its *own*, which is not what happens
+      here — the caller's sessions are already open when this runs, so the helper is handed
+      `connectors` and costs no second socket. The narrowing is applied in `build_langgraph_agent`
+      beside the in-process one, so it travels with `helper=True` rather than with this call site.
+    - **No checkpointer — `checkpointer=False`, which is not the same as passing nothing.**
+      Upstream's contract is that a helper sees the prompt it was given and returns one report; a
+      thread to resume would be a second conversation nobody addresses. This bullet said exactly
+      that while the call site passed `None`, and `None` is how a subgraph asks to inherit its
+      parent's saver: measured, one 2 MB helper write cost 18,944 kB of checkpoint rows, of which
+      17,760 kB — 93.8% — sat under a `tools:<uuid>` namespace on the caller's own `thread_id`.
+      With `False` the same turn costs 424 kB. What is given up is resuming a turn *inside* a
+      helper, which nothing here can reach: `interrupt()` has no caller in `src/`, and the two
+      tools that could ask a
+      question are subtracted from every helper's surface. No byte count belongs in this comment
+      either — see the ADR, which cannot be edited.
     - **No durable memory and no store.** `store=` is not forwarded, so the helper's backend has no
       `/memories/` route: nothing a helper writes reaches the knowledge graph or the memory tiers.
 
@@ -499,10 +699,12 @@ def _subagents(
       claimed both in turn.** Measured: upstream's `_return_command_with_state_update` copies every
       helper state key except `messages`, `todos` and `structured_response` into the caller's
       update, and `files` is not among the three — so a helper's `/scratch/evidence.md` lands in the
-      caller's `files` channel (9,937 characters of it, on the isolation fixture). The reverse holds
-      too: the helper is handed the caller's state minus those same three keys. "Returns one report"
-      is true of the *message thread* and false as a statement about state, which is a distinction
-      this comment and `HELPER_BRIEF` both used to blur — see
+      caller's `files` channel, whole. No byte count here either — the ADR cited below measured it
+      on the isolation fixture and an ADR cannot be edited, so a copy of that figure in this
+      comment is the only one of the two that can drift away from what was measured. The reverse
+      holds too: the helper is handed the caller's state minus those same three keys. "Returns one
+      report" is true of the *message thread* and false as a statement about state, which is a
+      distinction this comment and `HELPER_BRIEF` both used to blur — see
       `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit`.
 
       **And `files` is a checkpointed channel, so the reach is the caller's *session*, not its
@@ -533,24 +735,197 @@ def _subagents(
         audit_sink: The caller's trail, so a helper's tool calls land in the same place.
         correlation_id: The caller's correlation id, so the two halves of one turn are joinable.
         actor: The caller's fallback audit actor.
+        connectors: This turn's already-open connector tools, shared with the helper rather than
+            reopened. Narrowed to the read-only half by the helper's own build.
+
+    **One unnamed helper plus whatever `CHEMCLAW_AGENT_HELPER_ROSTER` names**, and the roster
+    half is new
+    (`D-2026-09-16-a-roster-varies-the-two-dimensions-that-carry-no-authority`). Every entry is
+    built by this same function with a `specialist=`, so each is an *intersection* of the caller's
+    surface rather than a profile of its own: a name can make a helper narrower and never wider.
+    The unnamed one stays, and must — it claims upstream's `general-purpose`, which is the string
+    comparison that displaces the ungoverned helper `create_deep_agent` would otherwise insert.
+
+    A rostered entry that binds no capability tool is **dropped with a WARNING rather than offered
+    empty**, because what a profile names and what a deployment binds are different sets: `safety`'s
+    three screens are served by a connector bundle, so with that bundle off its helper is a menu
+    entry whose only possible outcome is a wasted delegation. An unknown name is skipped the same
+    way and refused loudly at startup instead (`api/app.py`), which is the split this repository
+    already draws — a turn must not die for a misconfiguration, and a misconfiguration must not be
+    discoverable only by noticing something missing.
 
     Returns:
-        The single-entry list to hand `create_deep_agent(subagents=…)`.
+        The list to hand `create_deep_agent(subagents=…)`.
     """
-    return governed_roster(
-        [
-            general_purpose_helper(
-                build_langgraph_agent(
-                    model=model,
-                    profile=profile,
-                    actor=actor,
-                    correlation_id=correlation_id,
-                    audit_sink=audit_sink,
-                    helper=True,
-                )
+
+    def compile_helper(specialist: AgentProfile | None) -> Any:
+        """One helper graph, built from the caller's own profile and this turn's open connectors."""
+        return build_langgraph_agent(
+            model=model,
+            profile=profile,
+            actor=actor,
+            correlation_id=correlation_id,
+            audit_sink=audit_sink,
+            connectors=connectors,
+            helper=True,
+            specialist=specialist,
+        )
+
+    specs: list[dict[str, Any]] = [general_purpose_helper(compile_helper(None))]
+    if not settings.helper_roster:
+        return governed_roster(specs)
+
+    # Registering the file profiles is part of building the roster, not something each caller does
+    # first — `TemplateSurface.resolve` carries the same line and the record of what happened when
+    # it did not: `registered_profile_names()` holds `default` alone until this has run, so every
+    # shipped profile read as unknown from any process that had not started the front door.
+    #
+    # **Behind the roster check, behind a registry check, and inside a `try`, because none of the
+    # three was free.** `load_profiles` is idempotent in *registration* only: it re-globs, re-reads
+    # and re-validates every profile file on each call — measured at 8.06 ms, with no warm-up — so
+    # the comment that used to sit here, "the load is idempotent, so a turn pays for it once per
+    # process", was false and the cost landed on every turn, including one whose roster is empty
+    # and which is documented as "what this repository shipped before". Asking the registry first
+    # makes the sentence true: after any turn has loaded them, every rostered name resolves and the
+    # file read is skipped. And `ProfileError` is a `ValueError` raised *here* rather than by
+    # `get_profile`, so uncaught it killed the turn three lines above a comment arguing that a turn
+    # must not die for a roster misconfiguration.
+    try:
+        if not set(settings.helper_roster) <= set(registered_profile_names()):
+            load_profiles()
+    except ProfileError:
+        logger.warning(
+            "helper roster: the profile files could not be loaded, so no named helper is offered",
+            exc_info=True,
+        )
+        return governed_roster(specs)
+
+    held = frozenset(fn.__name__ for fn in _capability_tools(profile))
+    offered: set[str] = {specs[0]["name"]}
+    for name in settings.helper_roster:
+        if name in offered:
+            # Upstream keys its graphs by name and takes the last, so a repeat would compile twice
+            # and list twice while only one could be reached. `general-purpose` is in `offered`
+            # from the start deliberately: claiming that name is the one suppression that displaces
+            # upstream's own ungoverned helper, and a roster entry must not be able to take it.
+            logger.warning(
+                "helper roster: %r is already offered, so the repeat is ignored; upstream keys "
+                "subagents by name and would keep only the last",
+                name,
             )
-        ]
-    )
+            continue
+        try:
+            rostered = get_profile(name)
+        except ValueError:
+            # Fail-soft *here* and loud at startup (`api/app.py`), which is the split this
+            # repository already draws for a misconfiguration: a turn must not die because a
+            # deployment misspelled a roster entry, and a misspelling must not be discoverable only
+            # by noticing a missing menu item. Skipping is safe in the direction that matters — an
+            # absent helper costs delegation, never authority.
+            logger.warning(
+                "helper roster: no profile named %r, so it is not offered; known: %s",
+                name,
+                sorted(registered_profile_names()),
+            )
+            continue
+        surface = predicted_helper_surface(profile, held, rostered, connectors)
+        if not surface:
+            # A named helper that would bind nothing is a menu entry that can only waste a
+            # delegation. **INFO, not WARNING, and it names both causes**: this is the *normal*
+            # state of a rostered profile whose bundle is off, so at WARNING it was a line on every
+            # build of every turn forever — which is how operators learn to ignore WARNINGs. And a
+            # narrow caller empties a helper by intersection, where telling somebody to enable a
+            # connector is advice that cannot help.
+            logger.info(
+                "helper roster: %r is not offered on this turn — nothing survives the intersection "
+                "of the caller's surface (%s) with what that profile names. Either its connector "
+                "bundle is disabled, or this caller is too narrow for it",
+                name,
+                profile.name,
+            )
+            continue
+        offered.add(name)
+        specs.append(
+            {
+                "name": name,
+                "description": describe_helper(rostered, surface),
+                # **Compiled on first use, not here.** Measured, compiling the roster eagerly took
+                # a turn's graph build from 43 ms to 118 ms — 2.75x — against a 250 ms ceiling
+                # `tests/test_langgraph_connectors.py` holds and whose own docstring states the
+                # headroom as 1.9x-3x. Most of that is paid for helpers no turn spawns. The surface
+                # above is predicted from the same two functions the build applies, so nothing here
+                # needs the graph to exist; `tests/test_subagents.py` asserts the prediction equals
+                # what a compiled helper really binds, which is what keeps it honest.
+                "runnable": _compiled_on_first_use(partial(compile_helper, rostered)),
+            }
+        )
+    return governed_roster(specs)
+
+
+def predicted_helper_surface(
+    caller: AgentProfile,
+    held: frozenset[str],
+    specialist: AgentProfile,
+    connectors: list[Any] | None,
+) -> frozenset[str]:
+    """What a rostered helper *would* bind, without compiling its graph.
+
+    The roster needs this answer twice before any delegation happens — to drop an entry that would
+    bind nothing, and to write the tool list into its description — and compiling three graphs per
+    turn to learn it is most of the cost this roster adds. So it is derived from the same two
+    functions the build itself applies, `helper_profile` and `helper_connectors`, rather than from
+    a third rule that could disagree with them.
+
+    **A prediction is a claim about what a build will do, which is the shape this repository
+    distrusts** — `tests/test_context_floor.py`'s own docstring is about a basis that re-derives
+    rather than observes. It is safe *here* only because
+    `tests/test_subagents.py::test_the_predicted_surface_is_what_a_compiled_helper_binds` compiles
+    the helper and compares, so a change to the build that this function does not follow turns red
+    rather than silently advertising a surface nobody has.
+
+    The scratch verbs are absent by construction rather than subtracted: they come from
+    `FilesystemMiddleware`, which neither of these two functions knows about.
+
+    Args:
+        caller: The profile of the agent that would spawn this helper.
+        held: The caller's own resolved in-process tool names.
+        specialist: The rostered profile the helper is named for.
+        connectors: This turn's already-open connector tools.
+
+    Returns:
+        The capability tool names the compiled helper would hold, in-process and connector alike.
+    """
+    narrowed = helper_profile(caller, held, specialist)
+    # `narrowed.tool_names` rather than resolving it through `_capability_tools` again. The two are
+    # the same set here and only here, because `helper_profile` builds it by *removing* from
+    # `held` — which is itself the caller's already-resolved names — so every survivor is a name
+    # the registry answered for a moment ago. Resolving three more times cost ~6 ms each on a
+    # per-turn path, and the equality is asserted rather than assumed by the prediction test below.
+    in_process = narrowed.tool_names or frozenset()
+    reachable = helper_connectors(connectors, specialist) or []
+    return in_process | frozenset(tool.name for tool in reachable)
+
+
+def _compiled_on_first_use(build: Callable[[], Any]) -> Any:
+    """A runnable that builds its graph the first time it is invoked, then reuses it.
+
+    Deferring is what keeps a roster from taxing every turn with the cost of helpers no turn
+    spawns; memoising is what keeps a turn that delegates twice from paying twice. The cache is per
+    spec and a spec is built per turn, so nothing outlives the connectors it closed over — which is
+    the lifetime rule that makes the whole graph per-turn in the first place.
+
+    `RunnableLambda` over an async callable, because `_build_task_tool` calls `.with_config(...)`
+    on whatever sits in the `runnable` slot and then `await`s `.ainvoke(state, config)`; a sync
+    lambda returning a coroutine satisfies the first and leaves the second unawaited.
+    """
+    compiled: list[Any] = []
+
+    async def invoke(state: Any, config: Any = None) -> Any:
+        if not compiled:
+            compiled.append(build())
+        return await compiled[0].ainvoke(state, config)
+
+    return RunnableLambda(invoke)
 
 
 class ReloadingSkillsState(SkillsState):
@@ -602,6 +977,169 @@ class ReloadingSkillsMiddleware(SkillsMiddleware):
 
     state_schema = ReloadingSkillsState
 
+    def _format_skills_list(self, skills: list[SkillMetadata]) -> str:
+        """Upstream's listing, except when there is nothing to list — see `NO_SKILLS`.
+
+        The one case upstream cannot get right for this deployment, because its answer is an
+        invitation to do the thing `NarrowedSkillsBackend` refuses. Overriding the formatter rather
+        than the template, since `{skills_list}` is where that sentence is substituted in: the
+        template cannot tell an empty listing from a full one.
+
+        A private-method override, and therefore an upstream-shape dependency —
+        `tests/test_upstream_surface.py` pins it, so a rename goes red in the file that exists to
+        catch that rather than silently restoring the invitation.
+        """
+        if not skills:
+            return NO_SKILLS
+        return str(super()._format_skills_list(skills))
+
+
+#: What the model is told when its narrowed skills listing is empty.
+#:
+#: **Upstream's answer is an invitation to write one**, verbatim on a cold deployment: *"(No skills
+#: available yet. You can create skills in /cold)"*. Every write verb on the skills tree raises
+#: `SkillsReadOnlyRefusal` (`agent/skill_backend.py`), by a decision with no configuration —
+#: `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` — so that sentence is a prompt telling
+#: the model to attempt something this system exists to refuse, and the refusal it earns costs a
+#: turn and reads to the model as a fault it should route around.
+#:
+#: It also said `/cold` — the *virtual* route this repository invented for the tree, which is not a
+#: path on the pod and not one a chemist could be pointed at either.
+#:
+#: Empty is a real state and it has two causes worth telling apart in the model's own answer: the
+#: deployment ships no skills at all, or the three predicates narrowed them all away for this
+#: caller (`agent/skill_access.py`). The model cannot distinguish them and must not guess, so it is
+#: told what is true of both and what to do about it — answer without a procedure, and say so.
+NO_SKILLS = ModelProse(
+    "(None are available to you in this session. This is either a deployment that ships no "
+    "skills or a caller whose role reaches none of them; you cannot tell which, and you cannot "
+    "create one — the skills tree is read-only to every turn. Answer from the instructions and "
+    "the evidence you gather, and say plainly that you have no procedure for a task that "
+    "obviously wants one.)"
+)
+
+#: Every passage cut out of upstream's skills prompt, each named as this file refers to it.
+#:
+#: **Removed by substring rather than by re-declaring upstream's template**, so the ~40 lines that
+#: are correct keep arriving from upstream on every bump and only the removals are this
+#: repository's decision. `_skills_prompt` refuses rather than silently keeping one when upstream
+#: rewords it, and `tests/test_upstream_surface.py` pins each passage from the other side so a bump
+#: names the sentence that moved instead of raising from inside a graph build.
+#:
+#: The first was here alone until 2026-09-10, when the whole system message was taken off the wire
+#: at four fleet states and read rather than assumed. What the other three cost is not tokens (they
+#: are ~130 between them) but truth: this deployment **withholds `execute`**
+#: (`agent/scratchpad.py`) on stated egress and shell grounds, and the prompt was instructing the
+#: model in every configuration to run a skill's Python scripts and to "use any helper scripts". A
+#: capability declined by posture, described as available, is the same defect as prose naming a tool
+#: nothing binds — and its example was a "web-research skill" that does not exist, in a system with
+#: no egress to research with.
+#:
+#: 1. The Deepagents/Agents provenance sentence. It tells the model that a source labelled
+#:    "Deepagents" is specific to this agent tool and one labelled "Agents" is shared across every
+#:    agent tool *on this machine*. Neither label exists here: `_labelled` derives each source's
+#:    label from its directory (`skills`, or a bundle's name), there is no machine-wide skills tree,
+#:    and nothing else on the pod shares one.
+#: 2. The "Executing Skill Scripts" section — there is no verb here that runs one.
+#: 3. The example workflow, which is the second instruction to run scripts *and* the only mention
+#:    of a skill that has never existed in this tree.
+#: 4. The same absent skill again, as the parenthetical example of a request matching a skill.
+_SKILLS_PROMPT_REMOVALS: tuple[tuple[str, str], ...] = (
+    (
+        'Sources labeled "Deepagents" are specific to this agent tool; sources labeled "Agents" '
+        "are shared across all agent tools on this machine.\n\n",
+        "the Deepagents/Agents source-label sentence, which names labels no source here "
+        "carries and a machine-wide skills tree that does not exist",
+    ),
+    (
+        "**Executing Skill Scripts:**\nSkills may contain Python scripts or other executable "
+        "files. Always use absolute paths from the skill list.\n\n",
+        "the Executing Skill Scripts section, in a deployment whose `scratchpad_tools()` "
+        "withholds `execute` so that nothing here can run one",
+    ),
+    (
+        '**Example Workflow:**\n\nUser: "Can you research the latest developments in quantum '
+        'computing?"\n\n1. Check available skills -> See "web-research" skill with its '
+        "path\n2. "
+        'Read the full skill file: `read_file(file_path="...", limit=1000)`\n3. Follow the '
+        "skill's research workflow (search -> organize -> synthesize)\n4. Use any helper "
+        "scripts with absolute paths\n\n",
+        "the example workflow, which names a web-research skill this tree does not have and "
+        "tells the model to use its helper scripts",
+    ),
+    (
+        ' (e.g., "research X" -> web-research skill)',
+        "the web-research example in When to Use Skills, naming the same absent skill",
+    ),
+)
+
+
+def _skills_prompt() -> str:
+    """Upstream's skills prompt minus every passage that is false on this deployment.
+
+    Raises:
+        RuntimeError: When one of the passages is no longer in upstream's template. Loud, because
+            the alternative is that a bump quietly restores it — and because the substring is the
+            whole mechanism, so its absence means this function has stopped doing that removal at
+            all. Named one at a time, since the fix differs per passage.
+    """
+    prompt = SKILLS_SYSTEM_PROMPT
+    for passage, description in _SKILLS_PROMPT_REMOVALS:
+        if passage not in prompt:
+            raise RuntimeError(
+                f"deepagents' SKILLS_SYSTEM_PROMPT no longer contains {description}, which this "
+                "deployment removes; re-read upstream's template and update "
+                f"`_SKILLS_PROMPT_REMOVALS` (agent/langgraph_agent.py). Missing: {passage!r}"
+            )
+        prompt = prompt.replace(passage, "", 1)
+    return prompt
+
+
+def _bound_surface(
+    tools: list[Any], connectors: Sequence[Any] | None, handoffs: Sequence[Any] | None = None
+) -> list[Any]:
+    """The turn's whole tool surface, refusing a connector tool that claims a first-party name.
+
+    The in-process half is converted here rather than left for `ToolNode` to convert, because that
+    conversion is per-*process* work happening per turn: `agent/tool_schema.py` says why a
+    first-party tool's schema cannot vary between turns, and what it measured. The connector tools
+    are already `BaseTool`s belonging to this turn's sessions and pass through untouched.
+
+    **The name check is the reason this is a function**
+    (`D-2026-09-12-a-tool-list-is-a-name-space-whichever-argument-it-arrives-on`). `ToolNode` keys
+    `tools_by_name` by name and the connector half is appended second, so a connector tool called
+    `record_knowledge_note` simply *wins*: measured, 61 tools bound, the first-party writer gone,
+    no error and no warning. What makes that a security shape rather than a typing gap is that
+    `authz` still classifies the **name** — every gate fires exactly as it did while the
+    connector's body runs behind them, and `agent/audit.py` records the refusal or the call against
+    the first-party capability's identity.
+
+    `connectors/registry._declared_tool_names` already refuses a *manifest* claiming the name, and
+    that is the path a deployment takes. The `connectors` keyword is the one that bypasses it — it
+    is how `api/runner.py` hands the turn its opened sessions, and how a test builds a graph — so
+    the check belongs beside the concatenation, over the names the first list declares. The
+    refusal is a `ConnectorError` worded like the registry's, because an operator reading one of
+    the two should not have to work out that they are the same rule.
+    """
+    # The handoff tools arrive already built (`@tool` returns a `StructuredTool`), so they join
+    # `first_party` without conversion — but they join it *before* the check below rather than
+    # being appended afterwards, which is the whole point. A connector bundle declaring a tool
+    # called `transfer_to_safety` would otherwise win the name by arriving second, and the model
+    # would hand the conversation to a server instead of to a peer, with every gate firing
+    # correctly against the name it believed. That is `D-2026-09-12`'s defect with the control flow
+    # as its payload.
+    first_party = [as_structured_tool(fn) for fn in tools] + list(handoffs or [])
+    claimed = {tool.name for tool in first_party}
+    for tool in connectors or []:
+        if tool.name in claimed:
+            raise ConnectorError(
+                f"a connector tool named {tool.name!r} was bound alongside the first-party "
+                "capability of that name; a connector cannot take a first-party capability's "
+                "name, because the name is the authorization key and the model has only one of "
+                "them to call"
+            )
+    return [*first_party, *(connectors or [])]
+
 
 def _harness_middleware(profile: AgentProfile) -> list[Any]:
     """The plan/execute harness's todo list, and the runaway cap every profile gets.
@@ -620,6 +1158,13 @@ def _harness_middleware(profile: AgentProfile) -> list[Any]:
     The todo list stays harness-only: a classic turn has no plan for the gate to read, and
     advertising `write_todos` there would be a capability the mode does not use.
 
+    **It is `ScopedTodoListMiddleware`, not upstream's**, because a plan step has to say what it
+    will call for the approval to bound anything
+    (`D-2026-09-12-an-approval-that-names-no-tool-authorizes-every-tool`). Everything else about
+    upstream's middleware is kept — its prompt, its parallel-rewrite guard, the `todos` channel and
+    the `write_todos` name — so the gate, the plan link and the two decision surfaces read exactly
+    what they read before, one field wider.
+
     `enforce_loop_cap` both enforces the cap and records it, and `loop_cap.loop_capped` reads that
     record. One counter for one number — and it counts in `before_model` deliberately: see
     `agent/loop_cap.py` for the four regressions that delegating it to `ModelCallLimitMiddleware`
@@ -631,17 +1176,20 @@ def _harness_middleware(profile: AgentProfile) -> list[Any]:
     millions, depending on how wide it fans out and how large the results are, and nothing in the
     turn could tell those apart (`agent/spend_cap.py` says what `api/budget.py` does and does not
     close). The pair is a `before_model` hook that enforces and a `wrap_model_call` middleware that
-    meters, because only the response carries the bill; both are inert until a deployment sets
-    `agent_max_turn_billed_tokens`, so attaching them unconditionally costs a turn nothing until it
-    is asked for.
+    meters, because only the response carries the bill. **Both are live in every shipped
+    configuration**, because `agent_max_turn_billed_tokens` no longer defaults to 0. They were
+    attached unconditionally when it did — costing an unconfigured turn nothing — and that
+    unconditional attachment is now what actually enforces the ceiling.
     """
     caps = [enforce_loop_cap, enforce_spend_cap, MeterTurnSpend()]
     if not harness_enabled_for(profile):
         return caps
-    return [TodoListMiddleware(), *caps]
+    return [ScopedTodoListMiddleware(), *caps]
 
 
-def _skills_middleware(backend: CompositeBackend, labelled: list[tuple[str, str]]) -> Any:
+def _skills_middleware(
+    backend: CompositeBackend, labelled: list[tuple[str, str]], profile: AgentProfile
+) -> Any:
     """Wrap a narrowed backend in deepagents' provider — the plumbing around the decision.
 
     Private, and split from `skills_backend` for the reason `chemclaw_agent.skills_source` is split
@@ -664,13 +1212,58 @@ def _skills_middleware(backend: CompositeBackend, labelled: list[tuple[str, str]
     registers no tools. `FilesystemMiddleware` is the opposite case and does need the splice —
     upstream composes one unconditionally — which is why `_middleware` explains the rule there.
     """
+    # **Derived from the routes the backend really has, not from `labelled` alone.** The shared
+    # trees come from `labelled`; the chemist's own tier is mounted by `scratchpad_backend` on two
+    # conditions this function cannot see (a store, and a turn with an actor), so asking the backend
+    # is the only way the listing and the routes cannot disagree — and a source advertising a path
+    # that resolves to the composite's default `StateBackend` would publish an empty tier to the
+    # model on every turn a deployment has no store.
+    #
+    # **The order is ascending review depth, and it is a decision rather than an append.**
+    # Upstream resolves a name collision last-source-wins, so whichever tree is last silently
+    # displaces the others. One person, then an administrator, then a reviewed commit: a personal
+    # skill taking a shipped skill's name is the tier escaping the bound `api/routes/skills.py`
+    # refuses at, and that route cannot refuse the collision that arrives the other way round — a
+    # skill added to `skills/` months after somebody saved theirs. The organisation's tier sits
+    # between them for the same reason in both directions: an administrator publishing a name one
+    # chemist already uses privately must not be blocked by it (nobody can see that collision
+    # coming, and the whole deployment would be held up by one person's private vocabulary), and
+    # must not silently lose to it either. Of the two silences this is the safer one, and each
+    # person can still see their own document through the route that lists it.
+    #
+    # **A profile that narrows to the empty set reaches no tier at all, and `/mine` used to escape
+    # it.** `profile.skill_names` is a governance narrowing over the *shared* corpus and
+    # `local_skills.py` argues at length that it must not select among a person's own — which is
+    # right for a named subset and wrong for `[]`, which is a profile author writing down that this
+    # agent reaches no skill at all. The one thing that writes it is `data/evals/profiles/
+    # skills-removed.yaml`, the arm whose whole value is being the clean control its own header
+    # demands; measured before this, that arm listed a chemist's personal skill while listing none
+    # of the 28 shared ones, so every A/B it reported still carried personal judgment.
+    sources: list[tuple[str, str]] = []
+    if profile.skill_names != frozenset():
+        if LOCAL_SKILLS_ROOT in backend.routes:
+            sources.append((f"/{LOCAL_SKILLS_LABEL}", LOCAL_SKILLS_LABEL))
+        if ORG_SKILLS_ROOT in backend.routes:
+            sources.append((f"/{ORG_SKILLS_LABEL}", ORG_SKILLS_LABEL))
+    sources += [(f"/{label}", label) for label, _ in labelled]
     return ReloadingSkillsMiddleware(
-        backend=backend, sources=[(f"/{label}", label) for label, _ in labelled]
+        backend=backend,
+        sources=sources,
+        # Upstream's own template, minus one sentence that is false on this deployment. Passed
+        # here rather than defaulted because the constructor is the supported seam for it, and
+        # because a template that arrives from upstream every bump is the half that cannot go
+        # stale — see `_skills_prompt`.
+        system_prompt=_skills_prompt(),
     )
 
 
 def skills_backend(
-    profile: AgentProfile, tools: list[Any], *, labelled: list[tuple[str, str]] | None = None
+    profile: AgentProfile,
+    tools: list[Any],
+    *,
+    labelled: list[tuple[str, str]] | None = None,
+    available: Collection[str] | None = None,
+    permits: SkillNarrowing | None = None,
 ) -> CompositeBackend:
     """The skills backend for one profile — a backend that can only reach what it may.
 
@@ -697,23 +1290,121 @@ def skills_backend(
 
     `labelled` is the caller's already-walked `(label, directory)` list, so one build walks the
     trees once; omitting it walks them here, which is what a test building a backend alone wants.
+
+    Args:
+        profile: The profile whose surface the capability predicate is scoped by.
+        tools: This profile's resolved in-process tools, used only to answer "what does this
+            profile advertise" when no `available` is supplied.
+        labelled: The caller's already-walked `(label, directory)` list per skills tree.
+        available: The tool names this turn actually **binds**, connectors included — what
+            `build_langgraph_agent` passes, and what the prose is narrowed against. Omitted, this
+            falls back to `_advertised_names`, the *manifest* answer: correct for a caller asking
+            what a profile advertises (`tests/test_langgraph_agent.py` checks the tree against the
+            manifests that way) and wrong for a turn, because a manifest does not move when a
+            server is unreachable. The argument exists because that difference was measured
+            offering two skills with no bound tool at all.
+        permits: The narrowing this turn already computed (`skill_narrowing`), so one build asks
+            the question once and every mount binds the same answer. **Its `filed` half is what
+            these mounts get**, because a reviewed tree is the tier every narrowing was written
+            about; `scratchpad_backend` takes the same value and uses `stored`. Omitted, it is
+            computed here, which is what a test building a backend alone wants.
     """
     labelled = labelled if labelled is not None else _labelled(_skill_dirs())
-    dirs = [directory for _label, directory in labelled]
-    declared = declared_tools(dirs)
-    permits = skill_permits(
-        enabled=settings.skills_enabled_list,
-        declared=declared,
-        available=_advertised_names(profile, tools),
-        gates=settings.skill_role_gates,
-    )
-    _log_narrowing(profile, declared, permits)
+    if permits is None:
+        permits = skill_narrowing(profile, tools, labelled, available=available)
     return CompositeBackend(
         default=StateBackend(),
         routes={
-            f"/{label}/": NarrowedSkillsBackend(directory, permits) for label, directory in labelled
+            f"/{label}/": NarrowedSkillsBackend(directory, permits.filed)
+            for label, directory in labelled
         },
     )
+
+
+def skill_narrowing(
+    profile: AgentProfile,
+    tools: list[Any],
+    labelled: list[tuple[str, str]],
+    *,
+    available: Collection[str] | None = None,
+    stored: StoredSkillTools | None = None,
+) -> SkillNarrowing:
+    """Whether this turn may reach a skill, by name — **one narrowing, computed once per build**.
+
+    Extracted from `skills_backend` when the stored tiers gained a gate. The reviewed tree, the
+    chemist's own tier and the organisation's are three mounts of one turn, and a narrowing derived
+    independently per mount would not be a narrowing: the model reads all three through one composed
+    backend and can name a path in any of them.
+
+    That is not a hypothetical. The personal tier shipped narrowed in the *prompt* and not at the
+    backend, so `skill_names: []` — the eval control arm whose whole job is removing skills —
+    advertised nothing and still served the bodies. Computing this once and handing it to every
+    mount is what makes a second such gap a build error rather than a measurement nobody takes.
+
+    **"One predicate for every tier" is what this used to say, and it was the wrong invariant.** A
+    filed tree and a stored tier are not asked the same question, and three of the four narrowings
+    were answering the filed one about a stored tier: `EnabledSkills` deleted both stored tiers
+    outright, which is what `skill_access.SkillNarrowing` now partitions. The invariant that
+    actually held the gap shut is *computed once, handed to every mount* — which is unchanged, and
+    is why this returns one value carrying both predicates rather than letting a mount ask for its
+    own.
+
+    It is computed here rather than per mount for the second reason too: `_log_narrowing` writes one
+    line per build saying what this profile was offered, and three mounts deriving their own
+    predicate would write it three times with nothing to say which was binding.
+
+    Args:
+        profile: The profile whose surface the capability predicate is scoped by.
+        tools: This profile's resolved in-process tools, used only when `available` is omitted.
+        labelled: The already-walked `(label, directory)` list, for the declared-tools map.
+        available: The tool names this turn actually binds, connectors included. See
+            `skills_backend` for why the fallback is the manifest answer and why that differs.
+        stored: What the two stored tiers declare (`agent/stored_skill_tools.py`), read by the async
+            caller because this builder is synchronous. Omitted, the stored tiers declare nothing to
+            scope by, which is the pre-existing behaviour and the behaviour every caller off the
+            request path wants.
+
+    Returns:
+        The narrowing per kind of tier, each evaluated per reach because the role gate reads ambient
+        identity.
+    """
+    directories = [directory for _label, directory in labelled]
+    declared = declared_tools(directories)
+    required = required_tools(directories)
+    narrowing = skill_permits(
+        enabled=settings.skills_enabled_list,
+        # **Merged rather than passed separately**, so `ToolScopedSkills` does not learn that two
+        # kinds of tier exist: a declaration is a declaration, and the only thing that differs is
+        # where the frontmatter was read from.
+        #
+        # **The filed entry wins a name held by both, and that direction is load-bearing.** The
+        # other way round was written first, with a comment saying the collision could not happen
+        # because `UnreservedNames` removes it — which is true of the *stored* predicate and says
+        # nothing about the filed one, since both read this one map. Driven: a grandfathered
+        # `/mine/deep-research` declaring one tool nothing binds made the **reviewed**
+        # `deep-research` invisible, in a turn binding all twelve tools it declares. A stored
+        # declaration for a shipped name describes a body no turn can read, so it must not describe
+        # the body a turn does read.
+        declared={**(stored.declared if stored is not None else {}), **declared},
+        required={**(stored.required if stored is not None else {}), **required},
+        available=available if available is not None else _advertised_names(profile, tools),
+        gates=settings.skill_role_gates,
+        names=profile.skill_names,
+        # The keys of *this* walk rather than a `shipped_skill_names()` call, which would walk the
+        # trees a second time. The two agree on every production path — that function is
+        # `frozenset(declared_tools(_labelled(_skill_dirs())))` — and where they could differ, a
+        # caller that passed its own `labelled`, this one is the set the backend actually routes.
+        # A read side that reserved names from a different walk than the one it serves is the
+        # disagreement `UnreservedNames` exists to close, arriving by the other door.
+        reserved=frozenset(declared),
+    )
+    # **The *filed* map, deliberately, now that the narrowing reads both.** A stored name in this
+    # line would put a chemist's own vocabulary into a log field on every turn they take, which
+    # `local_skills._count_a_local_load` refuses to do to a metric label for exactly that reason.
+    # The count it reports is therefore about the discovered corpus, which is what "discovered"
+    # means.
+    _log_narrowing(profile, declared, narrowing.filed)
+    return narrowing
 
 
 def _log_narrowing(
@@ -765,6 +1456,40 @@ def _skill_dirs() -> list[str]:
     that resolve to nothing.
     """
     return [*settings.skills_dirs, *skills_dirs()]
+
+
+def shipped_skill_names() -> frozenset[str]:
+    """Every name this deployment's *reviewed* trees occupy — declared, or held by a broken file.
+
+    Public because `api/routes/skills.py` needs it to refuse a personal skill that would take a
+    shipped skill's name, and it has to be asked of the same walk the graph does — a route that
+    re-derived the tree list would answer about a different set than the one the model is served.
+    `agent/proposal_tools.validated_skill` is the second caller, since `propose_skill` routes
+    through it.
+
+    **"Declare" was the wrong word and is now "occupy", because a *broken* `SKILL.md` is in here
+    too.** `skill_manifest._declared_pair` keys an unreadable manifest by its **directory** name
+    (fail-closed: the frontmatter is the thing that could not be read, so its `tools:` declaration
+    cannot be trusted), so that directory name reaches this set. Driven on a tree holding one skill
+    with `name: '   '`: the map is keyed `'empty-name'`, and both `POST /skills/mine` and
+    `propose_skill` then refuse that name with "is the name of a skill this deployment already
+    ships" — about a skill whose frontmatter declares nothing at all.
+
+    **That is the behaviour this deployment wants, and it is a decision rather than a side effect.**
+    The alternative is for a directory with a broken manifest to leave its name free, which lets a
+    chemist's personal skill quietly shadow — or be shadowed by — a shipped skill that is one typo
+    away from working again; `make skill-validate` requires a directory and its `name` to match, so
+    the directory is the name that tree is going to occupy the moment the file is fixed. Refusing it
+    costs one confusing message on a corpus CI would already have failed; allowing it costs a
+    collision nobody can see. `tests/test_local_skills.py` is what holds it.
+
+    Cheap to call per request: `declared_tools` is `@cache`d on the directory tuple, so the cost is
+    `_skill_dirs`' `Path.is_dir()` fan-out over the enabled bundles and nothing else.
+
+    Returns:
+        Every occupied name, including every enabled connector bundle's own `skills/`.
+    """
+    return frozenset(declared_tools([directory for _label, directory in _labelled(_skill_dirs())]))
 
 
 def _labelled(dirs: list[str]) -> list[tuple[str, str]]:

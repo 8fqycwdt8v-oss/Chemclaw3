@@ -1,0 +1,61 @@
+{
+  "probe": {
+    "id": "rx-27",
+    "section": 11,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Build me the charge table for the Suzuki at 2 kg of 4-bromoanisole — phenylboronic acid 1.2 equiv, K2CO3 2.0 equiv, Pd(OAc)2 1.5 mol%, THF/water 4:1 at 10 volumes.",
+    "expects_tools": [
+      "stoichiometry_table",
+      "resolve_compound",
+      "green_metrics",
+      "screen_hazards"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a vessel size or reactor fill volume",
+      "a batch cycle time or addition rate",
+      "a predicted yield or isolated mass of product"
+    ],
+    "direction": "This is squarely inside the tool surface and should produce a real computed table rather than arithmetic in prose: limiting reagent identified, molecular weights resolved, moles, equivalents and masses for every component, and the solvent volumes that ten volumes implies. Should state which component it took as limiting and check that the equivalents it was given are what it used. The boundary to hold is that a charge table is not a batch record: no vessel, no fill level, no addition rate, no cycle time, and no master batch record template exists in this system. If it offers anything beyond the table, it should be a hazard screen on the charge list, not engineering.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-27",
+    "section": 11,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Build me the charge table for the Suzuki at 2 kg of 4-bromoanisole — phenylboronic acid 1.2 equiv, K2CO3 2.0 equiv, Pd(OAc)2 1.5 mol%, THF/water 4:1 at 10 volumes.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.45,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "4b787818cd294e58b310e94d06e2e29a",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

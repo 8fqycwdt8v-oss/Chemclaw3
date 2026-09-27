@@ -46,6 +46,7 @@ from chemclaw.core.config import settings
 from chemclaw.core.ids import stable_hash
 from chemclaw.core.temporal_client import connect
 from chemclaw.durable.artifact_eviction import ArtifactEvictionWorkflow
+from chemclaw.durable.check_in import CheckInWorkflow
 from chemclaw.durable.commitment_sync import CommitmentSyncWorkflow
 from chemclaw.durable.corpus_sync import ReactionCorpusWorkflow, corpus_sources
 from chemclaw.durable.digest import DigestWorkflow
@@ -55,6 +56,7 @@ from chemclaw.durable.eval_drift import EvalDriftWorkflow
 from chemclaw.durable.label_sync import ReactionLabelWorkflow
 from chemclaw.durable.note_index import NoteReindexWorkflow
 from chemclaw.durable.observation_jobs import ObservationSynthesisWorkflow
+from chemclaw.durable.orphaned_waits import OrphanedWaitsWorkflow
 from chemclaw.durable.publish_results import PublishResultsWorkflow
 from chemclaw.durable.retention import RetentionWorkflow
 from chemclaw.ingest.sources.registry import (
@@ -95,6 +97,7 @@ OWNED_SCHEDULE_IDS = frozenset(
         # has run one.
         "audit-verify",
         "digest",
+        "agent-check-in",
         "artifact-eviction",
         "observations",
         "document-sync",
@@ -115,6 +118,7 @@ OWNED_SCHEDULE_IDS = frozenset(
         # supposed to catch this enabled one conditional job and passed vacuously; it now builds
         # the full plan.
         "result-publish",
+        "orphaned-waits",
     }
 )
 
@@ -142,9 +146,13 @@ def planned_schedules() -> list[PlannedSchedule]:
     Pure and side-effect-free (no client), so a test can assert the set of jobs and their
     configured cadences without a live Temporal server.
 
-    **No Schedule here opens a pull request** (D-2026-08-25). Campaign synthesis, playbook
-    distillation and optimization-campaign detection used to fire hourly and propose PR-gated notes
-    with nobody having asked, which is knowledge arriving on a timer. The miners are unchanged and
+    **No Schedule here mines knowledge on a timer** (D-2026-08-25). Campaign synthesis, playbook
+    distillation and optimization-campaign detection used to fire hourly and propose notes with
+    nobody having asked, which is knowledge arriving on a timer. The rule was written as "no
+    Schedule opens a pull request" and outlived its mechanism:
+    `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` deleted the gate, so no path in this
+    tree opens one and the phrasing named the thing that went rather than the thing that matters,
+    which is who asked. The miners are unchanged and
     still run — `CampaignSynthesisWorkflow`, `PlaybookDistillationWorkflow` and
     `OptimizationCampaignWorkflow` are started on demand, by a chemist or by an agent workflow that
     has a reason to look. What is left on a timer is ingestion, indexing, eviction and retention:
@@ -224,6 +232,13 @@ def planned_schedules() -> list[PlannedSchedule]:
     if settings.digest_enabled:
         digest_every = timedelta(minutes=settings.digest_schedule_minutes)
         schedules.append(PlannedSchedule("digest", DigestWorkflow, digest_every))
+    # The check-in over a requester's own blocked work earns a Schedule where a deployment turns
+    # it on. Gated on a flag rather than on a registry, unlike its four neighbours above, because
+    # there is no manifest to ask: the thing it reports on is `pending_requests`, which every
+    # deployment has, and what a deployment chooses is whether its people want to hear about it.
+    if settings.check_in_enabled:
+        check_in_every = timedelta(minutes=settings.check_in_schedule_minutes)
+        schedules.append(PlannedSchedule("agent-check-in", CheckInWorkflow, check_in_every))
     # Retention only earns a Schedule where the deployment has stated a policy (gap SCH-1); an
     # unconfigured deployment must never start deleting records on a default it did not choose.
     #
@@ -247,6 +262,12 @@ def planned_schedules() -> list[PlannedSchedule]:
         schedules.append(
             PlannedSchedule("artifact-eviction", ArtifactEvictionWorkflow, eviction_every)
         )
+    # The orphaned-wait sweep is unconditional, unlike its neighbours, because there is no setting
+    # that turns waits on: any deployment can raise one, and a row whose run was terminated is
+    # stuck in an inbox whether or not anybody configured anything. With no waits it is one empty
+    # query an hour (`D-2026-09-25-a-wait-nobody-can-settle-is-settled-by-a-sweep`).
+    orphan_every = timedelta(minutes=settings.awaiting_orphan_sweep_minutes)
+    schedules.append(PlannedSchedule("orphaned-waits", OrphanedWaitsWorkflow, orphan_every))
     # Draining the result outbox earns a Schedule only where a sink is actually enabled - the same
     # question `document-sync` and `eln-sync` ask of their own registries, and asked of the sink
     # registry rather than of a second `result_publish_enabled` flag, because

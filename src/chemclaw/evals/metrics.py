@@ -61,7 +61,7 @@ def _positive_scalar(raw: Any, field: str) -> float:
     return value
 
 
-@metric("e_factor", Direction.LOWER_IS_BETTER)
+@metric("e_factor", Direction.LOWER_IS_BETTER, gated=True)
 def e_factor(case: EvalCase) -> MetricResult:
     """Green-chemistry E-factor: kg waste per kg product (Sheldon).
 
@@ -83,7 +83,7 @@ def e_factor(case: EvalCase) -> MetricResult:
     )
 
 
-@metric("pmi", Direction.LOWER_IS_BETTER)
+@metric("pmi", Direction.LOWER_IS_BETTER, gated=True)
 def process_mass_intensity(case: EvalCase) -> MetricResult:
     """Process Mass Intensity: total input mass per kg product (PMI = E-factor + 1).
 
@@ -105,7 +105,7 @@ def process_mass_intensity(case: EvalCase) -> MetricResult:
     )
 
 
-@metric("prediction_error", Direction.LOWER_IS_BETTER)
+@metric("prediction_error", Direction.LOWER_IS_BETTER, gated=True)
 def prediction_error(case: EvalCase) -> MetricResult:
     """Absolute error of a predicted value against a held-out reference.
 

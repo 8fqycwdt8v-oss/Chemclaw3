@@ -1,0 +1,58 @@
+{
+  "probe": {
+    "id": "op-16",
+    "section": 3,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "I want to maximise yield and minimise the des-bromo impurity at the same time. Give me the Pareto front over temperature, ligand and base.",
+    "expects_tools": [
+      "suggest_next_experiment"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "these conditions are the single best point",
+      "the front is the set of optimal conditions the model predicts",
+      "the optimizer proved no better trade-off exists"
+    ],
+    "direction": "Multi-objective is supported since W3, so the request as phrased *can* be met and refusing it is now the failure. The answer should pass both objectives — maximise yield, minimise the des-bromo impurity — with a direction each, supply every run's value for both, and present the returned `front`: the runs among those supplied that nothing else beats on both at once. It must let the chemist choose along that front rather than announcing a winner, because a trade-off has no single best point. Two things it must not claim: that the front is a *prediction* (it is the non-dominated subset of the runs supplied, a statement about measurements), and that no better trade-off exists anywhere (the optimizer searched, it did not prove). If the chemist supplied runs reporting only yield, the honest move is to ask for the impurity numbers rather than optimise one axis and call it a front.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "op-16",
+    "section": 3,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "I want to maximise yield and minimise the des-bromo impurity at the same time. Give me the Pareto front over temperature, ligand and base.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 2.14,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "12651aa0300440e1b70d2d7d3a5d9ada",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

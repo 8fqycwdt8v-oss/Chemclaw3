@@ -55,9 +55,15 @@ Three step kinds:
 
 **A template is not plan-gated.** The plan gate puts a human between an autonomously-chosen write
 and its execution; a template already has that human — the file is authored by a person, committed
-to git and reviewed, and nothing at run time can produce one. Asking an `agent` step to get its plan
-approved would be asking for approval of a plan nobody wrote, and there is no session to approve it
-in.
+to git and reviewed. Asking an `agent` step to get its plan approved would be asking for approval of
+a plan nobody wrote, and there is no session to approve it in.
+
+**The premise that used to carry that sentence was "nothing at run time can produce one", and it is
+false**: `agent/workflow_tools.compose_workflow` produces one. What restores the exemption is
+`templates/composed.py::authored_problems` — an agent-authored document may name no side-effecting
+tool and no `write_tools`, so it never reaches the question the gate answers. See "A workflow the
+agent composed" below; that section is the whole argument, and this one is no longer allowed to
+stand without it.
 
 **So the step is narrowed instead.** Its agent is built with every state-changing tool removed from
 both halves of its surface — the in-process tools *and* every connector's allow-list — unless the
@@ -92,15 +98,101 @@ makes a "simple config format" become a programming language with no debugger, a
 procedure needs them it wants an agent (a profile) or real code (a connector workflow), not more
 YAML.
 
+## Concurrency, which you do not write down
+
+Steps that do not read each other run at the same time. There is no `parallel:` key and there is
+nothing to opt into: a `${steps.<id>.result}` reference **is** a dependency edge, the validators
+above refuse a forward reference, so the declared order is already a topological order of a DAG and
+`templates/schedule.py` reads the waves straight off it. Two of the nine shipped templates —
+`degradant-triage` and `hazard-briefing` — turned out to be shaped this way and had been running
+one step after another for no reason anybody had written down.
+
+**How many actually run together is bounded, and it is the same number the ceiling is checked
+against.** A wave is dispatched in batches of `orchestrator_max_parallel_children`, pinned into the
+run at launch as `TemplateRunInput.max_parallel_steps`, and `run_ceiling_problems` sizes a wave as
+`ceil(width / limit)` slow steps. Sizing it at one slow step however wide it is was optimistic in a
+way no worker makes true — an agent-authored document of 501 independent steps passed the run
+ceiling as though the whole procedure cost 900 s
+(`D-2026-09-16-a-wave-costs-its-slowest-member-once-per-batch`). The two shipped templates with a
+concurrent wave are two steps wide, so nothing about them changes.
+
+**This is not the fan-out `D-2026-08-25-the-loop-is-a-composite-not-a-template` declined.** That
+decision is about a *loop*: ranking N microstates, where N is known only once an earlier step has
+answered. A loop needs iteration and expressions and still lives in a composite. What runs together
+here is steps the file already declares.
+
+So the way to make a procedure faster is to stop making a step read something it does not need: a
+step that references an earlier result only to pass it through has just serialised itself.
+
 ## Running one
 
 Each template becomes a generated agent tool named `run_<name>`, so the model can start it exactly
 as it starts any durable job — and it is gated, audited and attributed exactly the same way. It
 returns a job id; poll it with `get_durable_job_status`.
 
+**A launcher is withheld in one case**: no profile names it and its steps call a tool or job that a
+bundle here declares and this deployment does not bind — an opt-in capability that is off
+(`registry.withheld_reason`,
+`D-2026-09-26-a-launcher-no-profile-names-is-withheld-when-its-capability-is-off`). It is then
+never bound, so it costs no prefix, and enabling the bundle binds it. Every other launcher is bound
+whatever the connector set, and refuses at launch what it cannot run.
+
 `make template-validate` checks every template before it ships: unique step ids, references that
 resolve, tools that exist, profiles that exist, declared write tools that exist and actually write,
-and no forward references.
+and no forward references. It also checks that the **run** can finish the steps the file declares —
+`template_run_timeout_seconds` against the sum of the per-kind step ceilings — and
+`unrunnable_reason` asks the same question again at launch, so a procedure that cannot complete is
+refused before a workflow id exists rather than terminated hours later. That second check is not
+redundant with `core/config`'s: a `Settings` object cannot see this directory, so it can only
+require that *one* step fits, and one `job` step is 39,330 s against a run ceiling of 45,330 s.
+
+## What an `agent` step is handed
+
+A step's prompt is cut to `agent_max_tool_result_chars` at the model's edge
+(`durable/template_activities.bounded_prompt`), head and tail, with a notice saying so in this
+system's own marked words. The chat path's cap does not reach here — `bound_tool_results` is an
+entry of `tool_call_middleware`, and a `tool` step runs through `invoke_governed`, which folds the
+governance chain without the three entries that exist to serve a model. So a `${steps.<id>.result}`
+reference to an oversized result used to arrive whole: measured, 245,700 characters against a
+60,000 ceiling, and unreclaimable, because compaction's two edits are for history and a step has
+none. Reference a *field* of a large result (`${steps.ranking.result.smiles}`) rather than all of
+it when you can — `chemclaw_template_prompt_truncated_total` names the template when you have not.
+
+## A failed run resumes
+
+A run's id is `hash([name, inputs])` under `ALLOW_DUPLICATE_FAILED_ONLY`, so the only way to
+re-execute one is after a failure — and the steps that *had* finished were already recorded
+(`failed_template_record`) and were not read, so the next attempt redid them. It does not now: the
+sequencer asks `completed_steps` what the previous attempt finished, folds those results into
+scope, and dispatches only what is left.
+
+Three conditions, each of them a way this could be *wrong* rather than merely absent: the row must
+exist, it must be a failure (`job_records` is upserted on `job_id`, so a completed run's row would
+otherwise read back as a resume of itself), and its fingerprint must match the resolved template —
+because the run id says nothing about the steps, so editing the file and relaunching lands on the
+same id carrying a different procedure.
+
+## A workflow the agent composed
+
+`compose_workflow` writes one down at run time and `run_composed_workflow` runs it, so a procedure
+this system works out once stops being re-derived at one model call per step. It is the same
+`Template` model, so it gets the validators, the wave schedule and the resume above for free.
+
+**It may not write**, and that is what keeps the plan-gate exemption at the top of this file true:
+the exemption holds *because* a template is reviewed and uncreatable at run time, so an
+agent-authored one may name no side-effecting tool and no `write_tools` —
+`composed.authored_problems`, asked when it is stored and again when it is run.
+
+**It may run a durable job once a person approves that version of it**
+(`D-2026-09-15-an-approval-is-for-one-version-of-one-workflow`). Composing is not the decision: a
+workflow with `job` steps is stored unapproved, and `composed.unapproved_jobs` withholds the run
+until `POST /workflows/{name}/approval` records a person's Yes against
+`template_fingerprint(document)`. Because the approval is keyed on the document, re-composing
+lapses it — there is nothing to clear. There is no tool for approving, deliberately: a workflow
+must not be able to approve itself, which is `routes/plan.py::decide_plan`'s rule one seam over.
+
+An approval lifts the `job` step and nothing else. A job is a call the approver read in the
+document; `write_tools` is a permission a model spends later on a call nobody has seen.
 
 ## Versioning
 

@@ -26,7 +26,8 @@ import chemclaw.agent.verifier as verifier_module
 import chemclaw.api.runner as runner
 import chemclaw.api.runner_trace as runner_trace
 from chemclaw.agent.loop_cap import record_loop_cap
-from chemclaw.agent.plan_gate import PLAN_APPROVAL_PROMPT
+from chemclaw.agent.plan_approval_store import plan_approval_store
+from chemclaw.agent.plan_gate import PLAN_APPROVAL_PROMPT, approval_stands, plan_identity
 from chemclaw.agent.session import TurnSession
 from chemclaw.agent.spend_cap import record_spend_cap
 from chemclaw.agent.verifier import ClaimCheck, VerificationResult
@@ -362,6 +363,19 @@ def test_every_method_the_trace_offers_is_one_the_shipped_turn_calls() -> None:
     *class* and not the name: a method a turn stops calling is announced by its own tests
     continuing to pass. Whoever adds a provider that streams argument fragments adds the caller in
     the same change.
+
+    **The `__mutmut_` filter is what lets `make mutants` start at all, and its absence stopped the
+    whole run.** `api/runner_trace.py` is in `[tool.mutmut].source_paths`, so inside `mutants/` this
+    class carries mutmut's scaffolding beside its real methods — `xǁToolCallTraceǁissued__mutmut_3`
+    and 44 more. Those names pass the `_` filter above, no module under `api/` calls them (nothing
+    could), and this test therefore failed in the *stats* phase that runs before a single mutant is
+    tested: `failed to collect stats. runner returned 1`, in 27 seconds. Driven on `origin/main`
+    with no other change, so the weekly backstop was covering **nothing** while reading as
+    configured.
+
+    They are not methods the class offers; they are a harness's rewriting of the ones it does, and
+    the subject here is the shipped surface. `D-2026-09-22-a-mutation-backstop-that-cannot-start`
+    carries the finding.
     """
     src = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
     api = (src / "api").rglob("*.py")
@@ -371,7 +385,9 @@ def test_every_method_the_trace_offers_is_one_the_shipped_turn_calls() -> None:
     offered = [
         name
         for name, value in vars(runner_trace.ToolCallTrace).items()
-        if not name.startswith("_") and callable(getattr(value, "fget", value))
+        if not name.startswith("_")
+        and "__mutmut_" not in name
+        and callable(getattr(value, "fget", value))
     ]
     unused = [name for name in offered if f".{name}" not in readers]
     assert unused == [], (
@@ -614,12 +630,20 @@ def test_an_ungrounded_method_parameter_marks_the_answer_for_review(
     assert answer.confidence is None  # nothing was *scored*; the scan is not a measurement
 
 
-def test_the_shape_gate_is_off_unless_the_deployment_asks_for_it(
+def test_the_shape_gate_turned_off_marks_nothing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Default-off, because a heuristic that fires on a legitimate answer is worse than none."""
+    """A deployment that turns the gate off gets no mark from it, on the same answer that trips it.
+
+    **This asserted that off was the shipped default, and the default is now on** — the gate is
+    paired with `answer_review_max_rounds`, so a mark leads to a revision and, failing that, to a
+    person, which is the trade `core/config/llm.py` argues. The heuristic's over-firing is
+    unchanged and still pinned in `tests/test_verifier.py`. What survives the flip is the half that
+    is about the code: the knob really does turn the scan off, asserted against the very answer the
+    arm above shows it marking, so "off" cannot quietly become "on with nothing to say".
+    """
     monkeypatch.setattr(settings, "verifier_enabled", False)
-    assert settings.answer_shape_gate_enabled is False, "the gate must be off unless asked for"
+    monkeypatch.setattr(settings, "answer_shape_gate_enabled", False)
     answer = _verified_answer(_CitingAgent(_METHOD_ANSWER))
     assert answer.review_required is False
     assert answer.unsupported_claims == []
@@ -821,23 +845,29 @@ def test_the_transcript_stores_what_the_agent_did_not_only_what_it_said() -> Non
 # --- the plan-approval prompt: a gated turn that ends blocked must say so on the stream ----------
 
 
-def _plan_gated(monkeypatch: pytest.MonkeyPatch, todos: list[str] | None, approved: bool) -> None:
-    """Arrange a `plan_only` turn whose session proposes `todos` under a given decision state.
+def _plan_gated(monkeypatch: pytest.MonkeyPatch, titles: list[str] | None, approved: bool) -> None:
+    """Arrange a `plan_only` turn whose session proposes `titles` under a given decision state.
 
     The plan and the decision are faked at the runner's own imports — the same seam the
     verification tests above use — because what is under test is the emission rule, not the
     checkpointer read or the approval store, which have their own tests.
+
+    The fake answers `session_plan`'s shape — whole steps, declaration included — because that is
+    what the identity is taken over
+    (`D-2026-09-13-a-plan-identity-that-omits-the-scope-approves-a-plan-nobody-read`).
     """
     monkeypatch.setattr(settings, "harness_enabled", True)
     monkeypatch.setattr(settings, "harness_autonomy", "plan_only")
 
-    async def _todos(_session_id: str) -> list[str] | None:
-        return todos
+    async def _plan(_session_id: str) -> list[dict[str, Any]] | None:
+        if titles is None:
+            return None
+        return [{"content": t, "status": "pending", "tools": []} for t in titles]
 
     async def _stands(_session_id: str, _plan_hash: str | None) -> bool:
         return approved
 
-    monkeypatch.setattr(runner, "session_todos", _todos)
+    monkeypatch.setattr(runner, "session_plan", _plan)
     monkeypatch.setattr(runner, "approval_stands", _stands)
 
 
@@ -892,12 +922,136 @@ def test_an_unreadable_plan_stays_silent_rather_than_failing_the_turn(
     assert _answer(events) is not None
 
 
+def test_an_approval_that_authorizes_no_tool_is_still_an_approval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A read-only plan's approval must not re-ask forever — the `None`-vs-empty rule, as an effect.
+
+    `approval_stands` is `await approved_scope(...) is not None`, and the comparison is the control:
+    `frozenset()` means *somebody approved a plan that declared no state-changing tool*, which is a
+    real and common decision, while `None` means nobody has decided. A truthiness test
+    (`bool(await approved_scope(...))`) collapses them, and the visible consequence is here rather
+    than in the gate — the card is re-emitted on every turn of a plan the chemist has already
+    approved, which is the one thing an approval prompt must never do.
+
+    **Deliberately *not* stubbing `approval_stands`**, which every other case in this block does.
+    That stub is why the rule was docstring-only: collapsing the comparison left the whole suite
+    green, because its one caller was patched away two functions up. This drives the real predicate
+    against the real store, so the assertion is about the chain rather than about the emission rule.
+    """
+    monkeypatch.setattr(settings, "session_store", "memory")
+    plan_approval_store.cache_clear()
+    store = plan_approval_store()
+    _plan_gated(monkeypatch, ["look up the melting point of aspirin"], approved=False)
+    monkeypatch.setattr(runner, "approval_stands", approval_stands)
+    steps = [{"content": "look up the melting point of aspirin", "status": "pending", "tools": []}]
+    plan_hash = plan_identity(steps)
+    assert plan_hash is not None
+    asyncio.run(store.record("s-1", plan_hash, "chemist-1", True, frozenset()))
+    try:
+        assert [e for e in _run_turn() if isinstance(e, ApprovalRequestEvent)] == [], (
+            "a plan whose approval authorizes no tool was read as unapproved, so the chemist is "
+            "asked again for a decision they have already made"
+        )
+    finally:
+        plan_approval_store.cache_clear()
+
+
 def test_a_classic_turn_never_asks_for_plan_approval(monkeypatch: pytest.MonkeyPatch) -> None:
     """With the harness off there is no plan and no gate — the prompt would be unanswerable."""
     monkeypatch.setattr(settings, "harness_enabled", False)
 
-    async def _todos(_session_id: str) -> list[str] | None:
+    async def _plan(_session_id: str) -> list[dict[str, Any]] | None:
         raise AssertionError("an ungated turn must not read the plan at all")
 
-    monkeypatch.setattr(runner, "session_todos", _todos)
+    monkeypatch.setattr(runner, "session_plan", _plan)
     assert [e for e in _run_turn() if isinstance(e, ApprovalRequestEvent)] == []
+
+
+class _CappedAndSilentAgent(ScriptedTurn):
+    """A turn whose cap fired before the model wrote anything — `cap` picks which cap."""
+
+    def __init__(self, cap: str) -> None:
+        self._cap = cap
+
+    async def stream(self, message: str) -> AsyncIterator[Piece]:
+        """Record the cap and yield no prose, which is what the drive at `cap=1` produced."""
+        if self._cap == "spend":
+            record_spend_cap(1_020)
+        else:
+            record_loop_cap()
+        yield ""
+
+
+@pytest.mark.parametrize(
+    ("cap", "code"), [("spend", "spend_cap_reached"), ("loop", "loop_cap_reached")]
+)
+def test_a_capped_turn_that_wrote_nothing_says_so_once(cap: str, code: str) -> None:
+    """One event, one counter, and a message that does not promise an answer that is not there.
+
+    **Driven through `run_turn` at the shipped cap, because the defect is the *sequence* of two
+    events and neither helper has one.** Measured 2026-09-19 with
+    `CHEMCLAW_AGENT_MAX_TURN_BILLED_TOKENS=1` against the live mock gateway, and reproduced here:
+
+        error {"code":"spend_cap_reached","retryable":false,
+               "message":"… so the answer below is partial (session …)"}
+        error {"code":"empty_answer","retryable":true,
+               "message":"… Nothing was written, so there is nothing below to read …"}
+        chemclaw_turn_spend_caps_total 2.0
+        chemclaw_turn_empty_answers_total 2.0
+
+    Three things wrong in that, all asserted below:
+
+    - **two errors about one silence, with opposite `retryable` flags**, which a surface cannot
+      reconcile — `Chemclaw3_ui` branches on exactly that field;
+    - **`chemclaw_turn_empty_answers_total` moved**, firing `ChemclawTurnsAnsweringEmpty` at
+      `for: 0m`, whose own description and runbook entry both said "No error counter moves" and sent
+      the operator after "a model that emitted only tool calls" — naming neither the cap nor the
+      counter that identifies it;
+    - **the cap's message said "so the answer below is partial"** with nothing below it.
+
+    Parametrized over both caps rather than only the spend one: the two events are one sentence with
+    one number swapped, `events.py` names both as the errors that share a turn with an answer, and a
+    fix applied to one of them is the shape `tasks/lessons.md` calls a rule written twice.
+
+    The turn's own outcome is unchanged and is asserted in `tests/test_api_observability.py`; what
+    is asserted here is that `chemclaw_turns_finished_total` — the series
+    `ChemclawTurnsHittingACap` reads — is what carries it, rather than the emptiness counter.
+    """
+    empties = METRICS.value("chemclaw_turn_empty_answers_total")
+    events = _events(_CappedAndSilentAgent(cap))
+    errors = [event for event in events if isinstance(event, ErrorEvent)]
+
+    assert [error.code for error in errors] == [code], (
+        f"a capped silent turn emitted {[e.code for e in errors]}; two errors about one silence "
+        "with opposite `retryable` flags is what a surface cannot reconcile"
+    )
+    assert METRICS.value("chemclaw_turn_empty_answers_total") == empties, (
+        "`chemclaw_turn_empty_answers_total` moved for a turn a cap had already named, so "
+        "`ChemclawTurnsAnsweringEmpty` fires with its own description ('nothing explains it') "
+        "false and the operator is sent after the wrong cause"
+    )
+    assert "nothing below to read" in errors[0].message, (
+        f"the cap event still promises an answer that was never written: {errors[0].message}"
+    )
+    assert "the answer below is partial" not in errors[0].message, errors[0].message
+    # No `AnswerEvent` at all: an empty one renders as a blank assistant bubble, costs a judge call
+    # under `verifier_enabled`, and books `completed=True` for a turn that answered nothing.
+    assert not [event for event in events if isinstance(event, AnswerEvent)], (
+        "a capped silent turn shipped an AnswerEvent, so it books as answered"
+    )
+
+
+def test_a_capped_turn_that_did_write_still_calls_its_answer_partial() -> None:
+    """The other side of the same boundary — the wording is conditional, not replaced.
+
+    Without this, a fix that simply reworded both cap messages to "nothing below to read" would pass
+    the test above while telling every chemist whose capped turn *did* produce a partial answer that
+    there was nothing to read. `Chemclaw3_ui`'s `PARTIAL_ANSWER_CODES` renders that answer as
+    partial, so the sentence and the surface have to agree.
+    """
+    events = _events(_CappedSpendAgent())
+    errors = [event for event in events if isinstance(event, ErrorEvent)]
+    assert [error.code for error in errors] == ["spend_cap_reached"]
+    assert "so the answer below is partial" in errors[0].message, errors[0].message
+    assert _answer(events).text == "as much as the budget bought"

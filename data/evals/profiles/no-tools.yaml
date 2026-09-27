@@ -1,5 +1,15 @@
-# The control arm of the tool-utility A/B, and the only profile in this repository that exists to
-# be *measured against* rather than used.
+# A **prompt contrast**, and the only profile in this repository that exists to be *measured
+# against* rather than used.
+#
+# **It is not a tools contrast, and no document may read it as one**
+# (`D-2026-09-14-tools-were-never-the-variable`). It empties `tool_names` *and* supplies its own
+# `instructions:`, which `instructions_for` treats as a wholesale replacement of the default domain
+# prose rather than an addition — measured at a 13,895-character difference in the system prompt,
+# carrying away the ungated sentence that no tool removal can remove. So a delta measured against
+# this arm varies prompt and tools together and cannot be attributed to either. It stays because
+# the merged `make live-ab` run and the merged ChemBench pair were both measured on it, and
+# deleting it would strand those measurements; `tools-removed.yaml` beside it is the arm that
+# varies only the tools.
 #
 # **Why it is here and not in `data/profiles/`.** Everything under `data/profiles/` is advertised by
 # every deployment that starts the front door, and a toolless agent is not a capability anybody
@@ -17,8 +27,10 @@
 # judgment about them.
 #
 # **What it still carries, stated because a control arm that overstates itself is worse than none.**
-# `SubAgentMiddleware` and `FilesystemMiddleware` are in `create_deep_agent`'s required set and
-# cannot be stripped by a profile, so `task` and six file verbs are still bound. None of them
+# First, the deployment's own prose — it does *not* carry that, which is the confound above and the
+# largest single thing this arm changes. Second, `SubAgentMiddleware` and `FilesystemMiddleware`
+# are in `create_deep_agent`'s required set and cannot be stripped by a profile, so `task` and six
+# file verbs are still bound. None of them
 # reaches this programme's data: the helper is itself compiled from this profile, so it has no
 # capability tools either, and the file verbs write to scratch space that does not outlive the turn.
 # This is "the model answering from what it knows", not "a process with no verbs at all".

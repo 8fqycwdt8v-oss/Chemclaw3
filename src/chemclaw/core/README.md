@@ -24,6 +24,17 @@ rule has been written twice the two copies have disagreed silently. `db` holds t
 the same story: `apply_vector_recall_settings` is the pgvector recall parameters *both* dense
 searches run under.
 
+`markdown` is the same argument at a third scale, and the one where writing it twice was already
+wrong. Twenty sites across `agent`, `cli`, `evals`, `memory` and `protocols` rendered a Markdown
+table by hand, and **seventeen of them escaped nothing** — so a cell carrying a literal `|` added a
+column, which a connector's own tool result reaches: driven through `cli.live_jobs.report`, an
+`observed` of `result[0]='a | b'` rendered four cells under a header declaring three. The value here
+is not the grid, which is trivial; it is the three rules a generic table library would push back out
+to twenty callers — a `|` cannot add a cell, absence has exactly one spelling, and whether a
+zero-row table renders at all belongs to the caller, because only the caller knows whether "nothing
+came back" or "nothing was asked" is the true statement. `core` is the only package all five
+importers already depend on, and the module imports nothing but `collections.abc`.
+
 `connect` is the one way to attach a database this system does **not** own, and it is here for the
 `fulltext` reason rather than the `db` one: three seams reach somebody else's database — the
 warehouse ELN inbound (`ingest`), the result store outbound (`publish`), and the dense half of
@@ -40,6 +51,14 @@ parameter because Temporal matches non-retryable errors by class *name*, so each
 metrics.** `evals/metric.py` is the `@metric` decorator and registry for scored eval criteria and
 `evals/metrics.py` the seed criteria themselves; three files, one word, no relationship. `metrics`
 here counts turns, tokens and jobs for an operator.
+
+`llm_gateway` is one *policy*, not a primitive, and the reason it lives in the kernel is the reason
+the kernel exists. It refuses to boot a process pointed at a loopback model gateway, which is a
+question every process that takes a turn has to answer — the front door, the read-only MCP face, the
+background worker whose agent activity builds a graph, and the terminal CLI. It was written in
+`api/middleware.py`, where `create_app` was its only possible caller, so three of those four ran
+without it (`D-2026-09-12-a-gateway-guard-in-the-front-door-is-not-a-deployment-guard`). It reads
+`config` and `http.is_loopback_url` and nothing else, so no edge is created by it being here.
 
 **The rule that defines this package: `core` imports no sibling.** Not `agent`, not `durable`, not
 `connectors` — nothing. Everything else builds on it, so a single edge the other way would make the

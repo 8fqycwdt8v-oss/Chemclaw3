@@ -25,6 +25,8 @@ from collections.abc import Mapping
 from functools import cache
 from typing import Any
 
+from chemclaw.agent.framing import safe_id
+from chemclaw.agent.refusal_route import routed
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import get_current_actor, get_current_roles
 
@@ -69,8 +71,11 @@ class AuthorizationError(Exception):
 # gets it without configuring anything — the same property the manifest derivation gives bundles.
 #
 # `synthesize_memory` joins it for the same reason and one more: it re-reads every reaction from
-# every ingest source and opens pull requests in the knowledge repository, so it is both unbounded
-# in the corpus and outward-facing in its effect.
+# every ingest source and writes notes straight into the knowledge graph, so it is both unbounded
+# in the corpus and outward-facing in its effect. The reason used to be stated as "opens pull
+# requests in the knowledge repository", which has not been true since
+# `D-2026-09-05-the-gate-follows-behaviour-not-knowledge`; the classification is unchanged, because
+# a write that lands immediately is *more* outward-facing than one a human had to merge.
 CORE_EXPENSIVE_ACTIONS: frozenset[str] = frozenset(
     {
         "request_development_report",
@@ -80,6 +85,14 @@ CORE_EXPENSIVE_ACTIONS: frozenset[str] = frozenset(
         # stronger argument for the gate rather than a weaker one: a report nobody wanted costs
         # tokens, and four reactions nobody wanted costs four reactions.
         "request_external_input",
+        # A tournament is the most expensive single thing a turn can start: generation across
+        # several angles, a critique per hypothesis, `field/2 · ceil(log2(field))` judged
+        # comparisons and a check per survivor — roughly thirty structured model calls at the
+        # shipped field size, against a question a chemist may have asked idly. It is also the one
+        # job whose cost scales with a *setting* rather than with the request
+        # (`hypothesis_max_field`), so a deployment that widens the field widens this gate's
+        # subject without touching the tool.
+        "rank_competing_hypotheses",
     }
 )
 
@@ -118,9 +131,9 @@ CORE_EXPENSIVE_ACTIONS: frozenset[str] = frozenset(
 # nothing validates these names against the live tool surface.
 DEFAULT_WRITE_TOOL_GATES: frozenset[str] = frozenset(
     {
-        "record_knowledge_note",  # pushes a branch to the knowledge repo
-        "record_confirmed_answer",  # pushes a branch to the knowledge repo
-        "record_failure",  # pushes a branch to the knowledge repo, and retires a merged claim
+        "record_knowledge_note",  # commits into the knowledge repo
+        "record_confirmed_answer",  # commits into the knowledge repo
+        "record_failure",  # commits into the knowledge repo, and retires a claim already in it
     }
 )
 
@@ -158,6 +171,35 @@ STATE_CHANGING_TOOLS: frozenset[str] = (
             # would put drafting a protocol behind the same door as pushing to the graph.
             "structure_experiment_request",  # writes the structured ask as revision 1
             "draft_experiment_protocol",  # writes a protocol revision
+            # Writes `experiment_arm_results`, on the same terms and with one of its own: the
+            # table is INSERT-only for the application, so what the plan gate is approving is
+            # an addition to a record that cannot later be tidied. An outcome attached to the
+            # wrong revision or the wrong arm stays attached.
+            "attach_plate_results",  # writes measured outcomes against a revision
+            # Both halves of the composed-workflow seam. `compose_workflow` writes a row that
+            # later *runs*, which is a stronger reason to gate it than the row itself: what is
+            # being approved is a procedure, not a note. `run_composed_workflow` starts a durable
+            # run exactly as a `run_<template>` launcher does, and is here rather than in
+            # `template_tool_names()` because that function reads `data/templates/` and this tool
+            # is one name whatever a chemist has composed.
+            "compose_workflow",  # writes composed_workflows
+            "run_composed_workflow",  # starts a TemplateWorkflow run
+            # Writes a row in `behaviour_proposals`, which is the small reason. The real one is
+            # that a turn proposing a change to what the agent *does* is something the plan gate
+            # should see — the same standing `compose_workflow` has, where what is gated is the
+            # procedure rather than the row. Nothing here changes behaviour: only a person's
+            # `POST /proposals/...` does, and `SkillsReadOnlyRefusal` still refuses every skill
+            # write a turn could attempt. Being here also subtracts it from every helper's surface
+            # by arithmetic, which is `ask_clarifying_question`'s argument exactly: a helper
+            # proposing behaviour changes from a context the chemist cannot see is worse than one
+            # that cannot propose at all.
+            "propose_skill",  # writes behaviour_proposals
+            # Starts a durable tournament that ends by writing `experiment-proposal` and
+            # `hypothesis-field` notes into the graph, so it writes knowledge as well as spending a
+            # job's worth of model calls. Being here also subtracts it from every helper's surface,
+            # which is right for a second reason: a tournament spawned from inside a helper would
+            # be a fan-out inside a fan-out, priced against a budget its caller cannot see.
+            "rank_competing_hypotheses",  # starts a durable tournament that records notes
         }
     )
     | DEFAULT_WRITE_TOOL_GATES
@@ -216,10 +258,11 @@ KNOWLEDGE_READ_TOOLS: frozenset[str] = frozenset(
 # the knowledge graph or the memory tiers at all. Every path into them is one of these six, because
 # the write path is in-process and the memory stores are this repository's own.
 #
-# `synthesize_memory` is here although it *launches* rather than writes: the job it starts opens
-# pull requests against the knowledge repository, so a turn that called it is a turn that put
-# something back. `forget_preference` is here although it captures nothing: it changes the durable
-# record, which is what this column reports on.
+# `synthesize_memory` is here although it *launches* rather than writes: the job it starts records
+# notes in the knowledge graph directly, so a turn that called it is a turn that put something
+# back. It said "opens pull requests against the knowledge repository" until the gate was
+# deleted; nothing in this tree opens one now. `forget_preference` is here although it captures
+# nothing: it changes the durable record, which is what this column reports on.
 #
 # `tests/test_turn_knowledge.py` asserts this stays inside `side_effecting_tools()`, so a write
 # that stops being gated cannot go on being counted as one.
@@ -274,6 +317,30 @@ READ_ONLY_TOOLS: frozenset[str] = frozenset(
         # than from the current head is the write this pair exists to prevent.
         "read_experiment_protocol",
         "find_experiment_protocols",
+        # Scaling a stored protocol's charges to a new basis. **Read-only because it stores
+        # nothing**: it returns a proposal and every path to keeping one goes back through
+        # `draft_experiment_protocol`, under the same `parent_revision` check any other revision
+        # takes. The substantive reason is the same one `read_experiment_protocol` above carries —
+        # "what would this look like at 2 kg" is a question a chemist asks *while* deciding
+        # whether to approve the work, so the plan gate must not hold it until after.
+        "rescale_experiment_protocol",
+        # Reading a plate's outcomes back, and the observations they make for a campaign.
+        # A read for the same reason its neighbours are: "what did the plate give" is a
+        # question asked while deciding whether to approve the next round, not after.
+        "read_plate_results",
+        # Arithmetic over a campaign's recorded points: it reads a campaign thread and returns
+        # factors and arms, writing nothing anywhere. Read-only is the substantive classification
+        # rather than the technical one — the plan gate lets a read run while a plan is still being
+        # built, and "what would this campaign's next experiments look like as a plate" is a
+        # question that has to be answerable *before* somebody approves drafting them, not after.
+        "experiment_arms_from_campaign",
+        # Arithmetic over numbers the caller supplied in the call itself: it reads no store, opens
+        # no session and writes nothing. Read-only here is not a close call — the question is
+        # whether a result meets a limit, and a plan that cannot ask it before being approved is a
+        # plan whose analytical rows nobody checked.
+        "check_against_specification",
+        # The same case: a regression over timepoints the caller passed in the call.
+        "estimate_stability_trend",
         "get_durable_job_status",
         "list_attachments",
         "list_watches",
@@ -354,6 +421,22 @@ def side_effecting_tools() -> frozenset[str]:
 _MEMORY_WRITE_VERBS: frozenset[str] = frozenset({"write_file", "edit_file"})
 
 
+def memory_write_verbs() -> frozenset[str]:
+    """The tools whose gatedness is a function of their *arguments* rather than their name.
+
+    `side_effecting_tools()` is the set a gate can enumerate; this is the set it cannot, and the two
+    together are the whole gated surface. Exposed because a ratchet that walks only the first proves
+    nothing about the second, and the alternative — a test naming `write_file` — would be a third
+    declaration of a partition that already has two owners
+    (`D-2026-09-15-a-ratchet-that-enumerates-one-half-of-a-partition-proves-nothing-about-the-other`).
+
+    A reader wanting "is this call gated" wants `side_effecting_call`, which composes both halves.
+    This exists for the callers that need to *enumerate* the second half, of which the ratchet in
+    `tests/test_plan_scope.py` is the first.
+    """
+    return _MEMORY_WRITE_VERBS
+
+
 def writes_durable_memory(name: str, arguments: Mapping[str, Any]) -> bool:
     """Whether this *call* writes a person's durable memories, as opposed to the turn's scratchpad.
 
@@ -373,6 +456,24 @@ def writes_durable_memory(name: str, arguments: Mapping[str, Any]) -> bool:
     those name a path too; treating an unreadable argument as the ungated case is how a gate
     becomes bypassable by malformed input.
 
+    **The argument has to be read the way the router reads it, and reading it raw failed open.**
+    This tested `path.startswith(MEMORY_ROOT)` against the model's own spelling, while
+    `FilesystemMiddleware` passes every path through upstream's `validate_path` *before* the
+    permission check and before `CompositeBackend` routes it — and that function normalises
+    (`os.path.normpath`, then a leading slash if there is none). So the gate and the backend read
+    two different strings, and three spellings of one path sat in the gap: measured,
+    `memories/a.md`, `/./memories/a.md` and `memories/sub/b.md` all answered `False` here and all
+    routed to `BoundedStoreBackend` over Postgres. Under an unapproved plan the plan gate
+    short-circuits on `not side_effecting_call(...)`, and on a dry run `dry_run_refusal` does the
+    same, so a durable per-actor write landed with neither gate having looked at it.
+
+    Normalising first closes that by construction rather than by enumerating the spellings, and it
+    also closes the exact-root case the blanket `/**` deny was masking: `_route_for_path` documents
+    "path is exactly the route root without trailing slash" as routing to that backend, so
+    `/memories` is a durable write that no `startswith("/memories/")` can see. A path
+    `validate_path` *refuses* (traversal, a Windows absolute) counts as durable for the same reason
+    a non-string does — an argument this gate cannot resolve is never the ungated case.
+
     Args:
         name: The tool being called.
         arguments: That call's arguments, as the model supplied them.
@@ -380,6 +481,8 @@ def writes_durable_memory(name: str, arguments: Mapping[str, Any]) -> bool:
     Returns:
         `True` when this call would write under the memory root.
     """
+    from deepagents.backends.utils import validate_path
+
     from chemclaw.agent.scratchpad import MEMORY_ROOT
 
     if name not in _MEMORY_WRITE_VERBS:
@@ -387,7 +490,11 @@ def writes_durable_memory(name: str, arguments: Mapping[str, Any]) -> bool:
     path = arguments.get("file_path")
     if not isinstance(path, str):
         return True
-    return path.startswith(MEMORY_ROOT)
+    try:
+        routed = validate_path(path)
+    except ValueError:
+        return True
+    return routed == MEMORY_ROOT.rstrip("/") or routed.startswith(MEMORY_ROOT)
 
 
 def side_effecting_call(name: str, arguments: Mapping[str, Any]) -> bool:
@@ -401,8 +508,34 @@ def side_effecting_call(name: str, arguments: Mapping[str, Any]) -> bool:
     `write_todos` is deliberately not covered by either half. It writes the plan, and a gate that
     refused it under an unapproved plan would refuse the only call that can produce a plan to
     approve — the deadlock is the reason this is worth stating rather than leaving to inference.
+
+    **A handoff is deliberately not a case here** — see `changes_the_conversation`, which is the
+    predicate the dry-run refusal adds beside this one and the plan gate does not.
     """
     return name in side_effecting_tools() or writes_durable_memory(name, arguments)
+
+
+def changes_the_conversation(name: str) -> bool:
+    """Whether this call moves the conversation to another agent — what dry-run must also refuse.
+
+    **Separate from `side_effecting_call` because the two gates that read that predicate want
+    different answers here.** `transfer_to_<peer>` writes the checkpointed `active_agent`, so a
+    later turn resumes with whoever it named: a turn the chemist marked "do nothing" that made one
+    moved every later turn onto a different agent while its refusal text said "Nothing was
+    started" (measured, `tests/test_turn_graph.py`). So dry-run refuses it. The plan gate must not:
+    a handoff cannot extend the turn's authority
+    (`D-2026-09-19-a-handoff-redistributes-the-turns-authority-it-cannot-extend-it`), so gating it
+    protects nothing, and folded into `side_effecting_call` it put every handoff of an enabled mesh
+    behind a human-approved plan under the shipped harness defaults, with a refusal telling the
+    chemist the handoff "changes stored data or starts work".
+
+    Recognised by shape (`handoff.is_handoff_tool_name`) for the reason that function gives — the
+    enumerable set is cached and the roster is not. Imported lazily because `handoff` reaches
+    LangGraph and this module is on the kernel side of that.
+    """
+    from chemclaw.agent.handoff import is_handoff_tool_name
+
+    return is_handoff_tool_name(name)
 
 
 def expensive_actions() -> frozenset[str]:
@@ -475,6 +608,15 @@ def authorize_tool(tool: str) -> None:
     (add an entry to `tool_role_gates`, or grant a privileged role) belongs in the runbook and this
     docstring, not in a message a chemist reads.
 
+    **All three now also carry the routed footer** (`agent/refusal_route`), and all three declare
+    `sanctioned path: none from here` — which is the honest value and is the reason the footer is
+    worth attaching to a refusal nobody can route around. An agent cannot grant itself a role, so
+    every path it might invent is a retry against a wall that has not moved; saying so is
+    information the model otherwise has to infer from prose. `who can act` names a *kind* of account
+    and never a role name: enumerating what the account lacks would answer "which roles exist here"
+    for anyone able to call a tool, and this gate refuses tools that do not exist as readily as
+    tools that do.
+
     Args:
         tool: The tool's registered name (e.g. `"record_knowledge_note"`, `"gather_evidence"`).
 
@@ -485,12 +627,24 @@ def authorize_tool(tool: str) -> None:
     """
     if not settings.entra_required:
         return  # dev: no tenant, open gate
+    # The name as a *message* may carry, which is not the name the decision is made on: every
+    # lookup below still reads `tool` verbatim. This gate is the one refusal site reachable with a
+    # name nothing validated — under a `deny` default it refuses whatever the model put in its tool
+    # call, including a string spelling this system's own refusal footer — so the interpolated copy
+    # is reduced to a charset that cannot open a field (`agent/refusal_route`). A registered tool
+    # name is `[a-z_]+` and comes back unchanged.
+    named = safe_id(tool)
     required = settings.tool_role_gates.get(tool)
     if required is not None:
         if not _has_required_role(frozenset(required)):
             raise AuthorizationError(
-                f"{_actor()} is not authorized to use {tool}: the account holds none of the "
-                "roles this tool requires"
+                routed(
+                    f"{_actor()} is not authorized to use {named}: the account holds none of the "
+                    "roles this tool requires",
+                    code="tool_role_not_held",
+                    boundary="this deployment's per-tool authorization",
+                    who_can_act=f"an account holding one of the roles {named} requires here",
+                )
             )
         return
     if settings.tool_authz_default == "deny":
@@ -498,8 +652,13 @@ def authorize_tool(tool: str) -> None:
         # gate so a privileged role can never open an unlisted write tool under `deny` —
         # that would invert the allowlist for exactly the dangerous tools.
         raise AuthorizationError(
-            f"{_actor()} is not authorized to use {tool}: this deployment permits only an "
-            "approved list of tools, and this one is not on it"
+            routed(
+                f"{_actor()} is not authorized to use {named}: this deployment permits only an "
+                "approved list of tools, and this one is not on it",
+                code="tool_not_permitted_here",
+                boundary="this deployment's list of permitted tools",
+                who_can_act=f"an account this deployment has permitted for {named}",
+            )
         )
     if tool in DEFAULT_WRITE_TOOL_GATES:
         privileged = settings.entra_privileged_role_set
@@ -508,8 +667,13 @@ def authorize_tool(tool: str) -> None:
         # silently void the built-in write gate on an unconfigured deployment.
         if not privileged or not _has_required_role(privileged):
             raise AuthorizationError(
-                f"{_actor()} is not authorized to use {tool}: it changes stored data, so it "
-                "requires a privileged role the account does not hold"
+                routed(
+                    f"{_actor()} is not authorized to use {named}: it changes stored data, so it "
+                    "requires a privileged role the account does not hold",
+                    code="privileged_role_not_held",
+                    boundary="the built-in gate on tools that change stored data",
+                    who_can_act="an account holding a privileged role in this deployment",
+                )
             )
 
 
@@ -531,7 +695,14 @@ def authorize_trigger(action: str) -> None:
         return  # not a gated action
     actor = get_current_actor()
     if actor is None:
-        raise AuthorizationError(f"{action} requires an authenticated user")
+        raise AuthorizationError(
+            routed(
+                f"{action} requires an authenticated user",
+                code="expensive_action_unauthenticated",
+                boundary="the entitlement gate on expensive actions",
+                who_can_act="an authenticated user holding a privileged role",
+            )
+        )
     privileged = settings.entra_privileged_role_set
     # An empty privileged set means fail closed, not open — the same rule the built-in write gate
     # in `authorize_tool` states, and now reachable for the same reason: `_has_required_role` treats
@@ -541,7 +712,14 @@ def authorize_trigger(action: str) -> None:
     # whenever `entra_expensive_actions` names anything, and a *declared* expensive job needs no
     # entry in either, so the shipped shape passes validation with both empty.
     if not privileged or not _has_required_role(privileged):
-        raise AuthorizationError(f"user {actor} lacks a privileged role for {action}")
+        raise AuthorizationError(
+            routed(
+                f"user {actor} lacks a privileged role for {action}",
+                code="expensive_action_role_not_held",
+                boundary="the entitlement gate on expensive actions",
+                who_can_act="an account holding a privileged role in this deployment",
+            )
+        )
 
 
 def require_actor() -> str:

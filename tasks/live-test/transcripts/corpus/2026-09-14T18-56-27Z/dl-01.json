@@ -1,0 +1,63 @@
+{
+  "probe": {
+    "id": "dl-01",
+    "section": 1,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Sweep everything we hold on palladium-catalysed couplings of deactivated aryl chlorides — the knowledge graph, the ELN, the mounted share and the reaction store — and give me one page: what conditions recur, what failed, and where the evidence is thin.",
+    "expects_tools": [
+      "gather_evidence",
+      "conditions_for_similar_reaction",
+      "substrate_precedent",
+      "find_notes",
+      "expand_note",
+      "find_knowledge_gaps"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a cited note id that no tool call in this turn returned",
+      "a recurring condition presented without saying how many entries it rests on",
+      "a claim of completeness over sources the turn did not actually read"
+    ],
+    "direction": "The six-source sweep, and the canonical shape for this measurement: a lot of reading, a short answer, every claim cited. The arms differ in where the reading is billed, not in what a good answer says.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "dl-01",
+    "section": 1,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Sweep everything we hold on palladium-catalysed couplings of deactivated aryl chlorides — the knowledge graph, the ELN, the mounted share and the reaction store — and give me one page: what conditions recur, what failed, and where the evidence is thin.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.15,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "1f11eee76b184f74a786cac2d3a2dd62",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

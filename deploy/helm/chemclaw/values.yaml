@@ -63,6 +63,18 @@ route:
 
 service:
   port: 8080
+  # **Read only when `autoscaling.enabled` is false, and it ships true — so on the shipped defaults
+  # this value renders nowhere at all.** `chemclaw.frontDoorProcesses` takes
+  # `autoscaling.maxReplicas` while the HPA is on, and `deployment-service.yaml` omits `replicas`
+  # entirely in that branch (it is the HPA's to own). Measured: `--set service.replicas=0` changes
+  # not one byte of the shipped render. It is stated here because a `--set` that silently does
+  # nothing is worse than one that is refused: an operator scaling the front door on a default
+  # release has to turn the HPA off, or move `autoscaling.maxReplicas`.
+  #
+  # Neither may be zero. Both are refused at render time — see `chemclaw.frontDoorProcesses`, which
+  # carries the measurement: this number reaches every pod through the shared ConfigMap, and
+  # `Settings` refuses it below 1, so a zero stops the whole release from starting rather than
+  # scaling the front door down.
   replicas: 2
   # How long the Route's router is given to stop sending new requests to a pod that is going away,
   # before the pod is told to stop. Kubernetes removes the Endpoint and sends SIGTERM *concurrently*,
@@ -174,22 +186,72 @@ mcpFace:
 
 workers:
   background:
-    # Keep at 1 — but no longer for the checkout lock. That reason is closed: submissions to one
-    # remote are serialized across pods by a Postgres advisory lock
-    # (`kg/git_writer.py::_cluster_lock`), and the host-local `flock` now only guards this pod's
-    # own worktree sweep.
+    # Keep at 1 — and **the reason is now that nobody has driven two, not that two are known to
+    # break.** Saying which of those it is matters, because the two read identically in a values
+    # file and only one of them is a defect somebody can go and close.
     #
-    # The reason that is still live is `NoteReindexWorkflow`
-    # (`D-2026-08-27-what-a-second-background-worker-would-race-on`): the reindex retires
-    # `note_index` rows for every note missing from *this pod's* knowledge checkout, and that
-    # checkout is an emptyDir refreshed by the pod's own sidecar every
-    # `knowledge.sync.intervalSeconds`. Two pods are two views of the corpus, so a freshly merged
-    # note is indexed by one and retired by the other, alternating, while each run logs that it
-    # retired a note that exists. Nothing else on this queue needs the pin: the periodic jobs are
-    # Temporal Schedules under `SKIP` (server-enforced, so worker count is irrelevant to them), the
-    # ELN cursor has exactly one writer, retention re-checks every predicate inside its own DELETE,
-    # and the result outbox claims rows with `FOR UPDATE SKIP LOCKED`.
+    # Both reasons this comment used to give are closed. The D-069 checkout lock: submissions to one
+    # remote are serialized across pods by a Postgres advisory lock
+    # (`kg/git_writer.py::_cluster_lock`), and the host-local `flock` only guards this pod's own
+    # worktree sweep, which is per-pod by construction. And `NoteReindexWorkflow`'s disagreement
+    # about the corpus (`D-2026-08-27-what-a-second-background-worker-would-race-on`), in both its
+    # halves: a prune is bounded by the corpus revision a row was built from
+    # (`D-2026-09-14-a-prune-needs-the-corpus-two-pods-disagree-about`), and a note's fingerprint is
+    # a hash of its bytes rather than the mtime its own checkout wrote
+    # (`D-2026-09-16-a-fingerprint-that-names-a-checkout-is-not-a-fingerprint-of-a-note`), so two
+    # pods holding one commit now agree about every note — driven over two real clones against one
+    # index, where every note was re-embedded on every pass before and none is now. The rate was
+    # one endpoint call per note per pass, so what it cost a release was that release's own corpus
+    # size; the probe's corpus is this repository's 40 notes and is not a figure to read as yours.
+    #
+    # What is left is an *unmeasured* claim rather than a known race. The rest of this queue —
+    # periodic jobs as Temporal Schedules under `SKIP` (server-enforced, so worker count cannot
+    # reach them), one writer on the ELN cursor, retention re-checking every predicate inside its
+    # own DELETE, the result outbox claiming rows with `FOR UPDATE SKIP LOCKED` — is an argument
+    # that has never been run with two workers polling. It is a good argument and it is not
+    # evidence, which is the distinction this repository keeps having to relearn. `BACKLOG.md`
+    # carries what to drive before this becomes a 2.
+    #
+    # Note that `strategy: Recreate` in `deployment-workers.yaml` does **not** relax with this: its
+    # second justification — one code version replays any unfinished history — is independent of
+    # the replica count and still live.
     replicas: 1
+    # What one document parse may allocate **on this pod**, as an explicit
+    # `CHEMCLAW_DOCUMENT_PARSE_MEMORY_BYTES` on this Deployment.
+    #
+    # It overrides whatever the pod would otherwise read, which today is the *code* default: the key
+    # is deliberately absent from `config` below, so nothing puts it in the shared ConfigMap. Set it
+    # there to move the whole release and this entry still wins here — an explicit `env` beats the
+    # same name arriving through `envFrom`, and
+    # `tests/test_deploy_chart.py::_parse_budget_mib` resolves the three sources in that order so a
+    # fleet-wide raise cannot move a real budget without moving the inequality.
+    #
+    # **One number was serving two pods with twice the room between them.** The shipped default is
+    # derived downwards from the *front door* — a 1Gi limit, 523 MiB resident with a warm parse
+    # forkserver, two concurrent parse slots — which leaves 178.9 MiB a parse may spend and is
+    # rounded down to 160. This pod has a 4Gi limit and 370 MiB idle, and runs
+    # `CHEMCLAW_WORKER_MAX_CONCURRENT_ACTIVITIES` (8) parses rather than 2, so solving the same
+    # inequality gives **332.7 MiB**. Rounded down to 320, which is 142 MiB of slack against the
+    # 4Gi rather than the 12.7 the exact figure would leave.
+    #
+    # **It is ~2x rather than the 4x the limits suggest, and that is the whole reason a number
+    # belongs here rather than a doubling being obvious**: the limit is 4x the front door's and the
+    # activity count is 4x too, so most of the extra room is already spent on concurrency.
+    # `tests/test_deploy_chart.py::test_a_pod_that_starts_a_parse_forkserver_fits_the_memory_it_declares`
+    # holds the inequality per component against this value.
+    #
+    # What it buys, stated as the shapes rather than as a threshold: a 24.5 M-character delimited
+    # export needs more than 160 MiB to render and now parses here. A **50 MiB** one needs more than
+    # 512 MiB and still does not — affording that would need `370 + 8 x 1.4 x 512 = 6104` MiB, past
+    # this pod's limit, so it wants either fewer activity slots or a bigger limit, both of which are
+    # a site's declaration rather than this chart's. A refused parse is counted
+    # (`skipped_unreadable`) and names the ceiling.
+    #
+    # An explicit `env` entry beats the same key arriving through `envFrom`, which is how the
+    # ConfigMap's fleet-wide value reaches every other component — the same mechanism
+    # `deployment-connectors.yaml` uses for a bundle's own activity ceiling. Empty string or `null`
+    # leaves this pod on the fleet-wide value.
+    documentParseMemoryBytes: 335544320
 
 # A classical SMB/CIFS file share, mounted read-only on the background worker so its documents can
 # be crawled into the search index (D-2026-08-06-a-share-is-mounted-not-called). Mounted, never
@@ -380,6 +442,50 @@ connectors:
 # The port every connector container listens on (its own Service maps it 1:1). One value rather than
 # per-connector: they are separate Services, so there is no port to deconflict, and a single number
 # keeps the computed URL map and the probes trivially consistent.
+  # ---------------------------------------------------------------------------------------------
+  # The five process-development bundles, all **off**
+  # (`D-2026-09-20-declaring-a-capability-and-binding-it-are-different-decisions`).
+  #
+  # Their manifests ship in the image and declare `default_enabled: false`, so they are discovered
+  # by every checkout — which is what lets `skill-validate`, `prose-validate` and
+  # `template-validate` resolve tool names like `mtsr` — and bound by no deployment that has not
+  # asked. `chemclaw.connectorsEnabled` renders only the `enabled: true` names, so leaving these
+  # false renders an existing release's config byte-for-byte unchanged.
+  #
+  # **Turning one on costs prefix on every model call, not only on the calls that use it.**
+  # Measured: `unitops` 7,353 tokens / 7 tools, `suitability` 4,471 / 7, `thermalsafety` 3,764 / 7,
+  # `kinetics` 3,389 / 6, `props` 2,936 / 6 — 21,913 for all five, against a `PREFIX_BOUND` that
+  # `core/config/agent.py` derives both compaction thresholds from. Enable the ones the site's
+  # chemists actually ask for rather than the set.
+  #
+  # Each carries the same two operator obligations as `chem` and `safety` above: a
+  # `networkPolicy.egressDestinations` entry for the host, and `CHEMCLAW_<NAME>_TOKEN`, because the
+  # served side enforces a bearer on `/mcp` and a missing credential is a refused call.
+  props:
+    # Solvent and pure-component properties (`Chemclaw3-mcp`'s `servers/props`, port 8850).
+    enabled: false
+    server: true
+    url: http://chemclaw-mcp-props:8850/mcp
+  thermalsafety:
+    # Runaway and thermal-hazard arithmetic from measured calorimetry (`Chemclaw3-mcp`'s `servers/thermalsafety`, port 8851).
+    enabled: false
+    server: true
+    url: http://chemclaw-mcp-thermalsafety:8851/mcp
+  kinetics:
+    # Isothermal rate and ideal-reactor arithmetic (`Chemclaw3-mcp`'s `servers/kinetics`, port 8852).
+    enabled: false
+    server: true
+    url: http://chemclaw-mcp-kinetics:8852/mcp
+  unitops:
+    # Scale-up and unit-operation sizing (`Chemclaw3-mcp`'s `servers/unitops`, port 8853).
+    enabled: false
+    server: true
+    url: http://chemclaw-mcp-unitops:8853/mcp
+  suitability:
+    # USP <621> chromatographic system suitability (`Chemclaw3-mcp`'s `servers/suitability`, port 8892).
+    enabled: false
+    server: true
+    url: http://chemclaw-mcp-suitability:8892/mcp
 connectorPort: 8080
 
 # Connector bundles this image does **not** ship — `Chemclaw3-mcp`'s `manifests/` and any private
@@ -729,8 +835,48 @@ resources:
     # not guaranteeing it is latency on every turn rather than a failure anyone can point at. The
     # limit already allowed the burst; what was missing was the reservation. This raises what each
     # front-door pod reserves, and at `maxReplicas: 6` that is 6 CPUs reserved rather than 3.
-    requests: { cpu: "1", memory: "512Mi" }
-    limits: { cpu: "2", memory: "1Gi" }
+    #
+    # **The memory request is 640Mi because a warm parse forkserver is a second process in this
+    # pod, and 512Mi did not cover the idle pair.** `ingest/documents/isolate.py` runs every upload
+    # in a killable child forked from a `forkserver` that is started by fork *and exec*, so none of
+    # its pages are copy-on-write with the front door's. The pod is therefore over its request
+    # while idle from the first upload onwards — a node oversubscribed by the difference and a pod
+    # first in line for eviction — and nothing said so, because the chart was sized before that
+    # process existed.
+    #
+    # The limit stays 1Gi, and what one parse may spend inside it is
+    # `CHEMCLAW_DOCUMENT_PARSE_MEMORY_BYTES`, enforced by the kernel on the child that allocates.
+    # It is **not** `CHEMCLAW_DOCUMENT_MAX_EXPANDED_BYTES`, which this comment used to derive the
+    # limit from: a parse is not a function of a document's expanded size, and two legal uploads
+    # inside every declared ceiling OOM-killed this pod in a 1Gi cgroup while the gate stayed green
+    # (`D-2026-09-19-a-ceiling-on-the-archive-is-not-a-ceiling-on-the-parse`).
+    #
+    # **No number from that derivation is written here any more, and deleting them is the fix.**
+    # Six were — 432, 91, 523, 920, 404 and 3.1 — restating test constants that nothing reconciled
+    # against this file, so the day one moved this comment became a confident wrong answer about
+    # the pod an operator is reading about. `tests/test_deploy_chart.py` holds both inequalities
+    # against its own measured constants and against the settings that bound the work, and
+    # re-measures the forkserver's cost off a running one, so a preload that grew reds there rather
+    # than in an eviction. Read that file for the arithmetic; this file declares the sizes it
+    # produces.
+    #
+    # `mcpFace` shares this key and never parses — it serves no upload route, so `parse_context`
+    # never starts one there. **Driven rather than asserted**: all five shipped entrypoints report no
+    # forkserver after import, and nothing in the suite would notice if one of them started warming
+    # it, because no bound here would break if it did. So the face pays the extra request for
+    # memory it does not use, on one optional replica whose own resident set was tight against
+    # 512Mi anyway, which is why the key is not split.
+    #
+    # **And a turn is memory too, which is what moved both sizes again**
+    # (`D-2026-09-24-a-turn-costs-the-thread-it-loads`). The sizes above were derived with no turn
+    # in flight; a front door that has served turns keeps their warm-up and each permit's
+    # high-water, so it sat over the old request after its first busy minute, and every turn loads
+    # its whole conversation, so twelve permits on long threads OOM-killed it under the old limit
+    # with no upload anywhere. `CHEMCLAW_SESSION_MAX_THREAD_BYTES` bounds the conversation a turn
+    # may load, and the same test holds the request against the warm front door and the limit
+    # against every permit at that ceiling plus the parses.
+    requests: { cpu: "1", memory: "768Mi" }
+    limits: { cpu: "2", memory: "1536Mi" }
   # The default for every worker Deployment, core's and a bundle's. A bundle that needs different
   # sizing overrides it with its own `resources:` under `connectors.<name>` rather than growing a
   # key here, which is what keeps a capability's operational shape inside its own entry.
@@ -752,10 +898,21 @@ resources:
 config:
   # The one model destination. **Stated rather than left to the code default**, for the reason
   # `CHEMCLAW_CALC_SERVER_URL` below is: the default is the local dev mock on loopback, and a pod
-  # that inherited it would refuse to boot (`api/middleware._refuse_unconfigured_llm_gateway`).
+  # that inherited it would refuse to boot
+  # (`core/llm_gateway.refuse_unconfigured_llm_gateway`). **That was true of the front door alone**
+  # until 2026-09-12: the guard lived in `api/middleware.py` with `create_app` as its only caller,
+  # so the background worker — whose agent activity takes turns — inherited the mock and dialled it
+  # silently. It now runs in every component that makes model calls.
   # There is no `CHEMCLAW_LLM_PROVIDER` — this address is the whole knob
   # (`D-2026-09-04-a-gateway-is-the-only-provider`).
   CHEMCLAW_LLM_BASE_URL: "http://internal-llm.llm.svc:8000/v1"
+  # The one legitimate production case for a *loopback* gateway, stated here because a deployer who
+  # needs it will look for it here and nowhere else. A gateway **sidecar** in this pod is an
+  # ordinary topology, and the guard above refuses it by default — a loopback address is the dev
+  # mock's shipped default, and the guard cannot tell the two apart. Set this to `"true"` only
+  # beside a `CHEMCLAW_LLM_BASE_URL` that names a sidecar, never to make a refusal go away: with it
+  # on, every model call this pod makes goes to something on this host, and the boot log says so.
+  CHEMCLAW_LLM_ALLOW_LOOPBACK_GATEWAY: "false"
   CHEMCLAW_LLM_MODEL: "gpt-oss"
   # The window of the model on the line above, so the context policy's *second* bound is real.
   # `llm_context_window_tokens` defaults to 0 in code — "undeclared", the honest default for an
@@ -789,6 +946,19 @@ config:
   # CHEMCLAW_VERIFIER_ENABLED: "true"
   # CHEMCLAW_VERIFIER_CONFIDENCE_THRESHOLD: "0.7"
   CHEMCLAW_SESSION_STORE: "postgres"
+  # Durable agent memory and the skills tiers that ride on it. Stated rather than inherited even
+  # though it now matches the code default, because this is the switch with the widest consequence
+  # in the file: it mounts `/memories/` for every authenticated turn — agent-authored files that
+  # outlive the session, bounded by CHEMCLAW_AGENT_MEMORY_MAX_FILES — and it is what makes
+  # `POST /skills/mine`, `POST /skills/org` and the proposal-acceptance route answer at all rather
+  # than 503. A release that does not want durable agent-authored data sets this "false" here and
+  # knowingly loses the human gate on agent-proposed behaviour with it, which is the coupling
+  # `api/routes/skills.py` states rather than switches.
+  #
+  # The three caps beside it are deliberately NOT stated: their code defaults are derived in
+  # `core/config/agent.py` from measurements this chart cannot re-take, so a number copied here is
+  # a second answer that goes stale on the commit that re-measures.
+  CHEMCLAW_AGENT_MEMORY_ENABLED: "true"
   # Stated rather than left to the code default (16), because the code default was chosen for one
   # pool and this chart runs a fleet of them — how many is `chemclaw.fleetPools`, derived
   # from the topology rather than counted here, because the count written here said seventeen while
@@ -809,13 +979,31 @@ config:
   # same reason the pool is: the two numbers only mean anything together, and a reader changing one
   # has to see the other. A bundle whose activities are long waits overrides it in its own entry.
   CHEMCLAW_WORKER_MAX_CONCURRENT_ACTIVITIES: "8"
+  # How many started workflows a worker keeps resident between their tasks — the ceiling the
+  # activity one above does not reach, because a child workflow is not an activity. Stated here
+  # rather than left to the code default for the reason the pool pair is: this number and
+  # `resources.worker.requests.memory` only mean anything together. Measured at roughly 70-85 KiB
+  # per cached workflow plus ~1.05x its own state plus a history term, so 750 is ~62 MiB for
+  # trivial workflows and ~387 MiB for ones carrying 256 KiB of state and a campaign parent's
+  # history — both off the same three constants, rather than the first off the raw measurement
+  # and the second off the model. `tests/test_workers.py` holds the inequality and fails if the
+  # two stop fitting, whichever of them moved. The SDK's own default is 1,000, which
+  # that shape does not fit inside half of this request — raising the request instead would have
+  # charged every bundle's worker for cache slots no queue has been shown to need.
+  CHEMCLAW_WORKER_MAX_CACHED_WORKFLOWS: "750"
   # Stated rather than left to the code default, because the chart *derives* the publish target from
   # it: the knowledge-sync containers write to `knowledge.noteRepoPath` + this, which is exactly how
   # `Settings.knowledge_path` resolves. Left implicit, the chart would have to name the notes
   # subdirectory a second time, and a second name is what published the graph where nothing read it.
   CHEMCLAW_KNOWLEDGE_DIR: "knowledge"
+  # The broker, which is one deployment for the whole cluster in its own `temporal` namespace —
+  # note the address names no release. `CHEMCLAW_TEMPORAL_NAMESPACE` used to sit on the next line
+  # as the constant `"chemclaw"`, and is now `temporal.namespace` below, which this chart refuses
+  # to render without: the namespace is the only thing separating two ChemClaw releases that share
+  # this address, and a constant separated nothing. Written here as well it would render twice,
+  # every parser keeps the last, and the gate would be checking a value nothing reads — so the
+  # render refuses that too.
   CHEMCLAW_TEMPORAL_ADDRESS: "chemclaw-temporal-frontend.temporal.svc:7233"
-  CHEMCLAW_TEMPORAL_NAMESPACE: "chemclaw"
   # Where the calc physics server lives (`Chemclaw3-mcp`'s `servers/calc`,
   # D-2026-08-16-the-physics-leaves-the-cache-stays). `calc_server_url` is a `CalculatorSettings`
   # field `connectors/calc/remote.py::calc_session` dials directly for EVERY calculation — every
@@ -911,12 +1099,22 @@ config:
   CHEMCLAW_RXNLABEL_SERVER_URL: "http://chemclaw-mcp-rxnlabel:8865/mcp"
   # Entra identity is mandatory system-wide (the one exception is the generic LLM credential).
   CHEMCLAW_ENTRA_REQUIRED: "true"
+  # What a release that turns the line above off must *also* say, or its workers will not start.
+  # The background worker and every `connector-worker-*` bind no request surface, so the front
+  # door's refusal (a non-loopback bind with sign-in off) cannot reach them; each refuses to boot
+  # unauthenticated on its own unless this is `"true"`
+  # (`durable/serve.refuse_unauthenticated_worker`). Set it only beside
+  # `CHEMCLAW_ENTRA_REQUIRED: "false"` in a release nobody but its operator can reach — with it on,
+  # every activity runs as the shared dev principal with all authorization gates open, and the boot
+  # log says so. Inert while sign-in is on.
+  CHEMCLAW_WORKER_ALLOW_UNAUTHENTICATED: "false"
   CHEMCLAW_ENTRA_TENANT_ID: "00000000-0000-0000-0000-000000000000"
   CHEMCLAW_ENTRA_AUDIENCE: "api://chemclaw"
   # ⚠ EMPTY ON PURPOSE, AND EMPTY MEANS CLOSED. Until an operator sets this to their own Entra app
   # role(s), **every job a connector manifest declares `expensive: true` is refused for everyone**:
   # `sample_conformers`, `compute_interaction_energy`, `refine_ensemble` and the rest of `calc`'s
-  # expensive set, plus `start_optimization_campaign`. The trigger gate fails closed on an empty
+  # expensive set, plus `start_optimization_campaign` and `rank_competing_hypotheses` (a
+  # hypothesis tournament is ~25 judged model calls). The trigger gate fails closed on an empty
   # role set rather than open (`agent/authz.authorize_trigger`), which is the safe direction and a
   # silent one — the pod boots, the probes pass, reads work, and a chemist asking for a conformer
   # search is told they lack a privileged role. Set it to a comma list of the Entra app roles your
@@ -975,16 +1173,34 @@ config:
   # (`agent/spend_cap.py`). This is that ceiling, in billed tokens across every model call of a
   # turn, the subagent's included.
   #
-  # 0 (no cap) is deliberate rather than an omission, and it is the one guard in this block that
-  # ships inert. The others refuse a *request*; this one **ends a turn that is already running**,
-  # so a number set too low loses work a chemist has waited for, and no number this chart could
-  # ship would be right for a corpus it has never seen. Size it from this deployment's own
-  # `turn_costs.total_tokens` rows — the p99 of a turn that answered, with headroom — and set it
-  # then. `chemclaw_turn_spend_caps_total` is what says whether the number you chose is biting.
+  # **This shipped at 0 (no cap) and no longer does.** The caution behind that 0 was real and is
+  # kept: the others refuse a *request*, this one acts on a turn that is already running, so a
+  # number set too low costs work a chemist has waited for. Two things make a number the better
+  # side of that trade. `spend_cap.py` jumps the graph `to end` rather than raising, and the runner
+  # emits `spend_cap_reached` naming the answer **partial** — so a capped turn returns what it had.
+  # And the alternative was never "no cap" but an unbounded one: measured, one turn billed 250,000
+  # tokens against a 1,000-token session cap, which neither half of `BUDGET_ENABLED` can see.
   #
-  # Turning it on is not what makes the deployment guarded: `harness_max_loop_iterations` still
-  # bounds the loop, and that cap is on in every configuration.
-  CHEMCLAW_AGENT_MAX_TURN_BILLED_TOKENS: "0"
+  # **3,000,000 is a runaway backstop, not a budget — and the first number here was not one.**
+  # This shipped at 300,000, chosen from a measured 250,000-token runaway. A review four days later
+  # found that measurement predated a sevenfold growth in the static prefix: because the provider
+  # bills prompt *and* completion on every call, with cached tokens included, 300,000 funded
+  # **three** model calls where `harness_max_loop_iterations` permits 25 — so a plan/tool/answer
+  # turn with one correction did not finish, and the loop cap could no longer move at all.
+  #
+  # The value is now derived rather than chosen: the ceiling of a *lawful* turn is what the two
+  # guards already authorise, `harness_max_loop_iterations` calls each bounded by
+  # `agent_context_token_budget`. Only a bug exceeds that. `tests/test_spend_cap.py` holds the
+  # relation so the next prefix change cannot strand it silently.
+  #
+  # A deployment that wants a real cost *budget* sets a smaller number from its own
+  # `turn_costs.total_tokens` rows — and should know it is then buying refusals rather than a
+  # backstop. `chemclaw_turn_spend_caps_total` is what says whether the number you chose is biting;
+  # if it moves on turns that were doing real work, it is too low.
+  #
+  # It is not what makes the deployment guarded: `harness_max_loop_iterations` still bounds the
+  # loop, and that cap is on in every configuration.
+  CHEMCLAW_AGENT_MAX_TURN_BILLED_TOKENS: "3000000"
   # On in production, off in code, for the same reason `BUDGET_ENABLED` is (REV-16): a CLI, a test
   # and a single-user dev run have no reason to be throttled, and a deployment serving real users
   # over a shared endpoint has no reason not to be. The turn guards above bound what reaches the
@@ -1007,6 +1223,28 @@ config:
   # 500m: twelve permits are ~0.84 cores of steady demand, which a half-core request does not
   # guarantee under node contention.
   CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS: "12"
+  # How much of that a single chemist may hold. The cap above is actor-blind, so without this one
+  # principal opening twelve sessions takes every permit on the replica and everyone else is shed
+  # `at_capacity` — measured as one hang-up per permit (`chemclaw.api.detach`). The per-actor rate
+  # limit below never reaches it: the chart sets that to 120 requests/minute, which meters a rate
+  # while this counts simultaneous turns — a principal holds the whole replica on twelve requests.
+  #
+  # 4 of 12: one actor takes at most a third of a replica, so three distinct chemists are needed
+  # to fill a pod, and a full pod always has at least three people on it. It is already more
+  # parallelism than the shipped UI generates by hand — the browser holds one turn per open
+  # session view, and the per-user event-stream cap is 5 (a code default; this chart does not set
+  # that key).
+  #
+  # **Must stay strictly below `CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS`**; at or above it the guard
+  # enforces nothing while reading as protection — `tests/test_deploy_chart.py` holds the two
+  # apart here, and a cross-field validator in `core/config/__init__.py` refuses it at startup for
+  # the configuration a pod actually runs, which a values file cannot see. Off in code (0) because
+  # `chemclaw.cli.live_storm`'s family A sweeps the *admission* cap end to end, driving 48
+  # concurrent turns from one credential at each value; the posture lives here.
+  #
+  # Per process, so `service.autoscaling.maxReplicas` multiplies it — an actor spread over the
+  # fleet holds that multiple, and a fleet-wide per-actor limit belongs at the ingress (SCALE-1).
+  CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS_PER_ACTOR: "4"
   # What the shared LLM endpoint may be asked to serve by this whole deployment, at once.
   #
   # The admission cap is per-process and stays that way (SCALE-1: a fleet-wide counter would cost a
@@ -1087,8 +1325,12 @@ secrets:
     # content as data, so a thread replayed by another pod has its older retrieved material read as
     # ordinary prose — the injection marking switches itself off for precisely the oldest content it
     # exists to cover. Any deployment with `session_store="postgres"` or more than one replica
-    # should set this; `docs/planning/BACKLOG.md` carries the open question of whether the
-    # combination should be refused at startup.
+    # should set this. Whether such a combination is *refused* rather than warned was answered in
+    # `D-2026-09-13-the-lock-is-not-the-bound-the-commit-is`, which refuses the memory session
+    # store outright at render: the difference is whose deployments break — that key is stated in
+    # this file, this one is not, and refusing an unset key would fail every upgrade
+    # (D-2026-08-27-a-warning-is-the-shape-a-guard-takes-when-raising-would-break-a-deployment).
+    # The `BACKLOG.md` row this used to point at is gone.
     framingEnvelopeSecret: "CHEMCLAW_FRAMING_ENVELOPE_SECRET"
     # The bearer token the read-only MCP face requires on `/mcp`
     # (`CHEMCLAW_COMPONENT=mcp-face`, D-2026-08-29-a-digest-nobody-receives-is-not-delivered).
@@ -1289,6 +1531,25 @@ monitoring:
     # cannot mean anything yet.
     turnsFloorPerSecond: 0.01
     jobsFloorPerSecond: 0.002
+    # The share of one tool's calls that may end `error` before the turns group warns, and the
+    # floor under its own denominator — the third ratio, on the same argument as the two above.
+    #
+    # **Per tool, not fleet-wide**, because that is the whole diagnostic value:
+    # `chemclaw_tool_calls_total` already carries `tool`, one broken connector tool among forty
+    # healthy ones is invisible in a fleet ratio, and "which tool" is the operator's first question.
+    # `outcome="error"` is a raised exception *or* a connector answering `isError=True`
+    # (`agent/audit.py`) — never a governance refusal, which has its own outcome and its own
+    # counter — so a steady non-zero rate is a tool that is failing rather than a gate that is
+    # working.
+    #
+    # 0.5 rather than the turn group's 0.1: a *tool* legitimately refuses bad input by raising
+    # (`Chemclaw3-mcp`'s "refuse rather than approximate" rule makes an unknown solvent an error,
+    # deliberately), so a minority error rate is normal traffic and only a majority is a fault.
+    # The floor is per tool as well, and looser than the turn floor for the same reason it has to
+    # be: a tool called twice an hour cannot have a meaningful ratio.
+    #   toolCallsFloorPerSecond 0.005 = ~4.5 calls of that one tool in the rule's 15-minute window
+    toolErrorRatio: 0.5
+    toolCallsFloorPerSecond: 0.005
     # How long a result publication may sit undelivered before the outbox counts as stuck, in
     # seconds. Read off `chemclaw_outbox_oldest_pending_seconds`, the age gauge, and NOT off
     # queued-minus-published: dead-lettered rows never leave that difference, and its two counters
@@ -1474,6 +1735,48 @@ securityContext:
   # `emptyDir` mounted at `/tmp`, never on its own.
   readOnlyRootFilesystem: false
 
+# **Which Temporal this release owns, and the reason it has no default.**
+#
+# `CHEMCLAW_TEMPORAL_ADDRESS` above names one broker for the whole cluster, in its own `temporal`
+# Kubernetes namespace rather than one per release. Inside that broker the *Temporal namespace* is
+# the only boundary there is: `CHEMCLAW_BACKGROUND_TASK_QUEUE` is the constant `background-jobs`,
+# `durable/schedules.py`'s `OWNED_SCHEDULE_IDS` is a set of bare constants (`eln-sync`,
+# `retention`, `eval-drift`, …), and a job's workflow id carries no site. So the ordinary layout
+# this repository documents — `dev.yaml`, `staging.yaml`, `prod.yaml` in
+# `deploy/jenkins/environments/`, three Kubernetes namespaces, one shared Temporal — put every
+# release on one namespace, one queue and one schedule-id space while nothing said so.
+#
+# Measured against a live broker through the shipped `apply_schedules`/`_prune`, with the ids
+# probe-prefixed:
+#
+#   site A applied:  eln-sync -> workflow=SiteAWorkflow  interval=0:30:00
+#   site B applied:  eln-sync -> workflow=SiteBWorkflow  interval=0:05:00   <-- overwritten
+#   site A's schedules, settled:  ['eln-sync', 'eval-drift']
+#   after site B's apply pruned:  ['eln-sync']                              <-- deleted
+#
+# Site B's `helm upgrade` rewrote site A's Schedule to fire a different workflow type at a
+# different interval, and site B having `eval_drift_enabled: false` deleted site A's `eval-drift`
+# Schedule outright — `_prune` deletes every id in `OWNED_SCHEDULE_IDS` that *this* release did not
+# plan, and it cannot tell a peer's Schedule from a leftover of its own. Beyond Schedules: workers
+# polling `background-jobs` take each other's tasks, so a peer's `RetentionWorkflow` runs against
+# this release's Postgres and this release's knowledge checkout; and under
+# `ALLOW_DUPLICATE_FAILED_ONLY` a job requested here resolves to a peer's completed execution and
+# returns its result.
+#
+# **So the namespace is stated, never inherited.** There is no default because a default is exactly
+# what two releases would share: what this gate buys is that the discriminating string is typed
+# where it takes effect, in this release's own values file, rather than being a constant three
+# environments quietly agree on. The release's own Kubernetes namespace is the value that is
+# unique by construction where each environment gets one of its own, and it is what the
+# refusal suggests by name.
+#
+# **A shared Postgres is the same hazard and this knob does not cover it** — 44 tables carry no
+# deployment discriminator, and `durable/retention.py`'s expired-thread sweep would prune a peer's
+# live threads. Two ChemClaw releases need their own database as well as their own Temporal
+# namespace; nothing here can check that, which is why it is written down here.
+temporal:
+  namespace: ""
+
 # What happens to the durable tables' history — a posture this chart refuses to leave unstated,
 # by the same rule as the egress block below (D-2026-08-26-a-knob-that-renders-nothing-is-not-a-knob):
 # every retention window in `Settings` defaults to 0, meaning *disabled*, because "keep for N days,
@@ -1545,6 +1848,45 @@ retention:
   # The tables then grow exactly as they always did — the posture is unchanged, the silence is not.
   unboundedGrowthAccepted: false
 
+  # **The growth the nine windows above do not bound, and the reason it is asked here.**
+  # `artifact_blobs` — a calculation's Hessians, optimized geometries and conformer ensembles —
+  # is swept by a different job (`ArtifactEvictionWorkflow`) on a different schedule under two
+  # settings that carry no `CHEMCLAW_RETENTION_` prefix and both default to 0, meaning off. No
+  # window above reaches it. So a release that stated a retention posture, satisfied the gate and
+  # believed its growth bounded still accumulated by-products for the deployment's lifetime, and
+  # nothing asked — which is the same silence `unboundedGrowthAccepted` exists to break, one table
+  # over.
+  #
+  # **Only the `windows` arm is asked.** `unboundedGrowthAccepted: true` already says the durable
+  # tables grow forever and is true of this one too; there is nothing further to state, and asking
+  # anyway would make a third `--set` mandatory at every render of the shipped defaults. It is the
+  # release that says "I bound my growth" whose statement was incomplete. Set exactly one of
+  # `artifactStore` or `artifactGrowthAccepted` once you set `windows`, or the render refuses
+  # naming both ways out.
+  #
+  # Either bound turns the sweep on (`planned_schedules` creates the Schedule when either is
+  # non-zero), so there is no enable switch to forget:
+  #   artifactStore:
+  #     # The eviction budget in *stored* bytes — post-compression, blobs only. The sweep evicts
+  #     # least-recently-used blobs down to it; `calculation_results` is never evicted (D-011), so
+  #     # this bounds the by-products and not the cache of results that cite them.
+  #     CHEMCLAW_ARTIFACT_STORE_MAX_BYTES: "53687091200"
+  #     # And/or the idle window a blob must exceed to be a candidate at all. Stated alone it is an
+  #     # age policy with no size ceiling; stated together the budget decides how much goes and this
+  #     # decides what is eligible.
+  #     CHEMCLAW_ARTIFACT_EVICT_IDLE_DAYS: "90"
+  #
+  # A key here must name one of those two, or the render refuses — the same reason `windows` checks
+  # its own: an unknown prefixed variable is ignored by pydantic-settings, so a typo would state a
+  # posture and evict nothing. The sweep's *cadence*
+  # (`CHEMCLAW_ARTIFACT_EVICTION_SCHEDULE_MINUTES`, a day by default) is deliberately not accepted
+  # here and belongs in `config` above: it is how often the sweep runs, not whether anything is
+  # bounded, and a block that accepted it could be satisfied by a key that bounds nothing.
+  artifactStore: {}
+  # The escape hatch for this half, on the same terms as `unboundedGrowthAccepted` above: a
+  # deployment that wants every by-product kept says so where the next person greps for it.
+  artifactGrowthAccepted: false
+
 networkPolicy:
   enabled: true
   egressPorts:
@@ -1576,6 +1918,20 @@ networkPolicy:
     # cover it, and without an entry here an operator who adds the host to `egressDestinations`
     # still has every packet dropped — the misreading this chart used to ship.
     rxnpredict: 8857
+    # The five process-development bundles (`connectors.props.url` and its four siblings above), on
+    # exactly the same terms. **These are here although all five ship `enabled: false`**, and that
+    # is deliberate: a port entry for a disabled bundle opens nothing — the NetworkPolicy still
+    # restricts the destination, and no pod dials a bundle that is not in
+    # `CHEMCLAW_CONNECTORS_ENABLED` — while its *absence* is the failure that looks like the server
+    # being down. An operator who enables `thermalsafety` and adds its host to
+    # `egressDestinations` would otherwise have every packet dropped, with the connector reported
+    # unhealthy and nothing naming the port as the reason. Five separate values for the reason the
+    # three above are separate: each sibling is free to land on a different port.
+    props: 8850
+    thermalsafety: 8851
+    kinetics: 8852
+    unitops: 8853
+    suitability: 8892
   # WHERE those ports may be dialled. Empty renders `to: []`, which in a NetworkPolicy means
   # **any destination** — so with this unset, TCP/443 from every pod to the whole internet is
   # permitted. The addresses are deployment-specific and a chart cannot invent your Postgres CIDR,
@@ -1590,6 +1946,29 @@ networkPolicy:
   # `tests/test_no_egress.py` enforces "this system takes no external sources" (D-089) by scanning
   # source code for third-party host literals. That catches a developer adding a data source and
   # catches nothing at runtime — set this to make the network agree with the decision.
+  #
+  # **What else bounds a destination, and the two shapes where this list is the only thing that
+  # does.** The in-process guard (`chemclaw.core.netguard`) patches `socket.socket` and the `socket`
+  # module's resolvers, so it bounds pure-Python clients and nothing else: measured, a
+  # `grpc.insecure_channel`, the OTLP gRPC span exporter and `temporalio.Client.connect` each
+  # reached an off-allowlist listener with its refusal counter flat, because all three open sockets
+  # below the interpreter. `chemclaw.core.netguard_preload` — the `LD_PRELOAD` interposition on
+  # libc, armed by `deploy/entrypoint.sh` — is the layer that refuses those, and
+  # `D-2026-09-12-the-layer-that-binds-grpc-is-libc-not-socket-py` records what it covers. Two
+  # things are left over and they are this list's:
+  #
+  #   - A **statically linked** binary, or one issuing the syscall directly. There is no dynamic
+  #     symbol to interpose and no Python object to patch, so a destination list and a dropped
+  #     packet are the whole control.
+  #   - Any destination this deployment names in `CHEMCLAW_EGRESS_ALLOW` for one subsystem's sake.
+  #     Both process-level guards take the allowlist as one set for the whole pod; a rule here can
+  #     be narrower than that.
+  #
+  # **And one shape no `to:` list can reach at all: a proxy on loopback.** A sidecar — a service
+  # mesh, an egress gateway — shares the pod's network namespace, so its traffic never crosses a
+  # NetworkPolicy enforcement point, and the real destination is in the request line rather than in
+  # the address. Enumerating every peer below does not bound it. That case is refused at boot by
+  # `netguard.refuse_proxied_egress` instead, and there is no layer under that one.
   #
   # Entries are NetworkPolicyPeer objects, passed through verbatim:
   #   - ipBlock: {cidr: 10.0.1.0/24}                     # the database subnet

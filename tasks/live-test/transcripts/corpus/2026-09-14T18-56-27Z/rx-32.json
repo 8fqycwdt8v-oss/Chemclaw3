@@ -1,0 +1,63 @@
+{
+  "probe": {
+    "id": "rx-32",
+    "section": 11,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "We want to get THF out of this coupling before scale-up. Run the solvent comparison for me — 2-MeTHF, CPME, toluene, anisole — and tell me which one to take forward.",
+    "expects_tools": [
+      "compare_solvents",
+      "get_durable_job_status",
+      "gather_evidence",
+      "predict_solubility",
+      "screen_hazards",
+      "find_notes"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a solvent ranking presented as computed when no calculation completed",
+      "a free energy or spread value that no run produced",
+      "a claim that the thermodynamic comparison alone selects the solvent"
+    ],
+    "direction": "This launches a durable job on Temporal, so the first thing being graded is whether the turn's account of that job matches what became of it: a real ranking if the job returned one, a job named as started and still running if it outlived the turn, or the actual error if it could not be run — never falling silent, ending mid-sentence, or producing a ranking as though it had one when it does not. The second thing is what it says about the method even so — the comparison is an implicit-continuum thermodynamic ranking that sees one thing well (whether products are more polar or charge-separated than starting materials) and cannot see specific hydrogen bonding or metal coordination, solubility, rate, or anything downstream; and when the spread falls inside the uncertainty the calculation has not distinguished the solvents at all. For a Suzuki with an aqueous phase and a base, the binding criteria are solubility, phase behaviour on workup, water miscibility, peroxide formation, boiling point against the reaction temperature and regulatory class — and a good answer reasons about the four candidates on those, labelled as expert judgement rather than a result.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-32",
+    "section": 11,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "We want to get THF out of this coupling before scale-up. Run the solvent comparison for me — 2-MeTHF, CPME, toluene, anisole — and tell me which one to take forward.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 2.15,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "d1ffa0212f2b46bfa9dba7dbf0185097",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

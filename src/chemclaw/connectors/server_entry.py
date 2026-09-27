@@ -32,6 +32,7 @@ import logging
 
 import uvicorn
 
+from chemclaw.core.asgi import transport_bounds
 from chemclaw.core.config import settings
 from chemclaw.core.logging import configure_logging, configure_telemetry
 
@@ -55,6 +56,9 @@ def main(connector: str) -> None:
         # Ours is already applied above; letting uvicorn install its own would replace it — the
         # same reason `core/worker_http.py` passes `log_config=None`.
         log_config=None,
+        # This is every `connector-*` pod, and it ran unbounded. `BodySizeLimit` already covers the
+        # body half here over the connector's own smaller ceiling; these are the transport half.
+        **transport_bounds(),
     )
 
 

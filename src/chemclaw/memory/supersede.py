@@ -92,11 +92,12 @@ def _is_synthesis_minted(note: Note) -> bool:
     members" retires notes this job could never have written, and one such note now exists by
     design: since D-161 the observations tier promotes an observation into `playbook-<obs-hash>`,
     an id anchored on the observation's *scope* rather than on the cluster's smallest member, so
-    `distill_playbooks` can never re-mint it. It was therefore always "an id this run no longer
-    mints" and was proposed for retirement on every run, carrying the body line "this cluster's
-    membership changed (merge or shrink)" — which is untrue of it, and writing one drops a
-    human-approved playbook out of every current-evidence sweep via `Note.is_current`. There is no
-    review step left to catch that, which makes the lineage test the control rather than a
+    `chemclaw.memory.jobs.build_playbook_notes` can never re-mint it. It was therefore always
+    "an id this run no longer mints" and was proposed for retirement on every run, carrying the
+    body line "this cluster's membership changed (merge or shrink)" — which is untrue of it, and
+    writing one drops a promoted playbook out of every current-evidence sweep via
+    `Note.is_current`. There is no review step left to catch that, which makes the lineage test
+    the control rather than a
     convenience. The same match caught human-authored notes
     of a memory type; what stops that reaching a person's file is
     `kg/git_writer._refuse_to_clobber_a_person`, which raises rather than overwrite a note a human
@@ -123,8 +124,9 @@ def _successors_of(note: Note, members: dict[str, set[str]]) -> list[str]:
 def retire_note(note: Note, successors: list[str], as_of: date) -> Note:
     """Copy `note` with `valid_to` closed, a `superseded-by` edge, and prose naming the rest.
 
-    The first successor gets the typed edge — it is the note whose submission carries this
-    retirement, so the link resolves in the same PR — and every successor is named in the body.
+    The first successor gets the typed edge — it is the note whose write carries this retirement,
+    and `kg/record.py` writes the retirement last, so the link resolves at every instant a reader
+    could observe — and every successor is named in the body.
     `valid_to` is never set before `valid_from` (the schema rejects that window, F10-G2): a note
     whose validity has not begun is closed at its own start date instead of today.
 

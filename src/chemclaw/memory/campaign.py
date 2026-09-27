@@ -1,14 +1,27 @@
 """Build a `campaign` note from a detected chain (plan steps 5.1, 5.3, deterministic core).
 
 The episodic memory note: it narrates a chain of experiments and **cites every one** via a
-`[[reaction-<id>]]` wikilink. **Precondition:** synthesis runs over reactions whose reaction
-notes are already merged into the graph (the operational order is ELN-sync → human merges the
-reaction notes → memory synthesis), so the citations resolve; a campaign PR for a reaction not
-yet merged would dangle and `kg-validate` would reject it — the gate enforces the ordering, it
-is not assumed silently. This builder produces the citable, factual skeleton (the
-transformation sequence and its evidence); the richer prose narrative is the
-`campaign-narrative-synthesis` skill's judgment (per plan 5.3), layered on top, not invented here.
+`[[reaction-<id>]]` wikilink. Those citations resolve *outside* the markdown graph
+(`kg.note.EXTERNAL_ID_PREFIXES`): a run is a row in `reaction_records`, written by ELN sync before
+synthesis ever reads the corpus, and `kg.validate` checks the ids against that store. This
+paragraph used to state a precondition instead — a human had merged each reaction's *note* first,
+and the gate enforced the ordering on the campaign's own PR — and both halves are gone:
+D-2026-08-25 made the transcription a row and
+`D-2026-09-05-the-gate-follows-behaviour-not-knowledge` removed the PR. This builder produces the
+citable, factual skeleton (the transformation sequence and its evidence); the richer prose
+narrative is the `campaign-narrative-synthesis` skill's judgment (per plan 5.3), not invented here.
+
+**Nothing layers it automatically, and this used to say it did.** That skill is loaded on demand
+in a chat turn; no durable path invokes it, so a campaign note stays the skeleton unless a model
+reaches for the skill and writes over it. Phrased as though something applied it, it read as a
+pipeline — the shape `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution`
+names, a present-tense claim about a producer with no caller. The skeleton is complete and useful
+as it stands, which is why this corrects the prose and not the builder; the one note whose
+body was *not* usable on its own is the cross-project playbook, and
+`D-2026-09-15-a-note-that-asks-a-reader-to-finish-it-is-not-knowledge` is what changed there.
 """
+
+from datetime import date
 
 from chemclaw.ingest.eln.ord import OrdReaction
 from chemclaw.kg.note import Note
@@ -16,13 +29,23 @@ from chemclaw.memory.chains import Chain
 from chemclaw.memory.ids import stable_id
 
 
-def campaign_note_from_chain(chain: Chain, reactions: dict[str, OrdReaction]) -> Note:
+def campaign_note_from_chain(
+    chain: Chain, reactions: dict[str, OrdReaction], *, minted_on: date | None = None
+) -> Note:
     """Map a chain to an agent `campaign` note that links to each member reaction.
 
     `reactions` maps reaction id → the `OrdReaction`, for the per-step SMILES. The body
     lists the chain in order, each step wikilinking its reaction note (the evidence), then
     the product→reactant handoffs that make it a campaign. The project (if the members share
     one) is carried so the semantic layer can group campaigns across projects.
+
+    `minted_on` becomes `valid_from` — the day this chain's *anchor* run was performed, which
+    `jobs.supported_from` derives from `min(reaction_ids)`, the single member id this note's id is
+    also keyed on. Said the other way because the wording here was wrong and the error mattered:
+    the id is **not** a function of the member set, so a date derived from the set moves under a
+    stable id every time the cluster grows. Without a date the note is open-ended, which
+    `durable/digest._is_new` correctly reads as "not news" and which is therefore silence rather
+    than a default.
     """
     steps = []
     for position, reaction_id in enumerate(chain.reaction_ids, start=1):
@@ -54,4 +77,5 @@ def campaign_note_from_chain(chain: Chain, reactions: dict[str, OrdReaction]) ->
         source="memory:chain-detection",
         tags=sorted(projects),
         body=body,
+        valid_from=minted_on,
     )

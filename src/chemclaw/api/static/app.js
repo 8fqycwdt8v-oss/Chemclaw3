@@ -87,11 +87,12 @@ function applyEvent(evt, answerEl) {
     case "token":
       // Attributed tokens are another agent's working prose, not this turn's answer. The server
       // already knows: `api/runner` concatenates only unattributed tokens into `AnswerEvent.text`,
-      // so appending them here made the bubble a chemist reads diverge permanently from the
-      // durable transcript — permanently, because `case "answer"` below only fills an *empty*
-      // element and so never overwrites the contaminated one. Every other agent-bearing event
-      // routes through `agentTag`; this is the one where the attribution decides what the answer
-      // *is*, which is why it was the one worth getting wrong.
+      // so appending them here made the bubble a chemist reads diverge from the durable
+      // transcript. `case "answer"` below now *replaces* what this accumulated, so the divergence
+      // is no longer permanent — but the filter stays, because until the answer arrives the bubble
+      // is what the chemist is reading. Every other agent-bearing event routes through `agentTag`;
+      // this is the one where the attribution decides what the answer *is*, which is why it was
+      // the one worth getting wrong.
       if (evt.agent) {
         add("trace", `${agentTag(evt)}${evt.text}`);
         transcript.scrollTop = transcript.scrollHeight;
@@ -152,8 +153,17 @@ function applyEvent(evt, answerEl) {
     case "question":
       add("trace", `❓ ${evt.question}` + ((evt.options || []).length ? `\n   options: ${evt.options.join(" | ")}` : ""));
       return answerEl;
-    case "note_proposed":
-      // "recorded", not "proposed for review": nobody reviews it, and it is readable now.
+    case "note_recorded":
+      // **One name here, not two**, and that is not the treatment `Chemclaw3_ui` gets
+      // (`D-2026-09-14-the-reader-lands-first-and-the-name-follows`). That client accepts
+      // `note_proposed` as well, because a browser holding a bundle from before the rename is a
+      // real state there. This page is *served by this process*: it cannot be older than the
+      // service sending the event, so a second name would be a tolerance for a skew that cannot
+      // happen — and `tests/test_dev_page_events.py` asserts the set both ways, so it would fail
+      // as an event no turn can emit.
+      //
+      // The line a person reads already said "recorded" before the wire name did; that half was
+      // never the false one.
       add("trace", `📝 recorded ${evt.note_id} — ${evt.reference}`);
       return answerEl;
     case "approval_request":
@@ -169,13 +179,25 @@ function applyEvent(evt, answerEl) {
       // transcript showed a silent gap wherever a tool raised.
       add("trace", `${agentTag(evt)}✗ ${evt.tool} failed — ${evt.message}`);
       return answerEl;
+    case "handoff":
+      // The boundary rather than the speaker: what a reader needs is that the prose after this
+      // line comes from an agent with a different surface and a different brief. `reason` is the
+      // handing model's own account, which is the only record of the decision that exists.
+      add("trace", `\u21c4 ${evt.from_agent} \u2192 ${evt.to_agent}: ${evt.reason}`);
+      return answerEl;
     case "evidence_source":
       // Zero is the point of this line, not noise to filter: a source that found nothing is the
       // failure D-2026-08-01 went looking for, and it is invisible in the merged evidence list.
       add("trace", `⌕ ${evt.source}: ${evt.chunks} chunk(s)`);
       return answerEl;
     case "answer":
-      if (!answerEl) add("assistant", evt.text);
+      // **Replace, not fill.** `AnswerEvent.text` is the authoritative answer — and under
+      // `answer_review_max_rounds` it is the *revised* one, while the element still holds the
+      // flagged prose this turn streamed before it was sent back. Filling only an empty element
+      // left a chemist reading flagged-text + revised-text concatenated and threw the corrected
+      // answer away, which is the one outcome worse than either half alone.
+      if (!answerEl) answerEl = add("assistant", "");
+      answerEl.textContent = evt.text;
       return answerEl;
     case "error":
       add("error", evt.message);

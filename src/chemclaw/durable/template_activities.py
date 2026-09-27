@@ -25,27 +25,23 @@ worker is a different process, so this meters honestly rather than pretending to
 import asyncio
 import logging
 import time
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Iterator, Sequence
 from contextlib import AsyncExitStack, contextmanager
-from typing import Any
+from typing import Annotated, Any
 
 from langchain_core.callbacks import AsyncCallbackHandler
 from langchain_core.outputs import LLMResult
-from langchain_core.tools import tool as tool_decorator
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from temporalio import activity
 
-from chemclaw.agent.context_budget import (
-    begin_context_watch,
-    current_context,
-    end_context_watch,
-)
+from chemclaw.agent.context_budget import current_context
 from chemclaw.agent.loop_cap import loop_capped
 from chemclaw.agent.profiles import AgentProfile, get_profile
-from chemclaw.agent.repeat_guard import begin_call_watch, end_call_watch
 from chemclaw.agent.spend_cap import spend_capped
 from chemclaw.agent.state import answer_text, turn_config, turn_input
 from chemclaw.agent.tool_invocation import invoke_governed
+from chemclaw.agent.tool_result_size import STEP_REMEDY, bounded_content
+from chemclaw.agent.turn_ambient import turn_caps
 from chemclaw.agent.turn_cost import TurnCost, record_turn_cost
 from chemclaw.agent.turn_usage import TurnUsage, llm_result_usage
 from chemclaw.connectors.jobs import prepare_job_launch
@@ -58,8 +54,10 @@ from chemclaw.core.identity_context import (
     set_current_correlation_id,
     set_current_identity,
 )
+from chemclaw.core.logging import log_event
 from chemclaw.core.metrics import METRICS
 from chemclaw.core.session_context import reset_current_session_id, set_current_session_id
+from chemclaw.durable.governed_launch import audited_launch
 from chemclaw.durable.heartbeat import beating
 from chemclaw.durable.registry import durable_activity
 
@@ -89,7 +87,10 @@ class StepIdentity(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    actor: str = Field(min_length=1)
+    # Stripped, then refused blank: `Field(min_length=1)` accepted `" "`, and a whitespace actor is
+    # stamped ambient by every step as a principal nobody is — the same rule `api/auth.py` holds on
+    # the token's `oid`.
+    actor: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
     roles: list[str] = Field(default_factory=list)
     # Ties this run's audit events together, exactly as a conversation's correlation id does, so a
     # template's steps are one traceable unit in the trail rather than N unrelated tool calls.
@@ -134,6 +135,91 @@ class AgentStepInput(BaseModel):
     # still decodes — such a run books one row per step id it has, which for the shipped template
     # is one step.
     step_id: str = ""
+    # The run's template name, carried for the prompt-truncation counter's label and for nothing
+    # else — a step's *behaviour* must not depend on it, or a worker would be deciding what to run
+    # from a name rather than from the resolved step beside it.
+    #
+    # Defaulted for `step_id`'s reason one field up: both workers poll `background-jobs`, so a
+    # rolling deploy schedules an old-code workflow's input onto a new-code activity worker. An
+    # unlabelled cut is still a cut, still counted (`template=""`), and still says so in the text
+    # the model reads — which is the half that must not depend on a rollout.
+    template: str = ""
+
+
+class AgentStepResult(BaseModel):
+    """One `agent` step's answer **and what was missing while it was produced**.
+
+    The step used to return a bare `str`, and that is the whole defect this model exists to close:
+    a step whose connectors never came up, or whose model loop was stopped by its iteration cap,
+    returned a string byte-identical in *shape* to a complete one — so the next step of the
+    template read a partial answer as the finished article, `template_job_record` wrote a row with
+    nothing on it saying so, and the brief a chemist signs carried no notice. Measured on the real
+    activity against one scripted model: complete and connectors-unreachable both returned
+    `'FINAL: five hazard flags; two are severe.'`, and the capped run returned its interim sentence
+    with `state` unset on the run's record either way.
+
+    The fact was not missing, it was *discarded*. `open_connector_specs` already reports which
+    bundles did not open (`api/runner.py` yields `CapabilityDegradedEvent` off exactly that, and
+    the `tool` step already names them in its own failure), and `loop_capped`/`spend_capped` were
+    already read here — but only into `turn_costs.outcome`, a cost ledger the next step and the
+    final artifact cannot see. The comment above the call in `run_agent_step` had said as much
+    since the day that fix landed: "a truncated runaway booked `outcome="answered"` and handed the
+    next step of the template a partial answer with nothing saying so." It landed in the ledger
+    only. This is the other half.
+
+    `outcome` is `turn_costs.outcome`'s vocabulary rather than a second one, for the reason
+    `_book_step_spend` gives for spelling that vocabulary out: one word must mean one thing on
+    every writer, and this model is fed from the same variable the ledger row is.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    answer: str = ""
+    # How the turn ended, in `turn_costs.outcome`'s words. Only the *endings a value can carry*
+    # reach here: a step that raised has no result at all, so `errored` and `abandoned` are booked
+    # by the ledger and never constructed here.
+    outcome: str = "answered"
+    # The connector bundles that did not come up for this step. Names, not counts, because
+    # "2 unreachable" sends nobody anywhere — the same reason `_invoke` renders them by name.
+    unreachable: list[str] = Field(default_factory=list)
+
+    @property
+    def degraded(self) -> bool:
+        """Whether this answer was produced with something missing."""
+        return bool(self.unreachable) or self.outcome != "answered"
+
+    def notice(self) -> str:
+        """One sentence naming what was missing, or `""` for a clean step.
+
+        Written as system text in the first person of the *system*, not of the model, because it is
+        prepended to a model's prose and a reader must be able to tell the two apart — the same
+        stance `agent/tool_result_size.py` takes for the notice it splices into a cut result.
+        """
+        if not self.degraded:
+            return ""
+        missing = []
+        if self.outcome == "loop_capped":
+            missing.append("the step reached its model-call cap before it finished")
+        if self.outcome == "spend_capped":
+            missing.append("the step reached its token budget before it finished")
+        if self.outcome == "empty_answer":
+            missing.append("the step produced no answer")
+        if self.unreachable:
+            missing.append(
+                f"{len(self.unreachable)} capability bundle(s) were unreachable: "
+                f"{', '.join(sorted(self.unreachable))}"
+            )
+        return f"[INCOMPLETE — {'; '.join(missing)}]"
+
+    def step_value(self) -> str:
+        """What the next step and the run's record see: the notice, then the answer.
+
+        Prepended rather than appended for the reason `api/runner` emits `CapabilityDegradedEvent`
+        *before* the answer: a reader who stops early must still have read the notice, and a
+        result that is cut is cut from the end.
+        """
+        notice = self.notice()
+        return f"{notice}\n\n{self.answer}" if notice else self.answer
 
 
 class JobStepInput(BaseModel):
@@ -207,16 +293,19 @@ def _acting_as(identity: StepIdentity) -> Iterator[None]:
     be three chances to forget a reset, which leaks one run's identity into whatever the worker
     picks up next.
 
-    **This is no longer the only thing that binds them, and saying so is the point.**
-    `durable/interceptor.py` wraps *every* activity on every worker and reads the same three ids
-    off the same `identity` field — measured against the real `ToolStepInput`, `AgentStepInput` and
-    `JobStepInput`, it binds exactly what this bracket binds, over a scope that strictly contains
-    it. So on a worker this is redundant, and it cannot drift, because both read
-    `StepIdentity`'s own fields rather than restating them. What it still covers is an activity
-    invoked *directly* — which is how the two authorization tests over `authorize_job_step` prove
-    that a step cannot run a tool its requester could not run. Collapsing the two into one producer
-    means moving those tests onto a worker harness, and that is a decision with a security control
-    in its blast radius rather than a tidy-up (`docs/planning/BACKLOG.md`).
+    **This is no longer the only thing that binds them, and the difference between the two is not
+    the scope — it is the roles**
+    (`D-2026-09-12-two-producers-of-one-identity-are-not-redundant-when-they-disagree`).
+    `durable/interceptor.py` wraps *every* activity on every worker and reads the same `identity`
+    field, over a scope that strictly contains this bracket's. Three of the four values agree.
+    `roles` does not: the interceptor binds `frozenset()` **deliberately**, because a relayed
+    workflow argument is data rather than a verified claim (security review, `D-2026-08-28`), and
+    this bracket binds the real set for the reason the comment below gives. So the two are not two
+    producers of one value and collapsing them is not a tidy-up — measured, neutering only the role
+    bind leaves `test_an_expensive_job_step_is_refused_for_an_unentitled_requester` **still
+    refusing** and fails `test_an_entitled_requester_passes_the_same_gate` outright, i.e. it would
+    refuse every legitimately entitled template job step. This paragraph said "it binds exactly
+    what this bracket binds" for as long as that was false.
     """
     # The template path DOES bind `identity.roles`, unlike the interceptor and the report retriever
     # which bind empty (security review: roles do not cross the durable boundary from an unsigned
@@ -297,11 +386,12 @@ async def authorize_job_step(step: JobStepInput) -> ResolvedJob:
     """
     connector, job = find_job(step.job)
     with _acting_as(step.identity):
-        payload = await _audited(
-            step.identity,
+        payload = await audited_launch(
             job.name,
             step.arguments,
             lambda: prepare_job_launch(connector, job, step.arguments),
+            actor=step.identity.actor,
+            correlation_id=step.identity.correlation_id,
         )
     return ResolvedJob(
         connector=connector,
@@ -313,43 +403,6 @@ async def authorize_job_step(step: JobStepInput) -> ResolvedJob:
         awaits_answer=job.awaits_answer,
         payload=payload,
     )
-
-
-async def _audited(
-    identity: StepIdentity,
-    tool: str,
-    arguments: dict[str, Any],
-    action: Callable[[], dict[str, Any]],
-) -> dict[str, Any]:
-    """Run a job step's pre-flight through the governed chain, so the launch leaves an audit row.
-
-    Through the chain over a real tool rather than by emitting an `AuditEvent` directly: there is
-    exactly one place that decides what an audit record looks like, and a second emitter would
-    drift from it the first time that shape changed. The tool is named for the job, so the row
-    reads the same as the one a chat turn's launch of the same job writes — which is the point,
-    since the whole finding was that these two paths were governed differently.
-
-    The pre-flight is wrapped in a tool built on the spot rather than found on the surface, because
-    what is being audited is not a tool the model can call: it is the resolution and validation a
-    `job` step does before Temporal starts the workflow. Naming it after the job is what makes it
-    legible in the trail.
-
-    A refusal propagates after being recorded as an `error` outcome, exactly as a denied chat tool
-    call is.
-    """
-
-    @tool_decorator(name_or_callable=tool, description=f"launch the {tool!r} job")
-    async def _launch(**_kwargs: Any) -> dict[str, Any]:
-        return action()
-
-    payload: dict[str, Any] = await invoke_governed(
-        _launch,
-        arguments,
-        correlation_id=identity.correlation_id,
-        actor=identity.actor,
-        profile=get_profile(None),
-    )
-    return payload
 
 
 # **On the background queue, because until now it was on no queue at all.** `resolve_job_step` (as
@@ -543,10 +596,156 @@ class _StepMeter(AsyncCallbackHandler):
         self.usage.add(llm_result_usage(response))
 
 
+class ResumeRequest(BaseModel):
+    """Which run to look for completed steps from, and the definition they must belong to."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    job_id: str = Field(min_length=1)
+    # The fingerprint of the *resolved* template this run is executing. A run's id is
+    # `hash([name, inputs])`, so a relaunch after an edit lands on the same id carrying a different
+    # procedure — and step results produced by the old definition would then be folded into the new
+    # one silently. This is what refuses that.
+    fingerprint: str = Field(min_length=1)
+
+
 @durable_activity("background")
 @activity.defn
-async def run_agent_step(step: AgentStepInput) -> str:
-    """Run one agent turn as the run's actor and return its answer text.
+async def completed_steps(request: ResumeRequest) -> dict[str, Any]:
+    """The steps a previous failed run of `request.job_id` already finished, or `{}`.
+
+    **The work was always kept and never read.** `failed_template_record` writes
+    `result={"steps": completed}` and says why in as many words — *"A five-step procedure that died
+    at step four ran four real steps, and discarding them would lose the work while recording only
+    the failure"* — and then the sequencer rebuilt `scope` and `results` empty on every execution,
+    so a relaunch redid all four.
+
+    **An activity because it is a database read**, which workflow code may not do. That is also
+    what makes it safe for the thing it decides: the result is recorded in history, so a replay
+    folds the same steps rather than re-querying a table that has moved on (D-071 — a value that
+    shapes how many commands a workflow issues is captured once, not re-read).
+
+    **Three conditions, and each of them is a way this could be wrong rather than merely absent.**
+    The row must exist; it must be a *failure*, because `job_records` is upserted on `job_id` and a
+    completed run's row would otherwise be replayed as a resume of itself; and its fingerprint must
+    match, because the run id is a hash of the template *name* and its inputs, so editing the
+    file's steps produces a different procedure under the same id.
+
+    Best-effort in the same sense `_record_run` is: a resume that cannot be read is a slower run,
+    and failing a run because its optional shortcut was unavailable would trade a real outcome for
+    an optimisation.
+
+    Args:
+        request: The run to resume and the definition its steps must belong to.
+
+    Returns:
+        `{step_id: result}` for the steps already done, empty when there is nothing to resume.
+    """
+    from chemclaw.durable.job_record import lookup_job_record
+
+    try:
+        record = await lookup_job_record(request.job_id)
+    except Exception:
+        logger.warning("could not read %s to resume it; starting over", request.job_id)
+        return {}
+    if record is None or record.state != "failed":
+        return {}
+    result = record.result if isinstance(record.result, dict) else {}
+    if result.get("template_fingerprint") != request.fingerprint:
+        if result.get("steps"):
+            logger.info(
+                "not resuming %s: its completed steps belong to a different version of %r",
+                request.job_id,
+                record.job,
+            )
+        return {}
+    steps = result.get("steps")
+    return dict(steps) if isinstance(steps, dict) else {}
+
+
+def bounded_prompt(step: AgentStepInput) -> str:
+    """`step.prompt` cut to what a model may be handed in one blob, and said so in the text.
+
+    **The bound a template step did not have, and the one place the chat path's is not reachable
+    from.** `bound_tool_results` is an entry of `tool_call_middleware`; a template `tool` step runs
+    through `invoke_governed`, which folds `tool_governance_middleware` — deliberately, because the
+    three entries it omits exist to serve a model and a `tool` step has none. Correct for that step
+    and silently wrong one step later: the *next* step's prompt interpolates that unbounded result
+    through `${steps.<id>.result}`, and there is a model there. Measured over the shipped ceiling,
+    a result a chat turn cuts to 60,000 characters reached an `agent` step's prompt at **245,700**.
+
+    Nothing downstream could reclaim it either, which is what makes the hole the expensive kind.
+    The step's graph gets `agent/compaction.py` like any turn, and both of its edits are for
+    *history* — `ClearToolUsesEdit` clears tool results and the conversation window drops old
+    turns. A step is one `HumanMessage` with no history at all, so a prompt over the budget is
+    unreducible by construction: it ticks `chemclaw_context_unreducible_total` and goes out whole.
+
+    **In the activity and not in the sequencer**, which is the placement decision. Cutting in
+    workflow code would put a mutable setting into an activity *argument*, and an argument is
+    recomputed on replay while a result is read from history — so a deployment that lowered the
+    ceiling between the original execution and a replay would fail the run with a
+    non-determinism error rather than bound anything. It is also where `durable_tools.py` already
+    puts this class of rewrite, for a reason that reads the same here: the envelope belongs to the
+    model's context, so it belongs at the model's edge.
+
+    `agent_max_tool_result_chars` rather than a second setting, and that is the argument rather
+    than the convenience: it is this system's one answer to "how much text may reach a model in one
+    blob", and a prompt is a blob. A number of its own would be a second ceiling nobody could
+    reason about against the first, which is the defect `bounded_for_batch` names one layer down.
+
+    Head-and-tail is what makes this safe to do to a *prompt* rather than to a result. A template
+    prompt is instructions, then interpolated data, then instructions — read `tautomer-resolution`,
+    whose last four sentences are the whole judgment the step exists for. `_HEAD_SHARE` keeps both
+    ends and cuts the middle, so what a cut costs is the data it was already too large to read and
+    never the ask.
+
+    Args:
+        step: The resolved step. `template` labels the counter; `prompt` is what is bounded.
+
+    Returns:
+        The prompt, unchanged when it was already inside the ceiling.
+    """
+    bounded, removed = bounded_content(
+        step.prompt,
+        # Named for what it is rather than for a tool, because no tool returned it: the sentence
+        # the model reads says "this <name> result", and "template step input" is the true filler.
+        "template step input",
+        settings.agent_max_tool_result_chars,
+        remedy=STEP_REMEDY,
+    )
+    if not removed:
+        return step.prompt
+    METRICS.increment("chemclaw_template_prompt_truncated_total", 1.0, {"template": step.template})
+    log_event(
+        logger,
+        "template.prompt_truncated",
+        "cut %d characters from the %s step's prompt to stay inside the context ceiling",
+        removed,
+        step.step_id or "agent",
+        template=step.template,
+        step=step.step_id,
+        characters_removed=removed,
+        ceiling=settings.agent_max_tool_result_chars,
+    )
+    return str(bounded)
+
+
+@durable_activity("background")
+@activity.defn
+async def run_agent_step(step: AgentStepInput) -> AgentStepResult | str:
+    """Run one agent turn as the run's actor and return its answer **with its degradation**.
+
+    **The `| str` is the rollout, not indecision.** This activity used to return a bare answer
+    string, and both workers poll `background-jobs`: during a rolling deploy a new-code *workflow*
+    worker can schedule this step onto an old-code *activity* worker, which answers `"…"` where the
+    caller's type hint now says `AgentStepResult`. The pydantic data converter refuses that
+    (`ValidationError: 1 validation error for AgentStepResult`), `agent_step_retry()` allows one
+    attempt, and `failure_exception_types=[Exception]` fails the run — so annotating this
+    `AgentStepResult` alone would fail every template run in flight across every deploy, for the
+    length of the rollout. `template_run_timeout_seconds` is 45,330, so "in flight across a deploy"
+    is the ordinary case rather than a race. The sequencer's `isinstance` reads both shapes and the
+    old one degrades to what it always meant: an answer with nothing said about it. Same reasoning
+    as `AgentStepInput.step_id`'s default, one boundary further out.
 
     The step that keeps a template agentic: the sequence around it is fixed, the reasoning inside it
     is not. `profile` narrows which agent runs it, so a summarizing step need not hold the
@@ -565,9 +764,19 @@ async def run_agent_step(step: AgentStepInput) -> str:
 
     **So the step is ungated and the step is read-only by default**, which is the same sentence from
     both ends. The plan gate exists to put a human between an autonomously-chosen write and its
-    execution; a template already has that human — the author of a reviewed, git-committed file that
-    nothing at run time can produce — so gating it again would only ask for an approval of a plan
-    nobody wrote. What the gate *also* did was bound the blast radius of a model improvising inside
+    execution; a template already has that human — the author of a reviewed, git-committed file — so
+    gating it again would only ask for an approval of a plan nobody wrote.
+
+    **The premise this used to name is gone and the exemption is not.** `D-2026-08-12` rested it on
+    "nothing at run time can produce one", and `agent/workflow_tools.compose_workflow` produces one
+    — so this activity, which is where an agent step actually executes, was arguing from a false
+    premise. What holds it up now is `templates/composed.py::authored_problems`: an agent-authored
+    document may name no side-effecting tool and no `write_tools`, ever, and no approval lifts
+    either, so it cannot contain the write the gate exists to catch. A durable `job` step is the one
+    thing a person can add to it, and `templates/composed.unapproved_jobs` is where that is decided
+    — outside this activity, before anything is queued.
+
+    What the gate *also* did was bound the blast radius of a model improvising inside
     the step, and that half is kept structurally: `step_profile` hands this turn a surface with
     every side-effecting tool the step did not declare removed from it, so the graph is built
     without them.
@@ -596,11 +805,14 @@ async def run_agent_step(step: AgentStepInput) -> str:
     meters (the counters, and the durable row that outlives the process) and does not pretend to
     cap. A run-level cap on template spend needs a durable counter, which is a decision, not a call.
 
-    **The repeat guard is watched here too**, because it is per-turn ambient state that the middle-
-    ware reads and its caller owns the lifetime of (`agent/repeat_guard.py`). Without
-    `begin_call_watch` the guard is inert — its contextvar is `None`, so the counter it increments
-    is discarded — and a step's model could ask one tool the identical question indefinitely, which
-    is precisely the shape the guard was measured against (`find_past_jobs` ×8 in one turn).
+    **Every per-turn cap ambient is opened here**, through `agent.turn_ambient.turn_caps` rather
+    than by hand — this step used to open two of the four, so a `task` fan-out inside it was bounded
+    by the per-branch channel and a tool body's model call was booked by nothing. The repeat guard
+    is one of them, because it is per-turn ambient state the middleware reads and the caller owns
+    the lifetime of (`agent/repeat_guard.py`): without its watch the guard is inert — its contextvar
+    is `None`, so the counter it increments is discarded — and a step's model could ask one tool the
+    identical question indefinitely, the shape it was measured against (`find_past_jobs` ×8 in one
+    turn).
     """
     from chemclaw.agent.langgraph_agent import build_langgraph_agent
 
@@ -614,16 +826,24 @@ async def run_agent_step(step: AgentStepInput) -> str:
     # own end and produced nothing is the silent death, and every other ending overwrites this
     # before the `finally` books it.
     outcome = "empty_answer"
-    calls_token = begin_call_watch()
-    # Started for the same reason as the call watch above it: a step runs a real model turn, so the
-    # context policy's per-turn state has to exist here too or compaction reports one standing
-    # reduction once per model call and the step's cost row cannot say the policy fired
-    # (`agent/context_budget.py`).
-    context_token = begin_context_watch()
-    with _acting_as(step.identity):
+    # **Every cap ambient a turn runs under, not the two this step used to open.** A step runs a
+    # real model turn, so it needs the context record (or compaction reports one standing reduction
+    # once per model call and the cost row cannot say the policy fired) — and it needs the loop and
+    # spend watches for the reason `agent/turn_ambient.py` states: without them a `task` fan-out
+    # inside a step is bounded by the per-branch channel snapshot and each branch spends the whole
+    # allowance, and a model call a tool body makes is counted by nothing. `meter.usage` is passed
+    # rather than letting the manager build a ledger, so the caps are enforced against the same
+    # object `_book_step_spend` reads.
+    step_label = f"template {step.template or '?'} step {step.step_id or '?'}"
+    with turn_caps(meter.usage, closing=step_label), _acting_as(step.identity):
         try:
             async with AsyncExitStack() as stack:
-                connectors, _unreachable = await open_connector_specs(
+                # `unreachable` is kept, and discarding it was the defect `AgentStepResult`
+                # documents: this step's whole surface can be dark and the answer it returns is
+                # shaped exactly like a complete one. `api/runner.py` yields
+                # `CapabilityDegradedEvent` off this same tuple, and the `tool` step below names
+                # the same list in its own failure — this path threw it away.
+                connectors, unreachable = await open_connector_specs(
                     stack, connector_specs(profile)
                 )
                 # Compiled here, with this step's connectors, for the reason
@@ -662,7 +882,10 @@ async def run_agent_step(step: AgentStepInput) -> str:
                 # `chemclaw_tokens_total` rather than free and silent. Measured: 52 paid model
                 # calls, 6,240 tokens, booked.
                 result = await beating(
-                    graph.ainvoke(turn_input(step.prompt), {**turn_config(), "callbacks": [meter]}),
+                    graph.ainvoke(
+                        turn_input(bounded_prompt(step)),
+                        {**turn_config(), "callbacks": [meter]},
+                    ),
                     f"template agent step {step.step_id or step.profile or 'agent'}",
                     settings.template_step_heartbeat_timeout_seconds,
                 )
@@ -685,7 +908,10 @@ async def run_agent_step(step: AgentStepInput) -> str:
                     outcome = "spend_capped"
                 else:
                     outcome = "answered" if answered else "empty_answer"
-                return answer
+                # The same three facts the ledger books, returned to the caller as well — because
+                # the ledger is not a thing the next step of the template, `template_job_record` or
+                # the chemist reading the brief can see.
+                return AgentStepResult(answer=answer, outcome=outcome, unreachable=unreachable)
         except asyncio.CancelledError:
             # A Temporal activity cancellation — the workflow was cancelled, the worker is
             # draining, or an activity timeout fired. The chat path calls this ending `abandoned`
@@ -714,11 +940,11 @@ async def run_agent_step(step: AgentStepInput) -> str:
             # that one in-flight call — the provider reported no usage for it, and there is nothing
             # to read. Every call that completed is booked. So the ledger can under-report by at
             # most one call, never by a whole turn.
-            end_call_watch(calls_token)
-            # Booked *before* the context watch is torn down, because the row reads it. The call
-            # watch above has no such reader, which is why the two ends are not adjacent.
+            # Booked inside `turn_caps`, because the row reads the context watch and the manager
+            # tears every watch down on the way out. That ordering used to be spelled as two
+            # `end_*` calls with the booking between them; it is now a property of where this line
+            # sits, which is one fewer thing to get right by hand.
             _book_step_spend(step, meter.usage, time.perf_counter() - started, answered, outcome)
-            end_context_watch(context_token)
 
 
 def _book_step_spend(

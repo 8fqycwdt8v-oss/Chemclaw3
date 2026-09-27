@@ -248,42 +248,39 @@ def test_absorb_folds_every_chunk_counter_and_takes_the_max_cursor() -> None:
     assert ElnSyncState(max_iterations=100, remaining=[]).next_cursor is None
 
 
-def test_eln_sync_workflow_ingests_seed_corpus(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_eln_sync_workflow_ingests_seed_corpus(monkeypatch: pytest.MonkeyPatch) -> None:
     """The workflow ingests every seed ELN entry and reports them, durably."""
     records, reaction_store = _swap_stores(monkeypatch)
 
-    async def _run() -> None:
-        async with await start_env_or_skip() as env:
-            client: Client = pydantic_client(env)
-            async with Worker(
-                client,
+    async with await start_env_or_skip() as env:
+        client: Client = pydantic_client(env)
+        async with Worker(
+            client,
+            task_queue="test-eln",
+            workflows=[ElnSyncWorkflow],
+            activities=[plan_eln_sync, sync_eln_entries],
+        ):
+            # An explicit `since` is a manual backfill: it touches no stored cursor, so the
+            # cursor activities are never called and no database is needed.
+            summary = await client.execute_workflow(
+                ElnSyncWorkflow.run,
+                _EPOCH,
+                id="eln-sync-test",
                 task_queue="test-eln",
-                workflows=[ElnSyncWorkflow],
-                activities=[plan_eln_sync, sync_eln_entries],
-            ):
-                # An explicit `since` is a manual backfill: it touches no stored cursor, so the
-                # cursor activities are never called and no database is needed.
-                summary = await client.execute_workflow(
-                    ElnSyncWorkflow.run,
-                    _EPOCH,
-                    id="eln-sync-test",
-                    task_queue="test-eln",
-                )
-        # The seed corpus (data/eln-exports) has two valid reactions. The workflow reports counts
-        # (`ElnSyncOutcome`); *which* entries landed is asserted against the stores below, which is
-        # the stronger claim anyway — a count is a report, a record is the thing a chemist reads.
-        assert summary.ingested == 2
-        assert summary.rejected == 0
-        assert {record.reaction_id for record in await records.all_records()} == {
-            "eln-2026-001",
-            "eln-2026-002",
-        }
-        assert len(await reaction_store.all_records()) == 2
-
-    asyncio.run(_run())
+            )
+    # The seed corpus (data/eln-exports) has two valid reactions. The workflow reports counts
+    # (`ElnSyncOutcome`); *which* entries landed is asserted against the stores below, which is
+    # the stronger claim anyway — a count is a report, a record is the thing a chemist reads.
+    assert summary.ingested == 2
+    assert summary.rejected == 0
+    assert {record.reaction_id for record in await records.all_records()} == {
+        "eln-2026-001",
+        "eln-2026-002",
+    }
+    assert len(await reaction_store.all_records()) == 2
 
 
-def test_eln_sync_workflow_cursors_each_source_independently(
+async def test_eln_sync_workflow_cursors_each_source_independently(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A scheduled run stores a separate cursor per active ingest source (D-054)."""
@@ -301,35 +298,32 @@ def test_eln_sync_workflow_cursors_each_source_independently(
     monkeypatch.setattr(eln_sync, "load_cursor", fake_load)
     monkeypatch.setattr(eln_sync, "store_cursor", fake_store)
 
-    async def _run() -> None:
-        async with await start_env_or_skip() as env:
-            client: Client = pydantic_client(env)
-            async with Worker(
-                client,
+    async with await start_env_or_skip() as env:
+        client: Client = pydantic_client(env)
+        async with Worker(
+            client,
+            task_queue="test-eln-cursors",
+            workflows=[ElnSyncWorkflow],
+            activities=[
+                plan_eln_sync,
+                sync_eln_entries,
+                load_sync_cursor,
+                store_sync_cursor,
+            ],
+        ):
+            # No `since` → the scheduled path: load each cursor, sync, store each advanced one.
+            summary = await client.execute_workflow(
+                ElnSyncWorkflow.run,
+                id="eln-sync-cursors",
                 task_queue="test-eln-cursors",
-                workflows=[ElnSyncWorkflow],
-                activities=[
-                    plan_eln_sync,
-                    sync_eln_entries,
-                    load_sync_cursor,
-                    store_sync_cursor,
-                ],
-            ):
-                # No `since` → the scheduled path: load each cursor, sync, store each advanced one.
-                summary = await client.execute_workflow(
-                    ElnSyncWorkflow.run,
-                    id="eln-sync-cursors",
-                    task_queue="test-eln-cursors",
-                )
-        # Each ingest source got its own stored cursor — the shared-cursor skip is gone.
-        assert set(cursors) == {"eln-json", "eln-ord"}
-        # The JSON source's reactions still land (union across sources).
-        assert summary.ingested >= 2
-        assert {"eln-2026-001", "eln-2026-002"} <= {
-            record.reaction_id for record in await records.all_records()
-        }
-
-    asyncio.run(_run())
+            )
+    # Each ingest source got its own stored cursor — the shared-cursor skip is gone.
+    assert set(cursors) == {"eln-json", "eln-ord"}
+    # The JSON source's reactions still land (union across sources).
+    assert summary.ingested >= 2
+    assert {"eln-2026-001", "eln-2026-002"} <= {
+        record.reaction_id for record in await records.all_records()
+    }
 
 
 def test_one_failing_source_does_not_take_the_rest_of_the_sync_down(
@@ -493,7 +487,7 @@ def test_cancelling_a_drain_stops_it_instead_of_skipping_the_source_in_flight(
     )
 
 
-def test_eln_sync_workflow_drains_a_backlog_in_chunks(
+async def test_eln_sync_workflow_drains_a_backlog_in_chunks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """With a batch bound of 1 the workflow loops, persisting the cursor after every chunk.
@@ -526,37 +520,34 @@ def test_eln_sync_workflow_drains_a_backlog_in_chunks(
     monkeypatch.setattr(eln_sync, "load_cursor", fake_load)
     monkeypatch.setattr(eln_sync, "store_cursor", fake_store)
 
-    async def _run() -> None:
-        async with await start_env_or_skip() as env:
-            client: Client = pydantic_client(env)
-            async with Worker(
-                client,
+    async with await start_env_or_skip() as env:
+        client: Client = pydantic_client(env)
+        async with Worker(
+            client,
+            task_queue="test-eln-chunks",
+            workflows=[ElnSyncWorkflow],
+            activities=[
+                plan_eln_sync,
+                sync_eln_entries,
+                load_sync_cursor,
+                store_sync_cursor,
+            ],
+        ):
+            summary = await client.execute_workflow(
+                ElnSyncWorkflow.run,
+                id="eln-sync-chunks",
                 task_queue="test-eln-chunks",
-                workflows=[ElnSyncWorkflow],
-                activities=[
-                    plan_eln_sync,
-                    sync_eln_entries,
-                    load_sync_cursor,
-                    store_sync_cursor,
-                ],
-            ):
-                summary = await client.execute_workflow(
-                    ElnSyncWorkflow.run,
-                    id="eln-sync-chunks",
-                    task_queue="test-eln-chunks",
-                )
-        assert summary.ingested >= 2
-        assert {"eln-2026-001", "eln-2026-002"} <= {
-            record.reaction_id for record in await records.all_records()
-        }
-        assert len(stored) >= 2  # one persisted cursor per chunk, not one per run
-        assert stored == sorted(stored)  # the cursor only ever advances
-        # The overlap window is fetched by the first chunk only; later chunks of the same
-        # drain fetch from the advancing cursor (no per-chunk window replay).
-        assert overlap_flags[0] is True
-        assert overlap_flags[1:] and all(flag is False for flag in overlap_flags[1:])
-
-    asyncio.run(_run())
+            )
+    assert summary.ingested >= 2
+    assert {"eln-2026-001", "eln-2026-002"} <= {
+        record.reaction_id for record in await records.all_records()
+    }
+    assert len(stored) >= 2  # one persisted cursor per chunk, not one per run
+    assert stored == sorted(stored)  # the cursor only ever advances
+    # The overlap window is fetched by the first chunk only; later chunks of the same
+    # drain fetch from the advancing cursor (no per-chunk window replay).
+    assert overlap_flags[0] is True
+    assert overlap_flags[1:] and all(flag is False for flag in overlap_flags[1:])
 
 
 def test_background_worker_registers_eln_sync() -> None:

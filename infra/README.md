@@ -28,6 +28,19 @@ drives the lane in rounds, and `siblings.sh` is the one place that resolves a
 sibling checkout's path for both lanes. All are reached through `make live-*`;
 the procedure is in `docs/guides/runbook.md`.
 
+**No lane here carries the compiled egress layer, and that is a real gap rather
+than a detail.** `src/chemclaw/core/netguard_preload.c` is built in exactly one
+place — `deploy/Containerfile`, through `deploy/build-netguard-preload.sh` — so
+`make chat`, `make connectors`, `make live-up`, the four-repo `e2e-full-stack`
+lane and every local or CI `pytest` run with it absent. The code is honest about
+it (`chemclaw_egress_preload_armed` reads 0 and `netguard_preload.is_armed()`
+asks the dynamic linker rather than an environment variable), but nothing in
+these lanes exercises grpc's C-core or Temporal's Rust sdk-core against the
+allowlist the way a pod does. What *does* exercise it is
+`tests/test_netguard_preload.py`, which builds the library with the image's own
+recipe and drives real clients through it; a green live lane is evidence about
+the Python layer only (`D-2026-09-12-the-layer-that-binds-grpc-is-libc-not-socket-py`).
+
 **Neither the script count nor the process list is written out here**, and the
 count was wrong within one commit of being written — it said "the two scripts"
 over four. What each process is called and which port it holds is a thing the

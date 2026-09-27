@@ -232,6 +232,10 @@ class ConversionOutcome:
     `refused` carries row ids rather than a count alone: the whole reason this pass can refuse is
     that a stored message has no example to check a guess against, and the only useful next step is
     to go and look at the row.
+
+    `converted` is **rows this pass changed**, not rows it attempted — the two differ by whatever a
+    concurrent pass got to first, and only the first is a number an operator can check against the
+    table.
     """
 
     converted: int
@@ -319,8 +323,20 @@ async def convert_stored_messages(*, batch: int = _BATCH) -> ConversionOutcome:
             if updates:
                 async with conn.cursor() as cur:
                     await cur.executemany(_MARK_CONVERTED, updates)
+                    # `rowcount`, not `len(updates)` — how many rows the UPDATE *matched*, which
+                    # after `executemany` is the total across every parameter set. The difference
+                    # is exactly the `AND message_shape = 'maf'` predicate above: a row a
+                    # concurrent pass converted between this pass's SELECT and its UPDATE matches
+                    # nothing and must not be counted as this pass's work. Measured with two
+                    # overlapping passes over three convertible rows, the way the module's own
+                    # docstring says they can now be started (`make db-migrate` and the chart's
+                    # post-upgrade Job, neither taking a lock): they reported 3 + 3 = 6 over three
+                    # converted rows. The data was correct throughout — the predicate is what
+                    # makes it so — but "converted 6 stored message(s)" over a table of three is a
+                    # report an operator cannot reconcile against `SELECT count(*) … WHERE
+                    # message_shape`, which is the one check available to them.
+                    converted += cur.rowcount
                 await conn.commit()
-                converted += len(updates)
 
 
 if __name__ == "__main__":

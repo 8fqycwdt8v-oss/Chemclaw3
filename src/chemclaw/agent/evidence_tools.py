@@ -46,8 +46,8 @@ async def assemble_evidence_pack(session_id: str = "") -> dict[str, object]:
     Use it when somebody asks how an answer or a change came about, what the system was permitted
     to do, who approved something, or what it changed outside itself. It reads five stores that
     have always held this and puts them side by side: every tool call with its outcome and actor,
-    every durable run with the reason it was launched, every note proposed and how a human decided
-    it, every plan approval, and every effect on a system this deployment does not own.
+    every durable run with the reason it was launched, every plan approval, every effect on a
+    system this deployment does not own, and how each of the session's turns ended.
 
     **Report the `limits` it carries, verbatim, whenever you present it.** Three of them, and each
     corrects a reading somebody will otherwise make: the trail is append-only by database privilege
@@ -108,4 +108,16 @@ async def assemble_evidence_pack(session_id: str = "") -> dict[str, object]:
     payload["refusals"] = len(pack.refusals)
     if "tool_calls" in pack.truncated:
         payload["refusals_are_a_lower_bound"] = True
+    # `degraded_turns` calls itself "the pack's own headline" and "a reader who checks nothing else
+    # must be able to check this" — and until this line it had **no reader in `src/` at all**: one
+    # grep hit, its own `def`, with only three test assertions calling it. A plain `@property` is
+    # not a `computed_field`, so it is absent from `model_dump()` too, while its two siblings
+    # (`is_empty`, `refusals`) were surfaced here. That is the shape this repository deletes on
+    # sight — a member kept alive by a test that calls it directly — wearing a present-tense claim
+    # about a control. Surfaced rather than deleted because wave 14's finding was "a degraded
+    # answer that reads as complete", and this pack is where that is supposed to stop being true.
+    #
+    # The correlation ids rather than the turns: `PackTurn`'s four fields are already in
+    # `payload["turns"]`, so this is a pointer into what the reader already has, not a second copy.
+    payload["degraded_turns"] = [turn.correlation_id for turn in pack.degraded_turns]
     return payload

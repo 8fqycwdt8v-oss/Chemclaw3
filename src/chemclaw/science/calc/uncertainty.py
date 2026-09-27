@@ -66,7 +66,7 @@ from chemclaw.core.errors import ChemclawError
 # spread on its own chemistry", and a reviewer weighs the two differently.
 Method = Literal["reported", "propagated", "none"]
 
-# How an uncertainty was obtained, in the words someone reviewing a merged note reads. Kept beside
+# How an uncertainty was obtained, in the words someone reading the note sees. Kept beside
 # `Method` so the two cannot drift: a method with no prose here would render as an empty
 # parenthetical, which is the silence this module exists to break.
 _METHOD_PROSE: dict[Method, str] = {

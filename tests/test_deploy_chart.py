@@ -17,8 +17,12 @@ silently rather than loudly, which is why they earn a test of their own.
 
 import os
 import re
+import shlex
 import shutil
 import subprocess
+import sys
+import tempfile
+from functools import cache
 from pathlib import Path
 from typing import Any
 
@@ -782,29 +786,23 @@ def test_a_comment_never_swallows_the_line_after_it() -> None:
 # along. The exemption had never been checked against what kubeconform actually did.
 _CATALOG_VALIDATED_KINDS = frozenset({"ServiceMonitor", "PodMonitor", "PrometheusRule"})
 
-# The one kind kubeconform genuinely has no schema for, so `make helm-validate` runs with
-# `-ignore-missing-schemas` and *skips* it rather than failing. Keeping the set explicit is what
+# The kinds kubeconform genuinely has no schema for, so `make helm-validate` runs with
+# `-ignore-missing-schemas` and *skips* them rather than failing. Keeping the set explicit is what
 # stops that flag from being a hole: a skipped kind is a deliberate entry here, not a silent pass.
-_UNVALIDATED_KINDS = frozenset({"Route"})
-
-# Kinds the chart *can* render but does not on the shipped values, so they never reach kubeconform
-# in the validation render and cannot appear in its `Skipped` count.
 #
-# `AlertmanagerConfig` is gated on `monitoring.alertmanager.enabled`, which is off because the chart
-# cannot invent a receiver — a Slack webhook or a PagerDuty key is a deployment fact. It would be
-# skipped rather than validated if it did render (the datreeio catalog carries a `v1alpha1` schema
-# for it and no `v1beta1`), which is why it is recorded here rather than quietly left out: the point
-# of these three sets is that every kind in the template text is accounted for by *someone*.
-_UNRENDERED_BY_DEFAULT_KINDS = frozenset({"AlertmanagerConfig"})
-
-# What the CI gate reports for the chart as it stands: every rendered resource validated except the
-# OpenShift `Route`. Pinned as a number because the two sets above are claims about kubeconform's
-# behaviour, and a claim about someone else's tool is worth stating in a form that can be compared
-# against its actual output rather than believed.
-_EXPECTED_SKIPPED_RESOURCES = 1
+# `Route` is the OpenShift one, absent from both kubeconform's defaults and the datreeio catalog.
+# `AlertmanagerConfig` is the second and it was **not listed here until the gate was first run**: it
+# sat in a set called `_UNRENDERED_BY_DEFAULT_KINDS`, whose stated reason was that it "never reaches
+# kubeconform in the validation render and cannot appear in its `Skipped` count". That is false —
+# `make helm-validate`'s union arm sets `monitoring.alertmanager.enabled=true`, so it renders, it
+# reaches kubeconform, and it is skipped (the catalog carries a `v1alpha1` schema for it and no
+# `v1beta1`). A kind is exempt because of what kubeconform can do with it, which is a property of
+# the kind; whether a given arm renders it is a property of the arm, and conflating the two put the
+# second skipped kind in the set defined as the one that cannot be skipped.
+_UNVALIDATED_KINDS = frozenset({"Route", "AlertmanagerConfig"})
 
 
-def test_only_the_known_crd_is_unvalidated_by_kubeconform() -> None:
+def test_only_the_known_crds_are_unvalidated_by_kubeconform() -> None:
     """Pin which kinds the chart renders, so `-ignore-missing-schemas` cannot hide a new one.
 
     `make helm-validate` must pass `-ignore-missing-schemas` because the chart renders an OpenShift
@@ -815,7 +813,10 @@ def test_only_the_known_crd_is_unvalidated_by_kubeconform() -> None:
 
     The cost of the flag is that an unknown kind is skipped instead of rejected. This test buys that
     back offline: every kind the chart renders is a core Kubernetes kind, a CRD the catalog covers,
-    or the one genuinely unvalidated kind named above.
+    or one of the genuinely unvalidated kinds named above. It is a claim about the *kinds*; how many
+    **resources** of them each render arm emits is
+    `test_every_resource_kubeconform_skips_is_one_this_file_declared`, which is a different question
+    and used to be answered by comparing the two.
     """
     core_kinds = {
         "ConfigMap",
@@ -829,27 +830,118 @@ def test_only_the_known_crd_is_unvalidated_by_kubeconform() -> None:
         "ServiceAccount",
     }
     rendered = set(re.findall(r"^kind:\s*([A-Za-z]+)", _all_templates(), flags=re.MULTILINE))
-    unexpected = (
-        rendered
-        - core_kinds
-        - _CATALOG_VALIDATED_KINDS
-        - _UNVALIDATED_KINDS
-        - _UNRENDERED_BY_DEFAULT_KINDS
-    )
+    unexpected = rendered - core_kinds - _CATALOG_VALIDATED_KINDS - _UNVALIDATED_KINDS
     assert not unexpected, (
         f"the chart renders kind(s) {sorted(unexpected)} that kubeconform may silently skip — "
         "add a schema location, or add them to _UNVALIDATED_KINDS with the reason"
     )
     # Both exemptions must stay earned: a kind the chart stopped rendering is stale bookkeeping,
     # and — the failure this test itself had — an exemption nobody ever checked against the tool.
-    stale = (
-        _UNVALIDATED_KINDS | _CATALOG_VALIDATED_KINDS | _UNRENDERED_BY_DEFAULT_KINDS
-    ) - rendered
+    stale = (_UNVALIDATED_KINDS | _CATALOG_VALIDATED_KINDS) - rendered
     assert not stale, f"exempted kind(s) the chart no longer renders: {sorted(stale)}"
-    assert len(_UNVALIDATED_KINDS) == _EXPECTED_SKIPPED_RESOURCES, (
-        "the count CI reports as `Skipped` must match what this file claims is unvalidated; "
-        "if they diverge, one of them is wrong about kubeconform rather than about the chart"
+
+
+def _kubeconform_arms() -> list[list[str]]:
+    """The flag sets `make helm-validate` actually pipes through kubeconform.
+
+    Read out of the `Makefile`'s own `for flags in …` loop rather than restated here, for the reason
+    `test_the_union_render_covers_every_switch_this_chart_ships_off` gives about that same literal:
+    a copy of the list is a second answer to the question, and it stays green while the gate's
+    render narrows underneath it. Split on whitespace rather than with a second `shlex` pass,
+    because the `--set-json` values carry the quotes helm needs and a posix split strips them.
+    """
+    makefile = (DEPLOY.parent / "Makefile").read_text()
+    loop = next(line for line in makefile.splitlines() if line.lstrip().startswith("for flags in"))
+    body = loop.split("for flags in", 1)[1].rsplit("; do", 1)[0]
+    return [arm.split() for arm in shlex.split(body)]
+
+
+@pytest.mark.skipif(
+    shutil.which("helm") is None or shutil.which("kubeconform") is None,
+    # "helm is not installed" verbatim, because that literal is what `tests/conftest.py`'s epilogue
+    # counts; worded freshly, this skip was invisible to the count.
+    reason="helm is not installed (or kubeconform is): both render and validate the chart",
+)
+def test_every_resource_kubeconform_skips_is_one_this_file_declared() -> None:
+    """Take the skipped count off the tool, for every arm the gate validates.
+
+    `_UNVALIDATED_KINDS` is a claim about what kubeconform does, and this file used to check it by
+    comparing `len(_UNVALIDATED_KINDS)` against a literal `_EXPECTED_SKIPPED_RESOURCES = 1` sitting
+    six lines below it. Both halves were wrong in a way only running the tool could show, and it had
+    never been run here — `kubeconform` and `promtool` are absent from the sandbox, so `make
+    helm-validate` exits before its first render and the whole target had been taken on trust.
+
+    Run: the default arm reports `Skipped: 1` and the **union arm reports `Skipped: 3`** — two
+    `Route`s (the release's own and `chemclaw-mcp-face`'s) plus the `AlertmanagerConfig` that a set
+    named `_UNRENDERED_BY_DEFAULT_KINDS` claimed could never appear in this count. So the comparison
+    was between a number of *kinds* and a number of *resources*, which are different quantities
+    (`tasks/lessons.md`: two numbers on different bases do not compare, however carefully each was
+    measured); it held at `1 == 1` only because the default arm happens to render exactly one Route.
+
+    The deeper defect is what the comment claimed for itself: the literal was pinned, in its own
+    words, "in a form that can be compared against its actual output rather than believed" — and
+    nothing compared it. Its only reader was an assertion against the `len()` of a set in the same
+    file. So the count is now *derived* from the render per arm and *measured* against kubeconform's
+    own summary line, which is the only thing that can settle a claim about somebody else's tool.
+    """
+    arms = _kubeconform_arms()
+    assert len(arms) >= 2, (
+        "`make helm-validate` no longer renders more than one arm through kubeconform, so the "
+        "off-by-default templates reach it for the first time in an operator's cluster"
     )
+    for arm in arms:
+        render = _render(*arm).stdout
+        declared = [
+            f"{document.get('metadata', {}).get('name')} {document['kind']}"
+            for document in yaml.safe_load_all(render)
+            if document and document.get("kind") in _UNVALIDATED_KINDS
+        ]
+        result = subprocess.run(
+            [
+                "kubeconform",
+                "-strict",
+                "-summary",
+                "-ignore-missing-schemas",
+                "-kubernetes-version",
+                _kube_version(),
+                "-schema-location",
+                "default",
+                "-schema-location",
+                "https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/"
+                "{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json",
+            ],
+            input=render,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, (
+            f"kubeconform rejects the render for arm {arm or '(shipped defaults)'}:\n"
+            f"{result.stdout}{result.stderr}"
+        )
+        reported = re.search(r"Skipped:\s*(\d+)", result.stdout)
+        assert reported is not None, (
+            f"kubeconform printed no `Skipped` count for arm {arm or '(shipped defaults)'}, so "
+            f"this test cannot see what the flag hid:\n{result.stdout}"
+        )
+        assert int(reported.group(1)) == len(declared), (
+            f"kubeconform skipped {reported.group(1)} resource(s) on arm "
+            f"{arm or '(shipped defaults)'} and this file accounts for {len(declared)} "
+            f"({sorted(declared)}). `-ignore-missing-schemas` is hiding a kind — name it in "
+            "_UNVALIDATED_KINDS with the reason, or give kubeconform a schema location for it"
+        )
+
+
+def _kube_version() -> str:
+    """The Kubernetes version the gate validates against, off the `Makefile`'s own default.
+
+    Restating `1.29.0` here would be the defect this whole test exists to correct, one variable
+    over: a second declaration of a number, checked by nothing against the first.
+    """
+    makefile = (DEPLOY.parent / "Makefile").read_text()
+    match = re.search(r"^KUBE_VERSION \?= (\S+)$", makefile, flags=re.MULTILINE)
+    assert match is not None, "the Makefile no longer declares KUBE_VERSION"
+    return match.group(1)
 
 
 def test_something_actually_scrapes_the_metrics_endpoint() -> None:
@@ -1631,14 +1723,23 @@ def test_the_singleton_worker_is_a_singleton_across_a_rollout_too() -> None:
     one is told to stop, and the old one then has up to its `terminationGracePeriodSeconds` (150) to
     finish. Two background workers poll `background-jobs` for that whole window.
 
-    That is exactly the interleaving `values.yaml` and
-    `D-2026-08-27-what-a-second-background-worker-would-race-on` pin the replica count to prevent.
-    `NoteReindexWorkflow` retires `note_index` rows for notes missing from *this pod's* knowledge
-    checkout — an `emptyDir` its own sidecar refreshes on an interval — so during the overlap the
-    new pod's clone is fresh and the old pod's is up to an interval stale, and a merge-webhook
-    reindex landing on the old one deletes the freshly merged notes' rows while logging that it
-    retired notes that exist. The ADR's "one pod's clone only ever moves forward" is true at steady
-    state and false during a rollout, which is the gap this closes.
+    **The reason this test was written is gone, and it is kept for the other one.** It was the
+    corpus interleaving `D-2026-08-27-what-a-second-background-worker-would-race-on` named: during
+    the overlap the new pod's clone is fresh and the old pod's is up to a sidecar interval stale, so
+    a reindex landing on the old one retired the freshly merged notes' rows and then re-embedded
+    everything on the way back. Both halves are closed — the prune is bounded by the corpus revision
+    a row was built from (`D-2026-09-14-a-prune-needs-the-corpus-two-pods-disagree-about`) and the
+    fingerprint is a hash of the note's bytes rather than of the mtime its own checkout wrote
+    (`D-2026-09-16-a-fingerprint-that-names-a-checkout-is-not-a-fingerprint-of-a-note`), so two pods
+    holding one commit now agree about every note.
+
+    What still needs `Recreate` is replay: with no overlap every unfinished run on
+    `background-jobs` is resumed by exactly one code version, so the new image must be able to
+    replay the histories the old one wrote
+    (`D-2026-09-09-a-replay-control-needs-an-archived-history-not-a-patch`). That justification
+    never depended on the replica count, which is why this assertion outlives the race it was
+    written for — and why the premise assertion below is about `replicas` being *readable* rather
+    than about it still being the reason.
 
     `Recreate` rather than `maxSurge: 0`: a singleton worker has no availability to protect —
     Temporal redelivers an activity whose worker vanished — so the honest statement is that the old
@@ -1646,7 +1747,8 @@ def test_the_singleton_worker_is_a_singleton_across_a_rollout_too() -> None:
     """
     text = (CHART / "templates" / "deployment-workers.yaml").read_text()
     assert _values()["workers"]["background"]["replicas"] == 1, (
-        "the background worker is no longer pinned to one replica; this test's premise is gone"
+        "the background worker is no longer pinned to one replica — which is allowed now that the "
+        "corpus race is closed, but `Recreate` below then has to be re-argued for replay alone"
     )
     strategy = re.search(r"^  strategy:\n\s+type: (\w+)", text, flags=re.MULTILINE)
     assert strategy and strategy.group(1) == "Recreate", (
@@ -1678,30 +1780,57 @@ def test_the_migration_hook_cannot_hold_a_release_open_forever() -> None:
     )
 
 
+# What an interpolated `--set` value stands in as, once it is substituted rather than dropped. A
+# string, because the one flag that needs it is a Temporal namespace; a future interpolated flag
+# whose value may not be a string (a boolean posture, a number) has to be given a representative
+# value **here**, deliberately, and until it is it will fail the render below rather than vanish
+# from the basis. That failure is the correct one: this helper's whole claim is that the pipeline
+# can state every posture, and a posture nobody has said how to state is not stated.
+_JENKINS_INTERPOLATED = "jenkins-interpolated"
+
+
 def _jenkins_render_flags() -> list[str]:
     """Every `--set` the release pipeline's render stage can emit, with all its postures stated.
 
     Read out of the `Jenkinsfile` rather than restated here: the point of the test below is that
     the *pipeline's own* flags are enough to render this chart, so a copy of them would be a second
-    answer to the question and would stay green while the pipeline broke. The interpolated pair
-    (`image.digest`/`image.repository`) is dropped — a validation render has no published digest,
-    and neither is a posture the chart refuses to render without.
+    answer to the question and would stay green while the pipeline broke.
+
+    **Two different grounds for not taking a flag at face value, which used to be one condition.**
+    `image.digest`/`image.repository` are dropped because a validation render has no published
+    digest and neither is a posture. An *interpolated* value is a different case entirely: the
+    pipeline can state it — that is what a Jenkins parameter is — it simply cannot be resolved
+    outside a Jenkins run. Dropping it silently narrows this helper's own first sentence, so it is
+    **substituted** with `_JENKINS_INTERPOLATED` instead, and the render then actually exercises
+    the posture the pipeline claims to be able to state.
+
+    **The old condition never fired, and measuring is how that surfaced.** The value pattern was
+    `[A-Za-z0-9_.:/-]+`, which does not admit `$`, `{` or `}` — so `--set
+    temporal.namespace=${params.TEMPORAL_NAMESPACE}` was not *dropped by the `$` guard*, it failed
+    to match at all, and so did both `image.*` flags. Driven over the shipped stage, the regex
+    returned two flags and the `"$" in match.group(0)` arm was reached zero times. A guard that
+    cannot fire is not the reason a thing is missing, and reading it as one is how the third
+    posture came to be invisible here with no line of this file looking wrong.
     """
     # Split on the stage declarations at their own indentation, not on the bare string: a stage
     # name quoted inside a comment in the body would otherwise truncate the block being read.
     blocks = re.split(r"\n    stage\('", (DEPLOY.parent / "Jenkinsfile").read_text())
     stage = next(block for block in blocks if block.startswith("Render the chart')"))
     flags: list[str] = []
-    for match in re.finditer(r"--set ([A-Za-z0-9_.]+)=([A-Za-z0-9_.:/-]+)", stage):
-        if "$" in match.group(0) or match.group(1).startswith("image."):
+    # The value runs to the next whitespace or Groovy string terminator, so an interpolated
+    # `${...}` — and `${a}/${b}` — is *seen* rather than skipped past. That is what makes the two
+    # decisions below decisions rather than an accident of the character class.
+    for match in re.finditer(r"--set ([A-Za-z0-9_.]+)=([^\s'\"]+)", stage):
+        key, value = match.group(1), match.group(2)
+        if key.startswith("image."):
             continue
-        flags += ["--set", f"{match.group(1)}={match.group(2)}"]
+        flags += ["--set", f"{key}={_JENKINS_INTERPOLATED if '$' in value else value}"]
     return flags
 
 
 @pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
 def test_the_release_pipeline_can_state_every_posture_the_chart_demands() -> None:
-    """The chart refuses to render until a release states a posture, and there were two of them.
+    """The chart refuses to render until a release states a posture, and there are three of them.
 
     `templates/networkpolicy.yaml` refuses without an egress posture and `templates/config.yaml`
     refuses without a retention posture — both deliberate
@@ -1713,8 +1842,13 @@ def test_the_release_pipeline_can_state_every_posture_the_chart_demands() -> Non
 
     Rendered with the pipeline's flags rather than asserted as strings, because "a parameter named
     `ACCEPT_UNBOUNDED_GROWTH` exists" is not the claim — the claim is that what the pipeline can say
-    is enough for the chart to render, and only helm answers that. A third posture guard added to
-    the chart later fails this test with the message the operator would have got in the namespace.
+    is enough for the chart to render, and only helm answers that. The docstring here used to end
+    "a third posture guard added to the chart later fails this test with the message the operator
+    would have got in the namespace", and that is exactly what happened: `temporal.namespace` is
+    the third. It is not an escape hatch but a discriminator — the one string separating two
+    ChemClaw releases on a shared broker — so the pipeline states it from a parameter with no
+    default, and `_jenkins_render_flags` substitutes a placeholder rather than dropping it, because
+    "the pipeline can state it" is the whole of what this test asks.
     """
     flags = _jenkins_render_flags()
     result = subprocess.run(
@@ -1738,6 +1872,127 @@ def test_the_release_pipeline_can_state_every_posture_the_chart_demands() -> Non
             f"the render stage states {key} and `openshift.sh` cannot, so `helm upgrade` applies a "
             "release the pipeline never validated"
         )
+
+
+#: The two "a process is running unguarded" alerts. Both read a per-pod gauge, so both have the
+#: same aggregation question and both got the same answer wrong.
+_DISARMED_ALERTS = ("ChemclawEgressGuardDisarmed", "ChemclawEgressPreloadDisarmed")
+
+
+@pytest.mark.skipif(
+    shutil.which("helm") is None or shutil.which("promtool") is None,
+    # "helm is not installed" verbatim, because that literal is what `tests/conftest.py`'s
+    # epilogue counts; worded freshly, this skip was invisible to the count.
+    reason="helm is not installed (or promtool is): both render and evaluate the rule",
+)
+def test_a_single_disarmed_pod_is_what_these_alerts_are_for() -> None:
+    """`max(...) < 1` over a per-pod gauge cannot fire while any one pod is armed.
+
+    Which is the condition. This wave exists because one process kind out of four was unguarded
+    while three were fine, and the alerts written to catch the compiled layer's version of that
+    failure shipped reading `max` — 1 as soon as a single pod reports armed, so a fleet with one
+    disarmed pod never alerts and the runbook entry's first listed cause is a **per-pod** one.
+
+    Evaluated rather than read: `make helm-validate` runs `promtool check rules`, which parses an
+    expression and says nothing about what it evaluates to. The two-pod series below is the whole
+    difference — driven against the shipped `max` shape it produced **no alert**, and against `min`
+    it produced one.
+
+    The rule bodies are rebuilt from the render with only `alert` and `expr` kept, deliberately: a
+    `promtool` unit test matches annotations exactly, so carrying them here would put a second copy
+    of the alert's prose in this file, which is the duplication every other gate in this repository
+    is arranged to avoid.
+    """
+    render = subprocess.run(
+        [
+            "helm",
+            "template",
+            "chemclaw",
+            str(CHART),
+            "--set",
+            "networkPolicy.allowAnyDestination=true",
+            "--set",
+            "retention.unboundedGrowthAccepted=true",
+            "--set",
+            "temporal.namespace=chemclaw",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    rules = [
+        rule
+        for document in yaml.safe_load_all(render)
+        if document and document.get("kind") == "PrometheusRule"
+        for group in document["spec"]["groups"]
+        for rule in group["rules"]
+        if rule.get("alert") in _DISARMED_ALERTS
+    ]
+    assert {rule["alert"] for rule in rules} == set(_DISARMED_ALERTS), (
+        f"the render no longer carries both disarmed alerts: {[r.get('alert') for r in rules]}"
+    )
+    with tempfile.TemporaryDirectory() as scratch:
+        work = Path(scratch)
+        (work / "rules.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "groups": [
+                        {
+                            "name": "disarmed",
+                            "rules": [
+                                {"alert": rule["alert"], "expr": rule["expr"]} for rule in rules
+                            ],
+                        }
+                    ]
+                }
+            )
+        )
+        series = [
+            {
+                "series": f'{metric}{{pod="armed"}}',
+                "values": "1x10",
+            }
+            for metric in ("chemclaw_egress_guard_armed", "chemclaw_egress_preload_armed")
+        ] + [
+            {
+                "series": f'{metric}{{pod="disarmed"}}',
+                "values": "0x10",
+            }
+            for metric in ("chemclaw_egress_guard_armed", "chemclaw_egress_preload_armed")
+        ]
+        (work / "test.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "rule_files": ["rules.yaml"],
+                    "evaluation_interval": "1m",
+                    "tests": [
+                        {
+                            "interval": "1m",
+                            "input_series": series,
+                            "alert_rule_test": [
+                                {
+                                    "eval_time": "9m",
+                                    "alertname": name,
+                                    "exp_alerts": [{"exp_labels": {}}],
+                                }
+                                for name in _DISARMED_ALERTS
+                            ],
+                        }
+                    ],
+                }
+            )
+        )
+        evaluated = subprocess.run(
+            ["promtool", "test", "rules", "test.yaml"],
+            cwd=work,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    assert evaluated.returncode == 0, (
+        "one of the disarmed alerts does not fire for a fleet with a single disarmed pod — which "
+        f"is the only shape it exists for:\n{evaluated.stdout}{evaluated.stderr}"
+    )
 
 
 def test_no_delivery_script_deploys_this_chart_atomically() -> None:
@@ -2045,6 +2300,119 @@ def test_the_dependency_audit_gates_every_branch_push_and_the_local_gate() -> No
     assert "deps-audit" in ci_target, f"`make ci` does not depend on deps-audit: {ci_target}"
 
 
+#: Binaries a `shutil.which(...)` skip guard may rely on with no CI install step, because the
+#: runner image guarantees them. `bash`, `git` and `make` are what a GitHub Actions job *is* — a
+#: workflow that had to install `bash` would be describing a different problem — and `flock` is
+#: util-linux, present on every Ubuntu image. The point of the allowlist is that it is short and
+#: each entry is a claim about the image rather than about this repository.
+_RUNNER_IMAGE_BINARIES = frozenset({"bash", "flock", "git", "make"})
+
+
+def test_every_binary_the_suite_skips_on_is_installed_where_the_suite_runs() -> None:
+    """A `skipif(shutil.which(...))` is a promise that CI has the binary. Three of them did not.
+
+    Forty-eight places in this suite gate on seven binaries, and a missing one is a **skip**, which
+    reports green: driven with none of the three chart binaries on `PATH`, 75 tests skip across
+    `test_deploy_chart.py` and `test_retention.py` alone. (48 is the number of `shutil.which` calls,
+    not of tests — one decorator can cover a parametrised family, which is the whole gap between the
+    two figures and the reason both are stated as what they are.) So a skip guard is worth exactly
+    what the CI job running the suite installs, and nothing checked that. Measured when the
+    `kubeconform` test above was written and the obvious question was put to it: where does it
+    run?
+
+    Nowhere. `check` runs `make cov` and installed only `helm`; `chart` has `kubeconform` and
+    `promtool` and runs `make helm-validate` and no pytest. So the three tests gated on those two
+    binaries could not execute in either job —
+    `test_every_resource_kubeconform_skips_is_one_this_file_declared`,
+    `test_a_single_disarmed_pod_is_what_these_alerts_are_for`, and the `promtool` arm of
+    `tests/test_retention.py`. The latter two are the PromQL checks, and their whole subject is a
+    failure the cluster reports as `Valid` while the alerts silently never evaluate: written to
+    close that hole, and never once run by CI.
+
+    `check` installs all three binaries now. This test is the mechanism rather than the instance,
+    which is the distinction `test_every_gate_make_ci_runs_is_a_step_ci_yml_runs` below draws about
+    its own subject: the next binary-gated test added to this suite fails here on the day it is
+    written instead of skipping quietly for a month.
+
+    Both directions, because an allowlist nobody prunes is the other half of the same defect.
+    """
+    sources = "\n".join(
+        path.read_text() for path in sorted((DEPLOY.parent / "tests").rglob("*.py"))
+    )
+    gated = set(re.findall(r'shutil\.which\(\s*"([a-z0-9_-]+)"', sources))
+    assert "helm" in gated, f"the skip-guard scan did not parse: {sorted(gated)}"
+
+    jobs: dict[str, Any] = yaml.safe_load(
+        (DEPLOY.parent / ".github" / "workflows" / "ci.yml").read_text()
+    )["jobs"]
+    suite_jobs = [
+        name
+        for name, job in jobs.items()
+        if any(
+            target in {"cov", "test"}
+            for step in job.get("steps", [])
+            for command in re.findall(r"^make (.+)", str(step.get("run", "")), re.MULTILINE)
+            for target in command.split()
+        )
+    ]
+    assert len(suite_jobs) == 1, (
+        f"{suite_jobs} run the suite; this test assumes one job does, and two would mean a binary "
+        "installed in one of them still leaves the other's run skipping"
+    )
+    installed = "\n".join(
+        str(step)
+        for step in jobs[suite_jobs[0]]["steps"]
+        if str(step.get("name", "")).startswith("Install")
+    )
+
+    unprovided = sorted(
+        binary for binary in gated - _RUNNER_IMAGE_BINARIES if binary not in installed
+    )
+    assert not unprovided, (
+        f"tests skip on {unprovided} and the `{suite_jobs[0]}` job installs none of them, so those "
+        "tests report green in CI without ever running. Add an install step, or add the binary to "
+        "_RUNNER_IMAGE_BINARIES with the reason the runner image guarantees it"
+    )
+    stale = sorted(_RUNNER_IMAGE_BINARIES - gated)
+    assert not stale, (
+        f"_RUNNER_IMAGE_BINARIES exempts {stale}, which no test in this suite gates on any more"
+    )
+
+    # And the exemption has to be **earned**, or it is the hole rather than the guard. Driven: with
+    # only the two assertions above, moving `kubeconform` into the allowlist and deleting its
+    # install step passed — the escape hatch silenced exactly the defect this test was written for.
+    #
+    # An entry here claims the runner image guarantees the binary, which is a fact about somebody
+    # else's image and unverifiable from this tree. What *is* verifiable is the contrapositive: a
+    # binary this repository installs somewhere, or tells a human to install, is one it already
+    # knows is not guaranteed. So the two lists must be disjoint, and `kubeconform` cannot be
+    # exempted while `chart` installs it and the runbook names it under "install these".
+    install_steps = "\n".join(
+        str(step)
+        for job in jobs.values()
+        for step in job.get("steps", [])
+        if str(step.get("name", "")).startswith("Install")
+    )
+    # The binary each step *installs*, not every word it mentions: matched on the `install -m` that
+    # puts it on `PATH` and on the `setup-<tool>` action. A substring scan over the step text read
+    # `git` out of the `github.com` in a download URL — a guard that fires on its own plumbing.
+    installed_anywhere = set(re.findall(r"install -m \d+ \S*?/([a-z0-9_-]+)\b", install_steps))
+    installed_anywhere |= set(re.findall(r"uses: \S+/setup-([a-z0-9-]+)@", install_steps))
+    runbook = (DEPLOY.parent / "docs" / "guides" / "runbook.md").read_text()
+    runbook_block = runbook.split('says a binary is "not installed', 1)[1].split("```")[1]
+    told_to_install = {line.split()[0] for line in runbook_block.splitlines() if line.strip()}
+    assert {"helm", "kubeconform", "promtool"} <= installed_anywhere | told_to_install, (
+        "neither the workflow's install steps nor the runbook's install block parsed; this check "
+        f"saw {sorted(installed_anywhere)} and {sorted(told_to_install)}"
+    )
+    contradicted = sorted(_RUNNER_IMAGE_BINARIES & (installed_anywhere | told_to_install))
+    assert not contradicted, (
+        f"_RUNNER_IMAGE_BINARIES claims the runner image guarantees {contradicted}, and this "
+        "repository installs them or tells a human to — so it does not believe its own exemption. "
+        "Install the binary in the suite's job instead of exempting it"
+    )
+
+
 def test_every_gate_make_ci_runs_is_a_step_ci_yml_runs() -> None:
     """Two hand-maintained lists whose whole contract is that they agree, and nothing checked it.
 
@@ -2054,10 +2422,17 @@ def test_every_gate_make_ci_runs_is_a_step_ci_yml_runs() -> None:
     pinned; the *mechanism* was not, so the next gate to be added to one list and forgotten in the
     other fails nothing. This closes the class instead of the instance.
 
-    `helm-validate` is the one gate deliberately in a job of its own: it needs `helm` and
-    `kubeconform` and no Python, so it runs in `chart` in parallel rather than lengthening `check`.
-    The split is asserted rather than tolerated — a gate quietly moving between jobs is a change to
-    what blocks a merge.
+    `helm-validate` is the one gate deliberately in a job of its own, so it runs in `chart` in
+    parallel rather than lengthening `check`. The split is asserted rather than tolerated — a gate
+    quietly moving between jobs is a change to what blocks a merge.
+
+    The reason used to be stated as "it needs `helm` and `kubeconform` and no Python", and both
+    halves have since stopped being true. It needs `promtool` as well, and it needs Python: the
+    target unwraps its own render to feed the rule files to `promtool`, which is why `chart` grew a
+    `uv sync` step. And `check` now installs all three binaries too — not to run this gate, which
+    stays here, but because three tests in this suite gate on `kubeconform`/`promtool` and could
+    therefore run in neither job: they skipped in `check` for want of the binary, and `chart` runs
+    no pytest. The split is about which *gate* lives where, not about which binaries a job may have.
 
     **Both directions, and the second one is why this test was rewritten.** It used to slice the
     file in two on a literal newline-plus-`  chart:` and call the halves `check_job` and
@@ -2411,6 +2786,37 @@ def test_egress_destinations_are_declarable() -> None:
     assert _values()["networkPolicy"]["egressDestinations"] == []
 
 
+def test_the_destination_list_says_which_layer_it_is_the_only_one_of() -> None:
+    """An operator sizing this list has to know which shapes it is the whole control for.
+
+    The comment block above `egressDestinations` explained `to: []` and stopped there. What it did
+    not say is that the in-process guard patches `socket.socket` and therefore bounds **no**
+    gRPC or Temporal traffic at all — measured, three such clients reached an off-allowlist listener
+    with the refusal counter flat — and that a **loopback sidecar shares the pod's network
+    namespace**, so no entry here can see a service mesh or egress gateway's traffic. An operator
+    who read the old block came away believing a destination list was defence in depth where it was
+    the only layer, and believing it covered a shape it structurally cannot.
+
+    Pinned as prose because that is what the file carries and what a deployer reads; this repository
+    already pins chart prose this way (`test_the_connection_arithmetic_is_not_restated_in_prose`).
+    The phrases are the *claims*, not the wording around them, so a rewrite that keeps the meaning
+    keeps this green.
+    """
+    prose = (CHART / "values.yaml").read_text()
+    _, _, after = prose.partition("egressPorts:")
+    block, _, _ = after.partition("egressDestinations:")
+    for claim in (
+        "netguard_preload",
+        "statically linked",
+        "shares the pod's network namespace",
+        "refuse_proxied_egress",
+    ):
+        assert claim in block, (
+            f"the egressDestinations comment block does not say {claim!r} — a deployer cannot size "
+            "this list without knowing which layer it is the only one of"
+        )
+
+
 def _makefile_renders() -> list[list[str]]:
     """Every `helm template` of this chart in the Makefile, as its whole (continued) command.
 
@@ -2498,21 +2904,36 @@ def test_an_unstated_retention_posture_refuses_to_render() -> None:
     guard = "eq (empty .Values.retention.windows) (empty .Values.retention.unboundedGrowthAccepted)"
     assert guard in config, "the retention posture can be left unstated"
     assert "{{- fail " in config, "the guard warns rather than refusing"
+    # The type guard the egress twin has carried since it shipped and this half did not. `empty` is
+    # what misreads a quoted boolean, so the check has to sit *before* the emptiness test, not
+    # beside it — see `test_a_quoted_retention_escape_hatch_refuses_to_render` for the measurement.
+    assert 'kindIs "string" .Values.retention.unboundedGrowthAccepted' in config, (
+        "a quoted unboundedGrowthAccepted (--set-string) satisfies this gate while reading as off"
+    )
+    assert config.index('kindIs "string" .Values.retention.unboundedGrowthAccepted') < config.index(
+        guard
+    ), "the type guard runs after the emptiness test, which is the test that misreads the string"
     assert _values()["retention"]["windows"] == {}, (
         "the shipped default states a retention policy the release never wrote down"
     )
     assert _values()["retention"]["unboundedGrowthAccepted"] is False, (
         "the shipped default grants a permission the release never wrote down"
     )
-    # Every render of the shipped defaults must carry the escape hatch, or it cannot render at all
-    # — the same renders the egress test walks, now each paying both flags.
+    # Every render must state a retention posture, or it cannot render at all — the same renders
+    # the egress test walks. **A disjunction rather than the escape hatch by name**, because the
+    # guard above is an exclusive-or and the escape hatch is only one of its two arms: the
+    # `helm-validate` render that exists to parse `ChemclawRetentionNotSweeping` states
+    # `retention.windows` instead, since that rule renders on *that* arm and on no other. Asserting
+    # the flag by name would have failed the one render that covers the rule this half of the gate
+    # is about — and demanding both flags would fail every render, which is the guard working.
+    stated = ("--set retention.unboundedGrowthAccepted=true", "--set retention.windows")
     unflagged = [
         block[0].strip()
         for block in _makefile_renders()
-        if not any("--set retention.unboundedGrowthAccepted=true" in line for line in block)
+        if not any(flag in line for line in block for flag in stated)
     ]
     assert not unflagged, (
-        f"a shipped-defaults render is missing the flag it cannot render without: {unflagged}"
+        f"a render states no retention posture, so the chart refuses it: {unflagged}"
     )
 
 
@@ -2537,9 +2958,22 @@ def _alert_expressions() -> str:
     tells an operator to break the ratio down with three other series — so any check that reads the
     file as text will call a metric "alerted" because a sentence mentioned it. That is the exact
     shape of false coverage these tests exist to prevent, so the expressions are extracted first.
+
+    **The terminator is `for` *or* `labels` *or* `annotations`, and reading only `for` was this
+    function doing the thing it exists to prevent.** `for` is optional in a Prometheus rule — it
+    means "fire on the first evaluation" when omitted — and every one of the 51 rules here happened
+    to carry one, so the narrower pattern was correct by coincidence rather than by construction.
+    The first rule without one (`ChemclawBudgetNearingItsCap`, whose trigger is a step rather than a
+    rate) made the match run past its own annotations and the Go-template comment after them into
+    the *next* rule's `for`, so a metric named in somebody's prose read as alerted — false coverage,
+    from the guard against false coverage. `labels` and `annotations` are the only other keys that
+    can follow `expr`, and every rule has both. Verified behaviour-preserving: over the 51 rules
+    that predate this, the two patterns extract byte-identical text.
     """
     rule = (CHART / "templates" / "prometheusrule.yaml").read_text()
-    return " ".join(re.findall(r"expr:\s*(?:>-\s*)?((?:.|\n)*?)\n\s*for:", rule))
+    return " ".join(
+        re.findall(r"expr:\s*(?:>-\s*)?((?:.|\n)*?)\n\s*(?:for|labels|annotations):", rule)
+    )
 
 
 def _series_referenced(text: str) -> set[str]:
@@ -2714,15 +3148,36 @@ def test_every_ratio_alert_has_a_traffic_floor() -> None:
     against a 0.1 threshold, and one failed durable job in an idle half hour to `0.56` against
     0.2. Both now require their own denominator to clear an absolute rate first.
 
-    Derived rather than listed: any expression that divides one `rate()` by another is a ratio, so
-    a third one added tomorrow is covered on the day it is added.
+    Derived rather than listed: any expression that divides one range vector by another is a ratio,
+    so a third one added tomorrow is covered on the day it is added.
+
+    **That sentence was false the day it was written, and `increase()` is why.** The detector
+    matched `rate(` only, so the third ratio — added in the same commit as this docstring's claim —
+    carried a `clamp_min` denominator and no floor and was simply not seen: `ChemclawAnswer
+    RevisionsNotHelping` divides `increase()` by `increase()`. Both functions produce a range
+    vector and both have the same idle-window problem, so both are matched now, and the floor may
+    be expressed with either.
+
+    **And a second time, one level in: `sum by (…)`.** The floor pattern required a bare
+    `and sum(rate(`, which is every ratio this chart happened to hold — all three are
+    fleet-wide. `ChemclawToolCallsFailing` is per `tool`, so both its halves are
+    `sum by (tool) (rate(…))` and its floor, which is *stronger* than a fleet-wide one because it is
+    charged per series, did not match the pattern at all. The grouping clause is optional in the
+    pattern now. The lesson both instances carry is the one in `tasks/lessons.md`: a derived scope
+    that is derived by a *string shape* is only as general as the shapes its author happened to have
+    in front of them, and the detector, not the rules, is what goes stale.
     """
     rules = re.split(r"\n\s*- alert: ", (CHART / "templates" / "prometheusrule.yaml").read_text())
     ratios = []
     for block in rules[1:]:
         name = block.splitlines()[0].strip()
-        expr = " ".join(block.split("expr:")[1].split("for:")[0].split())
-        if re.search(r"rate\([^)]*\)\)?\s*/\s*", expr):
+        # Terminated the same way `_alert_expressions` is, and for the same reason: `for:` is only
+        # one of the three keys that can follow `expr:`, and a rule without one would otherwise
+        # swallow its own labels and annotations into the expression.
+        expr = " ".join(
+            re.split(r"\n\s*(?:for|labels|annotations):", block.split("expr:")[1])[0].split()
+        )
+        if re.search(r"(?:rate|increase)\([^)]*\)\)?\s*/\s*", expr):
             ratios.append((name, expr))
     assert ratios, "no ratio alerts found — the extraction is broken, not the rules"
     for name, expr in ratios:
@@ -2730,9 +3185,9 @@ def test_every_ratio_alert_has_a_traffic_floor() -> None:
             f"{name} still guards its denominator with clamp_min, which converts an idle window "
             "into a large finite ratio instead of no sample"
         )
-        assert re.search(r"\band\s+sum\(rate\(", expr), (
-            f"{name} divides two rates with no absolute floor on the denominator, so one event in "
-            "an idle window is a 100% failure rate"
+        assert re.search(r"\band\s+sum(?:\s+by\s*\([^)]*\))?\s*\((?:rate|increase)\(", expr), (
+            f"{name} divides two range vectors with no absolute floor on the denominator, so one "
+            "event in an idle window is a 100% failure rate"
         )
 
 
@@ -2819,9 +3274,35 @@ def test_the_metrics_that_were_designed_to_alert_actually_alert() -> None:
 
     Pinned by metric name rather than by rule count so renaming a metric without moving its alert
     fails here, which is the drift that makes an alerting stack quietly stop covering anything.
+
+    **The last three were added on 2026-09-19 and each was a control that read as present.**
+    `test_every_declared_metric_has_a_consumer` is satisfied by a *dashboard panel*, so each had a
+    reader and no rule, and the operability audit measured what that bought:
+
+    - `chemclaw_connectors_unreachable_total` was the **only** series that moved for a connector
+      answering 500 on `/mcp` while its `/healthz` answered 200 — the readiness gauge held 0, so
+      `ChemclawConnectorsUnhealthy` could not fire and nothing else read this one;
+    - `chemclaw_tool_calls_total{outcome="error"}` is the same fact for a connector that *does* come
+      up and then fails its calls, and had panels only;
+    - `chemclaw_turns_finished_total` carries `outcome="spend_capped"`, which `values.yaml` tells an
+      operator in as many words "is what says whether the number you chose is biting" — a chart
+      pointing at a control that did not exist.
+
+    The runbook half is guarded separately and derivably by
+    `test_every_alert_carries_a_runbook_url_that_resolves`, so an alert added here without an entry
+    there fails without needing a fourth name in this list.
+
+    **Read off the rules' PromQL, not off the file, and this test was doing the very thing
+    `_alert_expressions` exists to prevent.** It asserted `metric in rule` over the whole template,
+    so a Go-template comment or an annotation *mentioning* a series made it "alerted". Driven: the
+    `ChemclawToolCallsFailing` expression was repointed at another counter entirely and this test
+    stayed green, satisfied by the comment above that rule naming `chemclaw_tool_calls_total`. That
+    is the same false coverage `_alert_expressions`' own docstring describes, in the test one screen
+    away from it.
     """
     rule = (CHART / "templates" / "prometheusrule.yaml").read_text()
     assert "kind: PrometheusRule" in rule
+    alerted = _series_referenced(_alert_expressions())
     for metric in [
         "chemclaw_audit_sink_failures_total",
         "chemclaw_notes_publish_failures_total",
@@ -2831,8 +3312,14 @@ def test_the_metrics_that_were_designed_to_alert_actually_alert() -> None:
         "chemclaw_connectors_unhealthy",
         "chemclaw_db_unavailable_total",
         "chemclaw_tokens_total",
+        "chemclaw_connectors_unreachable_total",
+        "chemclaw_tool_calls_total",
+        "chemclaw_turns_finished_total",
     ]:
-        assert metric in rule, f"{metric} has no alert"
+        assert metric in alerted, (
+            f"{metric} is in no alert *expression* — a mention in a comment or in an "
+            "annotation is not an alert"
+        )
 
 
 @pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
@@ -2874,9 +3361,11 @@ def test_only_the_fleet_group_alerts_on_a_series_this_system_does_not_emit() -> 
     Its header argued that every rule reads an application counter — "so a process that is gone
     emits silence" — which is what makes `up` and `absent()` necessary. The sentence carried a
     count ("all sixteen") that was thirty-seven by the time anyone read it, and the count was never
-    the interesting half: the *split* is. Two rules read Prometheus's own synthesised `up` and
-    every other rule reads a series this registry declares, and that is what the header now says
-    and this asserts.
+    the interesting half: the *split* is. A short list of rules read Prometheus's own synthesised
+    `up` and every other rule reads a series this registry declares, and that is what the header
+    now says and this asserts. The list is enumerated below rather than counted here, for the
+    reason the count it replaced failed: a number in this docstring is stale the next time somebody
+    adds a rule, while a set that must match exactly is not.
 
     A third rule written against a series nothing here emits would be green forever, which reads
     exactly like the condition never occurring — the same failure
@@ -2907,9 +3396,15 @@ def test_only_the_fleet_group_alerts_on_a_series_this_system_does_not_emit() -> 
     # `monitoring.temporalSdkMetrics.enabled`, which is the same flag that renders the port the
     # exporter would bind, so it is absent from every shipped configuration rather than green
     # forever in one. The panels were unconditional.
+    # `ChemclawNoBackgroundWorkerIsScraped` is the fourth and belongs to the same fleet group as
+    # the first two: the shared-endpoint `absent()` beside it cannot see a background worker that
+    # is missing, because connectors and the front door serve the same `metrics` port and keep it
+    # satisfied. It reads `up` for exactly the reason the other two do — a pod that never became a
+    # target emits no first-party series to alert on.
     assert on_up == {
         "ChemclawTargetDown",
         "ChemclawNoWorkerIsScraped",
+        "ChemclawNoBackgroundWorkerIsScraped",
         "ChemclawWorkerNotPolling",
     }, (
         f"the rules that read something other than a first-party series are {sorted(on_up)}; the "
@@ -3043,30 +3538,43 @@ _SUPPLY_CHAIN_TOOLS = frozenset(
 _ABSENCE_MARKERS = ("nowhere", "there is no", "used to say", "is a real gap", "does not run")
 
 
-def _executable_workflow_text(workflow: str) -> str:
-    """Every string in `image.yml` a runner would actually execute: each step's `uses` and `run`.
+def _invoked_commands(workflow: str) -> set[str]:
+    """Every program `image.yml` actually *invokes*, plus each `make` target and each `uses`.
 
     Parsed as YAML rather than read as one blob, because a comment is not a control. Comments are
     the largest thing in this workflow — the file is more rationale than command — so a substring
     search over its text answers "is this word written down here", which is the question the runbook
-    already answers and not the one worth asking of CI.
+    already answers and not the one worth asking of CI. Shell comments inside a `run:` block survive
+    YAML parsing and are stripped for the same reason.
 
-    Shell comments inside a `run:` block survive YAML parsing, so they are stripped too: a `#` line
-    in a script is exactly as inert as a `#` line in the YAML around it. Only `#` at a line start or
-    after whitespace is treated as one, which is the shell's own rule closely enough for scripts
-    that quote their arguments.
+    **Command words, not substrings, and the difference is a whole gate.** This used to return the
+    executable text and callers asked `gate in executed`. Driven as a mutation: replacing
+    `trivy image ...` with `echo image ...` — a workflow that downloads the scanner and never runs
+    it — left the check green, because the installer's own URL and filename both contain the word.
+    Fetching a tool is not running it. So each fragment of each script is reduced to the program it
+    starts with, and `make <target>` contributes the target too, since that is how this workflow
+    spells several gates.
     """
     document: Any = yaml.safe_load(workflow)
-    executed: list[str] = []
+    commands: set[str] = set()
     for job in (document.get("jobs") or {}).values():
         for step in job.get("steps") or []:
             uses = step.get("uses")
             if isinstance(uses, str):
-                executed.append(uses)
+                commands.add(uses)
             run = step.get("run")
-            if isinstance(run, str):
-                executed.append(re.sub(r"(?m)(^|\s)#.*$", r"\1", run))
-    return "\n".join(executed)
+            if not isinstance(run, str):
+                continue
+            script = re.sub(r"(?m)(^|\s)#.*$", r"\1", run).replace("\\\n", " ")
+            for fragment in re.split(r"[\n|;&]+|\$\(", script):
+                words = fragment.split()
+                if not words:
+                    continue
+                program = words[0].rsplit("/", 1)[-1]
+                commands.add(program)
+                if program == "make":
+                    commands.update(words[1:])
+    return commands
 
 
 def test_every_supply_chain_gate_the_runbook_names_actually_runs() -> None:
@@ -3100,10 +3608,25 @@ def test_every_supply_chain_gate_the_runbook_names_actually_runs() -> None:
     workflow = (DEPLOY.parent / ".github" / "workflows" / "image.yml").read_text()
 
     section = runbook.split("### When a supply-chain gate goes red", 1)[1].split("\n## ", 1)[0]
-    table = [line for line in section.splitlines() if line.startswith("| `")]
-    assert table, "the gate table was not found — this check is reading the wrong section"
+    table = [line for line in section.splitlines() if line.startswith("|")]
+    assert any(line.startswith("| `") for line in table), (
+        "the gate table was not found — this check is reading the wrong section"
+    )
 
-    named = {re.match(r"\|\s*`([^`]+)`", line).group(1) for line in table}  # type: ignore[union-attr]
+    # **Every backticked tool in a table row, not just the row's first cell.** Reading only the
+    # leading `| \`gate\`` cell left the SBOM row — whose *third* cell says "it only fails if
+    # `syft` cannot run" — entirely unchecked: driven as a mutation, replacing `syft chemclaw:ci`
+    # with `echo chemclaw:ci` kept this green while the runbook went on naming the tool. A claim in
+    # a cell is a claim.
+    named = {
+        token
+        for line in table
+        for token in re.findall(r"`([^`]+)`", line)
+        if token in _SUPPLY_CHAIN_TOOLS
+    }
+    named |= {
+        match.group(1) for line in table if (match := re.match(r"\|\s*`([^`]+)`", line)) is not None
+    }
 
     # The prose half. Lines are joined before sentences are split because the section wraps mid
     # sentence, and the table lines are dropped because they are claims already counted above.
@@ -3118,17 +3641,38 @@ def test_every_supply_chain_gate_the_runbook_names_actually_runs() -> None:
             tool for tool in _SUPPLY_CHAIN_TOOLS if re.search(rf"\b{re.escape(tool)}\b", lowered)
         }
 
-    executed = _executable_workflow_text(workflow)
+    invoked = _invoked_commands(workflow)
     # `make deps-audit` is how the workflow spells pip-audit; the Makefile target is the real name.
     runs = {
         gate
         for gate in named
-        if gate in executed or gate.replace("pip-audit", "deps-audit") in executed
+        if gate in invoked or gate.replace("pip-audit", "deps-audit") in invoked
     }
     assert named == runs, (
         f"the runbook names supply-chain gate(s) that nothing runs: {sorted(named - runs)}. "
         "Either merge the gate or stop documenting it as one — a comment in the workflow is not "
         "a gate, and neither is a sentence next to the table."
+    )
+
+    # **And a gate that runs is not yet a gate that blocks**, which this check did not ask and the
+    # `BACKLOG.md` row said so in as many words: "it does not prove the named gate is *blocking*,
+    # only that something runs it". A step carrying `continue-on-error: true` executes, reports,
+    # and lets the merge through — a scanner nobody reads, which is the failure the image
+    # workflow's own comment names as the reason `pip-audit` blocks.
+    document: Any = yaml.safe_load(workflow)
+    non_blocking: list[str] = []
+    for job in (document.get("jobs") or {}).values():
+        for step in job.get("steps") or []:
+            body = f"{step.get('uses') or ''}\n{step.get('run') or ''}"
+            if not any(
+                gate in body or gate.replace("pip-audit", "deps-audit") in body for gate in named
+            ):
+                continue
+            if step.get("continue-on-error"):
+                non_blocking.append(str(step.get("name") or body.strip()[:60]))
+    assert not non_blocking, (
+        f"the runbook presents these as gates and their steps cannot fail the build: "
+        f"{non_blocking}. A non-blocking scanner is a report nobody opens."
     )
 
 
@@ -3141,8 +3685,15 @@ def test_every_supply_chain_gate_the_runbook_names_actually_runs() -> None:
 # `tests/test_helm_chart.py`'s docstring describes, with `make helm-validate` as the CI half.
 
 
+@cache
 def _render(*overrides: str) -> subprocess.CompletedProcess[str]:
     """`helm template` on the chart, with the egress and retention postures stated.
+
+    Cached on the overrides, because `helm template` is a subprocess and the chart on disk does
+    not change during a session: 18 of the 42 calls in this file pass no overrides at all and were
+    18 identical renders. Measured over the whole file, two runs each: 51.7 s / 51.1 s before,
+    43.5 s / 43.4 s after. The returned `CompletedProcess` is therefore shared between tests —
+    every reader here treats it as the immutable record of a render, which is what it is.
 
     `networkPolicy.allowAnyDestination=true` is the same flag the Makefile's two renders, the
     runbook and `deploy/README.md` all pass: the chart refuses to render until a release states
@@ -3151,6 +3702,12 @@ def _render(*overrides: str) -> subprocess.CompletedProcess[str]:
     (`D-2026-08-26-a-knob-that-renders-nothing-is-not-a-knob`'s retention half): a validation
     render states no disposal policy either, and both flags are what every other caller of this
     chart pays too — see `test_the_shipped_defaults_still_render`.
+
+    `temporal.namespace=chemclaw` is the third, and it is not a posture: it is the one string that
+    separates two ChemClaw releases sharing a broker, which the chart shipped as a constant inside
+    `config` and now refuses to default. A validation render has no site to name, so it names the
+    value the chart used to hard-code — see
+    `test_a_release_that_does_not_name_its_temporal_namespace_refuses_to_render`.
     """
     return subprocess.run(
         [
@@ -3162,6 +3719,8 @@ def _render(*overrides: str) -> subprocess.CompletedProcess[str]:
             "networkPolicy.allowAnyDestination=true",
             "--set",
             "retention.unboundedGrowthAccepted=true",
+            "--set",
+            "temporal.namespace=chemclaw",
             *overrides,
         ],
         capture_output=True,
@@ -3286,10 +3845,18 @@ def _render_windows(*keys: str) -> subprocess.CompletedProcess[str]:
     `_render` states the *other* retention posture and the gate refuses when both are set, so the
     escape hatch is overridden back to `false` rather than dropped: `--set` is last-wins, which
     leaves exactly one posture stated — the one under test.
+
+    `artifactGrowthAccepted=true` is here because stating a window is what makes the artifact-store
+    posture mandatory: the nine `CHEMCLAW_RETENTION_*` windows bound nine tables and none of them
+    is `artifact_blobs`, so a release that says "I bound my growth" is asked the second half.
+    Only on this arm — `_render`'s `unboundedGrowthAccepted` already covers that table by saying
+    everything grows.
     """
     return _render(
         "--set",
         "retention.unboundedGrowthAccepted=false",
+        "--set",
+        "retention.artifactGrowthAccepted=true",
         *(arg for key in keys for arg in ("--set", f"retention.windows.{key}=30")),
     )
 
@@ -3342,6 +3909,228 @@ def test_a_retention_window_naming_no_setting_refuses_to_render() -> None:
     assert "CHEMCLAW_RETENTION_ENABLED" in by_hand.stderr, by_hand.stderr
 
 
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+def test_a_release_that_does_not_name_its_temporal_namespace_refuses_to_render() -> None:
+    """Two releases land on one Temporal namespace, and the chart shipped that as the default.
+
+    `config.CHEMCLAW_TEMPORAL_ADDRESS` names one broker for the whole cluster — its own `temporal`
+    Kubernetes namespace, not one per release — and `CHEMCLAW_TEMPORAL_NAMESPACE` sat beside it as
+    the constant `"chemclaw"`. Inside that broker the namespace is the only boundary there is:
+    `CHEMCLAW_BACKGROUND_TASK_QUEUE` is the constant `background-jobs`, `OWNED_SCHEDULE_IDS` is a
+    set of bare constants, and a job's workflow id carries no site. The layout this repository
+    documents — `dev.yaml`/`staging.yaml`/`prod.yaml` in `deploy/jenkins/environments/`, three
+    Kubernetes namespaces, one shared Temporal — therefore put every release on one namespace, one
+    queue and one schedule-id space.
+
+    Measured against a live broker through the shipped `apply_schedules`/`_prune`, ids
+    probe-prefixed and deleted afterwards::
+
+        site A applied:  eln-sync -> workflow=SiteAWorkflow  interval=0:30:00
+        site B applied:  eln-sync -> workflow=SiteBWorkflow  interval=0:05:00   <-- overwritten
+        site A's schedules, settled:  ['eln-sync', 'eval-drift']
+        after site B's apply pruned:  ['eln-sync']                              <-- deleted
+
+    `_prune` deletes every id in `OWNED_SCHEDULE_IDS` that this release did not plan; it cannot tell
+    a peer's Schedule from a leftover of its own, and the comment above that set already anticipates
+    "a shared Temporal namespace" while protecting only *other software's* schedules.
+
+    Driven to the refusal **and** to a render, because a gate nobody has watched refuse is a claim
+    that a gate exists. The third arm is the duplicate: derived into the ConfigMap from
+    `temporal.namespace`, the key written in `config` as well would render twice and every parser
+    keeps the last, leaving this gate checking a value nothing reads.
+    """
+    # Built by hand rather than through `_render`, which states all three: `--set` is last-wins and
+    # there is no "unset", so `temporal.namespace=` would state the empty string — which is what
+    # the gate refuses — and this would then pass for the wrong reason.
+    unstated = subprocess.run(
+        [
+            "helm",
+            "template",
+            "chemclaw",
+            str(CHART),
+            "--set",
+            "networkPolicy.allowAnyDestination=true",
+            "--set",
+            "retention.unboundedGrowthAccepted=true",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert unstated.returncode != 0, (
+        "the chart still renders a Temporal namespace nobody chose, so two releases share one "
+        f"schedule-id space:\n{unstated.stdout[:2000]}"
+    )
+    assert "temporal.namespace" in unstated.stderr, unstated.stderr
+
+    stated = _render("--set", "temporal.namespace=chemclaw-staging")
+    assert stated.returncode == 0, stated.stderr
+    assert 'CHEMCLAW_TEMPORAL_NAMESPACE: "chemclaw-staging"' in stated.stdout, (
+        "the stated namespace does not reach the ConfigMap the pods read"
+    )
+
+    values = _values()
+    assert values["temporal"]["namespace"] == "", (
+        "the chart ships a default Temporal namespace again — a default is exactly the thing two "
+        "releases would share, which is why this gate has no escape hatch"
+    )
+    assert "CHEMCLAW_TEMPORAL_NAMESPACE" not in values["config"], (
+        "the namespace is back in `config`, where it is a constant rather than a release's choice"
+    )
+
+    both = _render("--set", "config.CHEMCLAW_TEMPORAL_NAMESPACE=written-by-hand")
+    assert both.returncode != 0, both.stdout[:2000]
+    assert "CHEMCLAW_TEMPORAL_NAMESPACE" in both.stderr, both.stderr
+
+    # And every shipped-defaults render in the `Makefile` must carry the flag, exactly as
+    # `test_an_unstated_egress_posture_refuses_to_render` demands of its own: this is the third
+    # thing `helm template` on these defaults cannot render without, so a render site that has not
+    # learned it does not fail *later*, it fails at once — which is what makes the omission cheap
+    # to find and worth asserting rather than remembering.
+    renders = _makefile_renders()
+    assert renders, "no `helm template` found in the Makefile — the extraction is broken"
+    unflagged = [
+        block[0].strip()
+        for block in renders
+        if not any("--set temporal.namespace=" in line for line in block)
+    ]
+    assert not unflagged, (
+        f"a shipped-defaults render is missing the flag it cannot render without: {unflagged}"
+    )
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+def test_a_quoted_retention_escape_hatch_refuses_to_render() -> None:
+    """`unboundedGrowthAccepted: "false"` used to *satisfy* the retention gate and disable disposal.
+
+    Go templates treat every non-empty string as truthy and `empty` agrees, so a quoted boolean —
+    an operator writing down what they do *not* want, or `--set-string`, which
+    `templates/networkpolicy.yaml` calls "the single most likely way to get this wrong" — read as
+    *stated* to the gate and as *off* to everyone else. That twin has carried a `kindIs "string"`
+    guard since it shipped; this half never grew one, so the retention gate could be walked through
+    its own escape hatch. Measured with the guard removed, on otherwise shipped defaults:
+
+        helm template … --set-string retention.unboundedGrowthAccepted=false
+        -> 32 objects rendered, `CHEMCLAW_RETENTION_ENABLED` present 0 times
+
+    A release that wrote down "not unbounded growth" and installed cleanly with every durable table
+    growing forever, which is the exact end state this gate exists to make impossible.
+
+    Driven rather than read, because the sibling text assertion in
+    `test_an_unstated_retention_posture_refuses_to_render` can see the guard's *presence* and not
+    what `empty` does with a string — and it was the second of those, not the first, that made this
+    reachable.
+    """
+    quoted = subprocess.run(
+        [
+            "helm",
+            "template",
+            "chemclaw",
+            str(CHART),
+            "--set",
+            "networkPolicy.allowAnyDestination=true",
+            "--set",
+            "temporal.namespace=chemclaw",
+            "--set-string",
+            "retention.unboundedGrowthAccepted=false",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert quoted.returncode != 0, (
+        "a quoted retention escape hatch still renders; the release states a posture it does not "
+        f"have and nothing is ever pruned:\n{quoted.stdout[:2000]}"
+    )
+    assert "must be a boolean" in quoted.stderr, quoted.stderr
+
+    # And the real boolean is untouched: a guard that refused both would be a broken gate, not a
+    # strict one, and the shipped defaults plus this flag are what every render site passes.
+    stated = _render()
+    assert stated.returncode == 0, stated.stderr
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+def test_stating_retention_windows_also_requires_an_artifact_store_posture() -> None:
+    """The retention gate bounds nine tables; `artifact_blobs` is not one of them.
+
+    `artifact_store_max_bytes` and `artifact_evict_idle_days` both default to 0 = off, they carry no
+    `CHEMCLAW_RETENTION_` prefix, and the sweep that reads them is a different workflow on a
+    different schedule. So a release that stated `retention.windows`, satisfied the posture gate and
+    believed its growth bounded still accumulated calculation by-products for the deployment's
+    lifetime — the gate's own escape hatch, one table over, which is the shape
+    `D-2026-08-26-a-knob-that-renders-nothing-is-not-a-knob` exists to close.
+
+    **Asked only on the `windows` arm, and that is what keeps the shipped defaults at two `--set`
+    flags rather than three.** `unboundedGrowthAccepted: true` already says the durable tables grow
+    forever, which is true of this table too; there is nothing further for such a release to state.
+    The first arm below is what pins that, because a gate that fired on both arms would look
+    correct here and cost every render site a flag.
+    """
+    accepted = _render()  # the `unboundedGrowthAccepted` arm, unchanged
+    assert accepted.returncode == 0, (
+        "accepting unbounded growth now also demands an artifact posture, which makes a third "
+        f"`--set` mandatory at every render site for nothing:\n{accepted.stderr}"
+    )
+
+    silent = _render(
+        "--set",
+        "retention.unboundedGrowthAccepted=false",
+        "--set",
+        "retention.windows.CHEMCLAW_RETENTION_SESSION_EVENTS_DAYS=30",
+    )
+    assert silent.returncode != 0, (
+        "a release states a retention posture and the artifact store still grows unbounded with "
+        f"nothing having asked:\n{silent.stdout[:2000]}"
+    )
+    assert "artifact_blobs" in silent.stderr, silent.stderr
+
+    bounded = _render_windows("CHEMCLAW_RETENTION_SESSION_EVENTS_DAYS")
+    assert bounded.returncode == 0, bounded.stderr  # `_render_windows` accepts the growth
+
+    evicting = _render(
+        "--set",
+        "retention.unboundedGrowthAccepted=false",
+        "--set",
+        "retention.windows.CHEMCLAW_RETENTION_SESSION_EVENTS_DAYS=30",
+        "--set",
+        "retention.artifactStore.CHEMCLAW_ARTIFACT_STORE_MAX_BYTES=53687091200",
+    )
+    assert evicting.returncode == 0, evicting.stderr
+    assert 'CHEMCLAW_ARTIFACT_STORE_MAX_BYTES: "53687091200"' in evicting.stdout, (
+        "the stated bound does not reach the ConfigMap, so the sweep is still off"
+    )
+
+    # And a key that names no bound refuses, for the reason `retention.windows` checks its own: an
+    # unknown prefixed variable is ignored by pydantic-settings, so it would state a posture and
+    # evict nothing. The cadence is the sharp case — it is a real setting, and it bounds nothing.
+    cadence_only = _render(
+        "--set",
+        "retention.unboundedGrowthAccepted=false",
+        "--set",
+        "retention.windows.CHEMCLAW_RETENTION_SESSION_EVENTS_DAYS=30",
+        "--set",
+        "retention.artifactStore.CHEMCLAW_ARTIFACT_EVICTION_SCHEDULE_MINUTES=60",
+    )
+    assert cadence_only.returncode != 0, cadence_only.stdout[:2000]
+    assert "CHEMCLAW_ARTIFACT_EVICTION_SCHEDULE_MINUTES" in cadence_only.stderr, cadence_only.stderr
+
+    # And the escape hatch must be a real boolean. `networkpolicy.yaml` calls `--set-string` on one
+    # of these "the single most likely way to get this wrong": a quoted boolean is truthy in Helm
+    # and `empty` agrees, so it would satisfy the gate while reading as off — this gate reached
+    # through the misspelling of its own escape hatch.
+    quoted = _render(
+        "--set",
+        "retention.unboundedGrowthAccepted=false",
+        "--set",
+        "retention.windows.CHEMCLAW_RETENTION_SESSION_EVENTS_DAYS=30",
+        "--set-string",
+        "retention.artifactGrowthAccepted=false",
+    )
+    assert quoted.returncode != 0, quoted.stdout[:2000]
+    assert "must be a boolean" in quoted.stderr, quoted.stderr
+
+
 # What a switch needs *besides itself* to render the branch it gates. The only literal here, and it
 # is a statement about prerequisites rather than a list of switches: `monitoring.alertmanager`
 # refuses to render with no receivers (deliberately — `templates/alertmanagerconfig.yaml`), and
@@ -3354,7 +4143,17 @@ _SWITCH_PREREQUISITES: dict[str, tuple[str, ...]] = {
         "--set",
         "monitoring.alertmanager.defaultReceiver=chemclaw-oncall",
     ),
-    "mcpFace.route.enabled": ("--set", "mcpFace.enabled=true"),
+    # Two, and the second is a posture rather than a prerequisite object: the chart refuses to
+    # publish the face until a deployment names who may reach it, because the `mcp-face-ingress`
+    # policy would otherwise drop every request the Route admits. Stated here as the router's own
+    # selector — the value the front door's list already ships — so this render is the posture a
+    # real publishing release takes.
+    "mcpFace.route.enabled": (
+        "--set",
+        "mcpFace.enabled=true",
+        "--set-json",
+        'mcpFace.ingressNamespaces=[{"network.openshift.io/policy-group":"ingress"}]',
+    ),
 }
 
 
@@ -3593,6 +4392,8 @@ def _render_manifest_only(*overrides: str) -> str:
             "networkPolicy.allowAnyDestination=true",
             "--set",
             "retention.unboundedGrowthAccepted=true",
+            "--set",
+            "temporal.namespace=chemclaw",
             "--no-hooks",
             *overrides,
         ],
@@ -3708,6 +4509,13 @@ def test_the_pre_install_hook_reads_a_configuration_that_exists_when_it_runs() -
     The `post-install`/`post-upgrade` Jobs read the tracked objects deliberately — by then the
     manifest is applied, and `convert` runs as the runtime role against the release that is now
     live, so the configuration it should see is the one the pods see.
+
+    `chemclaw-migrate` also runs on `pre-rollback`
+    (D-2026-09-09-a-grant-set-that-contracts-is-not-a-pre-upgrade-step): the grant file is a full
+    restatement, so it *narrows*, and `helm rollback` runs neither of the two hook points above —
+    without it a rolled-back release restores the older image against the newer ACL. The hook-scoped
+    configuration this test is about is the right source there for the same reason it is at
+    `pre-upgrade`: it is the target revision's own, rendered in the release being restored.
     """
     hooks = {
         doc["metadata"]["name"]: doc
@@ -3715,7 +4523,7 @@ def test_the_pre_install_hook_reads_a_configuration_that_exists_when_it_runs() -
         if doc and (doc["metadata"].get("annotations") or {}).get("helm.sh/hook")
     }
     for name, expected in (
-        ("chemclaw-migrate", "pre-install,pre-upgrade"),
+        ("chemclaw-migrate", "pre-install,pre-upgrade,pre-rollback"),
         ("chemclaw-convert", "post-install,post-upgrade"),
         ("chemclaw-schedules", "post-install,post-upgrade"),
     ):
@@ -4908,4 +5716,1039 @@ def test_the_shipped_connector_path_is_the_path_the_image_has() -> None:
     assert _values()["extraConnectors"]["shippedPath"] == expected, (
         f"extraConnectors.shippedPath is {_values()['extraConnectors']['shippedPath']!r}; the "
         f"image puts the shipped bundles at {expected!r}"
+    )
+
+
+def test_the_image_workflow_derives_component_modules_that_actually_import() -> None:
+    """`image.yml` derives the smoke list by grepping `entrypoint.sh`, and a grep reads prose.
+
+    Deriving the list from the script rather than restating it is right — a second list drifts from
+    the script in either direction, which is the defect that derivation exists to prevent. But the
+    derivation has to read the script the way the shell does, and it did not: a **comment** saying
+    that every ``exec python -m chemclaw<...>`` line resolved to the wrong interpreter was matched
+    by ``grep -oE 'python -m [a-z_][a-z0-9_.]*'``, so the workflow smoke-tested a component named
+    ``chemclaw<...>`` and died on ``SyntaxError: invalid syntax``. The fix strips whole-line
+    comments first; this holds it, offline, without building an image.
+
+    Asserting *importability* rather than "no ellipsis" on purpose. A rule naming the one shape that
+    broke would pass the next comment that happens to contain a plausible dotted path, and the
+    property the workflow actually needs is that every name it derives can be imported.
+    """
+    import importlib.util
+    import re
+
+    root = Path(__file__).resolve().parents[1]
+    workflow = (root / ".github" / "workflows" / "image.yml").read_text(encoding="utf-8")
+    assert "sed -E 's/^[[:space:]]*#.*$//' deploy/entrypoint.sh" in workflow, (
+        "image.yml no longer strips comments before deriving the component list, so a sentence in "
+        "entrypoint.sh can be smoke-tested as a module again"
+    )
+
+    # Reproduce the workflow's own derivation rather than restating its answer.
+    script = (DEPLOY / "entrypoint.sh").read_text(encoding="utf-8")
+    commands = re.sub(r"(?m)^[ \t]*#.*$", "", script)
+    modules = re.findall(r"python -m ([a-z_][a-z0-9_.]*)", commands)
+    targets = re.findall(r"uvicorn ([a-z_][a-z0-9_.]*:[a-zA-Z_]+)", commands)
+    modules += [target.split(":")[0] for target in targets]
+    assert len(modules) >= 2, "the derivation found nothing; it has drifted from the script"
+
+    for module in modules:
+        assert importlib.util.find_spec(module) is not None, (
+            f"image.yml would smoke-test {module!r}, which is not an importable module — the "
+            "derivation has picked up prose rather than a command"
+        )
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+def test_a_release_on_the_memory_session_store_refuses_to_render() -> None:
+    """The one lock that stops two pods racing a note write is gated on the postgres store.
+
+    `kg/git_writer.py::GitNoteWriter._cluster_lock` takes a Postgres advisory lock keyed on the
+    git remote and
+    skips it entirely when `session_store != "postgres"` — correctly, because a memory-store
+    deployment is single-process *as a CLI or a test*. A chart release is not: this chart renders a
+    front door and a background worker as separate pods, each with its own `emptyDir` clone, so the
+    host-local `flock` beneath that lock excludes nothing between them and two pods proposing one
+    note id are last-writer-wins with no error. Its own docstring named that combination as the
+    case it does not cover; a chart is the one place it is knowable, because the process cannot
+    count its own replicas.
+
+    Both arms, because a gate nobody has watched refuse is a claim that a gate exists — and the
+    positive arm is the load-bearing one here: the shipped `values.yaml` already says `postgres`,
+    which is what makes refusing safe rather than a break for every existing release
+    (`D-2026-09-13-the-lock-is-not-the-bound-the-commit-is`).
+    """
+    refused = _render("--set", "config.CHEMCLAW_SESSION_STORE=memory")
+    assert refused.returncode != 0, (
+        "a release still renders on the memory session store, so every note write in it is "
+        f"unguarded across pods:\n{refused.stdout[:2000]}"
+    )
+    assert "CHEMCLAW_SESSION_STORE" in refused.stderr, refused.stderr
+
+    shipped = _render()
+    assert shipped.returncode == 0, shipped.stderr
+    assert 'CHEMCLAW_SESSION_STORE: "postgres"' in shipped.stdout, (
+        "the shipped defaults no longer state the session store the guard above requires"
+    )
+
+
+# The ecosystems `.github/dependabot.yml` declares an updater for, mapped to the `make ci` target
+# that audits one for known vulnerabilities. An ecosystem absent from here is one nothing gates,
+# and the file has to say so in the accepted-risk form below.
+_AUDITED_ECOSYSTEMS = {"uv": "deps-audit"}
+_ACCEPTED_RISK = "ACCEPTED RISK"
+
+
+def test_every_declared_ecosystem_is_audited_or_accepted() -> None:
+    """A dependency gate that covers one of two declared ecosystems, claiming both.
+
+    `.github/dependabot.yml` opened with "the pipeline already *detects* a vulnerable closure —
+    `make deps-audit` runs `pip-audit` against `uv.lock`, blocking, in both workflows", twelve
+    lines above an updater for `github-actions`, which nothing in `make ci` reads. The sentence was
+    true of Python and silent about the ecosystem the file itself adds below it, so a reader
+    checking whether this repository's dependencies were gated got a yes for half a claim
+    (`D-2026-09-14-a-gate-for-one-ecosystem-is-not-a-gate-for-the-file`).
+
+    **Asserted as a choice rather than as coverage**, because the measurement says widening the
+    gate to `github-actions` would close nothing today: every action this repository uses carries
+    zero advisories at any version, and the seven findings GitHub reports are PyPI, at versions
+    this lockfile does not contain. So the requirement is that each declared ecosystem is either
+    audited by a target `make ci` actually runs, or named in the file as an accepted risk. Adding a
+    third ecosystem without doing one of the two fails here, and so does dropping `deps-audit` from
+    `make ci` while the claim about it stands.
+    """
+    dependabot = DEPLOY.parent / ".github" / "dependabot.yml"
+    document: Any = yaml.safe_load(dependabot.read_text(encoding="utf-8"))
+    declared = {update["package-ecosystem"] for update in document["updates"]}
+    assert declared, "no updaters are declared; this check is reading the wrong file"
+
+    ci_target = next(
+        line
+        for line in (DEPLOY.parent / "Makefile").read_text().splitlines()
+        if line.startswith("ci:")
+    )
+    gates = set(ci_target.split(":", 1)[1].split("##")[0].split())
+    assert len(gates) > 10, f"the `make ci` prerequisite list did not parse: {sorted(gates)}"
+    prose = dependabot.read_text(encoding="utf-8")
+
+    unheld: list[str] = []
+    for ecosystem in sorted(declared):
+        target = _AUDITED_ECOSYSTEMS.get(ecosystem)
+        if target is not None and target in gates:
+            continue
+        accepted = any(_ACCEPTED_RISK in line and ecosystem in line for line in prose.splitlines())
+        if not accepted:
+            unheld.append(ecosystem)
+
+    assert not unheld, (
+        f"`.github/dependabot.yml` declares updater(s) for {unheld} that no `make ci` target "
+        "audits and that the file does not record as an accepted risk. Either audit the ecosystem "
+        f"(and name its target in _AUDITED_ECOSYSTEMS) or write the `{_ACCEPTED_RISK}` line "
+        "naming it — an updater without either is a control a reader will assume exists."
+    )
+
+
+def test_the_background_worker_has_an_alert_the_shared_endpoint_cannot_give_it() -> None:
+    """The shared-endpoint alert cannot see a background worker that is missing entirely.
+
+    `Recreate` is what makes that state reachable.
+
+    `deployment-workers.yaml` is the only Deployment in this chart carrying a `strategy:` block,
+    and it is `Recreate` — deliberately, because two background workers racing on one corpus clone
+    is what `D-2026-08-27-what-a-second-background-worker-would-race-on` pins the replica count to
+    prevent. The cost is that the old pod is gone before the new one is tried, so a worker that
+    cannot start leaves the release with none.
+
+    `ChemclawNoWorkerIsScraped` does not cover that, and its own comment used to claim it did:
+    connector workers serve the same `metrics` port (`deployment-connectors.yaml` says so), as do
+    the front door and mcp-face, so its `absent()` is false whenever any of them is up. The
+    distinguishing label has to be in the expression, not in the reasoning about it.
+    """
+    rules = (CHART / "templates" / "prometheusrule.yaml").read_text()
+    assert "ChemclawNoBackgroundWorkerIsScraped" in rules
+
+    expr = _alert_expression(rules, "ChemclawNoBackgroundWorkerIsScraped")
+    assert "absent(" in expr, "only absent() alerts on no series existing at all"
+    assert 'app_kubernetes_io_component="background-worker"' in expr, (
+        "without the component label this is the shared-endpoint alert again, which any connector "
+        "or front-door pod keeps satisfied while no background worker exists"
+    )
+
+    # The other direction, which is what makes the first assertion mean something: the alert this
+    # one supplements must still NOT carry that label, or the two are the same rule twice.
+    shared = _alert_expression(rules, "ChemclawNoWorkerIsScraped")
+    assert "app_kubernetes_io_component" not in shared, (
+        "ChemclawNoWorkerIsScraped now scopes to a component, so the new alert is redundant and "
+        "one of the two should go"
+    )
+
+
+def test_the_component_label_the_worker_alert_reads_is_one_the_podmonitor_stamps() -> None:
+    """An alert label the scrape config does not produce is a rule that is wrong.
+
+    And for an `absent()` it is wrong in the *loud* direction.
+
+    `podTargetLabels` is what turns a pod label into a sample label, so an alert selecting on
+    `app_kubernetes_io_component` is only meaningful while the PodMonitor copies it. Held in both
+    directions so neither side can be edited alone.
+
+    **Which way it fails is worth stating, because this docstring said the opposite.** For a
+    positive expression — the fleet group's `kube_pod_status_ready` — a label no sample carries
+    means the vector is empty and the rule is green forever, which is the failure that reads as
+    "the condition never occurred". `ChemclawNoBackgroundWorkerIsScraped` is an `absent()`, and
+    `absent()` of a vector that matches nothing is **1**: drop the label and a `severity: critical`
+    alert pages permanently, for every release, until somebody deletes the rule. The condition this
+    test catches is the same; the symptom it sends a reader looking for is not.
+    """
+    monitor = (CHART / "templates" / "podmonitor.yaml").read_text()
+    assert "app.kubernetes.io/component" in monitor.split("podTargetLabels:")[1][:200], (
+        "the PodMonitor stopped copying the component label, so the background-worker alert's "
+        "`absent()` now matches no series and is 1 on every evaluation — a critical page that "
+        "never clears, rather than a rule that never fires"
+    )
+    workers = (CHART / "templates" / "deployment-workers.yaml").read_text()
+    assert "app.kubernetes.io/component: background-worker" in workers, (
+        "the worker Deployment's component label changed; the alert's selector no longer matches it"
+    )
+
+
+def test_no_alert_reads_a_series_this_prometheus_cannot_see() -> None:
+    """kube-state-metrics is platform monitoring; these rules are evaluated by user-workload.
+
+    The fleet group's comment already argues this for `kube_pod_status_ready`, and a backlog row
+    nevertheless proposed `kube_deployment_status_replicas_unavailable` for a stuck rollout — the
+    obvious expression, and one that would have been permanently empty here. Green forever reads
+    exactly like "the condition never occurred", which is the failure mode this whole file is
+    arranged against.
+
+    So the constraint is asserted rather than left in a comment for the next person to miss. If a
+    deployment ever federates those series, this test is the one place that has to change, and it
+    says why.
+
+    **Every alert, including one with no `for:`.** The haystack was `if "for:" in block`, which
+    dropped an alert without a hold-down entirely — `ChemclawBudgetNearingItsCap` has none, so a
+    `kube_*` series added there would have passed. The cut is now at whichever of `for:`, `labels:`
+    or `annotations:` comes first, because what has to be excluded is the *annotation prose* (a
+    description may legitimately name `kube_pod_status_ready` while arguing why it is not used),
+    and every alert has at least one of the three.
+    """
+    rules = (CHART / "templates" / "prometheusrule.yaml").read_text()
+    alerts = rules.split("- alert: ")[1:]
+    expressions = "\n".join(
+        min(
+            (block.split(marker)[0] for marker in ("for:", "labels:", "annotations:")),
+            key=len,
+        )
+        for block in alerts
+    )
+    assert len(alerts) == rules.count("- alert: "), "the split lost an alert"
+    for series in ("kube_deployment_", "kube_pod_", "kube_statefulset_", "kube_daemonset_"):
+        assert series not in expressions, (
+            f"an alert expression reads `{series}*`, which kube-state-metrics publishes to the "
+            "*platform* Prometheus in `openshift-monitoring`. A user-workload PrometheusRule "
+            "cannot see those series, so this rule is green forever."
+        )
+
+
+#: What the front door holds before it parses anything, in MiB.
+#:
+#: Measured on the real serving object — `uvicorn chemclaw.api.app:create_app --factory` against the
+#: dev Postgres, lifespan run, `/healthz` served — at 445,204 kB resident and 442,270 kB of `Pss`,
+#: which is 431.9 MiB.
+#:
+#: **`Pss` is not "unique pages", and the sentence here that said so was wrong**
+#: (`D-2026-09-19-a-ceiling-on-the-archive-is-not-a-ceiling-on-the-parse`). A memory cgroup charges
+#: a page in full to whichever cgroup first touched it, once; `Pss` divides a shared page by the
+#: number of processes mapping it *system-wide*, which is a different quantity and one that moves
+#: with what else is running on the node. So `Pss` understates this pod's charge whenever a page it
+#: brought in is also mapped outside it. **Driven here rather than argued**: one unchanged process
+#: with the parsers imported reads 53,118 kB of `Pss` alone, 47,653 kB while six unrelated siblings
+#: map the same shared objects, and 53,130 kB again when they exit — 10.3% of the reading belonged
+#: to what else was running, where `Rss` moved 12 kB (0.016%) across the same three samples. It is
+#: kept as the number this constant was derived
+#: from because re-deriving the front door's resident set is not what that ADR set out to do, and
+#: because every use of it here is a *floor* argument ("the pod already holds at least this"); the
+#: quantity a later derivation should use is the cgroup's own `memory.max_usage_in_bytes`, which is
+#: what the parse measurements below now use.
+#:
+#: A floor rather than a ceiling, and deliberately so: that process had compiled no agent graph,
+#: opened no connector session and served no turn. What it does not include is the subject of a
+#: `docs/planning/BACKLOG.md` row of its own.
+FRONT_DOOR_RESIDENT_MIB = 432
+
+#: The same for the background worker (`python -m chemclaw.durable.background_worker`), which starts
+#: a forkserver too — `ingest/documents/sync.py` parses every crawled document in one. Measured at
+#: 284,880 kB of `Pss` with every activity module imported, which is 278.2 MiB.
+WORKER_RESIDENT_MIB = 279
+
+#: What warming the parse forkserver costs the pod, in MiB.
+#:
+#: The forkserver's own `Pss`. Measured, the pod-level delta is 76.1 MiB under pytest, 79.1 MiB
+#: under the worker and 83.5 MiB under the front door, against a forkserver `Pss` of
+#: 90.0–91.0 MiB across five parents and two virtualenvs — so this number is above every delta
+#: measured for it, which is the property the budget uses. The reason given for that ordering used
+#: to be an argument about `Pss` being unique pages; see `FRONT_DOOR_RESIDENT_MIB` for why that
+#: argument does not hold and why the ordering is carried as a measurement instead.
+#:
+#: **It is not the 109 MiB `docs/planning/BACKLOG.md` carried**, which was `VmRSS`. The process
+#: really is a second full resident copy of pypdf, python-docx, openpyxl and python-pptx —
+#: `forkserver` starts its server by fork *and exec*, so nothing is copy-on-write — but 18.6 MiB of
+#: what `VmRSS` attributes to it is a shared object the front door already has mapped, and the pod's
+#: measured delta is 23–30% below it.
+#:
+#: `test_a_warm_parse_forkserver_still_costs_what_this_budget_was_derived_against` is the live guard
+#: on it, and it measures `VmRSS` rather than this number — see that test for why.
+#:
+#: **Re-measured 2026-09-19 and unchanged, on the run that moved the ceiling below.** Five readings
+#: of the same forkserver: `Pss` 82.5–84.9 (peer-dependent, as ever, which is why it is not the
+#: ratchet), and the pages that belong to it alone — `Private_Dirty` + `Private_Clean`, which is
+#: what a cgroup is charged once for and therefore the closest thing to the pod-level delta —
+#: **76.0–76.1 MiB**, flat to 0.1. Both are
+#: *under* this constant, so it remains the over-estimate it was derived as, and neither
+#: `resources.service` nor `resources.worker` needs re-deriving: the assertion below has 117 MiB of
+#: headroom at the front door (432 + 91 against a 640Mi request) and 654 at the worker, so even
+#: charging the pod the forkserver's whole `VmRSS` would fit. What moved is the `VmRSS` ratchet, and
+#: it moved for a reason that is not this quantity.
+FORKSERVER_POD_COST_MIB = 91
+
+#: What a warm forkserver's `VmRSS` may be, in MiB — the live guard on the constant above.
+#:
+#: `VmRSS` and not `Pss` because this is the quantity that belongs to the process alone, and that
+#: half is now driven rather than asserted: **109 readings across twelve arms** — a bare parent, a
+#: 417 MiB one, pytest's own 459 MiB one, `--cov`, eight CPU hogs, the compose stack plus four peers
+#: holding 2.4 GB and mapping these same libraries, a dropped page cache, a deleted `__pycache__`,
+#: 1/25/100 parses through the singleton, one CPU — read **108.56–109.05 MiB**, a 0.5% spread. The
+#: same forkserver's `Pss` read 93.4 MiB quiet and **81.1 MiB** with those four peers up: 12.3 MiB
+#: apart with nothing whatever touching the closure, which is the reason the test below gives for
+#: rejecting `Pss`, measured instead of argued.
+#:
+#: **What the closure is not is the only thing that moves `VmRSS`, and this comment used to say it
+#: was.** `forkserver` starts its server by fork *and exec*, so the server inherits the process's
+#: *environment* — and `site` then runs this virtualenv's `a1_coverage.pth` inside it, which imports
+#: `coverage` whenever `COVERAGE_PROCESS_START` is set. Driven: **113.81–113.90 MiB** against 108.9,
+#: `_PRELOAD` untouched, which is not a dent in the 3 MiB margin below but straight through this
+#: ceiling — the shape this test had until today reds outright on a gate run with subprocess
+#: coverage on, and names the preload list as the thing that grew. That is why the measurement now
+#: happens in a child started with those injectors dropped, rather than against the forkserver this
+#: pytest process happens to be holding.
+#:
+#: The closure is what it is *meant* to move with, and does: driven by editing `_PRELOAD` itself,
+#: adding `chemclaw.agent.langgraph_agent` measures 407.1 MiB, `chemclaw.core.chem` 148.4 and
+#: `jinja2` 110.5 — the last of those passing, correctly, because 1.6 MiB is inside the margin
+#: below.
+#:
+#: **One reading in roughly 150 is not explained by any of this**, and it is recorded rather than
+#: smoothed over: a single sample of that `jinja2` arm read 114.7, 4.1 MiB high in `RssAnon` alone
+#: with everything else flat, and 13 repeats of the identical arm then read 110.45–110.56. Nothing
+#: reproduced it — not 60 consecutive repeats of the shipped closure, not any arm above. It is
+#: larger than the margin below, so a second one reds this gate for a reason nothing here has named,
+#: and the thing to do with it is to read `RssAnon` rather than raise the ceiling.
+#:
+#: The 3.7 MiB of margin is what keeps a pypdf patch release out of the gate. It is not a bound on
+#: `FORKSERVER_POD_COST_MIB` — `Pss` is only ever below `VmRSS`, never pinned to it — it is a bound
+#: on the closure both of them are measured from.
+#:
+#: **112 → 120 on 2026-09-19, and the closure did not grow — the reading is environment-dependent,
+#: which every paragraph above denies.** Measured here: 116.19, 116.24, 116.2, 116.2, 116.2, 116.2,
+#: 116.3 MiB, a 0.11 spread, against the 108.56–109.05 recorded above. The decisive experiment is
+#: the one the paragraphs above could not do, because they were written before there was a second
+#: environment to do it in: `git archive 06dfd1bd src` — **the very commit that derived 108.9** —
+#: unpacked beside this checkout and imported over `PYTHONPATH` measures **115.6–115.8 MiB**
+#: in-process over three runs, and this tree measures 115.6–115.8 over three. The two revisions are
+#: the same closure to 0.1 MiB, so whatever moved the reading is not in either. No import
+#: entered the closure in between (`git diff 06dfd1bd..HEAD` over `core/`, `ingest/documents/`,
+#: `uv.lock` and `pyproject.toml` adds `resource`, `pathlib` and two first-party lines and nothing
+#: else), `uv.lock` has not changed since #388, and the closure is the same 1,448 modules with the
+#: same top-level set at both revisions.
+#:
+#: **The arms reproduce and only the base does not, which is what makes it an offset rather than a
+#: growth.** Measured at load average 1.1, five readings each: the shipped closure is 116.2 MiB flat
+#: (`RssAnon` 76.0 + `RssFile` 40.2, 0.0 spread), and adding `jinja2` reads 117.7–117.9 — **+1.6
+#: MiB, the same increment recorded above**, where a closure that had genuinely grown would move
+#: every arm. `chemclaw.core.chem` costs +43.8 here against +39.5 there and
+#: `agent.langgraph_agent` +321.6 against +298.2. So what differs between the two environments is a
+#: ~7.3 MiB constant in the base — anonymous, since `RssFile` is flat across every arm — and not
+#: anything `_PRELOAD` drags in.
+#:
+#: Two host properties were checked and are not it: THP is `madvise` with `AnonHugePages: 0`, and
+#: there is one interpreter (`/usr/local/bin/python3` is a symlink to `/usr/bin/python3.11`). What
+#: it most likely is — a differently-built wheel's data segment among the large dependencies — is
+#: not claimed, because nothing here can measure the other environment.
+#:
+#: **Load was ruled out, after one reading suggested it.** A single `jinja2` arm read 121.9 MiB at
+#: load average ~10; four repeats at load 1.1 read 117.7–117.9, while the shipped arm read 116.2 at
+#: both. One reading is not a measurement, which is the rule this nearly broke.
+#:
+#: What that costs is stated rather than hidden: on a host reading 108.9 this ceiling now tolerates
+#: ~11 MiB of real closure growth instead of ~3. The documented sensitivity is unchanged in both
+#: environments, and every arm was re-driven here against 120: `jinja2` **passes** at 117.8 as it
+#: passed at 110.5 there (the margin's whole purpose — a patch release must not red the gate),
+#: while `pandas` reds at 147.6, `chemclaw.core.chem` at 160.0 and `agent.langgraph_agent` at
+#: 437.8. The assertion now prints the decomposition and the command that tells a closure growth
+#: from another environment, so the next reader does not spend a second afternoon attributing this
+#: to `_PRELOAD`.
+FORKSERVER_RSS_CEILING_MIB = 120
+
+#: What one parse in flight costs the pod, per MiB of the budget the *parse* declares.
+#:
+#: **The quantity this is a coefficient of used to be the document's expanded size, and the parse
+#: is not a function of that** — see
+#: `D-2026-09-19-a-ceiling-on-the-archive-is-not-a-ceiling-on-the-parse`.
+#: Re-measured over a real memory cgroup — `memory.max_usage_in_bytes`, reset immediately
+#: before each parse, over a process tree holding the parent, the forkserver and every parse child,
+#: which is what a container is — one legal document at 99% of `document_max_expanded_bytes`
+#: charged the pod:
+#:
+#: | shape | ASCII | one `°` (Latin-1) | one `—` (BMP) | one U+1F9EA (astral) |
+#: | --- | --- | --- | --- | --- |
+#: | 63.4 MiB-expanded workbook, 52.2 M chars | 236 MiB | 287 | 337 | 500 |
+#: | 61.0 MiB-expanded `.docx`, 57.8 M chars | 369 MiB | 424 | 480 | 589 |
+#:
+#: — 1.8 to 9.7 MiB per expanded MiB against a constant of 3.1, because CPython stores a `str` at
+#: the width of its widest code point and `_parse_xlsx` builds one document-wide join. Two further
+#: measurements say the expanded size is not merely a noisy predictor but the wrong one: a workbook
+#: whose 5.9 MiB of expanded XML references one shared string 200,000 times yields 96.3 M
+#: characters and charged 321 MiB, and a markup-heavy `.docx` at 79% of the ceiling, holding
+#: 470,000 characters, charged 840 MiB of lxml DOM.
+#:
+#: So the bound moved to the one quantity a coefficient can honestly be taken against: what the
+#: parse is *allowed to allocate*, which `ingest/documents/isolate.py` sets as an `RLIMIT_DATA` on
+#: the child before it reads a byte. Measured against `document_parse_memory_bytes` over fourteen
+#: documents spanning both formats, all four width classes, the shared-string shape and the
+#: markup-heavy shape, at three different budgets, the pod's peak charge per parse ran 0.45–1.33×
+#: the declared budget at concurrency 1 and 0.65–1.32× at concurrency 2. The larger, rounded up. At
+#: the shipped budget and the shipped cap the worst case measured is two 50 MiB plain-text
+#: documents together: 406.7 MiB of pod, against the 448 MiB this constant allows them.
+#:
+#: Above 1.0 because the parent unpickles a second copy of the text the child sent; below 2.0
+#: because the child's own transient intermediates are inside its ceiling rather than beside it.
+#:
+#: **It is a measurement at a basis, and the basis has two terms rather than one**
+#: (`D-2026-09-19-a-coefficient-measured-at-one-cap-is-a-claim-about-that-cap`). The budget bounds
+#: what a parse allocates *beyond* the document it was handed — `_bound_allocations` reads its
+#: baseline after `raw` is unpickled, driven at `VmData` 230.4 MiB before a 50 MiB document and
+#: 280.5 MiB after — so the pod's real charge is a function of the cap too, and the sentence above
+#: that names "the shipped cap" was the only place that said so. `binding.max_file_bytes` now
+#: carries an `le` tied to `PARSE_COEFFICIENT_BASIS_BYTES`, and the test below asserts the two
+#: agree, so a site cannot raise the cap past what this number was measured against without the
+#: gate saying the coefficient needs re-measuring.
+PARSE_MIB_PER_PARSE_BUDGET_MIB = 1.4
+
+#: What the front door keeps after its first turns, in MiB, over the no-turn floor
+#: `FRONT_DOOR_RESIDENT_MIB` was measured at — the compiled graph's modules, the lazy imports and
+#: the caches a turn fills once.
+#:
+#: Measured as the memory cgroup's anonymous charge (`memory.stat total_rss`, sampled at 10 ms,
+#: because cgroup v1's `max_usage_in_bytes` folds in page cache) on the real uvicorn front door
+#: against the mock LLM (`D-2026-09-24-a-turn-costs-the-thread-it-loads`): +65 to +67 MiB over the
+#: first 50-100 turns at one at a time, in five runs, and flat to within 1 MiB for the next 250.
+#: Rounded up.
+TURN_WARM_MIB = 70
+
+#: What each admitted turn permit adds to the front door, in MiB, on a short thread.
+#:
+#: Stepping concurrency 1 -> 4 -> 8 -> 12 on a warm process added 5.1-6.1 MiB per permit, retained
+#: afterwards as allocator high-water, and 16 or 24 offered turns added nothing more — the
+#: admission cap is what bounds it, which is why it is multiplied by that cap below. Six parallel
+#: tool calls and a forty-call flood per turn added nothing over it once warm. Rounded up.
+TURN_MIB_PER_PERMIT = 6
+
+#: What a turn costs the front door per byte of the thread it continues, in bytes of pod per byte
+#: of the stored `messages` blob (`agent/checkpointer.stored_thread_bytes`).
+#:
+#: **Every turn loads its whole thread** — compaction trims what is sent, not what is held — so
+#: this is a per-permit term in the size of the conversation, and before
+#: `session_max_thread_bytes` nothing bounded that size: twelve threads of 95,000-character
+#: messages drove the front door alone past 1Gi and it was OOM-killed at turn 76. The coefficient
+#: is width-dependent the way the parse one is — CPython holds a `str` at its widest code point
+#: while the blob stays UTF-8 — so it was measured at the widest, one U+1F9EA per 95,000-character
+#: message, and it is noisy: the ratio read 13.4-17.6 across one run's rounds and 11.7 at the end
+#: of another, which reached the same 847 MiB a thread later — allocator high-water moves by
+#: ~50 MiB between runs. One em dash per message read 7.2; a thread of short messages about 1.
+#: This is the largest ratio measured at or under the ceiling, rounded up.
+POD_BYTES_PER_THREAD_BYTE = 18
+
+
+def test_the_parse_coefficient_still_describes_the_largest_document_a_binding_may_declare() -> None:
+    """The coefficient's second term, which nothing used to declare.
+
+    `PARSE_MIB_PER_PARSE_BUDGET_MIB` multiplies `document_parse_memory_bytes`, and that budget is
+    what a parse may allocate **beyond** its document. So the pod's real per-parse charge depends
+    on the largest document a binding will hand it, and that field is set per `datasource.yaml`.
+    It had `ge=1024` and no upper bound: a site binding at 200 MiB moved the real charge to
+    ~360 MiB and moved `test_a_pod_that_starts_a_parse_forkserver_fits_the_memory_it_declares` not
+    at all.
+
+    Asserted as the *agreement* between the two constants rather than as either figure, because
+    what must not drift is that the coefficient was measured at the cap the bindings can reach —
+    406.7 MiB of pod for two concurrent 50 MiB plain-text documents. Raising the cap is legitimate
+    and costs a re-measurement; this is what makes that cost visible instead of silent.
+    """
+    from chemclaw.ingest.documents.binding import (
+        PARSE_COEFFICIENT_BASIS_BYTES,
+        DocumentShareBinding,
+    )
+
+    field = DocumentShareBinding.model_fields["max_file_bytes"]
+    ceiling = next(
+        (getattr(item, "le", None) for item in field.metadata if getattr(item, "le", None)),
+        None,
+    )
+    assert ceiling == PARSE_COEFFICIENT_BASIS_BYTES, (
+        f"`max_file_bytes` is bounded at {ceiling} and the parse coefficient was measured against "
+        f"{PARSE_COEFFICIENT_BASIS_BYTES}; a binding may hand the pod a document larger than "
+        "anything `PARSE_MIB_PER_PARSE_BUDGET_MIB` has ever seen, and no inequality here moves"
+    )
+    assert field.default <= PARSE_COEFFICIENT_BASIS_BYTES, (
+        "the shipped default is already above the basis the coefficient was measured at"
+    )
+
+
+def _declared_mib(resources: dict[str, Any], kind: str) -> int:
+    """The `requests`/`limits` memory a `resources` block declares, in MiB."""
+    declared = str(resources[kind]["memory"])
+    units = {"Mi": 1, "Gi": 1024}
+    suffix = declared[-2:]
+    assert suffix in units, f"unhandled memory unit in {declared!r}"
+    return int(declared[:-2]) * units[suffix]
+
+
+#: The env name both halves of the parse budget are spelled with.
+_PARSE_BUDGET_KEY = "CHEMCLAW_DOCUMENT_PARSE_MEMORY_BYTES"
+
+
+def _parse_budget_mib(override: Any) -> float:
+    """What one parse may allocate on a pod, in MiB, resolved the way the kubelet resolves it.
+
+    **Per component, because one number was serving two pods with twice the room between them.**
+    `document_parse_memory_bytes` is derived downwards from the *front door* — a 1Gi limit and two
+    parse slots — and the background worker reads it with four times the limit and four times the
+    slots, so the same inequality allows 332.7 MiB there against 178.9 here.
+
+    Three sources, in the order a container actually sees them: an explicit `env` entry on the
+    Deployment, then the shared ConfigMap the release reaches through `envFrom`, then the code
+    default. **The middle one was missing and that repeated the defect this helper was written for,
+    one layer up**: the front-door arm resolved the budget from `settings` and never looked at
+    `.Values.config`, so a fleet-wide raise — the natural way to raise it — would move every pod's
+    real budget and move no inequality here. Driven: `config` at 512 MiB gives the front door
+    523 + 2 x 1.4 x 512 = 1957 MiB against a 1Gi limit, and this file stayed green.
+    """
+    from chemclaw.core.config import settings
+
+    if override in (None, ""):
+        return float(settings.document_parse_memory_bytes) / 1024**2
+    return float(override) / 1024**2
+
+
+def _parse_peak_mib(concurrent: int, budget_mib: float) -> float:
+    """What `concurrent` parses at `budget_mib` each peak at, in MiB."""
+    return concurrent * PARSE_MIB_PER_PARSE_BUDGET_MIB * budget_mib
+
+
+def _front_door_turn_mib(config: dict[str, Any]) -> tuple[float, float]:
+    """What the front door's turns hold, in MiB: warm at the admission cap, and at its peak.
+
+    The first is what a front door that has served a busy minute keeps with nothing in flight —
+    the warm-up plus every permit's high-water — and belongs under the *request*. The second adds
+    each permit loading a thread at `session_max_thread_bytes`, and belongs under the *limit*.
+
+    Both inputs resolved the way a container sees them, the lesson `_parse_budget_mib` records:
+    the release's shared `config` first, the code default second. A deployment raising the permit
+    count or the thread ceiling for the whole release has to move an inequality here.
+    """
+    from chemclaw.core.config import settings
+
+    def resolved(key: str, default: int) -> int:
+        """The release's value where it states one — a YAML `0` included — else the code's."""
+        stated = config.get(key)
+        return default if stated in (None, "") else int(stated)
+
+    permits = resolved(
+        "CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS", settings.service_max_concurrent_turns
+    )
+    thread_bytes = resolved("CHEMCLAW_SESSION_MAX_THREAD_BYTES", settings.session_max_thread_bytes)
+    assert thread_bytes, (
+        "session_max_thread_bytes is 0, so a turn may load a thread of any size and the front "
+        "door's peak has no bound this file can state"
+    )
+    warm = TURN_WARM_MIB + permits * TURN_MIB_PER_PERMIT
+    return warm, warm + permits * POD_BYTES_PER_THREAD_BYTE * thread_bytes / 1024**2
+
+
+def test_a_pod_that_starts_a_parse_forkserver_fits_the_memory_it_declares() -> None:
+    """Both components that parse documents are sized against the second process they start.
+
+    Written as an inequality over measured constants and the settings that bound the work, rather
+    than as a number somebody typed, because the failure it replaces is precisely a number typed
+    before `ingest/documents/isolate.py` existed: `resources.service` was sized when a parse ran on
+    a worker thread inside the front door, and a `forkserver` started by fork *and exec* shares no
+    page with it.
+
+    Measured, the request did not satisfy this: 432 MiB resident plus 91 MiB of warm forkserver is
+    523 MiB against a 512Mi request, exceeded while the pod is idle — which is a node oversubscribed
+    by the difference and a pod first in line for eviction, with nothing anywhere saying so.
+
+    **The limit half of this was green on a case that OOM-killed the pod, and what was wrong was
+    the quantity rather than the number**, and
+    `D-2026-09-19-a-ceiling-on-the-archive-is-not-a-ceiling-on-the-parse` has the measurements. It
+    read `document_max_expanded_bytes` and multiplied it by a coefficient
+    measured on three ASCII samples; a parse is not a function of a document's expanded size, for
+    the three independent reasons `PARSE_MIB_PER_PARSE_BUDGET_MIB` sets out. Driven in a 1Gi memory
+    cgroup carrying the 523 MiB idle pair: two legal uploads — 1,089,493 bytes on the wire against
+    `attachment_max_bytes` of 2,000,000, 63.4 MiB expanded against a 64 MiB ceiling — with one
+    astral character each took the *parent* with `SIGKILL`, exit 137, while this assertion
+    read 920 against 1024 and passed.
+
+    So what is multiplied here is `document_parse_memory_bytes`, the ceiling the kernel enforces on
+    the process that does the allocating. That is a coefficient of the quantity it is declared
+    against: raising the budget, `attachment_max_concurrent_parses` or
+    `worker_max_concurrent_activities`, or lowering either declaration, fails here instead of in an
+    OOMKill that takes every other connected turn with it.
+    """
+    from chemclaw.core.config import settings
+
+    values = _values()
+    resources = values["resources"]
+    front_door = FRONT_DOOR_RESIDENT_MIB + FORKSERVER_POD_COST_MIB
+    worker = WORKER_RESIDENT_MIB + FORKSERVER_POD_COST_MIB
+    # The worker declares its own parse allowance, because the fleet-wide one is derived from the
+    # *front door* and this pod has four times the limit and four times the parse slots. Read out of
+    # the values file rather than restated, so the inequality below is asserted against the number
+    # the Deployment actually renders (`deployment-workers.yaml`).
+    worker_override = values["workers"]["background"].get("documentParseMemoryBytes")
+    # The fleet-wide entry every component reads through `envFrom`, which is what a deployment
+    # raising this for the whole release would set. Absent from the shipped `config`, so today this
+    # resolves to the code default — but reading it is what stops that raise from moving a real
+    # budget while moving no inequality here.
+    fleet_wide = (values.get("config") or {}).get(_PARSE_BUDGET_KEY)
+
+    # **The turns are the third term, and the one that scales with load**
+    # (`D-2026-09-24-a-turn-costs-the-thread-it-loads`). The two above were measured with no turn
+    # in flight; a front door that has served turns keeps their warm-up and high-water, and one
+    # at its admission cap holds a thread per permit on top. The worker takes no front-door turns.
+    turns_warm, turns_peak = _front_door_turn_mib(values.get("config") or {})
+
+    for label, key, idle, concurrent, budget_mib, turns_idle, turns in (
+        (
+            "front door",
+            "service",
+            front_door + turns_warm,
+            settings.attachment_max_concurrent_parses,
+            _parse_budget_mib(fleet_wide),
+            turns_warm,
+            turns_peak,
+        ),
+        # **The worker's count is its activity cap, and it used to be 1** — justified by
+        # `ingest/documents/sync.py` awaiting each `_read_and_parse` in turn, which bounds one
+        # *activity* while this pod runs `worker_max_concurrent_activities` of them. That the
+        # document-sync schedule is `ScheduleOverlapPolicy.SKIP` over a workflow whose activities
+        # are sequential does make 1 the number today, but it is a three-hop argument across two
+        # modules that a second share schedule or one manual run breaks, and the pod fits its cap
+        # outright — so the cap is what is asserted and the argument is not needed.
+        (
+            "background worker",
+            "worker",
+            worker,
+            settings.worker_max_concurrent_activities,
+            _parse_budget_mib(worker_override if worker_override is not None else fleet_wide),
+            0.0,
+            0.0,
+        ),
+    ):
+        request = _declared_mib(resources[key], "requests")
+        limit = _declared_mib(resources[key], "limits")
+        assert idle <= request, (
+            f"the {label} holds {idle:.0f} MiB with its parse forkserver warm and nothing in "
+            f"flight ({turns_idle:.0f} of it kept from turns already served), "
+            f"against a memory request of {request} MiB. A pod over its request while idle is "
+            "scheduled onto a node that does not have the memory it uses, and is the first thing "
+            "evicted when that node comes under pressure"
+        )
+        needed = idle - turns_idle + turns + _parse_peak_mib(concurrent, budget_mib)
+        assert needed <= limit, (
+            f"{concurrent} concurrent parse(s) at the {budget_mib:.0f} MiB allocation ceiling this "
+            f"component declares need {needed:.0f} MiB in the {label} — the resident set, the "
+            f"warm forkserver and {turns:.0f} MiB of turns at the admission cap included — against "
+            f"the {limit} MiB its container declares. That is an OOMKill of the whole pod, not a "
+            "refused upload"
+        )
+
+
+#: The program the measurement runs, in a child of this process rather than in it.
+#:
+#: `_PRELOAD` is never named here: the child imports the shipped module and parses through it, so
+#: this stays a ratchet on the real list rather than on a transcription of it. A child that reaches
+#: the end without a forkserver prints nothing, which is the failure the caller names.
+_FORKSERVER_RSS_PROGRAM = """
+from multiprocessing import forkserver
+
+from chemclaw.ingest.documents.isolate import parse_document_isolated
+
+parse_document_isolated("budget.csv", b"id,yield\\nR-1,88\\n", None, 60.0)
+# Read through `getattr` because the pid is not on typeshed's `ForkServer`: upstream keeps no
+# public handle on the process it starts, and the alternative -- matching a `/proc` child by its
+# command line -- would be a second private shape with more code around it.
+pid = getattr(forkserver._forkserver, "_forkserver_pid", None)
+if pid is not None:
+    with open("/proc/%d/status" % pid, encoding="utf-8") as status:
+        for line in status:
+            # `RssAnon`/`RssFile` are the decomposition, printed before the total because the
+            # caller reads the *last* field as the reading. They are what tells a closure that grew
+            # from an environment whose allocator holds more anonymous pages for the same objects;
+            # see `FORKSERVER_RSS_CEILING_MIB` for the run where that distinction was the answer.
+            if line.startswith(("RssAnon:", "RssFile:")):
+                print(line.split()[0], line.split()[1])
+    with open("/proc/%d/status" % pid, encoding="utf-8") as status:
+        for line in status:
+            if line.startswith("VmRSS:"):
+                print(line.split()[1])
+                break
+"""
+
+#: Environment variables that put a module into *every* interpreter this virtualenv starts, through
+#: a `.pth` in `site-packages`, and so into the process being measured rather than into the closure
+#: being measured. Dropped for the measurement: driven, `COVERAGE_PROCESS_START` alone moves the
+#: reading +5.0 MiB with `isolate._PRELOAD` untouched.
+_PTH_INJECTORS = ("COVERAGE_PROCESS_START", "COVERAGE_PROCESS_CONFIG")
+
+
+@pytest.mark.skipif(not Path("/proc/self/status").exists(), reason="needs a Linux /proc")
+def test_a_warm_parse_forkserver_still_costs_what_this_budget_was_derived_against() -> None:
+    """The constant the chart rests on is re-measured here, against the shipped preload list.
+
+    `FORKSERVER_POD_COST_MIB` is the one input to the budget above that is a property of this tree
+    rather than of a declaration: it is whatever `isolate._PRELOAD` drags in, and adding a module to
+    that list — or an import to `ingest/documents/parse.py` — moves it with nothing else changing. A
+    constant transcribed from a measurement five days old is exactly what `docs/planning/BACKLOG.md`
+    carried, and it was 30% out.
+
+    So the closure is measured off a running forkserver rather than restated — **in a child of this
+    process, and no longer the forkserver this one is holding.** That is the correction this test
+    carries, and it is not the one the reading's first flake suggested.
+
+    **What is measured is `VmRSS`, and the first draft of this test measured `Pss` and flaked.**
+    `Pss` is the right unit for the *budget*, because a cgroup is charged once for a unique page; it
+    is the wrong unit for a *ratchet*, because a page's share depends on how many other processes
+    happen to map it. Observed: the first run of that draft inside a freshly created virtualenv read
+    above its 95 MiB ceiling and failed, and five later runs of the identical assertion read
+    90.0–91.0 MiB and passed. That reason is now driven rather than reasoned: four peers mapping
+    these same libraries pulled the forkserver's `Pss` from 93.4 MiB to 81.1 while its `VmRSS`
+    stayed inside 0.1 MiB. `VmRSS` does belong to the process alone, across every arm it was put
+    under — a 417 MiB parent, pytest's own, eight CPU hogs, 2.4 GB of peers, a dropped page cache,
+    a deleted `__pycache__`, a hundred parses through one singleton.
+
+    **What it does not belong to alone is `isolate._PRELOAD`, which is why the measurement moved
+    into a child.** `forkserver` starts its server by fork *and exec*, so the server inherits this
+    process's environment, and `site` runs this virtualenv's `a1_coverage.pth` inside it: with
+    `COVERAGE_PROCESS_START` set, the same untouched preload list measures 113.81–113.90 MiB against
+    108.9 — through the ceiling, not into the margin, so reading the singleton makes *how the gate
+    was invoked* red this assertion and blame `_PRELOAD` for it. A child started with those
+    injectors dropped measures the list and nothing else, and it costs ~2.0 s, of which 0.86 s is
+    the forkserver start this test was paying anyway whenever it ran first in a session.
+    """
+    environment = {k: v for k, v in os.environ.items() if k not in _PTH_INJECTORS}
+    child = subprocess.run(
+        [sys.executable, "-c", _FORKSERVER_RSS_PROGRAM],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=environment,
+        timeout=180,
+    )
+    reading = child.stdout.split()
+    # An empty answer is a parse that ran without a forkserver, or an upstream rename of the handle
+    # the child reads — a named failure rather than a silent skip, which is what this used to be.
+    assert child.returncode == 0 and reading and reading[-1].isdigit(), (
+        "the measurement child reported no forkserver `VmRSS`: a parse ran without a forkserver, "
+        "or upstream renamed the private handle it reads, and this budget then describes another "
+        f"shape. stdout={child.stdout!r} stderr={child.stderr[-2000:]!r}"
+    )
+    measured = int(reading[-1]) / 1024
+    split = " ".join(reading[:-1]) or "no decomposition reported"
+    assert measured <= FORKSERVER_RSS_CEILING_MIB, (
+        f"a warm parse forkserver is resident at {measured:.1f} MiB where the budget above was "
+        f"derived against a closure measured at {FORKSERVER_RSS_CEILING_MIB}. Whatever grew "
+        "`isolate._PRELOAD`'s closure has moved what every front door and every background worker "
+        "costs its node, and `FORKSERVER_POD_COST_MIB` — with `resources.service` and "
+        f"`resources.worker` under it — needs re-deriving before it ships. Decomposition: {split} "
+        "(kB). **Before attributing this to `_PRELOAD`, run the same measurement against a "
+        "revision whose closure is known**, which is the one thing that separates a closure that "
+        "grew from a machine that holds more anonymous pages for the same objects: `git archive "
+        "<rev> src | tar -x -C /tmp/base && PYTHONPATH=/tmp/base/src python -c "
+        "'import chemclaw.ingest.documents.parse'` and read `/proc/self/status`. A reading that is "
+        "high at the older revision too is the environment, and this ceiling is what moves"
+    )
+
+
+def test_the_chart_caps_turns_per_actor_strictly_below_the_process_cap() -> None:
+    """A fairness cap at or above the pod's own cap enforces nothing while reading as protection.
+
+    The code default is 0 (off) because `chemclaw.cli.live_storm`'s family A sweeps the *admission*
+    cap end to end from one credential, so the production posture lives here — and a posture
+    nothing checks is one that drifts. `>=` is the whole failure mode: at 12
+    against a 12-permit pod the guard is consulted on every request, refuses nothing ever, and a
+    reviewer reading `values.yaml` sees a per-actor limit that does not exist.
+    """
+    config = _values()["config"]
+    per_actor = int(config["CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS_PER_ACTOR"])
+    per_process = int(config["CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS"])
+
+    assert per_actor > 0, "the chart carries the production posture; 0 is the code default"
+    assert per_actor < per_process, (
+        f"a per-actor cap of {per_actor} against {per_process} permits refuses nothing; one "
+        f"principal can still hold every permit on the replica"
+    )
+
+
+#: The router's own namespace selector, as `networkPolicy.ingressNamespaces` already ships it for
+#: the chat front door. Written once here because the two tests below need the same value on
+#: opposite sides of one assertion — one renders with it, the other without.
+_ROUTER_PEER = 'mcpFace.ingressNamespaces=[{"network.openshift.io/policy-group":"ingress"}]'
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+def test_publishing_the_face_without_a_router_peer_refuses_to_render() -> None:
+    """`route.enabled` and an empty peer list published an address this chart's own policy drops.
+
+    The pair the chart shipped: `mcpFace.route.enabled=true` renders a `Route`, and
+    `templates/networkpolicy.yaml`'s `mcp-face-ingress` permits `podSelector` — which NetworkPolicy
+    scopes to the policy's own namespace — plus whatever `mcpFace.ingressNamespaces` names, which
+    defaults to `[]`. The router is in neither, so every request the Route admitted was dropped
+    before it reached the pod. The front door does not have this shape: `networkPolicy.ingress
+    Namespaces` ships the router's selector, in the same file, which is what makes the omission a
+    defect rather than a posture.
+
+    **Asserted through a real render in three directions**, because a `fail` is as easy to write too
+    wide as too narrow, and the too-wide version — refusing whenever `ingressNamespaces` is empty —
+    would break the coherent posture of a face reachable only from inside the cluster:
+
+    1. route on, list empty: refused, and the message names the key an operator has to set;
+    2. route on, list named: renders, and both the `Route` and the policy are there with the peer;
+    3. face on, route off: renders, with an empty peer list, because that is a stated posture.
+
+    Not defaulted from `networkPolicy.ingressNamespaces`, and the chart says why in the same words
+    the guard does: that list answers who may reach a surface behind Entra, this one answers who may
+    reach a surface whose whole authorization is one bearer token, and inheriting the first to grant
+    the second is the widening the two-list split exists to prevent.
+    """
+    unstated = _render("--set", "mcpFace.enabled=true", "--set", "mcpFace.route.enabled=true")
+    assert unstated.returncode != 0, (
+        "the chart published a Route whose traffic its own `mcp-face-ingress` policy drops:\n"
+        f"{unstated.stdout[:2000]}"
+    )
+    assert "mcpFace.ingressNamespaces" in unstated.stderr, (
+        f"the refusal does not name the key that fixes it: {unstated.stderr}"
+    )
+
+    stated = _render(
+        "--set",
+        "mcpFace.enabled=true",
+        "--set",
+        "mcpFace.route.enabled=true",
+        "--set-json",
+        _ROUTER_PEER,
+    )
+    assert stated.returncode == 0, stated.stderr
+    published = [
+        document
+        for document in yaml.safe_load_all(stated.stdout)
+        if document and document.get("metadata", {}).get("name", "").endswith("-mcp-face")
+    ]
+    assert {document["kind"] for document in published} >= {"Route", "Service"}, (
+        f"naming the peer did not publish the face: {[d['kind'] for d in published]}"
+    )
+    policy = next(
+        document
+        for document in yaml.safe_load_all(stated.stdout)
+        if document and document.get("metadata", {}).get("name", "").endswith("-mcp-face-ingress")
+    )
+    peers = policy["spec"]["ingress"][0]["from"]
+    assert any("namespaceSelector" in peer for peer in peers), (
+        "the policy still admits only this namespace's pods, so the Route the chart just agreed to "
+        f"publish is still dropped: {peers}"
+    )
+
+    # The narrow direction: an unpublished face with no peers is a posture, not an omission.
+    internal = _render("--set", "mcpFace.enabled=true")
+    assert internal.returncode == 0, internal.stderr
+    names = {
+        (document.get("kind"), document.get("metadata", {}).get("name"))
+        for document in yaml.safe_load_all(internal.stdout)
+        if document
+    }
+    assert ("NetworkPolicy", "chemclaw-mcp-face-ingress") in names, sorted(names)
+    # By parsed name, not by a substring of the whole render: the *chat* front door renders its own
+    # `Route` in the same output, so a text search finds one and says nothing about the face.
+    assert ("Route", "chemclaw-mcp-face") not in names, (
+        f"an unpublished face rendered a Route anyway: {sorted(names)}"
+    )
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+@pytest.mark.parametrize("overrides", _OFF_BY_DEFAULT_RENDERS.values(), ids=_OFF_BY_DEFAULT_RENDERS)
+def test_no_rendered_setting_reaches_a_pod_in_scientific_notation(
+    overrides: tuple[str, ...],
+) -> None:
+    """Helm renders a large or fractional values entry as a float, and `Settings` cannot read one.
+
+    **Driven, on the change that added the first one.** `workers.background.
+    documentParseMemoryBytes: 335544320` reached the container as `"3.3554432e+08"`, because Helm
+    parses the values entry as a float and `| quote` renders a float the way Go prints one.
+    `CHEMCLAW_DOCUMENT_PARSE_MEMORY_BYTES=3.3554432e+08` is a pydantic `int_parsing` error, so every
+    background worker would have crash-looped on start — a whole Deployment down, from a values file
+    that reads correctly and a chart that renders without complaint.
+
+    **The blind spot is why this is a general guard rather than a `%.0f` and a comment.** Every
+    other assertion in this file about that budget reads `values.yaml` through `yaml.safe_load`,
+    where the same entry is an ordinary `int` — so the arithmetic was checked against a number no
+    pod ever sees, and the render was the only place the defect existed. Any future numeric
+    override on any Deployment has the identical trap.
+
+    **And the ConfigMap is the bigger half, which the first version of this guard did not read.**
+    `config.yaml` renders `.Values.config`, `retention.windows` and `retention.artifactStore` with
+    `| quote` too, and those reach *every* pod through `envFrom: configMapRef` — so one float there
+    crash-loops the whole release rather than one Deployment. Driven through a values file (which is
+    where the trap lives; `--set` goes through Helm's strvals parser and keeps an int64):
+    `CHEMCLAW_ARTIFACT_STORE_MAX_BYTES: 10737418240` renders as `"1.073741824e+10"`. So this reads
+    container `env`, `envFrom` sources, and the `data` of every ConfigMap and Secret the chart
+    renders.
+
+    Parametrised over `_OFF_BY_DEFAULT_RENDERS` for the reason its two siblings are: a template
+    behind a switch is validated by nobody otherwise, and `CHEMCLAW_TEMPORAL_METRICS_PORT` exists
+    only under `monitoring.temporalSdkMetrics.enabled` and takes its value straight from the values
+    file through `| quote`.
+
+    Scoped to `CHEMCLAW_*`, because those are the names `Settings` parses; a float in someone
+    else's variable is that consumer's business.
+    """
+    rendered = _render(*overrides)
+    assert rendered.returncode == 0, rendered.stderr
+    offenders: list[str] = []
+
+    def _suspect(where: str, name: str, value: object) -> None:
+        text = str(value)
+        if name.startswith("CHEMCLAW_") and ("e+" in text or "E+" in text):
+            offenders.append(f"{where} {name}={text}")
+
+    for doc in yaml.safe_load_all(rendered.stdout):
+        if not doc:
+            continue
+        kind, name = doc.get("kind"), doc["metadata"]["name"]
+        if kind in {"ConfigMap", "Secret"}:
+            # Where a float does the most damage: one `envFrom: configMapRef` per pod, so the
+            # whole release crash-loops rather than one Deployment.
+            for key, value in (doc.get("data") or {}).items():
+                _suspect(f"{kind} {name}", key, value)
+            continue
+        for owner, spec in _pod_specs(yaml.safe_dump(doc)):
+            for container in [*spec.get("containers", []), *spec.get("initContainers", [])]:
+                for entry in container.get("env") or []:
+                    _suspect(f"{owner}/{container['name']}", entry["name"], entry.get("value", ""))
+
+    assert not offenders, (
+        "these rendered settings reach a pod in scientific notation, which pydantic refuses with "
+        f"`int_parsing`, so the container crash-loops on start: {offenders}. Render it with "
+        "`int64` rather than `| quote`, which prints a Helm float the way Go does"
+    )
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+@pytest.mark.parametrize(
+    ("overrides", "named"),
+    [
+        pytest.param(
+            ("--set", "service.autoscaling.maxReplicas=0"), "maxReplicas", id="hpa-ceiling"
+        ),
+        pytest.param(
+            (
+                "--set",
+                "service.autoscaling.enabled=false",
+                "--set",
+                "service.replicas=0",
+            ),
+            "service.replicas",
+            id="fixed-count",
+        ),
+    ],
+)
+def test_a_release_with_no_front_door_refuses_to_render(
+    overrides: tuple[str, ...], named: str
+) -> None:
+    """A zero front door renders a release in which every pod refuses to start.
+
+    `service_fleet_replicas` is `Field(default=1, gt=0)` and `config.yaml` renders this number into
+    the ConfigMap **every** pod reads through `envFrom`, so a zero does not scale the front door
+    down. It fails `Settings()` at `core/config/__init__.py`'s module-level singleton — which is why
+    this is not a question of which component reads the setting. Driven over nine entrypoints, all
+    nine exit 1, and `deploy/entrypoint.sh` runs `python -m chemclaw.cli.egress_preload` under
+    `set -euo pipefail` *before* its `case`, so every container dies in the shell prologue: the
+    seven connector Deployments, the background worker, and the migrate/schedules/convert hook Jobs
+    — so `helm upgrade` never converges either.
+
+    **Both arms, because the backlog row's own reproducer is not one of them.** It named
+    `--set service.replicas=0`, which on the shipped defaults changes not one byte: the HPA ships
+    enabled and `chemclaw.frontDoorProcesses` reads `maxReplicas` in that branch. The two that do
+    reach it are parametrised here.
+
+    Neither `helm template` nor `kubeconform` could catch this — the value is a valid string in a
+    valid ConfigMap — and `make helm-validate` renders only the defaults plus the flag union, so it
+    never sets a replica count. A render-time `fail` naming the key is the only thing between an
+    operator's `--set` and eleven crash-looping pods.
+    """
+    refused = _render(*overrides)
+
+    assert refused.returncode != 0, (
+        "the chart still renders a release whose every pod refuses to start on "
+        f"{overrides}:\n{refused.stdout[:2000]}"
+    )
+    assert named in refused.stderr, refused.stderr
+    assert "CHEMCLAW_SERVICE_FLEET_REPLICAS" in refused.stderr, (
+        "the refusal must name the setting that actually refuses the value, since that is what an "
+        f"operator has to look up: {refused.stderr}"
+    )
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+def test_the_front_door_count_the_chart_refuses_is_the_one_settings_refuses() -> None:
+    """The chart's bound and `Settings`' bound are one decision, asserted against each other.
+
+    Two places state "at least one front door" and a chart guard that drifted from the field would
+    be the worst of both: a render that succeeds into a crash-loop, or one that refuses a value the
+    code would have taken. Read off `model_fields` rather than transcribed, so moving the field
+    moves this.
+    """
+    from chemclaw.core.config import Settings
+
+    constraints = Settings.model_fields["service_fleet_replicas"].metadata
+    floors = [getattr(item, "gt", None) for item in constraints]
+    assert 0 in floors, (
+        "service_fleet_replicas no longer carries `gt=0`, so the chart guard refusing zero is now "
+        f"stricter than the code it protects: {constraints}"
+    )
+
+    # And the value one above the floor still renders, so the guard is a floor rather than a ban.
+    assert _render("--set", "service.autoscaling.maxReplicas=1").returncode == 0
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+def test_the_fixed_replica_count_renders_nowhere_while_the_hpa_is_on() -> None:
+    """`service.replicas` is dead config on the shipped defaults, and that is now written down.
+
+    The backlog row behind this change was built on `--set service.replicas=0` reaching the
+    ConfigMap. It does not: `service.autoscaling.enabled` ships true, `chemclaw.frontDoorProcesses`
+    reads `maxReplicas` in that branch, and `deployment-service.yaml` omits `replicas` entirely
+    because the HPA owns it. So a `--set` an operator would reasonably expect to scale the front
+    door silently does nothing.
+
+    Pinned as a test rather than left to the comment in `values.yaml`, because the comment is only
+    true while this remains true — and if a later change makes `service.replicas` live under the
+    HPA, this reds and that comment gets corrected with it.
+    """
+    baseline = _render()
+    overridden = _render("--set", "service.replicas=1")
+
+    assert baseline.returncode == 0 and overridden.returncode == 0
+    assert baseline.stdout == overridden.stdout, (
+        "service.replicas now changes the shipped render, so the values.yaml comment saying it is "
+        "read only when the HPA is off is stale"
     )

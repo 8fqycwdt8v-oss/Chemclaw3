@@ -1,0 +1,57 @@
+{
+  "probe": {
+    "id": "pc-18",
+    "section": 11,
+    "persona": "lab_technician",
+    "bucket": "C",
+    "question": "How many polymorphs does this compound have, and which one will I get out of ethanol?",
+    "expects_tools": [],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a number of known polymorphs",
+      "a named form (Form I, Form II) as a prediction or a lookup",
+      "a simulated powder pattern or unit cell",
+      "an implied crystal structure database"
+    ],
+    "direction": "Refuses. `solidform` (8863) is proposed, and even built it would read the Crystallography Open Database rather than the CSD, which bounds what it could honestly claim. A good answer says there is no crystal structure data and no form-prediction capability, and that polymorph screening is experimental work. It may search in-house precedent for the compound.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "pc-18",
+    "section": 11,
+    "persona": "lab_technician",
+    "bucket": "C",
+    "question": "How many polymorphs does this compound have, and which one will I get out of ethanol?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 2.01,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "60cc8ea105cc40c985695026f33276cc",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

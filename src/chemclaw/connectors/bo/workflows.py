@@ -8,7 +8,7 @@ by name.
 
 **This is the reference connector-owned workflow** (D-110/D-111), and what it does *not* do is
 the point. It returns a `ConnectorJobResult` and stops: core's `ConnectorJobWorkflow` supplies
-the idempotent job id, the actor attribution, the session push-back, and the PR-gate publish of
+the idempotent job id, the actor attribution, the session push-back, and the graph write of
 the note this returns. It is served by this bundle's own worker on its own task queue, so
 `bofire`/`botorch` run nowhere near the chat service — and the only thing binding it to core is
 the workflow *type name* and that queue, both strings in `connector.yaml`.
@@ -58,6 +58,7 @@ from chemclaw.durable.publish import (
     BAD_DATA_RETRY,
     calculation_retry,
     connector_queue_wait_timeout,
+    remaining_queue_wait_timeout,
 )
 from chemclaw.durable.registry import durable_workflow
 
@@ -67,6 +68,7 @@ def _carry_on_if_history_is_filling_up(
     history: list[Observation],
     rounds_remaining: int,
     rounds_done: int,
+    spent: timedelta,
 ) -> None:
     """Continue this campaign in a fresh run before Temporal's event history runs out.
 
@@ -97,6 +99,14 @@ def _carry_on_if_history_is_filling_up(
     `rounds_done` travels with it because the per-round campaign-record write keys its idempotency
     on the round index, and a continued run that restarted the count at zero would collide with the
     previous run's rows and silently drop them.
+
+    **`spent` travels for a reason of the same kind, one layer out.** The ceiling this campaign runs
+    under is a workflow *execution* timeout, which spans the whole continue-as-new chain — but
+    `workflow.info().workflow_start_time` is the *run's* start, reset on every continuation, so a
+    continued run that measured its own elapsed time would believe it had the full budget again.
+    That is the belief `_queue_wait` exists to not hold: it would hand the last dispatch of a
+    seven-hour campaign a two-hour wait the execution timeout cannot honour. There is no field on
+    `workflow.info()` that carries the chain's start, so it is carried here.
     """
     if rounds_remaining <= 0 or not workflow.info().is_continue_as_new_suggested():
         return
@@ -104,7 +114,10 @@ def _carry_on_if_history_is_filling_up(
         args=[
             payload,
             CampaignCarryOver(
-                history=history, rounds_remaining=rounds_remaining, rounds_done=rounds_done
+                history=history,
+                rounds_remaining=rounds_remaining,
+                rounds_done=rounds_done,
+                spent_seconds=spent.total_seconds(),
             ).model_dump(mode="json"),
         ]
     )
@@ -189,6 +202,56 @@ async def _measure(
     return [Observation.model_validate(row) for row in outcome.payload.get("observations", [])]
 
 
+def dispatches_left(rounds_remaining: int, seeding: bool) -> int:
+    """How many activities this campaign still has to dispatch before it can return.
+
+    The divisor `_queue_wait` shares the remaining execution budget by, so a campaign does not
+    spend most of its ceiling on the queue wait of its first step. Two for the seed (propose,
+    evaluate), three per round (propose, evaluate, record the round) and one terminal record.
+
+    **Being wrong here is a fairness bug, never a safety one**, which is what makes the counter
+    worth having rather than a liability. `_queue_wait` divides what is *left*, so whatever the
+    divisor, each dispatch is bounded by the remaining budget and the sum can never exceed it; an
+    over-count simply makes early waits shorter than they had to be. That is why the count may be
+    re-synced from `rounds_remaining` at the top of every round instead of being threaded through
+    every call.
+
+    A measured campaign runs fewer of these — `_evaluate` opens a child workflow rather than
+    dispatching an activity — and is not affected either way, because such a job is given no
+    execution ceiling at all and takes `_queue_wait`'s unbudgeted branch.
+
+    Args:
+        rounds_remaining: Rounds this campaign still owes.
+        seeding: Whether the seed batch is still ahead of it.
+
+    Returns:
+        The number of dispatches left, always at least one.
+    """
+    return (2 if seeding else 0) + 3 * rounds_remaining + 1
+
+
+class CampaignBudgetSpent(Exception):
+    """This campaign's execution budget can no longer fund another activity.
+
+    Raised by `_queue_wait` when the execution budget can no longer fund a wait plus an attempt.
+    Not a workflow failure: the evaluations already paid for are real, and a campaign that ran out
+    of wall clock has a best point and a history to return. What it must *not* do is dispatch one
+    more activity — the execution timeout would fire mid-flight, and a `WorkflowExecutionTimedOut`
+    reaches no workflow code, names neither the queue nor the reason, and pushes the chemist
+    nothing.
+
+    **Where it is caught is `run`'s round loop and its terminal write, and saying "caught by `run`"
+    unqualified was how a regression hid.** The loop's guard is
+    `_cannot_afford_another_dispatch`, which asks the same question on the same basis before any
+    of a round's three dispatches; the terminal `record_campaign_run` is wrapped because it runs
+    after the guard's last chance. The seed's two dispatches are neither guarded nor wrapped, and
+    that is sound only because they run with the budget untouched: `Settings` refuses a ceiling
+    that cannot fund one attempt, so a fresh run's first dispatch is affordable by construction
+    and a resumed run does not seed. It was *not* sound while affordability was read off the
+    share — see `_queue_wait`.
+    """
+
+
 @durable_workflow(bundle_queue("bo"))
 # Its failures must be able to *be* failures: without this the SDK parks a plain exception raised
 # in workflow code in an unbounded workflow-task-failure loop, so the parent
@@ -198,6 +261,109 @@ async def _measure(
 @workflow.defn(failure_exception_types=[Exception])
 class BoCampaignWorkflow:
     """Run a BO campaign durably and return the best point, the history, and the note to gate."""
+
+    #: What this execution had spent before the current run started, carried across each
+    #: continue-as-new because `workflow.info().workflow_start_time` is the run's own start.
+    _carried_spend: timedelta = timedelta(0)
+
+    #: How many activities are still to be dispatched, so `_queue_wait` can share what is left of
+    #: the execution budget between them rather than giving the first step most of it. Consumed by
+    #: `_queue_wait` and re-synced from `rounds_remaining` at the top of every round.
+    _dispatches_left: int = 1
+
+    def _spent(self) -> timedelta:
+        """How much of this campaign's execution budget is gone, across the whole run chain.
+
+        `workflow.now()` is deterministic under replay — it is the event's time, not the wall
+        clock — so this is safe to read in workflow code and reproduces exactly on a replay.
+        """
+        return self._carried_spend + (workflow.now() - workflow.info().workflow_start_time)
+
+    def _queue_wait(self) -> timedelta:
+        """How long the *next* activity may sit unclaimed, given what this campaign has left.
+
+        **The bug this closes is that there was one number here and it funded two dispatches.**
+        `connector_queue_wait_timeout()` is derived so that one wait plus one attempt fits the
+        parent's execution ceiling, and this workflow handed it unchanged to every activity it
+        runs — six of them for a single-round campaign (propose the seed, evaluate it, propose the
+        round, evaluate it, record the round, record the campaign). Measured at the shipped
+        settings: the wait is 10,170 s and a `bo` activity's budget is 300 s, so each step can
+        consume 10,470 s of a 25,200 s ceiling. Two fit. Three do not, and the third's overrun is a
+        `WorkflowExecutionTimedOut` delivered to nobody.
+
+        **What is left is divided by the dispatches still to come, and that division is what makes
+        the fix usable rather than merely safe.** Bounding each step by the whole remaining budget
+        is already enough for the sum to fit — but measured over a one-round campaign at the
+        shipped ceiling it funds only *three* worst-case dispatches, because the first takes 10,170
+        of 25,200 s and the second takes 10,170 more. Sharing instead gives all six a ~3,880 s
+        allowance and lands the total on 25,170 s, exactly the ceiling less one activity's
+        overhead.
+
+        Both bounds have to hold, so the answer is the smaller. The queue-wide one is a property of
+        the *queue* — the worst composite anything on it can run up — and does not shrink; the
+        shared one is a property of this *run* and shrinks as it goes.
+
+        Returns:
+            The `schedule_to_start_timeout` for the next dispatch.
+
+        Raises:
+            CampaignBudgetSpent: What is left cannot fund another wait plus attempt.
+        """
+        queue_bound = connector_queue_wait_timeout()
+        budget = workflow.info().execution_timeout
+        if budget is None:
+            # A campaign that suspends on a person gets no execution ceiling at all
+            # (`durable/connector_job.child_execution_timeout`), so there is no budget to spend
+            # down and the queue-wide bound is the whole of it.
+            return queue_bound
+        remaining = budget - self._spent()
+        # **Affordability is a property of what is left, never of the share**, and reading it off
+        # the share is what made a `n_rounds >= 25` campaign fail before doing any work: the
+        # divisor is `3n + 3`, so at 25 rounds the first dispatch's share of a full 25,200 s
+        # ceiling fell under one attempt plus its overhead and `propose_initial` — the very first
+        # activity, with 25,200 s of budget untouched in front of it — raised instead of running.
+        # `dispatches_left`'s own docstring already said why that cannot be right ("being wrong
+        # here is a fairness bug, never a safety one"): the sum fits because each dispatch is
+        # measured against what is *left*, so the share may narrow a wait and must never refuse one.
+        affordable = remaining_queue_wait_timeout(remaining, settings.bo_activity_timeout_seconds)
+        if affordable is None:
+            raise CampaignBudgetSpent
+        share = max(self._dispatches_left, 1)
+        self._dispatches_left = share - 1
+        fair = remaining_queue_wait_timeout(remaining / share, settings.bo_activity_timeout_seconds)
+        # **And a share below the floor is not a wait.** Sharing made the common case worse to
+        # improve one where the campaign fails either way: at the default ten-round spec every
+        # dispatch went from the 10,170 s queue-wide bound to 433.6 s, so a `bo` worker rolling,
+        # scaled to zero or slow to pull expires `schedule_to_start` and the campaign dies — the
+        # misdiagnosis `connector_queue_wait_timeout`'s own docstring warns about. The floor is a
+        # deployment fact (how long a worker may be absent), so it is configured rather than
+        # derived, and the `min` above keeps it inside both bounds that actually have to hold.
+        floor = timedelta(seconds=settings.bo_queue_wait_floor_seconds)
+        return min(queue_bound, affordable, max(fair or timedelta(0), floor))
+
+    def _cannot_afford_another_dispatch(self) -> bool:
+        """Whether this campaign's execution ceiling can still fund a wait plus an attempt.
+
+        A predicate rather than a `try`, because asking must not consume a share: `_queue_wait`
+        decrements `_dispatches_left` as part of handing one out, and a probe that did the same
+        would make the round it is probing for smaller than the round it then runs.
+
+        It asks the same question `_queue_wait` raises on, on the same basis — what is *left*,
+        undivided. Reading it off the share instead made the two disagree in the direction that
+        stops a campaign the dispatcher would happily have funded.
+
+        Returns:
+            True when the budget is spent and the loop must end with what it has.
+        """
+        budget = workflow.info().execution_timeout
+        if budget is None:
+            return False
+        return (
+            remaining_queue_wait_timeout(
+                budget - self._spent(), settings.bo_activity_timeout_seconds
+            )
+            is None
+        )
 
     async def _evaluate(
         self,
@@ -228,7 +394,7 @@ class BoCampaignWorkflow:
                 args=[spec.objective_name, candidates],
                 start_to_close_timeout=timeout,
                 heartbeat_timeout=heartbeat_timeout,
-                schedule_to_start_timeout=connector_queue_wait_timeout(),
+                schedule_to_start_timeout=self._queue_wait(),
                 # **`calculation_retry` and not `BAD_DATA_RETRY`, because this activity reaches the
                 # shared calculation backend.** A *computed* objective is
                 # `science.bo.objectives.solubility_objective`, which calls `cached_remote` on a
@@ -268,12 +434,13 @@ class BoCampaignWorkflow:
         heartbeat_timeout = timedelta(seconds=settings.bo_activity_heartbeat_timeout_seconds)
 
         if carried is None:
+            self._dispatches_left = dispatches_left(spec.n_rounds, seeding=True)
             seed = await workflow.execute_activity(
                 propose_initial,
                 args=[spec.problem, spec.n_initial, spec.seed],
                 start_to_close_timeout=timeout,
                 heartbeat_timeout=heartbeat_timeout,
-                schedule_to_start_timeout=connector_queue_wait_timeout(),
+                schedule_to_start_timeout=self._queue_wait(),
                 retry_policy=BAD_DATA_RETRY,
             )
             history = await self._evaluate(spec, seed, "seed", timeout, heartbeat_timeout)
@@ -305,21 +472,46 @@ class BoCampaignWorkflow:
             history = resumed.history
             rounds_remaining = resumed.rounds_remaining
             rounds_done = resumed.rounds_done
+            # Before any dispatch, so `_queue_wait` is never asked against a budget this run
+            # believes is untouched. See `CampaignCarryOver.spent_seconds`.
+            self._carried_spend = timedelta(seconds=resumed.spent_seconds)
 
         actor = workflow.memo_value("requested_by", settings.service_actor_id)
         correlation_id = workflow.memo_value("correlation_id", "")
 
         space = discrete_candidate_count(spec.problem)
+        budget_spent = False
         while rounds_remaining > 0:
             # Stop early if a purely discrete candidate set is exhausted.
             if space_exhausted(spec.problem, space, history, spec.batch):
+                break
+            # Re-synced every round rather than trusted to have been decremented exactly: a
+            # measured campaign's `_evaluate` opens a child workflow instead of dispatching, so
+            # the running count drifts, and `dispatches_left` says why that is safe to correct
+            # rather than track.
+            self._dispatches_left = dispatches_left(rounds_remaining, seeding=False)
+            # **Stop when the execution ceiling can no longer fund a dispatch.** Dispatching
+            # anyway is the failure the whole bound exists to remove: the execution timeout fires
+            # mid-activity, is delivered to no workflow code, and loses every evaluation this run
+            # has paid for.
+            #
+            # One check per round covers the round's three dispatches, and that is an argument
+            # rather than an optimism. `_queue_wait` hands out `R/n - w - a`, so the next dispatch
+            # sees `R - R/n + a` over `n - 1`, which is `R/n + a/(n-1)` — strictly more than
+            # `R/n`, which this check has just found to exceed `w + a`. Affordability is preserved
+            # as the share decrements, and a real dispatch spends *less* than its allowance, which
+            # only widens the margin. `CampaignBudgetSpent` escaping mid-round is a state this
+            # arithmetic cannot reach; it stays a named failure rather than a swallowed one,
+            # because a guard whose own reasoning is wrong should say so.
+            if self._cannot_afford_another_dispatch():
+                budget_spent = True
                 break
             proposed = await workflow.execute_activity(
                 propose_next,
                 args=[spec.problem, history, spec.batch, spec.seed],
                 start_to_close_timeout=timeout,
                 heartbeat_timeout=heartbeat_timeout,
-                schedule_to_start_timeout=connector_queue_wait_timeout(),
+                schedule_to_start_timeout=self._queue_wait(),
                 retry_policy=BAD_DATA_RETRY,
             )
             measured = await self._evaluate(
@@ -396,10 +588,12 @@ class BoCampaignWorkflow:
                 ],
                 start_to_close_timeout=timeout,
                 heartbeat_timeout=heartbeat_timeout,
-                schedule_to_start_timeout=connector_queue_wait_timeout(),
+                schedule_to_start_timeout=self._queue_wait(),
                 retry_policy=BAD_DATA_RETRY,
             )
-            _carry_on_if_history_is_filling_up(payload, history, rounds_remaining, rounds_done)
+            _carry_on_if_history_is_filling_up(
+                payload, history, rounds_remaining, rounds_done, self._spent()
+            )
 
         result = CampaignResult(best=best_of(spec.problem, history), history=history)
 
@@ -416,38 +610,74 @@ class BoCampaignWorkflow:
         #
         # The workflow id is the idempotency key. It is stable across a continue-as-new, so a
         # campaign that carried over does not write twice.
-        campaign_id = await workflow.execute_activity(
-            record_campaign_run,
-            args=[
-                spec.problem,
-                [Candidate(params=result.best.params)],
-                history,
-                actor,
-                correlation_id,
-                workflow.info().workflow_id,
-            ],
-            start_to_close_timeout=timeout,
-            heartbeat_timeout=heartbeat_timeout,
-            schedule_to_start_timeout=connector_queue_wait_timeout(),
-            retry_policy=BAD_DATA_RETRY,
-        )
+        #
+        # **It is skipped rather than attempted when the ceiling is spent**, and what makes that
+        # acceptable is the per-round write above: an interrupted campaign is already resumable
+        # from the rows it left, which is the guarantee that write exists for. Attempting it
+        # anyway would trade a named, complete answer for a `WorkflowExecutionTimedOut` that
+        # reaches nobody and loses the whole run.
+        # One dispatch is left and the divisor has to say so. `_dispatches_left` was last re-synced
+        # at the top of a round that has since finished, so without this the terminal write asks
+        # `_queue_wait` at `3R + 1` and is handed a share sized for rounds that will never run.
+        self._dispatches_left = 1
+        try:
+            campaign_id: str | None = await workflow.execute_activity(
+                record_campaign_run,
+                args=[
+                    spec.problem,
+                    [Candidate(params=result.best.params)],
+                    history,
+                    actor,
+                    correlation_id,
+                    workflow.info().workflow_id,
+                ],
+                start_to_close_timeout=timeout,
+                heartbeat_timeout=heartbeat_timeout,
+                schedule_to_start_timeout=self._queue_wait(),
+                retry_policy=BAD_DATA_RETRY,
+            )
+        except CampaignBudgetSpent:
+            campaign_id = None
+            budget_spent = True
 
-        # The recommendation as a PR-gated note (step 1d.5) — *built* here, because the BO→note
-        # mapping is this domain's knowledge, and *published* by core, because the PR-gate is
-        # the review boundary and a connector must not be able to reach around it. Best-effort
-        # publishing (a failed git write must never fail a completed campaign) is core's
-        # discipline too, so this workflow no longer carries it.
+        # The recommendation as a note (step 1d.5) — *built* here, because the BO→note mapping is
+        # this domain's knowledge, and *published* by core, because one write path into the graph
+        # is one place that stamps provenance and a connector must not be able to reach around it.
+        # It lands with no reviewer in front of it
+        # (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`): a campaign recommendation is
+        # knowledge, and what makes it safe is its label, its citations and the campaign that can
+        # contradict it. Best-effort publishing (a failed git write must never fail a completed
+        # campaign) is core's discipline too, so this workflow no longer carries it.
         # Always built, never conditional: whether it is *published* is the manifest's
         # `publish_to_graph`, which core reads. The spec used to carry a second, model-authored
         # switch that could suppress it, which meant a campaign could finish and leave nothing
         # behind (D-157).
         note = note_from_campaign_result(spec.objective_name, spec.problem, result)
         best = result.best
+        ending = (
+            f"recorded as {campaign_id}"
+            if campaign_id
+            else "its terminal record could not be written, but every completed round is on file"
+        )
+        if budget_spent and rounds_remaining > 0:
+            ending = (
+                f"{ending}. It stopped with {rounds_remaining} round(s) unrun because the job's "
+                "execution ceiling was spent — mostly waiting for a worker on the 'bo' queue. "
+                "Re-run it to continue from here"
+            )
+        elif budget_spent:
+            # Every round ran and only the terminal write could not be funded. Saying "it stopped
+            # with 0 round(s) unrun ... re-run it to continue from here" invites a chemist to
+            # re-run a campaign that has nothing left to do.
+            ending = (
+                f"{ending}. Every round ran; only the terminal record was left unfunded when the "
+                "job's execution ceiling was spent"
+            )
         return ConnectorJobResult(
             summary=(
                 f"campaign {spec.objective_name!r} finished after {len(history)} evaluation(s); "
                 f"best objective {best.value:.6g} ({best.provenance}); "
-                f"recorded as {campaign_id}"
+                f"{ending}"
             ),
             data=result.model_dump(mode="json"),
             payload_kind=type(result).__name__,

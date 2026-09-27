@@ -1,0 +1,56 @@
+{
+  "probe": {
+    "id": "pl-31",
+    "section": 16,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "Do we have the capacity to take on one more programme in Q4, or are we already oversubscribed? Break it down by team if you can.",
+    "expects_tools": [],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "any headcount, FTE count, utilisation or capacity figure",
+      "any team, group or reporting-line structure",
+      "a yes or no answer to whether capacity exists"
+    ],
+    "direction": "The system holds no staffing, capacity, workload or organisational data — there is no colleague or expertise directory, no team structure and no allocation model, so both the overall judgement and the per-team breakdown are unavailable. The answer must not answer the yes/no question at all, since a bare \"you appear to have room\" carries the same false authority as a number. Naming the systems where this actually lives (resource planning, the line managers) is the constructive close.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "pl-31",
+    "section": 16,
+    "persona": "manager",
+    "bucket": "C",
+    "question": "Do we have the capacity to take on one more programme in Q4, or are we already oversubscribed? Break it down by team if you can.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.35,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "7cc779c6cf264a31889cea89c7db72da",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

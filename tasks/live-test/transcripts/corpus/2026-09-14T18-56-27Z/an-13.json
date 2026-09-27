@@ -1,0 +1,91 @@
+{
+  "probe": {
+    "id": "an-13",
+    "section": 8,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "Isolated the RRT 1.32 impurity. 1H NMR (DMSO-d6, 400 MHz):\n\n  delta 12.9 (br s, 1H)\n  delta 9.62 (s, 1H)\n  delta 7.55 (d, J = 7.8, 1H)\n  delta 7.41 (t, J = 7.6, 1H)\n  delta 7.28 (d, J = 8.5, 2H)\n  delta 6.88 (d, J = 8.5, 2H)\n  delta 3.76 (s, 3H)\n\nCOSY: 7.55/7.41 coupled. HSQC: 3.76 correlates to a carbon at 55.4; no carbon\ncorrelation for 12.9 or 9.62. HMBC: 3.76 to a quaternary aromatic carbon at 158.9.\n\nDoes this support the mono-hydroxylated structure we proposed, or not?",
+    "expects_tools": [
+      "find_notes",
+      "gather_evidence",
+      "resolve_compound",
+      "similar_molecules"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "quoting predicted or computed 1H/13C chemical shifts",
+      "claiming an NMR prediction or spectral simulation was run",
+      "declaring the structure confirmed on this data alone",
+      "inventing correlations or signals not in the pasted table"
+    ],
+    "direction": "Engages with the pasted data specifically: the methoxy singlet at 3.76/55.4 with an HMBC to 158.9 says the methyl ether survived, the two exchangeable singlets at 12.9 and 9.62 with no HSQC carbon are consistent with a carboxylic acid plus a phenolic OH, and the AA'BB' pair at 7.28/6.88 says one ring is still para-disubstituted — so the hydroxylation is on the other ring, and the aromatic count constrains where. States explicitly that the system has no NMR prediction, so this is interpretation of the chemist's data, not a computed comparison, and says what is still ambiguous (which position on the second ring) and what would settle it.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "an-13",
+    "section": 8,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "Isolated the RRT 1.32 impurity. 1H NMR (DMSO-d6, 400 MHz):\n\n  delta 12.9 (br s, 1H)\n  delta 9.62 (s, 1H)\n  delta 7.55 (d, J = 7.8, 1H)\n  delta 7.41 (t, J = 7.6, 1H)\n  delta 7.28 (d, J = 8.5, 2H)\n  delta 6.88 (d, J = 8.5, 2H)\n  delta 3.76 (s, 3H)\n\nCOSY: 7.55/7.41 coupled. HSQC: 3.76 correlates to a carbon at 55.4; no carbon\ncorrelation for 12.9 or 9.62. HMBC: 3.76 to a quaternary aromatic carbon at 158.9.\n\nDoes this support the mono-hydroxylated structure we proposed, or not?",
+    "profile": "",
+    "answer": "The record is silent on your proposed structure for RRT 1.32. Let me analyze the NMR data you've provided to evaluate whether it supports a mono-hydroxylated structure:\n\n## Analysis of Your NMR Data\n\n**Key observations from the spectroscopic data:**\n\n1. **δ 12.9 (br s, 1H)** - Very downfield, no HSQC correlation → likely **carboxylic acid** or strongly H-bonded phenol\n2. **δ 9.62 (s, 1H)** - Downfield singlet, no HSQC → likely **phenol or formyl H**\n3. **δ 3.76 (s, 3H)** - Singlet integrating for 3H, HSQC to C at 55.4 ppm → **methoxy group** (OCH₃)\n4. **HMBC correlation** from this OCH₃ to quaternary aromatic C at 158.9 ppm → classic para-methoxyphenyl pattern\n5. **δ 7.28/6.88 (d, 2H each, J = 8.5 Hz)** - AA'BB' system → **para-disubstituted benzene**\n6. **δ 7.55/7.41** - Coupled aromatic signals, likely an **ortho-disubstituted benzene**\n\n**This pattern strongly suggests:**\n- A **para-methoxyphenyl** group (not hydroxylated, but methoxylated)\n- A second aromatic ring with ortho substitution\n- An acidic proton (δ 12.9) - likely COOH\n- A second exchangeable proton (δ 9.62) - possibly NH or phenolic OH\n\n**Does this support mono-hydroxylation?**\n\n**No, this does NOT support a simple mono-hydroxylated structure.** Instead, the data shows:\n\n- A **methoxy group** (OCH₃ at δ 3.76) rather than a hydroxyl\n- The para-disubstituted aromatic pattern is consistent with **p-methoxyphenyl**, not p-hydroxyphenyl\n- If your proposed structure was a mono-hydroxylated product, you would expect:\n  - An exchangeable OH showing up in the phenolic region (δ 8-10 for simple phenols)\n  - No methoxy singlet at δ 3.76\n  - A different HMBC pattern\n\n**What structure would fit this data better?**\n\nWithout knowing your parent compound, the data suggests a structure containing:\n- A p-methoxyphenyl moiety\n- A carboxylic acid (δ 12.9)\n- Possibly an amide NH or another phenolic OH (δ 9.62)\n- An additional aromatic ring\n\nCould you share the parent compound structure or the proposed mono-hydroxylated structure? That would let me definitively confirm whether the NMR matches or rules it out, and potentially help identify what this impurity actually is.",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "gather_evidence",
+      "find_notes",
+      "gather_evidence"
+    ],
+    "tool_results": [
+      {
+        "tool": "gather_evidence",
+        "preview": "chunks=[EvidenceChunk(content='<retrieved-note-802678ad5c37acd3 id=\"proposal-amide-2-methf\">\\n…so a\\n  yield difference could still be recovery.\\n\\nSeed content: the chemistry is illustrative, the sha"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "chunks=[EvidenceChunk(content='<retrieved-note-802678ad5c37acd3 id=\"playbook-route-scoring-is-not-per-step\">\\n…are the objectives; a process route is judged on cost, safety,\\nthroughput and impurity c"
+      },
+      {
+        "tool": "find_notes",
+        "preview": "matches=[] total_matches=0 widened=False corpus_notes=38 verdict='NO MATCH: 38 current note(s) were searched and none carried your terms. The graph is populated, so this is a real miss — but it is a m"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "chunks=[EvidenceChunk(content='<retrieved-note-802678ad5c37acd3 id=\"compound-salicylic-acid\">\\n2-hydroxybenzoic acid. The phenol that is acetylated to give aspirin, and a hydrolysis product of\\nit — w"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "1",
+      "2"
+    ],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 27.42,
+    "event_counts": {
+      "token": 72,
+      "tool_call": 4,
+      "evidence_source": 3,
+      "tool_result": 4,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "45b980815aa244b1b1125dcb61b8749d",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

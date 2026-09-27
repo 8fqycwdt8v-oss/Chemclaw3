@@ -107,6 +107,40 @@ def test_the_closure_contracts_rather_than_expanding() -> None:
     assert droppable_rows(rows, set()) == set()
 
 
+def test_a_row_mentioning_no_call_id_is_its_own_component() -> None:
+    """An ordinary user or answer row is droppable on its own terms, and that is not free.
+
+    The grouping is built by joining rows that share a call id, so a row sharing none is never an
+    argument to a `union` call: it exists as a component only because every row seeds the
+    structure before any joining happens. Seeding from the joins alone would leave plain
+    conversation rows — which are most of a thread — in no component at all and therefore
+    permanently undroppable, and retention would quietly stop reclaiming anything but tool traffic.
+    """
+    rows = [(1, frozenset()), (2, frozenset({"c1"})), (3, frozenset({"c1"}))]
+    assert droppable_rows(rows, {1}) == {1}
+    assert droppable_rows(rows, {1, 2}) == {1}
+    assert droppable_rows(rows, {1, 2, 3}) == {1, 2, 3}
+
+
+def test_the_closure_joins_across_more_than_one_hop() -> None:
+    """Four rows chained by three different ids are one component, not three pairs.
+
+    The two-call test above is one row linking two partners — a star, which a single round of
+    joining resolves. This is a path: 1–2 share `c1`, 2–3 share `c2`, 3–4 share `c3`, and no row
+    is adjacent to all of them. Nothing in the thread's order helps, either, since the rows are
+    fed in an order that joins the far end first.
+    """
+    rows = [
+        (4, frozenset({"c3"})),
+        (3, frozenset({"c2", "c3"})),
+        (2, frozenset({"c1", "c2"})),
+        (1, frozenset({"c1"})),
+    ]
+    for short in ({1}, {1, 2}, {1, 2, 3}, {2, 3, 4}):
+        assert droppable_rows(rows, short) == set(), short
+    assert droppable_rows(rows, {1, 2, 3, 4}) == {1, 2, 3, 4}
+
+
 # --- reading the ids out of a stored row, in either shape --------------------------------------
 
 

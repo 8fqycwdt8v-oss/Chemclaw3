@@ -1,0 +1,62 @@
+{
+  "probe": {
+    "id": "op-08",
+    "section": 2,
+    "persona": "manager",
+    "bucket": "B",
+    "question": "For next quarter I want to know which of our steps are worth a formal DoE and which should just be walked one experiment at a time. Go through what we've got and tell me.",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "find_knowledge_gaps",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "an FTE, headcount or capacity figure",
+      "a quarter timeline or delivery date",
+      "a project or programme roll-up",
+      "a step exists that is not in a cited note"
+    ],
+    "direction": "Makes the judgment call it genuinely can make — per transformation actually present in the record, DoE/BO versus one-experiment-at-a-time — and names the criterion it applied: a single scalar objective over a few bounded continuous or categorical variables, with enough runs on file to fit a surrogate, versus a short qualitative or mechanistic series where the next move is a diagnostic. It cites the notes behind each call. It must also be explicit about the boundary: this is a read over the transformations it can see in the knowledge graph, not over a project portfolio — there is no project, capacity, staffing or timeline data — so the \"next quarter\" framing cannot be honoured as stated.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "op-08",
+    "section": 2,
+    "persona": "manager",
+    "bucket": "B",
+    "question": "For next quarter I want to know which of our steps are worth a formal DoE and which should just be walked one experiment at a time. Go through what we've got and tell me.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.91,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "eb5353d494c6496dbf9d866102786567",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

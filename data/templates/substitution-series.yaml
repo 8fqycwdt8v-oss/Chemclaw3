@@ -1,0 +1,89 @@
+# Which position — the regioisomers of a substitution series, ranked by free energy.
+#
+# **The candidate set is the thing this template exists to supply.** A question like "what does
+# moving the methyl do" or "which of these positional isomers is most stable" used to have no
+# enumerator behind it, so a ranking ran over whichever compounds happened to be written down —
+# and a set is the universe of its answer. `chem`'s `enumerate_substitutions` produces the set from
+# the molecular graph; `rank_species` ranks it. Same shape as `tautomer-resolution.yaml`, and the
+# same reason for being two steps: enumerating is a question about the graph, ranking is a question
+# about free energy, and only the second costs anything.
+#
+# **`mode` is fixed at `move`, and that is a decision rather than an omission.** The tool's other
+# mode, `add`, puts a *new* group on each aromatic C-H and needs `substituent` — a second required
+# input, which would make this procedure one a hypothesis check cannot run from a structure alone
+# (`hypotheses.dispatch.ground_template_inputs`). It cannot be an optional input either: an unset
+# input resolves to `None` in `durable/template_job.py`'s scope and a tool step passes its arguments
+# through unchanged, so `mode: "${inputs.mode}"` would hand the tool a `None` its `move`/`add`
+# literal refuses. `move` is the question a drawn molecule already carries — its own isomers, with
+# the input first — so it is the one this template answers; the `add` question is a direct call to
+# the tool followed by `rank_species`.
+summary: Move aromatic substituents to every other ring position and rank the isomers.
+description: >-
+  Moves each aromatic substituent (or only the named group) to every other aromatic C-H of its
+  ring, ranks the regioisomers — the drawn one included — by free energy, and reports the favoured
+  position and the gap. A stability order, not a regioselectivity: the product a substitution
+  gives is set kinetically.
+
+inputs:
+  - name: smiles
+    type: string
+    description: The molecule, as SMILES.
+  - name: substituent
+    type: string
+    description: Move only this group, as SMILES bonding through its first atom ("C", "OC").
+    required: false
+  - name: solvent
+    type: string
+    description: Implicit solvent name. Omit it for gas phase.
+    required: false
+
+steps:
+  - id: isomers
+    kind: tool
+    purpose: >-
+      The regioisomer set, from the molecular graph. Structural — no calculation runs — and the
+      input is in it, labelled "as given", because "the isomer you drew is already the most
+      stable" is a common answer and needs the input ranked beside its alternatives.
+    tool: enumerate_substitutions
+    arguments:
+      smiles: "${inputs.smiles}"
+      substituent: "${inputs.substituent}"
+      mode: move
+
+  - id: ranking
+    kind: job
+    purpose: >-
+      Free energies across the isomers. `ranking: custom` because a positional isomer is none of
+      the three kinds the job names, and the labels carry the positions so the result reads as
+      "para to the OH" rather than as a bare SMILES.
+    job: rank_species
+    arguments:
+      # The whole list, by value, so the distribution's universe is the enumeration's universe.
+      species: "${steps.isomers.result.smiles}"
+      labels: "${steps.isomers.result.labels}"
+      ranking: custom
+      solvent: "${inputs.solvent}"
+      # **The job's own default level, as `stereoisomer-ranking.yaml` leaves it, and not the
+      # `thorough` `tautomer-resolution.yaml` pins.** That pin rests on one measured case — a form
+      # stabilised by an intramolecular hydrogen bond present in one conformer only — and nothing
+      # here has been measured to need it. An *ortho* isomer that can close such a bond is the same
+      # shape, so the report step is told to say so and name `rank_species` at `thorough` as the
+      # follow-up, rather than this template paying a conformer search per isomer on every run.
+
+  - id: report
+    kind: agent
+    purpose: Say which position is favoured, and that stability is not regioselectivity.
+    prompt: >-
+      Report the positional-isomer ranking of ${inputs.smiles}.
+
+      Isomers enumerated (${steps.isomers.result.count}): ${steps.isomers.result.labels}
+      Free-energy ranking: ${steps.ranking.result}
+
+      Name the favoured isomer by its position and the gap to the next, and say where the isomer
+      as drawn falls. Quote the reported uncertainty; a gap inside it is not a ranking. Then state
+      the limit that matters most: this is the thermodynamic order of the finished isomers, not a
+      regioselectivity. Which position an electrophilic aromatic substitution actually takes is
+      usually set kinetically, at the sigma complex, so the major product can differ from the most
+      stable isomer, and no transition state was computed here. If an ortho isomer could form an
+      intramolecular hydrogen bond, say that this ranking did not search conformers and that
+      `rank_species` at level thorough is the check.

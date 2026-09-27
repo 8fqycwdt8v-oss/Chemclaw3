@@ -138,14 +138,34 @@ def _example(probe: Probe) -> tuple[dict[str, Any], dict[str, Any], dict[str, An
     system produced. That is Phoenix's convention for a dataset example and it is also the honest
     one here: `expects_tools` and `forbids_claims` are the corpus's claim about a right answer, and
     they belong on the axis, not in the run.
+
+    `asserts_absent` travels with them for the same reason, and it is the one of the three that
+    says what the *system* was assumed to be: a reader comparing two experiments over a bucket-C
+    question needs to see which capability the question was scored as lacking, because that is the
+    premise a corpus edit most often changes underneath a stored verdict.
+
+    **`needs_bundle` goes with it, and that argument applies to it harder.** It is the other half
+    of the same premise — which deployment the probe was scored against — and unlike the three
+    above it changes with **no corpus edit at all**: mounting `CHEMCLAW_CONNECTORS_DIR` differently
+    is enough. Without it, two runs of one `needs_bundle` probe in two lanes are indistinguishable
+    in the published dataset, and the expectation `evals/live._tool_expectation_applies` silently
+    dropped in one of them is invisible to whoever compares them. On `metadata` rather than
+    `output`, because it is a fact about the run's configuration rather than a claim about the
+    right answer.
     """
     return (
         {"question": probe.question, "persona": probe.persona, "direction": probe.direction},
         {
             "expects_tools": sorted(probe.expects_tools),
             "forbids_claims": list(probe.forbids_claims),
+            "asserts_absent": list(probe.asserts_absent),
         },
-        {"probe_id": probe.id, "section": probe.section, "bucket": probe.bucket},
+        {
+            "probe_id": probe.id,
+            "section": probe.section,
+            "bucket": probe.bucket,
+            "needs_bundle": probe.needs_bundle,
+        },
     )
 
 

@@ -1,0 +1,60 @@
+{
+  "probe": {
+    "id": "ms-14",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We need a forced-degradation protocol for CC(C)Cc1ccc(cc1)C(C)C(=O)O and I would rather not guess at the conditions. Which bond gives way first, and what does that tell us to stress?",
+    "expects_tools": [
+      "run_bond_strength_survey",
+      "survey_bond_strengths"
+    ],
+    "expects_job": true,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a dissociation energy the calculation did not return",
+      "a quotable BDE in kcal/mol for any bond",
+      "a stress condition presented as a prediction of what the study will find",
+      "that ring bonds were surveyed"
+    ],
+    "direction": "The question starts from a SMILES and ends at a study, which is the whole sequence: enumerate the breakable bonds as radical pairs, compute one balanced reaction per bond, rank them weakest first. Either the named protocol or the parts in that order is a good answer; a ranking over bonds the model picked out by eye is not, and it is indistinguishable from the right answer in prose. The interpretation is what a chemist is paying for — a weak benzylic or alpha-to-heteroatom C-H is an autoxidation and hydrogen-abstraction liability, a weak C-N or C-O is a thermal or hydrolytic one. Two caveats must survive into the answer: the ordering is the finding and the magnitudes are not quotable as bond dissociation energies, and ring bonds were excluded so their absence is not evidence of strength. Close on conditions to run, framed as a study rather than as its result.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "ms-14",
+    "section": 8,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We need a forced-degradation protocol for CC(C)Cc1ccc(cc1)C(C)C(=O)O and I would rather not guess at the conditions. Which bond gives way first, and what does that tell us to stress?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.83,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "e8253b1ea101437db17e40c40c7fd898",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

@@ -11,6 +11,8 @@ happened", and refusals are part of the record rather than a list of faults.
 
 import asyncio
 
+import pytest
+
 from chemclaw.core.config import settings
 from chemclaw.core.db import connect
 from chemclaw.operations.evidence_pack import LIMITS, assemble
@@ -33,7 +35,7 @@ async def _clear() -> None:
     leaves rows for every later test to trip over.
     """
     async with await connect(settings.postgres_dsn) as conn:
-        for table in ("audit_events", "job_records", "effects", "plan_approvals"):
+        for table in ("audit_events", "job_records", "effects", "plan_approvals", "turn_costs"):
             await conn.execute(f"DELETE FROM {table} WHERE session_id = %s", (SESSION,))
         await conn.commit()
 
@@ -141,21 +143,17 @@ def test_a_refusal_is_part_of_the_record_rather_than_a_fault() -> None:
     asyncio.run(_clear())
 
 
-def test_an_empty_pack_says_so_rather_than_reading_as_nothing_happened() -> None:
+async def test_an_empty_pack_says_so_rather_than_reading_as_nothing_happened() -> None:
     """The one thing a caller must check before presenting a pack.
 
     An empty pack is a statement about the *record* — a window outside retention reads identically
     to a session in which nothing was done — which is the same distinction `Coverage` exists to
     make one module over.
     """
-
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        pack = await assemble("pack-test-session-that-never-existed")
-        assert pack.is_empty
-        assert pack.tool_calls == [] and pack.effects == []
-
-    asyncio.run(_run())
+    await migrated_db_or_skip()
+    pack = await assemble("pack-test-session-that-never-existed")
+    assert pack.is_empty
+    assert pack.tool_calls == [] and pack.effects == []
 
 
 def test_the_far_sides_own_text_reaches_the_model_with_no_live_delimiter() -> None:
@@ -258,6 +256,218 @@ def test_the_pack_carries_the_three_things_a_reader_must_not_supply_themselves()
         assert "not tamper-evidence" in joined
         assert "not the whole record of the decision" in joined
         assert "not the same as nothing" in joined
+
+    asyncio.run(_run())
+    asyncio.run(_clear())
+
+
+# --- how the turns ended, which the pack could not see --------------------------------------------
+
+
+async def _seed_turn(session_id: str, correlation_id: str, outcome: str, **columns: object) -> None:
+    """One `turn_costs` row — the ledger the pack now reads as its fifth store."""
+    row: dict[str, object] = {
+        "turn_id": f"tid-{session_id}-{correlation_id}",
+        "correlation_id": correlation_id,
+        "session_id": session_id,
+        "actor": "u-1",
+        "profile": "default",
+        "outcome": outcome,
+        "completed": outcome == "answered",
+        **columns,
+    }
+    async with await connect(settings.postgres_dsn) as conn:
+        await conn.execute(
+            f"INSERT INTO turn_costs ({', '.join(row)}) VALUES ({', '.join('%s' for _ in row)})",
+            tuple(row.values()),
+        )
+        await conn.commit()
+
+
+def test_a_degraded_session_no_longer_assembles_the_pack_a_clean_one_does() -> None:
+    """The finding, driven against the real stores.
+
+    Measured before the fifth read, with one session loop-capped and the durable tier dark: the
+    two packs were **byte-identical** once the timestamp and the latency were scrubbed. `assemble`
+    read `audit_events`, `job_records`, `effects` and `plan_approvals` — and `turn_costs`, which
+    holds `outcome`, was not among them. This is the module whose stated purpose is a
+    context-of-use record, and whose `LIMITS` names four other gaps and did not name this one.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        await _clear()
+        async with await connect(settings.postgres_dsn) as conn:
+            await conn.execute(
+                "INSERT INTO audit_events (correlation_id, session_id, actor, tool, arguments,"
+                " outcome, detail, latency_ms) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                ("c-1", SESSION, "u-1", "gather_evidence", "{}", "ok", "", 12.0),
+            )
+            await conn.commit()
+        await _seed_turn(SESSION, "c-1", "loop_capped", context_unreducible=True)
+
+        pack = await assemble(SESSION)
+
+        assert [(t.correlation_id, t.outcome) for t in pack.turns] == [("c-1", "loop_capped")]
+        assert pack.turns[0].completed is False
+        assert pack.turns[0].context_unreducible is True
+        assert [t.correlation_id for t in pack.degraded_turns] == ["c-1"]
+        # The tool call is unchanged: what ran is still what ran. The pack simply no longer
+        # presents it as a completed turn's evidence.
+        assert [call.tool for call in pack.tool_calls] == ["gather_evidence"]
+
+    asyncio.run(_run())
+    asyncio.run(_clear())
+
+
+def test_a_clean_turn_is_recorded_and_is_not_called_degraded() -> None:
+    """The control arm: `degraded_turns` empty on a turn that answered.
+
+    Without it the assertion above is satisfied by calling every turn degraded, which would make
+    the pack's headline mean nothing — the same reason `refusals` is asserted beside a successful
+    call rather than alone.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        await _clear()
+        await _seed_turn(SESSION, "c-9", "answered", answer_confidence=0.92, compacted=True)
+
+        pack = await assemble(SESSION)
+
+        assert [(t.correlation_id, t.outcome) for t in pack.turns] == [("c-9", "answered")]
+        assert pack.turns[0].answer_confidence == 0.92
+        # Compaction is the policy working on a long thread, not a statement about the answer.
+        assert pack.turns[0].compacted is True
+        assert pack.degraded_turns == []
+
+    asyncio.run(_run())
+    asyncio.run(_clear())
+
+
+def test_a_session_whose_only_record_is_an_abandoned_turn_is_not_reported_as_empty() -> None:
+    """A turn that spent tokens and was then abandoned writes a cost row and nothing else.
+
+    No audit row, no job, no approval — so before the fifth read the pack said "nothing recorded"
+    for a session that demonstrably ran and demonstrably cost money. `is_empty` is documented as
+    "the one thing a caller must check before presenting a pack", which is exactly the check that
+    was wrong here.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        await _clear()
+        await _seed_turn(SESSION, "c-x", "abandoned")
+
+        pack = await assemble(SESSION)
+
+        assert not pack.is_empty
+        assert [t.outcome for t in pack.degraded_turns] == ["abandoned"]
+
+    asyncio.run(_run())
+    asyncio.run(_clear())
+
+
+async def test_the_packs_own_headline_reaches_the_model_and_not_only_its_tests() -> None:
+    """`degraded_turns` had no reader in `src/` at all — one grep hit, its own `def`.
+
+    Its docstring calls it *"the pack's own headline"* and says *"a reader who checks nothing else
+    must be able to check this"*, in the present tense. Measured before this test: `grep -rn
+    degraded_turns --include=*.py src/` returned the definition and nothing else, its only callers
+    were three assertions in this file, and because a plain `@property` is not a `computed_field`
+    it was absent from `model_dump()` too — while its two siblings, `is_empty` and `refusals`, were
+    both surfaced on the payload the model receives.
+
+    That is a member kept alive by a test that calls it directly, carrying a present-tense claim
+    about a control: the two shapes this repository deletes on sight, in one object, added by the
+    wave that introduced it. Surfaced rather than deleted because that wave's finding was "a
+    degraded answer that reads as complete", and the pack is where that is supposed to stop being
+    true. This test is the reader the docstring claimed to have.
+    """
+    await migrated_db_or_skip()
+    await _clear()
+    async with await connect(settings.postgres_dsn) as conn:
+        await conn.execute(
+            "INSERT INTO audit_events (correlation_id, session_id, actor, tool, arguments,"
+            " outcome, detail, latency_ms) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+            ("c-head", SESSION, "u-1", "gather_evidence", "{}", "ok", "", 12.0),
+        )
+        await conn.commit()
+    await _seed_turn(SESSION, "c-head", "loop_capped", context_unreducible=True)
+
+    from chemclaw.agent.evidence_tools import assemble_evidence_pack
+
+    payload = await assemble_evidence_pack(SESSION)
+
+    assert payload["degraded_turns"] == ["c-head"], (
+        "the pack's own headline is absent from the payload the model receives, so a reader "
+        f"who checks nothing else checks nothing: {sorted(payload)}"
+    )
+
+
+def test_a_section_is_built_from_its_columns_by_name_and_not_by_their_order() -> None:
+    """Reversing a SELECT list must change nothing about the section it builds.
+
+    **This is the failure the pack could least afford and had.** `PackJob` was assembled by
+    unpacking a ten-element tuple whose first nine columns are all `TEXT` — `job_id`, `connector`,
+    `job`, `rationale`, `requested_by`, `summary`, `state`, `failure_reason`, `note_id` — so
+    editing the SELECT list swapped fields silently, passed `mypy --strict`, and produced a
+    plausible-looking evidence pack: a run attributed to the wrong person, with somebody else's
+    reason, in the one document a reader is told to treat as the record.
+
+    Both directions are driven, because only the pair is a control: the hostile order returns the
+    same section, and a column the model has no field for raises naming it rather than being
+    dropped.
+    """
+    import pydantic
+
+    from chemclaw.operations.evidence_pack import PackJob, _section
+
+    columns = (
+        "job_id, connector, job, rationale, requested_by, summary, state, failure_reason, "
+        "note_id, completed_at"
+    )
+    reversed_list = ", ".join(reversed([name.strip() for name in columns.split(",")]))
+    where = " FROM job_records WHERE session_id = %s ORDER BY completed_at LIMIT %s"
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        await _seed()
+        straight = await _section(PackJob, f"SELECT {columns}{where}", (SESSION, 10))
+        scrambled = await _section(PackJob, f"SELECT {reversed_list}{where}", (SESSION, 10))
+        assert straight and scrambled == straight, (
+            "the column order must not be able to decide which field a value lands in"
+        )
+        with pytest.raises(pydantic.ValidationError, match="surplus"):
+            await _section(PackJob, f"SELECT {columns}, connector AS surplus{where}", (SESSION, 10))
+
+    asyncio.run(_run())
+    asyncio.run(_clear())
+
+
+def test_a_hallucinated_tool_name_is_bounded_on_the_field_rather_than_by_its_reader() -> None:
+    """`audit_events.tool` is the model's own string, so the bound belongs on `ToolCall.tool`.
+
+    It used to be applied in the comprehension that built the section, and the comment beside it
+    recorded the reason that is not enough: "the sanitisation went into one reader of this column
+    and not its sibling in the same package". A row factory removes the comprehension altogether —
+    `class_row` builds the model straight out of the row and calls nothing of this module's on the
+    way — so a bound that lived in the reader would simply have been deleted by the conversion.
+    """
+
+    async def _run() -> None:
+        await migrated_db_or_skip()
+        await _seed()
+        async with await connect(settings.postgres_dsn) as conn:
+            await conn.execute(
+                "INSERT INTO audit_events (correlation_id, session_id, actor, tool, arguments,"
+                " outcome, detail, latency_ms) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                ("c-9", SESSION, "u-1", "drop table; --", "{}", "error", "", 1.0),
+            )
+            await conn.commit()
+        pack = await assemble(SESSION)
+        assert "drop table; --" not in [call.tool for call in pack.tool_calls]
+        assert "(unrecognised)" in [call.tool for call in pack.tool_calls]
 
     asyncio.run(_run())
     asyncio.run(_clear())

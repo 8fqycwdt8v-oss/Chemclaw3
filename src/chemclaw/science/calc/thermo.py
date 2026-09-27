@@ -19,8 +19,14 @@ meaning rather than their implementation:
 
 **Quasi-RRHO entropy (Grimme 2012).** A harmonic oscillator's entropy diverges as its frequency
 goes to zero, and the lowest modes are exactly where the harmonic approximation is worst — so a
-5 cm^-1 mode from a floppy molecule can contribute several kcal/mol of nonsense to G. Below
-`rrho_cutoff_cm` a mode is interpolated toward a free rotor, which is what `xtb` itself does.
+5 cm^-1 mode from a floppy molecule can contribute several kcal/mol of nonsense to G. Each mode's
+entropy is a Head-Gordon-damped mixture of the harmonic and free-rotor expressions, weighted
+1/(1 + (w0/w)^4) — so `rrho_cutoff_cm` is the frequency at which the two contribute equally rather
+than a threshold anything switches at. **It is a choice and its size is measured**: at the shipped
+w0 = 50 cm^-1, `xtb`'s own `--sthr` default, a flexible molecule's -T·S sits ~1.1 kcal/mol above
+what 25 cm^-1 gives and ~0.8 below Grimme's published 100 — see
+`tests/test_calc_thermo.py::test_the_qrrho_cutoff_is_the_one_xtb_uses_and_the_choice_is_worth_a_kcal`
+and `core/config/calculators.py` for why this deployment takes xtb's number.
 
 **The standard state follows the phase, and is not a knob.** A free energy is only a quantity once
 its reference state is named, and the two conventions differ by RT ln(RT c0/P0) = 1.894 kcal/mol per
@@ -52,6 +58,8 @@ from rdkit import Chem
 from scipy.linalg import null_space
 
 from chemclaw.core.config import settings
+from chemclaw.core.units import HARTREE_TO_KCAL as HARTREE_TO_KCAL
+from chemclaw.core.units import JOULE_PER_CALORIE
 from chemclaw.science.calc.models import (
     Conformer,
     ConformerEnsemble,
@@ -66,24 +74,36 @@ from chemclaw.science.calc.models import (
     WeightedValue,
 )
 
-# Hartree to kcal/mol. Every energy the server returns is in Hartree; every difference a chemist
-# reads is in kcal/mol, so this is the one conversion every composite here and in
-# `connectors/calc/compose.py` needs.
-HARTREE_TO_KCAL = 627.5094740631
-
-# SI constants (CODATA), and the conversions this module needs. Everything internal is SI; only the
-# reported fields are in the units a chemist reads.
+# The constants this module computes over.
+#
+# **`HARTREE_TO_KCAL` is imported rather than declared.** Every energy the server returns is in
+# Hartree and every difference a chemist reads is in kcal/mol, so it is the one conversion every
+# composite here and in `connectors/calc/compose.py` needs — and it was written out three times,
+# here, in `core/units.py` and in `publish/properties.py`, with the middle copy 1.5e-08 low.
+# `core.units` is the one definition. The `as HARTREE_TO_KCAL` above is the explicit re-export form
+# `mypy --strict` requires, and it is a re-export on purpose: `connectors/calc/compose.py` has read
+# this name from this module since before the constant had one home, and moving that import is
+# that file's change to make.
+#
+# The rest are SI (CODATA 2018 / SI 2019). Everything internal is SI; only the reported fields are
+# in the units a chemist reads. `_PLANCK`, `_BOLTZMANN` and `_AVOGADRO` are exact by definition
+# since the 2019 redefinition, which is why R is derived from two of them below rather than typed
+# out a third time.
 _PLANCK = 6.62607015e-34  # J s
 _BOLTZMANN = 1.380649e-23  # J/K
 _AVOGADRO = 6.02214076e23  # 1/mol
-_GAS_CONSTANT = 8.314462618  # J/(mol K)
 _LIGHT_CM = 2.99792458e10  # cm/s
 _HARTREE_J = 4.3597447222071e-18
 _AMU_KG = 1.66053906660e-27
-_J_PER_MOL_TO_KCAL = 1.0 / 4184.0
+_J_PER_MOL_TO_KCAL = 1.0 / (JOULE_PER_CALORIE * 1000.0)
 
-# The same gas constant in cal/(mol K), which is the unit a conformational entropy is reported in.
-_GAS_CONSTANT_CAL = 1.987204258640832
+# The molar gas constant, in J/(mol K) and in the cal/(mol K) a conformational entropy is reported
+# in. **One definition and one derivation, because two literals disagreed**: `8.314462618` here
+# against `1.987204258640832` there, the second being the *untruncated* R/4.184. The gap was
+# rel 1.8e-11 and harmless, and it is the shape that stops being harmless the moment somebody
+# retypes one of them from a different table.
+_GAS_CONSTANT = _BOLTZMANN * _AVOGADRO
+_GAS_CONSTANT_CAL = _GAS_CONSTANT / JOULE_PER_CALORIE
 
 # Grimme's free-rotor moment of inertia, the value that keeps the free-rotor entropy finite as the
 # frequency goes to zero (kg m^2).
@@ -143,17 +163,78 @@ def _atomic_masses(elements: list[int]) -> np.ndarray:
     return np.array([table.GetAtomicWeight(number) for number in elements])
 
 
-def _align_intensities(intensities: np.ndarray, modes: int, structure: Structure) -> np.ndarray:
-    """Drop xtb's projected-out external modes so intensities pair with our own modes.
+#: Below this wavenumber (cm^-1) the server has projected the mode out as a translation or a
+#: rotation. xtb writes those rows as exact zeros; the tolerance is for float formatting, not for
+#: a real mode, the softest of which are two orders above it.
+_EXTERNAL_MODE_CM = 0.01
 
-    xtb lists all 3N entries with the translations and rotations first; the projection below reports
-    only the vibrations. Reconciling by count is the point — if the two projections disagree about
-    how many external modes a molecule has, every intensity would shift by one mode, so a mismatch
-    fails loudly instead (gate G4).
+
+class IntensityAlignmentError(ValueError):
+    """The server's intensities cannot be paired with this projection's modes.
+
+    **A separate class because the failure is confined to the spectrum, and it used to take the
+    whole result down.** Pairing needs both sides to agree on how many modes are external, and they
+    decide it by different criteria (see `_align_intensities`) — so a geometry inside the
+    ~2.3-degree window where they disagree raised out of `thermochemistry_from_hessian`, and a
+    caller got **no** G, H, S or `is_minimum` for a Hessian whose thermochemistry was entirely
+    correct. The intensities feed the spectrum and nothing else: not one term of the partition
+    function reads them.
+
+    So the fail-loud stays and moves to the field it is about.
+    `ThermochemistryResult.spectrum_unavailable` carries this message and every
+    `VibrationalMode.ir_intensity_km_per_mol` is `None`, which is a statement rather than the silent
+    zero-intensity spectrum this module already refuses to produce one branch further down.
+
+    A `ValueError` still, so a direct caller of `_align_intensities` — and the messages a model
+    reads — are unchanged.
     """
+
+
+def _align_intensities(
+    intensities: np.ndarray,
+    modes: int,
+    structure: Structure,
+    wavenumbers_cm: list[float] | None = None,
+) -> np.ndarray:
+    """Pair the server's intensities with this projection's modes, by wavenumber where possible.
+
+    xtb lists all 3N entries with the translations and rotations first — measured against xtb 6.7.1
+    itself, on water, a planar-ammonia saddle and CO2, so the ordering is not an assumption.
+
+    **Counting was never sufficient, and the sentence that stood here claimed otherwise.** It said a
+    disagreement "fails loudly instead", and that check cannot fire: how many modes are external is
+    a judgement about the molecule, and the two sides make it by different criteria — xtb tests
+    unmassed inertia against an absolute threshold, `_is_linear` tests mass-weighted moments against
+    a relative one. Measured over a real O-C-O bend, they agree at 180.0 deg and at 175.0 deg and
+    disagree at **179.0 deg**, where xtb projects out six and this side expects four of nine. The
+    subtraction then yields five, which is neither negative nor suspicious, so nothing raised and
+    the 2593 cm^-1 stretch's intensity was reported against the band below it — every band shifted,
+    silently, on the geometry a scan point looks like.
+
+    So when the server says which wavenumber each entry belongs to, that is what is used: the
+    external rows it zeroed are dropped by value, and what remains must then match this projection's
+    mode count or the mismatch really does fail loudly. Without the field — a row cached before the
+    server sent it — the old subtraction stands, because it is the only thing available.
+    """
+    if wavenumbers_cm is not None:
+        if len(wavenumbers_cm) != intensities.size:
+            raise IntensityAlignmentError(
+                f"the server sent {len(wavenumbers_cm)} wavenumbers for {intensities.size} "
+                f"intensities for {structure.smiles or structure.structure_id}"
+            )
+        internal = np.abs(np.asarray(wavenumbers_cm)) >= _EXTERNAL_MODE_CM
+        paired = np.asarray(intensities[internal])
+        if paired.size != modes:
+            raise IntensityAlignmentError(
+                f"the server projected out {intensities.size - paired.size} external mode(s) "
+                f"leaving {paired.size}, and this projection found {modes} "
+                f"for {structure.smiles or structure.structure_id}; pairing them would shift "
+                "every band"
+            )
+        return paired
     external = intensities.size - modes
     if external < 0:
-        raise ValueError(
+        raise IntensityAlignmentError(
             f"the server reported {intensities.size} modes but the projection found {modes} "
             f"for {structure.smiles or structure.structure_id}"
         )
@@ -382,10 +463,22 @@ def thermochemistry_from_hessian(
     matrix = unpack_npy(hessian.hessian_npy)
     wavenumbers, vectors = _normal_modes(matrix, masses, positions)
     electronic = hessian.electronic_energy_hartree
+    # `None` means "this result carries no spectrum, and here is why" — see
+    # `IntensityAlignmentError`. Every term below is computed from the wavenumbers and the geometry,
+    # so a pairing that cannot be trusted costs the bands and nothing else.
+    intensities: np.ndarray | None
+    spectrum_unavailable: str | None = None
     if hessian.ir_intensities is not None:
-        intensities = _align_intensities(
-            np.asarray(hessian.ir_intensities), wavenumbers.size, structure
-        )
+        try:
+            intensities = _align_intensities(
+                np.asarray(hessian.ir_intensities),
+                wavenumbers.size,
+                structure,
+                hessian.ir_wavenumbers_cm,
+            )
+        except IntensityAlignmentError as mismatch:
+            intensities = None
+            spectrum_unavailable = str(mismatch)
     elif hessian.dipole_derivatives_npy is not None:
         intensities = _ir_intensities(unpack_npy(hessian.dipole_derivatives_npy), vectors, masses)
     else:
@@ -396,6 +489,11 @@ def thermochemistry_from_hessian(
             f"the Hessian for {structure.smiles or structure.structure_id} carries neither IR "
             "intensities nor dipole derivatives, so no spectrum can be derived from it"
         )
+
+    # One entry per mode either way, so the zip below stays strict.
+    per_mode: list[float | None] = (
+        [None] * int(wavenumbers.size) if intensities is None else list(intensities)
+    )
 
     temperature = spec.temperature_k
     # The reference state is the medium's, not the caller's — see `_reference_pressure`. Everything
@@ -468,12 +566,17 @@ def thermochemistry_from_hessian(
         imaginary_frequencies_cm=imaginary,
         is_stationary=stationary,
         max_gradient_hartree_per_angstrom=gradient,
+        spectrum_unavailable=spectrum_unavailable,
         modes=[
             VibrationalMode(
                 wavenumber_cm=round(float(wavenumber), 1),
-                ir_intensity_km_per_mol=round(float(intensity), 2),
+                ir_intensity_km_per_mol=None if band is None else round(float(band), 2),
             )
-            for wavenumber, intensity in zip(wavenumbers, intensities, strict=True)
+            # `strict=True` rather than indexing by position, which is what this used to be and is
+            # worth keeping: length agreement is the property `_align_intensities` exists to
+            # establish, and an intensity array *longer* than the mode set would be silently
+            # truncated here — the same off-by-one band shift that function refuses.
+            for wavenumber, band in zip(wavenumbers, per_mode, strict=True)
         ],
         mode_count=len(wavenumbers),
         lowest_wavenumbers_cm=[round(float(value), 1) for value in wavenumbers[:5]],

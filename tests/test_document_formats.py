@@ -18,6 +18,7 @@ import zipfile
 import pytest
 
 from chemclaw.agent.attachments import AttachmentError, content_type_for, parse_attachment
+from chemclaw.ingest.documents.parse import _decode
 from tests.document_fixtures import (
     _blank_pdf_bytes,
     _docx_bytes,
@@ -332,3 +333,87 @@ def test_an_ordinary_workbook_is_not_mistaken_for_a_bomb() -> None:
     """The guard must not refuse the documents it exists to protect."""
     raw = _xlsx_bytes({"yields": [["run", "yield"], [1, 84]]})
     assert "1 | 84" in parse_attachment("runs.xlsx", raw).text
+
+
+# --- encodings ----------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("name", ["notes.txt", "notes.md", "runs.csv", "runs.tsv"])
+def test_a_utf8_document_reads_exactly_as_it_did_before_detection_existed(name: str) -> None:
+    """The additivity property `_decode` rests on, asserted rather than argued.
+
+    Detection is consulted only for bytes strict UTF-8 refuses, so a correctly-encoded document must
+    decode to exactly what the single-encoding policy produced. That is the whole reason the
+    ordering is UTF-8-first rather than detector-first: a heuristic given the chance to re-label a
+    file that was already right can only make it wrong, and `charset_normalizer` demonstrably does
+    that on short inputs.
+
+    The comparison is against the *deleted* policy written out here, not against the code that
+    replaced it — a basis re-derived from the subject agrees with itself forever.
+    """
+    text = "Reaktion bei 60 °C; Ausbeute 87 %\nSolvens,Toluol\nBediener,A. Müller\n"
+    for raw in (b"", b"plain ascii\n", text.encode("utf-8"), text.encode("utf-8") + b"\r\n"):
+        assert _decode(raw) == raw.decode("utf-8", errors="replace"), raw
+
+    parsed = parse_attachment(name, text.encode("utf-8")).text
+    assert "°C" in parsed
+    assert "Müller" in parsed
+
+
+def test_a_cp1252_document_is_read_rather_than_punched_full_of_replacement_characters() -> None:
+    """The defect that costs a chemist a unit: a Windows-encoded note on a decade-old share.
+
+    `errors="replace"` never raises, so this was invisible — the mojibake was chunked, embedded,
+    retrieved and cited exactly like a correct reading. Both halves are measured here: what the
+    old policy produced, and what this one does.
+    """
+    text = (
+        "Reaction held at 60 °C; yield 87 %. Solvent: toluene. Operator: A. Müller. "
+        "Reaction held at 60 °C; yield 87 %. Solvent: toluene. Operator: A. Müller. "
+        "Reaction held at 60 °C; yield 87 %. Solvent: toluene. Operator: A. Müller. "
+        "Reaction held at 60 °C; yield 87 %. Solvent: toluene. Operator: A. Müller. "
+    )
+    raw = text.encode("cp1252")
+
+    # What shipped: the degree sign and the umlaut become U+FFFD, and nothing counts it.
+    old_policy_text = raw.decode("utf-8", errors="replace")
+    assert "60 �C" in old_policy_text
+    assert "°C" not in old_policy_text
+
+    assert parse_attachment("note.txt", raw).text == text
+
+
+def test_a_utf8_bom_does_not_end_up_inside_the_first_csv_header_cell() -> None:
+    """A BOM is valid UTF-8, so the single-encoding policy kept it — inside a *column name*.
+
+    Excel's "CSV UTF-8" writes one. The first header cell then reads `<U+FEFF>Compound`, which is a
+    column name nothing a caller can type or configure will match, and which reaches a chemist in a
+    rendered table looking like `Compound`.
+    """
+    raw = "﻿Compound,Temp_C\naspirin,60\n".encode()
+
+    old_policy_first_cell = raw.decode("utf-8", errors="replace").split(",", 1)[0]
+    assert old_policy_first_cell == "﻿Compound"
+
+    parsed = parse_attachment("runs.csv", raw)
+    assert parsed.text.startswith("Compound | Temp_C")
+    assert "﻿" not in parsed.text
+
+
+def test_a_utf16_document_is_read_instead_of_being_refused_for_its_nul_bytes() -> None:
+    """Notepad's "Unicode" save, refused by the share with a true statement about the wrong thing.
+
+    UTF-16 survives `errors="replace"` with its NUL bytes intact, so `sync._read_and_parse`'s
+    guard caught it and filed it as `skipped_unreadable` saying a Postgres `text` column cannot
+    hold a NUL. An operator reading that report learns nothing about the encoding, and the file
+    is simply absent from the corpus.
+    """
+    text = "Reaction held at 60 °C; yield 87 %. Solvent: toluene.\n"
+    raw = text.encode("utf-16")
+
+    old_policy_text = raw.decode("utf-8", errors="replace")
+    assert "\x00" in old_policy_text  # what the NUL guard saw, and why it fired
+
+    parsed = parse_attachment("note.txt", raw)
+    assert "\x00" not in parsed.text
+    assert parsed.text == text

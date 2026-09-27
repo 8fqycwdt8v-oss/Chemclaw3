@@ -111,96 +111,173 @@ def _binding() -> CorpusBinding:
     return CorpusBinding.model_validate(_BINDING)
 
 
-def test_the_drain_pages_by_keyset_and_records_what_it_reads() -> None:
+async def test_the_drain_pages_by_keyset_and_records_what_it_reads() -> None:
     """Two pages of two, resuming strictly after the last key — never re-reading a row."""
+    index, warehouse, binding = InMemoryLabelIndex(), _fake(), _binding()
+    first = await drain_corpus(warehouse, binding, index, "pistachio", limit=2)
+    assert (first.read, first.recorded, first.cursor, first.has_more) == (2, 2, "p2", True)
 
-    async def _run() -> None:
-        index, warehouse, binding = InMemoryLabelIndex(), _fake(), _binding()
-        first = await drain_corpus(warehouse, binding, index, "pistachio", limit=2)
-        assert (first.read, first.recorded, first.cursor, first.has_more) == (2, 2, "p2", True)
+    second = await drain_corpus(warehouse, binding, index, "pistachio", after=first.cursor, limit=2)
+    assert (second.read, second.recorded, second.skipped) == (2, 1, 1)
+    assert second.cursor == "p4"
 
-        second = await drain_corpus(
-            warehouse, binding, index, "pistachio", after=first.cursor, limit=2
+    third = await drain_corpus(warehouse, binding, index, "pistachio", after=second.cursor, limit=2)
+    assert (third.read, third.recorded, third.has_more) == (0, 0, False)
+
+    assert {r.reaction_id for r in await index.stale("any", limit=50)} == {"p1", "p2", "p3"}
+
+
+async def test_a_field_the_source_supplied_and_the_drain_cannot_read_is_counted(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A NULL nobody counted, in a report whose own field description says "Counted, never silent".
+
+    `_number` correctly refuses to coerce an unreadable value to zero — zero is a real temperature
+    and a real yield — and then lost it with no counter of any kind. Measured over eleven realistic
+    corpus cells, eight became `NULL`: `'60 °C'`, `'60C'`, `'333 K'`, `'60-65'`, `'rt'`, `'reflux'`,
+    `''` and `'1,20'`. `search.py`'s facets filter on `temperature_c`, so a precedent search for a
+    temperature window silently excludes every row whose column was written with a unit, and
+    `CorpusCoverage`'s verdict is about *labelling* coverage rather than field coverage, so nothing
+    in the answer says so. A site can declare a `transform:`, which is why this is a missing counter
+    and not a weak parser.
+
+    The blank cell is deliberately **not** counted: an empty column is the source recording nothing,
+    and putting the ordinary case in this counter would make it useless for the thing it is for.
+    """
+    import logging
+
+    binding = dict(_BINDING)
+    # No `transform:` on this field, which is where the silence lives: a declared `number`
+    # transform *raises* `TransformError` on an unreadable cell and takes the whole batch with it
+    # (loud, and non-retryable), while a plainly-bound column leaves `_number`'s own `float()` as
+    # the only parser — and that one answered `None` and said nothing.
+    binding["temperature_c"] = {"path": "root.TEMP"}
+    rows = _rows()[:2]
+    rows[0]["TEMP"] = "60 °C"
+    rows[1]["TEMP"] = ""
+    warehouse = KeysetWarehouse({_RELATION: rows}, _RELATION, "REACTION_ID")
+
+    with caplog.at_level(logging.WARNING):
+        report = await drain_corpus(
+            warehouse,
+            CorpusBinding.model_validate(binding),
+            InMemoryLabelIndex(),
+            "pistachio",
+            limit=5,
         )
-        assert (second.read, second.recorded, second.skipped) == (2, 1, 1)
-        assert second.cursor == "p4"
 
-        third = await drain_corpus(
-            warehouse, binding, index, "pistachio", after=second.cursor, limit=2
+    assert (report.read, report.recorded) == (2, 2), "the rows are recorded, without the field"
+    assert report.unreadable_fields == 1, "the unit-carrying cell is counted; the blank one is not"
+    assert "could not be read" in caplog.text
+
+
+async def test_a_blank_date_is_the_source_recording_nothing_and_is_not_counted() -> None:
+    """`_date` holds `_number`'s blank-is-absent rule rather than counting an undated row.
+
+    `iso_date` turns `''` into None, and the raw `''` is not None, so an undated row in a text-typed
+    export was counted as a value the drain failed to read — every such row a WARNING telling the
+    site to declare a transform it already had. A garbled date is still counted.
+    """
+    rows = _rows()[:2]
+    rows[0]["PUBLICATION_DATE"] = "   "
+    rows[1]["PUBLICATION_DATE"] = ""
+    warehouse = KeysetWarehouse({_RELATION: rows}, _RELATION, "REACTION_ID")
+
+    report = await drain_corpus(warehouse, _binding(), InMemoryLabelIndex(), "pistachio", limit=5)
+
+    assert (report.recorded, report.unreadable_fields) == (2, 0)
+
+
+async def test_the_corpus_page_runs_its_patterns_under_one_page_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The per-cell `regex` bound does not compose, so the drain has to open the page's own.
+
+    `_record` runs a site's transforms on every bound field of up to `corpus_page_size` rows, and
+    with no `pattern_budget()` open `_cell_budget` handed every cell the whole per-cell timeout:
+    a slow-but-completing pattern was minutes of synchronous CPU the activity could only time out
+    on, with the retry reading the identical page. A page budget too small for even an honest
+    pattern is what shows the bound is in force — before the fix this page drained cleanly.
+    """
+    from chemclaw.ingest.eln.warehouse.expr import PatternBudgetError
+
+    monkeypatch.setattr(settings, "eln_regex_page_budget_seconds", 1e-9)
+    binding = dict(_BINDING)
+    binding["citation"] = {
+        "path": "root.PATENT_NUMBER",
+        "transform": [{"regex": {"pattern": r"US(\d+)", "group": 0}}],
+    }
+
+    with pytest.raises(PatternBudgetError):
+        await drain_corpus(
+            _fake(), CorpusBinding.model_validate(binding), InMemoryLabelIndex(), "pistachio"
         )
-        assert (third.read, third.recorded, third.has_more) == (0, 0, False)
-
-        assert {r.reaction_id for r in await index.stale("any", limit=50)} == {"p1", "p2", "p3"}
-
-    asyncio.run(_run())
 
 
-def test_a_recorded_row_carries_the_citation_the_conditions_and_the_species() -> None:
+async def test_a_readable_corpus_counts_no_unreadable_fields() -> None:
+    """The counter's zero, so that a rise in it means something.
+
+    A test whose measured value is always nonzero cannot tell a reader that the ordinary case is
+    quiet, which is the half that makes the counter above worth reading.
+    """
+    report = await drain_corpus(_fake(), _binding(), InMemoryLabelIndex(), "pistachio", limit=5)
+    assert report.unreadable_fields == 0
+
+
+async def test_a_recorded_row_carries_the_citation_the_conditions_and_the_species() -> None:
     """A precedent a chemist cannot follow back is not a precedent — so the citation is required."""
+    index = InMemoryLabelIndex()
+    await drain_corpus(_fake(), _binding(), index, "pistachio", limit=10)
+    rows = {r.reaction_id: r for r in await index.stale("any", limit=50)}
 
-    async def _run() -> None:
-        index = InMemoryLabelIndex()
-        await drain_corpus(_fake(), _binding(), index, "pistachio", limit=10)
-        rows = {r.reaction_id: r for r in await index.stale("any", limit=50)}
-
-        buchwald = rows["p1"]
-        assert buchwald.citation == "US9376441B2"
-        assert buchwald.performed_on == date(2016, 6, 28)
-        assert buchwald.yield_percent == 88.0
-        assert buchwald.workup_text is not None and "EtOAc" in buchwald.workup_text
-        # `reactants>agents>products` split into species, each carrying the slot it came from. The
-        # agent slot is `reagent`, not `solvent`: the record form groups solvent, catalyst, ligand
-        # and base into one slot, and deciding which is the labeller's job.
-        assert [(s.smiles, s.role) for s in buchwald.species] == [
-            ("Brc1ccccc1", "reactant"),
-            ("NC1CCCCC1", "reactant"),
-            ("CC#N", "reagent"),
-            ("c1ccc(NC2CCCCC2)cc1", "product"),
-        ]
-        # Nothing is derived yet — that is the labelling drain's pass.
-        assert all(s.derived_role is None for s in buchwald.species)
-
-    asyncio.run(_run())
+    buchwald = rows["p1"]
+    assert buchwald.citation == "US9376441B2"
+    assert buchwald.performed_on == date(2016, 6, 28)
+    assert buchwald.yield_percent == 88.0
+    assert buchwald.workup_text is not None and "EtOAc" in buchwald.workup_text
+    # `reactants>agents>products` split into species, each carrying the slot it came from. The
+    # agent slot is `reagent`, not `solvent`: the record form groups solvent, catalyst, ligand
+    # and base into one slot, and deciding which is the labeller's job.
+    assert [(s.smiles, s.role) for s in buchwald.species] == [
+        ("Brc1ccccc1", "reactant"),
+        ("NC1CCCCC1", "reactant"),
+        ("CC#N", "reagent"),
+        ("c1ccc(NC2CCCCC2)cc1", "product"),
+    ]
+    # Nothing is derived yet — that is the labelling drain's pass.
+    assert all(s.derived_role is None for s in buchwald.species)
 
 
-def test_a_label_the_corpus_carries_is_recorded_and_marked_as_the_corpus_claim() -> None:
+async def test_a_label_the_corpus_carries_is_recorded_and_marked_as_the_corpus_claim() -> None:
     """A corpus claim and our own SMIRKS match are different evidence, and `method` says so."""
+    index = InMemoryLabelIndex()
+    await drain_corpus(_fake(), _binding(), index, "pistachio", limit=10)
+    rows = {r.reaction_id: r for r in await index.stale("any", limit=50)}
 
-    async def _run() -> None:
-        index = InMemoryLabelIndex()
-        await drain_corpus(_fake(), _binding(), index, "pistachio", limit=10)
-        rows = {r.reaction_id: r for r in await index.stale("any", limit=50)}
-
-        assert rows["p1"].named_reaction == "Buchwald-Hartwig amination"
-        assert rows["p1"].rxno_id == "RXNO:0000192"
-        assert rows["p1"].method == "source"
-        # The unclassified third: a row the corpus left empty, which the labeller must fill. It is
-        # stale exactly like every other row, because `provides` is not a skip.
-        assert rows["p3"].named_reaction is None
-        assert rows["p3"].method is None
-        assert rows["p3"].labeller_version is None
-        # And it is `None`, not the string "None". `as_text` is `str()` for everything, so a NULL
-        # column reached the model as a four-character name until this test caught it — after
-        # which every unclassified patent reaction would have been counted in frequency tables as
-        # a named reaction called "None".
-        assert rows["p3"].rxno_id is None
-
-    asyncio.run(_run())
+    assert rows["p1"].named_reaction == "Buchwald-Hartwig amination"
+    assert rows["p1"].rxno_id == "RXNO:0000192"
+    assert rows["p1"].method == "source"
+    # The unclassified third: a row the corpus left empty, which the labeller must fill. It is
+    # stale exactly like every other row, because `provides` is not a skip.
+    assert rows["p3"].named_reaction is None
+    assert rows["p3"].method is None
+    assert rows["p3"].labeller_version is None
+    # And it is `None`, not the string "None". `as_text` is `str()` for everything, so a NULL
+    # column reached the model as a four-character name until this test caught it — after
+    # which every unclassified patent reaction would have been counted in frequency tables as
+    # a named reaction called "None".
+    assert rows["p3"].rxno_id is None
 
 
-def test_re_draining_an_unchanged_release_is_a_no_op_that_keeps_its_labels() -> None:
+async def test_re_draining_an_unchanged_release_is_a_no_op_that_keeps_its_labels() -> None:
     """A drain is safe to stop and resume at any point, with no bookkeeping to get wrong."""
+    index = InMemoryLabelIndex()
+    await drain_corpus(_fake(), _binding(), index, "pistachio", limit=10)
+    rows = {r.reaction_id: r for r in await index.stale("any", limit=50)}
+    await index.store_labels(rows["p3"], "rxnlabel@1")
 
-    async def _run() -> None:
-        index = InMemoryLabelIndex()
-        await drain_corpus(_fake(), _binding(), index, "pistachio", limit=10)
-        rows = {r.reaction_id: r for r in await index.stale("any", limit=50)}
-        await index.store_labels(rows["p3"], "rxnlabel@1")
-
-        await drain_corpus(_fake(), _binding(), index, "pistachio", limit=10)
-        assert "p3" not in {r.reaction_id for r in await index.stale("rxnlabel@1", limit=50)}
-
-    asyncio.run(_run())
+    await drain_corpus(_fake(), _binding(), index, "pistachio", limit=10)
+    assert "p3" not in {r.reaction_id for r in await index.stale("rxnlabel@1", limit=50)}
 
 
 def test_the_shipped_pistachio_manifest_binds_and_declares_what_it_carries() -> None:
@@ -274,7 +351,7 @@ def _load_seq_warehouse() -> KeysetWarehouse:
     return KeysetWarehouse({_RELATION: _load_seq_rows()}, _RELATION, "LOAD_SEQ")
 
 
-def test_a_null_in_the_pagination_column_never_becomes_the_string_none() -> None:
+async def test_a_null_in_the_pagination_column_never_becomes_the_string_none() -> None:
     """`as_text` is `str()`, so a NULL cursor value resumed the next page at `> 'None'`.
 
     The identical defect `_field` documents and fixes, on the line that decides where the next page
@@ -284,25 +361,21 @@ def test_a_null_in_the_pagination_column_never_becomes_the_string_none() -> None
     A cursor that cannot advance holds its position instead, which is what makes the workflow's
     "no cursor advance" guard fire and name the mis-declared `order_by`.
     """
+    index, warehouse = InMemoryLabelIndex(), _load_seq_warehouse()
+    binding = CorpusBinding.model_validate(_LOAD_SEQ_BINDING)
 
-    async def _run() -> None:
-        index, warehouse = InMemoryLabelIndex(), _load_seq_warehouse()
-        binding = CorpusBinding.model_validate(_LOAD_SEQ_BINDING)
+    page = await drain_corpus(warehouse, binding, index, "pistachio", limit=1)
 
-        page = await drain_corpus(warehouse, binding, index, "pistachio", limit=1)
-
-        assert (page.read, page.recorded, page.has_more) == (1, 1, True)
-        assert page.cursor == "", "a NULL cursor value must not advance the keyset"
-        # And the *key* column's value is not substituted for it either: `p1` is an id, `LOAD_SEQ`
-        # holds load sequences, and comparing one against the other resumes the drain at an
-        # arbitrary point in the release.
-        await drain_corpus(warehouse, binding, index, "pistachio", after=page.cursor, limit=1)
-        assert [params for _, params in warehouse.executed] == [[1], [1]]
-
-    asyncio.run(_run())
+    assert (page.read, page.recorded, page.has_more) == (1, 1, True)
+    assert page.cursor == "", "a NULL cursor value must not advance the keyset"
+    # And the *key* column's value is not substituted for it either: `p1` is an id, `LOAD_SEQ`
+    # holds load sequences, and comparing one against the other resumes the drain at an
+    # arbitrary point in the release.
+    await drain_corpus(warehouse, binding, index, "pistachio", after=page.cursor, limit=1)
+    assert [params for _, params in warehouse.executed] == [[1], [1]]
 
 
-def test_the_cursor_advances_past_a_row_the_drain_skips() -> None:
+async def test_the_cursor_advances_past_a_row_the_drain_skips() -> None:
     """A row with no key is skipped as a precedent — the drain must still get past it.
 
     The cursor was only written for rows that *had* a key, so a keyless row at the end of a page
@@ -310,23 +383,19 @@ def test_the_cursor_advances_past_a_row_the_drain_skips() -> None:
     row it was never going to record. Advancing is read from the pagination column alone, which is
     the only column the resume predicate compares.
     """
+    rows = _load_seq_rows()
+    rows[1]["REACTION_ID"] = None  # the row `_record` refuses for want of a key
+    index = InMemoryLabelIndex()
+    warehouse = KeysetWarehouse({_RELATION: rows}, _RELATION, "LOAD_SEQ")
+    binding = CorpusBinding.model_validate(_LOAD_SEQ_BINDING)
 
-    async def _run() -> None:
-        rows = _load_seq_rows()
-        rows[1]["REACTION_ID"] = None  # the row `_record` refuses for want of a key
-        index = InMemoryLabelIndex()
-        warehouse = KeysetWarehouse({_RELATION: rows}, _RELATION, "LOAD_SEQ")
-        binding = CorpusBinding.model_validate(_LOAD_SEQ_BINDING)
+    page = await drain_corpus(warehouse, binding, index, "pistachio", after="A099", limit=1)
 
-        page = await drain_corpus(warehouse, binding, index, "pistachio", after="A099", limit=1)
-
-        assert (page.read, page.recorded, page.skipped) == (1, 0, 1)
-        assert page.cursor == "A100"
-
-    asyncio.run(_run())
+    assert (page.read, page.recorded, page.skipped) == (1, 0, 1)
+    assert page.cursor == "A100"
 
 
-def test_every_recorded_reaction_is_fingerprinted_under_its_source_and_id() -> None:
+async def test_every_recorded_reaction_is_fingerprinted_under_its_source_and_id() -> None:
     """The half that did not exist: a bulk source becomes searchable by transformation.
 
     `record_for_reaction` had exactly one caller in the tree — the ELN path — so a corpus drained
@@ -336,29 +405,25 @@ def test_every_recorded_reaction_is_fingerprinted_under_its_source_and_id() -> N
     lets a hit join to `reaction_labels` and what keeps two sources sharing an entry id from
     collapsing onto one row.
     """
+    index = InMemoryLabelIndex()
+    reactions = InMemoryFingerprintStore()
 
-    async def _run() -> None:
-        index = InMemoryLabelIndex()
-        reactions = InMemoryFingerprintStore()
+    report = await drain_corpus(
+        _fake(), _binding(), index, "pistachio", reactions=reactions, limit=10
+    )
 
-        report = await drain_corpus(
-            _fake(), _binding(), index, "pistachio", reactions=reactions, limit=10
-        )
-
-        stored = await reactions.all_records()
-        assert {(r.source, r.id) for r in stored} == {
-            ("pistachio", "p1"),
-            ("pistachio", "p2"),
-            ("pistachio", "p3"),
-        }
-        assert report.unfingerprintable == 0
-        # p4 resolved no product, so it is not a precedent and never reached the index at all.
-        assert report.skipped == 1
-
-    asyncio.run(_run())
+    stored = await reactions.all_records()
+    assert {(r.source, r.id) for r in stored} == {
+        ("pistachio", "p1"),
+        ("pistachio", "p2"),
+        ("pistachio", "p3"),
+    }
+    assert report.unfingerprintable == 0
+    # p4 resolved no product, so it is not a precedent and never reached the index at all.
+    assert report.skipped == 1
 
 
-def test_the_indexed_reaction_drops_its_agents_so_a_solvent_swap_cannot_dominate() -> None:
+async def test_the_indexed_reaction_drops_its_agents_so_a_solvent_swap_cannot_dominate() -> None:
     """The label the bits are taken over is `reactants>>products`, never the three-part form.
 
     `DrfpEncoder` folds the agent slot onto the reactants, so keeping it would encode the solvent
@@ -369,25 +434,21 @@ def test_the_indexed_reaction_drops_its_agents_so_a_solvent_swap_cannot_dominate
     Asserted on the *stored label* rather than on the bits, because that is the string a reader
     sees and the one a future change would silently widen.
     """
+    index = InMemoryLabelIndex()
+    reactions = InMemoryFingerprintStore()
 
-    async def _run() -> None:
-        index = InMemoryLabelIndex()
-        reactions = InMemoryFingerprintStore()
+    await drain_corpus(_fake(), _binding(), index, "pistachio", reactions=reactions, limit=10)
 
-        await drain_corpus(_fake(), _binding(), index, "pistachio", reactions=reactions, limit=10)
-
-        stored = {r.id: r for r in await reactions.all_records()}
-        # p1 was recorded with `CC#N` (acetonitrile) in the agent slot.
-        assert ">CC#N>" in _rows()[0]["REACTION_SMILES"]  # type: ignore[operator]
-        assert stored["p1"].label == "Brc1ccccc1.NC1CCCCC1>>c1ccc(NC2CCCCC2)cc1"
-        assert "CC#N" not in stored["p1"].label
-        assert stored["p1"].definition == reaction_definition()
-        assert stored["p1"].source == "pistachio"
-
-    asyncio.run(_run())
+    stored = {r.id: r for r in await reactions.all_records()}
+    # p1 was recorded with `CC#N` (acetonitrile) in the agent slot.
+    assert ">CC#N>" in _rows()[0]["REACTION_SMILES"]  # type: ignore[operator]
+    assert stored["p1"].label == "Brc1ccccc1.NC1CCCCC1>>c1ccc(NC2CCCCC2)cc1"
+    assert "CC#N" not in stored["p1"].label
+    assert stored["p1"].definition == reaction_definition()
+    assert stored["p1"].source == "pistachio"
 
 
-def test_a_reaction_with_no_fingerprint_is_counted_rather_than_failing_the_page() -> None:
+async def test_a_reaction_with_no_fingerprint_is_counted_rather_than_failing_the_page() -> None:
     """A degenerate transformation loses similarity, never the page beside it.
 
     The same asymmetry `CorpusMolecules.add_many` documents for structures: a bulk extract's
@@ -395,45 +456,39 @@ def test_a_reaction_with_no_fingerprint_is_counted_rather_than_failing_the_page(
     with it. The reaction row is written either way and still answers every facet query, so the
     count is what keeps the loss visible instead of implied.
     """
+    rows = _rows()
+    # Identical on both sides: DRFP's symmetric difference is empty, so there are no features
+    # to fold and `drfp_bitstring` refuses rather than storing meaningless bits.
+    rows[2]["REACTION_SMILES"] = "CCO>>CCO"
+    index = InMemoryLabelIndex()
+    reactions = InMemoryFingerprintStore()
+    warehouse = KeysetWarehouse({_RELATION: rows}, _RELATION, "REACTION_ID")
 
-    async def _run() -> None:
-        rows = _rows()
-        # Identical on both sides: DRFP's symmetric difference is empty, so there are no features
-        # to fold and `drfp_bitstring` refuses rather than storing meaningless bits.
-        rows[2]["REACTION_SMILES"] = "CCO>>CCO"
-        index = InMemoryLabelIndex()
-        reactions = InMemoryFingerprintStore()
-        warehouse = KeysetWarehouse({_RELATION: rows}, _RELATION, "REACTION_ID")
+    report = await drain_corpus(
+        warehouse, _binding(), index, "pistachio", reactions=reactions, limit=10
+    )
 
-        report = await drain_corpus(
-            warehouse, _binding(), index, "pistachio", reactions=reactions, limit=10
-        )
-
-        assert report.unfingerprintable == 1
-        assert report.recorded == 3
-        # Still recorded, still answerable by facet — only its similarity row is missing.
-        assert {r.id for r in await reactions.all_records()} == {"p1", "p2"}
-        assert await index.count() == 3
-
-    asyncio.run(_run())
+    assert report.unfingerprintable == 1
+    assert report.recorded == 3
+    # Still recorded, still answerable by facet — only its similarity row is missing.
+    assert {r.id for r in await reactions.all_records()} == {"p1", "p2"}
+    assert await index.count() == 3
 
 
-def test_the_drain_without_a_reaction_store_writes_no_fingerprints_and_still_records() -> None:
+async def test_the_drain_without_a_reaction_store_writes_no_fingerprints_and_still_records() -> (
+    None
+):
     """`reactions=None` is the release-mode default and must stay a complete drain.
 
     The molecule half has the same shape and the same reason: a caller that wants the label index
     and not the similarity indexes must not have to pass a store it will never search.
     """
+    index = InMemoryLabelIndex()
 
-    async def _run() -> None:
-        index = InMemoryLabelIndex()
+    report = await drain_corpus(_fake(), _binding(), index, "pistachio", limit=10)
 
-        report = await drain_corpus(_fake(), _binding(), index, "pistachio", limit=10)
-
-        assert report.recorded == 3
-        assert report.unfingerprintable == 0
-
-    asyncio.run(_run())
+    assert report.recorded == 3
+    assert report.unfingerprintable == 0
 
 
 @pytest.mark.anyio
@@ -563,7 +618,7 @@ def _baseline(name: str, **labels: str) -> float:
         return 0.0
 
 
-def test_the_drain_books_the_rows_it_read_and_the_two_series_partition_them() -> None:
+async def test_the_drain_books_the_rows_it_read_and_the_two_series_partition_them() -> None:
     """The corpus drain was the one ingest pass emitting nothing, so a healthy feed read flat.
 
     Driven over the page that holds *both* populations — one row recorded, one refused for want of
@@ -578,33 +633,30 @@ def test_the_drain_books_the_rows_it_read_and_the_two_series_partition_them() ->
     """
     source = "pistachio-metrics-partition"
 
-    async def _run() -> None:
-        counter = "chemclaw_ingest_records_total"
-        # Deltas, because the registry is process-wide and these counters are monotonic: the
-        # claim is about what *this* drain booked, not about what the process has booked since it
-        # started. See `_baseline`.
-        was_ingested = _baseline(counter, source=source, outcome="ingested")
-        was_rejected = _baseline(counter, source=source, outcome="rejected")
-        index, warehouse, binding = InMemoryLabelIndex(), _fake(), _binding()
-        first = await drain_corpus(warehouse, binding, index, source, limit=2)
-        page = await drain_corpus(warehouse, binding, index, source, after=first.cursor, limit=2)
+    counter = "chemclaw_ingest_records_total"
+    # Deltas, because the registry is process-wide and these counters are monotonic: the
+    # claim is about what *this* drain booked, not about what the process has booked since it
+    # started. See `_baseline`.
+    was_ingested = _baseline(counter, source=source, outcome="ingested")
+    was_rejected = _baseline(counter, source=source, outcome="rejected")
+    index, warehouse, binding = InMemoryLabelIndex(), _fake(), _binding()
+    first = await drain_corpus(warehouse, binding, index, source, limit=2)
+    page = await drain_corpus(warehouse, binding, index, source, after=first.cursor, limit=2)
 
-        assert (page.read, page.recorded, page.skipped) == (2, 1, 1)
-        ingested = _series(counter, source=source, outcome="ingested") - was_ingested
-        rejected = _series(counter, source=source, outcome="rejected") - was_rejected
-        # Both pages, so the totals are the whole four-row release rather than the second page.
-        assert (ingested, rejected) == (3.0, 1.0)
-        assert ingested + rejected == float(first.read + page.read)
-        # **The label set, not the absence of one word.** Written as `outcome="skipped"` not
-        # appearing, this survived the exact mutation `_drained`'s docstring argues against —
-        # adding `unfingerprintable` as a third outcome keeps `ingested + rejected == read` true
-        # and mints no `skipped`, so 18 tests passed while a recorded row sat in two series.
-        assert _outcomes(source) == {"ingested", "rejected"}
-
-    asyncio.run(_run())
+    assert (page.read, page.recorded, page.skipped) == (2, 1, 1)
+    ingested = _series(counter, source=source, outcome="ingested") - was_ingested
+    rejected = _series(counter, source=source, outcome="rejected") - was_rejected
+    # Both pages, so the totals are the whole four-row release rather than the second page.
+    assert (ingested, rejected) == (3.0, 1.0)
+    assert ingested + rejected == float(first.read + page.read)
+    # **The label set, not the absence of one word.** Written as `outcome="skipped"` not
+    # appearing, this survived the exact mutation `_drained`'s docstring argues against —
+    # adding `unfingerprintable` as a third outcome keeps `ingested + rejected == read` true
+    # and mints no `skipped`, so 18 tests passed while a recorded row sat in two series.
+    assert _outcomes(source) == {"ingested", "rejected"}
 
 
-def test_a_page_that_read_nothing_still_books_a_zero() -> None:
+async def test_a_page_that_read_nothing_still_books_a_zero() -> None:
     """A silent series has to mean the drain did not run, which needs a healthy empty page to book.
 
     `drain_corpus` returns early when the page is empty, and that return is the one a scheduled
@@ -614,16 +666,13 @@ def test_a_page_that_read_nothing_still_books_a_zero() -> None:
     """
     source = "pistachio-metrics-empty"
 
-    async def _run() -> None:
-        report = await drain_corpus(
-            _fake(), _binding(), InMemoryLabelIndex(), source, after="p9", limit=2
-        )
+    report = await drain_corpus(
+        _fake(), _binding(), InMemoryLabelIndex(), source, after="p9", limit=2
+    )
 
-        assert (report.read, report.recorded, report.skipped) == (0, 0, 0)
-        assert _series("chemclaw_ingest_records_total", source=source, outcome="ingested") == 0.0
-        assert _series("chemclaw_ingest_records_total", source=source, outcome="rejected") == 0.0
-
-    asyncio.run(_run())
+    assert (report.read, report.recorded, report.skipped) == (0, 0, 0)
+    assert _series("chemclaw_ingest_records_total", source=source, outcome="ingested") == 0.0
+    assert _series("chemclaw_ingest_records_total", source=source, outcome="rejected") == 0.0
 
 
 def test_the_series_are_per_source_which_is_what_the_aggregated_outcome_cannot_say() -> None:

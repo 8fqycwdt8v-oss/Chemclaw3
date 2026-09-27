@@ -30,6 +30,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from chemclaw.core.config import settings
+from chemclaw.core.connect import option_type_mismatch
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.manifest_io import read_manifest, resolve_driver, within_root
 from chemclaw.ingest.sources.base import DataSource, IngestHalf, RetrieveHalf, SourceSpec
@@ -53,8 +54,11 @@ class DataSourceError(ChemclawError):
     """
 
 
-def _source_dirs() -> list[Path]:
-    """Every data-source folder found across the configured dirs, sorted by name.
+def _source_dirs(dirs: tuple[str, ...]) -> list[Path]:
+    """Every data-source folder found across `dirs`, sorted by name.
+
+    The directories are an argument rather than a read of `settings.data_sources_dirs`, because
+    they are the input `_discovered_in` is cached on (see there).
 
     Sorted rather than filesystem order so retrieval fan-out order is identical on every machine.
     Earlier dirs win on a name collision, so a deployment can mount a folder that overrides a
@@ -63,7 +67,7 @@ def _source_dirs() -> list[Path]:
     variant plus a new branch in core.
     """
     found: dict[str, Path] = {}
-    for directory in settings.data_sources_dirs:
+    for directory in dirs:
         root = Path(directory)
         if not root.is_dir():
             continue
@@ -90,15 +94,47 @@ def _read_manifest(path: Path) -> DataSourceManifest:
 
 
 @cache
-def discovered() -> dict[str, DataSourceManifest]:
-    """Every data source found on disk, by name — manifests only, nothing imported.
+def _discovered_in(dirs: tuple[str, ...]) -> dict[str, DataSourceManifest]:
+    """Every data source found under `dirs`, by name — manifests only, nothing imported.
 
     Cached because discovery is filesystem I/O over a fixed layout and both consumers call it per
     operation. The cache holds *manifests*, never built halves: a built half may close over
     per-call config (a monkeypatched `knowledge_dir` in tests, a rotated export dir), so sources
     are constructed fresh on every call exactly as the old factories did.
+
+    **Keyed on the directories because they are the input.** This was `@cache` on a zero-argument
+    `discovered()` reading `settings.data_sources_dirs` itself, so the key omitted the only thing
+    the answer depends on and a single test pointing the registry at its own `tmp_path` manifests
+    poisoned the rest of the session. See `chemclaw.connectors.registry._discovered_in`.
     """
-    return {path.name: _read_manifest(path) for path in _source_dirs()}
+    return {path.name: _read_manifest(path) for path in _source_dirs(dirs)}
+
+
+def discovered() -> dict[str, DataSourceManifest]:
+    """Every data source found on disk, by name — manifests only, nothing imported.
+
+    The settings read is here rather than inside the cache, so a `data_sources_dir` changed
+    mid-process is seen on the next call instead of being answered from the old directory's entry.
+    """
+    return _discovered_in(tuple(settings.data_sources_dirs))
+
+
+def forget_discovered() -> None:
+    """Drop the cache so the next `discovered()` re-reads data-source manifests from disk.
+
+    **The one case a directory-keyed cache cannot see on its own**: new manifests written into a
+    directory this registry has *already* discovered. The key is the directory tuple, so it is
+    unchanged and the entry still answers. Repointing `data_sources_dir` needs no clearing at all,
+    because that is a different key.
+
+    A named function rather than `discovered.cache_clear`, which is what this was for a few hours.
+    An attribute assigned onto a function object is invisible to `mypy`: the definition needed a
+    `# type: ignore[attr-defined]` and **every one of the 35 call sites became an error**, so the
+    suppression at the definition bought silence in one place and noise in thirty-five. The tree
+    already had the right idiom for a test-isolation reset — `forget_reachability`,
+    `forget_vector_store`, `forget_open_warehouses` — and this is it.
+    """
+    _discovered_in.cache_clear()
 
 
 def resolve_half(reference: str) -> Callable[..., Any]:
@@ -119,8 +155,24 @@ def resolve_half(reference: str) -> Callable[..., Any]:
 
 
 def _build_half(manifest: DataSourceManifest, reference: str, **extra: Any) -> Any:
-    """Construct a half from its `module:callable`, the manifest `config`, and `extra` kwargs."""
+    """Construct a half from its `module:callable`, the manifest `config`, and `extra` kwargs.
+
+    **Two checks, and the second is not the first with values filled in.** The `except TypeError`
+    below catches a config *key* the callable will not take. `option_type_mismatch` catches a key it
+    takes and a *value* it will silently misread — measured, `snapshot: "false"` arms the
+    destructive sweep, because every non-empty string is truthy and nothing between the YAML and
+    the constructor coerces anything
+    (`D-2026-09-16-a-truthy-string-is-not-the-flag-somebody-wrote`). `extra` is this repository's
+    own keywords rather than a manifest's, so it is not judged: a defect there is a code defect and
+    fails in review.
+    """
     factory = resolve_half(reference)
+    mismatch = option_type_mismatch(factory, manifest.config)
+    if mismatch:
+        raise DataSourceError(
+            f"data source {manifest.name!r}: {reference} was given {mismatch} Fix the manifest's "
+            f"`config:` block; a value is passed through exactly as written."
+        )
     try:
         return factory(**manifest.config, **extra)
     except TypeError as exc:
@@ -274,6 +326,21 @@ def active_retrieve_sources() -> list[RetrieveHalf]:
         for manifest in active_manifests()
         if manifest.retrieve is not None
     ]
+
+
+def active_retrieve_corpora() -> dict[str, str]:
+    """Each enabled retrieve source's name mapped to the corpus it reads.
+
+    Names rather than halves, so the fusion can be told which of its lists read one body of
+    evidence without every retriever growing a field it would not otherwise have. A source that
+    declares no `corpus:` is its own corpus — the ordinary case, and the one that leaves the
+    single-stage fusion exactly as it was.
+    """
+    return {
+        manifest.name: manifest.corpus or manifest.name
+        for manifest in active_manifests()
+        if manifest.retrieve is not None
+    }
 
 
 def active_commitment_sources() -> list[str]:

@@ -1,0 +1,58 @@
+{
+  "probe": {
+    "id": "du-10",
+    "section": 9,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "What are we still waiting on, and how long has any of it been outstanding?",
+    "expects_tools": [
+      "check_pending_requests"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "that this is a complete list of the team's open work",
+      "an item nobody raised through this system",
+      "a person's workload, capacity or responsiveness"
+    ],
+    "direction": "Answerable, with one boundary that has to be stated rather than implied. The inbox holds every question *this system* raised and is still waiting on, with what was asked, why, who it is routed to, when it is due and how many times it has been chased — so ordering by deadline and naming what is overdue is a real answer. The boundary is scope: it knows nothing about work raised anywhere else, so presenting it as the group's outstanding items would be a list that looks complete and is not. A request routed to nobody in particular is waiting on whoever is entitled, not on nobody, and should not be reported as unassigned in a way that implies it has been dropped.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "du-10",
+    "section": 9,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "What are we still waiting on, and how long has any of it been outstanding?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.23,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "dde6ec94890e4382a3fbf9218d15ffa3",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

@@ -59,7 +59,7 @@ class _ResumingAgent(ScriptedTurn):
         yield Chunk("ok" if first else " and the answer", output_tokens=tokens)
 
 
-def test_the_mid_turn_resume_meters_its_own_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_the_mid_turn_resume_meters_its_own_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
     """The one feature that adds a second unbounded model call was invisible to the cost guard.
 
     Measured before the fix on exactly this shape: the turn spent 1,000 tokens before the wait and
@@ -82,17 +82,15 @@ def test_the_mid_turn_resume_meters_its_own_tokens(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr("chemclaw.api.runner.await_job_results", _results)
     agent = _ResumingAgent(first_tokens=1000, second_tokens=5000)
 
-    async def _drive() -> None:
-        async for _ in run_turn(
-            TurnSession(session_id="resume-usage"),
-            "compute it",
-            budget=_Recording(),
-            connectors=[],
-            graph_factory=agent.graph_factory,
-        ):
-            pass
+    async for _ in run_turn(
+        TurnSession(session_id="resume-usage"),
+        "compute it",
+        budget=_Recording(),
+        connectors=[],
+        graph_factory=agent.graph_factory,
+    ):
+        pass
 
-    asyncio.run(_drive())
     assert agent.calls == 2, "the resume must actually have run for this to mean anything"
     assert booked == [6000]
 

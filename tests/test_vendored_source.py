@@ -57,6 +57,7 @@ def _dataset(directory: Path, rows: str = _ROWS, sha: str | None = None) -> Path
                 "licence": "CC0-1.0",
                 "retrieved_from": "hand-authored for this test",
                 "description": "a two-row reagent table",
+                "mirrored": False,
                 "sha256": sha or hashlib.sha256(rows.encode()).hexdigest(),
                 "text_column": "name",
                 "smiles_column": "smiles",
@@ -99,6 +100,91 @@ def test_a_dataset_that_does_not_match_its_manifest_is_refused(tmp_path: Path) -
     manifest = _read_manifest(directory)
     with pytest.raises(VendoredDatasetError, match="does not match its manifest"):
         _read_records(directory, manifest)
+
+
+def test_a_corpus_that_is_not_utf8_is_named_bad_data_rather_than_escaping_as_a_decode_error(
+    tmp_path: Path,
+) -> None:
+    """The one failure `_BAD_DATA_TYPES` exists for, and the one shape it could not match.
+
+    `_read_records` caught `OSError` around `read_bytes` and nothing around `data.decode("utf-8")`,
+    so a latin-1 `records.csv` left this module as a bare `UnicodeDecodeError` — past this module's
+    own promise to "say precisely what is wrong with it", and past
+    `durable/publish._BAD_DATA_TYPES`, which matches by class *name* and lists
+    `VendoredDatasetError` precisely because "a retry re-reads the same bytes from the same image
+    layer". Driven with a latin-1 corpus **whose checksum matched**: `UnicodeDecodeError` out of the
+    loader, classified retryable, so Temporal burned `activity_max_attempts` against immutable image
+    bytes. The checksum passing is what makes it certainly permanent.
+
+    The byte and its offset are asserted because "not UTF-8" over a 40 MB corpus is not something an
+    operator can act on.
+    """
+    rows = "name,smiles,role\nac\xe9tonitrile,CC#N,solvent\n"
+    directory = tmp_path / "d"
+    directory.mkdir(parents=True)
+    (directory / "records.csv").write_bytes(rows.encode("latin-1"))
+    (directory / "dataset.json").write_text(
+        json.dumps(
+            {
+                "name": "latin1-reagents",
+                "version": "1.0.0",
+                "licence": "CC0-1.0",
+                "retrieved_from": "hand-authored for this test",
+                "description": "a corpus written by a tool that emitted latin-1",
+                "mirrored": False,
+                "sha256": hashlib.sha256(rows.encode("latin-1")).hexdigest(),
+                "text_column": "name",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    manifest = _read_manifest(directory)
+    with pytest.raises(VendoredDatasetError, match=r"not UTF-8.*0xe9 at offset 19") as raised:
+        _read_records(directory, manifest)
+    assert "checksum matched" in str(raised.value)
+
+    from chemclaw.durable.publish import BAD_DATA_RETRY
+
+    assert "VendoredDatasetError" in (BAD_DATA_RETRY.non_retryable_error_types or []), (
+        "the classification is by class name, so the raise and the register must agree"
+    )
+
+
+def test_a_manifest_that_is_not_utf8_is_named_the_same_way(tmp_path: Path) -> None:
+    """The sibling site two functions up, which had the same gap and no test either.
+
+    `_read_manifest` enumerated `OSError` and `json.JSONDecodeError` — a `ValueError` *sibling* of
+    the decode error rather than its parent — so the same bytes in the manifest escaped as an
+    unclassified `UnicodeDecodeError` too. Both call sites are in one commit because the sweep for
+    the shape is what the fix is; fixing only the one that was reported leaves the other.
+    """
+    directory = tmp_path / "d"
+    directory.mkdir(parents=True)
+    (directory / "dataset.json").write_bytes('{"name": "caf\xe9"}'.encode("latin-1"))
+    with pytest.raises(VendoredDatasetError, match="not UTF-8"):
+        _read_manifest(directory)
+
+
+def test_a_row_whose_text_cell_is_empty_is_dropped_out_loud(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The checksum proves these bytes are what was reviewed; the loader then served fewer rows.
+
+    Measured: three rows in, two loaded, and **no log, no count and no error** — the one loss
+    this module's own provenance argument cannot explain away: nothing about the file was wrong.
+    Still dropped rather than refused: a row with no text has nothing to retrieve, and one blank
+    line must not cost a corpus its whole load. What changes is that it says so, with the count,
+    which is what makes "the corpus is short" answerable.
+    """
+    import logging
+
+    rows = "name,smiles,role\nacetonitrile,CC#N,solvent\n,CCO,solvent\nDIPEA,CCN,base\n"
+    directory = _dataset(tmp_path / "d", rows=rows)
+    with caplog.at_level(logging.WARNING):
+        records = _read_records(directory, _read_manifest(directory))
+    assert len(records) == 2
+    assert "1 of 3 rows" in caplog.text and "records.csv" in caplog.text
 
 
 def test_verification_can_be_turned_off(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -215,3 +301,51 @@ def test_the_source_is_retrieve_only() -> None:
 def test_it_is_not_enabled_by_default() -> None:
     """A deployment that ships no dataset is unaffected by the mechanism existing."""
     assert "vendored" not in settings.data_sources
+
+
+def test_a_mirrored_corpus_must_name_who_refreshes_it_and_how_often(tmp_path: Path) -> None:
+    """A snapshot with no owner and no cadence goes stale with nobody knowing it has.
+
+    The rule is the fleet's — `Chemclaw3-mcp`'s `MODULES.md` states it as an open question and
+    neither repository enforced it: "a stale patent index that nobody knows is stale is worse than
+    no patent index". Enforced at *load*, because a review that has to remember a rule is exactly
+    the control this repository keeps finding gone
+    (`D-2026-09-14-a-mirror-with-no-owner-goes-stale-in-silence`).
+
+    Driven through `_read_manifest`, which is the function every path into a vendored corpus goes
+    through, rather than through the model — a validator nothing calls on the loading path would
+    pass this test and refuse nothing.
+    """
+    directory = _dataset(tmp_path / "d")
+    manifest = json.loads((directory / "dataset.json").read_text(encoding="utf-8"))
+    manifest["mirrored"] = True
+    (directory / "dataset.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(VendoredDatasetError) as refusal:
+        _read_manifest(directory)
+    assert "refresh_owner" in str(refusal.value)
+    assert "refresh_cadence" in str(refusal.value)
+
+    manifest["refresh_owner"] = "the process-chemistry data team"
+    manifest["refresh_cadence"] = "quarterly, against the upstream release feed"
+    (directory / "dataset.json").write_text(json.dumps(manifest), encoding="utf-8")
+    assert _read_manifest(directory).refresh_owner == "the process-chemistry data team"
+
+
+def test_first_party_content_may_not_claim_an_upstream_it_does_not_have(tmp_path: Path) -> None:
+    """The other direction, and it is not symmetry for its own sake.
+
+    A refresh owner on a corpus with no upstream sends the next reader looking for a feed that does
+    not exist — which is the same failure as a missing one, costing somebody an afternoon instead of
+    shipping a stale answer. The shipped `data/vendored` corpus is first-party and names neither.
+    """
+    directory = _dataset(tmp_path / "d")
+    manifest = json.loads((directory / "dataset.json").read_text(encoding="utf-8"))
+    manifest["refresh_owner"] = "somebody"
+    (directory / "dataset.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(VendoredDatasetError) as refusal:
+        _read_manifest(directory)
+    assert "no upstream" in str(refusal.value)
+
+    assert _read_manifest(_SHIPPED).mirrored is False

@@ -71,8 +71,8 @@ def test_the_default_gateway_is_the_mock_on_this_machine() -> None:
     process that configured nothing sent every prompt to the public vendor API. This one dials
     `cli/mock_llm`'s port on loopback, so the worst an unconfigured deployment can do is be refused
     a connection — loudly, on the first turn, rather than quietly and outbound
-    (`D-2026-09-04-a-gateway-is-the-only-provider`). A non-loopback bind on this default is refused
-    at boot by `api/middleware._refuse_unconfigured_llm_gateway`.
+    (`D-2026-09-04-a-gateway-is-the-only-provider`). Booting on this default at all is refused by
+    `core/llm_gateway.refuse_unconfigured_llm_gateway` unless the deployment states the posture.
 
     There is no `llm_provider` field to assert; that is the point, and
     `test_no_provider_field_survives` is what says so.
@@ -613,13 +613,28 @@ def _clear_prefixed_env() -> Iterator[None]:
 
 
 @pytest.mark.parametrize(
-    ("name", "overrides"),
+    ("name", "overrides", "fires"),
     [
         # Each of these was already forbidden in a field comment and enforced by nothing, so a
         # deployment could set it and find out in production (REV-18, D-136).
+        #
+        # **`fires` is a phrase out of the guard's own message, and it is not decoration.** These
+        # rows used to assert `pytest.raises(ValueError)` and nothing more, which every guard in
+        # `_guards_that_the_comments_already_demand` satisfies equally: a guard that started firing
+        # for the wrong reason, or an earlier one swallowing a later row, passed. Two of the eight
+        # rows *were* passing that way, and only naming the message found them — see the two
+        # comments below.
         (
-            "memory store cannot serve multiple workers",
-            {"session_store": "memory", "service_uvicorn_workers": 4},
+            # It used to read "memory store cannot serve multiple workers" over
+            # `{"session_store": "memory", "service_uvicorn_workers": 4}` — a name describing a
+            # store-specific rule that does not exist. Measured: `memory` and `postgres` are
+            # refused identically at 2 and at 4, because the guard reads
+            # `service_uvicorn_workers` alone, so the row would have passed unchanged with a
+            # store-specific rule deleted. The store is dropped rather than parametrised for the
+            # same reason: it decides nothing here.
+            "uvicorn workers above one are refused whatever else is set",
+            {"service_uvicorn_workers": 4},
+            "service_uvicorn_workers>1 silently breaks five per-process guarantees",
         ),
         (
             "a fleet cannot admit more turns than its declared ceiling",
@@ -628,17 +643,15 @@ def _clear_prefixed_env() -> Iterator[None]:
                 "service_max_concurrent_turns": 16,
                 "service_fleet_max_concurrent_turns": 48,
             },
+            r"may admit \d+ concurrent turns",
         ),
-        (
-            "uvicorn workers multiply the fleet the same way replicas do",
-            {
-                "session_store": "postgres",
-                "service_fleet_replicas": 6,
-                "service_uvicorn_workers": 2,
-                "service_max_concurrent_turns": 8,
-                "service_fleet_max_concurrent_turns": 48,
-            },
-        ),
+        # The row that stood here, "uvicorn workers multiply the fleet the same way replicas do",
+        # set `service_uvicorn_workers: 2` and was refused by the *workers* guard three statements
+        # earlier — it never reached the fleet product it was named after, and asserting only
+        # `ValueError` could not tell. It is gone rather than repaired because the axis it claimed
+        # to cover is unreachable by construction: the workers factor in
+        # `replicas × workers × cap` can only ever be 1 while that refusal stands, so the row
+        # above and the row before it are between them the whole of what can fire.
         (
             "a mid-turn resume cannot outlive its turn",
             {
@@ -646,6 +659,17 @@ def _clear_prefixed_env() -> Iterator[None]:
                 "mid_turn_resume_timeout_seconds": 900.0,
                 "service_turn_timeout_seconds": 600.0,
             },
+            "mid_turn_resume_timeout_seconds must be smaller than",
+        ),
+        (
+            "revision rounds cannot outlast the turn they run inside",
+            {
+                "verifier_enabled": True,
+                "answer_review_max_rounds": 20,
+                "verifier_timeout_seconds": 30.0,
+                "service_turn_timeout_seconds": 600.0,
+            },
+            "of judging alone against a",
         ),
         (
             "budgets on with every cap unlimited guards nothing",
@@ -656,10 +680,12 @@ def _clear_prefixed_env() -> Iterator[None]:
                 "budget_max_turns_per_user": 0,
                 "budget_max_tokens_per_user": 0,
             },
+            "guards nothing; set at least one budget_max",
         ),
         (
             "embedding_dim must match the note_index vector column when vector search is on",
             {"embedding_dim": 768, "data_sources": "graph,vector"},
+            "disagrees with the note_index vector column",
         ),
         # DARK-8: the check asked whether the *vector* source was on, while `reindex_notes` writes
         # the embedding column for every note-index-backed source. So these two configurations
@@ -668,16 +694,30 @@ def _clear_prefixed_env() -> Iterator[None]:
         (
             "a lexical-only deployment reaches the same vector column",
             {"embedding_dim": 768, "data_sources": "graph,lexical"},
+            "disagrees with the note_index vector column",
         ),
         (
             "the scheduled reindex writes it with no retrieve source at all",
             {"embedding_dim": 768, "data_sources": "graph", "note_reindex_enabled": True},
+            "disagrees with the note_index vector column",
         ),
     ],
 )
-def test_configurations_the_comments_forbid_are_rejected(name: str, overrides: dict) -> None:  # type: ignore[type-arg]
-    """A rule worth writing in a comment is worth failing on at startup."""
-    with pytest.raises(ValueError):
+def test_configurations_the_comments_forbid_are_rejected(
+    name: str,
+    overrides: dict,  # type: ignore[type-arg]
+    fires: str,
+) -> None:
+    """A rule worth writing in a comment is worth failing on at startup — and worth naming.
+
+    `match=` is what makes this table an assertion about *which* guard ran, and the difference is
+    measured rather than argued. Driven: widening the `service_uvicorn_workers` guard by one
+    disjunct so it also fires on a mismatched `embedding_dim` — an earlier guard swallowing a
+    later row, which is the failure mode here — leaves all **7** rows green under a bare
+    `pytest.raises(ValueError)` and turns **3** of them red under `match=`, each naming the
+    embedding guard it never reached.
+    """
+    with pytest.raises(ValueError, match=fires):
         Settings(_env_file=None, **overrides)  # type: ignore[call-arg]
 
 
@@ -709,14 +749,21 @@ def test_enforcing_identity_without_the_plan_gate_is_refused() -> None:
 
     `_refuse_unauthenticated_exposure` already makes exactly this argument for the analogous
     "the safe posture is one env var away" pair.
+
+    **The pairing has to be asked for explicitly since D-2026-09-13**, because `harness_enabled`
+    now defaults to `True` — so the refusal below names it rather than relying on the default to
+    produce it. That is a weaker trigger than it was and the refusal is no less necessary: a
+    deployment can still set the flag off, and this is what happens when it does so while claiming
+    to enforce identity.
     """
     with pytest.raises(ValueError, match="harness_enabled"):
-        Settings(_env_file=None, **_ENFORCED)  # type: ignore[call-arg]
+        Settings(_env_file=None, harness_enabled=False, **_ENFORCED)  # type: ignore[call-arg]
 
 
 def test_the_enforced_posture_with_the_gate_attached_constructs() -> None:
-    """The control: what the shipped chart sets must still boot."""
+    """The control: what the shipped chart sets must still boot — and is now also the default."""
     assert Settings(_env_file=None, harness_enabled=True, **_ENFORCED) is not None  # type: ignore[call-arg]
+    assert Settings(_env_file=None, **_ENFORCED) is not None  # type: ignore[call-arg]
 
 
 def test_the_opt_out_is_stated_in_the_same_vocabulary_as_the_thing_it_declines() -> None:
@@ -733,8 +780,17 @@ def test_the_opt_out_is_stated_in_the_same_vocabulary_as_the_thing_it_declines()
 
     A per-profile `harness_autonomy` still wins over it (`autonomy_for` prefers the profile), so
     the opt-out cannot silently disarm a profile that narrowed on purpose.
+
+    **What the opt-out now buys is different, and better.** While `harness_enabled` defaulted off,
+    `harness_autonomy=execute` changed no behaviour at all — it was a statement and nothing more.
+    With the harness on by default it is the real thing it always claimed to be: the todo list stays
+    attached and the gate comes off, which is what an unsupervised deployment actually wants and is
+    why the refusal points at this knob rather than at `harness_enabled`. Turning the harness off
+    would drop the plan with the gate.
     """
-    relaxed = Settings(_env_file=None, harness_autonomy="execute", **_ENFORCED)  # type: ignore[call-arg]
+    relaxed = Settings(  # type: ignore[call-arg]
+        _env_file=None, harness_enabled=False, harness_autonomy="execute", **_ENFORCED
+    )
     assert relaxed.entra_required and not relaxed.harness_enabled
     assert (
         Settings(  # type: ignore[call-arg]
@@ -1869,3 +1925,55 @@ def test_the_dispatch_count_each_bounded_drain_declares_is_the_one_it_runs() -> 
             f"_BOUNDED_DRAINS declares {declared} — the run-ceiling arithmetic is now wrong by "
             f"a factor of {counted / declared:.2f}"
         )
+
+
+def test_a_per_actor_cap_at_or_above_the_process_cap_is_refused_at_startup() -> None:
+    """A fairness cap that cannot fire is worse than none: it publishes itself as protection.
+
+    `chemclaw_turn_actor_capacity` reports the configured number to a dashboard, so a per-actor cap
+    of 12 against 12 permits reads exactly like a working guard while refusing nothing — the
+    request is checked, the count is scanned, and the predicate can never be true. The chart's own
+    pair is held apart by `tests/test_deploy_chart.py`, but that test reads `values.yaml`, so a
+    `--set` on the process cap or an env override of either key escaped it entirely. This is the
+    same argument the fleet-ceiling validator above makes: only this object sees the configuration
+    a pod actually runs.
+    """
+    with pytest.raises(ValueError) as excinfo:
+        Settings(  # type: ignore[call-arg]
+            _env_file=None,
+            service_max_concurrent_turns=12,
+            service_max_concurrent_turns_per_actor=12,
+        )
+    message = str(excinfo.value)
+    assert "service_max_concurrent_turns_per_actor" in message
+    # Both numbers, because the remedy is to move one of them and the operator has to know which.
+    assert "12" in message
+
+    with pytest.raises(ValueError):
+        Settings(  # type: ignore[call-arg]
+            _env_file=None,
+            service_max_concurrent_turns=4,
+            service_max_concurrent_turns_per_actor=8,
+        )
+
+
+def test_zero_is_the_off_switch_and_is_never_refused() -> None:
+    """0 is "not consulted", which is the shipped code default and must survive the guard above.
+
+    `chemclaw.cli.live_storm` drives tens of concurrent turns from one credential, so a code
+    default that refused the combination would break the instrument that sweeps the admission cap.
+    """
+    settings = Settings(  # type: ignore[call-arg]
+        _env_file=None,
+        service_max_concurrent_turns=1,
+        service_max_concurrent_turns_per_actor=0,
+    )
+    assert settings.service_max_concurrent_turns_per_actor == 0
+
+    # And strictly-below is accepted, which is what the chart ships.
+    ok = Settings(  # type: ignore[call-arg]
+        _env_file=None,
+        service_max_concurrent_turns=12,
+        service_max_concurrent_turns_per_actor=4,
+    )
+    assert ok.service_max_concurrent_turns_per_actor == 4

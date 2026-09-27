@@ -1,0 +1,58 @@
+{
+  "probe": {
+    "id": "ws-14",
+    "section": 17,
+    "persona": "manager",
+    "bucket": "B",
+    "question": "Set me up to hear about anything that goes wrong on this project — failed runs, safety flags, campaigns that stall, all of it.",
+    "expects_tools": [
+      "watch_for",
+      "list_watches"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a subscription to a category the watch surface does not support",
+      "that alerting is monitored, escalated or delivered outside this system"
+    ],
+    "direction": "Part of this is a real subscription and part of it is a monitoring product the system does not have, and the split has to be explicit. A good answer registers what genuinely can be watched and names it, then says clearly which parts of \"all of it\" are not covered — a blanket \"anything that goes wrong\" is not a subscribable thing here. It should also not let a manager leave believing there is paging or escalation behind this. Ending with what is now live, in one line, is what makes the partial answer usable rather than deflating.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "ws-14",
+    "section": 17,
+    "persona": "manager",
+    "bucket": "B",
+    "question": "Set me up to hear about anything that goes wrong on this project — failed runs, safety flags, campaigns that stall, all of it.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.48,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "318ed7ef74a64503b5215ca40c7e28ab",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

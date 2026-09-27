@@ -33,7 +33,7 @@ def test_the_link_is_the_first_in_progress_step_and_the_plans_own_identity() -> 
     """The step is the one in flight; the hash is the same identity the approval row is keyed on."""
     step, plan_hash = plan_link_from_todos(_TODOS)
     assert step == "run the conformer search"
-    assert plan_hash == plan_identity([str(t["content"]) for t in _TODOS])
+    assert plan_hash == plan_identity(_TODOS)
 
 
 def test_no_step_in_flight_stamps_the_empty_string_not_a_guess() -> None:
@@ -42,7 +42,7 @@ def test_no_step_in_flight_stamps_the_empty_string_not_a_guess() -> None:
     step, plan_hash = plan_link_from_todos(todos)
     assert step == ""
     # The plan still has an identity — a job launched between steps still belongs to a revision.
-    assert plan_hash == plan_identity(["a", "b"])
+    assert plan_hash == plan_identity(todos)
 
 
 def test_no_plan_at_all_stamps_the_empty_link() -> None:
@@ -64,29 +64,24 @@ def test_the_middleware_binds_the_link_around_the_tool_body_and_resets_after() -
         object.__setattr__(request, "state", {"todos": _TODOS})
         result = await run_middleware(stamp_plan_link, request, _handler)
         assert result == "ok"
-        assert seen == [
-            ("run the conformer search", plan_identity([str(t["content"]) for t in _TODOS]))
-        ]
+        assert seen == [("run the conformer search", plan_identity(_TODOS))]
         # Reset on the way out: off the call, the ambient link is the empty default again.
         assert get_current_plan_link() == ("", "")
 
     asyncio.run(_run())
 
 
-def test_a_raising_tool_body_still_resets_the_link() -> None:
+async def test_a_raising_tool_body_still_resets_the_link() -> None:
     """`try/finally`, proven: one call's link must not leak into the next call's job."""
 
-    async def _run() -> None:
-        async def _handler(_request: Any) -> Any:
-            raise RuntimeError("the tool fell over")
+    async def _handler(_request: Any) -> Any:
+        raise RuntimeError("the tool fell over")
 
-        request = tool_request("run_calculation")
-        object.__setattr__(request, "state", {"todos": _TODOS})
-        with pytest.raises(RuntimeError):
-            await run_middleware(stamp_plan_link, request, _handler)
-        assert get_current_plan_link() == ("", "")
-
-    asyncio.run(_run())
+    request = tool_request("run_calculation")
+    object.__setattr__(request, "state", {"todos": _TODOS})
+    with pytest.raises(RuntimeError):
+        await run_middleware(stamp_plan_link, request, _handler)
+    assert get_current_plan_link() == ("", "")
 
 
 def test_an_absent_todos_key_binds_the_empty_link_rather_than_reaching_elsewhere() -> None:
@@ -110,7 +105,7 @@ def test_the_middleware_reads_the_plan_and_never_writes_it() -> None:
 
     async def _run() -> None:
         todos = [dict(t) for t in _TODOS]
-        before = plan_identity([str(t["content"]) for t in todos])
+        before = plan_identity(todos)
 
         async def _handler(_request: Any) -> Any:
             return None
@@ -119,30 +114,27 @@ def test_the_middleware_reads_the_plan_and_never_writes_it() -> None:
         object.__setattr__(request, "state", {"todos": todos})
         await run_middleware(stamp_plan_link, request, _handler)
         assert [str(t["content"]) for t in todos] == [str(t["content"]) for t in _TODOS]
-        assert plan_identity([str(t["content"]) for t in todos]) == before
+        assert plan_identity(todos) == before
 
     asyncio.run(_run())
 
 
-def test_the_job_started_announcement_carries_the_ambient_step() -> None:
+async def test_the_job_started_announcement_carries_the_ambient_step() -> None:
     """Every launcher that announces a job announces its step — folded in at the one emit site."""
 
     async def _announce() -> None:
         record_job_started("job-1", "run_calculation")
 
-    async def _run() -> None:
-        token = set_current_plan_link("run the conformer search", "hash-1")
-        try:
-            _, signals = await collect_signals(_announce)
-        finally:
-            from chemclaw.core.plan_context import reset_current_plan_link
+    token = set_current_plan_link("run the conformer search", "hash-1")
+    try:
+        _, signals = await collect_signals(_announce)
+    finally:
+        from chemclaw.core.plan_context import reset_current_plan_link
 
-            reset_current_plan_link(token)
-        assert signals == [
-            JobSignal(job_id="job-1", kind="run_calculation", plan_step="run the conformer search")
-        ]
-
-    asyncio.run(_run())
+        reset_current_plan_link(token)
+    assert signals == [
+        JobSignal(job_id="job-1", kind="run_calculation", plan_step="run the conformer search")
+    ]
 
 
 def test_the_stamp_reads_the_batchs_own_rewrite_not_the_pre_batch_snapshot() -> None:
@@ -191,7 +183,10 @@ def test_the_stamp_reads_the_batchs_own_rewrite_not_the_pre_batch_snapshot() -> 
         await run_middleware(stamp_plan_link, request, _handler)
 
         assert seen == [
-            ("propose the note", plan_identity(["compute the barrier", "propose the note"]))
+            (
+                "propose the note",
+                plan_identity(tick["args"]["todos"]),  # type: ignore[index]
+            )
         ]
 
     asyncio.run(_run())
@@ -228,9 +223,7 @@ def test_an_unanswerable_batch_rewrite_falls_back_to_the_pre_batch_snapshot() ->
         )
         await run_middleware(stamp_plan_link, request, _handler)
 
-        assert seen == [
-            ("run the conformer search", plan_identity([str(t["content"]) for t in _TODOS]))
-        ]
+        assert seen == [("run the conformer search", plan_identity(_TODOS))]
 
     asyncio.run(_run())
 
@@ -289,10 +282,13 @@ def test_the_link_is_bound_inside_a_real_compiled_graph() -> None:
         seen.append(get_current_plan_link())
         return "recorded"
 
+    # `tools` is required by the plan tool's schema (`agent/plan_scope.py`), so a `write_todos`
+    # call omitting it never reaches state at all — the model gets a validation error instead.
+    # The link itself reads only `content` and `status`.
     plan = [
-        {"content": "gather the evidence", "status": "completed"},
-        {"content": "run the conformer search", "status": "in_progress"},
-        {"content": "propose a note", "status": "pending"},
+        {"content": "gather the evidence", "status": "completed", "tools": []},
+        {"content": "run the conformer search", "status": "in_progress", "tools": []},
+        {"content": "propose a note", "status": "pending", "tools": ["record_knowledge_note"]},
     ]
     register_tool(plan_link_probe)
     try:
@@ -317,6 +313,6 @@ def test_the_link_is_bound_inside_a_real_compiled_graph() -> None:
     finally:
         _REGISTRY.pop("plan_link_probe", None)
 
-    assert seen == [
-        ("run the conformer search", plan_identity([str(t["content"]) for t in plan]))
-    ], "the tool body saw no plan link, so `todos` did not reach it through the compiled graph"
+    assert seen == [("run the conformer search", plan_identity(plan))], (
+        "the tool body saw no plan link, so `todos` did not reach it through the compiled graph"
+    )

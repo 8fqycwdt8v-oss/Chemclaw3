@@ -9,22 +9,30 @@ in the order they were performed, each row naming what it changed relative to th
 (`chemclaw.memory.progression`), and cites each via `[[reaction-<id>]]`, so a chemist — or the
 agent — can read what was tried, in what order, and what moved the result. The comparative
 skeleton is deterministic; the analysis (which change was the lever, what to try next) is the
-`optimization-campaign-synthesis` and `experiment-progression` skills' judgment, on top.
+`optimization-campaign-synthesis` and `experiment-progression` skills' judgment.
+
+**Nothing applies that judgment automatically.** Both skills are loaded on demand in a chat turn
+and no durable path invokes either, so this note stays the comparative table unless a model reaches
+for one — which is fine, because the table is a complete answer to "what was tried and what moved
+the result". The phrase this replaced read as a pipeline that does not exist; see
+`D-2026-09-15-a-note-that-asks-a-reader-to-finish-it-is-not-knowledge` for the sibling case where
+the body was not usable on its own.
 """
+
+from datetime import date
 
 from pydantic import BaseModel
 
 from chemclaw.core.config import settings
+from chemclaw.core.markdown import MISSING, render_table
 from chemclaw.ingest.eln.ord import Impurity, OrdReaction
 from chemclaw.kg.note import Note, strip_links
 from chemclaw.memory.comparison import (
-    MISSING,
     cell,
     changes_cell,
     date_cell,
     drop_empty_columns,
     ordering_caveat,
-    render_table,
 )
 from chemclaw.memory.progression import progression
 from chemclaw.memory.similarity import cluster_by_similarity, reaction_fingerprints
@@ -55,7 +63,11 @@ def find_optimization_campaigns(
 
 
 def optimization_campaign_note(
-    note_id: str, campaign: OptimizationCampaign, reactions: dict[str, OrdReaction]
+    note_id: str,
+    campaign: OptimizationCampaign,
+    reactions: dict[str, OrdReaction],
+    *,
+    minted_on: date | None = None,
 ) -> Note:
     """Build an agent `optimization-campaign` note: the runs in time order, with their deltas.
 
@@ -72,7 +84,7 @@ def optimization_campaign_note(
     unreadable. When the runs carry no dates the note says so rather than implying a sequence.
 
     The note stays output-neutral: it surfaces the recorded conditions, outcomes and changes and
-    leaves *what mattered* to the skill's analysis and the human reviewer (D-005).
+    leaves *what mattered* to the skill's analysis and to the chemist who reads the note.
     """
     # The series *is* the ordering: every row is read off a step, and the run behind it is looked
     # up by id. Zipping two independently-sorted lists would have paired them positionally, which
@@ -112,7 +124,7 @@ def optimization_campaign_note(
         f"Optimization campaign: {len(members)} runs of the same transformation "
         f"(DRFP-similar), representative `{members[0].reaction_smiles()}`.\n\n"
         f"{ordering_caveat(series)}\n\n"
-        f"{render_table(headers, rows)}"
+        f"{render_table(headers, rows)}\n"
     )
     detail = "\n".join(block for r in members if (block := _run_detail(r)))
     if detail:
@@ -123,6 +135,12 @@ def optimization_campaign_note(
         created_by="agent",
         source="memory:optimization-grouping",
         body=body,
+        # The day this grouping's anchor run was performed — `min(reaction_ids)`, the single
+        # member id `note_id` is keyed on, not the member *set*, which would move this date under a
+        # stable id on every cluster growth. See `jobs.supported_from`. Absent, the note is
+        # open-ended and `durable/digest._is_new` correctly never reports it to anyone with a
+        # watermark.
+        valid_from=minted_on,
     )
 
 
@@ -130,11 +148,12 @@ def _run_detail(reaction: OrdReaction) -> str:
     """The per-run block: the hypothesis it tested, then its procedure excerpt (each if any).
 
     Both are ELN free text — what a technician typed, or a warehouse column a binding mapped — and
-    this block lands in a PR-gated note that a chemist merges and that the graph reads citations
-    out of. So a `[[wikilink]]` in either is stripped to its target: unstripped it was a real
-    outgoing edge to a note the campaign never referenced, forged by whoever wrote the procedure
-    and indistinguishable in review from one this system derived. Same rule and same reason as
-    `retrieval.harness.report_note`, which carried the identical defect over retrieved chunks.
+    this block lands in a note that is readable the moment it is written and that the graph reads
+    citations out of. So a `[[wikilink]]` in either is stripped to its target: unstripped it was a
+    real outgoing edge to a note the campaign never referenced, forged by whoever wrote the
+    procedure and indistinguishable to a reader from one this system derived. Same rule and same
+    reason as `retrieval.harness.report_note`, which carried the identical defect over retrieved
+    chunks.
     """
     lines = []
     if reaction.hypothesis:

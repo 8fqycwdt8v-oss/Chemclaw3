@@ -1,0 +1,62 @@
+{
+  "probe": {
+    "id": "rx-12",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "Design me a solvent and anti-solvent screen for the final crystallisation of this intermediate. Which pairs are worth putting in, and how should the screen be laid out?",
+    "expects_tools": [
+      "generate_screening_design",
+      "predict_solubility",
+      "gather_evidence",
+      "find_notes",
+      "screen_hazards"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "predicted solubilities in the screened organic solvents",
+      "a predicted crystal form or habit from any solvent",
+      "an ICH Q3C class or residual-solvent limit quoted as a looked-up value"
+    ],
+    "direction": "Partial by construction. What is real: a screening design over solvent and anti-solvent pairs, cooling profile and seeding as factors; a hazard screen on the candidate solvents; and the recrystallisation playbook in the record. What is absent and must be said: there is no organic-solvent solubility model (the predictor is aqueous only), no solid-state or polymorph data, and no residual-solvent table — so solvent classes may be discussed from chemical knowledge but must not be presented as looked up. A good answer builds the screen on criteria it can defend (solvent class diversity, boiling point spread, hydrogen-bonding capability, safety and downstream removability, precedent in the record), states that measured solubility curves are the input the screen exists to generate, and does not fill the gap with invented numbers.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-12",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "Design me a solvent and anti-solvent screen for the final crystallisation of this intermediate. Which pairs are worth putting in, and how should the screen be laid out?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.96,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "7c4353e40a72459f8a61da2955378a71",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

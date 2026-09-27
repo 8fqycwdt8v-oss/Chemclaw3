@@ -217,8 +217,8 @@ def _build_params_model(connector: str, job: JobSpec) -> type[BaseModel]:
 _RATIONALE_DOC = [
     "    rationale: Why this run is worth doing, in a sentence or two a chemist would recognise:",
     "        the question it should answer and what prompted it (whose request, which earlier",
-    "        result). It is stored with the run and stamped onto any note the run proposes, so a",
-    "        later session — or the human reviewing that note — can tell why it was done. Say what",
+    "        result). It is stored with the run and stamped onto any note the run records, so a",
+    "        later session — or a chemist reading that note — can tell why it was done. Say what",
     "        the run is *for*; do not restate the arguments.",
 ]
 

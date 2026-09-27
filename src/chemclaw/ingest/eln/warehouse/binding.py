@@ -68,7 +68,7 @@ def _check_identifier(value: str, what: str) -> str:
     The pattern and the message live in `core.connect` beside `check_env_name`, because that module
     owns what a `connection:` block may contribute and a binding is not the only thing that
     contributes an identifier — a sink's `schema:` does too, into libpq's `options`. This stays as
-    the local name that binds the error type, so the thirteen call sites below read unchanged and
+    the local name that binds the error type, so the eighteen call sites below read unchanged and
     every failure here is still a `BindingError`.
     """
     return check_identifier(value, what, error=BindingError)
@@ -118,6 +118,19 @@ class EntryBinding(BaseModel):
             "alone silently drops every correction a chemist ever makes to a recorded run."
         ),
     )
+    retracted_at: str = Field(
+        default="",
+        description=(
+            "The column the site stamps when it withdraws an entry. Declare it whenever the "
+            "source has one: it is the only thing that may set `reaction_records.retracted_at`, "
+            "which is what stops a withdrawn run answering as current evidence. Never inferred "
+            "from a row's disappearance — a fetch is a delta and an absent row is what every "
+            "already-ingested entry looks like. It joins the cursor's watermark for the same "
+            "reason `modified_at` does: a site that stamps this without touching its amendment "
+            "column would leave the withdrawn row behind the cursor forever, so the tombstone "
+            "would be written at the site and fetched by nobody."
+        ),
+    )
     where: str = Field(
         default="",
         description=(
@@ -159,6 +172,8 @@ class EntryBinding(BaseModel):
         _check_identifier(self.created_at, "entry created_at")
         if self.modified_at:
             _check_identifier(self.modified_at, "entry modified_at")
+        if self.retracted_at:
+            _check_identifier(self.retracted_at, "entry retracted_at")
         return self
 
 
@@ -274,6 +289,10 @@ class ImpurityBinding(BaseModel):
     name: FieldBinding | None = None
     smiles: FieldBinding | None = None
     area_percent: FieldBinding | None = None
+    # The column this docstring has always named and could not read. A site's analytics table keys
+    # its unresolved peaks by RRT, and without a binding for it the profile arrived carrying a
+    # label and an area% with no way to say which peak either belonged to.
+    rrt: FieldBinding | None = None
 
     @model_validator(mode="after")
     def _identifies_something(self) -> Self:
@@ -586,7 +605,7 @@ class VectorBinding(BaseModel):
         default=True,
         description=(
             "Drop a hit whose reaction already became a note. Without it a curated reaction would "
-            "reach the agent twice — once as reviewed, merged knowledge and once as a raw row — "
+            "reach the agent twice — once as a curated note and once as a raw row — "
             "and the duplicate would look like corroboration."
         ),
     )

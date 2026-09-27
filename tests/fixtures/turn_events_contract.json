@@ -14,6 +14,7 @@
   "members": {
     "answer": {
       "challenged": "bool",
+      "checks_run": "list[Literal['verifier', 'answer-shape']]",
       "confidence": "float | None",
       "review_hold_id": "str | None",
       "review_required": "bool",
@@ -48,6 +49,11 @@
       "failed": "bool",
       "source": "str"
     },
+    "handoff": {
+      "from_agent": "str",
+      "reason": "str",
+      "to_agent": "str"
+    },
     "job_completed": {
       "job_id": "str",
       "summary": "dict[str, object]"
@@ -61,12 +67,13 @@
       "kind": "str",
       "plan_step": "str"
     },
-    "note_proposed": {
+    "note_recorded": {
       "note_id": "str",
       "reference": "str"
     },
     "plan": {
       "plan_hash": "str",
+      "scope": "list[str]",
       "todos": "list[str]"
     },
     "question": {
@@ -94,6 +101,7 @@
       "note_ids": "list[str]",
       "numbers": "list[float]",
       "preview": "str",
+      "result_cut": "bool",
       "result_inline": "str",
       "result_ref": "str",
       "tool": "str",

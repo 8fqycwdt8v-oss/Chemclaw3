@@ -43,6 +43,8 @@ pipeline {
                  description: 'State that any-destination egress is intended. The chart refuses to render without a stated posture.')
     booleanParam(name: 'ACCEPT_UNBOUNDED_GROWTH', defaultValue: false,
                  description: 'State that the durable tables may grow forever. The sibling of the flag above: the chart refuses to render until a release states its retention posture too. Leave false and put `retention.windows` in the environment values file, which is the answer a real deployment wants.')
+    string(name: 'TEMPORAL_NAMESPACE', defaultValue: '',
+           description: 'The Temporal namespace this release owns. Deliberately empty: unlike the two flags above this is not a posture with a permissive escape hatch, it is a value with no safe default, and the render fails until you give it one. The chart used to ship the constant `chemclaw` against a cluster-shared broker, so dev, staging and prod landed on one namespace, one task queue and one schedule-id space — a peer\'s upgrade rewrote this release\'s Schedules and deleted the ones it did not itself plan. A boolean would not help: three environments would each set it true and still collide. Two releases also need separate databases, which no chart guard can check.')
     string(name: 'REGISTRY_CREDENTIALS_ID', defaultValue: 'chemclaw-registry',
            description: 'Jenkins username/password credential for the registry.')
     string(name: 'CLUSTER_CREDENTIALS_ID', defaultValue: 'chemclaw-openshift',
@@ -80,6 +82,11 @@ pipeline {
             [name: 'CLUSTER_CREDENTIALS_ID', value: params.CLUSTER_CREDENTIALS_ID,
              pattern: ~'^[A-Za-z0-9._-]*$'],
             [name: 'DATABRICKS_CREDENTIALS_ID', value: params.DATABRICKS_CREDENTIALS_ID,
+             pattern: ~'^[A-Za-z0-9._-]*$'],
+            // A Temporal namespace, reaching both `helm template` in the render stage and
+            // `openshift.sh`'s environment. Same alphabet as NAMESPACE plus dot and underscore,
+            // which Temporal permits and Kubernetes does not.
+            [name: 'TEMPORAL_NAMESPACE', value: params.TEMPORAL_NAMESPACE,
              pattern: ~'^[A-Za-z0-9._-]*$'],
           ]
           for (c in checks) {
@@ -197,6 +204,11 @@ dry run    ${params.DRY_RUN}"""
           // Without the second one this stage failed on every openshift run, on shipped defaults.
           if (params.ALLOW_ANY_EGRESS_DESTINATION) { flags += ' --set networkPolicy.allowAnyDestination=true' }
           if (params.ACCEPT_UNBOUNDED_GROWTH) { flags += ' --set retention.unboundedGrowthAccepted=true' }
+          // The third thing the chart refuses to render without, and the one that is a value rather
+          // than a posture. Passed unconditionally so an empty parameter reaches the chart's own
+          // refusal here, in the render stage, with the message an operator would otherwise have met
+          // in the namespace — rather than being defaulted to a constant two releases would share.
+          flags += " --set temporal.namespace=${params.TEMPORAL_NAMESPACE}"
           sh """
             set -euo pipefail
             helm template chemclaw deploy/helm/chemclaw ${flags} > rendered.yaml
@@ -239,6 +251,7 @@ dry run    ${params.DRY_RUN}"""
                 NAMESPACE='${params.NAMESPACE}' DRY_RUN='${params.DRY_RUN}' \
                 ALLOW_ANY_EGRESS_DESTINATION='${params.ALLOW_ANY_EGRESS_DESTINATION}' \
                 ACCEPT_UNBOUNDED_GROWTH='${params.ACCEPT_UNBOUNDED_GROWTH}' \
+                TEMPORAL_NAMESPACE='${params.TEMPORAL_NAMESPACE}' \
                   deploy/jenkins/targets/openshift.sh release.json
               """
             }

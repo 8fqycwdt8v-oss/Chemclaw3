@@ -19,9 +19,51 @@ class ElnSettings(BaseSettings):
     """
 
     # The one concrete adapter reads a JSON-export ELN from this directory; the sync activity's
-    # timeout bounds one batch of fetch+validate+index+PR-gate work.
+    # timeout bounds one batch of fetch+validate+index work.
     eln_export_dir: str = "data/eln-exports"
     eln_sync_timeout_seconds: float = Field(default=300.0, gt=0)
+    # How long one `regex` transform may spend on one warehouse cell
+    # (`D-2026-09-21-a-pattern-that-cannot-be-timed-out-is-run-by-an-engine-that-can`). A site
+    # writes the pattern in its `datasource.yaml` and this repository runs it over free-text cells
+    # whose length nobody here chose, so the work a match costs is unbounded in both factors and
+    # `re` has no timeout at any of them. This is the bound, and it is a bound on the *work*: a
+    # pattern that exceeds it fails the ingest naming itself, rather than being retried over the
+    # same page.
+    #
+    # 0.25 s because it is four orders of magnitude above what a real pattern costs. Measured on
+    # this box: a bounded pattern over a short cell is 1.2 us, and a full scan of a 1 MB cell with
+    # no match is 0.24 ms — so the ceiling is ~1,000x the worst honest case and the shortest
+    # catastrophic one tested reaches it in 0.25 s rather than never.
+    eln_regex_timeout_seconds: float = Field(default=0.25, gt=0)
+    # How long **every** `regex` transform together may spend on one page, which is the bound the
+    # per-cell one above does not compose into. `warehouse/adapter._read` runs one match per
+    # reaction field, per attribute, and per component and impurity *row*, so a page is
+    # `eln_sync_batch_size x cells_per_entry` matches and the per-cell ceiling multiplies.
+    #
+    # **The reachable case is a pattern that is slow and *completes*, which is why the per-cell
+    # bound cannot see it.** A pattern that exceeds 0.25 s is refused and, because
+    # `PatternBudgetError` is in `durable/publish._BAD_DATA_TYPES`, ends the page after one cell. A
+    # *polynomial* pattern never trips it: measured on this box, `a*a*a*$` over a 6,000-character
+    # cell is **165 ms** — 66% of the per-cell budget, no refusal — and twenty such cells across a
+    # 100-entry batch is **330 s**, which is past `eln_sync_timeout_seconds` (1.1x) and past the
+    # heartbeat, after which the retry runs the identical page. `map_to_ord` is synchronous CPU
+    # work, so no asyncio timer interrupts it; 1,818 of 2,000 cells were reached before the
+    # activity's own deadline.
+    #
+    # **Half of `eln_sync_timeout_seconds`, and that is a split rather than a measurement.** This
+    # bounds *matching* time only — `expr._PageBudget` accumulates what `regex` is given per search
+    # rather than running a wall clock, so the page's writes and fetches are not charged to it. Half
+    # is therefore a generous share rather than an arithmetic one, and what it buys is that a
+    # refusal is *reported* by the activity instead of the activity being killed with nothing to
+    # say.
+    #
+    # It does not need to be tight. An honest cell measures **0.0024 ms** warm, so a whole honest
+    # page of 2,000 cells is **0.0048 s** and this ceiling is ~31,000x it; the pathological pattern
+    # above is ~68,000x an honest one. (An earlier version of this comment said 0.472 ms and ~160x:
+    # that timed the first call, including the `lru_cache` compile miss, which is 0.3 ms on its own.
+    # A review caught it, and the corrected ratio makes the same argument far more strongly.)
+    # Raising `eln_sync_timeout_seconds` without raising this only shrinks the matching share.
+    eln_regex_page_budget_seconds: float = Field(default=150.0, gt=0)
     # The sync fetches from this far *behind* its high-water cursor, so an export file that
     # lands late with an older payload timestamp (an upstream export-job retry) is still picked
     # up instead of being silently dropped forever. Re-fetching the window is safe and cheap
@@ -38,7 +80,9 @@ class ElnSettings(BaseSettings):
     # advanced cursor after each one — so an arbitrarily large backlog makes bounded forward
     # progress instead of timing out one giant attempt forever. Entries inside the overlap
     # window re-ingest idempotently and do not count against the bound. Sized so a full chunk of
-    # per-entry PR-gate pushes fits comfortably inside `eln_sync_timeout_seconds`.
+    # per-entry writes fits comfortably inside `eln_sync_timeout_seconds` — it was sized against
+    # per-entry PR-gate pushes, a cost `D-2026-08-25-an-eln-transcription-is-data-not-a-claim`
+    # removed from this hop and nobody has re-measured without.
     eln_sync_batch_size: int = Field(default=100, ge=1)
     # How many chunks one *run* of the drain may take before it hands the rest to a fresh run with
     # `continue_as_new`. Nothing bounded this, and the ELN sync was the only drain in the package

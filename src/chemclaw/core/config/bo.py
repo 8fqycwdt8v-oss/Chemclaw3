@@ -28,6 +28,18 @@ class BoSettings(BaseSettings):
     # `xtb_job_heartbeat_timeout_seconds` applies to calc's durable jobs, sized down for a
     # per-round budget an order of magnitude smaller.
     bo_activity_heartbeat_timeout_seconds: float = Field(default=60.0, gt=0)
+    # The shortest queue wait a campaign's dispatch may be given, whatever its share of the
+    # execution ceiling works out to. `BoCampaignWorkflow._queue_wait` divides what is left of the
+    # ceiling between the dispatches still to come so that the first step cannot eat the whole of
+    # it — a fairness device, since the sum already fits by being measured against what is left.
+    # Without a floor that division answers the wrong question: at the default ten-round spec it
+    # hands every dispatch 433.6 s instead of the 10,170 s queue-wide bound, so a `bo` worker
+    # rolling, scaled to zero or merely slow to pull expires `schedule_to_start` and kills a
+    # healthy campaign. This is the deployment's answer to "how long may a `bo` worker be absent
+    # before a campaign gives up on it", which is why it is a setting and not an arithmetic:
+    # fifteen minutes is comfortably above a rolling restart and far below the queue-wide ceiling
+    # the `min` in `_queue_wait` still applies.
+    bo_queue_wait_floor_seconds: float = Field(default=900.0, gt=0)
     # Seed for BoFire's random design + SOBO strategies, so a campaign is reproducible
     # (deterministic seeding + proposals) rather than flaky run-to-run.
     bo_seed: int = 42
@@ -65,6 +77,19 @@ class BoSettings(BaseSettings):
     # past any design a human runs (a 12-factor two-level full factorial) and far below what
     # exhausts a pod.
     bo_max_design_runs: int = Field(default=4096, ge=1)
+    # Ceiling on how many candidates one ask may propose — `suggest_next_experiment`'s `count`, and
+    # the durable campaign's per-round `batch`. It was the one model-supplied size in this bundle
+    # with nothing above it, while every sibling here is bounded. The cost is linear in the batch:
+    # measured at ~0.65 s per candidate on an unconstrained two-parameter problem, and the tool's
+    # own docstring puts a *constrained* problem at roughly nine seconds each. Behind the bundle's
+    # `request_timeout: 120` a three-digit `count` is a request the client abandons while the pod
+    # keeps computing it.
+    #
+    # 96 is a plate, which is the largest batch anybody runs at once, and it is deliberately **not**
+    # a latency guarantee: 96 constrained candidates would still outlast that timeout. The number
+    # that bounds latency is the transport's; this bounds the ask. `bo_max_evaluations` still
+    # bounds a whole campaign's spend, of which this is one round.
+    bo_max_candidates_per_ask: int = Field(default=96, ge=1)
     # How many recent evaluations `science.bo.progress` reads for its "have the last N results
     # moved at all" statement, and how many consecutive noise-sized evaluations make a plateau.
     # Five is a working default rather than a statistical claim: it is short enough that a chemist
@@ -85,6 +110,16 @@ class BoSettings(BaseSettings):
     # than in the summary string because the sentence a chemist reads should not be a magic number
     # in a docstring.
     bo_fit_quality_trustworthy_observations: int = Field(default=20, ge=2)
+    # When a response counts as flat, as a fraction of its own magnitude: the fit-quality guard
+    # reports no R² once `max - min <= abs(mean) * this`. Relative rather than the exact `== 0.0`
+    # test it replaces, because exact equality is defeated by a *systematic sub-noise drift* —
+    # driven over a real BoFire fit, eight runs of 42.0 differing by 1e-10 scored R² 0.9991 and
+    # published "predicts held-out runs with R² 1.00", where the same runs at exactly 42.0 correctly
+    # reported no fit quality at all. 1e-9 is a claim about assays rather than about arithmetic, and
+    # a deliberately extreme one: no instrument resolves a billionth of what it is reading, so
+    # nothing a chemist measures can trip this, while float noise and a stuck sensor both do. It is
+    # well above float64's own 2.2e-16 epsilon, which is why the epsilon is not the number used.
+    bo_flat_response_relative_spread: float = Field(default=1e-9, gt=0.0, le=1e-3)
     # How long a measured campaign's round stays open before it expires unanswered
     # (D-2026-08-29-a-decision-that-waits-is-a-workflow). A plate turnaround is the unit here, not
     # a machine timeout: fourteen days is two working weeks, which is long enough that a batch

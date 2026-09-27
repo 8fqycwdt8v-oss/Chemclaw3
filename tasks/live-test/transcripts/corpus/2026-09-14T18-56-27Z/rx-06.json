@@ -1,0 +1,61 @@
+{
+  "probe": {
+    "id": "rx-06",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "Our Negishi looks clean at 100 mg — one spot, 94 LCAP — and at 2 kg we get three new impurities, the largest at 1.8%. Nothing in the recipe changed. What is different at scale?",
+    "expects_tools": [
+      "find_notes",
+      "gather_evidence",
+      "similar_reactions",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a computed mixing time, Reynolds number or mass-transfer coefficient",
+      "a heat-transfer or exotherm calculation for the large vessel",
+      "a quantitative attribution of impurity level to a scale parameter"
+    ],
+    "direction": "The chemistry half is answerable and the engineering half is not, and a good answer says which is which up front. Chemical hypotheses worth naming: longer addition and hold times so intermediates see conditions for hours rather than minutes, local excess at the point of addition, oxygen ingress over a longer charge, slower heat-up and cool-down giving a different thermal history, water or trace metals scaling with the reagent lot rather than with the reaction, and quench/workup residence time. Should ask what changed in dosing order, addition rate and hold time, since those are the usual real culprits and they are recorded facts the user has. Must state plainly that there is no scale-up heat/mass-transfer or mixing model in this system, so it cannot compute which of these dominates — and must not manufacture engineering numbers to close the gap.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-06",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "Our Negishi looks clean at 100 mg — one spot, 94 LCAP — and at 2 kg we get three new impurities, the largest at 1.8%. Nothing in the recipe changed. What is different at scale?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.16,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "62b1db5a2a2c4d15b14ee6020ef9ad2a",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

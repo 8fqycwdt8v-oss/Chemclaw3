@@ -1,6 +1,12 @@
 # The `computation` specialist: property prediction and quantum chemistry, inline and durable.
 #
 # The file's stem is the profile name. Everything here only ever narrows — see `evidence.yaml`.
+description: >-
+  Answers what has already been computed and which chemical species are in play: the
+  enumerations that build a species set, a molecule's topology, what the calibration ledger says
+  about a calculator's trustworthiness, and the stored results and artifacts of earlier runs. It
+  cannot run a calculation or start a job — ask it what exists and what to compute over, then do
+  the computing here.
 instructions: >-
   You are Chemclaw's computation specialist. You compute molecular and reaction properties and
   report them with units, uncertainty and which calculator produced them. Load the
@@ -68,6 +74,7 @@ tool_names:
   - enumerate_protonation_states
   - enumerate_stereoisomers
   - enumerate_bond_cleavages
+  - enumerate_substitutions
   - describe_topology
   # The named protocols. `tool_names` is an allow-list, so a template that is *enabled* is still
   # invisible to a profile that does not name it — and this profile named none of them, which made
@@ -80,6 +87,7 @@ tool_names:
   - run_regioselectivity_in_conformer
   - run_bond_strength_survey
   - run_stereoisomer_ranking
+  - run_substitution_series
   - run_degradant_triage
   - run_conformer_refinement
   - calculator_trust

@@ -12,7 +12,6 @@ how it can be undone and say it consistently, an irreversible one waits for a hu
 records the attempt *before* it is made.
 """
 
-import asyncio
 import inspect
 from pathlib import Path
 
@@ -119,99 +118,87 @@ def test_a_named_compensation_has_to_be_a_job_this_bundle_declares() -> None:
     assert resolved.jobs[0].effect.compensation == "retract_it"
 
 
-def test_the_ledger_records_the_attempt_before_it_is_made() -> None:
+async def test_the_ledger_records_the_attempt_before_it_is_made() -> None:
     """A row in `attempting` after a crash is the honest state, not a bug in the ledger.
 
     This system may have filed the deviation and lost the acknowledgement. A ledger that recorded
     only successes would answer "nothing happened" for exactly the case an operator most needs to
     investigate — which is why `unsettled` has an index of its own.
     """
+    await migrated_db_or_skip()
+    async with await connect(settings.postgres_dsn) as conn:
+        await conn.execute("DELETE FROM effects WHERE connector = 'effects-test'")
+        await conn.commit()
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        async with await connect(settings.postgres_dsn) as conn:
-            await conn.execute("DELETE FROM effects WHERE connector = 'effects-test'")
-            await conn.commit()
+    record = EffectRecord(
+        effect_id="eff-crash",
+        connector="effects-test",
+        job="file_deviation",
+        system="the QMS",
+        reversal="irreversible",
+        requested_by="u-1",
+        approved_by="u-qa",
+    )
+    await begin_effect(record)
 
-        record = EffectRecord(
-            effect_id="eff-crash",
-            connector="effects-test",
-            job="file_deviation",
-            system="the QMS",
-            reversal="irreversible",
-            requested_by="u-1",
-            approved_by="u-qa",
-        )
-        await begin_effect(record)
+    open_now = {row.effect_id for row in await unsettled()}
+    assert "eff-crash" in open_now
+    stored = await get_effect("eff-crash")
+    assert stored is not None and stored.state == "attempting"
 
-        open_now = {row.effect_id for row in await unsettled()}
-        assert "eff-crash" in open_now
-        stored = await get_effect("eff-crash")
-        assert stored is not None and stored.state == "attempting"
-
-        await settle_effect("eff-crash", state="applied", external_ref="DEV-2291")
-        settled = await get_effect("eff-crash")
-        assert settled is not None
-        assert (settled.state, settled.external_ref) == ("applied", "DEV-2291")
-        assert "eff-crash" not in {row.effect_id for row in await unsettled()}
-
-    asyncio.run(_run())
+    await settle_effect("eff-crash", state="applied", external_ref="DEV-2291")
+    settled = await get_effect("eff-crash")
+    assert settled is not None
+    assert (settled.state, settled.external_ref) == ("applied", "DEV-2291")
+    assert "eff-crash" not in {row.effect_id for row in await unsettled()}
 
 
-def test_an_applied_effect_is_never_walked_back_to_attempting() -> None:
+async def test_an_applied_effect_is_never_walked_back_to_attempting() -> None:
     """A replay must not put the far side's state back in doubt when it is not.
 
     `begin_effect` is idempotent on the job's deterministic workflow id, so a retried run re-opens
     its own row — but an effect that has already landed has landed.
     """
+    await migrated_db_or_skip()
+    record = EffectRecord(
+        effect_id="eff-applied",
+        connector="effects-test",
+        job="file_deviation",
+        system="the QMS",
+        reversal="idempotent",
+    )
+    await begin_effect(record)
+    await settle_effect("eff-applied", state="applied", external_ref="DEV-1")
+    await begin_effect(record)
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        record = EffectRecord(
-            effect_id="eff-applied",
-            connector="effects-test",
-            job="file_deviation",
-            system="the QMS",
-            reversal="idempotent",
-        )
-        await begin_effect(record)
-        await settle_effect("eff-applied", state="applied", external_ref="DEV-1")
-        await begin_effect(record)
-
-        stored = await get_effect("eff-applied")
-        assert stored is not None
-        assert stored.state == "applied"
-        assert stored.external_ref == "DEV-1"
-
-    asyncio.run(_run())
+    stored = await get_effect("eff-applied")
+    assert stored is not None
+    assert stored.state == "applied"
+    assert stored.external_ref == "DEV-1"
 
 
-def test_the_external_reference_survives_a_failure() -> None:
+async def test_the_external_reference_survives_a_failure() -> None:
     """It is the only handle an operator can undo by hand.
 
     Losing it because the call failed *after* the far side created the record is the worst possible
     time to lose it.
     """
-
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        await begin_effect(
-            EffectRecord(
-                effect_id="eff-partial",
-                connector="effects-test",
-                job="file_deviation",
-                system="the QMS",
-                reversal="compensating",
-            )
+    await migrated_db_or_skip()
+    await begin_effect(
+        EffectRecord(
+            effect_id="eff-partial",
+            connector="effects-test",
+            job="file_deviation",
+            system="the QMS",
+            reversal="compensating",
         )
-        await settle_effect(
-            "eff-partial", state="failed", external_ref="DEV-77", detail="timed out after create"
-        )
-        stored = await get_effect("eff-partial")
-        assert stored is not None
-        assert (stored.state, stored.external_ref) == ("failed", "DEV-77")
-
-    asyncio.run(_run())
+    )
+    await settle_effect(
+        "eff-partial", state="failed", external_ref="DEV-77", detail="timed out after create"
+    )
+    stored = await get_effect("eff-partial")
+    assert stored is not None
+    assert (stored.state, stored.external_ref) == ("failed", "DEV-77")
 
 
 def test_an_irreversible_effect_waits_for_a_human_and_refuses_on_expiry() -> None:
@@ -261,7 +248,7 @@ async def _clear(effect_id: str) -> None:
         await conn.commit()
 
 
-def test_a_failure_after_the_change_landed_cannot_rewrite_the_applied_row() -> None:
+async def test_a_failure_after_the_change_landed_cannot_rewrite_the_applied_row() -> None:
     """The one write that must not be believed: `failed` over an effect that already applied.
 
     `ConnectorJobWorkflow` settles `applied` and then runs `_finish` **inside the same `try`**,
@@ -274,74 +261,66 @@ def test_a_failure_after_the_change_landed_cannot_rewrite_the_applied_row() -> N
     Asserted as the *second* settle being refused rather than as the first succeeding, because the
     first always worked; it was the overwrite that lied.
     """
-
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        effect_id = "eff-applied-then-failed"
-        await _clear(effect_id)
-        await begin_effect(
-            EffectRecord(
-                effect_id=effect_id,
-                connector="qms",
-                job="file_deviation",
-                system="the QMS",
-                reversal="irreversible",
-                requested_by="u-1",
-                session_id="s-1",
-                approved_by="u-qa",
-            )
+    await migrated_db_or_skip()
+    effect_id = "eff-applied-then-failed"
+    await _clear(effect_id)
+    await begin_effect(
+        EffectRecord(
+            effect_id=effect_id,
+            connector="qms",
+            job="file_deviation",
+            system="the QMS",
+            reversal="irreversible",
+            requested_by="u-1",
+            session_id="s-1",
+            approved_by="u-qa",
         )
-        await settle_effect(effect_id, state="applied", external_ref="DEV-2291", detail="filed")
-        # Everything after the child returns runs inside the same `try`; this is what its handler
-        # would write.
-        await settle_effect(effect_id, state="failed", detail="Cancelled")
+    )
+    await settle_effect(effect_id, state="applied", external_ref="DEV-2291", detail="filed")
+    # Everything after the child returns runs inside the same `try`; this is what its handler
+    # would write.
+    await settle_effect(effect_id, state="failed", detail="Cancelled")
 
-        stored = await get_effect(effect_id)
-        assert stored is not None
-        assert stored.state == "applied", (
-            "a failure after the change landed rewrote the ledger to 'failed'; an operator would "
-            "be told the irreversible change did not happen and would repeat it"
-        )
-        assert stored.external_ref == "DEV-2291", (
-            "the far side's handle was erased by the later settle — it is the only string an "
-            "operator can undo the change by"
-        )
-
-    asyncio.run(_run())
+    stored = await get_effect(effect_id)
+    assert stored is not None
+    assert stored.state == "applied", (
+        "a failure after the change landed rewrote the ledger to 'failed'; an operator would "
+        "be told the irreversible change did not happen and would repeat it"
+    )
+    assert stored.external_ref == "DEV-2291", (
+        "the far side's handle was erased by the later settle — it is the only string an "
+        "operator can undo the change by"
+    )
 
 
-def test_a_settle_without_a_handle_does_not_erase_the_one_already_recorded() -> None:
+async def test_a_settle_without_a_handle_does_not_erase_the_one_already_recorded() -> None:
     """`external_ref` is coalesced, not assigned.
 
     A compensating settle that knows the state but not a new reference must leave the reference
     alone; assigning would blank the field precisely when an operator most needs it.
     """
-
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        effect_id = "eff-handle-kept"
-        await _clear(effect_id)
-        await begin_effect(
-            EffectRecord(
-                effect_id=effect_id,
-                connector="qms",
-                job="file_deviation",
-                system="the QMS",
-                reversal="compensating",
-                requested_by="u-1",
-                session_id="s-1",
-            )
+    await migrated_db_or_skip()
+    effect_id = "eff-handle-kept"
+    await _clear(effect_id)
+    await begin_effect(
+        EffectRecord(
+            effect_id=effect_id,
+            connector="qms",
+            job="file_deviation",
+            system="the QMS",
+            reversal="compensating",
+            requested_by="u-1",
+            session_id="s-1",
         )
-        await settle_effect(effect_id, state="failed", external_ref="DEV-7", detail="partial")
-        await settle_effect(effect_id, state="compensated", detail="rolled back")
-        stored = await get_effect(effect_id)
-        assert stored is not None
-        assert (stored.state, stored.external_ref) == ("compensated", "DEV-7")
+    )
+    await settle_effect(effect_id, state="failed", external_ref="DEV-7", detail="partial")
+    await settle_effect(effect_id, state="compensated", detail="rolled back")
+    stored = await get_effect(effect_id)
+    assert stored is not None
+    assert (stored.state, stored.external_ref) == ("compensated", "DEV-7")
 
-    asyncio.run(_run())
 
-
-def test_an_applied_effect_can_still_be_compensated() -> None:
+async def test_an_applied_effect_can_still_be_compensated() -> None:
     """The one transition out of `applied` that must survive the overwrite guard.
 
     `reversal: compensating` means "undone by another declared job", and applied → compensated is
@@ -352,43 +331,37 @@ def test_an_applied_effect_can_still_be_compensated() -> None:
     The existing compensation test asserts `failed` → `compensated`, which the guard always allowed;
     it passes whether or not this path works, which is why it could not catch this.
     """
-
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        effect_id = "eff-applied-then-compensated"
-        await _clear(effect_id)
-        await begin_effect(
-            EffectRecord(
-                effect_id=effect_id,
-                connector="qms",
-                job="file_deviation",
-                system="the QMS",
-                reversal="compensating",
-                requested_by="u-1",
-                session_id="s-1",
-                approved_by="u-qa",
-            )
+    await migrated_db_or_skip()
+    effect_id = "eff-applied-then-compensated"
+    await _clear(effect_id)
+    await begin_effect(
+        EffectRecord(
+            effect_id=effect_id,
+            connector="qms",
+            job="file_deviation",
+            system="the QMS",
+            reversal="compensating",
+            requested_by="u-1",
+            session_id="s-1",
+            approved_by="u-qa",
         )
-        await settle_effect(effect_id, state="applied", external_ref="DEV-55", detail="filed")
-        await settle_effect(
-            effect_id, state="compensated", external_ref="DEV-55R", detail="withdrawn"
-        )
+    )
+    await settle_effect(effect_id, state="applied", external_ref="DEV-55", detail="filed")
+    await settle_effect(effect_id, state="compensated", external_ref="DEV-55R", detail="withdrawn")
 
-        stored = await get_effect(effect_id)
-        assert stored is not None
-        assert stored.state == "compensated", (
-            "an applied effect could not be compensated, so the ledger still says a change is "
-            "standing after it was rolled back"
-        )
-        assert stored.external_ref == "DEV-55R", "the compensating handle was not recorded"
+    stored = await get_effect(effect_id)
+    assert stored is not None
+    assert stored.state == "compensated", (
+        "an applied effect could not be compensated, so the ledger still says a change is "
+        "standing after it was rolled back"
+    )
+    assert stored.external_ref == "DEV-55R", "the compensating handle was not recorded"
 
-        # And the guard it must not weaken: `failed` still cannot overwrite `applied`.
-        await settle_effect(effect_id, state="applied", detail="re-applied")
-        await settle_effect(effect_id, state="failed", detail="Cancelled")
-        again = await get_effect(effect_id)
-        assert again is not None and again.state == "applied"
-
-    asyncio.run(_run())
+    # And the guard it must not weaken: `failed` still cannot overwrite `applied`.
+    await settle_effect(effect_id, state="applied", detail="re-applied")
+    await settle_effect(effect_id, state="failed", detail="Cancelled")
+    again = await get_effect(effect_id)
+    assert again is not None and again.state == "applied"
 
 
 def test_an_irreversible_effect_without_a_named_approver_refuses_to_run() -> None:
@@ -569,3 +542,48 @@ def test_no_operator_surface_serves_the_unsettled_set_without_saying_so() -> Non
         "`durable/effect_ledger.py`'s docstring still says none does. Rewrite the sentence in the "
         "same change that serves it."
     )
+
+
+async def test_an_effect_is_built_from_the_columns_by_name_and_keeps_its_iso_stamps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reversing `_COLUMNS` must change nothing, and the two timestamps must stay ISO strings.
+
+    Fourteen positional subscripts used to restate this SELECT's order in Python, nine of them
+    adjacent `TEXT` columns — `requested_by`, `session_id`, `correlation_id`, `approved_by`,
+    `state`, `external_ref`, `detail` among them — so an edit to `_COLUMNS` renamed every value
+    silently. The stamps are asserted beside it because they are the one thing a row factory does
+    *not* do: `attempted_at` and `settled_at` are `TIMESTAMPTZ` and this model has always exposed
+    them as `datetime.isoformat()`, which is now a `BeforeValidator` rather than a line in a
+    hand-written builder — and a SQL-side `::text` would have spelled them differently.
+    """
+    from chemclaw.durable import effect_ledger
+
+    await migrated_db_or_skip()
+    await begin_effect(
+        EffectRecord(
+            effect_id="eff-by-name",
+            connector="effects-test",
+            job="file_deviation",
+            system="the QMS",
+            reversal="idempotent",
+            requested_by="u-1",
+        )
+    )
+    await settle_effect("eff-by-name", state="applied", external_ref="DEV-1")
+    straight = await get_effect("eff-by-name")
+    assert straight is not None
+    assert straight.attempted_at.count("T") == 1 and straight.settled_at.count("T") == 1, (
+        "these reach callers as `datetime.isoformat()` spells them, not as the server's "
+        "`::text` would"
+    )
+
+    columns = [name.strip() for name in effect_ledger._COLUMNS.split(",")]
+    monkeypatch.setattr(effect_ledger, "_COLUMNS", ", ".join(reversed(columns)))
+    assert await get_effect("eff-by-name") == straight, (
+        "the column order must not be able to decide which field a value lands in"
+    )
+
+    monkeypatch.setattr(effect_ledger, "_COLUMNS", f"{', '.join(columns)}, connector AS surplus")
+    with pytest.raises(ValidationError, match="surplus"):
+        await get_effect("eff-by-name")

@@ -1,0 +1,60 @@
+{
+  "probe": {
+    "id": "ws-16",
+    "section": 1,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Pull together everything we have run on this amide coupling and show me how the conditions moved over time — I want one table, not fifteen notes to read one at a time.",
+    "expects_tools": [
+      "condense_protocols",
+      "similar_reactions",
+      "gather_evidence"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a condition, yield or date not present in the records",
+      "that the set shown is everything on file, when the search that produced it may have been capped",
+      "a chronological trajectory when the records carry no dates"
+    ],
+    "direction": "The whole point of the tool is that this is *one* read rather than fifteen, so an answer that calls `expand_note` in a loop has missed it even if the content is right. A good answer finds the protocols (a similarity search or an evidence sweep), condenses them in one call, and returns the comparison as a table with one row per protocol and the reference each row came from, so a chemist can cite it directly.\nTwo honesty conditions carry most of the weight here. `complete` means every reference that was *passed* got read — it never means every protocol on file was seen — so the answer must not turn a capped search into \"here is everything we have tried\"; the right move is to say what was searched and that it may have been narrowed. And the ordering claim has to match the records: rows are a trajectory only when the notes carry dates, and an undated set presented as \"how the conditions moved over time\" invents a history. If some protocols were refused or too large to read, they are named rather than dropped.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "ws-16",
+    "section": 1,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Pull together everything we have run on this amide coupling and show me how the conditions moved over time — I want one table, not fifteen notes to read one at a time.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.06,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "be232532a0aa43cfb0adc8f9d00abbdb",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

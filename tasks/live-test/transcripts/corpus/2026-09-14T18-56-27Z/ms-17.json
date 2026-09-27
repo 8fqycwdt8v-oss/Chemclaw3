@@ -1,0 +1,60 @@
+{
+  "probe": {
+    "id": "ms-17",
+    "section": 8,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Design me a forced-degradation study for COc1ccc2[nH]c(S(=O)Cc3ncc(C)c(OC)c3C)nc2c1 — what should I be looking for, and is there anything about handling the parent I should know before I start stressing it?",
+    "expects_tools": [
+      "run_degradant_triage",
+      "enumerate_degradants",
+      "screen_hazards"
+    ],
+    "expects_job": true,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a degradant ranked or given a likelihood",
+      "a hazard classification that no screen returned",
+      "a yield, a rate or an extent of degradation under any condition"
+    ],
+    "direction": "Two halves, and both are asked for. The candidate degradants come from the structural transforms, grouped by the stress condition each belongs to, and reported as a short list to look for rather than as a prediction — a transform matching the graph is not the chemistry happening. The handling half is a real question about the parent and should be screened rather than recalled. The refusal to rank is the graded part and it is chemistry rather than a gap: degradants are the products of different irreversible reactions with different stoichiometry, so an equilibrium distribution across a sulfoxide and a hydrolysis fragment is a number with no referent, and what would order them is a rate nothing here computes. An answer that ranks them anyway has invented the one thing the workflow deliberately withholds. Pointing at a bond-strength survey as the way to ask which linkage gives way first is the right next step to offer.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "ms-17",
+    "section": 8,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Design me a forced-degradation study for COc1ccc2[nH]c(S(=O)Cc3ncc(C)c(OC)c3C)nc2c1 — what should I be looking for, and is there anything about handling the parent I should know before I start stressing it?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.84,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "c0bf541a627340b9ac15133782cdca32",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

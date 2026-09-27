@@ -22,8 +22,8 @@ import pytest
 from chemclaw.agent.dialogue_tools import ask_clarifying_question
 from chemclaw.agent.session import TurnSession
 from chemclaw.agent.tool_authz import DryRunRefusal, refuse_writes_on_dry_run
-from chemclaw.agent.turn_flags import is_dry_run, reset_dry_run, set_dry_run
 from chemclaw.api.runner import run_turn
+from chemclaw.core.turn_flags import is_dry_run, reset_dry_run, set_dry_run
 from tests.fakes_turn import Piece, ScriptedTurn
 from tests.middleware import run_middleware, tool_request
 

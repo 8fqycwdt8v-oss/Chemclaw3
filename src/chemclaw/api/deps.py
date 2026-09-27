@@ -49,9 +49,9 @@ from chemclaw.core.metrics import METRICS
 
 logger = logging.getLogger(__name__)
 
-# The resources this module can refuse, as a closed label set: a conversation and an experiment
-# design. A source literal at every call site, so `chemclaw_authz_refusals_total` can never grow a
-# series from anything a caller sends.
+# The resources this module can refuse, as a closed label set: a conversation, an experiment design
+# and the organisation's skills. A source literal at every call site, so
+# `chemclaw_authz_refusals_total` can never grow a series from anything a caller sends.
 _SESSION = "session"
 #: `POST /protocols/{id}/revisions` and `/status` refuse in their own module, with a 403 rather
 #: than this module's 404, and for a reason that module argues: a design is a shared artifact whose
@@ -60,6 +60,13 @@ _SESSION = "session"
 #: invisible on the one surface where the distinction between "no such design" and "not yours"
 #: survives at all. `record_refusal` is exported for exactly that call.
 DESIGN = "design"
+#: `POST /skills/org`, its revert and its delete refuse in their own module with a 403, for
+#: `DESIGN`'s reason: the tier's reads are open — every chemist pays for it in their prefix and is
+#: entitled to see it — so a skill's *name* existing is not the secret and only the right to change
+#: it is withheld. The `target` is therefore a skill name, which is deployment configuration, and
+#: never a third party's oid: that is one of the properties the promotion design was chosen for
+#: (`D-2026-09-20-a-behaviour-change-is-gated-by-its-blast-radius`).
+ORG_SKILL = "org-skill"
 
 
 def _refuse(

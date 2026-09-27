@@ -21,7 +21,7 @@ trip would be strictly worse.
 
 Resolution is deliberately *conservative*: an unknown name returns no match rather than a guess.
 Fabricating a structure from a name is the one failure mode that would be worse than the gap — a
-wrong structure propagates silently into a calculation, a fingerprint search, and a proposed note.
+wrong structure propagates silently into a calculation, a fingerprint search, and a recorded note.
 
 **There was a density table here, and it is gone.** `density_of` and its 23-entry
 `_RAW_DENSITIES` block existed for `stoichiometry_table` — the comment argued its correctness
@@ -260,7 +260,7 @@ def resolve_compound_name(name: str) -> ResolvedCompound | None:
     """Resolve a written reagent name (or a SMILES) to a canonical structure, or `None`.
 
     Returns `None` rather than guessing: a fabricated structure propagates silently into a
-    calculation, a similarity search, and eventually a proposed note, which is strictly worse than
+    calculation, a similarity search, and eventually a recorded note, which is strictly worse than
     an honest miss.
     """
     lookup = _TABLE.get(_normalize(name))

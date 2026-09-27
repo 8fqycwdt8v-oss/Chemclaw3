@@ -39,6 +39,7 @@ from pydantic import BaseModel, Field, computed_field
 
 from chemclaw.connectors.bo.calculators import properties_for
 from chemclaw.connectors.caller import caller_provenance
+from chemclaw.core.ids import stable_hash
 from chemclaw.science.bo.campaign_record import (
     CampaignThread,
     read_campaign_thread,
@@ -48,6 +49,7 @@ from chemclaw.science.bo.engine import (
     factorial_design,
     initial_candidates,
     interrogate_surrogate,
+    optimal_design,
     propose_candidates,
 )
 from chemclaw.science.bo.featurize import featurize_problem
@@ -57,6 +59,7 @@ from chemclaw.science.bo.problem import (
     FitQuality,
     Objective,
     Observation,
+    OptimalDesign,
     OptimizationProblem,
     ParamValue,
     Prediction,
@@ -377,12 +380,26 @@ def _recorded_provenance() -> tuple[str, str, str]:
     **The actor reaching this tool is a claim, not an identity, and the record has to say so.**
     `caller_provenance` reads `X-Chemclaw-Actor` off the serving HTTP request, and
     `chemclaw.connectors.caller` says in its own module docstring that these values "arrive on an
-    unauthenticated header from outside this process's trust boundary". This bundle's manifest
-    declares `auth: mode: none`, so the pod does not even authenticate *core*: anything that can
-    open a socket to it can name any chemist it likes. Measured before this existed — a call
-    carrying `X-Chemclaw-Actor: victim-oid` wrote `victim-oid` verbatim into `bo_campaigns.
-    opened_by` and `bo_suggestions.actor`, the two columns `agent/leaver.py` retains as the
-    answer to "who framed this campaign's decision space", indistinguishable from a real one.
+    unauthenticated header from outside this process's trust boundary". Measured before this
+    existed — a call carrying `X-Chemclaw-Actor: victim-oid` wrote `victim-oid` verbatim into
+    `bo_campaigns.opened_by` and `bo_suggestions.actor`, the two columns `agent/leaver.py` retains
+    as the answer to "who framed this campaign's decision space", indistinguishable from a real one.
+
+    **Who can make that claim is narrower than this paragraph used to say, and the marker survives
+    the narrowing.** It read "this bundle's manifest declares `auth: mode: none`, so the pod does
+    not even authenticate *core*: anything that can open a socket to it can name any chemist it
+    likes". The manifest declares `mode: bearer` with `token_env: CHEMCLAW_BO_MCP_TOKEN`
+    (`D-2026-08-20-a-networkpolicy-selects-peers-not-paths` closed that, and
+    `tests/test_connector_identity.py::test_every_bundle_this_repository_hosts_authenticates_its_own_mcp`
+    holds it for every bundle); driven against the real app, `/mcp` answers **401** with no token
+    and 401 with a wrong one. So the forgery is a *token-holder's*, not anyone's.
+
+    That is a smaller threat and not a closed one, which is exactly why the marking stays. A bearer
+    proves this request came from something holding this bundle's credential — in the shipped
+    deployment, core — and says nothing about *which chemist* core was serving. The header is still
+    the only thing carrying that, and it is still unauthenticated, so a column that recorded it bare
+    would be indistinguishable from one filled by a validated principal. Dropping the prefix on the
+    strength of the bearer would be trusting a credential to answer a question it does not answer.
 
     **Why marking rather than sourcing the real principal.** The durable sibling
     (`connectors/bo/workflows.py`) reads `requested_by` off the run's Temporal memo, which core sets
@@ -576,12 +593,34 @@ async def suggest_next_experiment(
     # just before it, which could not answer the question: two turns opening the same decision
     # space concurrently both read no campaign and both claimed to have opened one, while the
     # upsert underneath serialized them so exactly one was right. See `RecordedSuggestion`.
+    #
+    # **`job_id` is what makes the write idempotent, and the inline path passed none** — so the
+    # partial index `ON CONFLICT (campaign_id, job_id) WHERE job_id <> ''` did not cover this row
+    # and a replay landed a second one. That is not hypothetical since
+    # `D-2026-09-14-a-turn-outlives-its-request-already-and-nothing-can-pick-it-up`: a tool killed
+    # mid-call is re-run with its original arguments, and `record_suggestion`'s own parameter
+    # docstring already said what the absence costs ("empty for the inline tool. Makes the write
+    # idempotent — a Temporal activity is retried by design").
+    #
+    # Derived rather than minted, the way every other idempotency key in this tree is: a hash over
+    # the campaign, what was asked and what was known when it was asked. Two *genuinely* identical
+    # requests dedupe, and that is correct rather than a cost — a suggestion is a function of the
+    # problem and its observations, so asking the same question of the same evidence has one
+    # answer. A new observation changes `history` and therefore the key.
+    inline_key = "inline-" + stable_hash(
+        [
+            featurized.problem.model_dump(mode="json"),
+            [candidate.model_dump(mode="json") for candidate in candidates],
+            [observation.model_dump(mode="json") for observation in history],
+        ]
+    )
     recorded = await record_suggestion(
         problem=featurized.problem,
         candidates=candidates,
         observations=history,
         calc_refs=featurized.calc_refs,
         provenance=_recorded_provenance(),
+        job_id=inline_key,
     )
     campaign_id = recorded.campaign_id
     scales = [_objective_scale(problem, history, obj) for obj in problem.objectives]
@@ -706,7 +745,10 @@ async def generate_screening_design(
     n_center: int = 0,
     n_repetitions: int = 1,
     randomize: bool = False,
-) -> ScreeningDesign:
+    criterion: str = "factorial",
+    n_experiments: int = 0,
+    formula: str = "linear",
+) -> ScreeningDesign | OptimalDesign:
     """Generate a factorial screening design — full grid or reduced, categorical or continuous.
 
     Use this for the *other* classical DoE question — "run every combination of these conditions" —
@@ -751,10 +793,17 @@ async def generate_screening_design(
     grid instead. `n_repetitions` is unaffected: a replicate repeats whole rows, so it needs no
     midpoint.
 
-    **A problem carrying constraints is refused here.** A factorial screen enumerates the corners of
-    the space and honours no limit, so it would hand back runs that violate one. Either drop the
-    constraint and filter the returned runs yourself — saying that you did — or use
-    `suggest_next_experiment`, which does honour it.
+    **A problem carrying constraints is refused by the factorial.** It enumerates the corners of
+    the space and honours no limit, so it would hand back runs that violate one. That is what
+    `criterion` is for: pass `d-optimal` (or `i-optimal`, `a-optimal`, `space-filling`) with a run
+    budget and the design honours the constraints instead, filling the budget exactly. Use it
+    whenever the chemist has a real limit or a fixed number of runs rather than a grid.
+
+    An optimality criterion designs for a **stated model**, so `formula` is part of the question: a
+    `linear` design is blind to curvature by construction. Never report one without naming its
+    model. `space-filling` assumes no model at all. Two things in that return to repeat rather than
+    tidy away — a repeated row is intentional replication, and the design carries no alias
+    structure, so unlike a fractional factorial it cannot say what is confounded.
 
     Args:
         problem: The decision variables and the objective (its direction is not used by a screening
@@ -766,13 +815,34 @@ async def generate_screening_design(
             available on a reduced design that also has categorical factors.
         n_repetitions: How many times to replicate the design. Needs a continuous factor.
         randomize: Shuffle the run order (reproducibly).
+        criterion: `factorial` (the default, everything above) or one of `d-optimal`,
+            `i-optimal`, `a-optimal`, `space-filling` — see the paragraph below.
+        n_experiments: The run budget, required by every criterion except `factorial` and refused
+            with it (a factorial's size is the grid, not a number you choose).
+        formula: The model an optimality criterion is optimal *for*: `linear`,
+            `linear-and-interactions`, `linear-and-quadratic`, `fully-quadratic`.
 
     Returns:
-        The runs to perform, plus `resolution`, `two_level_continuous`, and a `summary` stating
-        whether the design is exhaustive, what was collapsed, and what is confounded.
+        For `factorial`, the runs plus `resolution`, `two_level_continuous` and a `summary` stating
+        whether the design is exhaustive, what was collapsed and what is confounded. For every
+        other criterion, the runs plus `formula`, `n_terms`, `duplicate_runs`,
+        `honoured_constraints` and a `summary` of what that design cannot do.
     """
     problem = OptimizationProblem.model_validate(problem)
     require_names_do_not_clash(problem)
+    if criterion != "factorial":
+        return await asyncio.to_thread(optimal_design, problem, n_experiments, criterion, formula)
+    if n_experiments:
+        # The rule this tool's own docstring already applies to `n_center` and `n_repetitions`: a
+        # silently ignored argument is worse than an error. A factorial's size is the product of its
+        # level counts, so a caller who passed a budget is asking for a design this criterion cannot
+        # give — and being handed 128 rows after asking for 24 is the failure.
+        raise ValueError(
+            f"a factorial's run count is the size of the grid, so n_experiments={n_experiments} "
+            "cannot be honoured here. Pass a criterion that takes a budget — 'd-optimal' for "
+            "estimating a model, 'space-filling' for covering the region — or reduce the grid with "
+            "n_generators."
+        )
     return await asyncio.to_thread(
         factorial_design,
         problem,

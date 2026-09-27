@@ -30,7 +30,9 @@ from chemclaw.protocols.checks import (
     is_a_protocol,
     layout_fits,
     limiting_is_limiting,
+    no_documented_failure,
     objectives_are_measured,
+    precedent_consulted,
     quantities_are_plausible,
     run_checks,
 )
@@ -48,8 +50,10 @@ from chemclaw.protocols.models import (
     ProtocolCheck,
     ProtocolStep,
     ProtocolStepKind,
+    RecordedFailure,
     RequestedComponent,
     Setpoints,
+    UncitedPrecedent,
     Well,
 )
 from chemclaw.science.labels.vocabulary import SpeciesRole
@@ -828,6 +832,68 @@ def test_quantities_are_plausible_flags_a_zero_equivalents_line() -> None:
     assert "0 equivalents" in verdict.detail
 
 
+def test_a_kilo_lab_charge_is_not_a_unit_mistake_when_the_scale_says_so() -> None:
+    """The bench bands described a discovery chemist and called a 20 kg campaign an error.
+
+    `data/evals/probes/process-chemistry.yaml`'s opening probe is 20 kg in a 250 L reactor. Every
+    charge on it cleared 1 kg and 20 L, so this warning fired on correct input — which is the one
+    kind of warning that teaches a chemist to stop reading the two checks beside it.
+    """
+    charge = [
+        ChargeLine(component="aryl bromide", limiting=True, mass_mg=20_000_000.0).model_dump(),
+        ChargeLine(component="2-MeTHF", volume_ml=200_000.0).model_dump(),
+    ]
+    at_scale = _design(
+        request=_request(scale={"value": "20 kg", "basis": "stated", "quote": "20 kg"}),
+        base={"charge": charge},
+    )
+    assert quantities_are_plausible(at_scale).passed
+
+    unstated = _design(base={"charge": charge})
+    verdict = quantities_are_plausible(unstated)
+    assert not verdict.passed
+    assert "is over 1 kg" in verdict.detail
+
+
+def test_the_scale_relative_band_still_catches_a_thousandfold_slip() -> None:
+    """Widening the band must not delete it: at 20 kg, 20 tonnes is still a slip."""
+    design = _design(
+        request=_request(scale={"value": "20 kg", "basis": "stated", "quote": "20 kg"}),
+        base={"charge": [ChargeLine(component="solid", mass_mg=2e13).model_dump()]},
+    )
+    verdict = quantities_are_plausible(design)
+    assert not verdict.passed
+    assert "for the declared scale of 20 kg" in verdict.detail
+
+
+def test_a_declared_scale_never_tightens_the_band() -> None:
+    """A 5 g scale must not start failing a 900 g charge that passes with no scale at all.
+
+    The band exists to catch an order-of-magnitude slip, and one that grew teeth because somebody
+    filled in an optional field would be a check that punishes stating your scale.
+    """
+    charge = [ChargeLine(component="solid", mass_mg=900_000.0).model_dump()]
+    assert quantities_are_plausible(_design(base={"charge": charge})).passed
+    small = _design(
+        request=_request(scale={"value": "5 g", "basis": "stated", "quote": "5 g"}),
+        base={"charge": charge},
+    )
+    assert quantities_are_plausible(small).passed
+
+
+def test_a_scale_that_is_not_a_quantity_leaves_the_bench_bands_alone() -> None:
+    """A 96-well plate and 'pilot' are ordinary answers, and neither fixes a bound."""
+    design = _design(
+        request=_request(
+            scale={"value": "a 96-well plate", "basis": "stated", "quote": "a 96-well plate"}
+        ),
+        base={"charge": [ChargeLine(component="solid", mass_mg=2_000_000.0).model_dump()]},
+    )
+    verdict = quantities_are_plausible(design)
+    assert not verdict.passed
+    assert "is over 1 kg" in verdict.detail
+
+
 # --- coverage_is_stated -------------------------------------------------------------------------
 
 
@@ -934,6 +1000,14 @@ def test_run_checks_keeps_its_declared_reading_order() -> None:
     assert _check_ids()[1] == "components_resolve"
     assert _check_ids()[-1] == "coverage_is_stated"
     assert _check_ids().index("charge_is_consistent") < _check_ids().index("evidence_present")
+    # What the corpus knows is read after what the design says, and before the coverage note that
+    # never fails: a recorded failure is worth knowing rather than arithmetically wrong, and it is
+    # the last thing with an opinion.
+    assert (
+        _check_ids().index("evidence_present")
+        < _check_ids().index("no_documented_failure")
+        < _check_ids().index("coverage_is_stated")
+    )
 
 
 def test_blockers_selects_exactly_the_failed_blocking_checks() -> None:
@@ -1279,3 +1353,232 @@ def test_limiting_is_limiting_ignores_a_sub_stoichiometric_catalyst() -> None:
         )
     )
     assert verdict.passed
+
+
+# --- no_documented_failure -------------------------------------------------------------------
+
+
+def test_no_documented_failure_passes_when_the_corpus_knows_nothing_against_the_design() -> None:
+    """The ordinary case, and the one a caller that never looked also produces.
+
+    Those two are indistinguishable here by construction, which `run_checks` states rather than
+    hides: the check decides over what it is handed, and whether anybody asked the corpus is the
+    caller's honesty to keep.
+    """
+    verdict = no_documented_failure(_protocol(), ())
+    assert verdict.passed and verdict.severity == "note"
+    assert verdict.check_id == "no_documented_failure"
+
+
+def test_no_documented_failure_names_what_the_corpus_already_recorded() -> None:
+    """The gap the audit called the most concrete in the system.
+
+    `forbidden_absent` tests what the chemist *typed*; nothing tested what the corpus *knows*, so a
+    design could cite a playbook and repeat a documented failure sitting in the same graph. The
+    refusal has to name the note, because "something failed before" a chemist cannot open is not
+    evidence.
+    """
+    failures = [RecordedFailure(id="failure-abc123", summary="the catalyst died above 60 C")]
+    verdict = no_documented_failure(_protocol(), failures)
+    assert not verdict.passed
+    assert "failure-abc123" in verdict.detail
+    assert "the catalyst died above 60 C" in verdict.detail
+
+
+def test_a_recorded_failure_is_a_note_rather_than_a_blocker() -> None:
+    """Evidence, not a verdict — and blocking would teach people to stop citing their evidence.
+
+    A single failed run is not a refutation of a general rule (`failure_note` carries a
+    `confidence` for exactly that), the same reagent appears in unrelated routes, and re-running
+    something that failed in order to characterise it is ordinary work. Asserted through
+    `blockers()` because the severity field alone would not catch a future change that kept the
+    label and raised the consequence.
+    """
+    failures = [RecordedFailure(id="failure-abc123", summary="it did not hold")]
+    checks = run_checks(_protocol(), failures=failures)
+    assert blockers(checks) == []
+    verdict = {check.check_id: check for check in checks}["no_documented_failure"]
+    assert not verdict.passed and verdict.severity == "note"
+
+
+def test_many_failures_are_summarised_rather_than_listed_entire() -> None:
+    """A design citing eight refuted notes has one thing wrong with it, not eight.
+
+    The count still reports the rest, so the detail is a summary rather than a truncation that
+    loses the scale of the problem.
+    """
+    failures = [
+        RecordedFailure(id=f"failure-{n:02d}", summary=f"observation {n}") for n in range(8)
+    ]
+    verdict = no_documented_failure(_protocol(), failures)
+    assert "8 failure(s)" in verdict.detail
+    assert "and 5 more" in verdict.detail
+    assert "failure-07" not in verdict.detail
+
+
+def test_the_failure_check_runs_at_the_request_stage_too() -> None:
+    """A structured ask already names reagents and can already cite evidence.
+
+    So a failure bearing on it is knowable before there is a procedure, which is the moment it is
+    cheapest to act on — and this is the only protocol-stage check that is not deferred, which is a
+    deliberate exception rather than an oversight.
+    """
+    failures = [RecordedFailure(id="failure-abc123", summary="it did not hold")]
+    checks = run_checks(_design(), stage="request", failures=failures)
+    verdict = {check.check_id: check for check in checks}["no_documented_failure"]
+    assert not verdict.passed, "a request-stage design must still be told what already failed"
+    assert "not checked yet" not in verdict.detail
+
+
+# --- precedent_consulted -----------------------------------------------------------------------
+
+
+def test_precedent_consulted_is_silent_when_nothing_is_offered() -> None:
+    """The passing text says nothing was *offered*, not that no precedent exists.
+
+    Three different things produce an empty list — nobody looked, the index is empty or
+    mid-rebuild, the record genuinely holds nothing like this — and `FingerprintSearch` exists
+    because a chemist told "no precedent" over an unindexed corpus is worse than one told nothing.
+    A check cannot re-derive that from a list, so it must not claim the negative.
+    """
+    verdict = precedent_consulted(_protocol(), ())
+
+    assert verdict.passed and verdict.severity == "note"
+    assert "offered" in verdict.detail
+    assert "no precedent" not in verdict.detail.lower()
+
+
+def test_precedent_consulted_names_the_runs_the_design_did_not_cite() -> None:
+    """A pointer a chemist can open, with the similarity that made it a hit.
+
+    The number is in the detail because "similar" is not a verdict: 0.91 and 0.36 are different
+    advice, and a reader shown neither has to open all of them to find out.
+    """
+    hits = [UncitedPrecedent(id="ord-9f2", similarity=0.91, label="Suzuki, XPhos")]
+
+    verdict = precedent_consulted(_protocol(), hits)
+
+    assert not verdict.passed
+    assert "ord-9f2" in verdict.detail and "0.91" in verdict.detail
+
+
+def test_uncited_precedent_is_a_note_rather_than_a_blocker() -> None:
+    """A Tanimoto neighbour can share a scaffold and nothing else.
+
+    The chemist may have read it and judged it inapplicable, and a deliberate re-run under changed
+    conditions is ordinary work — so blocking on it would teach people to cite noise. Asserted
+    through `blockers()`, because the severity field alone would not catch a future change that
+    kept the label and raised the consequence.
+    """
+    hits = [UncitedPrecedent(id="ord-9f2", similarity=0.88)]
+
+    checks = run_checks(_protocol(), precedent=hits)
+
+    assert blockers(checks) == []
+    verdict = {check.check_id: check for check in checks}["precedent_consulted"]
+    assert not verdict.passed and verdict.severity == "note"
+
+
+def test_many_precedents_are_summarised_rather_than_listed_entire() -> None:
+    """A design that ignored twenty near neighbours has one thing wrong with it, not twenty.
+
+    The count is still reported, by this repository's standing rule that a silent truncation reads
+    as completeness.
+    """
+    hits = [UncitedPrecedent(id=f"ord-{index}", similarity=0.9) for index in range(9)]
+
+    detail = precedent_consulted(_protocol(), hits).detail
+
+    assert "9 similar run(s)" in detail
+    assert "and 6 more" in detail
+
+
+def test_the_precedent_check_never_writes_into_evidence() -> None:
+    """The whole reason this is advisory: a citation is a claim, a hit is a thing that exists.
+
+    Writing a hit into `evidence` would forge the first out of the second and leave
+    `evidence_present` passing on a design nobody grounded — a check satisfying itself, which is
+    worse than the gap it closes. Asserted over the design object, because "advisory" is a property
+    of what is *not* mutated and no assertion about the returned check could see it.
+    """
+    design = _protocol()
+    before = list(design.evidence)
+
+    run_checks(design, precedent=[UncitedPrecedent(id="ord-9f2", similarity=0.99)])
+
+    assert list(design.evidence) == before
+
+
+def test_every_run_checks_caller_supplies_the_corpus_the_corpus_checks_need() -> None:
+    """A caller that skips the lookup publishes a clean bill the corpus never gave.
+
+    `run_checks`' own docstring says that in as many words, and the route added in the same merge
+    was such a caller: `api/routes/protocols.post_revision` passed neither `failures=` nor
+    `precedent=`. Measured on one document, the two shapes side by side —
+
+        no_documented_failure  agent: FAIL "the corpus records 1 failure(s) bearing on this design"
+                               route: PASS "no recorded failure bears on this design"
+        precedent_consulted    agent: FAIL "the record holds 1 similar run(s) ... does not cite"
+                               route: PASS "no uncited precedent was offered for this design"
+
+    — so a chemist fixing a typo on a flagged design republished it clean and overwrote the
+    verdict. `post_revision`'s docstring exists to refuse exactly that ("the two halves of the
+    surface would grade the same document differently depending on who wrote it").
+
+    Read off the source rather than driven, because the two call shapes differ only in arguments a
+    unit test would have to supply itself — asserting on a corpus this test built would prove the
+    fixture, not the wiring. The keyword names are what the defect was, so they are what is
+    asserted; `supplied` in `run_checks` is the single place that says which those are.
+    """
+    import ast
+    from pathlib import Path
+
+    needed = {"failures", "precedent"}
+    src = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
+    thin: dict[str, set[str]] = {}
+    seen = 0
+    for module in sorted(src.rglob("*.py")):
+        tree = ast.parse(module.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+            if name != "run_checks":
+                continue
+            seen += 1
+            passed = {keyword.arg for keyword in node.keywords if keyword.arg}
+            if missing := needed - passed:
+                thin[f"{module.relative_to(src)}:{node.lineno}"] = missing
+    assert seen, "no run_checks call sites found; this test is reading the wrong tree"
+    assert not thin, (
+        f"{thin} call run_checks without the corpus those checks take as an argument, so they "
+        "report 'no recorded failure bears on this design' over a lookup never made"
+    )
+
+
+def test_the_precedent_check_runs_at_the_request_stage_too() -> None:
+    """The second half of `_REQUEST_STAGE`, which nothing drove.
+
+    `test_the_failure_check_runs_at_the_request_stage_too` holds `no_documented_failure`; nothing
+    held `precedent_consulted`. Driven: cutting `_REQUEST_STAGE` back to
+    `{"components_resolve", "no_documented_failure"}` left all 190 tests across the three protocol
+    files green while the precedent check silently stopped running on `structure_experiment_request`
+    — the stage `_REQUEST_STAGE`'s own comment calls "the moment it is cheapest to read".
+
+    A `note`, not a blocker, for the reason `precedent_consulted` is always a note: an offer the
+    chemist may decline is not a reason to refuse an ask.
+    """
+    design = ExperimentDesign(request=_request(reaction_smiles="CCO.CC(=O)O>>CCOC(C)=O"))
+    precedent = [UncitedPrecedent(id="ord-9f2", similarity=0.91, label="a near-identical run")]
+
+    verdicts = {
+        check.check_id: check for check in run_checks(design, stage="request", precedent=precedent)
+    }
+
+    assert not verdicts["precedent_consulted"].passed, (
+        "the precedent check did not run at the request stage, so an ask is graded without the "
+        "similar runs the record already holds"
+    )
+    assert "ord-9f2" in verdicts["precedent_consulted"].detail
+    assert verdicts["precedent_consulted"].severity == "note"

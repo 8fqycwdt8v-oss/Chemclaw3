@@ -3,8 +3,7 @@
 The Temporal wrapper over `chemclaw.ingest.documents.sync`, and the sibling of
 `durable/note_index.py`: both keep a *derived* index in step with a source of truth that lives
 somewhere else, on the `background-jobs` queue, driven by a Schedule. Nothing here is knowledge —
-the share's documents are evidence retrieved with a citation, so no note is proposed and the
-PR-gate is not involved.
+the share's documents are evidence retrieved with a citation, so no note is written at all.
 
 Three things this file exists to get right, none of which belong in the sync loop itself:
 

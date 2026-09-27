@@ -1,0 +1,62 @@
+{
+  "probe": {
+    "id": "rx-26",
+    "section": 11,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We are taking the biaryl coupling from 5 g to kilo lab. Have we run anything like this at scale before, and what went wrong when we did?",
+    "expects_tools": [
+      "find_notes",
+      "gather_evidence",
+      "similar_reactions",
+      "expand_note",
+      "find_past_jobs"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a scale, batch size or campaign history the record does not contain",
+      "a predicted yield at the larger scale",
+      "an equipment or facility reference"
+    ],
+    "direction": "Precedent retrieval is the capability being tested and it should be exercised properly: the seed record for this coupling (4-bromoanisole and phenylboronic acid, Pd(OAc)2 1.5 mol%, K2CO3, THF/water 4:1, 80 °C, 12 h, degassed, 76% isolated), the two failure modes and the ligand-before-temperature playbook. The scale-relevant reading of the protodeboronation failure is the one to draw out: it was found because assay conversion improved while isolated yield fell, which is exactly the way a scale-up gets misread. Must be honest that the record carries laboratory-scale runs with little or no scale metadata, so 'have we run this at scale' is answered by 'here is what we have, and it is not at scale'. Should name the degassing playbook, since oxygen control is the thing that genuinely changes character on scale-up.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-26",
+    "section": 11,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We are taking the biaryl coupling from 5 g to kilo lab. Have we run anything like this at scale before, and what went wrong when we did?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.59,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "1a53b6a7043a4cb9a9d87dded698b4a0",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

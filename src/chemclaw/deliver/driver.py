@@ -22,9 +22,10 @@ from urllib.parse import urlsplit
 import httpx
 
 from chemclaw.core.config import PG_LOOPBACK_HOSTS, settings
+from chemclaw.core.http import default_ssl_context
 from chemclaw.core.ids import stable_hash
 from chemclaw.core.logging import register_secret_env
-from chemclaw.deliver.message import Message
+from chemclaw.deliver.message import Attachment, Message
 
 
 @runtime_checkable
@@ -35,10 +36,31 @@ class DeliveryDriver(Protocol):
     factory a *manifest* named, and the only thing standing between a mistyped `driver:` and a
     message silently going nowhere is an `isinstance` at the moment it is built. A structural check
     is all that is available — the protocol is one method — and one method is what the seam needs.
+
+    **A driver is called at least once per message, and that is a requirement on the driver rather
+    than a wish.** `registry.deliver` walks the enabled channels serially and swallows each one's
+    failure, so the activity around it never fails *because* of a channel — what can fail it is its
+    `start_to_close` expiring mid-walk or the worker dying, both retryable under `BAD_DATA_RETRY`,
+    and a retry re-walks **every** channel including the ones that already took the message. There
+    is no per-channel delivery record, deliberately: a local row can say the POST was sent and never
+    whether it landed, and making a courtesy copy depend on Postgres is a worse trade than a
+    duplicate the destination can recognise. One activity per channel would shrink the window and
+    not close it, because a retry of *that* activity re-sends to *that* channel.
+
+    So every driver must make a redelivery of one message **identifiable at the destination**: carry
+    `message_id(message)` where the destination will key on it, or be idempotent by construction
+    (the file driver is both — the id is its filename). A driver that does neither turns one worker
+    restart into a duplicated ticket somebody closes by hand, and the widening of
+    `delivery_timeout_seconds` that mitigated it is a threshold rather than a bound.
+    `tests/test_delivery.py::test_every_shipped_delivery_driver_makes_a_redelivery_identifiable`
+    holds every discovered channel's driver to it, rather than the two tests that each held one.
     """
 
     async def deliver(self, message: Message) -> None:
-        """Send `message`. Raises on any failure; the caller decides whether that is fatal."""
+        """Send `message`. Raises on any failure; the caller decides whether that is fatal.
+
+        Called at least once per message — see the class docstring for what that requires here.
+        """
         ...
 
 
@@ -97,14 +119,28 @@ def message_id(message: Message) -> str:
     and left the payload with no field a receiver could key on. Measured: three `deliver()` calls of
     one message put one file on the share and **three** POSTs on the wire.
 
-    `deliver_digest_activity` runs under `BAD_DATA_RETRY`, so a worker death after the POST landed
-    re-runs the activity and re-POSTs — at-least-once by construction, which is correct for
-    delivery and is exactly why the receiver needs a key. A duplicated digest is a nuisance; the
-    same driver is the declared seam for the `job-result` and `report` kinds, where a duplicate is
-    a duplicated ticket.
+    `deliver_message_activity` runs under `BAD_DATA_RETRY`, so a worker death after the POST
+    landed re-runs the activity and re-POSTs — at-least-once by construction, which is correct
+    for delivery and is exactly why the receiver needs a key. A duplicated digest is a nuisance;
+    the same driver now really does carry the `job-result`, `report` and `awaiting` kinds, where
+    a duplicate is a duplicated ticket — this paragraph said "declared seam" while those three
+    had no producer at all.
 
-    Content only, so it carries no correlation id and no identity: the same four fields the payload
-    already contains, so the two channels answer "is this the same message" identically.
+    **`correlation_id` is in the *key* and stays out of the *payload*, and conflating those two
+    questions cost a real message.** The paragraph above is right that the id must not be rendered
+    to a recipient; it does not follow that an idempotency key may not be derived from it. Keyed on
+    content alone, two genuinely distinct runs with identical content collapse: measured, two
+    `job-result` messages from different runs of the same job for the same chemist produced the
+    identical id `d1b783a371b64708`, so a compliant receiver drops the second **by design** and the
+    share overwrites it. `subject` is `f"{connector}:{job} finished"` and `body` is a summary
+    derived from the inputs, so a re-run of one job is byte-identical by construction — and
+    `job-result` is the one kind with no natural discriminator in its body, where digest, report
+    and awaiting carry note ids, a `note_ref` and a deadline.
+
+    Folding it in preserves the property the key exists for, because a *retry* of one delivery
+    carries the same correlation id by construction: the workflow builds the message once and
+    Temporal re-runs the activity with that same input. Same delivery, same key; different run,
+    different key. A producer that passes no correlation id is unchanged.
 
     **`kind` is in the hash, and the file driver's hash did not have it** — the file driver spelled
     the kind as the filename's *prefix* instead. Folding it in changes every share filename once,
@@ -120,11 +156,18 @@ def message_id(message: Message) -> str:
             "subject": message.subject,
             "body": message.body,
             "kind": message.kind,
+            "correlation": message.correlation_id,
+            # **The attachment's identity, not its bytes.** A key that hashed the content would
+            # make a re-delivery of the same report a *different* message the moment the draft was
+            # regenerated with one word changed, which is the opposite of what an idempotency key
+            # is for; a key that ignored attachments entirely would give a message and the same
+            # message carrying a run sheet one id, so a receiver drops the one that has the file.
+            "attachments": [(one.filename, one.media_type) for one in message.attachments],
         }
     )
 
 
-def _write_atomically(path: Path, content: str) -> None:
+def _write_atomically(path: Path, content: str | bytes) -> None:
     """Put `content` at `path` in one step, so a concurrent reader never sees half of it.
 
     `Path.write_text` truncates and *then* writes, and readers of a delivery share hold no lock —
@@ -144,8 +187,13 @@ def _write_atomically(path: Path, content: str) -> None:
     a four-line stdlib idiom, not an abstraction. If a third caller appears, the idiom belongs in
     `core/`.
     """
+    binary = isinstance(content, bytes)
     with tempfile.NamedTemporaryFile(
-        "w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", delete=False
+        "wb" if binary else "w",
+        encoding=None if binary else "utf-8",
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        delete=False,
     ) as handle:
         handle.write(content)
         handle.flush()
@@ -189,12 +237,35 @@ class FileDeliveryDriver:
         *verdict* — a path that can never be a directory — not the creation.
         """
         self.directory.mkdir(parents=True, exist_ok=True)
-        path = self.directory / f"{message.kind}-{message_id(message)}{self.suffix}"
+        identity = message_id(message)
         stamp = datetime.now(UTC).isoformat()
+        attached = [
+            _attachment_path(self.directory, message.kind, identity, one)
+            for one in message.attachments
+        ]
+        # **The attachments land before the message names them.** A chemist watching the share
+        # opens the `.md` the moment it appears; a message listing a file that is not there yet
+        # reads as a delivery that lost it. Same ordering rule, and the same reason, as
+        # `kg/record.py` writing a note's dependencies before the note that cites them.
+        for path, attachment in zip(attached, message.attachments, strict=True):
+            _write_atomically(path, attachment.content)
+        listing = "".join(f"File: {path.name}\n" for path in attached)
         _write_atomically(
-            path,
-            f"# {message.subject}\n\nTo: {message.recipient}\nWhen: {stamp}\n\n{message.body}\n",
+            self.directory / f"{message.kind}-{identity}{self.suffix}",
+            f"# {message.subject}\n\nTo: {message.recipient}\nWhen: {stamp}\n{listing}\n"
+            f"{message.body}\n",
         )
+
+
+def _attachment_path(directory: Path, kind: str, identity: str, attachment: Attachment) -> Path:
+    """Where one attachment sits beside its message on the share.
+
+    Prefixed with the message's own id so two deliveries carrying `run-sheet.csv` do not overwrite
+    each other — the message file is content-addressed for exactly that reason, and an attachment
+    named only by its filename would undo it for the half a chemist actually opens. `Attachment`'s
+    pattern is what makes joining these two safe: no separator can reach here.
+    """
+    return directory / f"{kind}-{identity}-{attachment.filename}"
 
 
 def plaintext_channel_refusal(name: str, url: str, token_env: str = "", *, enforced: bool) -> str:
@@ -299,7 +370,11 @@ class WebhookDeliveryDriver:
         token = os.environ.get(self.token_env, "")
         if token:
             headers["Authorization"] = f"Bearer {token}"
-        payload = message.model_dump(include={"recipient", "subject", "body", "kind"})
+        # Attachments included, base64 as `AttachmentBytes` serialises them — this seam's whole
+        # point is that a receiver gets the artefact and not a pointer to it.
+        payload = message.model_dump(
+            include={"recipient", "subject", "body", "kind", "attachments"}
+        )
         # **At-least-once is the right contract, and this is the handle that makes it survivable.**
         # See `message_id` for the measurement. Sent as a field *and* as `Idempotency-Key`, because
         # a chat or ticketing host reads the header and a site's own receiver reads the body, and
@@ -310,20 +385,40 @@ class WebhookDeliveryDriver:
         headers["Idempotency-Key"] = identity
         async with httpx.AsyncClient(
             timeout=self.timeout_seconds,
+            # **One process-wide trust store, for the reason `core.http.default_ssl_context`
+            # measures: httpx builds a fresh `ssl.SSLContext` and parses the whole certifi bundle
+            # per client, at ~22 ms each.** This driver is rebuilt per delivery on purpose —
+            # `registry.build` is uncached so a driver cannot outlive a credential rotation — so it
+            # constructs a client per *message*, and it was the one httpx client in this tree
+            # reaching a real dependency that paid full price for it. The cost is blocking CPU on
+            # the loop that serves every stream on the pod, not await time, which is what made it
+            # invisible.
+            #
+            # A shared *connection pool* is the other half and is deliberately not taken here: it
+            # would have to be cached per event loop, which is the shape `core/db.py` already
+            # carries a measured bug and a `_forget_pools_of_ended_loops` sweep for. Deliveries are
+            # low-frequency and the handshake is per destination; the context was the measured part.
+            verify=default_ssl_context(),
             # Never inherit an ambient proxy — the same flag, and the same reason, every other
-            # *httpx* client in this tree that reaches a real dependency carries. Not every client:
-            # `api/auth.py`'s `PyJWKClient` fetches the tenant key set through
-            # `urllib.request.urlopen`, which has no such flag and follows `HTTP_PROXY` (measured);
-            # it is a `BACKLOG.md` row rather than a silent exception to this sentence. The httpx
-            # set is (`connectors/registry.py`,
-            # `core/mcp_session.py`, `core/embeddings.py`, `connectors/health.py`,
-            # `agent/llm_provider.py`, `publish/drivers/http.py`). That list was *aspirational*
-            # about its last two until 2026-09-05: both LLM seams carried the flag only on a
-            # private-CA branch no shipped configuration takes, so this comment described a fleet
-            # posture two of its six members did not have
+            # *httpx* client in this tree that reaches a real dependency carries. The set is
+            # (`connectors/registry.py`, `core/mcp_session.py`, `core/embeddings.py`,
+            # `connectors/health.py`, `agent/llm_provider.py`, `publish/drivers/http.py`,
+            # `api/auth.py`). That list was *aspirational* about two of them until 2026-09-05: both
+            # LLM seams carried the flag only on a private-CA branch no shipped configuration
+            # takes, so this comment described a fleet posture two of its six members did not have
             # (`D-2026-09-05-a-proxy-moves-the-destination-out-of-the-address` made it true).
-            # This one was the exception and
-            # is the worst place for it: the payload is human-readable message content and the
+            #
+            # **`api/auth.py` is the seventh and used to be named here as the exception.** It
+            # fetched the tenant key set through `urllib.request.urlopen`, which takes no such flag
+            # and was measured following `HTTP_PROXY` — on the anchor every bearer token is
+            # validated against. `_HttpxJwkClient` overrides PyJWT's `fetch_data` onto httpx, so
+            # the exception is closed rather than tracked. The sentence that stood here also cited
+            # a `BACKLOG.md` row for it, and no such row has ever existed: `grep -i jwks
+            # docs/planning/*.md` returns nothing, which is a claim about a control that was not
+            # merely stale but never true.
+            #
+            # This client is the worst place to inherit a proxy: the payload is human-readable
+            # message content and the
             # request carries `Authorization: Bearer`. Measured with a recording listener installed
             # as `HTTP_PROXY`, the proxy received the whole POST — body and bearer — and the
             # configured destination received nothing. The destination is stated in the manifest

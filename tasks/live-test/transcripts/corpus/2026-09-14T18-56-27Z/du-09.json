@@ -1,0 +1,58 @@
+{
+  "probe": {
+    "id": "du-09",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "The stability pull for lot 42 is due from QC in two weeks and I keep forgetting to chase it. Can you hold that open and tell me when it lands?",
+    "expects_tools": [
+      "request_external_input"
+    ],
+    "expects_job": true,
+    "expects_notes": [],
+    "forbids_claims": [
+      "that the system will email, message or notify anyone outside it",
+      "a result, timepoint or specification for the pull",
+      "that the request has been accepted, scheduled or acknowledged by QC"
+    ],
+    "direction": "A held-open question is exactly what this is for, and the answer should be precise about what it does and does not do. It raises a durable request routed to QC with the deadline the asker gave and the reason in their words, and that request survives the conversation ending — which is the property worth stating, because the whole complaint was about forgetting. What it must not imply is delivery: nothing here reaches a person outside this system, so the request appears in the inbox of whoever is entitled and is chased on a timer inside it. It also has no idea whether QC has seen it. An answer that says \"I have notified QC\" is wrong in a way that matters, because the asker will then stop chasing.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "du-09",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "The stability pull for lot 42 is due from QC in two weeks and I keep forgetting to chase it. Can you hold that open and tell me when it lands?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.47,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "b4d5638dcfb848bf93dfa67baac68c80",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

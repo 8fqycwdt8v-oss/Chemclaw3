@@ -1,6 +1,8 @@
 # Konzept: Der Plan-/Ausführungs-Harness (LangGraph)
 
-> Status: **gebaut und in Betrieb hinter `harness_enabled`** (Default `false`). Dieses Dokument
+> Status: **gebaut und in Betrieb hinter `harness_enabled`** (Default `true` seit
+> `D-2026-09-13-the-default-is-the-posture-every-deployment-already-runs`; davor `false`, während
+> der Helm-Chart ihn einschaltete). Dieses Dokument
 > beschreibt, was der Harness *heute ist* — nicht mehr, was er einmal werden sollte. Es ist eine
 > Ergänzung zu [`architektur.md`](./architektur.md) §1, **keine** Revision der Vier-Schichten-
 > Trennung. Abschnittsverweise ohne Doku-Namen beziehen sich auf `architektur.md`.
@@ -228,7 +230,7 @@ Implementiert sind bewusst nur die *tatsächlich konsumierten* Felder:
 
 | Setting | Zweck | Default |
 |---|---|---|
-| `harness_enabled` | Master-Schalter (Fallback: klassischer Agent ohne Todo-Liste und ohne Deckel) | `false` |
+| `harness_enabled` | Master-Schalter (Fallback: klassischer Agent ohne Todo-Liste und ohne Deckel) | `true` |
 | `harness_autonomy` | `plan_only` (Freigabe-Gate aktiv) \| `execute` | `plan_only` |
 | `harness_max_loop_iterations` | Runaway-Bremse; als Modellaufruf-Zähler in `ChemclawState` geführt | `25` |
 | `agent_teams_enabled` | Supervisor + fünf Spezialisten statt eines Agenten (§7) | `false` |

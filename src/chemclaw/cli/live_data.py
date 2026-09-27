@@ -66,10 +66,12 @@ from chemclaw.core.config import settings
 from chemclaw.core.db import _redact
 from chemclaw.core.db import connection as db_connection
 from chemclaw.core.logging import configure_logging
+from chemclaw.core.markdown import render_table
 from chemclaw.ingest.eln.json_adapter import JsonExportAdapter
 from chemclaw.ingest.eln.ord import OrdReaction
 from chemclaw.ingest.eln.ord_adapter import OrdJsonAdapter
 from chemclaw.ingest.eln.record import record_from_ord_reaction
+from chemclaw.ingest.eln.warehouse.expr import PatternBudgetError, pattern_budget
 
 logger = logging.getLogger(__name__)
 
@@ -563,11 +565,12 @@ async def check_prose_yields_its_numbers(eln_export_dir: Path) -> Check:
 
     Which field it may be recovered *into* is decided, and the decision is the whole point.
     `D-2026-08-26-a-transcription-may-not-infer-a-setpoint` removed the headline prose fallback
-    after measuring what it produced: a reaction run at 80 °C for 12 h, stored as 0 °C for 0.5 h,
-    because a procedure begins by charging a vessel and the *addition* temperature is simply the
-    first number it states. So `OrdReaction.temperature_c`/`.time_h` are the structured field or
-    absent, and the regex result lives on `ReactionStep`, where "0 °C" belongs to the charging step
-    and says so.
+    after measuring what it produced, because a procedure begins by charging a vessel and the
+    *addition* temperature is simply the first number it states — the entry that measurement was
+    taken on is written out once, in `ingest/eln/json_adapter._number`, which is the code that
+    stopped doing it; the ADR is the frozen copy, and a third would be the one free to drift. So
+    `OrdReaction.temperature_c`/`.time_h` are the structured field or absent, and the regex result
+    lives on `ReactionStep`, where "0 °C" belongs to the charging step and says so.
 
     Both halves are asserted here, because each without the other is a check that passes for the
     wrong reason: a record carrying no step temperature would mean the prose was lost entirely, and
@@ -581,44 +584,58 @@ async def check_prose_yields_its_numbers(eln_export_dir: Path) -> Check:
     raws = await adapter.fetch_new_entries(_EPOCH)
     checked = 0
     wrong: list[str] = []
-    for raw in raws:
-        prose = str(raw.payload.get("procedure") or "")
-        temperature = _PROSE_TEMPERATURE.search(prose)
-        time_h = _PROSE_TIME.search(prose)
-        if temperature is None or time_h is None:
-            continue
-        try:
-            reaction = adapter.map_to_ord(raw)
-        except Exception:
-            continue
-        checked += 1
-        # `is not None` on the step values, and not a truthiness test: one fixture reads "cooled to
-        # 0 °C", and `0.0 or None` would report the extraction as a failure that it is not.
-        steps_carry = any(step.temperature_c is not None for step in reaction.steps) and any(
-            step.duration_h is not None for step in reaction.steps
-        )
-        # The setpoint may be present only if the entry stated it in its own field. Read from the
-        # payload rather than assumed absent, so an entry that legitimately carries both is not
-        # counted as a regression.
-        stated = (
-            raw.payload.get("temperature_c") is not None,
-            raw.payload.get("time_h") is not None,
-        )
-        setpoint_invented = (
-            reaction.temperature_c is not None and not stated[0],
-            reaction.time_h is not None and not stated[1],
-        )
-        if not steps_carry:
-            wrong.append(
-                f"{raw.entry_id}: prose states "
-                f"{(float(temperature.group(1)), float(time_h.group(1)))} and no step carries both"
+    # One budget for the whole check, matching how a real sync runs it: a per-entry budget would
+    # satisfy the derived guard below and bound nothing, since the cost this exists to bound is
+    # the page's total rather than any one entry's.
+    with pattern_budget():
+        for raw in raws:
+            prose = str(raw.payload.get("procedure") or "")
+            temperature = _PROSE_TEMPERATURE.search(prose)
+            time_h = _PROSE_TIME.search(prose)
+            if temperature is None or time_h is None:
+                continue
+            try:
+                reaction = adapter.map_to_ord(raw)
+            except PatternBudgetError:
+                # **Not swallowed, which the broad arm below would do.** `PatternBudgetError` is a
+                # bare `Exception`, so exhausting the page budget used to skip every remaining entry
+                # and let this check *pass* with a quietly smaller denominator — the exact "silent
+                # denominator" failure this function's own docstring names two paragraphs up. A
+                # binding too expensive to map a page is a finding, not a skippable entry.
+                raise
+            except Exception:
+                continue
+            checked += 1
+            # `is not None` on the step values, and not a truthiness test: one fixture reads
+            # "cooled to 0 °C", and `0.0 or None` would report the extraction as a failure that it
+            # is not.
+            steps_carry = any(step.temperature_c is not None for step in reaction.steps) and any(
+                step.duration_h is not None for step in reaction.steps
             )
-        elif any(setpoint_invented):
-            wrong.append(
-                f"{raw.entry_id}: headline setpoint "
-                f"{(reaction.temperature_c, reaction.time_h)} was derived from prose, which "
-                f"D-2026-08-26 forbids"
+            # The setpoint may be present only if the entry stated it in its own field. Read from
+            # the
+            # payload rather than assumed absent, so an entry that legitimately carries both is not
+            # counted as a regression.
+            stated = (
+                raw.payload.get("temperature_c") is not None,
+                raw.payload.get("time_h") is not None,
             )
+            setpoint_invented = (
+                reaction.temperature_c is not None and not stated[0],
+                reaction.time_h is not None and not stated[1],
+            )
+            if not steps_carry:
+                wrong.append(
+                    f"{raw.entry_id}: prose states "
+                    f"{(float(temperature.group(1)), float(time_h.group(1)))} and no step "
+                    "carries both"
+                )
+            elif any(setpoint_invented):
+                wrong.append(
+                    f"{raw.entry_id}: headline setpoint "
+                    f"{(reaction.temperature_c, reaction.time_h)} was derived from prose, which "
+                    f"D-2026-08-26 forbids"
+                )
     return Check(
         name="prose reaches the steps, and never the setpoint",
         passed=checked > 0 and not wrong,
@@ -666,15 +683,17 @@ async def check_the_corpus_is_findable(mapped: dict[str, list[OrdReaction]]) -> 
     question". `find_similar_reactions` is the real entry point behind the agent's
     `similar_reactions`, so this measures what a chemist gets rather than what a store contains.
 
-    **It is deliberately checked while the notes are still unmerged**, because that is the state a
-    freshly-ingested corpus is in and the state the PR-gate keeps it in until a human acts. The
-    fingerprint row is written at ingestion and the note is not, so the two halves disagree by
-    design, and which retrieval path you take decides what you see. Measured on this corpus with
-    every note pending: an unfiltered search returns 10 real wells for a 4-bromoanisole coupling,
-    and the same search narrowed by `{"type": "reaction"}` through `FingerprintReactionRetriever`
-    returns **0**, loudly ("filtered reaction search returned 0 of 10 wanted hits"). Both are
-    correct — a note nobody can read cannot be shown to satisfy a filter — and the gap is worth a
-    check precisely because nothing else states it.
+    **It is deliberately checked while the corpus has no notes at all**, which is what an ingested
+    corpus is: `ingest_reaction` writes the record and the fingerprint row and mints no note
+    (`D-2026-08-25-an-eln-transcription-is-data-not-a-claim`), so the two halves disagree by design
+    and which retrieval path you take decides what you see. Measured: an unfiltered search returns
+    10 real wells for a 4-bromoanisole coupling, and the same search narrowed by
+    `{"type": "reaction"}` through `FingerprintReactionRetriever` returns **0**, loudly ("filtered
+    reaction search returned 0 of 10 wanted hits"). Both are correct — a note that was never
+    written cannot satisfy a filter — and the gap is worth a check precisely because nothing else
+    states it. This paragraph read "while the notes are still unmerged … the state the PR-gate keeps
+    it in until a human acts", which `D-2026-09-05-the-gate-follows-behaviour-not-knowledge`
+    falsified twice over: there is no gate, and there was never a pending note here to hold.
 
     `index_empty` is asserted as well as the hit count: an empty index answering "no precedents" is
     the exact defect `find_similar_reactions`' own docstring was written around.
@@ -790,13 +809,16 @@ async def _map_corpus(
     }
     mapped: dict[str, list[OrdReaction]] = {}
     refused: dict[str, int] = {}
-    for raw in raws:
-        dataset_id = dataset_of.get(raw.entry_id, "")
-        try:
-            mapped.setdefault(dataset_id, []).append(adapter.map_to_ord(raw))
-        except Exception as exc:
-            refused[dataset_id] = refused.get(dataset_id, 0) + 1
-            logger.debug("refused %s: %s", raw.entry_id, exc)
+    # The same page-wide regex budget a real sync runs under, so this probe measures the shipped
+    # bound rather than an unbounded variant of it — which is the whole point of a live check.
+    with pattern_budget():
+        for raw in raws:
+            dataset_id = dataset_of.get(raw.entry_id, "")
+            try:
+                mapped.setdefault(dataset_id, []).append(adapter.map_to_ord(raw))
+            except Exception as exc:
+                refused[dataset_id] = refused.get(dataset_id, 0) + 1
+                logger.debug("refused %s: %s", raw.entry_id, exc)
     return mapped, refused
 
 
@@ -868,20 +890,32 @@ def report(run: DataRun) -> str:
         # read as "every check returned nothing", which is a different and much worse claim.
         lines.append("No checks run (`--backfill-only`). `make live-data` reads what arrived.")
         return "\n".join(lines)
+    lines.append(
+        render_table(
+            ["dataset", "published", "seeded", "mapped", "refused"],
+            [
+                [
+                    reach.dataset,
+                    str(reach.published),
+                    str(reach.seeded),
+                    str(reach.mapped),
+                    str(reach.refused),
+                ]
+                for reach in run.reach
+            ],
+            align="lrrrr",
+        )
+    )
     lines += [
-        "| dataset | published | seeded | mapped | refused |",
-        "| --- | ---: | ---: | ---: | ---: |",
+        "",
+        render_table(
+            ["check", "result", "observed"],
+            [
+                [check.name, "PASS" if check.passed else "**FAIL**", check.observed]
+                for check in run.checks
+            ],
+        ),
     ]
-    for reach in run.reach:
-        lines.append(
-            f"| {reach.dataset} | {reach.published} | {reach.seeded} "
-            f"| {reach.mapped} | {reach.refused} |"
-        )
-    lines += ["", "| check | result | observed |", "| --- | --- | --- |"]
-    for check in run.checks:
-        lines.append(
-            f"| {check.name} | {'PASS' if check.passed else '**FAIL**'} | {check.observed} |"
-        )
     passed = sum(1 for check in run.checks if check.passed)
     lines.append(f"\n**{passed}/{len(run.checks)} checks passed.**")
     return "\n".join(lines)

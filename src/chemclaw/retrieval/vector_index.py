@@ -25,6 +25,7 @@ import logging
 import math
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from functools import partial
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -42,6 +43,7 @@ from chemclaw.core.fulltext import (
     reference_tokens,
 )
 from chemclaw.kg.graph import (
+    corpus_revision,
     invalidate_cache,
     load_notes,
     note_file_fingerprints,
@@ -56,11 +58,11 @@ log = logging.getLogger(__name__)
 class NoteRecord(BaseModel):
     """One indexed note: its id, the text that was embedded/tokenized, and its dense embedding.
 
-    `fingerprint` is the stat signature (`chemclaw.kg.graph.note_file_fingerprints`) the note's file
-    had when this record was embedded — empty when the caller does not track one (every offline test
-    that builds a `NoteRecord` directly). `reindex_notes` is the only writer that fills it in for
-    real, and it is what makes an incremental rebuild possible: a note whose fingerprint has not
-    moved needs no fresh embedding call.
+    `fingerprint` is the content digest (`chemclaw.kg.graph.note_file_fingerprints`) the note's
+    file had when this record was embedded — empty when the caller does not track one (every
+    offline test that builds a `NoteRecord` directly). `reindex_notes` is the only writer that
+    fills it in for real, and it is what makes an incremental rebuild possible: a note whose
+    fingerprint has not moved needs no fresh embedding call.
     """
 
     note_id: str = Field(min_length=1)
@@ -80,22 +82,42 @@ class IndexHit(BaseModel):
 class NoteIndex(Protocol):
     """Persistence + dense/lexical search over the note corpus. Backends implement this."""
 
-    async def upsert(self, records: list[NoteRecord], embedding_key: str) -> None:
+    async def upsert(
+        self,
+        records: list[NoteRecord],
+        embedding_key: str,
+        *,
+        corpus_revision: int | None = None,
+    ) -> None:
         """Insert or replace index rows by note id, recording which configuration embedded them.
 
         `embedding_key` is `chemclaw.core.embeddings.embedding_config_key()` — a batch-level fact,
         not a per-record one, exactly as the document index takes it (`ingest/documents/index.py`),
         so one upsert can never write two generations of vector under one call.
+
+        `corpus_revision` is the same batch-level fact about the *corpus*: how many commits the
+        checkout these notes were read from had behind it
+        (`chemclaw.kg.graph.corpus_revision`). It is what `retire_absent`'s `built_before` is
+        compared against, and it is stored rather than derived because a later pass on another pod
+        has no way to recover it.
         """
         ...
 
-    async def retire_absent(self, keep: set[str]) -> int:
+    async def retire_absent(self, keep: set[str], *, built_before: int | None = None) -> int:
         """Delete every indexed note whose id is not in `keep`; return how many went.
 
         Phrased as "keep exactly these" rather than "delete these" because that is what the caller
         knows: `reindex_notes` has just listed the corpus on disk, and asking it to also enumerate
         what the backend holds would be a second round trip to compute a difference the backend can
         compute itself.
+
+        **`built_before` is the caller saying how current its own corpus is**, and rows built from
+        a *newer* corpus than that are left alone
+        (`D-2026-09-14-a-prune-needs-the-corpus-two-pods-disagree-about`). The index is shared and
+        the checkout under it is not, so absence from one pod's disk cannot distinguish a deleted
+        note from a note that pod's sidecar has not fetched yet. `None` means the caller has no
+        revision to offer and everything absent is retired, which is what every backend did before
+        this argument existed and what an offline corpus still needs.
 
         **An empty `keep` must delete nothing.** A missing or mis-pointed notes directory would
         otherwise wipe the index, and a rebuild costs one embedding call per note.
@@ -209,22 +231,50 @@ class InMemoryNoteIndex:
         """Start with an empty index, keyed by note id (re-upserting an id replaces it)."""
         self._records: dict[str, NoteRecord] = {}
         self._embedding_keys: dict[str, str] = {}
+        self._corpus_revisions: dict[str, int | None] = {}
 
-    async def upsert(self, records: list[NoteRecord], embedding_key: str) -> None:
+    async def upsert(
+        self,
+        records: list[NoteRecord],
+        embedding_key: str,
+        *,
+        corpus_revision: int | None = None,
+    ) -> None:
         """Insert or replace each record by note id, under the configuration that embedded it."""
         for record in records:
             self._records[record.note_id] = record
             self._embedding_keys[record.note_id] = embedding_key
+            self._corpus_revisions[record.note_id] = corpus_revision
 
-    async def retire_absent(self, keep: set[str]) -> int:
-        """Drop every record whose note id is not in `keep`; an empty `keep` drops nothing."""
+    async def retire_absent(self, keep: set[str], *, built_before: int | None = None) -> int:
+        """Drop every record whose note id is not in `keep`; an empty `keep` drops nothing.
+
+        A record built from a corpus revision *newer* than `built_before` is kept: this caller's
+        checkout predates it and cannot know whether the note was deleted or simply not fetched.
+        """
         if not keep:
             return 0
-        gone = [note_id for note_id in self._records if note_id not in keep]
+        gone = [
+            note_id
+            for note_id in self._records
+            if note_id not in keep and not self._is_newer_than(note_id, built_before)
+        ]
         for note_id in gone:
             del self._records[note_id]
             self._embedding_keys.pop(note_id, None)
+            self._corpus_revisions.pop(note_id, None)
         return len(gone)
+
+    def _is_newer_than(self, note_id: str, built_before: int | None) -> bool:
+        """Was this row built from a corpus revision the caller has not reached?
+
+        Unknown on either side is "no constraint" — the same reading the Postgres predicate gives a
+        NULL column, so the reference oracle and the backend answer one question.
+        """
+        if built_before is None:
+            return False
+        stored = self._corpus_revisions.get(note_id)
+        return stored is not None and stored > built_before
 
     async def fingerprints(self, embedding_key: str) -> dict[str, str]:
         """Fingerprints of rows embedded under `embedding_key`; empty ones omitted.
@@ -320,13 +370,14 @@ class PostgresNoteIndex:
         width = settings.embedding_dim
         self._upsert = (
             "INSERT INTO note_index "
-            "(note_id, embedding, lexeme, fingerprint, embedding_key, updated_at) "
+            "(note_id, embedding, lexeme, fingerprint, embedding_key, updated_at, "
+            "corpus_commit_count) "
             f"VALUES (%(id)s, %(emb)s::vector({width}), "
-            "to_tsvector('english', %(text)s), %(fp)s, %(key)s, now()) "
+            "to_tsvector('english', %(text)s), %(fp)s, %(key)s, now(), %(corpus)s) "
             "ON CONFLICT (note_id) DO UPDATE SET "
             "embedding = EXCLUDED.embedding, lexeme = EXCLUDED.lexeme, "
             "fingerprint = EXCLUDED.fingerprint, embedding_key = EXCLUDED.embedding_key, "
-            "updated_at = now()"
+            "updated_at = now(), corpus_commit_count = EXCLUDED.corpus_commit_count"
         )
         # The `> 0` floor mirrors the InMemory reference (`score > 0.0`): a zero/near-zero or
         # negatively-correlated note is not a hit. Without it pgvector returns the top-k nearest
@@ -468,7 +519,13 @@ class PostgresNoteIndex:
         """
         return _vector_literal(record.embedding)
 
-    async def upsert(self, records: list[NoteRecord], embedding_key: str) -> None:
+    async def upsert(
+        self,
+        records: list[NoteRecord],
+        embedding_key: str,
+        *,
+        corpus_revision: int | None = None,
+    ) -> None:
         """Insert or replace each record (embedding + tsvector + fingerprint + key) by note id."""
         if not records:
             return
@@ -484,27 +541,49 @@ class PostgresNoteIndex:
                         "text": normalize_search_text(record.text),
                         "fp": record.fingerprint or None,
                         "key": embedding_key,
+                        "corpus": corpus_revision,
                     },
                 )
             await conn.commit()
 
-    async def retire_absent(self, keep: set[str]) -> int:
+    async def retire_absent(self, keep: set[str], *, built_before: int | None = None) -> int:
         """Delete rows for notes no longer on disk, returning the ids so a subclass can follow.
 
         `RETURNING note_id` rather than a count: `ExternalVectorNoteIndex` needs the ids to remove
         the matching points from its store, and asking the table twice would race its own delete.
         """
-        return len(await self._retire_absent_ids(keep))
+        return len(await self._retire_absent_ids(keep, built_before=built_before))
 
-    async def _retire_absent_ids(self, keep: set[str]) -> list[str]:
-        """The shared half: delete and report which ids went. Empty `keep` deletes nothing."""
+    async def _retire_absent_ids(
+        self, keep: set[str], *, built_before: int | None = None
+    ) -> list[str]:
+        """The shared half: delete and report which ids went. Empty `keep` deletes nothing.
+
+        The `built_before` clause is written so a NULL on either side prunes: a row from before
+        migration 099, or a caller with no corpus revision to offer, behaves exactly as it did
+        before this existed. Only a row that *states* it came from a newer corpus than the caller
+        holds is protected, which is the one case a pod cannot judge.
+
+        Two things about the predicate are load-bearing and neither is obvious. The `::int` casts:
+        a bare `%(before)s IS NOT NULL` gives Postgres a parameter it can infer no type for and the
+        statement fails to prepare (`AmbiguousParameter: could not determine data type of parameter
+        $2`) — on *every* prune, including the ones that pass no revision at all. And the two
+        `IS NULL` arms are spelled out rather than folded into a `NOT (... AND ...)`: three-valued
+        logic makes `NULL > 5` unknown, `TRUE AND unknown` unknown and `NOT unknown` unknown, so
+        the compact form silently *protected* every row written before migration 099 instead of
+        pruning it. Driven against a real table, which is why that arm is in the test.
+        """
         if not keep:
             return []
         async with self._connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
-                    "DELETE FROM note_index WHERE NOT (note_id = ANY(%(keep)s)) RETURNING note_id",
-                    {"keep": sorted(keep)},
+                    "DELETE FROM note_index WHERE NOT (note_id = ANY(%(keep)s)) "
+                    "AND (corpus_commit_count IS NULL "
+                    "OR %(before)s::int IS NULL "
+                    "OR corpus_commit_count <= %(before)s::int) "
+                    "RETURNING note_id",
+                    {"keep": sorted(keep), "before": built_before},
                 )
                 rows = await cur.fetchall()
             await conn.commit()
@@ -606,11 +685,12 @@ def _needs_embedding(note_id: str, current: dict[str, str], stored: dict[str, st
     """Whether `note_id` must be (re-)embedded: its file fingerprint differs from the stored one.
 
     A note the fingerprint scan does **not** know is always re-embedded rather than compared. The
-    two sides are keyed differently by construction — the scan keys on the file's stem (stat-only,
-    it never parses), the note list keys on the id inside the frontmatter — so a note whose filename
-    disagrees with its id is missing from `current`, was missing from `stored` too, and `None !=
-    None` is False: it read as "unchanged" forever and was never indexed at all, with `full=True`
-    no help because it takes the same branch. Absent means unknown, and unknown means embed it.
+    two sides are keyed differently by construction — the scan keys on the file's stem (it hashes
+    the bytes, it never parses), the note list keys on the id inside the frontmatter — so a note
+    whose filename disagrees with its id is missing from `current`, was missing from `stored`
+    too, and `None != None` is False: it read as "unchanged" forever and was never indexed at
+    all, with `full=True` no help because it takes the same branch. Absent means unknown, and
+    unknown means embed it.
 
     Said at WARNING because the only way to be here is that mismatch (or a file deleted between the
     two scans, which is transient): the note is indexed, but it costs an embedding on every run
@@ -670,15 +750,22 @@ async def reindex_notes(
     """(Re)build `index` from the notes on disk; return how many notes were (re-)embedded.
 
     Incremental by default (D-2026-08-02-embed-only-what-changed): a note whose file fingerprint
-    (`chemclaw.kg.graph.note_file_fingerprints`, stat-only — no read/parse) matches what `index`
+    (`chemclaw.kg.graph.note_file_fingerprints`, a hash of the file's bytes) matches what `index`
     already has stored is left alone, so a scheduled run against an unchanged corpus embeds nothing.
     Before this, every run — hourly by default (`durable/note_index.py`) — re-embedded every note in
     the knowledge graph regardless of whether anything had changed, one LLM-endpoint call per note
     per hour forever.
 
+    **"Unchanged" is a property of the note's content, and it has to be, because `index` is shared
+    between pods while the checkout each pass reads is not**
+    (`D-2026-09-16-a-fingerprint-that-names-a-checkout-is-not-a-fingerprint-of-a-note`). While the
+    fingerprint was `mtime_ns:size` this incremental rebuild was incremental for exactly one pod:
+    driven over two clones of one commit, every pass after the first re-embedded the whole corpus,
+    40 of 40 notes on the corpus this repository ships.
+
     **A model change is detected too, and needs no flag**
     (D-2026-08-08-a-derived-index-must-record-what-derived-it).
-    The file fingerprint cannot see one — swapping the embedding model moves no mtime —
+    The file fingerprint cannot see one — swapping the embedding model changes no note's bytes —
     so the index also stores which configuration embedded each row (`note_index.embedding_key`,
     migration 039), and `fingerprints()` only reports rows made by the current one. A row from a
     superseded configuration therefore has no stored fingerprint to match and is re-embedded here,
@@ -688,7 +775,8 @@ async def reindex_notes(
     `full=True` re-embeds every note unconditionally (the CLI's `--full`), for recovery from a
     corrupted index.
 
-    Idempotent either way (upsert by id), so it is safe to run on a schedule or after a merge.
+    Idempotent either way (upsert by id), so it is safe to run on a schedule or after a note
+    write.
 
     **Notes deleted from disk are retired here** (D-2026-08-25). They used to be left behind as
     stale rows, on the argument that the retrievers drop a hit whose note no longer loads — true,
@@ -698,15 +786,36 @@ async def reindex_notes(
     The prune runs before the "nothing changed" exit below, because a run whose only news is a
     deletion has nothing to embed and must still remove it.
 
-    **Reads past the graph cache deliberately.** This is the one in-process moment that correlates
-    with a merge — the PR-gate's merge webhook triggers it — and the note list below is compared
+    **Reads past the graph cache deliberately, and past the per-file parse cache too.** This runs
+    while notes are landing in the tree underneath it — on a Schedule, `durable/note_index.py` being
+    Schedule-only since its webhook starter was deleted — and the note list below is compared
     against a freshly scanned `note_file_fingerprints`. Without the bust the two halves could come
-    from different moments: a graph cached before the merge landed, diffed against fingerprints
-    read after it, which computes `changed` from a stale set of notes. The cost is one rescan on a
+    from different moments: a graph cached before a write landed, diffed against fingerprints read
+    after it, which computes `changed` from a stale set of notes. The cost is one rescan on a
     job that is about to re-embed anyway.
+
+    **`reparse=True` is the half that was missing, and omitting it was worse than not busting at
+    all** (`D-2026-09-16-a-stat-cache-and-a-content-hash-do-not-agree-about-what-changed`).
+    `invalidate_cache` deliberately keeps `_PARSED_FILES`, whose key is `(mtime_ns, size)`, on the
+    argument that a write the stat cannot see the fingerprint cannot see either. Since
+    `note_file_fingerprints` became a hash of the file's bytes that argument is false, and the
+    disagreement runs the harmful way: measured, a same-size edit with the mtime restored moves the
+    fingerprint while `load_notes` returns the previous body. This function would then embed the
+    **old** text and store it under the **new** digest — after which the digest matches on every
+    later run and the row never heals. Before the fingerprint was a hash both halves were blind
+    together and nothing was re-embedded at all, so the fix belongs here rather than in the
+    comparison.
     """
     directory = Path(notes_dir) if notes_dir is not None else settings.knowledge_path
-    await asyncio.to_thread(invalidate_cache, directory)
+    await asyncio.to_thread(partial(invalidate_cache, directory, reparse=True))
+    # **Hashed before parsed, and the order is the fix for a race rather than a style choice.**
+    # The two reads are separate passes over the tree, so a note rewritten between them pairs one
+    # moment's body with another's digest. Parsed first, that pair is *old body, new digest* — the
+    # same stuck row the paragraph above closes, because every later pass sees the digest match.
+    # Hashed first, it is *new body, old digest*, which the next pass reads as changed and heals.
+    current_fingerprints = (
+        await asyncio.to_thread(note_file_fingerprints, directory) if directory.exists() else {}
+    )
     notes = await asyncio.to_thread(load_notes, directory) if directory.exists() else []
     if not notes:
         # **A silent 0 here is what a mis-mounted knowledge volume looks like**, and it is also
@@ -726,7 +835,6 @@ async def reindex_notes(
         else:
             log.debug("note re-index found no notes under %s; nothing to do", directory)
         return 0
-    current_fingerprints = await asyncio.to_thread(note_file_fingerprints, directory)
     # Guarded three times over against wiping the index: `notes` is non-empty by the return above,
     # `retire_absent` itself does nothing for an empty `keep`, and `keep` is the union below rather
     # than the parsed set. A mis-pointed directory costs one embedding call per note to recover
@@ -738,8 +846,11 @@ async def reindex_notes(
     # alone made a *transient* parse failure a *deletion* from the derived index. Measured: 40 of
     # 100 notes made unparseable retired 40 index rows, and repairing them cost one embedding call
     # each, over an hour in which both index-backed legs answered as though those notes did not
-    # exist. `note_file_fingerprints` is stat-only and keyed by the same id, so it holds an entry
+    # exist. `note_file_fingerprints` never parses and is keyed by the same id, so it holds an entry
     # for a file whose frontmatter is broken — which is exactly the population that must survive.
+    # It holds one for a file that will not *open* either (`graph.UNREADABLE`), which is the wider
+    # window hashing opened and which would otherwise have reintroduced this defect through a door
+    # the `keep` union was not watching.
     # The graph leg already degrades this way (skip, WARNING, counter); the derived legs now do too.
     on_disk = set(current_fingerprints)
     unparsed = await asyncio.to_thread(
@@ -752,7 +863,18 @@ async def reindex_notes(
             len(unparsed),
             ", ".join(sorted(unparsed)[:5]),
         )
-    retired = await index.retire_absent({note.id for note in notes} | on_disk)
+    # **A prune is a claim about the corpus, and two pods hold different corpora**
+    # (`D-2026-09-14-a-prune-needs-the-corpus-two-pods-disagree-about`). `note_index` is shared
+    # while the checkout under it is an `emptyDir` each pod's sidecar refreshes on its own
+    # schedule, so "absent from my disk" cannot distinguish a deleted note from one this pod has
+    # not fetched. `corpus_revision` is the one comparable fact the two share, and a row built
+    # from a *newer* revision than this pass holds is left alone. `None` — no git work tree, no
+    # `git`, no commits — is no constraint, which is what every offline corpus needs and what this
+    # did before the argument existed.
+    revision = await asyncio.to_thread(corpus_revision, directory)
+    retired = await index.retire_absent(
+        {note.id for note in notes} | on_disk, built_before=revision
+    )
     if retired:
         log.info("retired %d note(s) no longer on disk", retired)
     embedding_key = note_embedding_key()
@@ -785,7 +907,7 @@ async def reindex_notes(
             )
             for note, text, embedding in zip(batch, texts, embeddings, strict=True)
         ]
-        await index.upsert(records, embedding_key)
+        await index.upsert(records, embedding_key, corpus_revision=revision)
         indexed += len(records)
     return indexed
 

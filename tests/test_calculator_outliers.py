@@ -10,8 +10,6 @@ and two units low on every acid; the two populations average into one reassuring
 aggregate can pull them apart.
 """
 
-import asyncio
-
 import pytest
 
 from chemclaw.connectors.calc.server import tools
@@ -51,23 +49,19 @@ def _ledger(monkeypatch: pytest.MonkeyPatch) -> None:
     install(monkeypatch, FakeCalcServer())
 
 
-def test_an_uncalibrated_property_is_refused_and_the_message_names_the_real_ones() -> None:
+async def test_an_uncalibrated_property_is_refused_and_the_message_names_the_real_ones() -> None:
     """The bug this replaces: anything that was not "solubility" was reported as pKa.
 
     Silently, in pKa's unit, from pKa's current version — a wrong answer indistinguishable from a
     right one, about the reliability of a calculator the chemist is deciding whether to trust.
     """
-
-    async def _run() -> None:
-        with pytest.raises(ValueError, match="not a calibrated property"):
-            await tools.calculator_trust("logd")
-        with pytest.raises(ValueError, match="solubility"):  # it names what does exist
-            await tools.calculator_outliers("logd")
-
-    asyncio.run(_run())
+    with pytest.raises(ValueError, match="not a calibrated property"):
+        await tools.calculator_trust("logd")
+    with pytest.raises(ValueError, match="solubility"):  # it names what does exist
+        await tools.calculator_outliers("logd")
 
 
-def test_a_disabled_ledger_does_not_render_as_a_well_behaved_calculator(
+async def test_a_disabled_ledger_does_not_render_as_a_well_behaved_calculator(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The default deployment's answer, and it was an empty list with nothing to read it by.
@@ -85,78 +79,55 @@ def test_a_disabled_ledger_does_not_render_as_a_well_behaved_calculator(
 
     monkeypatch.setattr(tools, "reconciled_for", _empty)
 
-    async def _run() -> None:
-        report = await tools.calculator_outliers("pka")
-        assert report.residuals == [] and report.enabled is False
-        assert "CALIBRATION NOT RECORDED" in report.model_dump()["verdict"]
+    report = await tools.calculator_outliers("pka")
+    assert report.residuals == [] and report.enabled is False
+    assert "CALIBRATION NOT RECORDED" in report.model_dump()["verdict"]
 
-        # An *enabled* but empty ledger is a different state, and says so.
-        monkeypatch.setattr(settings, "calibration_enabled", True)
-        empty = await tools.calculator_outliers("pka")
-        assert empty.enabled is True and "UNCALIBRATED" in empty.verdict
-
-    asyncio.run(_run())
+    # An *enabled* but empty ledger is a different state, and says so.
+    monkeypatch.setattr(settings, "calibration_enabled", True)
+    empty = await tools.calculator_outliers("pka")
+    assert empty.enabled is True and "UNCALIBRATED" in empty.verdict
 
 
-def test_each_calibrated_property_reports_in_its_own_unit() -> None:
+async def test_each_calibrated_property_reports_in_its_own_unit() -> None:
     """The unit came from the same conditional, so it was wrong for the same inputs."""
-
-    async def _run() -> None:
-        assert (await tools.calculator_outliers("solubility")).residuals[0].unit == "log S"
-        assert (await tools.calculator_outliers("pka")).residuals[0].unit == "pKa"
-
-    asyncio.run(_run())
+    assert (await tools.calculator_outliers("solubility")).residuals[0].unit == "log S"
+    assert (await tools.calculator_outliers("pka")).residuals[0].unit == "pKa"
 
 
-def test_the_worst_miss_comes_first_and_keeps_its_sign() -> None:
+async def test_the_worst_miss_comes_first_and_keeps_its_sign() -> None:
     """Ranked by magnitude, reported signed: "consistently low" is correctable, scattered is not."""
-
-    async def _run() -> None:
-        found = (await tools.calculator_outliers("solubility")).residuals
-        assert [r.smiles for r in found][:2] == ["CC(=O)O", "OC(=O)c1ccccc1"]
-        assert found[0].error == pytest.approx(-2.1)
-        assert found[0].predicted == pytest.approx(-2.0)
-        assert found[0].observed == pytest.approx(0.1)
-
-    asyncio.run(_run())
+    found = (await tools.calculator_outliers("solubility")).residuals
+    assert [r.smiles for r in found][:2] == ["CC(=O)O", "OC(=O)c1ccccc1"]
+    assert found[0].error == pytest.approx(-2.1)
+    assert found[0].predicted == pytest.approx(-2.0)
+    assert found[0].observed == pytest.approx(0.1)
 
 
-def test_a_substructure_filter_isolates_the_class_the_aggregate_hides() -> None:
+async def test_a_substructure_filter_isolates_the_class_the_aggregate_hides() -> None:
     """The whole point: the acids are twice as bad as the calculator's overall record."""
-
-    async def _run() -> None:
-        acids = await tools.calculator_outliers("solubility", matching="C(=O)O")
-        assert [r.smiles for r in acids.residuals] == ["CC(=O)O", "OC(=O)c1ccccc1"]
-        everything = await tools.calculator_outliers("solubility")
-        assert len(everything.residuals) == 4
-
-    asyncio.run(_run())
+    acids = await tools.calculator_outliers("solubility", matching="C(=O)O")
+    assert [r.smiles for r in acids.residuals] == ["CC(=O)O", "OC(=O)c1ccccc1"]
+    everything = await tools.calculator_outliers("solubility")
+    assert len(everything.residuals) == 4
 
 
-def test_a_filter_matching_nothing_returns_nothing_rather_than_everything() -> None:
+async def test_a_filter_matching_nothing_returns_nothing_rather_than_everything() -> None:
     """An empty list is the honest answer; falling back to the unfiltered set would be a lie.
 
     And it says *which* emptiness it is: the ledger holds four measurements, none of them of a
     platinum compound, so the class is untested rather than well handled.
     """
-
-    async def _run() -> None:
-        report = await tools.calculator_outliers("solubility", matching="[Pt]")
-        assert report.residuals == [] and report.measured == 4
-        assert "untested" in report.verdict
-
-    asyncio.run(_run())
+    report = await tools.calculator_outliers("solubility", matching="[Pt]")
+    assert report.residuals == [] and report.measured == 4
+    assert "untested" in report.verdict
 
 
-def test_uncertainty_coverage_is_reported_per_molecule() -> None:
+async def test_uncertainty_coverage_is_reported_per_molecule() -> None:
     """Missed by 2 log units *and* outside its own error bar is the actionable statement."""
-
-    async def _run() -> None:
-        found = (await tools.calculator_outliers("solubility")).residuals
-        assert found[0].within_uncertainty is False  # |−2.1| > 0.5
-        assert found[-1].within_uncertainty is True  # |−0.1| < 0.5
-
-    asyncio.run(_run())
+    found = (await tools.calculator_outliers("solubility")).residuals
+    assert found[0].within_uncertainty is False  # |−2.1| > 0.5
+    assert found[-1].within_uncertainty is True  # |−0.1| < 0.5
 
 
 def test_a_prediction_that_claimed_no_uncertainty_is_not_reported_as_a_miss() -> None:
@@ -165,15 +136,11 @@ def test_a_prediction_that_claimed_no_uncertainty_is_not_reported_as_a_miss() ->
     assert unclaimed.within_uncertainty is None
 
 
-def test_limit_is_clamped_to_the_configured_ceiling(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_limit_is_clamped_to_the_configured_ceiling(monkeypatch: pytest.MonkeyPatch) -> None:
     """The listing exists to be read; the cap is the deployment's, not the model's."""
-
-    async def _run() -> None:
-        monkeypatch.setattr(settings, "calc_outliers_max_results", 2)
-        assert len((await tools.calculator_outliers("solubility", limit=1000)).residuals) == 2
-        assert len((await tools.calculator_outliers("solubility", limit=0)).residuals) == 1
-
-    asyncio.run(_run())
+    monkeypatch.setattr(settings, "calc_outliers_max_results", 2)
+    assert len((await tools.calculator_outliers("solubility", limit=1000)).residuals) == 2
+    assert len((await tools.calculator_outliers("solubility", limit=0)).residuals) == 1
 
 
 def test_a_substructure_query_is_smarts_first_then_smiles() -> None:
@@ -190,7 +157,7 @@ def test_an_empty_substructure_query_is_rejected_rather_than_matching_everything
         substructure_pattern("not a molecule at all )(")
 
 
-def test_the_calibrated_version_comes_from_the_server_and_never_from_here() -> None:
+async def test_the_calibrated_version_comes_from_the_server_and_never_from_here() -> None:
     """The single most important correctness item of the split, asserted where it is read.
 
     `calculator_trust` and `calculator_outliers` used to derive the version locally, from
@@ -218,24 +185,22 @@ def test_the_calibrated_version_comes_from_the_server_and_never_from_here() -> N
         asked.append((calc_type, calc_version))
         return Calibration(calc_type=calc_type, unit=unit, n=0)
 
-    async def _run() -> None:
-        with pytest.MonkeyPatch.context() as patch:
-            server = install(patch, FakeCalcServer())
-            patch.setattr(tools, "reconciled_for", _reconciled)
-            patch.setattr(tools, "calibration_for", _calibration)
-            await tools.calculator_outliers("pka")
-            await tools.calculator_trust("solubility")
-            # The probe molecule is configuration, and it is the only argument the derivation
-            # needs — a version is a property of the programs behind a calculator, not of a
-            # molecule.
-            assert [args["tool"] for args in server.arguments("calculation_key")] == [
-                "predict_pka",
-                "predict_solubility",
-            ]
-            assert all(
-                args["arguments"] == {"smiles": settings.calc_version_probe_smiles}
-                for args in server.arguments("calculation_key")
-            )
+    with pytest.MonkeyPatch.context() as patch:
+        server = install(patch, FakeCalcServer())
+        patch.setattr(tools, "reconciled_for", _reconciled)
+        patch.setattr(tools, "calibration_for", _calibration)
+        await tools.calculator_outliers("pka")
+        await tools.calculator_trust("solubility")
+        # The probe molecule is configuration, and it is the only argument the derivation
+        # needs — a version is a property of the programs behind a calculator, not of a
+        # molecule.
+        assert [args["tool"] for args in server.arguments("calculation_key")] == [
+            "predict_pka",
+            "predict_solubility",
+        ]
+        assert all(
+            args["arguments"] == {"smiles": settings.calc_version_probe_smiles}
+            for args in server.arguments("calculation_key")
+        )
 
-    asyncio.run(_run())
     assert asked == [("pka", FAKE_VERSION), ("solubility", FAKE_VERSION)]

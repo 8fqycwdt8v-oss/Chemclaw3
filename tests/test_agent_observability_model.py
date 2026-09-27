@@ -440,6 +440,49 @@ def test_a_budget_too_small_for_one_character_still_bounds_the_parse_error() -> 
         settings.agent_audit_max_arg_chars = original
 
 
+def test_the_bounded_reason_is_the_longest_suffix_that_fits_at_every_budget() -> None:
+    """The search is the whole of this function, so it is checked against a linear scan.
+
+    Three boundaries, because each is a different branch and two of them were defects. A budget
+    **larger than the whole document** must return the document quoted and *unmarked* — no
+    ellipsis, since nothing was cut — and that is the early return above the search rather than
+    the search finding `len(text)`. A budget too small for one character returns the ellipsis
+    alone. Everything between returns the longest suffix that fits, which is asserted against a
+    scan rather than against a transcribed number: a number here would be a claim about `repr`'s
+    escaping table, and the scan is that table.
+
+    The document mixes a newline, a quote and a backslash on purpose. Those are the characters
+    `repr` expands, so they are what makes a fixed slice width unsafe and what makes the suffix
+    lengths differ from the budget at all.
+    """
+    from chemclaw.agent.model_calls import _bounded_reason
+
+    document = "A" * 40 + "\n'quoted'\\tail"
+    original = settings.agent_audit_max_arg_chars
+    try:
+        settings.agent_audit_max_arg_chars = len(repr(document)) + 1
+        assert _bounded_reason(document) == repr(document), "nothing was cut, so nothing is marked"
+
+        for budget in range(len(repr(document)) + 2):
+            settings.agent_audit_max_arg_chars = budget
+            bounded = _bounded_reason(document)
+            if budget >= len(repr(document)):
+                assert bounded == repr(document)
+                continue
+            longest = max(
+                (n for n in range(1, len(document) + 1) if len(repr(document[-n:])) <= budget),
+                default=0,
+            )
+            expected = "…" + repr(document[-longest:]) if longest else "…"
+            assert bounded == expected, f"budget {budget}: {bounded!r} != {expected!r}"
+            # The ellipsis is the one character over budget the marker costs; the quoted slice
+            # itself is inside it. Without this the "longest that fits" claim is satisfied by a
+            # search that fits nothing.
+            assert len(bounded) <= budget + 1, f"budget {budget} returned {len(bounded)} chars"
+    finally:
+        settings.agent_audit_max_arg_chars = original
+
+
 def test_the_refusal_cannot_carry_a_forged_evidence_delimiter_back_to_the_model() -> None:
     """The refusal quotes the model's own document, and that is a channel `framing` must cover.
 

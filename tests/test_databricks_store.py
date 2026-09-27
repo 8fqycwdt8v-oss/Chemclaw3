@@ -15,8 +15,6 @@ this adapter can be wrong in a way no exception reports:
 * the normalisation, because Databricks' L2 ordering only equals cosine ordering for unit vectors.
 """
 
-import asyncio
-import functools
 import math
 from typing import Any
 
@@ -33,20 +31,6 @@ from chemclaw.retrieval.vectors.databricks import (
 )
 
 COLLECTION = "main.chemclaw.document_chunks"
-
-
-def _sync(test: Any) -> Any:
-    """Run an `async def` test on its own loop, so pytest collects a plain function.
-
-    This repository has no async pytest plugin; the same decorator sits at the top of
-    `tests/test_vector_store.py` for the same reason.
-    """
-
-    @functools.wraps(test)
-    def runner(*args: Any, **kwargs: Any) -> None:
-        asyncio.run(test(*args, **kwargs))
-
-    return runner
 
 
 def _score_for(cosine: float) -> float:
@@ -127,7 +111,6 @@ def test_the_orthogonal_score_is_the_floor_pushed_to_the_server() -> None:
     assert cosine_from_score(ORTHOGONAL_SCORE) == pytest.approx(0.0)
 
 
-@_sync
 async def test_a_negative_cosine_is_not_a_hit() -> None:
     """A row the server let through below the floor is still dropped, not surfaced as evidence."""
     index = _FakeIndex(rows=[["doc-a#0", "doc-a", _score_for(0.8)], ["doc-b#0", "doc-b", 0.2]])
@@ -139,7 +122,6 @@ async def test_a_negative_cosine_is_not_a_hit() -> None:
 # --- normalisation ------------------------------------------------------------------------------
 
 
-@_sync
 async def test_points_are_stored_as_unit_vectors() -> None:
     """Databricks' L2 ranking only equals cosine ranking when both sides have length 1."""
     index = _FakeIndex()
@@ -149,7 +131,6 @@ async def test_points_are_stored_as_unit_vectors() -> None:
     assert stored == pytest.approx([0.6, 0.8])
 
 
-@_sync
 async def test_the_query_vector_is_normalised_too() -> None:
     """Both sides, or the conversion is not the transform it claims to invert."""
     index = _FakeIndex()
@@ -157,7 +138,6 @@ async def test_the_query_vector_is_normalised_too() -> None:
     assert index.searches[0]["query_vector"] == pytest.approx([0.0, 1.0])
 
 
-@_sync
 async def test_a_zero_vector_never_reaches_the_store() -> None:
     """It has cosine 0 to everything, so it is no hit — and no round trip."""
     index = _FakeIndex()
@@ -168,7 +148,6 @@ async def test_a_zero_vector_never_reaches_the_store() -> None:
 # --- the scope: pre-filter, and the empty-set rule from both ends -------------------------------
 
 
-@_sync
 async def test_a_group_scope_is_sent_as_a_server_side_filter() -> None:
     """Applied before the top-k, which is the whole reason an external store is worth attaching."""
     index = _FakeIndex()
@@ -176,7 +155,6 @@ async def test_a_group_scope_is_sent_as_a_server_side_filter() -> None:
     assert index.searches[0]["filters"] == {GROUP_COLUMN: ["doc-a", "doc-b"]}
 
 
-@_sync
 async def test_an_unfiltered_search_sends_no_filter() -> None:
     """`None` means the whole collection and must cost nothing extra."""
     index = _FakeIndex()
@@ -184,7 +162,6 @@ async def test_an_unfiltered_search_sends_no_filter() -> None:
     assert index.searches[0]["filters"] is None
 
 
-@_sync
 async def test_an_empty_scope_returns_nothing_without_a_round_trip() -> None:
     """An empty scope means nothing is eligible — never send that as an unfiltered search."""
     index = _FakeIndex()
@@ -192,7 +169,6 @@ async def test_an_empty_scope_returns_nothing_without_a_round_trip() -> None:
     assert index.searches == []
 
 
-@_sync
 async def test_the_floor_is_pushed_to_the_server() -> None:
     """A threshold applied afterwards would cost slots in the top-k."""
     index = _FakeIndex()
@@ -204,7 +180,6 @@ async def test_the_floor_is_pushed_to_the_server() -> None:
 # --- addressing, empty calls, and error translation ---------------------------------------------
 
 
-@_sync
 async def test_the_index_is_addressed_by_endpoint_and_catalogue_name() -> None:
     """An index is a pair; resolving it from the name alone is not possible."""
     index = _FakeIndex()
@@ -213,7 +188,6 @@ async def test_the_index_is_addressed_by_endpoint_and_catalogue_name() -> None:
     assert client.requested == [("ep-1", COLLECTION)]
 
 
-@_sync
 async def test_empty_writes_are_no_round_trip() -> None:
     """The sync calls both with nothing to do on every quiet pass."""
     index = _FakeIndex()
@@ -223,7 +197,6 @@ async def test_empty_writes_are_no_round_trip() -> None:
     assert index.upserted == [] and index.deleted == []
 
 
-@_sync
 async def test_delete_passes_the_catalogue_keys_through() -> None:
     """The id this seam addresses a point by *is* the index's primary key — no re-encoding."""
     index = _FakeIndex()
@@ -231,7 +204,6 @@ async def test_delete_passes_the_catalogue_keys_through() -> None:
     assert index.deleted == ["doc-a#chunks#0", "doc-a#chunks#1"]
 
 
-@_sync
 async def test_a_row_without_an_id_is_dropped_rather_than_guessed_at() -> None:
     """It cannot be rejoined to the catalogue, so it is not a citation anybody could check."""
     index = _FakeIndex(rows=[[None, "doc-a", 0.9], ["doc-b#0", "doc-b", _score_for(0.7)]])
@@ -239,7 +211,6 @@ async def test_a_row_without_an_id_is_dropped_rather_than_guessed_at() -> None:
 
 
 @pytest.mark.parametrize("method", ["upsert", "search", "delete"])
-@_sync
 async def test_a_client_failure_becomes_one_retryable_error_type(method: str) -> None:
     """The client raises its own hierarchy; a caller deciding retry wants `VectorStoreError`.
 
@@ -267,7 +238,6 @@ async def test_a_client_failure_becomes_one_retryable_error_type(method: str) ->
             await store.delete(COLLECTION, ["n-1"])
 
 
-@_sync
 async def test_an_unreadable_response_shape_warns_rather_than_reading_as_no_matches(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

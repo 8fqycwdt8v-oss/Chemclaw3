@@ -39,7 +39,7 @@ class _NoOpWriter:
 
     async def write(self, write: NoteWrite) -> WriteOutcome:
         """Report the unchanged tree, the way the git writer reports it."""
-        return WriteOutcome(reference="main", written=False)
+        return WriteOutcome(reference="main", notes=0)
 
 
 class _FailingSubmitter:

@@ -17,7 +17,9 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
+import psycopg
 import pytest
 import uvicorn
 from fastapi import FastAPI
@@ -29,6 +31,12 @@ from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
 from tests.fakes import asgi_client
 from tests.fakes_turn import Piece, ScriptedTurn
+from tests.pg import (
+    TEST_SCHEMA,
+    create_test_schema,
+    drop_test_schema,
+    migrated_db_or_skip,
+)
 
 # A minimal ASGI HTTP scope, for the one test that drives the app below `TestClient` (which
 # cannot express "the handler was cancelled and nothing was ever sent").
@@ -255,6 +263,172 @@ def test_readyz_does_not_probe_a_database_a_memory_deployment_does_not_have(
     assert res.json()["status"] == "ready"
 
 
+def test_readyz_refuses_a_pod_whose_image_is_ahead_of_the_schema(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """New code against an old schema must fail at rollout, not in traffic.
+
+    The probe was `SELECT 1` only, which every schema answers. Measured against a database
+    migrated through `080` while the code was current: `/readyz` answered
+    `200 {"status": "ready"}`, the pod joined the Route, and `outbox`,
+    `calculation_results.epoch` and `turn_costs.turn_id` were all missing under it. The Helm
+    `pre-upgrade` hook Job normally prevents that state; `--no-hooks`, a `kubectl set image` and
+    an ArgoCD sync that proceeds past a failed hook all reach it.
+
+    Driven by naming a migration this image "ships" that no ledger can hold, against the real
+    `schema_migrations` — the query, the connection and the ledger are the shipped ones, and only
+    the filename is arranged.
+    """
+    asyncio.run(migrated_db_or_skip())
+    monkeypatch.setattr(settings, "session_store", "postgres")
+    monkeypatch.setattr(settings, "service_readiness_cache_seconds", 0.0)
+    monkeypatch.setattr(
+        "chemclaw.api.routes.ops.newest_shipped_migration",
+        lambda: "999_a_migration_this_database_has_never_seen.sql",
+    )
+    with _client(_FakeAgent()) as client:
+        res = client.get("/readyz")
+    assert res.status_code == 503
+    assert res.json()["status"] == "schema behind image", (
+        "the pod was drained for the wrong reason — an operator running `curl` gets this line "
+        "and nothing else"
+    )
+
+
+def test_readyz_stays_ready_when_the_schema_is_ahead_of_the_image(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rollback must serve. The schema check is one-directional, and this is that direction.
+
+    An image behind its database is the *normal* state after a rollback: the schema only goes
+    forward, by a merged decision, so ledger rows past the newest file this image ships are
+    expected and must not gate. Making the comparison symmetric — "the ledger equals the file
+    set" — would refuse traffic on every rolled-back pod, which is a worse failure than the
+    forward one being fixed. The backwards case is reported by `core/migrate.py`'s
+    `migrate.database_ahead` warning instead, where an operator can act on it.
+    """
+    asyncio.run(migrated_db_or_skip())
+    monkeypatch.setattr(settings, "session_store", "postgres")
+    monkeypatch.setattr(settings, "service_readiness_cache_seconds", 0.0)
+    # The image ships through the *first* tracked migration; the database holds every later one.
+    oldest = sorted(
+        path.name
+        for path in (Path(settings.sql_migrations_dir).glob("*.sql"))
+        if path.name != "000_schema_migrations.sql"
+    )[0]
+    monkeypatch.setattr("chemclaw.api.routes.ops.newest_shipped_migration", lambda: oldest)
+    with _client(_FakeAgent()) as client:
+        res = client.get("/readyz")
+    assert res.status_code == 200, f"a rolled-back pod refused to serve: {res.text}"
+    assert res.json()["status"] == "ready"
+
+
+def test_a_database_with_no_migration_ledger_takes_the_pod_out_of_the_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No `schema_migrations` is the strongest evidence of a mismatch, not the absence of any.
+
+    **This test asserted the opposite until 2026-09-19, and the sentence it asserted was the
+    defect.** It said a database with no ledger "reports itself and stays ready", on the argument
+    that a ledger the probe *cannot read* must not take a pod out of the Route. That argument is
+    about **privilege** — a split session store whose role may use the store and may not select the
+    ledger — and it was implemented by catching `UndefinedTable` beside `InsufficientPrivilege`, so
+    the shape admitted was much wider than the case argued: `schema_migrations` is created by the
+    first migration, so its absence means *nothing has been applied*.
+
+    Driven against an empty database under the chart's shipped `CHEMCLAW_SESSION_STORE=postgres`:
+    `/readyz` answered `200 {"status":"ready","connectors_unhealthy":8}`, so the pod would have
+    joined the Route and failed every session write, every audit row and every owner lookup. Reached
+    by the three paths `_schema_carries_this_image` names (`--no-hooks`, `kubectl set image`, an
+    ArgoCD sync past a failed hook) and by the two-releases-one-database hazard the chart's own
+    `temporal.namespace` refusal admits no guard can cover.
+
+    The privilege case it was standing in for now has its own test below, which is the half nothing
+    covered: it was proved by a *missing table*, which is not what it claims.
+    """
+    schema = f"{TEST_SCHEMA}_no_ledger"
+    base = settings.postgres_dsn.split("?")[0]
+    asyncio.run(migrated_db_or_skip())
+    asyncio.run(create_test_schema(base, schema))
+    try:
+        # `search_path` to the empty schema *only*: with `public` behind it the ledger every other
+        # test migrated would resolve, and this test would silently assert nothing.
+        separator = "&" if "?" in base else "?"
+        monkeypatch.setattr(
+            settings,
+            "session_store_dsn",
+            f"{base}{separator}options={quote(f'-c search_path={schema}')}",
+        )
+        monkeypatch.setattr(settings, "session_store", "postgres")
+        monkeypatch.setattr(settings, "service_readiness_cache_seconds", 0.0)
+        with _client(_FakeAgent()) as client:
+            res = client.get("/readyz")
+        assert res.status_code == 503, (
+            f"a pod with no schema at all reported itself ready: {res.text}"
+        )
+        # The same status the behind-schema case answers, deliberately: it is the same fact at its
+        # limit and the remedy is identical, and the log line is where the two are distinguished.
+        assert res.json()["status"] == "schema behind image", res.text
+    finally:
+        asyncio.run(drop_test_schema(base, schema))
+
+
+def test_a_ledger_this_role_may_not_select_does_not_take_the_pod_out_of_the_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The case the trade actually argues, proved by a real privilege denial for the first time.
+
+    A split session store can put the probe on a different server from the one `migrate()` runs
+    against, with a role that may use the store and may not read the ledger. Refusing there would
+    turn a diagnostic into a fleet-wide outage over somebody else's grant table, so this stays
+    ready — and it is the *only* unreadable-ledger shape that does.
+
+    **Driven through a real `InsufficientPrivilege`**, which is the point: the trade was covered by
+    a test that dropped the *table*, so what it proved was `UndefinedTable`'s branch and the
+    privilege branch had no test at all. The ledger here exists, is resolvable on the search path,
+    and the session's role has `USAGE` on the schema and no `SELECT` on it — so the failure is
+    exactly "cannot select the ledger" rather than "cannot see the schema".
+
+    `-c role=` in the DSN rather than a second login: the connection runs as the restricted role
+    without a password, a `pg_hba` entry or a second DSN, and the role is dropped in the `finally`.
+    """
+    asyncio.run(migrated_db_or_skip())
+    schema = f"{TEST_SCHEMA}_norights"
+    role = f"{schema}_role"
+    base = settings.postgres_dsn.split("?")[0]
+
+    async def _setup() -> None:
+        async with await psycopg.AsyncConnection.connect(base, autocommit=True) as conn:
+            await conn.execute(f'CREATE SCHEMA "{schema}"')
+            await conn.execute(f'CREATE TABLE "{schema}".schema_migrations (filename text)')
+            await conn.execute(f'CREATE ROLE "{role}" NOLOGIN')
+            # USAGE and no SELECT: the table resolves, reading it does not.
+            await conn.execute(f'GRANT USAGE ON SCHEMA "{schema}" TO "{role}"')
+
+    async def _teardown() -> None:
+        async with await psycopg.AsyncConnection.connect(base, autocommit=True) as conn:
+            await conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+            await conn.execute(f'REVOKE ALL ON SCHEMA public FROM "{role}"')
+            await conn.execute(f'DROP ROLE IF EXISTS "{role}"')
+
+    asyncio.run(_setup())
+    try:
+        separator = "&" if "?" in base else "?"
+        options = quote(f"-c search_path={schema} -c role={role}")
+        monkeypatch.setattr(settings, "session_store_dsn", f"{base}{separator}options={options}")
+        monkeypatch.setattr(settings, "session_store", "postgres")
+        monkeypatch.setattr(settings, "service_readiness_cache_seconds", 0.0)
+        with _client(_FakeAgent()) as client:
+            res = client.get("/readyz")
+        assert res.status_code == 200, (
+            "a ledger this role may not select drained the pod, which is the fleet-wide outage "
+            f"the trade exists to avoid: {res.text}"
+        )
+        assert res.json()["status"] == "ready", res.text
+    finally:
+        asyncio.run(_teardown())
+
+
 def test_readyz_reuses_its_database_verdict_inside_the_window(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -272,9 +446,18 @@ def test_readyz_reuses_its_database_verdict_inside_the_window(
         nonlocal probes
         probes += 1
 
+        class _Cursor:
+            async def fetchone(self) -> tuple[bool]:
+                return (True,)
+
         class _Conn:
-            async def execute(self, _sql: str) -> None:
-                return None
+            # Two statements now, and the double has to answer both: `SELECT 1` for reachability
+            # and the ledger `EXISTS` for whether the schema carries this image. A double that
+            # only accepted the first would make this test pass by not exercising the probe.
+            async def execute(
+                self, _sql: str, _params: tuple[object, ...] | None = None
+            ) -> _Cursor:
+                return _Cursor()
 
         yield _Conn()
 
@@ -348,7 +531,7 @@ def test_readyz_bounds_the_whole_database_leg_not_just_the_statement_timeout(
     )
 
 
-def test_concurrent_readiness_probes_cost_one_connector_sweep(
+async def test_concurrent_readiness_probes_cost_one_connector_sweep(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Fifty simultaneous `/readyz` probes must cost one sweep, not fifty.
@@ -375,17 +558,15 @@ def test_concurrent_readiness_probes_cost_one_connector_sweep(
 
     monkeypatch.setattr("chemclaw.api.app.probe_connectors", _counting_probe)
 
-    async def _run() -> None:
-        app = _app()
-        async with asgi_client(app) as client:
-            responses = await asyncio.gather(*(client.get("/readyz") for _ in range(50)))
-        assert {res.status_code for res in responses} == {200}
+    app = _app()
+    async with asgi_client(app) as client:
+        responses = await asyncio.gather(*(client.get("/readyz") for _ in range(50)))
+    assert {res.status_code for res in responses} == {200}
 
-    asyncio.run(_run())
     assert sweeps == 1, f"50 concurrent probes triggered {sweeps} connector sweeps"
 
 
-def test_concurrent_readiness_probes_cost_one_database_checkout(
+async def test_concurrent_readiness_probes_cost_one_database_checkout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The same, for the probe that borrows from a 16-connection pool.
@@ -406,21 +587,28 @@ def test_concurrent_readiness_probes_cost_one_database_checkout(
         checkouts += 1
         await asyncio.sleep(0.05)
 
+        class _Cursor:
+            async def fetchone(self) -> tuple[bool]:
+                return (True,)
+
         class _Conn:
-            async def execute(self, _sql: str) -> None:
-                return None
+            # Two statements now, and the double has to answer both: `SELECT 1` for reachability
+            # and the ledger `EXISTS` for whether the schema carries this image. A double that
+            # only accepted the first would make this test pass by not exercising the probe.
+            async def execute(
+                self, _sql: str, _params: tuple[object, ...] | None = None
+            ) -> _Cursor:
+                return _Cursor()
 
         yield _Conn()
 
     monkeypatch.setattr("chemclaw.api.routes.ops.db.connection", _counting_connection)
 
-    async def _run() -> None:
-        app = _app()
-        async with asgi_client(app) as client:
-            responses = await asyncio.gather(*(client.get("/readyz") for _ in range(50)))
-        assert {res.status_code for res in responses} == {200}
+    app = _app()
+    async with asgi_client(app) as client:
+        responses = await asyncio.gather(*(client.get("/readyz") for _ in range(50)))
+    assert {res.status_code for res in responses} == {200}
 
-    asyncio.run(_run())
     assert checkouts == 1, f"50 concurrent probes requested {checkouts} pooled connections"
 
 
@@ -460,7 +648,7 @@ def test_security_headers_reach_a_streaming_sse_response() -> None:
             assert "frame-ancestors 'none'" in res.headers["Content-Security-Policy"]
 
 
-def test_a_cancelled_request_closes_the_connection_instead_of_500ing() -> None:
+async def test_a_cancelled_request_closes_the_connection_instead_of_500ing() -> None:
     """A handler cancelled before it responds must not be turned into a 500 with a traceback.
 
     This is the multi-worker blocker, and it is not hypothetical: a 50-user load run logged 44
@@ -494,11 +682,9 @@ def test_a_cancelled_request_closes_the_connection_instead_of_500ing() -> None:
     async def _receive() -> MutableMapping[str, Any]:
         return {"type": "http.request", "body": b"", "more_body": False}
 
-    async def _drive() -> None:
-        with pytest.raises(asyncio.CancelledError):
-            await app(_ASGI_GET_SCOPE, _receive, _send)
+    with pytest.raises(asyncio.CancelledError):
+        await app(_ASGI_GET_SCOPE, _receive, _send)
 
-    asyncio.run(_drive())
     assert sent == [], f"a cancelled handler still emitted a response: {sent}"
 
 
@@ -988,6 +1174,93 @@ def test_pushback_collapses_a_replayed_backlog_of_reminders(monkeypatch) -> None
     assert {e["request_id"] for e in events} == {"await-9f2c"}
 
 
+def test_pushback_reports_the_newest_state_of_a_collapsed_backlog(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """The surviving frame of a collapsed run is the newest one, not the oldest.
+
+    `D-2026-09-13-a-collapse-without-the-batch-keeps-the-oldest-frame`. The sibling above asserts
+    that a month of reminders arrives as one open notice and one expiry. What it cannot see is
+    *which* open notice: its fake replaces the tailer, so the per-connection suppression is the only
+    thing running, and that suppression decides one row at a time against rows that arrive
+    oldest-first — so the frame it kept carried `reminders=0` while `reminders=14` was the truth at
+    connect time. Driven here: `[0, 14]` against the `[14, 14]` a surface needs.
+
+    **So this drives the real tailer**, with only its claim faked, because the defect and the fix
+    both live in the seam between the two: the batch exists inside one claim and nowhere else, and
+    the reduction is `stream_new_events`' `collapse` argument. Reading that argument out of
+    `kwargs` rather than passing `_newest_per_state` in by hand is what makes the test fail if the
+    route stops handing it over — a test that supplied the collapse itself would pass against a
+    route that had dropped it.
+    """
+    import chemclaw.api.app as app_module
+    from chemclaw.agent import session_events as session_events_module
+    from chemclaw.agent.session_events import SessionEvent
+    from chemclaw.durable.awaiting import AWAITING_KIND
+
+    backlog = [
+        SessionEvent(
+            session_id="s",
+            kind=AWAITING_KIND,
+            payload={
+                "request_id": "await-9f2c",
+                "kind": "measurement",
+                "subject": "Isolated yield for arm B3",
+                "asked_of": "process-chemist",
+                "due_at": "2026-09-06T00:00:00Z",
+                "reminders": reminder,
+                "state": "waiting",
+            },
+        )
+        for reminder in range(15)
+    ] + [
+        SessionEvent(
+            session_id="s",
+            kind=AWAITING_KIND,
+            payload={
+                "request_id": "await-9f2c",
+                "subject": "Isolated yield for arm B3",
+                "state": "expired",
+                "reminders": 14,
+            },
+        )
+    ]
+
+    async def _claim(_session_id: str) -> list[SessionEvent]:
+        return backlog
+
+    handed: list[object] = []
+
+    async def _one_poll(session_id: str, **kwargs: object) -> object:
+        """One claim through the production tailer, bounded so the SSE stream ends."""
+        handed.append(kwargs.get("collapse"))
+        async for event in session_events_module.stream_new_events(
+            session_id,
+            max_polls=1,
+            claim=_claim,
+            collapse=kwargs.get("collapse"),  # type: ignore[arg-type]
+        ):
+            yield event
+
+    monkeypatch.setattr(app_module, "stream_new_events", _one_poll)
+
+    with _client(_FakeAgent()) as client:
+        session_id = client.post("/sessions").json()["session_id"]
+        events = []
+        with client.stream("GET", f"/sessions/{session_id}/events") as res:
+            for line in res.iter_lines():
+                if line.startswith("data:"):
+                    events.append(json.loads(line[len("data:") :].strip()))
+
+    assert handed and handed[0] is not None, (
+        "the route no longer hands the tailer a batch reduction, so the collapse it does perform "
+        "can only ever keep the oldest frame of a run"
+    )
+    assert [e["state"] for e in events] == ["waiting", "expired"], events
+    assert [e["reminders"] for e in events] == [14, 14], (
+        "the collapse kept the oldest frame of the run, so the client was told the question had "
+        f"been chased {events[0]['reminders']} times when it had been chased 14"
+    )
+
+
 def test_pushback_does_not_collapse_two_different_requests(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """The collapse is per request, so two open questions are two notices."""
     import chemclaw.api.app as app_module
@@ -1368,6 +1641,8 @@ def test_transcript_reads_back_the_stored_thread() -> None:
     assert [row["role"] for row in transcript] == ["user", "assistant"]
     assert transcript[0]["text"] == "hello"
     assert transcript[1]["text"] == "hi there"
+    # Seeded off the request path, so no turn stored it: unknown, not a turn named "".
+    assert [row["correlation_id"] for row in transcript] == [None, None]
 
 
 def test_a_turn_writes_itself_into_the_transcript() -> None:
@@ -1408,6 +1683,38 @@ def test_a_turn_writes_itself_into_the_transcript() -> None:
     # `_FakeAgent` streams "hi " then "there"; the transcript stores the assembled answer, not the
     # fragments, because that is what a chemist reading back is owed.
     assert transcript[1]["text"] == "hi there"
+
+
+def test_a_turns_transcript_rows_carry_its_correlation_id() -> None:
+    """A detached client finds its turn's answer by the id it sent, not by the answer's text.
+
+    Driven through a real turn on the in-memory store, which must answer the field as the durable
+    one does; `tests/test_api_sessions.py` holds the Postgres half.
+    """
+    from chemclaw.api.auth import Principal, require_principal
+
+    app = _app()
+    app.dependency_overrides[require_principal] = lambda: Principal(
+        oid="alice", upn="a@corp", roles=frozenset()
+    )
+    client = TestClient(app)
+    session_id = client.post("/sessions").json()["session_id"]
+
+    with client.stream(
+        "POST",
+        f"/sessions/{session_id}/messages",
+        json={"message": "what is the pKa?"},
+        headers={"X-Chemclaw-Correlation-Id": "ui-turn-0001"},
+    ) as res:
+        assert res.status_code == 200
+        for _line in res.iter_lines():
+            pass
+
+    transcript = client.get(f"/sessions/{session_id}/messages").json()
+    assert [(row["role"], row["correlation_id"]) for row in transcript] == [
+        ("user", "ui-turn-0001"),
+        ("assistant", "ui-turn-0001"),
+    ], transcript
 
 
 def test_transcript_of_an_unknown_session_is_404() -> None:
@@ -1659,7 +1966,7 @@ def _gated_agent(gate: asyncio.Event, started: asyncio.Event, blocked_message: s
     return _GatedAgent()
 
 
-def test_concurrent_turn_on_same_session_is_409() -> None:
+async def test_concurrent_turn_on_same_session_is_409() -> None:
     """While one turn runs, a second POST to the same session is rejected with 409.
 
     Two concurrent turns would drive `agent.run` against the same TurnSession at once,
@@ -1667,48 +1974,40 @@ def test_concurrent_turn_on_same_session_is_409() -> None:
     (matching the admission semaphore's shed-don't-queue semantics), and the slot frees when
     the running turn's stream ends.
     """
-
-    async def _run() -> None:
-        gate = asyncio.Event()
-        started = asyncio.Event()
-        app = _app(_gated_agent(gate, started, "first"))
-        async with asgi_client(app) as client:
-            session_id = (await client.post("/sessions")).json()["session_id"]
-            first = asyncio.create_task(
-                client.post(f"/sessions/{session_id}/messages", json={"message": "first"})
-            )
-            await asyncio.wait_for(started.wait(), timeout=5)  # the first turn is mid-run
-            dup = await client.post(f"/sessions/{session_id}/messages", json={"message": "second"})
-            assert dup.status_code == 409
-            gate.set()
-            assert (await first).status_code == 200
-            # The slot is released with the stream — the next turn is admitted again.
-            ok = await client.post(f"/sessions/{session_id}/messages", json={"message": "third"})
-            assert ok.status_code == 200
-
-    asyncio.run(_run())
+    gate = asyncio.Event()
+    started = asyncio.Event()
+    app = _app(_gated_agent(gate, started, "first"))
+    async with asgi_client(app) as client:
+        session_id = (await client.post("/sessions")).json()["session_id"]
+        first = asyncio.create_task(
+            client.post(f"/sessions/{session_id}/messages", json={"message": "first"})
+        )
+        await asyncio.wait_for(started.wait(), timeout=5)  # the first turn is mid-run
+        dup = await client.post(f"/sessions/{session_id}/messages", json={"message": "second"})
+        assert dup.status_code == 409
+        gate.set()
+        assert (await first).status_code == 200
+        # The slot is released with the stream — the next turn is admitted again.
+        ok = await client.post(f"/sessions/{session_id}/messages", json={"message": "third"})
+        assert ok.status_code == 200
 
 
-def test_concurrent_turns_on_different_sessions_are_admitted() -> None:
+async def test_concurrent_turns_on_different_sessions_are_admitted() -> None:
     """The per-session gate is per session: a turn on another session is not blocked."""
-
-    async def _run() -> None:
-        gate = asyncio.Event()
-        started = asyncio.Event()
-        app = _app(_gated_agent(gate, started, "blocked"))
-        async with asgi_client(app) as client:
-            first = (await client.post("/sessions")).json()["session_id"]
-            second = (await client.post("/sessions")).json()["session_id"]
-            blocked = asyncio.create_task(
-                client.post(f"/sessions/{first}/messages", json={"message": "blocked"})
-            )
-            await asyncio.wait_for(started.wait(), timeout=5)
-            other = await client.post(f"/sessions/{second}/messages", json={"message": "b"})
-            assert other.status_code == 200  # a different session's turn runs concurrently
-            gate.set()
-            assert (await blocked).status_code == 200
-
-    asyncio.run(_run())
+    gate = asyncio.Event()
+    started = asyncio.Event()
+    app = _app(_gated_agent(gate, started, "blocked"))
+    async with asgi_client(app) as client:
+        first = (await client.post("/sessions")).json()["session_id"]
+        second = (await client.post("/sessions")).json()["session_id"]
+        blocked = asyncio.create_task(
+            client.post(f"/sessions/{first}/messages", json={"message": "blocked"})
+        )
+        await asyncio.wait_for(started.wait(), timeout=5)
+        other = await client.post(f"/sessions/{second}/messages", json={"message": "b"})
+        assert other.status_code == 200  # a different session's turn runs concurrently
+        gate.set()
+        assert (await blocked).status_code == 200
 
 
 def test_stalled_turn_times_out_and_frees_the_permit(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -1873,6 +2172,16 @@ def test_event_streams_are_capped_per_user(monkeypatch) -> None:  # type: ignore
                     await asyncio.sleep(0.01)
             second = await client.get(f"/sessions/{session_id}/events")
             assert second.status_code == 429  # the per-user cap binds
+            # **And it carries `Retry-After`**, which decides how the shipped client renders it:
+            # `Chemclaw3_ui`'s `errorFromStatus` splits 429 on the header's *presence*, and without
+            # one it raises `budget_exhausted` — "the usage budget for this service is exhausted" —
+            # which locks the composer and which that module's own comment says nothing in the UI
+            # clears. This cap lifts the moment the client closes a stream, so both halves of that
+            # sentence would be false. Found while the turn route was being hardened against the
+            # identical mistake.
+            assert second.headers.get("retry-after"), (
+                "a 429 with no Retry-After renders as a permanent budget_exhausted in the UI"
+            )
             first.cancel()
             with contextlib.suppress(asyncio.CancelledError, httpx.HTTPError):
                 await first
@@ -1998,7 +2307,7 @@ def test_a_session_with_no_plan_has_nothing_to_decide_on() -> None:
         # back as an approval either, or the display disagrees with the gate that refuses it.
         asyncio.run(
             client.app.state.plan_approvals.record(  # type: ignore[attr-defined]
-                session_id, plan["plan_hash"], "someone", True
+                session_id, plan["plan_hash"], "someone", True, ()
             )
         )
         assert client.get(f"/sessions/{session_id}/plan").json()["approved"] is False, (
@@ -2170,7 +2479,7 @@ def test_readyz_does_not_name_the_connector_fleet_to_an_unauthenticated_caller(
     assert body["connectors_unhealthy"] == 1
 
 
-def test_the_thread_pool_covers_the_tool_calls_one_admitted_turn_can_fan_out(
+async def test_the_thread_pool_covers_the_tool_calls_one_admitted_turn_can_fan_out(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """`reserved` is the front door's claim about its own caps, and it charged a turn one thread.
@@ -2207,11 +2516,8 @@ def test_the_thread_pool_covers_the_tool_calls_one_admitted_turn_can_fan_out(
     monkeypatch.setattr(app_module, "install_default_executor", _spy)
     app = app_module.create_app(connector_factory=_no_connectors)
 
-    async def _boot() -> None:
-        async with app.router.lifespan_context(app):
-            pass
-
-    asyncio.run(_boot())
+    async with app.router.lifespan_context(app):
+        pass
 
     fan_out = settings.service_max_concurrent_turns * max(1, settings.agent_max_parallel_tool_calls)
     caps = fan_out + settings.attachment_max_concurrent_parses

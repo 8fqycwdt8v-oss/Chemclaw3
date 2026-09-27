@@ -1,0 +1,61 @@
+{
+  "probe": {
+    "id": "pc-17",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Has anyone here run a Suzuki on a deactivated aryl chloride? What catalyst systems worked?",
+    "expects_tools": [
+      "conditions_for_similar_reaction",
+      "substrate_precedent",
+      "gather_evidence",
+      "reagent_frequency"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a catalyst system named as the house standard on the strength of one or two entries",
+      "a count of precedent entries that the tools did not return",
+      "an empty precedent search presented as an absence of risk"
+    ],
+    "direction": "The question the system is built for. Searches precedent by transformation and by substrate class, cites entries, and reports the catalyst systems with how often each appears rather than naming one as \"the\" answer. If the corpus is thin it says how thin — \"two entries\" is a different answer from \"the house standard is XPhos\" and must not be rendered as the second.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "pc-17",
+    "section": 6,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Has anyone here run a Suzuki on a deactivated aryl chloride? What catalyst systems worked?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 2.15,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "622f67becd3b4451aa1c0183cd35001b",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

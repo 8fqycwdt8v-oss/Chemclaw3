@@ -129,6 +129,39 @@ def test_find_notes_surfaces_provenance(tmp_path: Path, monkeypatch: pytest.Monk
     assert ref.confidence == 0.8
 
 
+_CALC_KEY = "xtb.hess@GFN2-xTB+tblite+0.4.0:ab12cd:34ef56"
+
+
+def _seed_computed_note(tmp_path: Path) -> None:
+    """A note whose whole basis is a calculation that lives outside the graph."""
+    (tmp_path / "j.md").write_text(
+        f"---\nid: job-1\ntype: job-result\ncreated_by: agent\n"
+        f"calc_refs: ['{_CALC_KEY}']\nartifact_refs: ['{_CALC_KEY}#hessian']\n"
+        "---\nThe barrier is 21.4 kcal/mol.\n",
+        encoding="utf-8",
+    )
+
+
+def test_the_calculation_a_claim_rests_on_reaches_the_reader(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`calc_refs` is a citation, and a citation nobody can read is not one.
+
+    `record_knowledge_note` tells the model to file these keys "so a stale calculation can be
+    traced to the conclusions drawn from it". Every reader of a note — the model through
+    `expand_note`/`find_notes`, the chemist through `GET /notes/{id}`, which returns this same
+    `NoteView` — went through `_ref`, and `_ref` dropped both fields. So the one field on a
+    computed note that says what the number came from was write-only.
+    """
+    _seed_computed_note(tmp_path)
+    monkeypatch.setattr(settings, "knowledge_dir", str(tmp_path))
+    view = asyncio.run(expand_note("job-1"))
+    assert view.note.calc_refs == [_CALC_KEY]
+    assert view.note.artifact_refs == [f"{_CALC_KEY}#hessian"]
+    (ref,) = asyncio.run(find_notes("barrier")).matches
+    assert ref.calc_refs == [_CALC_KEY]
+
+
 def test_a_notes_frontmatter_reaches_the_model_with_no_live_delimiter(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -596,3 +629,89 @@ def test_find_notes_truncates_in_id_order(tmp_path: Path, monkeypatch: pytest.Mo
         "compound-a",
         "compound-b",
     ]
+
+
+def test_find_notes_says_whether_there_was_a_corpus_to_miss(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Three different answers rendered byte-identically, and one of them is an outage.
+
+    Measured: on a zero-note corpus, `find_notes("aspirin")`, `find_notes("")` and a genuine miss
+    over a one-note corpus all returned `{'matches': [], 'total_matches': 0, 'widened': False}`.
+    "We have no note on aspirin" and "there is no knowledge graph on this deployment" are not the
+    same statement, and the honest form already existed one module away — `gather_evidence` reports
+    `sources_skipped={'graph': 'no notes found under <path>'}` and `find_knowledge_gaps()` already
+    reports `total_notes: 0`.
+
+    The tool's docstring did say "an empty result means not even one term matched — it does not
+    mean the topic is absent from the graph", which is the docstring-only pattern the verdict field
+    exists to end: read once when the tool is defined, absent from the payload that sits in the
+    context window when the answer is written.
+    """
+    # Two directories rather than one seeded halfway through: `load_notes` caches behind a stat
+    # fingerprint whose mtime resolution is coarser than this test, so writing into the directory
+    # it has just read is not a reliable way to change what it holds.
+    bare, seeded = tmp_path / "bare", tmp_path / "seeded"
+    bare.mkdir()
+    seeded.mkdir()
+    _seed(seeded)
+
+    monkeypatch.setattr(settings, "knowledge_dir", str(bare))
+    empty = asyncio.run(find_notes("aspirin"))
+    assert empty.corpus_notes == 0
+    assert "NO CORPUS" in empty.model_dump()["verdict"]
+
+    # A query with nothing searchable in it never reaches the corpus, so it may not claim one is
+    # missing: `corpus_notes is None` is "this search cannot say", the same distinction
+    # `retrieval.evidence.Hits.found is None` draws.
+    unsearchable = asyncio.run(find_notes(""))
+    assert unsearchable.corpus_notes is None
+    assert "NOT SEARCHED" in unsearchable.model_dump()["verdict"]
+
+    # ...and a real corpus that simply does not hold the answer says exactly that.
+    monkeypatch.setattr(settings, "knowledge_dir", str(seeded))
+    miss = asyncio.run(find_notes("aspirin"))
+    assert miss.matches == []
+    assert miss.corpus_notes == 2
+    verdict = miss.model_dump()["verdict"]
+    assert "NO MATCH" in verdict
+    assert "2" in verdict
+
+    hit = asyncio.run(find_notes("target"))
+    assert hit.corpus_notes == 2
+    assert "FOUND" in hit.model_dump()["verdict"]
+
+
+def test_no_docstring_on_the_write_path_still_promises_a_human_reviewer() -> None:
+    """The write path commits directly, and three docstrings said in the present tense it did not.
+
+    Measured: `record_failure` → `record_note` → `GitNoteWriter` commits, with nothing between the
+    tool returning and the note being served as current evidence. Meanwhile
+    `memory/failure.py`'s module docstring said "It writes through the PR-gate like everything
+    else", `failure_note`'s `Returns:` said the note "is *proposed*, never written… a human decides
+    whether the graph accepts the correction", `get_note`'s 404 paragraph named "a note still
+    awaiting its PR-gate review" as the commonest cause of an unknown id, and this module's
+    `record_failure` told a reader "the reviewer signs off". Every one of them is a claim about a
+    commit (`D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit`), and each is now false.
+
+    An **absence** test, on the pattern the empty `audit_events.agent` column left behind: prose is
+    the only place this defect can live, so the assertion has to be that the sentence is gone. The
+    phrases are the measured ones rather than the word "gate", because the honest sentences here
+    *do* name the gate — in the past tense, saying what it used to explain and why it no longer
+    can.
+    """
+    root = Path(__file__).resolve().parent.parent / "src" / "chemclaw"
+    claims = {
+        "memory/failure.py": (
+            "writes through the PR-gate",
+            "a human decides whether the graph accepts",
+            "ready to ride alongside",
+            "one PR-gate submission",
+        ),
+        "api/routes/notes.py": ("awaiting its PR-gate review",),
+        "agent/graph_tools.py": ("the reviewer signs off",),
+    }
+    for relative, phrases in claims.items():
+        source = (root / relative).read_text(encoding="utf-8")
+        for phrase in phrases:
+            assert phrase not in source, f"{relative} still claims a reviewer: {phrase!r}"

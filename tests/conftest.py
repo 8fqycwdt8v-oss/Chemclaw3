@@ -4,11 +4,16 @@
 "record a note" path imports it (`from tests.conftest import FakeWriter`)
 instead of redefining an identical fake per file (DRY).
 
-`_fresh_discovery_caches` clears the connector and template `@cache`d discovery seams around
-every test; see its docstring for why that has to be autouse rather than a per-file convention.
+`_fresh_derived_tool_sets` clears the two `@cache`d authorization sets derived from the connector
+and template registries around every test; see its docstring for why that has to be autouse rather
+than a per-file convention, and for why the registries themselves are no longer cleared here.
 
 `_free_port` is the one "ask the OS for an unused loopback port" helper, shared by every test
 that starts a real server instead of being redefined per file (Rule of Three).
+
+`client` and `log_field` are the same rule applied to the front-door suites: the fixture that
+builds the app with a fake agent, and the one-line reader for an `extra=` field on a captured
+record, were byte-identical in `test_api_observability.py` and `test_api_review_logging.py`.
 
 `pytest_collection_modifyitems` owns both wall-clock-cap adjustments: the `thread` timeout method
 for Temporal-backed modules, and `PYTEST_TIMEOUT_SCALE`, which is the one knob that relaxes *every*
@@ -20,25 +25,25 @@ server, or an absent `helm` binary took away.
 """
 
 import asyncio
+import logging
 import os
 import socket
 from collections.abc import Iterator
+from typing import Any
 
 import psycopg
 import pytest
 from _pytest.config import UsageError
 from _pytest.terminal import TerminalReporter
+from fastapi.testclient import TestClient
 
 from chemclaw.agent.authz import knowledge_read_tools as _knowledge_read_tools
 from chemclaw.agent.authz import side_effecting_tools as _side_effecting_tools
 from chemclaw.connectors.reachability import forget_reachability as _forget_reachability
-from chemclaw.connectors.registry import discovered as _connectors_discovered
 from chemclaw.core.config import settings
 from chemclaw.ingest.eln.warehouse.connect import forget_open_warehouses as _forget_warehouses
-from chemclaw.ingest.sources.registry import discovered as _sources_discovered
 from chemclaw.kg.record import NoteWrite, WriteOutcome
 from chemclaw.retrieval.vectors.registry import forget_vector_store as _forget_vector_store
-from chemclaw.templates.registry import discovered as _templates_discovered
 from tests.pg import create_test_schema, drop_test_schema, schema_dsn
 
 # `pytester` runs a throwaway pytest session inside a tmp dir, which is the only way to observe
@@ -47,11 +52,64 @@ from tests.pg import create_test_schema, drop_test_schema, schema_dsn
 pytest_plugins = ["pytester"]
 
 
+@pytest.fixture(scope="session")
+def anyio_backend() -> str:
+    """Pin anyio's pytest plugin to asyncio, which is the only loop anything here runs on.
+
+    `anyio_mode = "auto"` in `pyproject.toml` is what makes an `async def test_*` run at all; this
+    fixture decides *how*. The plugin ships its own `anyio_backend`, parametrized over every
+    installed backend, so without this override an async test is an id with an `[asyncio]` suffix
+    today — four files already carried one — and a second, failing `[trio]` arm the day anything
+    pulls trio into the closure. Nothing here is trio-compatible: psycopg, the Temporal client and
+    the LangGraph checkpointer are all asyncio, so that second arm would never be a signal about
+    this system.
+
+    **It is the same teardown `asyncio.run` gives, which is the property the durable layer needs.**
+    The asyncio backend's `TestRunner` is an `asyncio.Runner`, and the plugin takes its lease
+    inside `pytest_pyfunc_call` and drops it there, so each test still gets a fresh loop that is
+    cancelled, `shutdown_asyncgens`-ed and closed on the way out. `core/db.py` caches its pools
+    *per event loop* and sweeps the ones whose loop has ended
+    (`D-2026-09-13-a-loop-that-abandons-its-pool-can-fail-to-end`); a plugin that reused one loop
+    across the session, or left it open, would quietly defeat both. Driven against a real database
+    before the conversion: two tests that open a pool and abandon it get two distinct, closed
+    loops and the session ends in under a second.
+    """
+    return "asyncio"
+
+
 def _free_port() -> int:
     """An unused localhost port, so concurrent test runs cannot collide on a fixed one."""
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
+
+
+def log_field(record: logging.LogRecord, name: str) -> Any:
+    """One `extra=` field off a captured record — `getattr`, because a `LogRecord` has no schema.
+
+    Named for what it reads rather than `_field`, because a shared helper is called from files
+    that have their own `_`-private names and a leading underscore here would claim the opposite
+    of what a conftest is.
+    """
+    return getattr(record, name)
+
+
+@pytest.fixture
+def client() -> TestClient:
+    """The front door with a fake agent — the same seam every other front-door test uses.
+
+    Here rather than per file because two suites held a byte-identical copy. A file that wants a
+    differently-built client still defines its own `client` fixture and pytest's nearest-wins
+    resolution gives it that one, which is how `test_api_shedding.py`, `test_jobs_api.py`,
+    `test_protocol_routes.py` and `test_tool_results.py` keep theirs.
+
+    `tests.test_service` is imported inside the body on purpose: pytest imports this conftest
+    before collecting anything, so a module-scope import here would make every run — `pytest
+    tests/test_bo.py` included — pay for the front-door module and its whole dependency tree.
+    """
+    from tests.test_service import _app, _FakeAgent
+
+    return TestClient(_app(_FakeAgent()))
 
 
 class FakeWriter:
@@ -134,41 +192,45 @@ def isolated_postgres_schema() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
-def _fresh_discovery_caches() -> Iterator[None]:
-    """Clear the connector, template and data-source `@cache`d discovery registries per test.
+def _fresh_derived_tool_sets() -> Iterator[None]:
+    """Clear the two `@cache`d authorization sets derived from the discovery registries, per test.
 
-    `chemclaw.connectors.registry.discovered`, `chemclaw.templates.registry.discovered` and
-    `chemclaw.ingest.sources.registry.discovered` are `@cache`d for production, where the
-    bundle/template/source layout is fixed for the process's life.
-    Most of the suite calls them expecting the real, on-disk default; a handful of tests repoint
-    `connectors_dir` / `templates_dir` at a `tmp_path` fixture bundle instead. `monkeypatch`
-    restores the setting afterwards, but it has no idea a `functools.cache` sits downstream, so a
-    test that forgot to clear it left the *next* test reading a stale or `tmp_path`-only result —
-    order-dependent failures in `test_agent.py` and `test_prose_contract.py` traced to exactly
-    this (`docs/planning/BACKLOG.md`). Clearing both directions, autouse, turns "remember to clear
-    the cache" from a per-file convention every new test has to rediscover into an invariant nothing
-    can forget — and it is cheap: clearing an empty `functools.cache` is O(1).
+    `chemclaw.agent.authz.side_effecting_tools` and `knowledge_read_tools` are `@cache`d on *no
+    arguments* while their real input is the enabled connector and template manifests, so a test
+    that repoints `connectors_dir` at a `tmp_path` bundle leaves the next test's write gates
+    reading the old deployment's classification and its turn record counting the old one's
+    searches. Autouse for the reason every cache-clearing fixture here is: "remember to clear the
+    cache" as a per-file convention is something each new test file has to rediscover, and the
+    failure it produces lands in a *different* file, order-dependent. It is cheap — measured at
+    0.018 ms and 0.005 ms to re-derive against warm registries, because both are a pass over
+    manifests already parsed.
 
-    **The data-source registry is the third of the same kind and was the one not here**, cleared
-    instead by a per-file autouse fixture in `tests/test_datasource_seam.py`. That worked for as
-    long as every test repointing `data_sources_dir` lived in that file, and stopped the moment one
-    did not: a single test elsewhere pointing the registry at its own `tmp_path` manifests poisoned
-    the cache for the rest of the session, and 50 tests in four unrelated files failed reading a
-    corpus of one fixture source. Which is precisely the failure the docstring above already
-    describes, in the one registry it did not cover.
+    **The three discovery registries themselves are deliberately no longer cleared here.**
+    `connectors.registry.discovered`, `templates.registry.discovered` and
+    `ingest.sources.registry.discovered` were `@cache`d on nothing for the same reason, and this
+    fixture was the defence: clear them around all 5,747 tests so the ~21 files that repoint a
+    directory cannot poison the rest. Clearing is O(1); the *re-discovery* it forced is not —
+    measured at 48 ms, 32 ms and 32 ms a time. They are now keyed on the directory tuple they
+    actually read, so a repointed `tmp_path` is a different cache entry and the poisoning it was
+    protecting against cannot happen. `forget_discovered()` is the seam for the narrower case a
+    key cannot see: new manifests written into a directory the registry has already discovered.
+    It is a named function rather than `discovered.cache_clear`, which is what it was for a few
+    hours — an attribute assigned onto a function object is invisible to `mypy`, so that spelling
+    needed one suppression at the definition and produced an error at every one of its 35 call
+    sites.
+
+    **The claim that removes an order-dependence is checked by running in two orders.** Deleting a
+    fixture that ran on every test is only safe if nothing was relying on it, and the one way that
+    fails is ordering — so it was measured rather than argued: the 39 test files that touch any of
+    `connectors_dir`, `templates_dir`, `data_sources_dir`, `cache_clear` or `discovered()` were run
+    forward and reversed, **1,136 passed both ways**. That is evidence about those files and not
+    about the suite, which runs in one fixed order and has never had its order shaken out —
+    `pytest-randomly` is not installed here, and installing it is a separate decision with its own
+    cost.
     """
-    _connectors_discovered.cache_clear()
-    _templates_discovered.cache_clear()
-    _sources_discovered.cache_clear()
-    # Derived from the first two, so it goes stale exactly when they do — a repointed
-    # `connectors_dir` with this cache still warm would leave the write gates reading the old
-    # deployment's classification, and the turn record counting the old one's searches.
     _side_effecting_tools.cache_clear()
     _knowledge_read_tools.cache_clear()
     yield
-    _connectors_discovered.cache_clear()
-    _templates_discovered.cache_clear()
-    _sources_discovered.cache_clear()
     _side_effecting_tools.cache_clear()
     _knowledge_read_tools.cache_clear()
 
@@ -199,7 +261,7 @@ def _fresh_attached_connections() -> Iterator[None]:
     wrong in a test session, though — `warehouse_fake.prime()` installs a new fake per test, and a
     cached connection would serve every later test the *first* test's rows.
 
-    Autouse for `_fresh_discovery_caches`'s reason: "clear the cache" as a per-file convention is
+    Autouse for `_fresh_derived_tool_sets`'s reason: "clear the cache" as a per-file convention is
     something each new test file has to rediscover, and the failure it produces is order-dependent.
     """
     _forget_warehouses()
@@ -210,15 +272,24 @@ def _fresh_attached_connections() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
-def loopback_service_host(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Run tests in the loopback dev posture, so `create_app`'s fail-closed guard admits them.
+def loopback_dev_posture(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run tests in the loopback dev posture, so the fail-closed boot guards admit them.
 
-    The front door refuses to boot unauthenticated on a non-loopback bind (SEC-2); tests drive
-    the app entirely in-process (TestClient — no socket is ever bound), so they use the loopback
-    posture. The guard's own refuse/opt-in/boot behavior is proven explicitly in test_auth.py,
-    which overrides these settings per test.
+    Three guards, three postures, and each is *stated* here rather than inferred from the suite's
+    circumstances. The front door refuses to boot unauthenticated on a non-loopback bind (SEC-2);
+    tests drive the app entirely in-process (TestClient — no socket is ever bound), so they use the
+    loopback bind. And every process that makes model calls refuses a loopback `llm_base_url`
+    unless the posture is declared (`core/llm_gateway`) — the suite's gateway is
+    `chemclaw.cli.mock_llm`'s shipped default address, which is exactly that case, so it declares
+    it. And a Temporal worker refuses to boot with sign-in off unless that is declared
+    (`durable/serve.refuse_unauthenticated_worker`) — the suite runs with `entra_required` off, so
+    it declares that too. Each guard's own refuse/opt-in/boot behaviour is proven explicitly —
+    `test_auth.py` for the first, `tests/test_llm_gateway_guard.py` for the second,
+    `tests/test_worker_posture.py` for the third — by overriding these per test.
     """
     monkeypatch.setattr(settings, "service_host", "127.0.0.1")
+    monkeypatch.setattr(settings, "llm_allow_loopback_gateway", True)
+    monkeypatch.setattr(settings, "worker_allow_unauthenticated", True)
 
 
 def timeout_scale() -> float:
@@ -469,6 +540,40 @@ def _report_helm_skips(terminalreporter: TerminalReporter) -> None:
     )
 
 
+def _report_slow_fork_skips(terminalreporter: TerminalReporter) -> None:
+    """Say when a box's own process-creation cost took the parse-deadline tests away.
+
+    The fourth thing a green line can be silent about, and the only one that is a property of the
+    *machine* rather than of a missing dependency. `tests/test_parse_isolation.py` derives its
+    budgets from what the fixture costs to parse here, with a floor of one fork round trip — below
+    that the child is killed before it reads a byte and the test is about process creation. In this
+    remote sandbox a fork round trip measured a **0.165 s median against the CI runner's 0.030 s**,
+    so the floor has no room and three tests cannot express the scenario at all.
+
+    Reported rather than left to `-ra`, because the thing that made this worth a section is that it
+    used to be a *failure*: a red gate for a machine property is what teaches everybody to re-run,
+    and a silent skip of the wedge regression is what the wedge got shipped behind the first time.
+    Matched on the marker the test module spells, imported rather than restated, the way
+    `_report_sibling_skips` matches `tests/siblings.SIBLING_SKIP`.
+    """
+    from tests.test_parse_isolation import _SLOW_FIXTURE_SKIP
+
+    skipped = [
+        report
+        for report in terminalreporter.stats.get("skipped", [])
+        if _SLOW_FIXTURE_SKIP in str(report.longrepr)
+    ]
+    if not skipped:
+        return
+    terminalreporter.write_sep("=", "Parse-deadline tests did not run", yellow=True)
+    terminalreporter.write_line(
+        f"{len(skipped)} tests were skipped because creating a process costs more here than the "
+        "deadline they derive, so this run is not evidence that a parse past its deadline frees "
+        "its upload slot — the wedge those tests regress against. CI's runner forks ~5x faster "
+        "and runs them."
+    )
+
+
 # The marker `tests/temporal_env.py::start_env_or_skip` puts in its skip reason. Matched the same
 # way, for the same reason: the number a reader needs is how many tests did not run.
 _TEMPORAL_SKIP = "Temporal test server unavailable"
@@ -536,11 +641,14 @@ def _report_sibling_skips(terminalreporter: TerminalReporter) -> None:
         return
     terminalreporter.write_sep("=", "Cross-repository checks did not run", yellow=True)
     terminalreporter.write_line(
-        f"{len(skipped)} tests were skipped because there is no Chemclaw3-mcp checkout to read, so "
-        "this run is not evidence about the half of the request prefix that fleet serves — the "
-        "allowance PREFIX_BOUND is built from and both compaction defaults are derived from — nor "
-        "about whether the two repositories still declare the same connector surface and the same "
-        "`calc` tool names. Clone it beside this one, or set CHEMCLAW_MCP_REPO."
+        f"{len(skipped)} tests were skipped because Chemclaw3-mcp could not be read, so this run "
+        "is not evidence about the half of the request prefix that fleet serves — the allowance "
+        "PREFIX_BOUND is built from and both compaction defaults are derived from — nor about "
+        "whether the two repositories still declare the same connector surface, or still agree "
+        "about the tool names and argument keys on the `calc` and `rxnlabel` backend seams. "
+        "Clone it beside this one, or set CHEMCLAW_MCP_REPO; where there is a checkout already, "
+        "each skip above names the bundle it could not measure and why — a missing dependency in "
+        "that tree's own `.venv` now costs that bundle's measurement and no other."
     )
 
 
@@ -550,8 +658,8 @@ def pytest_terminal_summary(terminalreporter: TerminalReporter) -> None:
     Every section is about the same misreading: a run's headline number is believed without the
     things that qualify it. A timed-out test proves nothing about the assertions it never
     reached, and a skipped Postgres, Temporal or helm test proves nothing at all — see
-    `_report_postgres_skips`, `_report_temporal_skips`, `_report_helm_skips` and
-    `_report_sibling_skips`.
+    `_report_postgres_skips`, `_report_temporal_skips`, `_report_helm_skips`,
+    `_report_sibling_skips` and `_report_slow_fork_skips`.
 
     `FAILED tests/test_pka.py::test_… - Failed: Timeout (>180.0s) from pytest-timeout` in the
     short summary was read as a numerical failure by two separate reviewers of this repository, and
@@ -566,6 +674,7 @@ def pytest_terminal_summary(terminalreporter: TerminalReporter) -> None:
     _report_helm_skips(terminalreporter)
     _report_public_schema_shadowing(terminalreporter)
     _report_sibling_skips(terminalreporter)
+    _report_slow_fork_skips(terminalreporter)
     timed_out = sorted(
         report.nodeid
         for report in terminalreporter.stats.get("failed", [])

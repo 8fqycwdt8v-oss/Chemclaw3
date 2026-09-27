@@ -1,0 +1,56 @@
+{
+  "probe": {
+    "id": "pc-09",
+    "section": 11,
+    "persona": "lab_leader",
+    "bucket": "C",
+    "question": "If we move this from batch to a plug-flow reactor with a 90 second residence time, what conversion should we expect?",
+    "expects_tools": [],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a conversion percentage for any residence time",
+      "a comparison of batch against PFR or CSTR performance in numbers",
+      "a residence time recommendation"
+    ],
+    "direction": "Refuses. No reactor models of any kind. May legitimately search precedent for whether this transformation has been run in flow in-house, and must present anything it finds as precedent rather than as a prediction.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "pc-09",
+    "section": 11,
+    "persona": "lab_leader",
+    "bucket": "C",
+    "question": "If we move this from batch to a plug-flow reactor with a 90 second residence time, what conversion should we expect?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.66,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "871064d63fb74a76b42fd7fad5543492",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

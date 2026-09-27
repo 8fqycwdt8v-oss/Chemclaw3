@@ -1,0 +1,3272 @@
+{
+ "events": [
+  {
+   "eventId": "1",
+   "eventTime": "2026-09-26T11:49:10.417Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_EXECUTION_STARTED",
+   "workflowExecutionStartedEventAttributes": {
+    "workflowType": {
+     "name": "HypothesisTournamentWorkflow"
+    },
+    "taskQueue": {
+     "name": "background-jobs"
+    },
+    "input": {
+     "payloads": [
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "eyJxdWVzdGlvbiI6InEtcmVwbGF5LW5vLWNhbGwiLCJjb250ZXh0IjoiIiwicmVxdWVzdGVkX2J5IjoiY2hlbWlzdEBleGFtcGxlLmNvbSIsInJlcXVlc3RlZF9yb2xlcyI6W10sImNvcnJlbGF0aW9uX2lkIjoiIiwic2Vzc2lvbl9pZCI6IiJ9"
+      }
+     ]
+    },
+    "workflowExecutionTimeout": "315360000s",
+    "workflowRunTimeout": "315360000s",
+    "workflowTaskTimeout": "10s",
+    "originalExecutionRunId": "d4e5ffa0-9ce3-4a52-ae56-70e5ba822238",
+    "identity": "10908@vm",
+    "firstExecutionRunId": "d4e5ffa0-9ce3-4a52-ae56-70e5ba822238",
+    "attempt": 1,
+    "firstWorkflowTaskBackoff": "0s",
+    "priority": {}
+   }
+  },
+  {
+   "eventId": "2",
+   "eventTime": "2026-09-26T11:49:10.417Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+   "workflowTaskScheduledEventAttributes": {
+    "taskQueue": {
+     "name": "background-jobs"
+    },
+    "startToCloseTimeout": "10s",
+    "attempt": 1
+   }
+  },
+  {
+   "eventId": "3",
+   "eventTime": "2026-09-26T11:49:10.417Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+   "workflowTaskStartedEventAttributes": {
+    "scheduledEventId": "2",
+    "identity": "10908@vm",
+    "historySizeBytes": "404"
+   }
+  },
+  {
+   "eventId": "4",
+   "eventTime": "2026-09-26T11:49:10.462Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+   "workflowTaskCompletedEventAttributes": {
+    "scheduledEventId": "2",
+    "identity": "10908@vm",
+    "binaryChecksum": "3a7616fd2f4d197b056bb96367a452e0",
+    "sdkMetadata": {
+     "coreUsedFlags": [
+      3,
+      1,
+      2
+     ],
+     "sdkName": "temporal-python",
+     "sdkVersion": "1.31.0"
+    },
+    "meteringMetadata": {}
+   }
+  },
+  {
+   "eventId": "5",
+   "eventTime": "2026-09-26T11:49:10.462Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+   "activityTaskScheduledEventAttributes": {
+    "activityId": "1",
+    "activityType": {
+     "name": "resolve_field_limits"
+    },
+    "taskQueue": {
+     "name": "background-jobs",
+     "kind": "TASK_QUEUE_KIND_NORMAL"
+    },
+    "header": {},
+    "input": {},
+    "scheduleToCloseTimeout": "315360000s",
+    "scheduleToStartTimeout": "3600s",
+    "startToCloseTimeout": "30s",
+    "heartbeatTimeout": "0s",
+    "workflowTaskCompletedEventId": "3",
+    "retryPolicy": {
+     "initialInterval": "1s",
+     "backoffCoefficient": 2.0,
+     "maximumInterval": "100s",
+     "maximumAttempts": 5,
+     "nonRetryableErrorTypes": [
+      "ValueError",
+      "ValidationError",
+      "ChemclawError",
+      "InvalidSmilesError",
+      "FingerprintError",
+      "FingerprintInputError",
+      "SessionForkError",
+      "ProposalStoreError",
+      "SkillRefused",
+      "UnreadableConditions",
+      "ElnMappingError",
+      "ElnFormatError",
+      "OrdFormatError",
+      "IngestError",
+      "ActivityResultTooLarge",
+      "MetricError",
+      "PlaybookError",
+      "BoTranslationError",
+      "NoteError",
+      "DeliveryChannelError",
+      "EvalCaseError",
+      "CaseSetMismatchError",
+      "ToolReturnedFailure",
+      "UnparsedArguments",
+      "SkillsReadOnlyRefusal",
+      "ConnectorJobError",
+      "GitWriteError",
+      "CalculationDomainError",
+      "ConnectorError",
+      "DataSourceError",
+      "AmbiguousReactionRecord",
+      "LabelIndexError",
+      "LabelToolError",
+      "ResultSinkError",
+      "SinkRejectedError",
+      "SinkConnectionError",
+      "ProjectionError",
+      "UnknownPropertyError",
+      "ErasureError",
+      "VectorStoreConfigError",
+      "LayoutError",
+      "RevisionConflict",
+      "StatusConflict",
+      "UnstorableDocument",
+      "UnknownDesign",
+      "UnknownArm",
+      "TemplateError",
+      "ComposedWorkflowError",
+      "UnresolvedReference",
+      "ProfileError",
+      "SurrogateFitError",
+      "BindingError",
+      "PathSyntaxError",
+      "PatternBudgetError",
+      "TransformError",
+      "WarehouseQueryError",
+      "VendoredDatasetError",
+      "DocumentShareError",
+      "CalcToolError",
+      "RepeatedCallRefusal",
+      "AuthorizationError",
+      "DryRunRefusal",
+      "PlanNotApprovedError",
+      "UndeclaredWriteRefusal"
+     ]
+    },
+    "priority": {}
+   }
+  },
+  {
+   "eventId": "6",
+   "eventTime": "2026-09-26T11:49:10.463Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+   "activityTaskStartedEventAttributes": {
+    "scheduledEventId": "5",
+    "identity": "10908@vm",
+    "attempt": 1
+   }
+  },
+  {
+   "eventId": "7",
+   "eventTime": "2026-09-26T11:49:10.466Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+   "activityTaskCompletedEventAttributes": {
+    "result": {
+     "payloads": [
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "eyJhbmdsZXMiOjEsInBlcl9hbmdsZSI6MiwibWF4X2h5cG90aGVzZXMiOjEwLCJkb3VibGVfanVkZ2VfZmlyc3Rfcm91bmQiOmZhbHNlLCJtYXhfcHJvcG9zYWxzIjozLCJtYXhfY2FsY3VsYXRpb25zIjoyLCJyZXN1bHRfbWF4X2NoYXJzIjoyMDAwLCJtYXhfcGFyYWxsZWxfc3RlcHMiOjB9"
+      }
+     ]
+    },
+    "scheduledEventId": "5",
+    "startedEventId": "6",
+    "identity": "10908@vm"
+   }
+  },
+  {
+   "eventId": "8",
+   "eventTime": "2026-09-26T11:49:10.466Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+   "workflowTaskScheduledEventAttributes": {
+    "taskQueue": {
+     "name": "background-jobs"
+    },
+    "startToCloseTimeout": "10s",
+    "attempt": 1
+   }
+  },
+  {
+   "eventId": "9",
+   "eventTime": "2026-09-26T11:49:10.466Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+   "workflowTaskStartedEventAttributes": {
+    "scheduledEventId": "8",
+    "identity": "10908@vm",
+    "historySizeBytes": "2133"
+   }
+  },
+  {
+   "eventId": "10",
+   "eventTime": "2026-09-26T11:49:10.473Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+   "workflowTaskCompletedEventAttributes": {
+    "scheduledEventId": "8",
+    "identity": "10908@vm",
+    "binaryChecksum": "3a7616fd2f4d197b056bb96367a452e0",
+    "sdkMetadata": {},
+    "meteringMetadata": {}
+   }
+  },
+  {
+   "eventId": "11",
+   "eventTime": "2026-09-26T11:49:10.473Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+   "activityTaskScheduledEventAttributes": {
+    "activityId": "2",
+    "activityType": {
+     "name": "draft_angles"
+    },
+    "taskQueue": {
+     "name": "background-jobs",
+     "kind": "TASK_QUEUE_KIND_NORMAL"
+    },
+    "header": {},
+    "input": {
+     "payloads": [
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "eyJxdWVzdGlvbiI6InEtcmVwbGF5LW5vLWNhbGwiLCJjb250ZXh0IjoiIiwicmVxdWVzdGVkX2J5IjoiY2hlbWlzdEBleGFtcGxlLmNvbSIsInJlcXVlc3RlZF9yb2xlcyI6W10sImNvcnJlbGF0aW9uX2lkIjoiIiwic2Vzc2lvbl9pZCI6IiJ9"
+      },
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "MQ=="
+      }
+     ]
+    },
+    "scheduleToCloseTimeout": "315360000s",
+    "scheduleToStartTimeout": "3600s",
+    "startToCloseTimeout": "120s",
+    "heartbeatTimeout": "0s",
+    "workflowTaskCompletedEventId": "9",
+    "retryPolicy": {
+     "initialInterval": "1s",
+     "backoffCoefficient": 2.0,
+     "maximumInterval": "100s",
+     "maximumAttempts": 5,
+     "nonRetryableErrorTypes": [
+      "ValueError",
+      "ValidationError",
+      "ChemclawError",
+      "InvalidSmilesError",
+      "FingerprintError",
+      "FingerprintInputError",
+      "SessionForkError",
+      "ProposalStoreError",
+      "SkillRefused",
+      "UnreadableConditions",
+      "ElnMappingError",
+      "ElnFormatError",
+      "OrdFormatError",
+      "IngestError",
+      "ActivityResultTooLarge",
+      "MetricError",
+      "PlaybookError",
+      "BoTranslationError",
+      "NoteError",
+      "DeliveryChannelError",
+      "EvalCaseError",
+      "CaseSetMismatchError",
+      "ToolReturnedFailure",
+      "UnparsedArguments",
+      "SkillsReadOnlyRefusal",
+      "ConnectorJobError",
+      "GitWriteError",
+      "CalculationDomainError",
+      "ConnectorError",
+      "DataSourceError",
+      "AmbiguousReactionRecord",
+      "LabelIndexError",
+      "LabelToolError",
+      "ResultSinkError",
+      "SinkRejectedError",
+      "SinkConnectionError",
+      "ProjectionError",
+      "UnknownPropertyError",
+      "ErasureError",
+      "VectorStoreConfigError",
+      "LayoutError",
+      "RevisionConflict",
+      "StatusConflict",
+      "UnstorableDocument",
+      "UnknownDesign",
+      "UnknownArm",
+      "TemplateError",
+      "ComposedWorkflowError",
+      "UnresolvedReference",
+      "ProfileError",
+      "SurrogateFitError",
+      "BindingError",
+      "PathSyntaxError",
+      "PatternBudgetError",
+      "TransformError",
+      "WarehouseQueryError",
+      "VendoredDatasetError",
+      "DocumentShareError",
+      "CalcToolError",
+      "RepeatedCallRefusal",
+      "AuthorizationError",
+      "DryRunRefusal",
+      "PlanNotApprovedError",
+      "UndeclaredWriteRefusal"
+     ]
+    },
+    "priority": {}
+   }
+  },
+  {
+   "eventId": "12",
+   "eventTime": "2026-09-26T11:49:10.473Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+   "activityTaskStartedEventAttributes": {
+    "scheduledEventId": "11",
+    "identity": "10908@vm",
+    "attempt": 1
+   }
+  },
+  {
+   "eventId": "13",
+   "eventTime": "2026-09-26T11:49:10.475Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+   "activityTaskCompletedEventAttributes": {
+    "result": {
+     "payloads": [
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "eyJhbmdsZXMiOlsib25lIGFuZ2xlIl19"
+      }
+     ]
+    },
+    "scheduledEventId": "11",
+    "startedEventId": "12",
+    "identity": "10908@vm"
+   }
+  },
+  {
+   "eventId": "14",
+   "eventTime": "2026-09-26T11:49:10.475Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+   "workflowTaskScheduledEventAttributes": {
+    "taskQueue": {
+     "name": "background-jobs"
+    },
+    "startToCloseTimeout": "10s",
+    "attempt": 1
+   }
+  },
+  {
+   "eventId": "15",
+   "eventTime": "2026-09-26T11:49:10.475Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+   "workflowTaskStartedEventAttributes": {
+    "scheduledEventId": "14",
+    "identity": "10908@vm",
+    "historySizeBytes": "3877"
+   }
+  },
+  {
+   "eventId": "16",
+   "eventTime": "2026-09-26T11:49:10.479Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+   "workflowTaskCompletedEventAttributes": {
+    "scheduledEventId": "14",
+    "identity": "10908@vm",
+    "binaryChecksum": "3a7616fd2f4d197b056bb96367a452e0",
+    "sdkMetadata": {},
+    "meteringMetadata": {}
+   }
+  },
+  {
+   "eventId": "17",
+   "eventTime": "2026-09-26T11:49:10.479Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+   "activityTaskScheduledEventAttributes": {
+    "activityId": "3",
+    "activityType": {
+     "name": "gather_hypothesis_evidence"
+    },
+    "taskQueue": {
+     "name": "background-jobs",
+     "kind": "TASK_QUEUE_KIND_NORMAL"
+    },
+    "header": {},
+    "input": {
+     "payloads": [
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "InEtcmVwbGF5LW5vLWNhbGwi"
+      },
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "IiI="
+      },
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "ImNoZW1pc3RAZXhhbXBsZS5jb20i"
+      },
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "IiI="
+      }
+     ]
+    },
+    "scheduleToCloseTimeout": "315360000s",
+    "scheduleToStartTimeout": "3600s",
+    "startToCloseTimeout": "180s",
+    "heartbeatTimeout": "0s",
+    "workflowTaskCompletedEventId": "15",
+    "retryPolicy": {
+     "initialInterval": "1s",
+     "backoffCoefficient": 2.0,
+     "maximumInterval": "100s",
+     "maximumAttempts": 5,
+     "nonRetryableErrorTypes": [
+      "ValueError",
+      "ValidationError",
+      "ChemclawError",
+      "InvalidSmilesError",
+      "FingerprintError",
+      "FingerprintInputError",
+      "SessionForkError",
+      "ProposalStoreError",
+      "SkillRefused",
+      "UnreadableConditions",
+      "ElnMappingError",
+      "ElnFormatError",
+      "OrdFormatError",
+      "IngestError",
+      "ActivityResultTooLarge",
+      "MetricError",
+      "PlaybookError",
+      "BoTranslationError",
+      "NoteError",
+      "DeliveryChannelError",
+      "EvalCaseError",
+      "CaseSetMismatchError",
+      "ToolReturnedFailure",
+      "UnparsedArguments",
+      "SkillsReadOnlyRefusal",
+      "ConnectorJobError",
+      "GitWriteError",
+      "CalculationDomainError",
+      "ConnectorError",
+      "DataSourceError",
+      "AmbiguousReactionRecord",
+      "LabelIndexError",
+      "LabelToolError",
+      "ResultSinkError",
+      "SinkRejectedError",
+      "SinkConnectionError",
+      "ProjectionError",
+      "UnknownPropertyError",
+      "ErasureError",
+      "VectorStoreConfigError",
+      "LayoutError",
+      "RevisionConflict",
+      "StatusConflict",
+      "UnstorableDocument",
+      "UnknownDesign",
+      "UnknownArm",
+      "TemplateError",
+      "ComposedWorkflowError",
+      "UnresolvedReference",
+      "ProfileError",
+      "SurrogateFitError",
+      "BindingError",
+      "PathSyntaxError",
+      "PatternBudgetError",
+      "TransformError",
+      "WarehouseQueryError",
+      "VendoredDatasetError",
+      "DocumentShareError",
+      "CalcToolError",
+      "RepeatedCallRefusal",
+      "AuthorizationError",
+      "DryRunRefusal",
+      "PlanNotApprovedError",
+      "UndeclaredWriteRefusal"
+     ]
+    },
+    "priority": {}
+   }
+  },
+  {
+   "eventId": "18",
+   "eventTime": "2026-09-26T11:49:10.480Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+   "activityTaskStartedEventAttributes": {
+    "scheduledEventId": "17",
+    "identity": "10908@vm",
+    "attempt": 1
+   }
+  },
+  {
+   "eventId": "19",
+   "eventTime": "2026-09-26T11:49:10.481Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+   "activityTaskCompletedEventAttributes": {
+    "result": {
+     "payloads": [
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "eyJoeXBvdGhlc2lzX2lkIjoiIiwiZnJhbWVkIjpbXSwibm90ZV9pZHMiOltdfQ=="
+      }
+     ]
+    },
+    "scheduledEventId": "17",
+    "startedEventId": "18",
+    "identity": "10908@vm"
+   }
+  },
+  {
+   "eventId": "20",
+   "eventTime": "2026-09-26T11:49:10.481Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+   "workflowTaskScheduledEventAttributes": {
+    "taskQueue": {
+     "name": "background-jobs"
+    },
+    "startToCloseTimeout": "10s",
+    "attempt": 1
+   }
+  },
+  {
+   "eventId": "21",
+   "eventTime": "2026-09-26T11:49:10.481Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+   "workflowTaskStartedEventAttributes": {
+    "scheduledEventId": "20",
+    "identity": "10908@vm",
+    "historySizeBytes": "5616"
+   }
+  },
+  {
+   "eventId": "22",
+   "eventTime": "2026-09-26T11:49:10.486Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+   "workflowTaskCompletedEventAttributes": {
+    "scheduledEventId": "20",
+    "identity": "10908@vm",
+    "binaryChecksum": "3a7616fd2f4d197b056bb96367a452e0",
+    "sdkMetadata": {},
+    "meteringMetadata": {}
+   }
+  },
+  {
+   "eventId": "23",
+   "eventTime": "2026-09-26T11:49:10.486Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+   "activityTaskScheduledEventAttributes": {
+    "activityId": "4",
+    "activityType": {
+     "name": "generate_hypotheses"
+    },
+    "taskQueue": {
+     "name": "background-jobs",
+     "kind": "TASK_QUEUE_KIND_NORMAL"
+    },
+    "header": {},
+    "input": {
+     "payloads": [
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "eyJxdWVzdGlvbiI6InEtcmVwbGF5LW5vLWNhbGwiLCJjb250ZXh0IjoiIiwiYW5nbGUiOiJvbmUgYW5nbGUiLCJldmlkZW5jZSI6W10sIndhbnRlZCI6MiwicmVxdWVzdGVkX2J5IjoiY2hlbWlzdEBleGFtcGxlLmNvbSIsImNvcnJlbGF0aW9uX2lkIjoiIn0="
+      }
+     ]
+    },
+    "scheduleToCloseTimeout": "315360000s",
+    "scheduleToStartTimeout": "3600s",
+    "startToCloseTimeout": "120s",
+    "heartbeatTimeout": "0s",
+    "workflowTaskCompletedEventId": "21",
+    "retryPolicy": {
+     "initialInterval": "1s",
+     "backoffCoefficient": 2.0,
+     "maximumInterval": "100s",
+     "maximumAttempts": 5,
+     "nonRetryableErrorTypes": [
+      "ValueError",
+      "ValidationError",
+      "ChemclawError",
+      "InvalidSmilesError",
+      "FingerprintError",
+      "FingerprintInputError",
+      "SessionForkError",
+      "ProposalStoreError",
+      "SkillRefused",
+      "UnreadableConditions",
+      "ElnMappingError",
+      "ElnFormatError",
+      "OrdFormatError",
+      "IngestError",
+      "ActivityResultTooLarge",
+      "MetricError",
+      "PlaybookError",
+      "BoTranslationError",
+      "NoteError",
+      "DeliveryChannelError",
+      "EvalCaseError",
+      "CaseSetMismatchError",
+      "ToolReturnedFailure",
+      "UnparsedArguments",
+      "SkillsReadOnlyRefusal",
+      "ConnectorJobError",
+      "GitWriteError",
+      "CalculationDomainError",
+      "ConnectorError",
+      "DataSourceError",
+      "AmbiguousReactionRecord",
+      "LabelIndexError",
+      "LabelToolError",
+      "ResultSinkError",
+      "SinkRejectedError",
+      "SinkConnectionError",
+      "ProjectionError",
+      "UnknownPropertyError",
+      "ErasureError",
+      "VectorStoreConfigError",
+      "LayoutError",
+      "RevisionConflict",
+      "StatusConflict",
+      "UnstorableDocument",
+      "UnknownDesign",
+      "UnknownArm",
+      "TemplateError",
+      "ComposedWorkflowError",
+      "UnresolvedReference",
+      "ProfileError",
+      "SurrogateFitError",
+      "BindingError",
+      "PathSyntaxError",
+      "PatternBudgetError",
+      "TransformError",
+      "WarehouseQueryError",
+      "VendoredDatasetError",
+      "DocumentShareError",
+      "CalcToolError",
+      "RepeatedCallRefusal",
+      "AuthorizationError",
+      "DryRunRefusal",
+      "PlanNotApprovedError",
+      "UndeclaredWriteRefusal"
+     ]
+    },
+    "priority": {}
+   }
+  },
+  {
+   "eventId": "24",
+   "eventTime": "2026-09-26T11:49:10.486Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+   "activityTaskStartedEventAttributes": {
+    "scheduledEventId": "23",
+    "identity": "10908@vm",
+    "attempt": 1
+   }
+  },
+  {
+   "eventId": "25",
+   "eventTime": "2026-09-26T11:49:10.488Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+   "activityTaskCompletedEventAttributes": {
+    "result": {
+     "payloads": [
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "eyJoeXBvdGhlc2VzIjpbeyJpZCI6IndldCIsInN0YXRlbWVudCI6InRoZSBzb2x2ZW50IHdhcyB3ZXQiLCJtZWNoYW5pc20iOiIiLCJyZWZ1dGVkX2lmIjoibm8gY2hhbmdlIGlzIHNlZW4gaW4gdGhlIHNvbHZlbnQgd2FzIHdldCBhZnRlciB0aGUgY29udHJvbCBydW4iLCJjaXRlZF9ub3RlX2lkcyI6W10sImFuZ2xlIjoiIn0seyJpZCI6InRoZXJtYWwiLCJzdGF0ZW1lbnQiOiJ0aGUgaW1wdXJpdHkgaXMgdGhlcm1hbCBpbiBvcmlnaW4iLCJtZWNoYW5pc20iOiIiLCJyZWZ1dGVkX2lmIjoibm8gY2hhbmdlIGlzIHNlZW4gaW4gdGhlIGltcHVyaXR5IGlzIHRoZXJtYWwgaW4gb3JpZ2luIGFmdGVyIHRoZSBjb250cm9sIHJ1biIsImNpdGVkX25vdGVfaWRzIjpbXSwiYW5nbGUiOiIifV19"
+      }
+     ]
+    },
+    "scheduledEventId": "23",
+    "startedEventId": "24",
+    "identity": "10908@vm"
+   }
+  },
+  {
+   "eventId": "26",
+   "eventTime": "2026-09-26T11:49:10.488Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+   "workflowTaskScheduledEventAttributes": {
+    "taskQueue": {
+     "name": "background-jobs"
+    },
+    "startToCloseTimeout": "10s",
+    "attempt": 1
+   }
+  },
+  {
+   "eventId": "27",
+   "eventTime": "2026-09-26T11:49:10.488Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+   "workflowTaskStartedEventAttributes": {
+    "scheduledEventId": "26",
+    "identity": "10908@vm",
+    "historySizeBytes": "7716"
+   }
+  },
+  {
+   "eventId": "28",
+   "eventTime": "2026-09-26T11:49:10.492Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+   "workflowTaskCompletedEventAttributes": {
+    "scheduledEventId": "26",
+    "identity": "10908@vm",
+    "binaryChecksum": "3a7616fd2f4d197b056bb96367a452e0",
+    "sdkMetadata": {},
+    "meteringMetadata": {}
+   }
+  },
+  {
+   "eventId": "29",
+   "eventTime": "2026-09-26T11:49:10.492Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+   "activityTaskScheduledEventAttributes": {
+    "activityId": "5",
+    "activityType": {
+     "name": "gather_hypothesis_evidence"
+    },
+    "taskQueue": {
+     "name": "background-jobs",
+     "kind": "TASK_QUEUE_KIND_NORMAL"
+    },
+    "header": {},
+    "input": {
+     "payloads": [
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "InEtcmVwbGF5LW5vLWNhbGwgdGhlIHNvbHZlbnQgd2FzIHdldCI="
+      },
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "IndldCI="
+      },
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "ImNoZW1pc3RAZXhhbXBsZS5jb20i"
+      },
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "IiI="
+      }
+     ]
+    },
+    "scheduleToCloseTimeout": "315360000s",
+    "scheduleToStartTimeout": "3600s",
+    "startToCloseTimeout": "180s",
+    "heartbeatTimeout": "0s",
+    "workflowTaskCompletedEventId": "27",
+    "retryPolicy": {
+     "initialInterval": "1s",
+     "backoffCoefficient": 2.0,
+     "maximumInterval": "100s",
+     "maximumAttempts": 5,
+     "nonRetryableErrorTypes": [
+      "ValueError",
+      "ValidationError",
+      "ChemclawError",
+      "InvalidSmilesError",
+      "FingerprintError",
+      "FingerprintInputError",
+      "SessionForkError",
+      "ProposalStoreError",
+      "SkillRefused",
+      "UnreadableConditions",
+      "ElnMappingError",
+      "ElnFormatError",
+      "OrdFormatError",
+      "IngestError",
+      "ActivityResultTooLarge",
+      "MetricError",
+      "PlaybookError",
+      "BoTranslationError",
+      "NoteError",
+      "DeliveryChannelError",
+      "EvalCaseError",
+      "CaseSetMismatchError",
+      "ToolReturnedFailure",
+      "UnparsedArguments",
+      "SkillsReadOnlyRefusal",
+      "ConnectorJobError",
+      "GitWriteError",
+      "CalculationDomainError",
+      "ConnectorError",
+      "DataSourceError",
+      "AmbiguousReactionRecord",
+      "LabelIndexError",
+      "LabelToolError",
+      "ResultSinkError",
+      "SinkRejectedError",
+      "SinkConnectionError",
+      "ProjectionError",
+      "UnknownPropertyError",
+      "ErasureError",
+      "VectorStoreConfigError",
+      "LayoutError",
+      "RevisionConflict",
+      "StatusConflict",
+      "UnstorableDocument",
+      "UnknownDesign",
+      "UnknownArm",
+      "TemplateError",
+      "ComposedWorkflowError",
+      "UnresolvedReference",
+      "ProfileError",
+      "SurrogateFitError",
+      "BindingError",
+      "PathSyntaxError",
+      "PatternBudgetError",
+      "TransformError",
+      "WarehouseQueryError",
+      "VendoredDatasetError",
+      "DocumentShareError",
+      "CalcToolError",
+      "RepeatedCallRefusal",
+      "AuthorizationError",
+      "DryRunRefusal",
+      "PlanNotApprovedError",
+      "UndeclaredWriteRefusal"
+     ]
+    },
+    "priority": {}
+   }
+  },
+  {
+   "eventId": "30",
+   "eventTime": "2026-09-26T11:49:10.492Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+   "activityTaskScheduledEventAttributes": {
+    "activityId": "6",
+    "activityType": {
+     "name": "gather_hypothesis_evidence"
+    },
+    "taskQueue": {
+     "name": "background-jobs",
+     "kind": "TASK_QUEUE_KIND_NORMAL"
+    },
+    "header": {},
+    "input": {
+     "payloads": [
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "InEtcmVwbGF5LW5vLWNhbGwgdGhlIGltcHVyaXR5IGlzIHRoZXJtYWwgaW4gb3JpZ2luIg=="
+      },
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "InRoZXJtYWwi"
+      },
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "ImNoZW1pc3RAZXhhbXBsZS5jb20i"
+      },
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "IiI="
+      }
+     ]
+    },
+    "scheduleToCloseTimeout": "315360000s",
+    "scheduleToStartTimeout": "3600s",
+    "startToCloseTimeout": "180s",
+    "heartbeatTimeout": "0s",
+    "workflowTaskCompletedEventId": "27",
+    "retryPolicy": {
+     "initialInterval": "1s",
+     "backoffCoefficient": 2.0,
+     "maximumInterval": "100s",
+     "maximumAttempts": 5,
+     "nonRetryableErrorTypes": [
+      "ValueError",
+      "ValidationError",
+      "ChemclawError",
+      "InvalidSmilesError",
+      "FingerprintError",
+      "FingerprintInputError",
+      "SessionForkError",
+      "ProposalStoreError",
+      "SkillRefused",
+      "UnreadableConditions",
+      "ElnMappingError",
+      "ElnFormatError",
+      "OrdFormatError",
+      "IngestError",
+      "ActivityResultTooLarge",
+      "MetricError",
+      "PlaybookError",
+      "BoTranslationError",
+      "NoteError",
+      "DeliveryChannelError",
+      "EvalCaseError",
+      "CaseSetMismatchError",
+      "ToolReturnedFailure",
+      "UnparsedArguments",
+      "SkillsReadOnlyRefusal",
+      "ConnectorJobError",
+      "GitWriteError",
+      "CalculationDomainError",
+      "ConnectorError",
+      "DataSourceError",
+      "AmbiguousReactionRecord",
+      "LabelIndexError",
+      "LabelToolError",
+      "ResultSinkError",
+      "SinkRejectedError",
+      "SinkConnectionError",
+      "ProjectionError",
+      "UnknownPropertyError",
+      "ErasureError",
+      "VectorStoreConfigError",
+      "LayoutError",
+      "RevisionConflict",
+      "StatusConflict",
+      "UnstorableDocument",
+      "UnknownDesign",
+      "UnknownArm",
+      "TemplateError",
+      "ComposedWorkflowError",
+      "UnresolvedReference",
+      "ProfileError",
+      "SurrogateFitError",
+      "BindingError",
+      "PathSyntaxError",
+      "PatternBudgetError",
+      "TransformError",
+      "WarehouseQueryError",
+      "VendoredDatasetError",
+      "DocumentShareError",
+      "CalcToolError",
+      "RepeatedCallRefusal",
+      "AuthorizationError",
+      "DryRunRefusal",
+      "PlanNotApprovedError",
+      "UndeclaredWriteRefusal"
+     ]
+    },
+    "priority": {}
+   }
+  },
+  {
+   "eventId": "31",
+   "eventTime": "2026-09-26T11:49:10.492Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+   "activityTaskStartedEventAttributes": {
+    "scheduledEventId": "29",
+    "identity": "10908@vm",
+    "attempt": 1
+   }
+  },
+  {
+   "eventId": "32",
+   "eventTime": "2026-09-26T11:49:10.493Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+   "activityTaskCompletedEventAttributes": {
+    "result": {
+     "payloads": [
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "eyJoeXBvdGhlc2lzX2lkIjoid2V0IiwiZnJhbWVkIjpbXSwibm90ZV9pZHMiOltdfQ=="
+      }
+     ]
+    },
+    "scheduledEventId": "29",
+    "startedEventId": "31",
+    "identity": "10908@vm"
+   }
+  },
+  {
+   "eventId": "33",
+   "eventTime": "2026-09-26T11:49:10.493Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+   "workflowTaskScheduledEventAttributes": {
+    "taskQueue": {
+     "name": "background-jobs"
+    },
+    "startToCloseTimeout": "10s",
+    "attempt": 1
+   }
+  },
+  {
+   "eventId": "34",
+   "eventTime": "2026-09-26T11:49:10.493Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+   "workflowTaskStartedEventAttributes": {
+    "scheduledEventId": "33",
+    "identity": "10908@vm",
+    "historySizeBytes": "10965"
+   }
+  },
+  {
+   "eventId": "35",
+   "eventTime": "2026-09-26T11:49:10.496Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+   "workflowTaskCompletedEventAttributes": {
+    "scheduledEventId": "33",
+    "identity": "10908@vm",
+    "binaryChecksum": "3a7616fd2f4d197b056bb96367a452e0",
+    "sdkMetadata": {},
+    "meteringMetadata": {}
+   }
+  },
+  {
+   "eventId": "36",
+   "eventTime": "2026-09-26T11:49:10.492Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+   "activityTaskStartedEventAttributes": {
+    "scheduledEventId": "30",
+    "identity": "10908@vm",
+    "attempt": 1
+   }
+  },
+  {
+   "eventId": "37",
+   "eventTime": "2026-09-26T11:49:10.496Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+   "activityTaskCompletedEventAttributes": {
+    "result": {
+     "payloads": [
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "eyJoeXBvdGhlc2lzX2lkIjoidGhlcm1hbCIsImZyYW1lZCI6W10sIm5vdGVfaWRzIjpbXX0="
+      }
+     ]
+    },
+    "scheduledEventId": "30",
+    "startedEventId": "35",
+    "identity": "10908@vm"
+   }
+  },
+  {
+   "eventId": "38",
+   "eventTime": "2026-09-26T11:49:10.496Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+   "workflowTaskScheduledEventAttributes": {
+    "taskQueue": {
+     "name": "background-jobs"
+    },
+    "startToCloseTimeout": "10s",
+    "attempt": 2
+   }
+  },
+  {
+   "eventId": "39",
+   "eventTime": "2026-09-26T11:49:10.496Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+   "workflowTaskStartedEventAttributes": {
+    "scheduledEventId": "38",
+    "identity": "10908@vm",
+    "historySizeBytes": "11268"
+   }
+  },
+  {
+   "eventId": "40",
+   "eventTime": "2026-09-26T11:49:10.500Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+   "workflowTaskCompletedEventAttributes": {
+    "scheduledEventId": "38",
+    "identity": "10908@vm",
+    "binaryChecksum": "3a7616fd2f4d197b056bb96367a452e0",
+    "sdkMetadata": {},
+    "meteringMetadata": {}
+   }
+  },
+  {
+   "eventId": "41",
+   "eventTime": "2026-09-26T11:49:10.500Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+   "activityTaskScheduledEventAttributes": {
+    "activityId": "7",
+    "activityType": {
+     "name": "critique_hypothesis"
+    },
+    "taskQueue": {
+     "name": "background-jobs",
+     "kind": "TASK_QUEUE_KIND_NORMAL"
+    },
+    "header": {},
+    "input": {
+     "payloads": [
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "eyJxdWVzdGlvbiI6InEtcmVwbGF5LW5vLWNhbGwiLCJoeXBvdGhlc2lzIjp7ImlkIjoid2V0Iiwic3RhdGVtZW50IjoidGhlIHNvbHZlbnQgd2FzIHdldCIsIm1lY2hhbmlzbSI6IiIsInJlZnV0ZWRfaWYiOiJubyBjaGFuZ2UgaXMgc2VlbiBpbiB0aGUgc29sdmVudCB3YXMgd2V0IGFmdGVyIHRoZSBjb250cm9sIHJ1biIsImNpdGVkX25vdGVfaWRzIjpbXSwiYW5nbGUiOiIifSwiZXZpZGVuY2UiOltdLCJzdWJqZWN0X25vdGVfaWRzIjpbXSwicmVxdWVzdGVkX2J5IjoiY2hlbWlzdEBleGFtcGxlLmNvbSIsImNvcnJlbGF0aW9uX2lkIjoiIn0="
+      }
+     ]
+    },
+    "scheduleToCloseTimeout": "315360000s",
+    "scheduleToStartTimeout": "3600s",
+    "startToCloseTimeout": "120s",
+    "heartbeatTimeout": "0s",
+    "workflowTaskCompletedEventId": "39",
+    "retryPolicy": {
+     "initialInterval": "1s",
+     "backoffCoefficient": 2.0,
+     "maximumInterval": "100s",
+     "maximumAttempts": 5,
+     "nonRetryableErrorTypes": [
+      "ValueError",
+      "ValidationError",
+      "ChemclawError",
+      "InvalidSmilesError",
+      "FingerprintError",
+      "FingerprintInputError",
+      "SessionForkError",
+      "ProposalStoreError",
+      "SkillRefused",
+      "UnreadableConditions",
+      "ElnMappingError",
+      "ElnFormatError",
+      "OrdFormatError",
+      "IngestError",
+      "ActivityResultTooLarge",
+      "MetricError",
+      "PlaybookError",
+      "BoTranslationError",
+      "NoteError",
+      "DeliveryChannelError",
+      "EvalCaseError",
+      "CaseSetMismatchError",
+      "ToolReturnedFailure",
+      "UnparsedArguments",
+      "SkillsReadOnlyRefusal",
+      "ConnectorJobError",
+      "GitWriteError",
+      "CalculationDomainError",
+      "ConnectorError",
+      "DataSourceError",
+      "AmbiguousReactionRecord",
+      "LabelIndexError",
+      "LabelToolError",
+      "ResultSinkError",
+      "SinkRejectedError",
+      "SinkConnectionError",
+      "ProjectionError",
+      "UnknownPropertyError",
+      "ErasureError",
+      "VectorStoreConfigError",
+      "LayoutError",
+      "RevisionConflict",
+      "StatusConflict",
+      "UnstorableDocument",
+      "UnknownDesign",
+      "UnknownArm",
+      "TemplateError",
+      "ComposedWorkflowError",
+      "UnresolvedReference",
+      "ProfileError",
+      "SurrogateFitError",
+      "BindingError",
+      "PathSyntaxError",
+      "PatternBudgetError",
+      "TransformError",
+      "WarehouseQueryError",
+      "VendoredDatasetError",
+      "DocumentShareError",
+      "CalcToolError",
+      "RepeatedCallRefusal",
+      "AuthorizationError",
+      "DryRunRefusal",
+      "PlanNotApprovedError",
+      "UndeclaredWriteRefusal"
+     ]
+    },
+    "priority": {}
+   }
+  },
+  {
+   "eventId": "42",
+   "eventTime": "2026-09-26T11:49:10.500Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+   "activityTaskScheduledEventAttributes": {
+    "activityId": "8",
+    "activityType": {
+     "name": "critique_hypothesis"
+    },
+    "taskQueue": {
+     "name": "background-jobs",
+     "kind": "TASK_QUEUE_KIND_NORMAL"
+    },
+    "header": {},
+    "input": {
+     "payloads": [
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "eyJxdWVzdGlvbiI6InEtcmVwbGF5LW5vLWNhbGwiLCJoeXBvdGhlc2lzIjp7ImlkIjoidGhlcm1hbCIsInN0YXRlbWVudCI6InRoZSBpbXB1cml0eSBpcyB0aGVybWFsIGluIG9yaWdpbiIsIm1lY2hhbmlzbSI6IiIsInJlZnV0ZWRfaWYiOiJubyBjaGFuZ2UgaXMgc2VlbiBpbiB0aGUgaW1wdXJpdHkgaXMgdGhlcm1hbCBpbiBvcmlnaW4gYWZ0ZXIgdGhlIGNvbnRyb2wgcnVuIiwiY2l0ZWRfbm90ZV9pZHMiOltdLCJhbmdsZSI6IiJ9LCJldmlkZW5jZSI6W10sInN1YmplY3Rfbm90ZV9pZHMiOltdLCJyZXF1ZXN0ZWRfYnkiOiJjaGVtaXN0QGV4YW1wbGUuY29tIiwiY29ycmVsYXRpb25faWQiOiIifQ=="
+      }
+     ]
+    },
+    "scheduleToCloseTimeout": "315360000s",
+    "scheduleToStartTimeout": "3600s",
+    "startToCloseTimeout": "120s",
+    "heartbeatTimeout": "0s",
+    "workflowTaskCompletedEventId": "39",
+    "retryPolicy": {
+     "initialInterval": "1s",
+     "backoffCoefficient": 2.0,
+     "maximumInterval": "100s",
+     "maximumAttempts": 5,
+     "nonRetryableErrorTypes": [
+      "ValueError",
+      "ValidationError",
+      "ChemclawError",
+      "InvalidSmilesError",
+      "FingerprintError",
+      "FingerprintInputError",
+      "SessionForkError",
+      "ProposalStoreError",
+      "SkillRefused",
+      "UnreadableConditions",
+      "ElnMappingError",
+      "ElnFormatError",
+      "OrdFormatError",
+      "IngestError",
+      "ActivityResultTooLarge",
+      "MetricError",
+      "PlaybookError",
+      "BoTranslationError",
+      "NoteError",
+      "DeliveryChannelError",
+      "EvalCaseError",
+      "CaseSetMismatchError",
+      "ToolReturnedFailure",
+      "UnparsedArguments",
+      "SkillsReadOnlyRefusal",
+      "ConnectorJobError",
+      "GitWriteError",
+      "CalculationDomainError",
+      "ConnectorError",
+      "DataSourceError",
+      "AmbiguousReactionRecord",
+      "LabelIndexError",
+      "LabelToolError",
+      "ResultSinkError",
+      "SinkRejectedError",
+      "SinkConnectionError",
+      "ProjectionError",
+      "UnknownPropertyError",
+      "ErasureError",
+      "VectorStoreConfigError",
+      "LayoutError",
+      "RevisionConflict",
+      "StatusConflict",
+      "UnstorableDocument",
+      "UnknownDesign",
+      "UnknownArm",
+      "TemplateError",
+      "ComposedWorkflowError",
+      "UnresolvedReference",
+      "ProfileError",
+      "SurrogateFitError",
+      "BindingError",
+      "PathSyntaxError",
+      "PatternBudgetError",
+      "TransformError",
+      "WarehouseQueryError",
+      "VendoredDatasetError",
+      "DocumentShareError",
+      "CalcToolError",
+      "RepeatedCallRefusal",
+      "AuthorizationError",
+      "DryRunRefusal",
+      "PlanNotApprovedError",
+      "UndeclaredWriteRefusal"
+     ]
+    },
+    "priority": {}
+   }
+  },
+  {
+   "eventId": "43",
+   "eventTime": "2026-09-26T11:49:10.500Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+   "activityTaskStartedEventAttributes": {
+    "scheduledEventId": "41",
+    "identity": "10908@vm",
+    "attempt": 1
+   }
+  },
+  {
+   "eventId": "44",
+   "eventTime": "2026-09-26T11:49:10.502Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+   "activityTaskCompletedEventAttributes": {
+    "result": {
+     "payloads": [
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "eyJvYmplY3Rpb25zIjpbeyJoeXBvdGhlc2lzX2lkIjoid2V0IiwiY29uY2VybiI6InVudGVzdGVkIGF0IHNjYWxlIiwicmF0aW9uYWxlIjoiZXZlcnkgcnVuIG9uIGZpbGUgd2FzIGF0IG9uZSBncmFtIiwiY2l0ZWRfbm90ZV9pZHMiOltdfV19"
+      }
+     ]
+    },
+    "scheduledEventId": "41",
+    "startedEventId": "43",
+    "identity": "10908@vm"
+   }
+  },
+  {
+   "eventId": "45",
+   "eventTime": "2026-09-26T11:49:10.502Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+   "workflowTaskScheduledEventAttributes": {
+    "taskQueue": {
+     "name": "background-jobs"
+    },
+    "startToCloseTimeout": "10s",
+    "attempt": 1
+   }
+  },
+  {
+   "eventId": "46",
+   "eventTime": "2026-09-26T11:49:10.502Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+   "workflowTaskStartedEventAttributes": {
+    "scheduledEventId": "45",
+    "identity": "10908@vm",
+    "historySizeBytes": "14928"
+   }
+  },
+  {
+   "eventId": "47",
+   "eventTime": "2026-09-26T11:49:10.504Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+   "workflowTaskCompletedEventAttributes": {
+    "scheduledEventId": "45",
+    "identity": "10908@vm",
+    "binaryChecksum": "3a7616fd2f4d197b056bb96367a452e0",
+    "sdkMetadata": {},
+    "meteringMetadata": {}
+   }
+  },
+  {
+   "eventId": "48",
+   "eventTime": "2026-09-26T11:49:10.500Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+   "activityTaskStartedEventAttributes": {
+    "scheduledEventId": "42",
+    "identity": "10908@vm",
+    "attempt": 1
+   }
+  },
+  {
+   "eventId": "49",
+   "eventTime": "2026-09-26T11:49:10.504Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+   "activityTaskCompletedEventAttributes": {
+    "result": {
+     "payloads": [
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "eyJvYmplY3Rpb25zIjpbeyJoeXBvdGhlc2lzX2lkIjoidGhlcm1hbCIsImNvbmNlcm4iOiJ1bnRlc3RlZCBhdCBzY2FsZSIsInJhdGlvbmFsZSI6ImV2ZXJ5IHJ1biBvbiBmaWxlIHdhcyBhdCBvbmUgZ3JhbSIsImNpdGVkX25vdGVfaWRzIjpbXX1dfQ=="
+      }
+     ]
+    },
+    "scheduledEventId": "42",
+    "startedEventId": "47",
+    "identity": "10908@vm"
+   }
+  },
+  {
+   "eventId": "50",
+   "eventTime": "2026-09-26T11:49:10.504Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+   "workflowTaskScheduledEventAttributes": {
+    "taskQueue": {
+     "name": "background-jobs"
+    },
+    "startToCloseTimeout": "10s",
+    "attempt": 2
+   }
+  },
+  {
+   "eventId": "51",
+   "eventTime": "2026-09-26T11:49:10.504Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+   "workflowTaskStartedEventAttributes": {
+    "scheduledEventId": "50",
+    "identity": "10908@vm",
+    "historySizeBytes": "15324"
+   }
+  },
+  {
+   "eventId": "52",
+   "eventTime": "2026-09-26T11:49:10.508Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+   "workflowTaskCompletedEventAttributes": {
+    "scheduledEventId": "50",
+    "identity": "10908@vm",
+    "binaryChecksum": "3a7616fd2f4d197b056bb96367a452e0",
+    "sdkMetadata": {},
+    "meteringMetadata": {}
+   }
+  },
+  {
+   "eventId": "53",
+   "eventTime": "2026-09-26T11:49:10.508Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+   "activityTaskScheduledEventAttributes": {
+    "activityId": "9",
+    "activityType": {
+     "name": "compare_hypotheses"
+    },
+    "taskQueue": {
+     "name": "background-jobs",
+     "kind": "TASK_QUEUE_KIND_NORMAL"
+    },
+    "header": {},
+    "input": {
+     "payloads": [
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "eyJxdWVzdGlvbiI6InEtcmVwbGF5LW5vLWNhbGwiLCJsZWZ0Ijp7ImlkIjoidGhlcm1hbCIsInN0YXRlbWVudCI6InRoZSBpbXB1cml0eSBpcyB0aGVybWFsIGluIG9yaWdpbiIsIm1lY2hhbmlzbSI6IiIsInJlZnV0ZWRfaWYiOiJubyBjaGFuZ2UgaXMgc2VlbiBpbiB0aGUgaW1wdXJpdHkgaXMgdGhlcm1hbCBpbiBvcmlnaW4gYWZ0ZXIgdGhlIGNvbnRyb2wgcnVuIiwiY2l0ZWRfbm90ZV9pZHMiOltdLCJhbmdsZSI6IiJ9LCJyaWdodCI6eyJpZCI6IndldCIsInN0YXRlbWVudCI6InRoZSBzb2x2ZW50IHdhcyB3ZXQiLCJtZWNoYW5pc20iOiIiLCJyZWZ1dGVkX2lmIjoibm8gY2hhbmdlIGlzIHNlZW4gaW4gdGhlIHNvbHZlbnQgd2FzIHdldCBhZnRlciB0aGUgY29udHJvbCBydW4iLCJjaXRlZF9ub3RlX2lkcyI6W10sImFuZ2xlIjoiIn0sImV2aWRlbmNlIjpbXSwicmVxdWVzdGVkX2J5IjoiY2hlbWlzdEBleGFtcGxlLmNvbSIsImNvcnJlbGF0aW9uX2lkIjoiIn0="
+      }
+     ]
+    },
+    "scheduleToCloseTimeout": "315360000s",
+    "scheduleToStartTimeout": "3600s",
+    "startToCloseTimeout": "120s",
+    "heartbeatTimeout": "0s",
+    "workflowTaskCompletedEventId": "51",
+    "retryPolicy": {
+     "initialInterval": "1s",
+     "backoffCoefficient": 2.0,
+     "maximumInterval": "100s",
+     "maximumAttempts": 5,
+     "nonRetryableErrorTypes": [
+      "ValueError",
+      "ValidationError",
+      "ChemclawError",
+      "InvalidSmilesError",
+      "FingerprintError",
+      "FingerprintInputError",
+      "SessionForkError",
+      "ProposalStoreError",
+      "SkillRefused",
+      "UnreadableConditions",
+      "ElnMappingError",
+      "ElnFormatError",
+      "OrdFormatError",
+      "IngestError",
+      "ActivityResultTooLarge",
+      "MetricError",
+      "PlaybookError",
+      "BoTranslationError",
+      "NoteError",
+      "DeliveryChannelError",
+      "EvalCaseError",
+      "CaseSetMismatchError",
+      "ToolReturnedFailure",
+      "UnparsedArguments",
+      "SkillsReadOnlyRefusal",
+      "ConnectorJobError",
+      "GitWriteError",
+      "CalculationDomainError",
+      "ConnectorError",
+      "DataSourceError",
+      "AmbiguousReactionRecord",
+      "LabelIndexError",
+      "LabelToolError",
+      "ResultSinkError",
+      "SinkRejectedError",
+      "SinkConnectionError",
+      "ProjectionError",
+      "UnknownPropertyError",
+      "ErasureError",
+      "VectorStoreConfigError",
+      "LayoutError",
+      "RevisionConflict",
+      "StatusConflict",
+      "UnstorableDocument",
+      "UnknownDesign",
+      "UnknownArm",
+      "TemplateError",
+      "ComposedWorkflowError",
+      "UnresolvedReference",
+      "ProfileError",
+      "SurrogateFitError",
+      "BindingError",
+      "PathSyntaxError",
+      "PatternBudgetError",
+      "TransformError",
+      "WarehouseQueryError",
+      "VendoredDatasetError",
+      "DocumentShareError",
+      "CalcToolError",
+      "RepeatedCallRefusal",
+      "AuthorizationError",
+      "DryRunRefusal",
+      "PlanNotApprovedError",
+      "UndeclaredWriteRefusal"
+     ]
+    },
+    "priority": {}
+   }
+  },
+  {
+   "eventId": "54",
+   "eventTime": "2026-09-26T11:49:10.508Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+   "activityTaskStartedEventAttributes": {
+    "scheduledEventId": "53",
+    "identity": "10908@vm",
+    "attempt": 1
+   }
+  },
+  {
+   "eventId": "55",
+   "eventTime": "2026-09-26T11:49:10.509Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+   "activityTaskCompletedEventAttributes": {
+    "result": {
+     "payloads": [
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "eyJiZXR0ZXIiOiJyaWdodCIsInJhdGlvbmFsZSI6InRoZSByZWNvcmQgZmF2b3VycyBpdCJ9"
+      }
+     ]
+    },
+    "scheduledEventId": "53",
+    "startedEventId": "54",
+    "identity": "10908@vm"
+   }
+  },
+  {
+   "eventId": "56",
+   "eventTime": "2026-09-26T11:49:10.509Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+   "workflowTaskScheduledEventAttributes": {
+    "taskQueue": {
+     "name": "background-jobs"
+    },
+    "startToCloseTimeout": "10s",
+    "attempt": 1
+   }
+  },
+  {
+   "eventId": "57",
+   "eventTime": "2026-09-26T11:49:10.509Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+   "workflowTaskStartedEventAttributes": {
+    "scheduledEventId": "56",
+    "identity": "10908@vm",
+    "historySizeBytes": "17428"
+   }
+  },
+  {
+   "eventId": "58",
+   "eventTime": "2026-09-26T11:49:10.512Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+   "workflowTaskCompletedEventAttributes": {
+    "scheduledEventId": "56",
+    "identity": "10908@vm",
+    "binaryChecksum": "3a7616fd2f4d197b056bb96367a452e0",
+    "sdkMetadata": {},
+    "meteringMetadata": {}
+   }
+  },
+  {
+   "eventId": "59",
+   "eventTime": "2026-09-26T11:49:10.512Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+   "activityTaskScheduledEventAttributes": {
+    "activityId": "10",
+    "activityType": {
+     "name": "fit_ratings"
+    },
+    "taskQueue": {
+     "name": "background-jobs",
+     "kind": "TASK_QUEUE_KIND_NORMAL"
+    },
+    "header": {},
+    "input": {
+     "payloads": [
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "WyJ3ZXQiLCJ0aGVybWFsIl0="
+      },
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "W3sid2lubmVyIjoid2V0IiwibG9zZXIiOiJ0aGVybWFsIiwib3V0Y29tZSI6MS4wLCJ3ZWlnaHQiOjEuMH1d"
+      }
+     ]
+    },
+    "scheduleToCloseTimeout": "315360000s",
+    "scheduleToStartTimeout": "3600s",
+    "startToCloseTimeout": "30s",
+    "heartbeatTimeout": "0s",
+    "workflowTaskCompletedEventId": "57",
+    "retryPolicy": {
+     "initialInterval": "1s",
+     "backoffCoefficient": 2.0,
+     "maximumInterval": "100s",
+     "maximumAttempts": 5,
+     "nonRetryableErrorTypes": [
+      "ValueError",
+      "ValidationError",
+      "ChemclawError",
+      "InvalidSmilesError",
+      "FingerprintError",
+      "FingerprintInputError",
+      "SessionForkError",
+      "ProposalStoreError",
+      "SkillRefused",
+      "UnreadableConditions",
+      "ElnMappingError",
+      "ElnFormatError",
+      "OrdFormatError",
+      "IngestError",
+      "ActivityResultTooLarge",
+      "MetricError",
+      "PlaybookError",
+      "BoTranslationError",
+      "NoteError",
+      "DeliveryChannelError",
+      "EvalCaseError",
+      "CaseSetMismatchError",
+      "ToolReturnedFailure",
+      "UnparsedArguments",
+      "SkillsReadOnlyRefusal",
+      "ConnectorJobError",
+      "GitWriteError",
+      "CalculationDomainError",
+      "ConnectorError",
+      "DataSourceError",
+      "AmbiguousReactionRecord",
+      "LabelIndexError",
+      "LabelToolError",
+      "ResultSinkError",
+      "SinkRejectedError",
+      "SinkConnectionError",
+      "ProjectionError",
+      "UnknownPropertyError",
+      "ErasureError",
+      "VectorStoreConfigError",
+      "LayoutError",
+      "RevisionConflict",
+      "StatusConflict",
+      "UnstorableDocument",
+      "UnknownDesign",
+      "UnknownArm",
+      "TemplateError",
+      "ComposedWorkflowError",
+      "UnresolvedReference",
+      "ProfileError",
+      "SurrogateFitError",
+      "BindingError",
+      "PathSyntaxError",
+      "PatternBudgetError",
+      "TransformError",
+      "WarehouseQueryError",
+      "VendoredDatasetError",
+      "DocumentShareError",
+      "CalcToolError",
+      "RepeatedCallRefusal",
+      "AuthorizationError",
+      "DryRunRefusal",
+      "PlanNotApprovedError",
+      "UndeclaredWriteRefusal"
+     ]
+    },
+    "priority": {}
+   }
+  },
+  {
+   "eventId": "60",
+   "eventTime": "2026-09-26T11:49:10.513Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+   "activityTaskStartedEventAttributes": {
+    "scheduledEventId": "59",
+    "identity": "10908@vm",
+    "attempt": 1
+   }
+  },
+  {
+   "eventId": "61",
+   "eventTime": "2026-09-26T11:49:10.517Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+   "activityTaskCompletedEventAttributes": {
+    "result": {
+     "payloads": [
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "eyJyYXRlZCI6W3siaHlwb3RoZXNpc19pZCI6IndldCIsInJhdGluZyI6MTY0NS40MTA4MTczMTgxNDQsInN0YW5kYXJkX2Vycm9yIjoxODIuMjAyNTY0OTA2MTExOCwiY29tcGFyaXNvbnMiOjF9LHsiaHlwb3RoZXNpc19pZCI6InRoZXJtYWwiLCJyYXRpbmciOjEzNTQuNTg5MTgyNjgxODU2LCJzdGFuZGFyZF9lcnJvciI6MTgyLjIwMjU2NDkwNjExMTgsImNvbXBhcmlzb25zIjoxfV0sImxlYWRlcl9pc19kZWNpc2l2ZSI6ZmFsc2V9"
+      }
+     ]
+    },
+    "scheduledEventId": "59",
+    "startedEventId": "60",
+    "identity": "10908@vm"
+   }
+  },
+  {
+   "eventId": "62",
+   "eventTime": "2026-09-26T11:49:10.517Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+   "workflowTaskScheduledEventAttributes": {
+    "taskQueue": {
+     "name": "background-jobs"
+    },
+    "startToCloseTimeout": "10s",
+    "attempt": 1
+   }
+  },
+  {
+   "eventId": "63",
+   "eventTime": "2026-09-26T11:49:10.517Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+   "workflowTaskStartedEventAttributes": {
+    "scheduledEventId": "62",
+    "identity": "10908@vm",
+    "historySizeBytes": "19338"
+   }
+  },
+  {
+   "eventId": "64",
+   "eventTime": "2026-09-26T11:49:10.521Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+   "workflowTaskCompletedEventAttributes": {
+    "scheduledEventId": "62",
+    "identity": "10908@vm",
+    "binaryChecksum": "3a7616fd2f4d197b056bb96367a452e0",
+    "sdkMetadata": {},
+    "meteringMetadata": {}
+   }
+  },
+  {
+   "eventId": "65",
+   "eventTime": "2026-09-26T11:49:10.521Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+   "activityTaskScheduledEventAttributes": {
+    "activityId": "11",
+    "activityType": {
+     "name": "derive_check"
+    },
+    "taskQueue": {
+     "name": "background-jobs",
+     "kind": "TASK_QUEUE_KIND_NORMAL"
+    },
+    "header": {},
+    "input": {
+     "payloads": [
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "eyJxdWVzdGlvbiI6InEtcmVwbGF5LW5vLWNhbGwiLCJoeXBvdGhlc2lzIjp7ImlkIjoid2V0Iiwic3RhdGVtZW50IjoidGhlIHNvbHZlbnQgd2FzIHdldCIsIm1lY2hhbmlzbSI6IiIsInJlZnV0ZWRfaWYiOiJubyBjaGFuZ2UgaXMgc2VlbiBpbiB0aGUgc29sdmVudCB3YXMgd2V0IGFmdGVyIHRoZSBjb250cm9sIHJ1biIsImNpdGVkX25vdGVfaWRzIjpbXSwiYW5nbGUiOiIifSwiZXZpZGVuY2UiOltdLCJzdWJqZWN0X25vdGVfaWRzIjpbXSwicmVxdWVzdGVkX2J5IjoiY2hlbWlzdEBleGFtcGxlLmNvbSIsImNvcnJlbGF0aW9uX2lkIjoiIn0="
+      }
+     ]
+    },
+    "scheduleToCloseTimeout": "315360000s",
+    "scheduleToStartTimeout": "3600s",
+    "startToCloseTimeout": "120s",
+    "heartbeatTimeout": "0s",
+    "workflowTaskCompletedEventId": "63",
+    "retryPolicy": {
+     "initialInterval": "1s",
+     "backoffCoefficient": 2.0,
+     "maximumInterval": "100s",
+     "maximumAttempts": 5,
+     "nonRetryableErrorTypes": [
+      "ValueError",
+      "ValidationError",
+      "ChemclawError",
+      "InvalidSmilesError",
+      "FingerprintError",
+      "FingerprintInputError",
+      "SessionForkError",
+      "ProposalStoreError",
+      "SkillRefused",
+      "UnreadableConditions",
+      "ElnMappingError",
+      "ElnFormatError",
+      "OrdFormatError",
+      "IngestError",
+      "ActivityResultTooLarge",
+      "MetricError",
+      "PlaybookError",
+      "BoTranslationError",
+      "NoteError",
+      "DeliveryChannelError",
+      "EvalCaseError",
+      "CaseSetMismatchError",
+      "ToolReturnedFailure",
+      "UnparsedArguments",
+      "SkillsReadOnlyRefusal",
+      "ConnectorJobError",
+      "GitWriteError",
+      "CalculationDomainError",
+      "ConnectorError",
+      "DataSourceError",
+      "AmbiguousReactionRecord",
+      "LabelIndexError",
+      "LabelToolError",
+      "ResultSinkError",
+      "SinkRejectedError",
+      "SinkConnectionError",
+      "ProjectionError",
+      "UnknownPropertyError",
+      "ErasureError",
+      "VectorStoreConfigError",
+      "LayoutError",
+      "RevisionConflict",
+      "StatusConflict",
+      "UnstorableDocument",
+      "UnknownDesign",
+      "UnknownArm",
+      "TemplateError",
+      "ComposedWorkflowError",
+      "UnresolvedReference",
+      "ProfileError",
+      "SurrogateFitError",
+      "BindingError",
+      "PathSyntaxError",
+      "PatternBudgetError",
+      "TransformError",
+      "WarehouseQueryError",
+      "VendoredDatasetError",
+      "DocumentShareError",
+      "CalcToolError",
+      "RepeatedCallRefusal",
+      "AuthorizationError",
+      "DryRunRefusal",
+      "PlanNotApprovedError",
+      "UndeclaredWriteRefusal"
+     ]
+    },
+    "priority": {}
+   }
+  },
+  {
+   "eventId": "66",
+   "eventTime": "2026-09-26T11:49:10.521Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+   "activityTaskScheduledEventAttributes": {
+    "activityId": "12",
+    "activityType": {
+     "name": "derive_check"
+    },
+    "taskQueue": {
+     "name": "background-jobs",
+     "kind": "TASK_QUEUE_KIND_NORMAL"
+    },
+    "header": {},
+    "input": {
+     "payloads": [
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "eyJxdWVzdGlvbiI6InEtcmVwbGF5LW5vLWNhbGwiLCJoeXBvdGhlc2lzIjp7ImlkIjoidGhlcm1hbCIsInN0YXRlbWVudCI6InRoZSBpbXB1cml0eSBpcyB0aGVybWFsIGluIG9yaWdpbiIsIm1lY2hhbmlzbSI6IiIsInJlZnV0ZWRfaWYiOiJubyBjaGFuZ2UgaXMgc2VlbiBpbiB0aGUgaW1wdXJpdHkgaXMgdGhlcm1hbCBpbiBvcmlnaW4gYWZ0ZXIgdGhlIGNvbnRyb2wgcnVuIiwiY2l0ZWRfbm90ZV9pZHMiOltdLCJhbmdsZSI6IiJ9LCJldmlkZW5jZSI6W10sInN1YmplY3Rfbm90ZV9pZHMiOltdLCJyZXF1ZXN0ZWRfYnkiOiJjaGVtaXN0QGV4YW1wbGUuY29tIiwiY29ycmVsYXRpb25faWQiOiIifQ=="
+      }
+     ]
+    },
+    "scheduleToCloseTimeout": "315360000s",
+    "scheduleToStartTimeout": "3600s",
+    "startToCloseTimeout": "120s",
+    "heartbeatTimeout": "0s",
+    "workflowTaskCompletedEventId": "63",
+    "retryPolicy": {
+     "initialInterval": "1s",
+     "backoffCoefficient": 2.0,
+     "maximumInterval": "100s",
+     "maximumAttempts": 5,
+     "nonRetryableErrorTypes": [
+      "ValueError",
+      "ValidationError",
+      "ChemclawError",
+      "InvalidSmilesError",
+      "FingerprintError",
+      "FingerprintInputError",
+      "SessionForkError",
+      "ProposalStoreError",
+      "SkillRefused",
+      "UnreadableConditions",
+      "ElnMappingError",
+      "ElnFormatError",
+      "OrdFormatError",
+      "IngestError",
+      "ActivityResultTooLarge",
+      "MetricError",
+      "PlaybookError",
+      "BoTranslationError",
+      "NoteError",
+      "DeliveryChannelError",
+      "EvalCaseError",
+      "CaseSetMismatchError",
+      "ToolReturnedFailure",
+      "UnparsedArguments",
+      "SkillsReadOnlyRefusal",
+      "ConnectorJobError",
+      "GitWriteError",
+      "CalculationDomainError",
+      "ConnectorError",
+      "DataSourceError",
+      "AmbiguousReactionRecord",
+      "LabelIndexError",
+      "LabelToolError",
+      "ResultSinkError",
+      "SinkRejectedError",
+      "SinkConnectionError",
+      "ProjectionError",
+      "UnknownPropertyError",
+      "ErasureError",
+      "VectorStoreConfigError",
+      "LayoutError",
+      "RevisionConflict",
+      "StatusConflict",
+      "UnstorableDocument",
+      "UnknownDesign",
+      "UnknownArm",
+      "TemplateError",
+      "ComposedWorkflowError",
+      "UnresolvedReference",
+      "ProfileError",
+      "SurrogateFitError",
+      "BindingError",
+      "PathSyntaxError",
+      "PatternBudgetError",
+      "TransformError",
+      "WarehouseQueryError",
+      "VendoredDatasetError",
+      "DocumentShareError",
+      "CalcToolError",
+      "RepeatedCallRefusal",
+      "AuthorizationError",
+      "DryRunRefusal",
+      "PlanNotApprovedError",
+      "UndeclaredWriteRefusal"
+     ]
+    },
+    "priority": {}
+   }
+  },
+  {
+   "eventId": "67",
+   "eventTime": "2026-09-26T11:49:10.521Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+   "activityTaskStartedEventAttributes": {
+    "scheduledEventId": "66",
+    "identity": "10908@vm",
+    "attempt": 1
+   }
+  },
+  {
+   "eventId": "68",
+   "eventTime": "2026-09-26T11:49:10.523Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+   "activityTaskCompletedEventAttributes": {
+    "result": {
+     "payloads": [
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "eyJoeXBvdGhlc2lzX2lkIjoidGhlcm1hbCIsInF1ZXN0aW9uIjoicnVuIHRoZSBjb250cm9sIGZvciB0aGVybWFsIiwia2luZCI6ImNvbXB1dGFibGUiLCJ0b29sIjoiIiwiY2FsbCI6eyJ0b29sIjoicHJlZGljdF9wa2EiLCJzdWJqZWN0X25vdGVfaWQiOiJjb21wb3VuZC14Iiwiam9iIjoiIiwic3ViamVjdHMiOnt9LCJzd2VlcF9wYXJhbWV0ZXIiOiIiLCJzd2VlcF92YWx1ZXMiOltdLCJ0ZW1wbGF0ZSI6IiJ9LCJleHBlY3RhdGlvbiI6InRoZSBlZmZlY3QgZGlzYXBwZWFycyBpZiB0aGUgaHlwb3RoZXNpcyBob2xkcyJ9"
+      }
+     ]
+    },
+    "scheduledEventId": "66",
+    "startedEventId": "67",
+    "identity": "10908@vm"
+   }
+  },
+  {
+   "eventId": "69",
+   "eventTime": "2026-09-26T11:49:10.523Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+   "workflowTaskScheduledEventAttributes": {
+    "taskQueue": {
+     "name": "background-jobs"
+    },
+    "startToCloseTimeout": "10s",
+    "attempt": 1
+   }
+  },
+  {
+   "eventId": "70",
+   "eventTime": "2026-09-26T11:49:10.523Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+   "workflowTaskStartedEventAttributes": {
+    "scheduledEventId": "69",
+    "identity": "10908@vm",
+    "historySizeBytes": "23146"
+   }
+  },
+  {
+   "eventId": "71",
+   "eventTime": "2026-09-26T11:49:10.525Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+   "workflowTaskCompletedEventAttributes": {
+    "scheduledEventId": "69",
+    "identity": "10908@vm",
+    "binaryChecksum": "3a7616fd2f4d197b056bb96367a452e0",
+    "sdkMetadata": {},
+    "meteringMetadata": {}
+   }
+  },
+  {
+   "eventId": "72",
+   "eventTime": "2026-09-26T11:49:10.521Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+   "activityTaskStartedEventAttributes": {
+    "scheduledEventId": "65",
+    "identity": "10908@vm",
+    "attempt": 1
+   }
+  },
+  {
+   "eventId": "73",
+   "eventTime": "2026-09-26T11:49:10.525Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+   "activityTaskCompletedEventAttributes": {
+    "result": {
+     "payloads": [
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "eyJoeXBvdGhlc2lzX2lkIjoid2V0IiwicXVlc3Rpb24iOiJydW4gdGhlIGNvbnRyb2wgZm9yIHdldCIsImtpbmQiOiJjb21wdXRhYmxlIiwidG9vbCI6IiIsImNhbGwiOm51bGwsImV4cGVjdGF0aW9uIjoidGhlIGVmZmVjdCBkaXNhcHBlYXJzIGlmIHRoZSBoeXBvdGhlc2lzIGhvbGRzIn0="
+      }
+     ]
+    },
+    "scheduledEventId": "65",
+    "startedEventId": "71",
+    "identity": "10908@vm"
+   }
+  },
+  {
+   "eventId": "74",
+   "eventTime": "2026-09-26T11:49:10.525Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+   "workflowTaskScheduledEventAttributes": {
+    "taskQueue": {
+     "name": "background-jobs"
+    },
+    "startToCloseTimeout": "10s",
+    "attempt": 2
+   }
+  },
+  {
+   "eventId": "75",
+   "eventTime": "2026-09-26T11:49:10.525Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+   "workflowTaskStartedEventAttributes": {
+    "scheduledEventId": "74",
+    "identity": "10908@vm",
+    "historySizeBytes": "23565"
+   }
+  },
+  {
+   "eventId": "76",
+   "eventTime": "2026-09-26T11:49:10.529Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+   "workflowTaskCompletedEventAttributes": {
+    "scheduledEventId": "74",
+    "identity": "10908@vm",
+    "binaryChecksum": "3a7616fd2f4d197b056bb96367a452e0",
+    "sdkMetadata": {},
+    "meteringMetadata": {}
+   }
+  },
+  {
+   "eventId": "77",
+   "eventTime": "2026-09-26T11:49:10.529Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+   "activityTaskScheduledEventAttributes": {
+    "activityId": "13",
+    "activityType": {
+     "name": "run_computable_check"
+    },
+    "taskQueue": {
+     "name": "background-jobs",
+     "kind": "TASK_QUEUE_KIND_NORMAL"
+    },
+    "header": {},
+    "input": {
+     "payloads": [
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "eyJoeXBvdGhlc2lzX2lkIjoid2V0IiwicXVlc3Rpb24iOiJydW4gdGhlIGNvbnRyb2wgZm9yIHdldCIsImtpbmQiOiJjb21wdXRhYmxlIiwidG9vbCI6IiIsImNhbGwiOm51bGwsImV4cGVjdGF0aW9uIjoidGhlIGVmZmVjdCBkaXNhcHBlYXJzIGlmIHRoZSBoeXBvdGhlc2lzIGhvbGRzIn0="
+      },
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "ImNoZW1pc3RAZXhhbXBsZS5jb20i"
+      },
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "W10="
+      },
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "IiI="
+      }
+     ]
+    },
+    "scheduleToCloseTimeout": "315360000s",
+    "scheduleToStartTimeout": "3600s",
+    "startToCloseTimeout": "120s",
+    "heartbeatTimeout": "0s",
+    "workflowTaskCompletedEventId": "75",
+    "retryPolicy": {
+     "initialInterval": "1s",
+     "backoffCoefficient": 2.0,
+     "maximumInterval": "100s",
+     "maximumAttempts": 5,
+     "nonRetryableErrorTypes": [
+      "ValueError",
+      "ValidationError",
+      "ChemclawError",
+      "InvalidSmilesError",
+      "FingerprintError",
+      "FingerprintInputError",
+      "SessionForkError",
+      "ProposalStoreError",
+      "SkillRefused",
+      "UnreadableConditions",
+      "ElnMappingError",
+      "ElnFormatError",
+      "OrdFormatError",
+      "IngestError",
+      "ActivityResultTooLarge",
+      "MetricError",
+      "PlaybookError",
+      "BoTranslationError",
+      "NoteError",
+      "DeliveryChannelError",
+      "EvalCaseError",
+      "CaseSetMismatchError",
+      "ToolReturnedFailure",
+      "UnparsedArguments",
+      "SkillsReadOnlyRefusal",
+      "ConnectorJobError",
+      "GitWriteError",
+      "CalculationDomainError",
+      "ConnectorError",
+      "DataSourceError",
+      "AmbiguousReactionRecord",
+      "LabelIndexError",
+      "LabelToolError",
+      "ResultSinkError",
+      "SinkRejectedError",
+      "SinkConnectionError",
+      "ProjectionError",
+      "UnknownPropertyError",
+      "ErasureError",
+      "VectorStoreConfigError",
+      "LayoutError",
+      "RevisionConflict",
+      "StatusConflict",
+      "UnstorableDocument",
+      "UnknownDesign",
+      "UnknownArm",
+      "TemplateError",
+      "ComposedWorkflowError",
+      "UnresolvedReference",
+      "ProfileError",
+      "SurrogateFitError",
+      "BindingError",
+      "PathSyntaxError",
+      "PatternBudgetError",
+      "TransformError",
+      "WarehouseQueryError",
+      "VendoredDatasetError",
+      "DocumentShareError",
+      "CalcToolError",
+      "RepeatedCallRefusal",
+      "AuthorizationError",
+      "DryRunRefusal",
+      "PlanNotApprovedError",
+      "UndeclaredWriteRefusal"
+     ]
+    },
+    "priority": {}
+   }
+  },
+  {
+   "eventId": "78",
+   "eventTime": "2026-09-26T11:49:10.529Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+   "activityTaskScheduledEventAttributes": {
+    "activityId": "14",
+    "activityType": {
+     "name": "run_computable_check"
+    },
+    "taskQueue": {
+     "name": "background-jobs",
+     "kind": "TASK_QUEUE_KIND_NORMAL"
+    },
+    "header": {},
+    "input": {
+     "payloads": [
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "eyJoeXBvdGhlc2lzX2lkIjoidGhlcm1hbCIsInF1ZXN0aW9uIjoicnVuIHRoZSBjb250cm9sIGZvciB0aGVybWFsIiwia2luZCI6ImNvbXB1dGFibGUiLCJ0b29sIjoiIiwiY2FsbCI6eyJ0b29sIjoicHJlZGljdF9wa2EiLCJzdWJqZWN0X25vdGVfaWQiOiJjb21wb3VuZC14Iiwiam9iIjoiIiwic3ViamVjdHMiOnt9LCJzd2VlcF9wYXJhbWV0ZXIiOiIiLCJzd2VlcF92YWx1ZXMiOltdLCJ0ZW1wbGF0ZSI6IiJ9LCJleHBlY3RhdGlvbiI6InRoZSBlZmZlY3QgZGlzYXBwZWFycyBpZiB0aGUgaHlwb3RoZXNpcyBob2xkcyJ9"
+      },
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "ImNoZW1pc3RAZXhhbXBsZS5jb20i"
+      },
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "W10="
+      },
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "IiI="
+      }
+     ]
+    },
+    "scheduleToCloseTimeout": "315360000s",
+    "scheduleToStartTimeout": "3600s",
+    "startToCloseTimeout": "120s",
+    "heartbeatTimeout": "0s",
+    "workflowTaskCompletedEventId": "75",
+    "retryPolicy": {
+     "initialInterval": "1s",
+     "backoffCoefficient": 2.0,
+     "maximumInterval": "100s",
+     "maximumAttempts": 5,
+     "nonRetryableErrorTypes": [
+      "ValueError",
+      "ValidationError",
+      "ChemclawError",
+      "InvalidSmilesError",
+      "FingerprintError",
+      "FingerprintInputError",
+      "SessionForkError",
+      "ProposalStoreError",
+      "SkillRefused",
+      "UnreadableConditions",
+      "ElnMappingError",
+      "ElnFormatError",
+      "OrdFormatError",
+      "IngestError",
+      "ActivityResultTooLarge",
+      "MetricError",
+      "PlaybookError",
+      "BoTranslationError",
+      "NoteError",
+      "DeliveryChannelError",
+      "EvalCaseError",
+      "CaseSetMismatchError",
+      "ToolReturnedFailure",
+      "UnparsedArguments",
+      "SkillsReadOnlyRefusal",
+      "ConnectorJobError",
+      "GitWriteError",
+      "CalculationDomainError",
+      "ConnectorError",
+      "DataSourceError",
+      "AmbiguousReactionRecord",
+      "LabelIndexError",
+      "LabelToolError",
+      "ResultSinkError",
+      "SinkRejectedError",
+      "SinkConnectionError",
+      "ProjectionError",
+      "UnknownPropertyError",
+      "ErasureError",
+      "VectorStoreConfigError",
+      "LayoutError",
+      "RevisionConflict",
+      "StatusConflict",
+      "UnstorableDocument",
+      "UnknownDesign",
+      "UnknownArm",
+      "TemplateError",
+      "ComposedWorkflowError",
+      "UnresolvedReference",
+      "ProfileError",
+      "SurrogateFitError",
+      "BindingError",
+      "PathSyntaxError",
+      "PatternBudgetError",
+      "TransformError",
+      "WarehouseQueryError",
+      "VendoredDatasetError",
+      "DocumentShareError",
+      "CalcToolError",
+      "RepeatedCallRefusal",
+      "AuthorizationError",
+      "DryRunRefusal",
+      "PlanNotApprovedError",
+      "UndeclaredWriteRefusal"
+     ]
+    },
+    "priority": {}
+   }
+  },
+  {
+   "eventId": "79",
+   "eventTime": "2026-09-26T11:49:10.529Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+   "activityTaskStartedEventAttributes": {
+    "scheduledEventId": "78",
+    "identity": "10908@vm",
+    "attempt": 1
+   }
+  },
+  {
+   "eventId": "80",
+   "eventTime": "2026-09-26T11:49:10.531Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+   "activityTaskCompletedEventAttributes": {
+    "result": {
+     "payloads": [
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "eyJoeXBvdGhlc2lzX2lkIjoidGhlcm1hbCIsInZlcmRpY3QiOiJpbmNvbmNsdXNpdmUiLCJkZXRhaWwiOiIxIiwiY2FsY19yZWZzIjpbXSwicmVmdXNhbF9jb2RlIjoiIiwicmFuIjoiIn0="
+      }
+     ]
+    },
+    "scheduledEventId": "78",
+    "startedEventId": "79",
+    "identity": "10908@vm"
+   }
+  },
+  {
+   "eventId": "81",
+   "eventTime": "2026-09-26T11:49:10.531Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+   "workflowTaskScheduledEventAttributes": {
+    "taskQueue": {
+     "name": "background-jobs"
+    },
+    "startToCloseTimeout": "10s",
+    "attempt": 1
+   }
+  },
+  {
+   "eventId": "82",
+   "eventTime": "2026-09-26T11:49:10.531Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+   "workflowTaskStartedEventAttributes": {
+    "scheduledEventId": "81",
+    "identity": "10908@vm",
+    "historySizeBytes": "27229"
+   }
+  },
+  {
+   "eventId": "83",
+   "eventTime": "2026-09-26T11:49:10.534Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+   "workflowTaskCompletedEventAttributes": {
+    "scheduledEventId": "81",
+    "identity": "10908@vm",
+    "binaryChecksum": "3a7616fd2f4d197b056bb96367a452e0",
+    "sdkMetadata": {},
+    "meteringMetadata": {}
+   }
+  },
+  {
+   "eventId": "84",
+   "eventTime": "2026-09-26T11:49:10.529Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+   "activityTaskStartedEventAttributes": {
+    "scheduledEventId": "77",
+    "identity": "10908@vm",
+    "attempt": 1
+   }
+  },
+  {
+   "eventId": "85",
+   "eventTime": "2026-09-26T11:49:10.534Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+   "activityTaskCompletedEventAttributes": {
+    "result": {
+     "payloads": [
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "eyJoeXBvdGhlc2lzX2lkIjoid2V0IiwidmVyZGljdCI6ImluY29uY2x1c2l2ZSIsImRldGFpbCI6Im5vIGNhbGwiLCJjYWxjX3JlZnMiOltdLCJyZWZ1c2FsX2NvZGUiOiJuby1jYWxsIiwicmFuIjoiIn0="
+      }
+     ]
+    },
+    "scheduledEventId": "77",
+    "startedEventId": "83",
+    "identity": "10908@vm"
+   }
+  },
+  {
+   "eventId": "86",
+   "eventTime": "2026-09-26T11:49:10.534Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+   "workflowTaskScheduledEventAttributes": {
+    "taskQueue": {
+     "name": "background-jobs"
+    },
+    "startToCloseTimeout": "10s",
+    "attempt": 2
+   }
+  },
+  {
+   "eventId": "87",
+   "eventTime": "2026-09-26T11:49:10.534Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+   "workflowTaskStartedEventAttributes": {
+    "scheduledEventId": "86",
+    "identity": "10908@vm",
+    "historySizeBytes": "27599"
+   }
+  },
+  {
+   "eventId": "88",
+   "eventTime": "2026-09-26T11:49:10.537Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+   "workflowTaskCompletedEventAttributes": {
+    "scheduledEventId": "86",
+    "identity": "10908@vm",
+    "binaryChecksum": "3a7616fd2f4d197b056bb96367a452e0",
+    "sdkMetadata": {},
+    "meteringMetadata": {}
+   }
+  },
+  {
+   "eventId": "89",
+   "eventTime": "2026-09-26T11:49:10.537Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+   "activityTaskScheduledEventAttributes": {
+    "activityId": "15",
+    "activityType": {
+     "name": "read_check_result"
+    },
+    "taskQueue": {
+     "name": "background-jobs",
+     "kind": "TASK_QUEUE_KIND_NORMAL"
+    },
+    "header": {},
+    "input": {
+     "payloads": [
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "eyJoeXBvdGhlc2lzX2lkIjoid2V0IiwicXVlc3Rpb24iOiJydW4gdGhlIGNvbnRyb2wgZm9yIHdldCIsImtpbmQiOiJjb21wdXRhYmxlIiwidG9vbCI6IiIsImNhbGwiOm51bGwsImV4cGVjdGF0aW9uIjoidGhlIGVmZmVjdCBkaXNhcHBlYXJzIGlmIHRoZSBoeXBvdGhlc2lzIGhvbGRzIn0="
+      },
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "Im5vIGNhbGwi"
+      },
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "ImNoZW1pc3RAZXhhbXBsZS5jb20i"
+      },
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "IiI="
+      }
+     ]
+    },
+    "scheduleToCloseTimeout": "315360000s",
+    "scheduleToStartTimeout": "3600s",
+    "startToCloseTimeout": "120s",
+    "heartbeatTimeout": "0s",
+    "workflowTaskCompletedEventId": "87",
+    "retryPolicy": {
+     "initialInterval": "1s",
+     "backoffCoefficient": 2.0,
+     "maximumInterval": "100s",
+     "maximumAttempts": 5,
+     "nonRetryableErrorTypes": [
+      "ValueError",
+      "ValidationError",
+      "ChemclawError",
+      "InvalidSmilesError",
+      "FingerprintError",
+      "FingerprintInputError",
+      "SessionForkError",
+      "ProposalStoreError",
+      "SkillRefused",
+      "UnreadableConditions",
+      "ElnMappingError",
+      "ElnFormatError",
+      "OrdFormatError",
+      "IngestError",
+      "ActivityResultTooLarge",
+      "MetricError",
+      "PlaybookError",
+      "BoTranslationError",
+      "NoteError",
+      "DeliveryChannelError",
+      "EvalCaseError",
+      "CaseSetMismatchError",
+      "ToolReturnedFailure",
+      "UnparsedArguments",
+      "SkillsReadOnlyRefusal",
+      "ConnectorJobError",
+      "GitWriteError",
+      "CalculationDomainError",
+      "ConnectorError",
+      "DataSourceError",
+      "AmbiguousReactionRecord",
+      "LabelIndexError",
+      "LabelToolError",
+      "ResultSinkError",
+      "SinkRejectedError",
+      "SinkConnectionError",
+      "ProjectionError",
+      "UnknownPropertyError",
+      "ErasureError",
+      "VectorStoreConfigError",
+      "LayoutError",
+      "RevisionConflict",
+      "StatusConflict",
+      "UnstorableDocument",
+      "UnknownDesign",
+      "UnknownArm",
+      "TemplateError",
+      "ComposedWorkflowError",
+      "UnresolvedReference",
+      "ProfileError",
+      "SurrogateFitError",
+      "BindingError",
+      "PathSyntaxError",
+      "PatternBudgetError",
+      "TransformError",
+      "WarehouseQueryError",
+      "VendoredDatasetError",
+      "DocumentShareError",
+      "CalcToolError",
+      "RepeatedCallRefusal",
+      "AuthorizationError",
+      "DryRunRefusal",
+      "PlanNotApprovedError",
+      "UndeclaredWriteRefusal"
+     ]
+    },
+    "priority": {}
+   }
+  },
+  {
+   "eventId": "90",
+   "eventTime": "2026-09-26T11:49:10.537Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+   "activityTaskScheduledEventAttributes": {
+    "activityId": "16",
+    "activityType": {
+     "name": "read_check_result"
+    },
+    "taskQueue": {
+     "name": "background-jobs",
+     "kind": "TASK_QUEUE_KIND_NORMAL"
+    },
+    "header": {},
+    "input": {
+     "payloads": [
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "eyJoeXBvdGhlc2lzX2lkIjoidGhlcm1hbCIsInF1ZXN0aW9uIjoicnVuIHRoZSBjb250cm9sIGZvciB0aGVybWFsIiwia2luZCI6ImNvbXB1dGFibGUiLCJ0b29sIjoiIiwiY2FsbCI6eyJ0b29sIjoicHJlZGljdF9wa2EiLCJzdWJqZWN0X25vdGVfaWQiOiJjb21wb3VuZC14Iiwiam9iIjoiIiwic3ViamVjdHMiOnt9LCJzd2VlcF9wYXJhbWV0ZXIiOiIiLCJzd2VlcF92YWx1ZXMiOltdLCJ0ZW1wbGF0ZSI6IiJ9LCJleHBlY3RhdGlvbiI6InRoZSBlZmZlY3QgZGlzYXBwZWFycyBpZiB0aGUgaHlwb3RoZXNpcyBob2xkcyJ9"
+      },
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "IjEi"
+      },
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "ImNoZW1pc3RAZXhhbXBsZS5jb20i"
+      },
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "IiI="
+      }
+     ]
+    },
+    "scheduleToCloseTimeout": "315360000s",
+    "scheduleToStartTimeout": "3600s",
+    "startToCloseTimeout": "120s",
+    "heartbeatTimeout": "0s",
+    "workflowTaskCompletedEventId": "87",
+    "retryPolicy": {
+     "initialInterval": "1s",
+     "backoffCoefficient": 2.0,
+     "maximumInterval": "100s",
+     "maximumAttempts": 5,
+     "nonRetryableErrorTypes": [
+      "ValueError",
+      "ValidationError",
+      "ChemclawError",
+      "InvalidSmilesError",
+      "FingerprintError",
+      "FingerprintInputError",
+      "SessionForkError",
+      "ProposalStoreError",
+      "SkillRefused",
+      "UnreadableConditions",
+      "ElnMappingError",
+      "ElnFormatError",
+      "OrdFormatError",
+      "IngestError",
+      "ActivityResultTooLarge",
+      "MetricError",
+      "PlaybookError",
+      "BoTranslationError",
+      "NoteError",
+      "DeliveryChannelError",
+      "EvalCaseError",
+      "CaseSetMismatchError",
+      "ToolReturnedFailure",
+      "UnparsedArguments",
+      "SkillsReadOnlyRefusal",
+      "ConnectorJobError",
+      "GitWriteError",
+      "CalculationDomainError",
+      "ConnectorError",
+      "DataSourceError",
+      "AmbiguousReactionRecord",
+      "LabelIndexError",
+      "LabelToolError",
+      "ResultSinkError",
+      "SinkRejectedError",
+      "SinkConnectionError",
+      "ProjectionError",
+      "UnknownPropertyError",
+      "ErasureError",
+      "VectorStoreConfigError",
+      "LayoutError",
+      "RevisionConflict",
+      "StatusConflict",
+      "UnstorableDocument",
+      "UnknownDesign",
+      "UnknownArm",
+      "TemplateError",
+      "ComposedWorkflowError",
+      "UnresolvedReference",
+      "ProfileError",
+      "SurrogateFitError",
+      "BindingError",
+      "PathSyntaxError",
+      "PatternBudgetError",
+      "TransformError",
+      "WarehouseQueryError",
+      "VendoredDatasetError",
+      "DocumentShareError",
+      "CalcToolError",
+      "RepeatedCallRefusal",
+      "AuthorizationError",
+      "DryRunRefusal",
+      "PlanNotApprovedError",
+      "UndeclaredWriteRefusal"
+     ]
+    },
+    "priority": {}
+   }
+  },
+  {
+   "eventId": "91",
+   "eventTime": "2026-09-26T11:49:10.538Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+   "activityTaskStartedEventAttributes": {
+    "scheduledEventId": "90",
+    "identity": "10908@vm",
+    "attempt": 1
+   }
+  },
+  {
+   "eventId": "92",
+   "eventTime": "2026-09-26T11:49:10.539Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+   "activityTaskCompletedEventAttributes": {
+    "result": {
+     "payloads": [
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "eyJ2ZXJkaWN0IjoiaW5jb25jbHVzaXZlIiwicmVhc29uIjoic3R1YiJ9"
+      }
+     ]
+    },
+    "scheduledEventId": "90",
+    "startedEventId": "91",
+    "identity": "10908@vm"
+   }
+  },
+  {
+   "eventId": "93",
+   "eventTime": "2026-09-26T11:49:10.539Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+   "workflowTaskScheduledEventAttributes": {
+    "taskQueue": {
+     "name": "background-jobs"
+    },
+    "startToCloseTimeout": "10s",
+    "attempt": 1
+   }
+  },
+  {
+   "eventId": "94",
+   "eventTime": "2026-09-26T11:49:10.540Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+   "workflowTaskStartedEventAttributes": {
+    "scheduledEventId": "93",
+    "identity": "10908@vm",
+    "historySizeBytes": "31197"
+   }
+  },
+  {
+   "eventId": "95",
+   "eventTime": "2026-09-26T11:49:10.543Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+   "workflowTaskCompletedEventAttributes": {
+    "scheduledEventId": "93",
+    "identity": "10908@vm",
+    "binaryChecksum": "3a7616fd2f4d197b056bb96367a452e0",
+    "sdkMetadata": {},
+    "meteringMetadata": {}
+   }
+  },
+  {
+   "eventId": "96",
+   "eventTime": "2026-09-26T11:49:10.538Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+   "activityTaskStartedEventAttributes": {
+    "scheduledEventId": "89",
+    "identity": "10908@vm",
+    "attempt": 1
+   }
+  },
+  {
+   "eventId": "97",
+   "eventTime": "2026-09-26T11:49:10.543Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+   "activityTaskCompletedEventAttributes": {
+    "result": {
+     "payloads": [
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "eyJ2ZXJkaWN0IjoiaW5jb25jbHVzaXZlIiwicmVhc29uIjoic3R1YiJ9"
+      }
+     ]
+    },
+    "scheduledEventId": "89",
+    "startedEventId": "95",
+    "identity": "10908@vm"
+   }
+  },
+  {
+   "eventId": "98",
+   "eventTime": "2026-09-26T11:49:10.543Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+   "workflowTaskScheduledEventAttributes": {
+    "taskQueue": {
+     "name": "background-jobs"
+    },
+    "startToCloseTimeout": "10s",
+    "attempt": 2
+   }
+  },
+  {
+   "eventId": "99",
+   "eventTime": "2026-09-26T11:49:10.543Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+   "workflowTaskStartedEventAttributes": {
+    "scheduledEventId": "98",
+    "identity": "10908@vm",
+    "historySizeBytes": "31490"
+   }
+  },
+  {
+   "eventId": "100",
+   "eventTime": "2026-09-26T11:49:10.546Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+   "workflowTaskCompletedEventAttributes": {
+    "scheduledEventId": "98",
+    "identity": "10908@vm",
+    "binaryChecksum": "3a7616fd2f4d197b056bb96367a452e0",
+    "sdkMetadata": {},
+    "meteringMetadata": {}
+   }
+  },
+  {
+   "eventId": "101",
+   "eventTime": "2026-09-26T11:49:10.546Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+   "activityTaskScheduledEventAttributes": {
+    "activityId": "17",
+    "activityType": {
+     "name": "record_hypothesis_field"
+    },
+    "taskQueue": {
+     "name": "background-jobs",
+     "kind": "TASK_QUEUE_KIND_NORMAL"
+    },
+    "header": {},
+    "input": {
+     "payloads": [
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "IkNvbXBldGluZyBleHBsYW5hdGlvbnMgZ2VuZXJhdGVkIGFuZCByYW5rZWQgZm9yOiBxLXJlcGxheS1uby1jYWxsXG5cbioqTmV4dDogcnVuIHRoZSBjb250cm9sIGZvciB3ZXQqKiAocmFuOyB0aGUgZWZmZWN0IGRpc2FwcGVhcnMgaWYgdGhlIGh5cG90aGVzaXMgaG9sZHMpXG5cbioqVGhlIGZpZWxkIGRvZXMgbm90IHNlcGFyYXRlLioqIFRoZSBsZWFkaW5nIGh5cG90aGVzZXMgc2l0IGluc2lkZSB0aGVpciBvd24gdW5jZXJ0YWludHksIHNvIHRoZSBvcmRlciBiZWxvdyBpcyBub3QgeWV0IGV2aWRlbmNlIOKAlCBpdCBzYXlzIHdoaWNoIGNvbXBhcmlzb25zIGhhdmUgYmVlbiBydW4sIG5vdCB3aGljaCBleHBsYW5hdGlvbiBpcyByaWdodC5cblxuMS4gKip0aGUgc29sdmVudCB3YXMgd2V0Kiog4oCUIDE2NDUgwrEgMTgyIG92ZXIgMSBjb21wYXJpc29uKHMpXG4gICAtIHJlZnV0ZWQgaWY6IG5vIGNoYW5nZSBpcyBzZWVuIGluIHRoZSBzb2x2ZW50IHdhcyB3ZXQgYWZ0ZXIgdGhlIGNvbnRyb2wgcnVuXG4gICAtIG9iamVjdGlvbjogdW50ZXN0ZWQgYXQgc2NhbGUg4oCUIGV2ZXJ5IHJ1biBvbiBmaWxlIHdhcyBhdCBvbmUgZ3JhbVxuICAgLSBjaGVjayByYW46ICoqaW5jb25jbHVzaXZlKiog4oCUIHN0dWIgQ29tcHV0ZWQ6IG5vIGNhbGxcbjIuICoqdGhlIGltcHVyaXR5IGlzIHRoZXJtYWwgaW4gb3JpZ2luKiog4oCUIDEzNTUgwrEgMTgyIG92ZXIgMSBjb21wYXJpc29uKHMpXG4gICAtIHJlZnV0ZWQgaWY6IG5vIGNoYW5nZSBpcyBzZWVuIGluIHRoZSBpbXB1cml0eSBpcyB0aGVybWFsIGluIG9yaWdpbiBhZnRlciB0aGUgY29udHJvbCBydW5cbiAgIC0gb2JqZWN0aW9uOiB1bnRlc3RlZCBhdCBzY2FsZSDigJQgZXZlcnkgcnVuIG9uIGZpbGUgd2FzIGF0IG9uZSBncmFtXG4gICAtIGNoZWNrIHJhbjogKippbmNvbmNsdXNpdmUqKiDigJQgc3R1YiBDb21wdXRlZDogMVxuXG5fMSBjb21wYXJpc29ucy5fXG5cbi0tLVxuXG5fUmF0aW5ncyBhcmUgb24gdGhlIEVsbyBzY2FsZSBhbmQgY29tZSBmcm9tIHBhaXJ3aXNlIGp1ZGdlbWVudHMgb2YgdGhlc2UgaHlwb3RoZXNlcyBhZ2FpbnN0IGVhY2ggb3RoZXIsIHNlZWRlZCB3aXRoIHJldHJpZXZlZCBldmlkZW5jZS4gQSByYXRpbmcgaXMgYSBwcmVmZXJlbmNlIG9yZGVyaW5nIG92ZXIgdGhpcyBmaWVsZCDigJQgbm90IGEgcHJvYmFiaWxpdHkgdGhhdCBhIGh5cG90aGVzaXMgaXMgdHJ1ZSwgYW5kIG5vdCBldmlkZW5jZSBhYm91dCB0aGUgY2hlbWlzdHJ5LiBPbmx5IHRoZSBleHBlcmltZW50cyBzZXR0bGUgdGhhdC5fIg=="
+      },
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "Imh5cG90aGVzaXMtZmllbGQtZGYyOTdmYjdiZTA4OWRhNSI="
+      },
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "WyJoeXBvdGhlc2lzIl0="
+      },
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "ImNoZW1pc3RAZXhhbXBsZS5jb20i"
+      },
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "IiI="
+      }
+     ]
+    },
+    "scheduleToCloseTimeout": "315360000s",
+    "scheduleToStartTimeout": "3600s",
+    "startToCloseTimeout": "120s",
+    "heartbeatTimeout": "0s",
+    "workflowTaskCompletedEventId": "99",
+    "retryPolicy": {
+     "initialInterval": "1s",
+     "backoffCoefficient": 2.0,
+     "maximumInterval": "100s",
+     "maximumAttempts": 3,
+     "nonRetryableErrorTypes": [
+      "ValueError",
+      "ValidationError",
+      "ChemclawError",
+      "InvalidSmilesError",
+      "FingerprintError",
+      "FingerprintInputError",
+      "SessionForkError",
+      "ProposalStoreError",
+      "SkillRefused",
+      "UnreadableConditions",
+      "ElnMappingError",
+      "ElnFormatError",
+      "OrdFormatError",
+      "IngestError",
+      "ActivityResultTooLarge",
+      "MetricError",
+      "PlaybookError",
+      "BoTranslationError",
+      "NoteError",
+      "DeliveryChannelError",
+      "EvalCaseError",
+      "CaseSetMismatchError",
+      "ToolReturnedFailure",
+      "UnparsedArguments",
+      "SkillsReadOnlyRefusal",
+      "ConnectorJobError",
+      "GitWriteError",
+      "CalculationDomainError",
+      "ConnectorError",
+      "DataSourceError",
+      "AmbiguousReactionRecord",
+      "LabelIndexError",
+      "LabelToolError",
+      "ResultSinkError",
+      "SinkRejectedError",
+      "SinkConnectionError",
+      "ProjectionError",
+      "UnknownPropertyError",
+      "ErasureError",
+      "VectorStoreConfigError",
+      "LayoutError",
+      "RevisionConflict",
+      "StatusConflict",
+      "UnstorableDocument",
+      "UnknownDesign",
+      "UnknownArm",
+      "TemplateError",
+      "ComposedWorkflowError",
+      "UnresolvedReference",
+      "ProfileError",
+      "SurrogateFitError",
+      "BindingError",
+      "PathSyntaxError",
+      "PatternBudgetError",
+      "TransformError",
+      "WarehouseQueryError",
+      "VendoredDatasetError",
+      "DocumentShareError",
+      "CalcToolError",
+      "RepeatedCallRefusal",
+      "AuthorizationError",
+      "DryRunRefusal",
+      "PlanNotApprovedError",
+      "UndeclaredWriteRefusal"
+     ]
+    },
+    "priority": {}
+   }
+  },
+  {
+   "eventId": "102",
+   "eventTime": "2026-09-26T11:49:10.546Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+   "activityTaskStartedEventAttributes": {
+    "scheduledEventId": "101",
+    "identity": "10908@vm",
+    "attempt": 1
+   }
+  },
+  {
+   "eventId": "103",
+   "eventTime": "2026-09-26T11:49:10.548Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+   "activityTaskCompletedEventAttributes": {
+    "result": {
+     "payloads": [
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "Imh5cG90aGVzaXMtZmllbGQtZGYyOTdmYjdiZTA4OWRhNSI="
+      }
+     ]
+    },
+    "scheduledEventId": "101",
+    "startedEventId": "102",
+    "identity": "10908@vm"
+   }
+  },
+  {
+   "eventId": "104",
+   "eventTime": "2026-09-26T11:49:10.548Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+   "workflowTaskScheduledEventAttributes": {
+    "taskQueue": {
+     "name": "background-jobs"
+    },
+    "startToCloseTimeout": "10s",
+    "attempt": 1
+   }
+  },
+  {
+   "eventId": "105",
+   "eventTime": "2026-09-26T11:49:10.548Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+   "workflowTaskStartedEventAttributes": {
+    "scheduledEventId": "104",
+    "identity": "10908@vm",
+    "historySizeBytes": "34563"
+   }
+  },
+  {
+   "eventId": "106",
+   "eventTime": "2026-09-26T11:49:10.551Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+   "workflowTaskCompletedEventAttributes": {
+    "scheduledEventId": "104",
+    "identity": "10908@vm",
+    "binaryChecksum": "3a7616fd2f4d197b056bb96367a452e0",
+    "sdkMetadata": {},
+    "meteringMetadata": {}
+   }
+  },
+  {
+   "eventId": "107",
+   "eventTime": "2026-09-26T11:49:10.551Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED",
+   "activityTaskScheduledEventAttributes": {
+    "activityId": "18",
+    "activityType": {
+     "name": "record_job"
+    },
+    "taskQueue": {
+     "name": "background-jobs",
+     "kind": "TASK_QUEUE_KIND_NORMAL"
+    },
+    "header": {},
+    "input": {
+     "payloads": [
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "eyJqb2JfaWQiOiJoaXN0b3J5LWZpeHR1cmUtdG91cm5hbWVudC1uby1jYWxsIiwiY29ubmVjdG9yIjoiY29yZSIsImpvYiI6InJhbmtfY29tcGV0aW5nX2h5cG90aGVzZXMiLCJyYXRpb25hbGUiOiJxLXJlcGxheS1uby1jYWxsIiwicmVxdWVzdGVkX2J5IjoiY2hlbWlzdEBleGFtcGxlLmNvbSIsInNlc3Npb25faWQiOiIiLCJjb3JyZWxhdGlvbl9pZCI6IiIsInBsYW5fc3RlcCI6IiIsInBsYW5faGFzaCI6IiIsInBheWxvYWQiOnsicXVlc3Rpb24iOiJxLXJlcGxheS1uby1jYWxsIiwiY29udGV4dCI6IiJ9LCJzdW1tYXJ5IjoiKipOZXh0OiBydW4gdGhlIGNvbnRyb2wgZm9yIHdldCoqIChyYW47IHRoZSBlZmZlY3QgZGlzYXBwZWFycyBpZiB0aGUgaHlwb3RoZXNpcyBob2xkcylcblxuKipUaGUgZmllbGQgZG9lcyBub3Qgc2VwYXJhdGUuKiogVGhlIGxlYWRpbmcgaHlwb3RoZXNlcyBzaXQgaW5zaWRlIHRoZWlyIG93biB1bmNlcnRhaW50eSwgc28gdGhlIG9yZGVyIGJlbG93IGlzIG5vdCB5ZXQgZXZpZGVuY2Ug4oCUIGl0IHNheXMgd2hpY2ggY29tcGFyaXNvbnMgaGF2ZSBiZWVuIHJ1biwgbm90IHdoaWNoIGV4cGxhbmF0aW9uIGlzIHJpZ2h0LlxuXG4xLiAqKnRoZSBzb2x2ZW50IHdhcyB3ZXQqKiDigJQgMTY0NSDCsSAxODIgb3ZlciAxIGNvbXBhcmlzb24ocylcbiAgIC0gcmVmdXRlZCBpZjogbm8gY2hhbmdlIGlzIHNlZW4gaW4gdGhlIHNvbHZlbnQgd2FzIHdldCBhZnRlciB0aGUgY29udHJvbCBydW5cbiAgIC0gb2JqZWN0aW9uOiB1bnRlc3RlZCBhdCBzY2FsZSDigJQgZXZlcnkgcnVuIG9uIGZpbGUgd2FzIGF0IG9uZSBncmFtXG4gICAtIGNoZWNrIHJhbjogKippbmNvbmNsdXNpdmUqKiDigJQgc3R1YiBDb21wdXRlZDogbm8gY2FsbFxuMi4gKip0aGUgaW1wdXJpdHkgaXMgdGhlcm1hbCBpbiBvcmlnaW4qKiDigJQgMTM1NSDCsSAxODIgb3ZlciAxIGNvbXBhcmlzb24ocylcbiAgIC0gcmVmdXRlZCBpZjogbm8gY2hhbmdlIGlzIHNlZW4gaW4gdGhlIGltcHVyaXR5IGlzIHRoZXJtYWwgaW4gb3JpZ2luIGFmdGVyIHRoZSBjb250cm9sIHJ1blxuICAgLSBvYmplY3Rpb246IHVudGVzdGVkIGF0IHNjYWxlIOKAlCBldmVyeSBydW4gb24gZmlsZSB3YXMgYXQgb25lIGdyYW1cbiAgIC0gY2hlY2sgcmFuOiAqKmluY29uY2x1c2l2ZSoqIOKAlCBzdHViIENvbXB1dGVkOiAxXG5cbl8xIGNvbXBhcmlzb25zLl8iLCJyZXN1bHQiOnsicXVlc3Rpb24iOiJxLXJlcGxheS1uby1jYWxsIiwicmFua2VkIjpbeyJoeXBvdGhlc2lzIjp7ImlkIjoid2V0Iiwic3RhdGVtZW50IjoidGhlIHNvbHZlbnQgd2FzIHdldCIsIm1lY2hhbmlzbSI6IiIsInJlZnV0ZWRfaWYiOiJubyBjaGFuZ2UgaXMgc2VlbiBpbiB0aGUgc29sdmVudCB3YXMgd2V0IGFmdGVyIHRoZSBjb250cm9sIHJ1biIsImNpdGVkX25vdGVfaWRzIjpbXSwiYW5nbGUiOiIifSwicmF0aW5nIjoxNjQ1LjQxMDgxNzMxODE0NCwic3RhbmRhcmRfZXJyb3IiOjE4Mi4yMDI1NjQ5MDYxMTE4LCJjb21wYXJpc29ucyI6MSwib2JqZWN0aW9ucyI6W3siaHlwb3RoZXNpc19pZCI6IndldCIsImNvbmNlcm4iOiJ1bnRlc3RlZCBhdCBzY2FsZSIsInJhdGlvbmFsZSI6ImV2ZXJ5IHJ1biBvbiBmaWxlIHdhcyBhdCBvbmUgZ3JhbSIsImNpdGVkX25vdGVfaWRzIjpbXX1dLCJjaGVjayI6eyJoeXBvdGhlc2lzX2lkIjoid2V0IiwicXVlc3Rpb24iOiJydW4gdGhlIGNvbnRyb2wgZm9yIHdldCIsImtpbmQiOiJjb21wdXRhYmxlIiwidG9vbCI6IiIsImNhbGwiOm51bGwsImV4cGVjdGF0aW9uIjoidGhlIGVmZmVjdCBkaXNhcHBlYXJzIGlmIHRoZSBoeXBvdGhlc2lzIGhvbGRzIn0sIm91dGNvbWUiOnsiaHlwb3RoZXNpc19pZCI6IndldCIsInZlcmRpY3QiOiJpbmNvbmNsdXNpdmUiLCJkZXRhaWwiOiJzdHViIENvbXB1dGVkOiBubyBjYWxsIiwiY2FsY19yZWZzIjpbXSwicmVmdXNhbF9jb2RlIjoibm8tY2FsbCIsInJhbiI6IiJ9fSx7Imh5cG90aGVzaXMiOnsiaWQiOiJ0aGVybWFsIiwic3RhdGVtZW50IjoidGhlIGltcHVyaXR5IGlzIHRoZXJtYWwgaW4gb3JpZ2luIiwibWVjaGFuaXNtIjoiIiwicmVmdXRlZF9pZiI6Im5vIGNoYW5nZSBpcyBzZWVuIGluIHRoZSBpbXB1cml0eSBpcyB0aGVybWFsIGluIG9yaWdpbiBhZnRlciB0aGUgY29udHJvbCBydW4iLCJjaXRlZF9ub3RlX2lkcyI6W10sImFuZ2xlIjoiIn0sInJhdGluZyI6MTM1NC41ODkxODI2ODE4NTYsInN0YW5kYXJkX2Vycm9yIjoxODIuMjAyNTY0OTA2MTExOCwiY29tcGFyaXNvbnMiOjEsIm9iamVjdGlvbnMiOlt7Imh5cG90aGVzaXNfaWQiOiJ0aGVybWFsIiwiY29uY2VybiI6InVudGVzdGVkIGF0IHNjYWxlIiwicmF0aW9uYWxlIjoiZXZlcnkgcnVuIG9uIGZpbGUgd2FzIGF0IG9uZSBncmFtIiwiY2l0ZWRfbm90ZV9pZHMiOltdfV0sImNoZWNrIjp7Imh5cG90aGVzaXNfaWQiOiJ0aGVybWFsIiwicXVlc3Rpb24iOiJydW4gdGhlIGNvbnRyb2wgZm9yIHRoZXJtYWwiLCJraW5kIjoiY29tcHV0YWJsZSIsInRvb2wiOiIiLCJjYWxsIjp7InRvb2wiOiJwcmVkaWN0X3BrYSIsInN1YmplY3Rfbm90ZV9pZCI6ImNvbXBvdW5kLXgiLCJqb2IiOiIiLCJzdWJqZWN0cyI6e30sInN3ZWVwX3BhcmFtZXRlciI6IiIsInN3ZWVwX3ZhbHVlcyI6W10sInRlbXBsYXRlIjoiIn0sImV4cGVjdGF0aW9uIjoidGhlIGVmZmVjdCBkaXNhcHBlYXJzIGlmIHRoZSBoeXBvdGhlc2lzIGhvbGRzIn0sIm91dGNvbWUiOnsiaHlwb3RoZXNpc19pZCI6InRoZXJtYWwiLCJ2ZXJkaWN0IjoiaW5jb25jbHVzaXZlIiwiZGV0YWlsIjoic3R1YiBDb21wdXRlZDogMSIsImNhbGNfcmVmcyI6W10sInJlZnVzYWxfY29kZSI6IiIsInJhbiI6IiJ9fV0sInJlamVjdGVkIjpbXSwibWVyZ2VkIjpbXSwiY29tcGFyaXNvbnNfcnVuIjoxLCJwb3NpdGlvbl9iaWFzIjpudWxsLCJsZWFkZXJfaXNfZGVjaXNpdmUiOmZhbHNlLCJwcm9wb3NhbF9ub3RlX2lkcyI6W119LCJub3RlX2lkIjoiIiwiY2FsY19yZWZzIjpbXSwicnVudGltZV9zZWNvbmRzIjowLjAsInBheWxvYWRfa2luZCI6IlRvdXJuYW1lbnRPdXRjb21lIiwic3RhdGUiOiJjb21wbGV0ZWQiLCJmYWlsdXJlX3JlYXNvbiI6IiIsImNvbXBsZXRlZF9hdCI6bnVsbH0="
+      }
+     ]
+    },
+    "scheduleToCloseTimeout": "315360000s",
+    "scheduleToStartTimeout": "900s",
+    "startToCloseTimeout": "30s",
+    "heartbeatTimeout": "0s",
+    "workflowTaskCompletedEventId": "105",
+    "retryPolicy": {
+     "initialInterval": "1s",
+     "backoffCoefficient": 2.0,
+     "maximumInterval": "100s",
+     "maximumAttempts": 5,
+     "nonRetryableErrorTypes": [
+      "ValueError",
+      "ValidationError",
+      "ChemclawError",
+      "InvalidSmilesError",
+      "FingerprintError",
+      "FingerprintInputError",
+      "SessionForkError",
+      "ProposalStoreError",
+      "SkillRefused",
+      "UnreadableConditions",
+      "ElnMappingError",
+      "ElnFormatError",
+      "OrdFormatError",
+      "IngestError",
+      "ActivityResultTooLarge",
+      "MetricError",
+      "PlaybookError",
+      "BoTranslationError",
+      "NoteError",
+      "DeliveryChannelError",
+      "EvalCaseError",
+      "CaseSetMismatchError",
+      "ToolReturnedFailure",
+      "UnparsedArguments",
+      "SkillsReadOnlyRefusal",
+      "ConnectorJobError",
+      "GitWriteError",
+      "CalculationDomainError",
+      "ConnectorError",
+      "DataSourceError",
+      "AmbiguousReactionRecord",
+      "LabelIndexError",
+      "LabelToolError",
+      "ResultSinkError",
+      "SinkRejectedError",
+      "SinkConnectionError",
+      "ProjectionError",
+      "UnknownPropertyError",
+      "ErasureError",
+      "VectorStoreConfigError",
+      "LayoutError",
+      "RevisionConflict",
+      "StatusConflict",
+      "UnstorableDocument",
+      "UnknownDesign",
+      "UnknownArm",
+      "TemplateError",
+      "ComposedWorkflowError",
+      "UnresolvedReference",
+      "ProfileError",
+      "SurrogateFitError",
+      "BindingError",
+      "PathSyntaxError",
+      "PatternBudgetError",
+      "TransformError",
+      "WarehouseQueryError",
+      "VendoredDatasetError",
+      "DocumentShareError",
+      "CalcToolError",
+      "RepeatedCallRefusal",
+      "AuthorizationError",
+      "DryRunRefusal",
+      "PlanNotApprovedError",
+      "UndeclaredWriteRefusal"
+     ]
+    },
+    "priority": {}
+   }
+  },
+  {
+   "eventId": "108",
+   "eventTime": "2026-09-26T11:49:10.551Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_STARTED",
+   "activityTaskStartedEventAttributes": {
+    "scheduledEventId": "107",
+    "identity": "10908@vm",
+    "attempt": 1
+   }
+  },
+  {
+   "eventId": "109",
+   "eventTime": "2026-09-26T11:49:10.553Z",
+   "eventType": "EVENT_TYPE_ACTIVITY_TASK_COMPLETED",
+   "activityTaskCompletedEventAttributes": {
+    "result": {
+     "payloads": [
+      {
+       "metadata": {
+        "encoding": "YmluYXJ5L251bGw="
+       }
+      }
+     ]
+    },
+    "scheduledEventId": "107",
+    "startedEventId": "108",
+    "identity": "10908@vm"
+   }
+  },
+  {
+   "eventId": "110",
+   "eventTime": "2026-09-26T11:49:10.553Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED",
+   "workflowTaskScheduledEventAttributes": {
+    "taskQueue": {
+     "name": "background-jobs"
+    },
+    "startToCloseTimeout": "10s",
+    "attempt": 1
+   }
+  },
+  {
+   "eventId": "111",
+   "eventTime": "2026-09-26T11:49:10.553Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_STARTED",
+   "workflowTaskStartedEventAttributes": {
+    "scheduledEventId": "110",
+    "identity": "10908@vm",
+    "historySizeBytes": "39222"
+   }
+  },
+  {
+   "eventId": "112",
+   "eventTime": "2026-09-26T11:49:10.556Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+   "workflowTaskCompletedEventAttributes": {
+    "scheduledEventId": "110",
+    "identity": "10908@vm",
+    "binaryChecksum": "3a7616fd2f4d197b056bb96367a452e0",
+    "sdkMetadata": {},
+    "meteringMetadata": {}
+   }
+  },
+  {
+   "eventId": "113",
+   "eventTime": "2026-09-26T11:49:10.556Z",
+   "eventType": "EVENT_TYPE_WORKFLOW_EXECUTION_COMPLETED",
+   "workflowExecutionCompletedEventAttributes": {
+    "result": {
+     "payloads": [
+      {
+       "metadata": {
+        "encoding": "anNvbi9wbGFpbg=="
+       },
+       "data": "eyJzdW1tYXJ5IjoiKipOZXh0OiBydW4gdGhlIGNvbnRyb2wgZm9yIHdldCoqIChyYW47IHRoZSBlZmZlY3QgZGlzYXBwZWFycyBpZiB0aGUgaHlwb3RoZXNpcyBob2xkcylcblxuKipUaGUgZmllbGQgZG9lcyBub3Qgc2VwYXJhdGUuKiogVGhlIGxlYWRpbmcgaHlwb3RoZXNlcyBzaXQgaW5zaWRlIHRoZWlyIG93biB1bmNlcnRhaW50eSwgc28gdGhlIG9yZGVyIGJlbG93IGlzIG5vdCB5ZXQgZXZpZGVuY2Ug4oCUIGl0IHNheXMgd2hpY2ggY29tcGFyaXNvbnMgaGF2ZSBiZWVuIHJ1biwgbm90IHdoaWNoIGV4cGxhbmF0aW9uIGlzIHJpZ2h0LlxuXG4xLiAqKnRoZSBzb2x2ZW50IHdhcyB3ZXQqKiDigJQgMTY0NSDCsSAxODIgb3ZlciAxIGNvbXBhcmlzb24ocylcbiAgIC0gcmVmdXRlZCBpZjogbm8gY2hhbmdlIGlzIHNlZW4gaW4gdGhlIHNvbHZlbnQgd2FzIHdldCBhZnRlciB0aGUgY29udHJvbCBydW5cbiAgIC0gb2JqZWN0aW9uOiB1bnRlc3RlZCBhdCBzY2FsZSDigJQgZXZlcnkgcnVuIG9uIGZpbGUgd2FzIGF0IG9uZSBncmFtXG4gICAtIGNoZWNrIHJhbjogKippbmNvbmNsdXNpdmUqKiDigJQgc3R1YiBDb21wdXRlZDogbm8gY2FsbFxuMi4gKip0aGUgaW1wdXJpdHkgaXMgdGhlcm1hbCBpbiBvcmlnaW4qKiDigJQgMTM1NSDCsSAxODIgb3ZlciAxIGNvbXBhcmlzb24ocylcbiAgIC0gcmVmdXRlZCBpZjogbm8gY2hhbmdlIGlzIHNlZW4gaW4gdGhlIGltcHVyaXR5IGlzIHRoZXJtYWwgaW4gb3JpZ2luIGFmdGVyIHRoZSBjb250cm9sIHJ1blxuICAgLSBvYmplY3Rpb246IHVudGVzdGVkIGF0IHNjYWxlIOKAlCBldmVyeSBydW4gb24gZmlsZSB3YXMgYXQgb25lIGdyYW1cbiAgIC0gY2hlY2sgcmFuOiAqKmluY29uY2x1c2l2ZSoqIOKAlCBzdHViIENvbXB1dGVkOiAxXG5cbl8xIGNvbXBhcmlzb25zLl8iLCJkYXRhIjp7InF1ZXN0aW9uIjoicS1yZXBsYXktbm8tY2FsbCIsInJhbmtlZCI6W3siaHlwb3RoZXNpcyI6eyJpZCI6IndldCIsInN0YXRlbWVudCI6InRoZSBzb2x2ZW50IHdhcyB3ZXQiLCJtZWNoYW5pc20iOiIiLCJyZWZ1dGVkX2lmIjoibm8gY2hhbmdlIGlzIHNlZW4gaW4gdGhlIHNvbHZlbnQgd2FzIHdldCBhZnRlciB0aGUgY29udHJvbCBydW4iLCJjaXRlZF9ub3RlX2lkcyI6W10sImFuZ2xlIjoiIn0sInJhdGluZyI6MTY0NS40MTA4MTczMTgxNDQsInN0YW5kYXJkX2Vycm9yIjoxODIuMjAyNTY0OTA2MTExOCwiY29tcGFyaXNvbnMiOjEsIm9iamVjdGlvbnMiOlt7Imh5cG90aGVzaXNfaWQiOiJ3ZXQiLCJjb25jZXJuIjoidW50ZXN0ZWQgYXQgc2NhbGUiLCJyYXRpb25hbGUiOiJldmVyeSBydW4gb24gZmlsZSB3YXMgYXQgb25lIGdyYW0iLCJjaXRlZF9ub3RlX2lkcyI6W119XSwiY2hlY2siOnsiaHlwb3RoZXNpc19pZCI6IndldCIsInF1ZXN0aW9uIjoicnVuIHRoZSBjb250cm9sIGZvciB3ZXQiLCJraW5kIjoiY29tcHV0YWJsZSIsInRvb2wiOiIiLCJjYWxsIjpudWxsLCJleHBlY3RhdGlvbiI6InRoZSBlZmZlY3QgZGlzYXBwZWFycyBpZiB0aGUgaHlwb3RoZXNpcyBob2xkcyJ9LCJvdXRjb21lIjp7Imh5cG90aGVzaXNfaWQiOiJ3ZXQiLCJ2ZXJkaWN0IjoiaW5jb25jbHVzaXZlIiwiZGV0YWlsIjoic3R1YiBDb21wdXRlZDogbm8gY2FsbCIsImNhbGNfcmVmcyI6W10sInJlZnVzYWxfY29kZSI6Im5vLWNhbGwiLCJyYW4iOiIifX0seyJoeXBvdGhlc2lzIjp7ImlkIjoidGhlcm1hbCIsInN0YXRlbWVudCI6InRoZSBpbXB1cml0eSBpcyB0aGVybWFsIGluIG9yaWdpbiIsIm1lY2hhbmlzbSI6IiIsInJlZnV0ZWRfaWYiOiJubyBjaGFuZ2UgaXMgc2VlbiBpbiB0aGUgaW1wdXJpdHkgaXMgdGhlcm1hbCBpbiBvcmlnaW4gYWZ0ZXIgdGhlIGNvbnRyb2wgcnVuIiwiY2l0ZWRfbm90ZV9pZHMiOltdLCJhbmdsZSI6IiJ9LCJyYXRpbmciOjEzNTQuNTg5MTgyNjgxODU2LCJzdGFuZGFyZF9lcnJvciI6MTgyLjIwMjU2NDkwNjExMTgsImNvbXBhcmlzb25zIjoxLCJvYmplY3Rpb25zIjpbeyJoeXBvdGhlc2lzX2lkIjoidGhlcm1hbCIsImNvbmNlcm4iOiJ1bnRlc3RlZCBhdCBzY2FsZSIsInJhdGlvbmFsZSI6ImV2ZXJ5IHJ1biBvbiBmaWxlIHdhcyBhdCBvbmUgZ3JhbSIsImNpdGVkX25vdGVfaWRzIjpbXX1dLCJjaGVjayI6eyJoeXBvdGhlc2lzX2lkIjoidGhlcm1hbCIsInF1ZXN0aW9uIjoicnVuIHRoZSBjb250cm9sIGZvciB0aGVybWFsIiwia2luZCI6ImNvbXB1dGFibGUiLCJ0b29sIjoiIiwiY2FsbCI6eyJ0b29sIjoicHJlZGljdF9wa2EiLCJzdWJqZWN0X25vdGVfaWQiOiJjb21wb3VuZC14Iiwiam9iIjoiIiwic3ViamVjdHMiOnt9LCJzd2VlcF9wYXJhbWV0ZXIiOiIiLCJzd2VlcF92YWx1ZXMiOltdLCJ0ZW1wbGF0ZSI6IiJ9LCJleHBlY3RhdGlvbiI6InRoZSBlZmZlY3QgZGlzYXBwZWFycyBpZiB0aGUgaHlwb3RoZXNpcyBob2xkcyJ9LCJvdXRjb21lIjp7Imh5cG90aGVzaXNfaWQiOiJ0aGVybWFsIiwidmVyZGljdCI6ImluY29uY2x1c2l2ZSIsImRldGFpbCI6InN0dWIgQ29tcHV0ZWQ6IDEiLCJjYWxjX3JlZnMiOltdLCJyZWZ1c2FsX2NvZGUiOiIiLCJyYW4iOiIifX1dLCJyZWplY3RlZCI6W10sIm1lcmdlZCI6W10sImNvbXBhcmlzb25zX3J1biI6MSwicG9zaXRpb25fYmlhcyI6bnVsbCwibGVhZGVyX2lzX2RlY2lzaXZlIjpmYWxzZSwicHJvcG9zYWxfbm90ZV9pZHMiOltdfSwibm90ZSI6bnVsbCwiZXh0ZXJuYWxfcmVmIjoiIiwiY2FsY19yZWZzIjpbXSwicGF5bG9hZF9raW5kIjoiVG91cm5hbWVudE91dGNvbWUifQ=="
+      }
+     ]
+    },
+    "workflowTaskCompletedEventId": "111"
+   }
+  }
+ ]
+}

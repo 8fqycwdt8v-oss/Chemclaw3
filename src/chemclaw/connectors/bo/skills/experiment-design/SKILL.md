@@ -307,6 +307,64 @@ Both `n_center` and `n_repetitions` need at least one continuous factor and are 
 all-categorical problem, because BoFire ignores them there. If the chemist wants replicates of an
 all-categorical screen, say that they should run the returned list twice.
 
+## The third DoE question: a constrained space with a fixed budget
+
+A factorial enumerates corners and **honours no constraint** — it refuses a problem that carries
+one, and says so. So the ask it cannot serve is the common process-development one: *"I have
+twelve runs, and base plus acid has to stay under three equivalents."* That is the same
+`generate_screening_design` tool with a `criterion` other than `factorial` and a run budget: it
+fills that budget exactly and returns runs that all satisfy the declared limits.
+
+**Choose the criterion by the chemist's question, not by the letter.**
+
+- **`d-optimal`** — estimate the model as precisely as the budget allows. The default, and the
+  right answer to "which factors matter and by how much".
+- **`i-optimal`** — predict well *across the region* rather than estimate coefficients. Reach for
+  it when the chemist intends to interpolate: "what will happen at conditions I have not run".
+- **`a-optimal`** — the one people name when they mean D. Take it if they ask for it by name.
+- **`space-filling`** — no model at all. For "what does this region even look like" and for
+  generating a first batch in a space nobody has explored.
+
+**`formula` is half the question and the model is the half people forget.** A D-optimal design is
+optimal *for a stated model*, so the same factors and budget give a different design for `linear`
+than for `fully-quadratic` — and a `linear` design is **blind to curvature by construction**, which
+is usually exactly what a process chemist is hunting. Ask which they need before you call it:
+
+- `linear` — main effects only. Cheapest, and cannot see an optimum inside the range.
+- `linear-and-interactions` — main effects plus two-factor interactions. Usually the right default
+  when factors are expected to interact, which in chemistry they generally do.
+- `linear-and-quadratic` / `fully-quadratic` — curvature. Needed if the question is *where* the
+  optimum is rather than which direction is better.
+
+**Never report the design without naming the model it is optimal for.** "Twelve D-optimal runs" is
+not a statement a chemist can act on; "twelve runs, optimal for a model with main effects and
+two-factor interactions, so it will not resolve curvature" is.
+
+**Two things in the return to repeat rather than tidy away.**
+
+- **A repeated row is intentional.** Replication at an informative point is what minimises the
+  criterion, so two identical rows are the design working. A chemist who spots the duplicate and
+  deletes it has changed the design — say so when `duplicate_runs` is non-zero.
+- **There is no resolution and no alias structure.** Unlike a fractional factorial, this cannot
+  tell you which effects are confounded. What it offers instead is that every run is feasible, and
+  those are different guarantees — do not describe one as the other.
+
+**A budget below the model's term count is refused**, because such a design is singular and
+estimates none of its coefficients. The refusal names the term count and a simpler formula; pass
+that on rather than quietly dropping to `linear`, because which model the chemist needs is their
+call. Note too that a budget *exactly* at the term count leaves no residual degrees of freedom —
+the model will fit perfectly and say nothing about how well, which is worth a sentence.
+
+**Which design to reach for**, in one line each: every combination and no limits is
+`generate_screening_design` at its default `factorial`; a fixed budget under a real constraint is
+the same tool with `d-optimal`, `i-optimal`, `a-optimal` or `space-filling` and an
+`n_experiments` budget; and "where do I go next given what I have already run" is
+`suggest_next_experiment`, the only one that looks at results.
+
+**A budget is refused by `factorial` rather than ignored**, because a factorial's size is the
+product of its level counts. Asking for 24 runs and being handed 128 is the failure that refusal
+prevents — pass a criterion that takes a budget, or reduce the grid with `n_generators`.
+
 ## A design space is not a protocol
 
 Everything above answers *which conditions*. It does not answer what a chemist weighs out, in what

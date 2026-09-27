@@ -25,14 +25,16 @@ from chemclaw.agent.audit import refusal_reason, returned_failure
 from chemclaw.agent.authz import (
     AuthorizationError,
     authorize_tool,
+    changes_the_conversation,
     side_effecting_call,
     side_effecting_tools,
 )
 from chemclaw.agent.framing import SYSTEM_SPEECH_MARK, defang
+from chemclaw.agent.refusal_route import routed, sentence_of
 from chemclaw.agent.tool_result_size import bounded_for_batch
-from chemclaw.agent.turn_flags import is_dry_run
 from chemclaw.connectors.transport import transport_failure
 from chemclaw.core.errors import ChemclawError, SubsystemUnavailableError
+from chemclaw.core.turn_flags import is_dry_run
 from chemclaw.core.turn_signals import record_tool_failure
 
 logger = logging.getLogger(__name__)
@@ -100,14 +102,45 @@ def dry_run_refusal(name: str, arguments: Mapping[str, Any]) -> DryRunRefusal | 
 
     Takes the arguments as well as the name because one of the calls it must refuse cannot be
     recognised from the name — `write_file` under `/memories/` is durable and the same verb under
-    `/scratch/` is not. See `authz.side_effecting_call`.
+    `/scratch/` is not. See `authz.side_effecting_call`, and `authz.changes_the_conversation` for
+    the handoff this gate refuses and the plan gate does not.
     """
-    if is_dry_run() and side_effecting_call(name, arguments):
-        return DryRunRefusal(
+    if not is_dry_run():
+        return None
+    if side_effecting_call(name, arguments):
+        sentence = (
             f"DRY RUN — {name} changes stored data or starts work, so it was not called. "
             "Nothing was started; re-ask without dry-run to do it."
         )
-    return None
+        path = (
+            "every read-only tool still runs — look up what the real call would need, and "
+            "say what you would have done"
+        )
+    elif changes_the_conversation(name):
+        # Its own wording, because a handoff writes nothing and starts nothing: the harm it would
+        # do on a dry run is moving this and every later turn to another agent, and telling the
+        # chemist it "changes stored data" is the mis-description `changes_the_conversation` was
+        # split out of `side_effecting_call` to stop.
+        sentence = (
+            f"DRY RUN — {name} would move this conversation, and every later turn, to another "
+            "agent, so it was not taken. The conversation stays with you; re-ask without dry-run "
+            "to hand over."
+        )
+        path = (
+            "answer the chemist yourself with what you have, and name the agent you would have "
+            "handed to and what you wanted from it"
+        )
+    else:
+        return None
+    return DryRunRefusal(
+        routed(
+            sentence,
+            code="dry_run",
+            boundary="this turn's dry-run flag",
+            who_can_act="the chemist, by asking again without dry run",
+            sanctioned_path=path,
+        )
+    )
 
 
 def undeclared_write_refusal(name: str, held: frozenset[str]) -> UndeclaredWriteRefusal | None:
@@ -143,18 +176,34 @@ def undeclared_write_refusal(name: str, held: frozenset[str]) -> UndeclaredWrite
         return None
     if name in side_effecting_tools():
         return UndeclaredWriteRefusal(
-            f"{name} changes stored data or starts work, and this agent was not given it, so it "
-            "was not called. Nothing was started; say what you could not do and continue with "
-            "what you can."
+            routed(
+                f"{name} changes stored data or starts work, and this agent was not given it, so "
+                "it was not called. Nothing was started; say what you could not do and continue "
+                "with what you can.",
+                code="tool_withheld_write",
+                boundary="the tools this agent was built with",
+                who_can_act="an agent holding the full set; this one was narrowed on purpose",
+                sanctioned_path=(
+                    "continue with the tools you do hold, and name this one in what you report back"
+                ),
+            )
         )
     if name in SPEAKS_TO_THE_CHEMIST:
         # A second sentence, because for this one the name is not the reason: it changes nothing,
         # so "changes stored data or starts work" would be false, and a refusal that misstates its
         # own reason is worse than the library message it replaces.
         return UndeclaredWriteRefusal(
-            f"{name} reaches the chemist directly, and this agent was not given it, so it was not "
-            "called. Nothing was asked; answer from what you have, or say in your own answer what "
-            "you would have needed to ask."
+            routed(
+                f"{name} reaches the chemist directly, and this agent was not given it, so it was "
+                "not called. Nothing was asked; answer from what you have, or say in your own "
+                "answer what you would have needed to ask.",
+                code="tool_withheld_reaches_the_chemist",
+                boundary="the tools this agent was built with",
+                who_can_act="whatever this agent reports back to, which does reach the chemist",
+                sanctioned_path=(
+                    "answer from what you have, naming in that answer what you would have asked"
+                ),
+            )
         )
     return None
 
@@ -180,8 +229,15 @@ def domain_error_result(exc: BaseException) -> str:
 
 
 def failure_detail(exc: BaseException) -> str:
-    """What the *chemist's* transcript is told a tool raised, bounded so it cannot flood."""
-    return f"{type(exc).__name__}: {exc}"[:_FAILURE_CHARS]
+    """What the *chemist's* transcript is told a tool raised, bounded so it cannot flood.
+
+    `sentence_of` drops a refusal's routing footer, because this channel's reader is the chemist
+    and that footer is written for the model — in the model's second person, with two machine
+    fields. It is also the channel where the bound bites: the footer pushed four of the eleven
+    refusals past `_FAILURE_CHARS`, so a chemist read the sentence followed by a footer cut
+    mid-word. Anything without a footer is returned unchanged, so no other failure is affected.
+    """
+    return f"{type(exc).__name__}: {sentence_of(str(exc))}"[:_FAILURE_CHARS]
 
 
 def returned_failure_detail(message: ToolMessage) -> str:

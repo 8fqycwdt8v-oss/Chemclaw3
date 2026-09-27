@@ -1,0 +1,62 @@
+{
+  "probe": {
+    "id": "dl-04",
+    "section": 1,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "Across every campaign we have recorded, which transformations have we run most often, and which of those has the worst spread in yield?",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note",
+      "reagent_frequency",
+      "similar_reactions"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a corpus-wide claim when only part of the corpus was read",
+      "a yield spread stated without the number of runs behind it",
+      "a transformation ranked by frequency with no count given"
+    ],
+    "direction": "A corpus-wide aggregation: many notes read, two numbers out. Must say how many campaigns it actually read rather than implying the whole corpus if it sampled.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "dl-04",
+    "section": 1,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "Across every campaign we have recorded, which transformations have we run most often, and which of those has the worst spread in yield?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.87,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "a0576c4454984520a2fb5e9a913e2962",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

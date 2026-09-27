@@ -1,0 +1,61 @@
+{
+  "probe": {
+    "id": "gr-03",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Have we ever coupled anything that looks like BrC1=CC=C(OC)C=C1 before?",
+    "expects_tools": [
+      "similar_reactions",
+      "substructure_matches",
+      "similar_molecules",
+      "gather_evidence",
+      "find_notes"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "'no prior work found' or equivalent, when 264 records on this exact halide are seeded",
+      "a count of matching records stated without any identifier a reader could check"
+    ],
+    "direction": "4-bromoanisole is one of fifteen aryl halides on the seeded Buchwald-Hartwig amination plates, with 264 records behind it and two sibling halides (the chloride and the iodide of the same anisole) on the same grid. A good answer finds them, says roughly how many and what varied, and points at something identifiable. A \"no\" here is a retrieval defect, not an honest absence.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-03",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Have we ever coupled anything that looks like BrC1=CC=C(OC)C=C1 before?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.76,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "b15d526abb6e450bb268952a17a9aced",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

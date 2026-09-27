@@ -1,0 +1,66 @@
+{
+  "probe": {
+    "id": "pt-04",
+    "section": 4,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "The Suzuki on our deactivated aryl chloride is going nowhere with the conditions we have. Put me a 24-well plate together — I want catalyst and base varied, one plate, and I want the choices to come from what we've actually run rather than a catalogue.",
+    "expects_tools": [
+      "structure_experiment_request",
+      "draft_experiment_protocol",
+      "generate_screening_design",
+      "reagent_frequency",
+      "conditions_for_similar_reaction",
+      "substrate_precedent",
+      "condense_protocols",
+      "similar_reactions"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a catalyst or base frequency, count or ranking that no cited query returned",
+      "a predicted yield for any well",
+      "that the plate has been ordered, booked or scheduled",
+      "more wells occupied than the stated plate format holds"
+    ],
+    "direction": "Twenty-four wells is a fixed budget and the answer is a bet against it, so the useful reply says what it spent the budget on and what it deliberately did not. Factors and levels are argued from the record's own frequencies — which catalyst, ligand and base comparable couplings actually reached for, with counts behind them — rather than from a plausible catalogue of palladium sources, and a deactivated chloride is the case where the record's modal answer is most likely to be wrong, which is worth saying. The design comes back as one stored object with its arms laid out on the plate, controls included, and the answer states the run order and whether it was randomised — drift across a session reading as a factor effect is the failure randomisation exists to prevent, and a randomised order needs a seed so the plate can be reproduced. Checks are reported, including any warning about factor coverage the plate does not achieve. An answer that fills 24 wells with a full factorial that does not fit, or that silently drops arms to make one fit, is worse than an answer that says 24 wells buys a smaller question than the one asked.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "pt-04",
+    "section": 4,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "The Suzuki on our deactivated aryl chloride is going nowhere with the conditions we have. Put me a 24-well plate together — I want catalyst and base varied, one plate, and I want the choices to come from what we've actually run rather than a catalogue.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.82,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "a8ba6e0bda9c44e6b13fca082d1ed9a5",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

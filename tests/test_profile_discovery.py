@@ -19,7 +19,13 @@ from fastapi.testclient import TestClient
 
 from chemclaw.agent.chemclaw_agent import advertised_tool_names, connector_specs
 from chemclaw.agent.profile_discovery import ProfileError, load_profiles, profile_files
-from chemclaw.agent.profiles import _REGISTRY, get_profile, registered_profile_names
+from chemclaw.agent.profiles import (
+    _REGISTRY,
+    DEFAULT_PROFILE,
+    AgentProfile,
+    get_profile,
+    registered_profile_names,
+)
 from chemclaw.api.app import create_app
 from tests.surface import surface
 
@@ -281,3 +287,74 @@ def test_a_profile_file_is_read_through_the_one_bounded_manifest_reader(
     (profiles_dir / "deep.yaml").write_text("a: " + "[" * 2000 + "]" * 2000 + "\n")
     with pytest.raises(ProfileError, match="deeper than"):
         load_profiles()
+
+
+def _tool_universe() -> frozenset[str]:
+    """Every name any shipped profile declares as a tool, plus the in-process registry.
+
+    The universe is what separates a *tool* name in a profile's prose from an argument or field
+    name that happens to be snake_case — `structure_id` is a property on a calculation model and
+    `artifact_refs` is a note field, and both appear in `evidence.yaml`'s prose legitimately.
+
+    Built from the declarations rather than from a running graph on purpose. A connector that is
+    unreachable in this environment drops its tools from the *advertised* surface — measured, the
+    `computation` profile advertises 20 of the 41 names it declares with no fleet running — so a
+    check against the live surface would fail on a laptop and pass in a pod, which is the opposite
+    of what a repository-owned guard should do.
+    """
+    from chemclaw.core.tool_registry import registered_tool_names
+
+    names = set(registered_tool_names())
+    for profile in _shipped_profiles():
+        names |= set(profile.tool_names or ())
+    return frozenset(names)
+
+
+def _shipped_profiles() -> list[AgentProfile]:
+    """Every profile under `data/profiles/`, read through the registry rather than the loader.
+
+    **`load_profiles()` returns what it *newly* registered, not what exists**, and that is a trap
+    worth naming: it is idempotent by skipping names already in the registry, so the second call in
+    a process returns `[]`. The first draft of the guard below iterated it, measured an empty list,
+    and passed green over a defect this file had already been shown — the guard-that-cannot-fail
+    shape, reached through a contract nobody misread so much as assumed.
+    """
+    load_profiles()
+    shipped = (name for name in registered_profile_names() if name != DEFAULT_PROFILE.name)
+    return [get_profile(name) for name in shipped]
+
+
+def test_no_shipped_profiles_prose_names_a_tool_that_profile_does_not_bind() -> None:
+    """The defect `PromptBlock` exists to end, surviving one function along.
+
+    `instructions_for` narrows the *default* prose block by block against the graph's surface, and
+    passes a profile's own `instructions:` through whole — its docstring's reason being that a
+    profile's prose is "text this repository did not write and cannot cut into blocks". The six
+    profiles under `data/profiles/` **are** text this repository wrote, so that exemption does not
+    cover them and nothing checked them.
+
+    Measured when this was written: `evidence.yaml` told the evidence specialist that "a spectrum is
+    the band list compute_thermochemistry returned" while binding fourteen names, none of them that
+    one. A model reads a tool name in its own system prompt as a tool it has — that is the whole
+    premise of `PromptBlock.requires` — so the specialist whose brief is explicitly "never compute a
+    new value" was pointed at a calculation tool it cannot call.
+
+    Scoped to the profiles in this repository, deliberately. A site's own profile is a manifest this
+    tree cannot see, and the general fix for one — a profile supplying *blocks* so its prose is
+    narrowed like the default's — is a `BACKLOG.md` row rather than an abstraction with no caller.
+    """
+    universe = _tool_universe()
+    offences: dict[str, list[str]] = {}
+    for profile in _shipped_profiles():
+        declared = set(profile.tool_names or ())
+        text = profile.instructions or ""
+        if not text or not profile.tool_names:
+            continue
+        named = {name for name in universe if name in text}
+        if missing := sorted(named - declared):
+            offences[profile.name] = missing
+
+    assert not offences, (
+        "a profile's system prompt names a tool that profile does not bind; a model reads that as "
+        f"a tool it has: {offences}"
+    )

@@ -33,18 +33,22 @@ def plan_link_from_todos(todos: Sequence[Mapping[str, Any]]) -> tuple[str, str]:
     the step this call serves. No step in flight stamps `""`, which reads as the honest "this call
     was not made from a plan step" rather than a guess at the nearest pending one.
 
-    The hash is `plan_identity` over the bare contents — the same identity the approval row is
+    The hash is `plan_identity` over the steps themselves — the same identity the approval row is
     keyed on, computed by the same function, so a stamped job can be matched to the plan revision
-    a chemist actually decided about. An empty plan has no identity (`plan_identity` returns
-    `None` for the reason its docstring gives), so it stamps `""` too.
+    a chemist actually decided about. The steps rather than their text because the identity covers
+    each step's declaration as well as its content
+    (`D-2026-09-13-a-plan-identity-that-omits-the-scope-approves-a-plan-nobody-read`); handing it a
+    list of strings here would stamp a job with a hash matching no decision, which is the same
+    failure `plan_state`'s header records for the rendered line. An empty plan has no identity
+    (`plan_identity` returns `None` for the reason its docstring gives), so it stamps `""` too.
     """
-    contents = [str(todo["content"]) for todo in todos if "content" in todo]
+    steps = [todo for todo in todos if "content" in todo]
     in_progress = (
         str(todo["content"])
         for todo in todos
         if todo.get("status") == "in_progress" and "content" in todo
     )
-    return next(in_progress, ""), plan_identity(contents) or ""
+    return next(in_progress, ""), plan_identity(steps) or ""
 
 
 def plan_link_for_call(request: Any) -> tuple[str, str]:

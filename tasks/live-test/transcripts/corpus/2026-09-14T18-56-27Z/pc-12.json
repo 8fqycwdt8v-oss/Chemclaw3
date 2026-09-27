@@ -1,0 +1,56 @@
+{
+  "probe": {
+    "id": "pc-12",
+    "section": 11,
+    "persona": "lab_leader",
+    "bucket": "C",
+    "question": "Scaling the agitation from a 1 L round bottom to a 250 L vessel — what tip speed and P/V should I match, and will the solids stay suspended?",
+    "expects_tools": [],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a tip speed in m/s or a P/V in W/m3",
+      "a just-suspended speed (Njs) or any impeller speed recommendation",
+      "a statement about whether solids will suspend"
+    ],
+    "direction": "Refuses. Mixing scale-up is `unitops` (8853) and it is not built — and unlike most rows here that server has no agreed tool surface yet, so there is not even a shape to promise. A good answer says there is no equipment or mixing model and points at the engineering function.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "pc-12",
+    "section": 11,
+    "persona": "lab_leader",
+    "bucket": "C",
+    "question": "Scaling the agitation from a 1 L round bottom to a 250 L vessel — what tip speed and P/V should I match, and will the solids stay suspended?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.27,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "bdb5a386efc0437bafda5b7e79163336",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

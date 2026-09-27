@@ -14,14 +14,14 @@ harmless once a deleted note leaves a vector behind in a store that bills for it
 sweep reaches.
 """
 
-import asyncio
-import functools
+import subprocess
 from pathlib import Path
-from typing import Any
 
 import pytest
 
 from chemclaw.core.config import settings
+from chemclaw.kg import graph
+from chemclaw.kg.graph import corpus_revision, note_file_fingerprints
 from chemclaw.retrieval.external_note_index import ExternalVectorNoteIndex
 from chemclaw.retrieval.vector_index import (
     InMemoryNoteIndex,
@@ -35,16 +35,6 @@ from chemclaw.retrieval.vectors.memory import InMemoryVectorStore
 from tests.pg import migrated_db_or_skip
 
 COLLECTION = "notes"
-
-
-def _sync(test: Any) -> Any:
-    """Run an `async def` test on its own loop; this repository has no async pytest plugin."""
-
-    @functools.wraps(test)
-    def runner(*args: Any, **kwargs: Any) -> None:
-        asyncio.run(test(*args, **kwargs))
-
-    return runner
 
 
 def _record(note_id: str, vector: list[float], text: str = "ester formation") -> NoteRecord:
@@ -68,7 +58,6 @@ def _write_note(directory: Path, note_id: str, title: str) -> None:
 # --- the prune, on the reference backend (no database needed) -----------------------------------
 
 
-@_sync
 async def test_retire_absent_removes_what_is_no_longer_on_disk() -> None:
     """The gap D-2026-08-25 closed: nothing in this system ever deleted a note vector."""
     index = InMemoryNoteIndex()
@@ -78,7 +67,6 @@ async def test_retire_absent_removes_what_is_no_longer_on_disk() -> None:
     assert set(await index.fingerprints("key-1")) == {"a"}
 
 
-@_sync
 async def test_an_empty_keep_set_retires_nothing() -> None:
     """A mis-pointed notes directory must not wipe an index that costs one call per note to rebuild.
 
@@ -92,7 +80,6 @@ async def test_an_empty_keep_set_retires_nothing() -> None:
     assert set(await index.fingerprints("key-1")) == {"a"}
 
 
-@_sync
 async def test_reindex_retires_a_deleted_note_even_when_nothing_changed(tmp_path: Path) -> None:
     """A run whose only news is a deletion has nothing to embed and must still remove it.
 
@@ -110,7 +97,6 @@ async def test_reindex_retires_a_deleted_note_even_when_nothing_changed(tmp_path
     assert set(await index.fingerprints(await _key())) == {"reaction-a"}
 
 
-@_sync
 async def test_an_empty_notes_directory_does_not_empty_the_index(tmp_path: Path) -> None:
     """`reindex_notes` returns before the prune when it loaded no notes at all."""
     _write_note(tmp_path, "reaction-a", "Ester A")
@@ -168,7 +154,6 @@ def test_the_external_index_satisfies_the_protocol() -> None:
 # --- the composition, against a real `note_index` table -----------------------------------------
 
 
-@_sync
 async def test_the_vectors_leave_and_the_catalogue_stays(tmp_path: Path) -> None:
     """The whole design in one assertion: `note_index.embedding` is NULL, the store has it.
 
@@ -195,7 +180,6 @@ async def test_the_vectors_leave_and_the_catalogue_stays(tmp_path: Path) -> None
     assert row is not None and row[0] is None, "the pgvector column is written NULL, not dropped"
 
 
-@_sync
 async def test_dense_search_ranks_in_the_store_and_returns_note_ids(tmp_path: Path) -> None:
     """A note is embedded whole, so the point id *is* the note id — no encoding, no resolve step."""
     store = InMemoryVectorStore()
@@ -208,7 +192,6 @@ async def test_dense_search_ranks_in_the_store_and_returns_note_ids(tmp_path: Pa
     assert [hit.note_id for hit in hits] == ["reaction-a"], "orthogonal notes are not hits"
 
 
-@_sync
 async def test_a_scope_narrows_before_the_cut_rather_than_after_it(tmp_path: Path) -> None:
     """Filtering after the top-k is how a narrow scope over a wide corpus returns nothing at all."""
     store = InMemoryVectorStore()
@@ -221,14 +204,12 @@ async def test_a_scope_narrows_before_the_cut_rather_than_after_it(tmp_path: Pat
     assert [hit.note_id for hit in hits] == ["reaction-1"]
 
 
-@_sync
 async def test_a_zero_query_vector_costs_no_round_trip(tmp_path: Path) -> None:
     """It has cosine 0 to everything, which is what the reference backend returns too."""
     index = await _fresh_index(InMemoryVectorStore())
     assert await index.search_dense([0.0, 0.0], 5) == []
 
 
-@_sync
 async def test_retiring_a_note_removes_its_point_too(tmp_path: Path) -> None:
     """The reason this class needed a prune at all: an orphaned vector has no other sweep."""
     store = InMemoryVectorStore()
@@ -244,7 +225,6 @@ async def test_retiring_a_note_removes_its_point_too(tmp_path: Path) -> None:
     )
 
 
-@_sync
 async def test_switching_provider_re_embeds_rather_than_returning_nothing(tmp_path: Path) -> None:
     """A deployment whose notes were in Postgres must not silently lose its dense leg on the move.
 
@@ -283,3 +263,292 @@ async def _embed(text: str) -> list[float]:
     from chemclaw.core.embeddings import embed_texts
 
     return embed_texts([text])[0]
+
+
+# --- the prune against a corpus two pods disagree about -----------------------------------------
+
+
+def _git(directory: Path, *args: str) -> None:
+    """Run one git command in `directory`, carrying its own identity rather than the machine's.
+
+    The identity is passed with `-c` on every invocation instead of being written once into the
+    origin's config, because `git clone` copies no identity: a commit made in a *clone* falls back
+    to the ambient `user.name`/`user.email`, which a developer's machine has and a CI runner does
+    not. That is exactly how this file failed — green locally for as long as it existed, and
+    `Author identity unknown`, exit 128, the first time `_delete_and_commit` ran on a runner.
+    """
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.email=probe@example.invalid",
+            "-c",
+            "user.name=probe",
+            "-C",
+            str(directory),
+            *args,
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+
+def _corpus_at_two_revisions(root: Path) -> tuple[Path, Path]:
+    """One note corpus in git, cloned twice: the current checkout, and one commit behind it.
+
+    The deployment shape, built literally: `note_index` is shared while each pod's knowledge
+    checkout is an `emptyDir` its own sidecar refreshes, so at any moment two pods can hold two
+    commits of one corpus. Real clones rather than two copied directories, because the guard under
+    test reads `git rev-list` and a directory that is not a work tree has no revision at all — the
+    first version of this probe used copies, measured no change, and was measuring nothing.
+    """
+    origin = root / "origin"
+    origin.mkdir()
+    _git(origin, "init", "-q", "-b", "main")
+    _write_note(origin, "reaction-a", "Ester A")
+    _write_note(origin, "reaction-b", "Ester B")
+    _git(origin, "add", "-A")
+    _git(origin, "commit", "-q", "-m", "two notes")
+    behind = subprocess.run(
+        ["git", "-C", str(origin), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+    _write_note(origin, "reaction-c", "Ester C")
+    _git(origin, "add", "-A")
+    _git(origin, "commit", "-q", "-m", "a third note")
+
+    current, lagging = root / "current", root / "lagging"
+    _git(root, "clone", "-q", str(origin), str(current))
+    _git(root, "clone", "-q", str(origin), str(lagging))
+    _git(lagging, "checkout", "-q", behind)
+    return current, lagging
+
+
+def _delete_and_commit(checkout: Path, relative: str) -> None:
+    """Remove a note from a checkout and commit it — a deletion the prune is *meant* to act on."""
+    _git(checkout, "rm", "-q", relative)
+    _git(checkout, "commit", "-q", "-m", f"delete {relative}")
+
+
+def test_a_corpus_outside_a_work_tree_has_no_revision(tmp_path: Path) -> None:
+    """`None` is "no constraint", and every offline corpus in this suite takes that path."""
+    assert corpus_revision(tmp_path) is None
+
+
+async def test_a_lagging_checkout_does_not_retire_a_note_it_has_not_fetched(tmp_path: Path) -> None:
+    """The thrash, on the reference backend: one shared index, two differently-aged checkouts.
+
+    Measured before the guard — pod B's scheduled pass retired `reaction-c` and pod A's next one
+    re-embedded it, alternating for as long as the two sidecars stay out of step, while both legs
+    of retrieval answered as though the newest note did not exist for half of every cycle.
+
+    Asserted as the index contents rather than as `retire_absent`'s count, because the count is the
+    mechanism and the corpus the index serves is the property.
+    """
+    current, lagging = _corpus_at_two_revisions(tmp_path)
+    index = InMemoryNoteIndex()
+
+    await reindex_notes(index, notes_dir=str(current))
+    assert set(await index.fingerprints(await _key())) == {"reaction-a", "reaction-b", "reaction-c"}
+
+    await reindex_notes(index, notes_dir=str(lagging))
+    assert set(await index.fingerprints(await _key())) == {
+        "reaction-a",
+        "reaction-b",
+        "reaction-c",
+    }, "a pod one commit behind retired a note its own sidecar has not fetched yet"
+
+
+async def test_a_note_deleted_from_the_corpus_is_still_retired(tmp_path: Path) -> None:
+    """The guard may only decline where it cannot judge; a real deletion still goes.
+
+    Without this the fix would be indistinguishable from removing the prune, which is the shape a
+    guard is most easily mistaken for.
+    """
+    current, _ = _corpus_at_two_revisions(tmp_path)
+    index = InMemoryNoteIndex()
+    await reindex_notes(index, notes_dir=str(current))
+
+    _delete_and_commit(current, "reaction/reaction-b.md")
+    await reindex_notes(index, notes_dir=str(current))
+    assert set(await index.fingerprints(await _key())) == {"reaction-a", "reaction-c"}
+
+
+async def test_the_postgres_predicate_protects_a_row_from_a_newer_corpus(tmp_path: Path) -> None:
+    """The same guard through the SQL, because the SQL is what a deployment runs.
+
+    The reference backend evaluates the comparison in Python and the shipped one in a `DELETE`
+    predicate; a guard that held in one and not the other would be a guard that exists only in the
+    tests. `corpus_commit_count` NULL on either side must still prune, which is what every row
+    written before migration 099 and every non-git corpus relies on.
+    """
+    await migrated_db_or_skip()
+    from chemclaw.core import db
+
+    async with db.connection(settings.postgres_dsn) as conn:
+        await conn.execute("DELETE FROM note_index")
+        await conn.commit()
+
+    index = PostgresNoteIndex()
+    # Full-width vectors: this backend writes `note_index.embedding` itself, and the column is
+    # `vector(settings.embedding_dim)`. The short vectors elsewhere in this file are the external
+    # index's, which leaves that column NULL.
+    width = settings.embedding_dim
+    newer = _record("newer", [1.0] + [0.0] * (width - 1))
+    older = _record("older", [0.0, 1.0] + [0.0] * (width - 2))
+    await index.upsert([newer], "key-1", corpus_revision=9)
+    await index.upsert([older], "key-1", corpus_revision=2)
+    await index.upsert([_record("unknown", [0.5] * width)], "key-1")
+
+    # A pod at commit 5: it cannot judge `newer`, and may judge the other two.
+    assert await index.retire_absent({"kept"}, built_before=5) == 2
+    assert set(await index.fingerprints("key-1")) == {"newer"}
+
+    # A caller with no revision of its own prunes everything absent, exactly as before.
+    assert await index.retire_absent({"kept"}) == 1
+    assert await index.fingerprints("key-1") == {}
+
+
+# --- two pods at ONE commit: the re-embedding half of the same measurement ----------------------
+
+
+def _corpus_cloned_twice(root: Path) -> tuple[Path, Path]:
+    """One commit of one corpus, cloned twice — the steady state, not the lagging one.
+
+    `_corpus_at_two_revisions` above builds the *retirement* case: two pods that genuinely disagree
+    about what the corpus contains. This builds the case where they agree about everything a person
+    would call content and still disagree about the fingerprint, because a clone writes its own
+    mtimes. Real clones rather than copied directories, for the reason that helper gives.
+    """
+    origin = root / "origin"
+    origin.mkdir()
+    _git(origin, "init", "-q", "-b", "main")
+    for note_id in ("reaction-a", "reaction-b", "reaction-c"):
+        _write_note(origin, note_id, note_id.upper())
+    _git(origin, "add", "-A")
+    _git(origin, "commit", "-q", "-m", "three notes")
+
+    pod_a, pod_b = root / "pod-a", root / "pod-b"
+    _git(root, "clone", "-q", str(origin), str(pod_a))
+    _git(root, "clone", "-q", str(origin), str(pod_b))
+    return pod_a, pod_b
+
+
+def test_two_clones_of_one_commit_fingerprint_every_note_identically(tmp_path: Path) -> None:
+    """The root cause, at the smallest scale that shows it.
+
+    Measured before the change: the two dicts shared not one value, because `mtime_ns:size` names
+    the moment a checkout *wrote* the file. Asserted as full equality rather than as "the same
+    keys", since the keys always agreed — that was the whole trap.
+    """
+    pod_a, pod_b = _corpus_cloned_twice(tmp_path)
+    assert note_file_fingerprints(pod_a) == note_file_fingerprints(pod_b) != {}
+
+
+async def test_two_pods_sharing_one_index_re_embed_nothing_on_an_unchanged_corpus(
+    tmp_path: Path,
+) -> None:
+    """The defect, as the count that pays for it: embedding calls per scheduled pass.
+
+    Driven before the change, over these exact clones: pass 1 embedded 3, and passes 2, 3, 4 and 5
+    each embedded 3 again — the whole corpus, every pass, for ever, which is the incremental
+    rebuild `D-2026-08-02-embed-only-what-changed` exists to provide degenerating to a full one the
+    moment a second pod shares the index.
+
+    Five passes rather than two, and alternating, because two would be satisfied by a fingerprint
+    that merely happened to survive one round trip: the steady state is each pod repeatedly finding
+    the other's work acceptable. Pass 5 repeats pod A immediately after pod B, which is the
+    interleaving a Temporal Schedule actually produces — one execution per firing, landing on
+    whichever worker polls first.
+    """
+    pod_a, pod_b = _corpus_cloned_twice(tmp_path)
+    index = InMemoryNoteIndex()
+
+    assert await reindex_notes(index, notes_dir=str(pod_a)) == 3, "the first pass embeds the corpus"
+    for pod in (pod_b, pod_a, pod_b, pod_a):
+        assert await reindex_notes(index, notes_dir=str(pod)) == 0, (
+            "a pod re-embedded notes another pod had already embedded from the identical commit"
+        )
+
+
+async def test_a_second_pod_still_embeds_a_note_the_first_has_not_seen(tmp_path: Path) -> None:
+    """The change may only stop work that was redundant; a real edit still costs its call.
+
+    Without this, the fix is indistinguishable from deleting the diff — the shape a
+    "nothing changed" optimisation is most easily mistaken for. Both arms are here: a note edited
+    in one clone is re-embedded from that clone, and a note added to it is embedded too.
+    """
+    pod_a, pod_b = _corpus_cloned_twice(tmp_path)
+    index = InMemoryNoteIndex()
+    await reindex_notes(index, notes_dir=str(pod_a))
+
+    _write_note(pod_b, "reaction-b", "Ester B, corrected")
+    _write_note(pod_b, "reaction-d", "Ester D")
+    assert await reindex_notes(index, notes_dir=str(pod_b)) == 2
+
+    # And pod A, which still holds the old bytes for `reaction-b`, sees its own version as changed.
+    assert await reindex_notes(index, notes_dir=str(pod_a)) == 1
+
+
+async def test_the_fingerprint_survives_the_round_trip_through_postgres(tmp_path: Path) -> None:
+    """The same agreement through the shipped backend, because a column is what a deployment has.
+
+    `note_index.fingerprint` is `TEXT` (migration 035) and the value it now holds is 71 characters
+    where it held around 25, so this is the assertion that the wider value is stored and read back
+    whole rather than truncated somewhere between the upsert and `fingerprints()`. A fingerprint
+    that came back clipped would compare unequal and re-embed everything — the defect, restored,
+    with every offline test still green.
+    """
+    await migrated_db_or_skip()
+    from chemclaw.core import db
+
+    async with db.connection(settings.postgres_dsn) as conn:
+        await conn.execute("DELETE FROM note_index")
+        await conn.commit()
+
+    pod_a, pod_b = _corpus_cloned_twice(tmp_path)
+    index = PostgresNoteIndex()
+
+    assert await reindex_notes(index, notes_dir=str(pod_a)) == 3
+    stored = await index.fingerprints(await _key())
+    assert stored == note_file_fingerprints(pod_b), (
+        "what Postgres gave back is not what the other pod's disk says"
+    )
+    assert await reindex_notes(index, notes_dir=str(pod_b)) == 0
+
+
+async def test_a_note_that_will_not_open_is_kept_rather_than_retired(tmp_path: Path) -> None:
+    """Hashing widened the window in which a note can drop out of `keep`, and this holds it shut.
+
+    `reindex_notes` builds `keep` from `note_file_fingerprints`, which is what stops a note it
+    cannot *parse* being retired from the index — measured at 40 rows per 40 broken notes. Moving
+    from stat to read added a second way to fail: a file that stats fine and will not open. Without
+    `graph.UNREADABLE` it would have vanished from that set and taken its index row with it.
+
+    The last two passes are the part that was written wrong before it was run. The docstring in
+    `note_file_fingerprints` claimed the note is "re-embedded exactly once" when the file opens
+    again; it is re-embedded only if its *bytes* moved, so a fault that heals to the same content
+    costs nothing. The fault is staged as a directory wearing a note's name, the same
+    privilege-independent way `tests/test_graph.py` stages it.
+    """
+    index = InMemoryNoteIndex()
+    _write_note(tmp_path, "reaction-a", "Ester A")
+    _write_note(tmp_path, "reaction-b", "Ester B")
+    assert await reindex_notes(index, notes_dir=str(tmp_path)) == 2
+
+    broken = tmp_path / "reaction" / "reaction-b.md"
+    broken.unlink()
+    broken.mkdir()
+    assert note_file_fingerprints(tmp_path)["reaction-b"] == graph.UNREADABLE
+    assert await reindex_notes(index, notes_dir=str(tmp_path)) == 0
+    assert set(await index.fingerprints(await _key())) == {"reaction-a", "reaction-b"}, (
+        "a note that would not open was retired by the pass that could not read it"
+    )
+
+    # Healed to the *same* bytes: the stored digest was never wrong, so there is nothing to redo.
+    broken.rmdir()
+    _write_note(tmp_path, "reaction-b", "Ester B")
+    assert await reindex_notes(index, notes_dir=str(tmp_path)) == 0
+
+    # Healed to *different* bytes: exactly that one note.
+    _write_note(tmp_path, "reaction-b", "Ester B, corrected")
+    assert await reindex_notes(index, notes_dir=str(tmp_path)) == 1

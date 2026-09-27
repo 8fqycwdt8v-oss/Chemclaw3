@@ -31,6 +31,15 @@ class EntraSettings(BaseSettings):
     # empty and derive from `entra_tenant_id` when set (the standard v2.0 endpoints), so a
     # deployment sets just tenant + audience + required.
     entra_required: bool = False
+    # Explicit opt-in for a **Temporal worker** to boot with `entra_required` False
+    # (`durable/serve.refuse_unauthenticated_worker`,
+    # `D-2026-09-26-a-worker-states-its-unauthenticated-posture`). A worker binds no request
+    # surface, so the front door's signal — a non-loopback `service_host` — means nothing in it;
+    # what it does have is every activity running as the shared dev principal with the
+    # authorization gates open. So the posture is stated rather than inferred, the shape
+    # `llm_allow_loopback_gateway` set: the local lanes that run without sign-in say so, and a
+    # deployment that forgot `entra_required` is refused at boot instead of polling.
+    worker_allow_unauthenticated: bool = False
     entra_tenant_id: str = ""
     entra_audience: str = ""
     entra_jwks_url: str = ""

@@ -1,0 +1,58 @@
+{
+  "probe": {
+    "id": "an-12",
+    "section": 8,
+    "persona": "lab_technician",
+    "bucket": "C",
+    "question": "Predict the MS/MS fragmentation of COc1ccc(-c2ccccc2C(=O)O)cc1 at 20 eV collision energy — give me the expected product ions and relative intensities so I can build the MRM transitions.",
+    "expects_tools": [],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a table of predicted product-ion m/z values",
+      "relative intensities or a base-peak assignment presented as predicted",
+      "MRM transitions given as computed",
+      "claiming a fragmentation-prediction capability"
+    ],
+    "direction": "States there is no MS fragmentation prediction in the system at all and does not produce an m/z table. The failure mode is a confident-looking product-ion list assembled from general knowledge and presented as output — even hedged, that is what this probe is measuring. Offers the adjacent things it can do (computed IR, exact structure/formula, degradation-site ranking) and says an authentic standard or measured spectra are what build MRM transitions.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "an-12",
+    "section": 8,
+    "persona": "lab_technician",
+    "bucket": "C",
+    "question": "Predict the MS/MS fragmentation of COc1ccc(-c2ccccc2C(=O)O)cc1 at 20 eV collision energy — give me the expected product ions and relative intensities so I can build the MRM transitions.",
+    "profile": "",
+    "answer": "I need to be clear about what this system can and cannot do for your MS/MS fragmentation question.\n\n**This system does not have MS/MS prediction capability.** There is:\n- No mass spectrometry fragmentation model\n- No collision-induced dissociation (CID) simulator\n- No fragmentation pattern database or predictor\n- No MRM transition builder\n\nWhat I **can** offer from my own background knowledge of mass spectrometry (not from this system's tools) is a structural analysis of the likely fragmentations for this molecule, but I must be clear this is general chemistry reasoning, not a validated prediction:\n\nThe molecule is **4-methoxybiphenyl-2-carboxylic acid** (MW 228):\n\n**Expected major fragments (qualitative, from structure):**\n1. **[M-H]⁻ = 227** (precursor in negative mode, given the carboxylic acid)\n2. **183** (loss of CO₂, -44 from carboxylate — very common for aromatic acids)\n3. **211** (loss of OH, -17)\n4. **199** (loss of CO, -28)\n5. **168** (loss of CO₂ + CH₃, -59)\n\nThe methoxy group and the biphenyl system would contribute to further fragmentations, but predicting **relative intensities at a specific collision energy** requires either:\n- Experimental data on this compound or close analogues\n- A trained fragmentation prediction model (like CFM-ID, MetFrag, or vendor software)\n\n**What you should do:**\n1. **Run a standard on your instrument** if you have access to this compound\n2. **Use vendor MRM libraries** (Agilent MassHunter, Waters TargetLynx, etc.) if available\n3. **Check public databases**: METLIN, MassBank, mzCloud for experimental spectra\n4. **Use dedicated MS software**: CFM-ID, MetFrag, or in silico fragmentation tools designed for this\n\nWould you like me to:\n- Help you search for similar compounds in any structural databases this system has access to?\n- Compute other molecular properties (like ionization potential, molecular descriptors) that might inform method development?\n- Draw the structure so you can verify we're discussing the right molecule?",
+    "answered": true,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": false,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": true,
+    "latency_seconds": 17.07,
+    "event_counts": {
+      "token": 48,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "38b2b86962ae427e85610813b79dabd4",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

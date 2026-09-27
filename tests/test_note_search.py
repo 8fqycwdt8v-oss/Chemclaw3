@@ -18,12 +18,15 @@ import pytest
 
 from chemclaw.agent.graph_tools import find_notes
 from chemclaw.agent.subscriptions import Subscription
+from chemclaw.core.config import settings
 from chemclaw.durable.digest import _matches
 from chemclaw.kg.graph import invalidate_cache, load_notes
 from chemclaw.kg.note import Note
 from chemclaw.kg.render import render_note
 from chemclaw.kg.search import query_terms, search_text, term_coverage
 from chemclaw.retrieval.retrievers import GraphRetriever
+from chemclaw.retrieval.vector_index import NoteRecord, PostgresNoteIndex
+from tests.pg import migrated_db_or_skip
 
 _KNOWLEDGE = Path(__file__).resolve().parents[1] / "knowledge"
 
@@ -129,3 +132,100 @@ def test_every_note_in_the_shipped_corpus_is_findable_by_its_own_type() -> None:
     invalidate_cache()
     for note in load_notes(_KNOWLEDGE):
         assert term_coverage(note, [note.type]) == 1, note.id
+
+
+def test_a_question_s_own_grammar_is_not_a_term_the_record_must_contain() -> None:
+    """A chemist asks in sentences, and every function word in one used to be a required term.
+
+    `_STOPWORDS` held fourteen entries — enough to stop `the` erasing a hit (D-138) and nothing
+    more — so `"Has anyone here run that before, and what conditions did they end up on?"` asked
+    the corpus for `has`, `anyone`, `here`, `that`, `what`, `did` and `they` alongside
+    `conditions`. Every one of them is a word no note is *about*, and each does one of two
+    damaging things: under the all-terms rule it removes a real hit, and once the search has
+    widened (`_rank_by_terms`) it *adds* every note that happens to contain it.
+
+    Substring matching is what makes the second half severe: `so` is inside `isolated`,
+    `dissolved` and `solvent`, `at` is inside `temperature`, `he` is inside `ether`. Measured
+    over the 19 `knowledge.yaml` probes, dropping `so` alone moved two gold notes.
+    """
+    terms = query_terms("Has anyone here run that before, and what conditions did they end up on?")
+
+    assert "conditions" in terms
+    assert "anyone" in terms  # not a function word; the list is closed-class only
+    for framing in ("has", "here", "that", "what", "did", "they", "up"):
+        assert framing not in terms, framing
+
+
+def test_a_stopword_list_only_grows_by_words_a_note_cannot_be_about() -> None:
+    """The cost `_STOPWORDS`' own comment names, held as an assertion rather than a promise.
+
+    Each entry is one more word a query can no longer require, so the list may hold only
+    closed-class English function words. The open-class verbs a question frames itself with
+    (`give`, `use`, `need`, `get`) were measured on the same 19 probes and moved recall by
+    **exactly zero**, so they are not here — an entry that buys nothing still costs.
+    """
+    from chemclaw.kg.search import _STOPWORDS
+
+    for open_class in ("give", "given", "use", "used", "using", "get", "got", "need", "yield"):
+        assert open_class not in _STOPWORDS, open_class
+
+
+def test_the_two_lexical_rules_over_one_corpus_are_not_one_rule() -> None:
+    """Neither lexical leg subsumes the other, which is why the duplication is not removable.
+
+    Two rankers read the notes: `GraphRetriever` scores `kg.search.term_coverage`'s **substring**
+    match in this process, `LexicalRetriever` asks Postgres for `ts_rank` over the same rows. That
+    reads as one rule written twice — the shape `core/fulltext.py` exists to end, and the shape
+    D-2026-08-05 is about — and it is not: the server stems and stop-words by a text-search
+    configuration, and a substring is not a lexeme. Measured on 2026-09-16 against live
+    PostgreSQL 16 over the two notes below, each direction has words the other cannot reach.
+
+    This is the assertion behind the decision *not* to delete either leg. Deleting one because the
+    other "already does that" is the removal this pins as lossy, and the gold-set half of the same
+    measurement is in `retrieval/retrievers.py` — where the Postgres leg is the better ranker (42
+    of 46 gold notes to the graph leg's 40 at a matched slot budget) and the graph leg is the only
+    one that answers at all where the derived index is never built.
+    """
+    asyncio.run(migrated_db_or_skip())
+    corpus = {
+        "n-coupling": "The Suzuki coupling was run in toluene.",
+        "n-polyester": "The polyester film was dried overnight.",
+    }
+    durable = PostgresNoteIndex()
+    asyncio.run(
+        durable.upsert(
+            [
+                NoteRecord(note_id=note_id, text=text, embedding=[0.0] * settings.embedding_dim)
+                for note_id, text in corpus.items()
+            ],
+            "probe",
+        )
+    )
+    scope = set(corpus)
+
+    def stemmed(query: str) -> set[str]:
+        hits = asyncio.run(durable.search_lexical(query, 50, within=scope))
+        return {hit.note_id for hit in hits}
+
+    def substrings(query: str) -> set[str]:
+        terms = query_terms(query)
+        return {
+            note_id
+            for note_id, text in corpus.items()
+            if term_coverage(Note(id=note_id, type="reaction", body=text), terms) == len(terms)
+        }
+
+    # Inflections the server stems and a substring test cannot see at all.
+    for inflected, note_id in (
+        ("couplings", "n-coupling"),
+        ("coupled", "n-coupling"),
+        ("dry", "n-polyester"),
+        ("films", "n-polyester"),
+    ):
+        assert stemmed(inflected) == {note_id}, inflected
+        assert substrings(inflected) == set(), inflected
+
+    # And the coarseness that goes the other way: `ester` inside `polyester` is a hit for the
+    # substring rule and no lexeme at all for the server.
+    assert substrings("ester") == {"n-polyester"}
+    assert stemmed("ester") == set()

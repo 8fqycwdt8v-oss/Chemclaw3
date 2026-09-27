@@ -21,7 +21,13 @@ from chemclaw.memory.campaign import campaign_note_from_chain
 from chemclaw.memory.chains import detect_chains
 from chemclaw.memory.ids import stable_id
 from chemclaw.memory.interaction import note_from_confirmed_answer
-from chemclaw.memory.jobs import SynthesisUnit, build_campaign_notes, build_playbook_notes
+from chemclaw.memory.jobs import (
+    PARTIAL_READ_CAVEAT,
+    SynthesisUnit,
+    build_campaign_notes,
+    build_playbook_notes,
+    supported_from,
+)
 from chemclaw.memory.observations import Observation
 from chemclaw.memory.playbook import (
     SOURCE_DISTILLATION,
@@ -330,6 +336,50 @@ def test_playbook_candidate_needs_two_projects() -> None:
     assert set(candidates[0].reaction_ids) >= {"x", "y"}
 
 
+def test_a_note_from_an_incomplete_read_says_so_in_the_body_a_chemist_reads() -> None:
+    """`memory_corpus_max_reactions` is justified by "partial knowledge that says it is partial".
+
+    It did not. `corpus_complete=False` skipped the retirement pass and logged a WARNING into a
+    worker's log, and the note landing in `knowledge/` was byte-identical to one distilled from
+    the whole record — so the only statement that the evidence might be a subset was in a place
+    nobody reading the note would look.
+
+    Both halves are asserted in one test on purpose: skipping the retirement pass without marking
+    the note, or marking it without skipping, each looks like the fix and is half of it.
+    """
+    ester_x = _reaction("x", ["CCO", "CC(=O)O"], ["CCOC(C)=O"], project="proj-x")
+    ester_y = _reaction("y", ["CCCO", "CC(=O)O"], ["CCCOC(C)=O"], project="proj-y")
+
+    partial = build_playbook_notes([ester_x, ester_y], corpus_complete=False)
+    whole = build_playbook_notes([ester_x, ester_y])
+
+    assert partial, "the fixture distilled nothing; this test proves nothing"
+    assert all(PARTIAL_READ_CAVEAT in unit.note.body for unit in partial)
+    assert all(not unit.retirements for unit in partial)
+    assert all(PARTIAL_READ_CAVEAT not in unit.note.body for unit in whole), (
+        "a complete read must not caveat its own notes, or the mark says nothing"
+    )
+
+
+def test_the_caveat_names_the_id_risk_the_skipped_retirement_pass_leaves_open() -> None:
+    """The second-order consequence, which the flag's other half is what exposes.
+
+    `stable_id` anchors on the cluster's *smallest* member, so a truncated read that drops that
+    member mints a **different id for the same cluster** — the case
+    `test_shrunk_cluster_retires_the_pre_shrink_note` exists for, and which the retirement pass
+    normally resolves by superseding the predecessor. An incomplete read is precisely the run whose
+    retirement pass is skipped, so the two notes coexist with nothing linking them, and the caveat
+    is the only thing a reader has. Asserted on the id derivation as well as on the words, because
+    the sentence is only worth having while the mechanism behind it is real.
+    """
+    whole = stable_id("playbook", ["r-001", "r-002", "r-003"])
+    truncated = stable_id("playbook", ["r-002", "r-003"])
+
+    assert whole != truncated, "dropping the anchor no longer changes the id; re-read the caveat"
+    assert "id may differ" in PARTIAL_READ_CAVEAT
+    assert "No note was retired" in PARTIAL_READ_CAVEAT
+
+
 def test_single_project_repetition_is_not_a_playbook() -> None:
     """Repetition within one project is episodic, not a transferable playbook."""
     a = _reaction("a", ["CCO", "CC(=O)O"], ["CCOC(C)=O"], project="proj-x")
@@ -510,3 +560,350 @@ def test_record_confirmed_answer_tool_uses_gate(monkeypatch: pytest.MonkeyPatch)
     submitted = fake.writes[0]
     assert submitted.files[0].path.endswith("interaction/interaction-q-42.md")
     assert "reaction-eln-2026-002" in submitted.files[0].content
+
+
+# --- when a synthesized note became knowledge ----------------------------------------------------
+
+
+def test_a_synthesized_note_is_dated_by_its_evidence_and_not_by_the_clock() -> None:
+    """The date has to be a function of the members, and this is why.
+
+    Every synthesized note is keyed by `stable_id(kind, reaction_ids)`, so a miner re-run over the
+    same members mints the same id. A `date.today()` would then rewrite that note with a new
+    `valid_from` on every run — the content changes, `record_note` commits, and the digest reports
+    it as new again the next day. That is the storm
+    `D-2026-09-14-an-undated-note-is-not-news-every-hour` closed, in a new dress.
+
+    Asserted as *stability*, not as a literal: two runs over the same evidence agree, which is the
+    property that matters and the one a fixture reworded with different dates cannot fake.
+    """
+    runs = {
+        "r1": _dated("r1", date(2026, 7, 1)),
+        "r2": _dated("r2", date(2026, 7, 31)),
+    }
+
+    first = supported_from(["r1", "r2"], runs)
+    again = supported_from(["r1", "r2"], runs)
+
+    assert first == again == date(2026, 7, 1)
+
+
+def test_a_cluster_that_gains_a_member_keeps_both_its_id_and_its_date() -> None:
+    """The one assertion that would have caught the defect this function shipped with.
+
+    `supported_from` was `max(performed_at)` over the members, and its docstring justified that
+    with "when a member joins, the id changes too, so the identity and the date move together or
+    not at all". `memory/ids.stable_id` hashes `min(member_ids)` *deliberately* — its own docstring
+    says hashing the set would mint a new id on every cluster growth — so the premise was false and
+    nothing asserted it either way.
+
+    What that cost: a nightly ELN sync adds a member, the id does not move, `valid_from` rises, and
+    `digest._is_new` reports a note the subscriber already holds as news. The silent direction is
+    worse — a member dropping out, or a `corpus_complete=False` partial read, lowers `valid_from`
+    under one id, and `_is_new` then answers `False` forever for a note whose content just changed.
+
+    So the property is asserted as the docstring states it: over a *growing* cluster, id and date
+    are both invariant. `max` fails this; the anchor does not.
+    """
+    runs = {
+        "r1": _dated("r1", date(2026, 7, 1)),
+        "r2": _dated("r2", date(2026, 7, 31)),
+        "r3": _dated("r3", date(2026, 8, 20)),
+    }
+    before, after = ["r1", "r2"], ["r1", "r2", "r3"]
+
+    assert stable_id("playbook", before) == stable_id("playbook", after)
+    assert supported_from(before, runs) == supported_from(after, runs) == date(2026, 7, 1)
+
+
+def test_the_date_is_the_anchor_run_rather_than_the_newest_or_the_oldest() -> None:
+    """Keyed on `min(reaction_ids)` — the same single input the note's id is keyed on.
+
+    Not the earliest date and not the latest: either is a function of the member *set*, and a
+    function of the set moves under an id that is a function of one member. The anchor's own date
+    is the only reading that makes the two move together, which is what the id's stability rule
+    already promised and what `supported_from` claimed and did not deliver.
+
+    Ordered so the anchor is neither the newest nor the oldest run, because a fixture where it
+    happens to be both cannot tell the three rules apart.
+    """
+    runs = {
+        "r2": _dated("r2", date(2026, 7, 15)),
+        "r1": _dated("r1", date(2026, 7, 20)),
+        "r3": _dated("r3", date(2026, 7, 10)),
+    }
+
+    assert min(["r2", "r1", "r3"]) == "r1"
+    assert supported_from(["r2", "r1", "r3"], runs) == date(2026, 7, 20)
+
+
+def test_evidence_that_states_no_date_leaves_the_note_open_ended() -> None:
+    """`None` is the truthful answer, not a fallback to today.
+
+    `OrdReaction.performed_at` is optional because a source may not state one, and a corpus that
+    never said when its runs happened cannot support a narrower claim than "open-ended".
+    """
+    runs = {"r1": _reaction("r1", ["CC"], ["CCO"])}
+
+    assert supported_from(["r1"], runs) is None
+
+
+def test_a_member_the_corpus_does_not_hold_is_skipped_rather_than_raising() -> None:
+    """A partial corpus read is an ordinary condition here — `_units` has a whole guard for it.
+
+    Three cases, because the two-tier rule answers each differently and the differences are the
+    whole design: a missing *non-anchor* is invisible (the point — the date does not move as the
+    cluster changes around a dated anchor); a missing or undated *anchor* falls to the earliest
+    dated member rather than leaving the note open-ended, which is the coverage the first version
+    of this fix lost; and a corpus that dates nothing at all is still `None`, because that is the
+    truthful answer rather than a fallback to today.
+    """
+    runs = {"r1": _dated("r1", date(2026, 7, 1)), "r2": _dated("r2", date(2026, 8, 20))}
+
+    assert supported_from(["r1", "zz-missing"], runs) == date(2026, 7, 1)
+    assert supported_from(["aa-missing", "r1", "r2"], runs) == date(2026, 7, 1)
+    assert supported_from([], runs) is None
+    assert supported_from(["r1"], {"r1": _reaction("r1", ["CC"], ["CCO"])}) is None
+
+
+def test_an_undated_anchor_falls_to_the_earliest_dated_member_rather_than_to_nothing() -> None:
+    """The coverage this fix lost on its first attempt, asserted so it cannot be lost again.
+
+    Anchoring the date on `min(reaction_ids)` made the note open-ended whenever *the anchor* was
+    undated, however many members carried dates — `None` went from meaning "no member is dated" to
+    "one particular member is not", which for a per-member dating probability `p` over `n` members
+    takes the undated rate from `(1-p)^n` to `(1-p)`. An undated note reaches no subscriber holding
+    a watermark, so that is a regression in the metric this whole wave exists to improve, and the
+    first version stated it as a residual without measuring it.
+
+    Tier 2 is `min` rather than `max` for the reason tier 1 exists at all: a cluster growing
+    forward in time does not move its earliest member, where `max(performed_at)` moved on every
+    arrival.
+    """
+    runs = {
+        "r1": _reaction("r1", ["CC"], ["CCO"]),  # the anchor, undated
+        "r2": _dated("r2", date(2026, 8, 20)),
+        "r3": _dated("r3", date(2026, 7, 31)),
+    }
+
+    assert min(["r1", "r2", "r3"]) == "r1", "the fixture's anchor must be the undated one"
+    assert supported_from(["r1", "r2", "r3"], runs) == date(2026, 7, 31)
+
+    # And it is still stable under growth: a later run joining moves neither tier.
+    runs["r4"] = _dated("r4", date(2026, 9, 30))
+    assert supported_from(["r1", "r2", "r3", "r4"], runs) == date(2026, 7, 31)
+
+
+def _dated(rid: str, performed_at: date) -> OrdReaction:
+    """A reaction that says when it was run."""
+    return _reaction(rid, ["CC"], ["CCO"]).model_copy(update={"performed_at": performed_at})
+
+
+def test_every_miner_dates_the_note_it_mints() -> None:
+    """Three builders, one defect — fixing one would leave the other two silently unreachable.
+
+    `D-2026-09-14-an-undated-note-is-not-news-every-hour` named only the playbook producer and left
+    the rest "for the pass that touches it". The argument does not distinguish them: a mined note
+    became knowledge the day its evidence did.
+
+    **This assertion has been wrong twice, each time one notch less wrong, and the third version is
+    the first that drives anything.** It shipped asserting `"minted_on" in kwargs`, and all three
+    builders re-broken to `minted_on=None` left 38 passing — an AST guard reading the call's
+    *shape*. It was then "fixed" to assert `ast.unparse(value).startswith("supported_from(")`,
+    which is the callee's *name*: `minted_on=supported_from([], by_id)` (always `None`) and
+    `minted_on=supported_from(sorted(ids)[1:], by_id)` — the original defect in a new dress, a date
+    keyed on something other than the id's own input — both passed, 33 green. The list of builders
+    was hardcoded besides, so a fourth miner minting undated notes was invisible.
+
+    So it drives the builders and reads the result. The property is the one the whole fix rests on:
+    **a note's `valid_from` is the date `supported_from` derives from the members its own id is
+    anchored on**, recomputed here from the note's citations rather than from the builder's
+    arguments, so a date wired to a different member set fails.
+    """
+    from chemclaw.memory.ids import MEMBER_PREFIX
+    from chemclaw.memory.jobs import (
+        build_campaign_notes,
+        build_optimization_notes,
+        build_playbook_notes,
+        supported_from,
+    )
+
+    def _on(reaction: OrdReaction, day: date) -> OrdReaction:
+        """The corpus's own reaction, dated — `_dated` builds its own fixed structure."""
+        return reaction.model_copy(update={"performed_at": day})
+
+    chain = [
+        _on(_reaction("c1", ["CCO"], ["CC=O"]), date(2026, 7, 10)),
+        _on(_reaction("c2", ["CC=O"], ["CC(O)O"]), date(2026, 8, 20)),
+    ]
+    playbook = [
+        _on(
+            _reaction("p1", ["CCO", "CC(=O)O"], ["CCOC(C)=O"], project="proj-x"),
+            date(2026, 7, 10),
+        ),
+        _on(
+            _reaction("p2", ["CCCO", "CC(=O)O"], ["CCCOC(C)=O"], project="proj-y"),
+            date(2026, 8, 20),
+        ),
+    ]
+    optimization = [
+        _on(_reaction("o1", ["CCO", "CC(=O)O"], ["CCOC(C)=O"]), date(2026, 7, 10)),
+        _on(_reaction("o2", ["CCO", "CC(=O)O"], ["CCOC(C)=O"]), date(2026, 8, 20)),
+    ]
+
+    built = {
+        "campaign": (build_campaign_notes(chain), chain),
+        "playbook": (build_playbook_notes(playbook), playbook),
+        "optimization": (build_optimization_notes(optimization), optimization),
+    }
+
+    for kind, (units, corpus) in built.items():
+        assert units, f"the {kind} fixture built nothing; this test would prove nothing"
+        by_id = {reaction.reaction_id: reaction for reaction in corpus}
+        for unit in units:
+            members = [
+                cited.removeprefix(MEMBER_PREFIX)
+                for cited in unit.note.outgoing_links()
+                if cited.startswith(MEMBER_PREFIX)
+            ]
+            assert members, f"the {kind} note cites no member, so its date cannot be checked"
+            expected = supported_from(members, by_id)
+            assert expected is not None, "the fixture must date its runs, or this proves nothing"
+            assert unit.note.valid_from == expected, (
+                f"the {kind} note's valid_from is {unit.note.valid_from}, not the "
+                f"{expected} its own cited members anchor. A date keyed on anything but the "
+                "members the id is keyed on moves under a stable id — the storm D-2026-09-14 "
+                "closed, and the defect the first two versions of this test could not see."
+            )
+
+
+def test_no_miner_mints_a_note_without_passing_the_corpus_derived_date() -> None:
+    """The builder list is derived from the calls, not written down beside them.
+
+    The driving test above proves the three miners that exist are wired correctly; this one is what
+    notices a *fourth*. Its predecessor hardcoded `["campaign_note_from_chain", "playbook_note",
+    "optimization_campaign_note"]` while holding every `ast.Call` in the module, so a new miner
+    minting undated notes passed — cause (f) in `tasks/lessons.md`, a universe that is a strict
+    subset of the surface at risk.
+
+    Every call in `memory/jobs.py` to a `*_note*` builder must pass `minted_on`, and the argument
+    must name `supported_from`. That is deliberately the weaker of the two assertions — the strong
+    one is above — because its job is coverage rather than correctness.
+    """
+    import ast
+    from pathlib import Path
+
+    import chemclaw.memory.jobs as jobs
+
+    tree = ast.parse(Path(jobs.__file__).read_text(encoding="utf-8"))
+    thin: dict[str, str] = {}
+    seen = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            continue
+        if not (node.func.id.endswith("_note") or "_note_" in node.func.id):
+            continue
+        seen += 1
+        passed = {keyword.arg: keyword.value for keyword in node.keywords}
+        if "minted_on" not in passed:
+            thin[node.func.id] = "no minted_on at all"
+        elif "supported_from" not in ast.unparse(passed["minted_on"]):
+            thin[node.func.id] = ast.unparse(passed["minted_on"])
+    assert seen >= 3, f"only {seen} note builders found in memory/jobs.py; this scan is stale"
+    assert not thin, (
+        f"{thin} mint notes the digest reads as open-ended, so they reach no subscriber who has a "
+        "watermark. Every miner dates its note from the members its id is anchored on."
+    )
+
+
+def test_a_mined_playbook_states_a_finding_and_asks_the_reader_for_nothing() -> None:
+    """The body went into `knowledge/` carrying a to-do, and `knowledge/` is what retrieval cites.
+
+    `_summary` used to end "Distil the transferable rule and conditions from the cited evidence",
+    and nothing in this repository ever did: `skills/playbook-distillation/SKILL.md` is loaded only
+    in a chat turn and no durable path invokes it. Measured on this fixture before the change, the
+    excerpt a chemist is shown for the term "recurring" carried that sentence verbatim, and
+    `Note.headline()` — which a digest now uses to announce new knowledge — rendered as
+    "Transformation recurring across 2 projects … Distil the…".
+
+    Asserted as the *absence of an instruction* rather than against the new wording, so the
+    sentence can be improved without this test having an opinion about prose. The imperatives are
+    the ones a to-do actually uses; a body that told a reader to go and do something would match
+    one of them.
+    """
+    units = build_playbook_notes(
+        [
+            _reaction("r1", ["CC(=O)O", "CCO"], ["CC(=O)OCC"], project="PRJ-1"),
+            _reaction("r2", ["CC(=O)O", "CCCO"], ["CC(=O)OCCC"], project="PRJ-2"),
+        ]
+    )
+    assert units, "the fixture mined no playbook, so this test asserts nothing"
+    body = units[0].note.body.lower()
+    for imperative in ("distil ", "distill ", "write the rule", "summarise the", "fill in"):
+        assert imperative not in body, (
+            f"a mined playbook's body tells its reader to {imperative.strip()!r}. It is written "
+            "into the corpus and cited to a chemist as evidence, so an instruction there reaches "
+            "them as the system's own words about a job it has not done"
+        )
+    assert "recurs across 2 projects" in body
+
+
+def test_a_mined_playbook_is_findable_as_undistilled_and_a_promoted_one_is_not() -> None:
+    """The epistemic status is a label the system can count, not prose in the body.
+
+    Both halves matter and only together. A tag on every playbook would say nothing; a tag on none
+    would leave the recurrence indistinguishable from a rule somebody wrote. The cluster miner
+    finds that a transformation recurs — real, deterministic, and not a transferable rule — while
+    `durable/observation_jobs.py` promotes an observation whose `statement` *is* a claim.
+    """
+    from chemclaw.kg.note import UNDISTILLED_TAG
+    from chemclaw.memory.playbook import playbook_note
+
+    units = build_playbook_notes(
+        [
+            _reaction("r1", ["CC(=O)O", "CCO"], ["CC(=O)OCC"], project="PRJ-1"),
+            _reaction("r2", ["CC(=O)O", "CCCO"], ["CC(=O)OCCC"], project="PRJ-2"),
+        ]
+    )
+    assert units
+    assert UNDISTILLED_TAG in units[0].note.tags, (
+        "a mined recurrence is indistinguishable from a distilled rule, so nothing can report "
+        "which playbooks are still waiting for one"
+    )
+    promoted = playbook_note("playbook-promoted", "Degas before adding Pd(0).", ["interaction-1"])
+    assert UNDISTILLED_TAG not in promoted.tags, (
+        "a promoted observation carries a real statement and must not be reported as awaiting one"
+    )
+
+
+def test_no_producer_claims_a_skill_layers_onto_its_note_automatically() -> None:
+    """Three docstrings said a skill refines these notes, and nothing invokes one.
+
+    All four skills named across `memory/` exist — this is not a dangling reference — but they are
+    loaded on demand in a chat turn and no durable path reaches any of them. Stated as "layered on
+    top" and "on top", that read as a pipeline: the same shape as
+    `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution`, where three docstrings
+    described a trail naming the agent while the column was empty on every row ever written.
+
+    An absence test, because the correction is prose and prose is what regresses. It fails whoever
+    re-asserts the layering without building it — and building it would be an ADR, not a sentence.
+
+    **The phrase is banned outright, including in prose explaining why it is banned**, and this
+    test caught its own first correction doing exactly that. A scan that exempted quotations would
+    be a scan an author defeats by adding quotation marks, and the next reader cannot tell a
+    retired claim being explained from a live one being made — which is the whole failure. So the
+    corrections describe the retired wording instead of reproducing it.
+    """
+    import re
+    from pathlib import Path
+
+    claim = re.compile(r"(layered on top|skills' judgment, on top|, layered on top)")
+    package = Path(__file__).resolve().parents[1] / "src" / "chemclaw" / "memory"
+    offenders = [
+        path.name for path in sorted(package.rglob("*.py")) if claim.search(path.read_text("utf-8"))
+    ]
+    assert not offenders, (
+        f"{offenders} assert that a skill layers judgment onto a note automatically. No durable "
+        "path invokes any skill; if one now does, say which and delete this test with the ADR "
+        "that built it"
+    )

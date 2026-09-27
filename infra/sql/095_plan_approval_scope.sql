@@ -1,0 +1,38 @@
+-- What a plan approval authorizes, recorded beside the approval itself
+-- (D-2026-09-12-an-approval-that-names-no-tool-authorizes-every-tool).
+--
+-- Migration 020 keyed the decision to `(session_id, plan_hash)` so that a rewritten plan is a
+-- different key, and 034 made spending it durable. Both bound *which plan* the human said yes to.
+-- Neither bounded *what saying yes lets the agent do*: `enforce_plan_approval` asked only whether
+-- an approval stood for this plan, so an approval recorded for a one-line, read-only plan
+-- authorized every name in `chemclaw.agent.authz.side_effecting_tools()` — every knowledge-graph
+-- write, every durable job launcher, every connector's state-changing surface. Driven at the
+-- commit before this one, that was all of them and nothing was refused; the figure lives in
+-- `tests/test_plan_scope.py`, which fails when it goes stale.
+--
+-- So the decision records its own scope. The agent declares, per step, the tools that step will
+-- call (`agent/plan_scope.py` — the field is required by the plan tool's schema, so an omission is
+-- a tool-call validation error the model retries rather than a plan that quietly authorizes
+-- everything); the human approves the plan *and the declaration*; and the gate permits a
+-- state-changing call only when the approval it stands on names that tool.
+--
+-- **The scope is stamped once, by the human's act, and never re-read from the model's plan.**
+-- `plan_identity` still hashes `content` only — deliberately, because that is what makes the
+-- canonical "tick the step, run its tool" batch keep its approval (`plan_gate.plan_after_batch`)
+-- — so a rewrite that keeps every step's text and widens its `tools` hashes to the same approved
+-- plan. It gains nothing: the gate reads this column, not the todo list. A plan whose *text*
+-- changes is already a different key and unapproved.
+--
+-- **`NOT NULL DEFAULT '{}'`, and the direction of that default is the decision.** An existing row
+-- — an approval recorded before this migration ran — gets the empty scope, which authorizes no
+-- state-changing tool at all, so a chemist mid-session is asked to approve again. The alternative,
+-- a NULL meaning "unbounded", would make every pre-upgrade row a standing authorization for
+-- everything and would leave a second, permanently fail-open meaning in the column this migration
+-- exists to close. 034 chose the re-arm direction over revoking live approvals; this chooses the
+-- opposite, because there the fail-open cost was one extra approval request and here it is the
+-- whole control. An approval is one turn wide, so what it costs is bounded by the deploy window.
+--
+-- `TEXT[]` rather than JSONB: the value is a set of tool names, it is read whole on every gated
+-- call, and no predicate is ever written against one element. No index — the row is already
+-- reached by the one-row lookup `plan_approvals_lookup` serves.
+ALTER TABLE plan_approvals ADD COLUMN IF NOT EXISTS scope TEXT[] NOT NULL DEFAULT '{}';

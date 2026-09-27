@@ -45,6 +45,7 @@ from typing import Any
 
 from chemclaw.cli.soak_report import describe, fit
 from chemclaw.core.logging import configure_logging
+from chemclaw.core.markdown import render_table
 
 logger = logging.getLogger(__name__)
 
@@ -184,23 +185,30 @@ def report(samples: Sequence[Sample]) -> str:
     lines = [
         f"# Leak probe: {int(turns[-1])} turns in {len(samples)} batches",
         "",
-        "| series | first | last | per turn | verdict |",
-        "| --- | ---: | ---: | ---: | --- |",
     ]
-    for label, values, unit in (
-        ("RSS", [s.rss_kb for s in samples], "KB"),
-        ("gc objects", [s.gc_objects for s in samples], "objects"),
-        ("tracemalloc", [s.tracked_kb for s in samples], "KB"),
-    ):
-        if not any(values):
-            continue
-        per_turn = _per_turn(values[-1] - values[0], span)
-        # `describe` fits against the *batch index*, so its slope is per batch; the per-turn column
-        # beside it is the number a reader wants and the verdict is the number they can trust.
-        lines.append(
-            f"| {label} | {values[0]:.0f} | {values[-1]:.0f} | {per_turn:+.2f} {unit} | "
-            f"{describe(values, unit + '/batch')} |"
+    # `describe` fits against the *batch index*, so its slope is per batch; the per-turn column
+    # beside it is the number a reader wants and the verdict is the number they can trust.
+    lines.append(
+        render_table(
+            ["series", "first", "last", "per turn", "verdict"],
+            [
+                [
+                    label,
+                    f"{values[0]:.0f}",
+                    f"{values[-1]:.0f}",
+                    f"{_per_turn(values[-1] - values[0], span):+.2f} {unit}",
+                    describe(values, unit + "/batch"),
+                ]
+                for label, values, unit in (
+                    ("RSS", [s.rss_kb for s in samples], "KB"),
+                    ("gc objects", [s.gc_objects for s in samples], "objects"),
+                    ("tracemalloc", [s.tracked_kb for s in samples], "KB"),
+                )
+                if any(values)
+            ],
+            align="lrrrl",
         )
+    )
     grown = sorted(
         (
             (samples[-1].types.get(name, 0) - samples[0].types.get(name, 0), name)
@@ -209,12 +217,18 @@ def report(samples: Sequence[Sample]) -> str:
         reverse=True,
     )[:12]
     if any(delta > 0 for delta, _ in grown):
-        lines += ["", "## Live objects gained per turn, by type", "", "| type | per turn | total |"]
-        lines.append("| --- | ---: | ---: |")
-        for delta, name in grown:
-            if delta <= 0:
-                continue
-            lines.append(f"| `{name}` | {_per_turn(delta, span):+.2f} | {delta:+d} |")
+        lines += ["", "## Live objects gained per turn, by type", ""]
+        lines.append(
+            render_table(
+                ["type", "per turn", "total"],
+                [
+                    [f"`{name}`", f"{_per_turn(delta, span):+.2f}", f"{delta:+d}"]
+                    for delta, name in grown
+                    if delta > 0
+                ],
+                align="lrr",
+            )
+        )
     allocations = [line for sample in samples for line in sample.top_allocations]
     if allocations:
         lines += ["", "## Largest growth since the first batch", ""]

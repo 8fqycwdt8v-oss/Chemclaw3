@@ -1,0 +1,58 @@
+{
+  "probe": {
+    "id": "pr-05",
+    "section": 6,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "Before I let anyone quote a predicted product in a report, I want to know what is actually behind these predictions in our deployment. Which models are running, which are not, and why not?",
+    "expects_tools": [
+      "list_available_models"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a model roster recited from general knowledge rather than read from the deployment",
+      "a count of running predictors that the tool did not report",
+      "a claim that a predictor is unavailable without the reason the deployment gave"
+    ],
+    "direction": "A governance question with a mechanical answer, and the graded behaviour is that the system *asks the deployment* instead of describing the software. A good answer lists the predictors this build knows about, which of them this deployment will answer with, and for each one that it will not, the reason the tool gives — a predictor can fail to load (a missing optional dependency) or be switched off by configuration, and those are different facts with different remedies. Each entry carries a citation, so an answer that attributes a prediction to the paper behind the model rather than to \"the server\" is doing the thing this tool exists for. The trap is answering from memory of what open reaction predictors exist: any roster not taken from this deployment is exactly the claim a manager asking this question is trying to avoid. The honest closing point is the one the server's own docstring makes — a deployment that expected five predictors and installed one still returns an answer wearing the word \"consensus\".",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "pr-05",
+    "section": 6,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "Before I let anyone quote a predicted product in a report, I want to know what is actually behind these predictions in our deployment. Which models are running, which are not, and why not?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.63,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "2ba2ea0959de4819af911f90191c8445",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

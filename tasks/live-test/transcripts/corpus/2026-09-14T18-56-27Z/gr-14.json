@@ -1,0 +1,60 @@
+{
+  "probe": {
+    "id": "gr-14",
+    "section": 4,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "Take whatever we learned on the P2Et plate and tell me what changes for BTMG.",
+    "expects_tools": [
+      "gather_evidence",
+      "expand_note",
+      "generate_screening_design",
+      "suggest_next_experiment"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a transfer asserted with no statement of what differs between the two plates",
+      "per-plate numbers quoted without saying which plate they came from"
+    ],
+    "direction": "The two plates share their grid and differ in the base. That makes the transfer legitimate and bounded, and the answer should say where it holds and where the base change plausibly breaks it. Treating the two as interchangeable is the failure.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-14",
+    "section": 4,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "Take whatever we learned on the P2Et plate and tell me what changes for BTMG.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.88,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "69c3d688f40a4bc9b30cf12467d9bf04",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

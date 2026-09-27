@@ -1,0 +1,59 @@
+{
+  "probe": {
+    "id": "ws-04",
+    "section": 17,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "What do you already know about how I like things done? I want to see it before I ask you to plan anything.",
+    "expects_tools": [
+      "recall_preferences",
+      "read_file",
+      "ls"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a preference that was never recorded",
+      "another person's preferences"
+    ],
+    "direction": "A read of the durable memory this asker owns, reported as it stands. If nothing is on file the answer must say so plainly — an empty memory is a real answer and inventing a plausible preference is the worst failure available here. If there are entries it should show them with enough context to be recognised and offer to change or drop any of them, because the point of asking is usually to correct one.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "ws-04",
+    "section": 17,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "What do you already know about how I like things done? I want to see it before I ask you to plan anything.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 2.0,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "429ed768958344fd8821214827717b1f",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

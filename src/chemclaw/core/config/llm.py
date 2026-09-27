@@ -46,6 +46,18 @@ class LlmSettings(BaseSettings):
     # base URL would hand the request back to the OpenAI SDK's own hardcoded public host.
     llm_base_url: str = "http://127.0.0.1:8820/v1"
     llm_model: str = "mock"
+    # Explicit opt-in to run with the gateway on **this host** — the dev mock, or a gateway
+    # sidecar in the same pod. Every process that makes model calls refuses to boot on a loopback
+    # `llm_base_url` unless this is set (`core/llm_gateway.refuse_unconfigured_llm_gateway`),
+    # because the shipped default *is* a loopback address and a deployment that never overrode it
+    # would meet that as a refused connection on a chemist's first question — or, in a durable
+    # activity, inside a retry loop with nobody watching.
+    #
+    # A flag rather than the bind this check used to read. `api/middleware` exempted a loopback
+    # `service_host`, which is a fact about the front door's socket: it said nothing about a
+    # background worker, which is the process the guard turned out not to reach at all. A stated
+    # posture asks one question in every process kind.
+    llm_allow_loopback_gateway: bool = False
     # A `SecretStr`, like every other credential on this object
     # (`D-2026-08-26-a-credential-is-a-type-not-a-convention`): its `repr` is `**********`, so the
     # value cannot reach a log line, a `model_dump()` or a pydantic error message through a route
@@ -143,6 +155,24 @@ class LlmSettings(BaseSettings):
     # window is a property of the endpoint every task shares. A deployment that routes tasks across
     # models with different windows should declare the smallest.
     llm_context_window_tokens: int = Field(default=0, ge=0)
+    # **The BPE encoding the endpoint's meter uses, as far as this deployment can state it.**
+    # `agent/context_budget.py` counts the request prefix with it instead of chars/4: measured
+    # 2026-09-16 on the `default` profile, that estimator is 18% high on the system message and
+    # 0.05% low on the tool schemas, and the clamp in `estimator_ratio` means an over-estimate is
+    # never refunded — so the 1,161 tokens between the two counts were thread the policy cut for
+    # nothing.
+    #
+    # **A name rather than a model id, because the model is deliberately unknowable.** Every call
+    # goes to one OpenAI-compatible gateway (`D-2026-09-04-a-gateway-is-the-only-provider`) that
+    # does not say what it fronts, so `tiktoken.encoding_for_model` has nothing to be handed. A
+    # gateway fronting a non-OpenAI vendor therefore gets a closer approximation rather than the
+    # bill, which is why the measured calibration ratio stays in front of it.
+    #
+    # **It must resolve from a cache baked into the image** (`TIKTOKEN_CACHE_DIR`): production is
+    # air-gapped and `tiktoken` fetches its merge table over HTTPS on a miss. With no cache the
+    # budget says so once at INFO and counts with chars/4 as before, so this never fails a turn and
+    # never reaches the network. Set it to the empty string to keep the estimator deliberately.
+    llm_token_encoding: str = "o200k_base"
     # Per-task model routing (plan F10-E). Maps a task name to the model id to use for it, so a
     # cheap model can run high-throughput/secondary steps (verification, classification) while
     # the frontier model drives the main reasoning turn — without a second provider or a second
@@ -188,6 +218,55 @@ class LlmSettings(BaseSettings):
     # `verifier_band_rerolls` extra judge calls only on answers that land inside the band, each
     # under its own `verifier_timeout_seconds`.
     verifier_review_band: float = Field(default=0.2, ge=0, le=0.5)
+    # How many times a flagged answer is sent back to be answered again, in the same turn
+    # (`D-2026-09-15-a-flagged-answer-that-goes-out-flagged-is-a-verdict-nobody-acted-on`).
+    # `agent/verifier.py` has always *marked* an unsupported answer and nothing routed it back
+    # — `D-2026-08-16-a-second-judge-is-a-second-answer-about-the-same-answer` concedes the gap
+    # in those words while declining upstream's `RubricMiddleware` on four other counts.
+    #
+    # **Counts only agent-initiated rounds.** The bound is a per-turn local in
+    # `api/runner.py`, so a chemist's own follow-up starts a fresh allowance while the model
+    # cannot buy itself one — the distinction `loop_cap`/`spend_cap` cannot express, because
+    # they count uniformly. Each revision is still a model call and is still counted by both,
+    # which is the conclusion D-2026-08-16 reached about revisions and a cap they could skip.
+    #
+    # 0 is off, on the convention `core/config/agent.py` states for numeric ceilings. **It ships
+    # on, at 2, and the gate below is what makes that mean anything.** The loop reads a *verdict*,
+    # so it is reachable only behind `verifier_enabled` or `answer_shape_gate_enabled` — with both
+    # off, as they were, every non-zero value here was a no-op. `answer_shape_gate_enabled` now
+    # ships on, which is the deliberate pairing: a deterministic gate that marks an answer, and a
+    # bounded loop that tries to re-ground what it marked rather than only labelling it.
+    # `verifier_enabled` stays off — it adds a judge model call to every answer and
+    # `require_verifier_capability()` fails pod startup where the gateway cannot enforce structured
+    # output, which is a deployment's decision rather than this one.
+    #
+    # The cost is real and is accepted rather than argued away: a flagged turn pays up to two extra
+    # model calls, and one that stays flagged through both opens a durable review request
+    # (`answer_review_escalation_enabled`). 0 restores the previous posture exactly, and the
+    # off-path is asserted as a complete no-op rather than assumed.
+    #
+    # **Bounded against the turn deadline** by the cross-field check in `core/config/__init__.py`:
+    # each round is a model round-trip *and* a judge call, so a setting whose judging alone fills
+    # `service_turn_timeout_seconds` buys rounds the chemist can never be shown.
+    answer_review_max_rounds: int = Field(default=2, ge=0)
+    # Whether an answer that is *still* flagged when the rounds run out is put in front of a
+    # person, as a durable `review` wait (`durable/awaiting.py`) opened by `api/runner.py`.
+    # Bounded rounds that end in silence are the gap this closes: the rounds were spent, the
+    # exhaustion counter moved, and the chemist got an answer marked for review that nobody was
+    # ever asked to look at — the bounded half of Paperclip's `maxReviewRounds` without the
+    # escalation that gives the bound its meaning.
+    #
+    # **On by default, unlike its neighbours above, because it has no trigger of its own.** It
+    # fires only where `answer_review_max_rounds` is non-zero *and* a check flagged the answer
+    # *and* the rounds bought nothing, so a deployment that turned the loop on has already decided
+    # the mark is worth acting on; an escalation that reaches nobody is what makes that spend buy
+    # nothing at all. Turned off, an exhausted answer ships marked and the only record is
+    # `chemclaw_answer_review_exhausted_total`, which is where this started.
+    #
+    # It opens a wait and changes nothing else: the answer still ships, and a wait that cannot be
+    # opened is logged and skipped rather than failing the turn
+    # (`api/runner.py::_escalate_exhausted_review`).
+    answer_review_escalation_enabled: bool = True
     verifier_band_rerolls: int = Field(default=2, ge=1)
     # The per-protocol condensation call's own deadline (`agent.condense`). Per *map unit*, so
     # one stalled extraction costs one row of the comparison and never the turn — the same
@@ -204,16 +283,22 @@ class LlmSettings(BaseSettings):
     # specification — a flow rate, a gradient table, a wavelength, a back pressure, a column brand,
     # an ICH limit, a polymorph form — marked for review when no tool in the turn produced them.
     #
-    # Off by default and deliberately a deployment decision. It is a *shape* heuristic, not proof
-    # of grounding: it both misses (an invented number in a shape it does not know) and over-fires
-    # (a chemist's own figure quoted back). An answer marked for review that did not need it costs
-    # trust in every mark after it, which is the failure mode that matters more here.
+    # **On by default, and the over-firing is accepted rather than denied.** It is a *shape*
+    # heuristic, not proof of grounding: it both misses (an invented number in a shape it does not
+    # know) and over-fires (a chemist's own figure quoted back — four such answers are pinned in
+    # `tests/test_verifier.py`, deliberately, so the rate cannot drift unnoticed). An answer marked
+    # for review that did not need it still costs trust in every mark after it. What changed is
+    # what a mark leads to: with `answer_review_max_rounds` shipping at 2, a mark sends the answer
+    # back to be re-grounded and, failing that, to a person — so an over-fire now costs a model
+    # call and possibly a review request, where before it cost only a label the chemist had to
+    # learn to discount. That trade is why this gate rather than `verifier_enabled` is the one
+    # turned on: it is deterministic and costs no model call of its own.
     #
     # The measured case for having it at all: a capability-boundary instruction cut invented
     # parameter classes from 9 to 1 across the six worst live probes, and a stronger model still
     # produced a complete branded HPLC method table *while writing* "not a validated method".
     # Prompting is necessary and demonstrably not sufficient.
-    answer_shape_gate_enabled: bool = False
+    answer_shape_gate_enabled: bool = True
     # Embedding provider (plan F10-A). Selects how a note/query is embedded: `hash` is a
     # deterministic, offline, dependency-free feature-hash (dev/CI only — token-overlap
     # similarity, NOT neural-semantic); `openai_compatible` calls the internal endpoint's

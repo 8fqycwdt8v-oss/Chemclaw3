@@ -1,0 +1,103 @@
+{
+  "probe": {
+    "id": "an-11",
+    "section": 8,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "Unknown impurity at RRT 1.32, about 0.4% in the last Suzuki batch. LC-MS, positive ESI:\n\n  m/z 259.0965  [M+H]+ (base peak)\n  m/z 241.0859  (-18)\n  m/z 227.0703  (-32)\n  m/z 199.0754  (-60)\n  m/z 152.0621\n\nMain product is COc1ccc(-c2ccccc2C(=O)O)cc1 ([M+H]+ 229.086). What candidate\nstructures fit, given how the batch was actually made?",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "similar_molecules",
+      "predict_site_reactivity",
+      "resolve_compound"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "claiming an MS fragmentation was predicted or computed",
+      "asserting an identification rather than a ranked hypothesis list",
+      "an invented prior observation of this impurity in a specific batch",
+      "a predicted retention time or RRT for any candidate"
+    ],
+    "direction": "Actually uses the pasted numbers: +30 on the parent and neutral losses of 18, 32 and 60 are the evidence, and it reasons from them (an added oxygen plus a methyl, a methoxy loss, a hydroxylation) rather than ignoring the data. Grounds candidates in the route by retrieving what the graph knows about the Suzuki chemistry and its known by-products (homocoupling, protodeboronation, oxidation). States that the system has no MS fragmentation prediction, so the fragment rationalisation is chemical reasoning, not a computed spectrum. Presents a ranked hypothesis list with what would distinguish the candidates — and may point at computed IR as the one discriminator it can actually run.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "an-11",
+    "section": 8,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "Unknown impurity at RRT 1.32, about 0.4% in the last Suzuki batch. LC-MS, positive ESI:\n\n  m/z 259.0965  [M+H]+ (base peak)\n  m/z 241.0859  (-18)\n  m/z 227.0703  (-32)\n  m/z 199.0754  (-60)\n  m/z 152.0621\n\nMain product is COc1ccc(-c2ccccc2C(=O)O)cc1 ([M+H]+ 229.086). What candidate\nstructures fit, given how the batch was actually made?",
+    "profile": "",
+    "answer": "Based on the mass spec data and the Suzuki coupling conditions, here are the most likely candidate structures for your m/z 259.0965 impurity:\n\n## **Most Likely: Homo-coupled Boronic Acid Product**\n\n**Structure:** 2,2'-Dicarboxybiphenyl (biphenyl-2,2'-dicarboxylic acid)\n**SMILES:** `OC(=O)c1ccccc1-c1ccccc1C(=O)O`\n**[M+H]⁺ calc:** 243.065 (for the diacid)\n\nWait - let me recalculate. If your impurity is **+30 from product (229)**, we get **259**.\n\n## **Top Candidate: Methyl Ester Formation**\n\n**Structure:** Methyl ester of your product\n**SMILES:** `COc1ccc(-c2ccccc2C(=O)OC)cc1`\n**[M+H]⁺ calc:** 243.10 (still not quite right...)\n\nLet me reconsider with the **actual fragmentation pattern**:\n\nThe **-18 loss (H₂O) and -32 loss (CH₃OH)** strongly suggest:\n1. A carboxylic acid (for -H₂O)\n2. A methoxy group (for -CH₃OH, likely from the 4-methoxyphenyl ring)\n\n**+30 mass** from your product suggests addition of: **CH₂O (formaldehyde, MW=30)**\n\n## **Most Probable Structure: Hydroxymethylation**\n\n**Structure:** Product with hydroxymethyl group ortho to carboxylic acid\n**SMILES:** `COc1ccc(-c2ccccc2C(=O)O)cc1` with added -CH₂OH at ortho position\n**Likely:** `COc1ccc(-c2c(CO)cccc2C(=O)O)cc1` or similar hydroxymethyl isomer\n\n**Formation mechanism:** Formaldehyde (from oxidative degradation of THF or methanol contamination) adding via electrophilic aromatic substitution at the activated ortho position.\n\n**Fragmentation fits:**\n- m/z 259 [M+H]⁺\n- m/z 241 (-18, loss of H₂O from either COOH or CH₂OH)\n- m/z 227 (-32, loss of CH₃OH from p-methoxyphenyl ring)\n- m/z 199 (-60, sequential losses)\n- m/z 152 (likely 4-methoxybiphenyl cation fragment, formula C₁₀H₁₁O⁺ or similar)\n\n**Would you like me to:**\n1. Compute properties of these candidate structures to help discriminate?\n2. Search for precedent of formaldehyde impurities in THF-based Suzuki reactions?\n3. Propose diagnostic MS/MS experiments or derivatization to confirm?\n\nThe **hydroxymethylation** from formaldehyde contamination in aged THF is the most consistent with both your mass and fragmentation pattern.",
+    "answered": true,
+    "tools_called": [
+      "gather_evidence",
+      "similar_reactions",
+      "expand_note",
+      "resolve_compound",
+      "resolve_compound",
+      "predict_forward_reaction"
+    ],
+    "tool_results": [
+      {
+        "tool": "similar_reactions",
+        "preview": "<retrieved-note-802678ad5c37acd3 id=\"rxnfp:similar_reactions\">\n{\n  \"subject\": \"reaction\",\n  \"hits\": [],\n  \"approximate\": false,\n  \"index_empty\": false,\n  \"index_partial\": false,\n  \"scan_truncated\": fa"
+      },
+      {
+        "tool": "gather_evidence",
+        "preview": "chunks=[EvidenceChunk(content='<retrieved-note-802678ad5c37acd3 id=\"compound-4-methoxybiphenyl\">\\nThe biaryl product of coupling compound-4-bromoanisole with\\ncompound-phenylboronic-acid. Produced by "
+      },
+      {
+        "tool": "expand_note",
+        "preview": "note=NoteRef(id='rxn-suzuki-biaryl', type='reaction', compound_smiles=None, tags=['cross-coupling', 'suzuki'], created_by='human', source='seed-corpus', confidence=0.85, valid_from=datetime.date(2026,"
+      },
+      {
+        "tool": "resolve_compound",
+        "preview": ""
+      },
+      {
+        "tool": "resolve_compound",
+        "preview": ""
+      }
+    ],
+    "tools_failed": [
+      "predict_forward_reaction"
+    ],
+    "expected_tools_met": true,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [
+      "2",
+      "1",
+      "4",
+      "3"
+    ],
+    "failed_loudly": true,
+    "error_code": null,
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 38.01,
+    "event_counts": {
+      "token": 38,
+      "tool_call": 6,
+      "evidence_source": 2,
+      "tool_result": 5,
+      "tool_failed": 1,
+      "answer": 1
+    },
+    "transport_error": null,
+    "session_id": "48f88c0c46dc4a68a56738ac981a8a6c",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

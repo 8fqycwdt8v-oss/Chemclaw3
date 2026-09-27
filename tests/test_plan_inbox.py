@@ -37,6 +37,25 @@ _ALICE = Principal(oid="alice", upn="alice@corp", roles=frozenset())
 _BOB = Principal(oid="bob", upn="bob@corp", roles=frozenset())
 
 
+# What every step in this file declares. Non-empty on purpose: the row carries the scope an approval
+# would grant (`D-2026-09-12-an-approval-that-names-no-tool-authorizes-every-tool`), and a fixture
+# declaring nothing cannot tell a route that reports the scope from one that reports `[]`. No case
+# here *varies* it, because which sessions are listed does not depend on what they declare.
+_DECLARES = ["record_knowledge_note"]
+
+
+def _steps(lines: list[str]) -> list[dict[str, Any]]:
+    """Plan lines in the shape `plan_state.session_plan` answers — steps, declaration included.
+
+    One function, because three places in this file need it: the stubbed read, the decision the
+    store records, and the identity the row is checked against. A step's declaration is part of
+    the plan's identity
+    (`D-2026-09-13-a-plan-identity-that-omits-the-scope-approves-a-plan-nobody-read`), so a second
+    shaping here would record a decision against a plan the route never hashed.
+    """
+    return [{"content": line, "status": "pending", "tools": list(_DECLARES)} for line in lines]
+
+
 class _Inbox:
     """The front door with the two stores this route reads, both in memory and both inspectable.
 
@@ -44,7 +63,7 @@ class _Inbox:
     exist, on which profile, with which plan and which decision — and reading that arrangement in
     the test body is what makes each assertion legible.
 
-    The plan read is stubbed at `routes.plan.session_todos`, the seam `tests/test_runner.py` uses
+    The plan read is stubbed at `routes.plan.session_plan`, the seam `tests/test_runner.py` uses
     for the same purpose: what is under test here is which sessions get read and what the route
     concludes, not the checkpointer decode `tests/test_plan_state.py` already drives against a real
     saver.
@@ -54,19 +73,22 @@ class _Inbox:
         """Wire an app whose plan reads come from `self.todos` and are counted in `self.reads`."""
         self.owners = _FakeOwnerStore()
         self.approvals = InMemoryPlanApprovalStore()
-        # `None` for a session whose plan is unreadable, matching `plan_state.session_todos` — the
-        # distinction the route turns into `unread` rather than into "nothing waiting".
+        # `None` for a session whose plan is unreadable, matching `plan_state.session_plan` — the
+        # distinction the route turns into `unread` rather than into "nothing waiting". Held as
+        # bare lines because no case here varies a step's declaration; `_steps` puts each line
+        # into the shape the route reads.
         self.todos: dict[str, list[str] | None] = {}
         self.reads: list[str] = []
         self.app = create_app(owner_store=self.owners, connector_factory=_no_connectors)
         self.app.state.plan_approvals = self.approvals
         self.app.dependency_overrides[require_principal] = lambda: _ALICE
 
-        async def _todos(session_id: str, **_kwargs: Any) -> list[str] | None:
+        async def _plan(session_id: str, **_kwargs: Any) -> list[dict[str, Any]] | None:
             self.reads.append(session_id)
-            return self.todos.get(session_id)
+            lines = self.todos.get(session_id)
+            return None if lines is None else _steps(lines)
 
-        monkeypatch.setattr(plan_routes, "session_todos", _todos)
+        monkeypatch.setattr(plan_routes, "session_plan", _plan)
         self.client = TestClient(self.app)
 
     def add_session(
@@ -83,7 +105,14 @@ class _Inbox:
 
     def decide(self, session_id: str, plan: list[str], *, approved: bool, spent: bool) -> None:
         """Record a human decision on `session_id`'s plan, optionally already spent by its turn."""
-        asyncio.run(self.approvals.record(session_id, plan_identity(plan) or "", "alice", approved))
+        asyncio.run(
+            # The inbox lists what nobody has decided on, so *what* a decision authorizes is
+            # irrelevant here and the scope is empty on purpose — an approval that permits no
+            # tool is still a decision, and this route must not list it.
+            self.approvals.record(
+                session_id, plan_identity(_steps(plan)) or "", "alice", approved, ()
+            )
+        )
         if spent:
             asyncio.run(self.approvals.consume_all(session_id))
 
@@ -106,10 +135,16 @@ def gated(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_an_undecided_plan_is_listed_with_the_conversation_that_holds_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The row carries what a chemist navigates by: the session, its name, and the steps.
+    """The row carries what a chemist navigates by: the session, its name, the steps, and the scope.
 
     The session id is the load-bearing field — it is the one thing a chemist who closed the tab
     cannot reconstruct, and every other plan route needs it as a path segment.
+
+    `scope` is asserted here because nothing else asserted it: the inbox is a place a chemist can
+    decide from, and a row that listed the steps without what approving them would authorize would
+    be collecting a yes to a bound the reader could not see
+    (`D-2026-09-12-an-approval-that-names-no-tool-authorizes-every-tool`). Mutating the route to
+    report `scope=[]` left this file green before this line existed.
     """
     inbox = _Inbox(monkeypatch)
     plan = ["screen the hazards", "file the note"]
@@ -124,7 +159,11 @@ def test_an_undecided_plan_is_listed_with_the_conversation_that_holds_it(
     row = body["plans"][0]
     assert row["plan"] == plan
     assert row["title"] == "conversation sess-blocked"
-    assert row["plan_hash"] == plan_identity(plan), (
+    assert row["scope"] == _DECLARES, (
+        "the row does not say what approving this plan would authorize: "
+        f"{row['scope']} against the {_DECLARES} its steps declare"
+    )
+    assert row["plan_hash"] == plan_identity(_steps(plan)), (
         "the row must name the plan the gate would ask about, not a second hashing of it"
     )
     assert (body["considered"], body["gated"], body["unread"]) == (2, 2, 0)
@@ -246,7 +285,7 @@ def test_the_scan_is_bounded_and_reports_what_it_did_not_reach(
 def test_an_unreadable_plan_is_counted_unread_rather_than_reported_as_nothing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`session_todos` returning `None` means "unknown", and the inbox must not round it to "none".
+    """`session_plan` returning `None` means "unknown", and the inbox must not round it to "none".
 
     That distinction is `agent/plan_state`'s whole reason for not returning one list, and it fails
     open here in exactly the way it fails open there: a checkpointer nobody can reach would
@@ -273,7 +312,7 @@ def test_without_a_durable_registry_the_inbox_is_empty_and_says_which_emptiness(
     async def _unreached(session_id: str, **_kwargs: Any) -> list[str] | None:
         raise AssertionError(f"no registry, so no session should be read: {session_id}")
 
-    monkeypatch.setattr(plan_routes, "session_todos", _unreached)
+    monkeypatch.setattr(plan_routes, "session_plan", _unreached)
     app = create_app(owner_store=None, connector_factory=_no_connectors)
     app.dependency_overrides[require_principal] = lambda: _ALICE
     with TestClient(app) as client:
@@ -335,11 +374,13 @@ def test_a_blocked_plan_below_the_listings_page_boundary_is_still_found(
 
     reads: list[str] = []
 
-    async def _todos(session_id: str, **_kwargs: Any) -> list[str] | None:
+    async def _todos(session_id: str, **_kwargs: Any) -> list[dict[str, Any]]:
         reads.append(session_id)
-        return ["screen the hazards"] if session_id == blocked else []
+        if session_id != blocked:
+            return []
+        return [{"content": "screen the hazards", "status": "pending", "tools": []}]
 
-    monkeypatch.setattr(plan_routes, "session_todos", _todos)
+    monkeypatch.setattr(plan_routes, "session_plan", _todos)
     app = create_app(owner_store=owners, connector_factory=_no_connectors)
     app.state.plan_approvals = InMemoryPlanApprovalStore()
     app.dependency_overrides[require_principal] = lambda: _ALICE
@@ -358,15 +399,22 @@ def test_a_blocked_plan_below_the_listings_page_boundary_is_still_found(
 def test_the_listing_walk_is_bounded_when_nothing_the_caller_owns_is_gated(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The paged walk must terminate on the *shipped* posture, where nothing is ever gated.
+    """The paged walk must terminate on a posture where nothing is ever gated.
 
     `_owned_sessions` exited only on a short page or on `len(gated) > budget`, and `gated` counts
-    plan-gated sessions — so with `harness_enabled` off (the code's own default, and the case
-    `_plan_gated`'s docstring names as the one this route is "free" in) the budget can never bind
-    and the loop pages through the caller's entire history on every request. Measured against the
-    real `_owned_sessions` at 5,000 sessions and the shipped page of 100: **51** keyset statements
-    where the route before paging issued exactly one, returning `plans: []` every time, repeatable
-    by the caller at will.
+    plan-gated sessions — so where nothing is gated the budget can never bind and the loop pages
+    through the caller's entire history on every request. Measured against the real
+    `_owned_sessions` at 5,000 sessions and the shipped page of 100: **51** keyset statements where
+    the route before paging issued exactly one, returning `plans: []` every time, repeatable by the
+    caller at will.
+
+    **This said "the *shipped* posture" and named `harness_enabled` off as "the code's own
+    default", and D-2026-09-13 inverted both.** The shipped default now attaches the gate, so the
+    ungated posture is the one a deployment opts into (`harness_autonomy=execute`, or the flag off)
+    rather than the one it gets — and the flag is set explicitly below instead of inherited, which
+    is what makes this case still be the case it describes. The defect is unchanged and so is its
+    reach: a deployment that turns the gate off is exactly the one this unbounded walk was measured
+    against.
 
     Driven against the real `SessionOwnerStore` for the reason the page-boundary test above gives —
     a fake registry has no page boundary to fall off — with the page and the budget shrunk so the
@@ -409,11 +457,13 @@ def test_the_listing_walk_is_bounded_when_nothing_the_caller_owns_is_gated(
     asyncio.run(_seed())
     monkeypatch.setattr(settings, "service_max_listed_sessions", 2)
     monkeypatch.setattr(settings, "service_max_plan_scans", 3)
+    # The posture this case is about, stated rather than inherited — see the docstring.
+    monkeypatch.setattr(settings, "harness_enabled", False)
 
     async def _unreached(session_id: str, **_kwargs: Any) -> list[str] | None:
         raise AssertionError(f"no session is gated here, so {session_id} must not be read")
 
-    monkeypatch.setattr(plan_routes, "session_todos", _unreached)
+    monkeypatch.setattr(plan_routes, "session_plan", _unreached)
     app = create_app(owner_store=owners, connector_factory=_no_connectors)
     app.state.plan_approvals = InMemoryPlanApprovalStore()
     app.dependency_overrides[require_principal] = lambda: _ALICE

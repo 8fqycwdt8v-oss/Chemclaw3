@@ -170,7 +170,7 @@ class AgentSettings(BaseSettings):
     # `D-2026-08-29-a-tool-schema-nobody-calls-is-still-paid-for`'s deferred schemas — not a budget
     # that pretends the prefix is smaller than it is.
     #
-    # **119,000, and 133,000 re-opened the defect `D-2026-09-04` closed.** That ADR's whole
+    # **119,500, and 133,000 re-opened the defect `D-2026-09-04` closed.** That ADR's whole
     # pass/fail criterion was "does the request fit a 128k model", and it fixed a measured 137,301
     # down to 100,000. Holding the *thread* allowance fixed at 57,000 and letting the request bound
     # follow the prefix put it back at 133,000 — a maximal request of ~131,400 billed at the real
@@ -182,8 +182,9 @@ class AgentSettings(BaseSettings):
     # **So the derivation runs the other way now: the window is the input and the thread allowance
     # is what is left over.** 128,000 is the smallest window this stack targets (the chart ships
     # `gpt-oss`, published at 131,072, and `D-2026-09-04` argues every figure against 128k), less
-    # `llm_max_tokens` = 4,096 reserved for the answer, leaving **123,904** of input, and 119,000
-    # is inside it by 4,904.
+    # `llm_max_tokens` = 4,096 reserved for the answer, leaving **123,904** of input, and 119,500
+    # is inside it by 4,404. (Both figures are asserted in `tests/test_compaction.py`, which is why
+    # a change to either has to be stated here rather than discovered there.)
     #
     # **That criterion used to need a tokenizer constant and no longer does, which is the point.**
     # It was written as "a maximal request bills `budget + (r - 1) x prefix`", with `r` a
@@ -202,13 +203,24 @@ class AgentSettings(BaseSettings):
     # see its own comment below.
     #
     # **What it costs, stated because it is a behavioural change**: the thread allowance falls from
-    # the 57,000 the paragraph above held fixed to **43,000** at the prefix bound (more at today's
-    # measured prefix, which sits below the bound — `tests/test_compaction.py` measures it, and this
-    # line does not, because the figure it carried moved by 507 tokens between two measurements a
-    # day apart), and the band between this and the lossless edit's trigger falls
-    # from 27,000 to 13,000. That band is squeezed by the prefix, not by this number: at a
-    # 76,000-token prefix bound and a 128k window the whole policy has 43,000 tokens of thread to
-    # divide between two edits. The instrument for wanting more is a narrower prefix.
+    # the 57,000 the paragraph above held fixed, and the band between this default and the lossless
+    # edit's trigger falls with it. That band is squeezed by the *prefix* rather than by this
+    # number: at a 128k window the whole policy has only the window minus the prefix bound to divide
+    # between two edits, so the instrument for wanting more is a narrower prefix.
+    #
+    # **This paragraph no longer states those three figures, and that is the fix rather than an
+    # omission.** It carried them three times and shipped stale all three: 43,000/13,000/76,000,
+    # falsified by wave 13 raising the ratchet ceiling 500 without touching this comment; then
+    # 42,500/12,500/76,500, falsified the same way by D-2026-09-13 raising it 2,000. The second
+    # correction was written *in the commit that staled it*, which is the argument in
+    # `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` happening to the sentence making
+    # it. A digit here is a claim about somebody else's ceiling, and the ceiling is a thing other
+    # branches move.
+    #
+    # The three are `tests/test_compaction.BUDGET_THREAD_ALLOWANCE`, this default minus
+    # `agent_tool_result_clear_trigger`, and `tests/test_context_floor.PREFIX_BOUND`. All three are
+    # asserted there, against the prefix the model is actually sent — so read them there, where a
+    # change moves the number and the assertion together.
     #
     # **And the second bound is now real.** `llm_context_window_tokens` stays 0 in code — this
     # repository cannot know an endpoint's window — but `deploy/helm/chemclaw/values.yaml` states
@@ -216,7 +228,7 @@ class AgentSettings(BaseSettings):
     # number alone. Both halves are asserted in `tests/test_compaction.py`
     # (`BUDGET_THREAD_ALLOWANCE`, `SMALLEST_TARGET_WINDOW`), because the reviewer who found this
     # collapsed the split to 107,000 and got 150 passing tests.
-    agent_context_token_budget: int = Field(default=119_000, ge=1)
+    agent_context_token_budget: int = Field(default=118_700, ge=1)
     agent_keep_last_tool_groups: int = Field(default=2, ge=0)
     agent_keep_last_conversation_groups: int = Field(default=0, ge=0)
     # `agent_tool_result_clear_trigger` is the *lossless* edit's own threshold, and splitting it
@@ -285,13 +297,26 @@ class AgentSettings(BaseSettings):
     # prose.
     #
     # **Same derivation, honest input**: `tests/test_context_floor.PREFIX_BOUND` — the ratchet
-    # ceiling with the connector surface in its basis (65,000) plus 11,000 for the three bundles
-    # served from `Chemclaw3-mcp` that no test here can measure — plus the same 30,000 of thread
-    # this setting has always intended. It is still a translation rather than a retuning; what
-    # moved is the size of the thing being translated. The 11,000 is a *bound* and belongs beside
-    # the ceiling it extends, so it lives in `tests/test_context_floor.SERVED_ELSEWHERE_ALLOWANCE`
-    # where the assertion can read it, not as a second number here that would drift away from it.
-    agent_tool_result_clear_trigger: int = Field(default=106_000, ge=1)
+    # ceiling with the connector surface in its basis, plus
+    # `tests/test_context_floor.SERVED_ELSEWHERE_ALLOWANCE` for the bundles served from
+    # `Chemclaw3-mcp` that no test here can measure — plus the thread allowance this setting has
+    # always intended, which `tests/test_compaction.CLEAR_TRIGGER_THREAD_ALLOWANCE` holds. It is a
+    # translation rather than a retuning; what moves is the size of the thing being translated.
+    #
+    # **The figures that used to be in this paragraph are gone, and their absence is the point.**
+    # It named a default of 109,000 derived from a ceiling of 68,000 — against a field that reads
+    # 110,800 and a ceiling that reads 69,800 — because each raise moved the constants and left the
+    # narrative, which is `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` in the file
+    # that *defines* the number. The sibling paragraph 90 lines above already argued this and was
+    # not followed here. The live values are the field below, `PREFIX_BOUND` and
+    # `CLEAR_TRIGGER_THREAD_ALLOWANCE`; read those, and `tests/test_compaction.py` asserts the
+    # arithmetic between them rather than a reader checking it.
+    #
+    # What is durable, and is why the derivation runs this way rather than the budget's: this is
+    # derived *upwards* from the ceiling, so it moves with the prefix and keeps the whole thread
+    # allowance intact. The budget below cannot follow, because it is derived downwards from the
+    # model's window — which is why a ceiling raise costs the budget's thread and never this one's.
+    agent_tool_result_clear_trigger: int = Field(default=111_600, ge=1)
     # **What the two numbers above are denominated in, which used to be left unsaid and was wrong.**
     # Both are counted with `count_tokens_approximately` — chars/4 — and that estimator is content
     # dependent in one direction. Re-measured 2026-09-06 against real BPE encodings, on the observed
@@ -386,19 +411,191 @@ class AgentSettings(BaseSettings):
     # `calc_find_max_result_chars` and the rest); it is the floor under all of them, applied at the
     # one place every tool result passes.
     agent_max_tool_result_chars: int = Field(default=60_000, ge=0)
-    # Durable working memory for the agent's scratchpad (`agent/scratchpad.py`). Off by default,
-    # and the default is about *data* rather than about the code being unproven: enabling it
-    # creates the `store`/`store_vectors` tables and starts writing files a turn authored to a
-    # place that outlives the session. A deployment should decide that, not inherit it.
+    # Durable working memory for the agent's scratchpad (`agent/scratchpad.py`), and the switch the
+    # whole personal/organisation skills stack rides on.
+    #
+    # **On by default since `D-2026-09-20-a-behaviour-change-is-gated-by-its-blast-radius`, and the
+    # default it replaced was argued rather than careless.** `D-2026-08-15` shipped it off saying
+    # "the default is about *data* rather than about the code being unproven… a deployment should
+    # decide that, not inherit it", which was right while the only thing behind it was a scratchpad
+    # that outlives a session. It is no longer: `personal_skills_available()` reads this, so with it
+    # off `POST /skills/mine`, `POST /skills/org` and the whole proposal-acceptance path answer 503,
+    # `make distill --propose` refuses, and `propose_skill` is not even bound. A gate nobody can
+    # reach is not a gate, which is
+    # `D-2026-09-16-a-setting-that-ships-off-is-a-feature-nobody-has`'s whole point, and it is the
+    # reason `D-2026-09-18-a-skill-a-chemist-keeps…` declined to add a second flag beside this one.
+    #
+    # **What turning it on actually starts**, stated because the list is longer than "skills":
+    # `/memories/` is mounted for every authenticated turn, so `write_file`/`edit_file` under that
+    # root become durable and agent-authored, bounded only by `agent_memory_max_files` and evicted
+    # by `BoundedStoreBackend`; `propose_skill` joins every request's prefix at ~462 tokens; and
+    # `store`/`store_migrations` are created on first use — which is why `deploy/entrypoint.sh`'s
+    # `migrate` role now creates them between the migrations and the grants that name them.
     #
     # With it off, a turn still gets `/scratch/` — the graph-state scratchpad that makes a
     # multi-source research turn possible — and simply has no `/memories/` route. The two are
-    # separate capabilities and only the durable half needs a decision.
+    # separate capabilities and only the durable half needs a decision; a deployment that does not
+    # want one sets this False and loses the skills tiers with it, which is the coupling
+    # `api/routes/skills.py` states rather than switches.
     #
     # It is also inert without an actor: no ambient identity means no namespace, and a memory
     # written under a shared prefix would be one nobody can erase and everybody can read
-    # (`agent/scratchpad.memory_namespace`).
-    agent_memory_enabled: bool = False
+    # (`agent/scratchpad.memory_namespace`). The organisation's tier is the one exception and needs
+    # no actor, because it is nobody's (`agent/org_skills.org_skills_namespace`).
+    # **What a helper may write into its caller's checkpointed state**, which nothing bounded.
+    # `task` returns a `Command` whose update carries every non-excluded key of the helper's final
+    # state, `files` included — so a helper's scratch filesystem crosses into the caller's `files`
+    # channel whole. Driven, a helper reading 2 MB left its caller a *thread* of 57 characters and
+    # **2,000,137 characters** of `files`: the isolation
+    # `D-2026-08-29-a-helpers-report-is-model-prose-in-its-callers-thread` measured is real and it
+    # is about the thread only.
+    #
+    # A separate number from `agent_max_tool_result_chars`, because it bounds a different resource.
+    # That one is context — what a model is sent. This is storage: LangGraph writes the whole
+    # channel per superstep and again per version, so a large write is amplified across a turn's
+    # supersteps.
+    #
+    # **The 10.4x this comment used to quote was mostly not this channel**, which is worth keeping
+    # because it is why the figure is gone rather than updated. One 2 MB helper write measured
+    # 20,712 kB of checkpoint rows above baseline, and
+    # `D-2026-09-18-a-checkpointer-of-none-is-the-callers-checkpointer` attributed the bulk of it to
+    # the helper checkpointing its *own* thread onto the caller's saver — a cost this setting never
+    # touched, and which is now closed. **Not "~98% of 20,712", which this comment said**: that
+    # arm's own cap reclaimed 8.8% of the 20,712, so at most 91.2% can be the helper's thread.
+    # 97.8% is the reduction measured on the *other* arm (18,944 -> 424), and carrying a
+    # percentage across two bases is the defect this paragraph exists to describe.
+    # What this bound is actually charged against is the caller's
+    # `files` channel alone. No replacement number is written here, for the reason the paragraph
+    # below already gives about the discarded one. It is a *total*:
+    # several files share it, the way a batch of tool calls shares `agent_max_tool_result_chars`,
+    # because the resource is the channel and not the file.
+    #
+    # **This comment shipped with a third, smaller figure for the same probe (~15.6 MB, 7.8x) and
+    # it was the discarded measurement**, not a disagreement worth splitting: the first attempt
+    # padded the 2 MB with `"x"` and measured TOAST compression rather than the write.
+    # `D-2026-09-12-a-helpers-scratch-file-crosses-into-its-callers-state` says so, `.env.example`
+    # already carried the corrected number, and only this line did not — one probe with two
+    # answers in the tree is the defect
+    # `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` names.
+    agent_subagent_files_max_chars: int = Field(default=200_000, ge=0)
+    # **The per-write bound on a turn's *own* files**, which nothing had
+    # (`D-2026-09-26-a-chemists-scratch-write-is-bounded-and-expires`). The setting above is applied
+    # only to what a *helper* hands back; a caller's `write_file` and `edit_file` go through
+    # `StateBackend`, which writes the `files` channel directly and reaches no middleware. So
+    # `agent/scratchpad.BoundedStateBackend` (the `/scratch/` route) and `BoundedStoreBackend` (the
+    # `/memories/` route) **refuse** a write or an edit whose resulting file would be longer than
+    # this, with a message naming the limit — never a truncation, because a cut would hand a chemist
+    # a document that simply stops, and a refusal lets the model split the file or write less.
+    #
+    # The same number as `agent_subagent_files_max_chars` by default, and for the resource's reason
+    # rather than by coincidence: that budget is the channel's whole allowance, and every file here
+    # is charged against it for every later helper, so one write larger than it would exhaust the
+    # channel by itself. No `0 = off` spelling: a refusal that can be switched off is the unbounded
+    # write this replaced, and a deployment that needs larger files raises the number.
+    agent_scratch_file_max_chars: int = Field(default=200_000, gt=0)
+    # **How long a file in a thread's `files` channel is kept after it was last written.** The
+    # channel is checkpointed under the thread and accumulates, and nothing deleted a scratch file
+    # short of `make user-erase` or disposing of the whole thread. Enforced at the start of each
+    # turn on that thread (`agent/scratchpad.expire_stale_scratch`), through the channel's reducer —
+    # the one path that can remove a key from a `DeltaChannel` without rewriting its checkpoint by
+    # hand. A thread nobody returns to keeps its files until the thread itself is disposed of
+    # (`retention_checkpoints_days`), which is the half this does not cover and says so.
+    #
+    # 90 days is the owner's default (2026-09-26). **0 keeps files for ever**, and only when a
+    # deployment sets it: unlike the `retention_*` windows this is not gated on `retention_enabled`,
+    # because it disposes of a turn's working surface rather than of a record.
+    agent_scratch_retention_days: int = Field(default=90, ge=0)
+    agent_memory_enabled: bool = True
+    # **What bounds the `store` table, which nothing did.** `durable/retention.py`'s register said
+    # of it "**nothing bounds it**", and it was right: `store` is agent-writable with no size cap,
+    # no window and no clock. Driven, 2,000 files of 5 kB each landed as `(2000, '816 kB')` under
+    # one namespace with nothing evicted. The runaway is not a looping turn — the loop cap and the
+    # parallel-call cap put a hard ceiling on writes *per turn* — it is accumulation across turns,
+    # because nothing ever removed a row.
+    #
+    # **A row count rather than a clock or a byte budget.** A memory is written in order to
+    # persist, so age is the wrong axis: the oldest memory is as likely to be the one worth keeping
+    # as the newest. Bytes are the wrong axis too, because the thing a chemist notices is a memory
+    # disappearing, and "your memories now hold fewer files because one of them was long" is not a
+    # rule anybody can hold in their head. A count is what `ingest/rejections.py` settled on for
+    # the same reason, and this is its per-actor twin. Past the cap the least *recently updated*
+    # file goes, which is a tiebreak rather than a policy — it is the only ordering the store
+    # carries.
+    #
+    # 200 at 5 kB is ~1 MB per person, which a namespace this is meant to hold does not approach:
+    # the working surface of one chemist's research turns, not an archive.
+    agent_memory_max_files: int = Field(default=200, ge=1)
+    # **What bounds the chemist's own skills tier, which `agent_memory_max_files` does not.** That
+    # cap lives in `scratchpad.BoundedStoreBackend`, which mounts `/memories/`; the local-skills
+    # tier mounts a plain read-only backend and is written from an HTTP route, so nothing on either
+    # half counted a row until these two existed.
+    #
+    # Two numbers because they bound different things, the `preferences_*` pair's reason exactly.
+    # The char cap is one skill's *body*, which is read into context on demand. The row cap is
+    # **prefix** spend: every local skill's name and description sit in the system message of every
+    # model call this chemist makes, unconditionally, so the row count is a multiplier on the one
+    # part of the request nothing can compact. 20 x deepagents' 1,024-character description limit is
+    # ~5,300 tokens of worst case; `agent/local_skills.py` carries the arithmetic.
+    #
+    # Refused at the route rather than evicted, unlike the memory tier: a memory a turn wrote may
+    # be dropped silently, and judgment a person authored may not.
+    #
+    # 16,000 is the shared tree's own largest skill (`protocol-generation`, 12,896 characters)
+    # plus room, so a person may write judgment as substantial as anything reviewed in. 20 is
+    # not the memory tier's 200 because a memory is a note a turn took and there are as many as
+    # the work produced, while a skill is judgment somebody sat down and wrote.
+    agent_local_skill_max_chars: int = Field(default=16_000, ge=1)
+    agent_local_skills_max: int = Field(default=20, ge=1)
+    # **How many behaviour proposals one `GET /proposals` answers**, newest first. A bound on a
+    # response rather than on storage: the table keeps every row, and the route is both the queue
+    # read (`state=open`) and the audit read (`state=`), so the audit read is the one this can cut
+    # short. 50 is the number the stores had hard-coded as a default in three places; it is a
+    # setting so a deployment that needs the whole audit trail can raise it rather than patch it.
+    agent_proposals_list_max: int = Field(default=50, ge=1)
+    # **What bounds the organisation's tier, and why it is not the personal tier's number.**
+    # `agent_local_skills_max` bounds one person's prefix and is usually spent on nobody: most
+    # chemists keep none, so the worst case is a worst case. This tier is the opposite — whatever an
+    # administrator publishes is in the prompt of *every* turn *every* chemist takes, so the cap is
+    # not a ceiling on an unusual case, it is the bill.
+    #
+    # And it is paid more than once per turn. The org tier is mounted on the turn's backend, and a
+    # helper is compiled through the same builder over the same backend, so a four-helper fan-out
+    # sends it five times. At the personal tier's 20 rows that is ~27,900 tokens of prefix across
+    # one turn's graphs; at 12 it is ~16,700. The measured basis is one maximal row at ~278 tokens
+    # (deepagents' 1,024-character description limit plus the listing's own scaffolding), which
+    # `tests/test_context_floor.py` derives and re-measures on this tier's own mount.
+    #
+    # 12 rather than the shipped tree's 28 because the reviewed tree is narrowed by all four
+    # predicates and most profiles reach a fraction of it, while this tier applies fewer: every org
+    # row is in every prefix. Refused at the route rather than evicted, the personal tier's reason
+    # exactly — judgment a person authored may not vanish because somebody added one more.
+    agent_org_skills_max: int = Field(default=12, ge=1)
+    # How many previously-activated bodies of one organisation skill stay revertible.
+    #
+    # **Evicted rather than refused, which is the opposite of the cap above, and the asymmetry is
+    # the decision.** Refusing here would mean an administrator cannot publish a fix because the
+    # skill has been edited too often — a bound on exactly the wrong thing. Evicting the least
+    # recently activated is `scratchpad.BoundedStoreBackend`'s tiebreak taken for its reason: it is
+    # the only ordering the store carries, and the version anybody reverts to is a recent one.
+    #
+    # This is the one place the stored tier is weaker than the git tree it stands beside: `skills/`
+    # can be reverted to any commit and this to the last 20 activations
+    # (`D-2026-09-20-a-revert-is-a-pointer-when-there-is-no-commit-to-revert`). 20 because a skill
+    # with 20 distinct bodies behind it has a process problem rather than a history problem.
+    agent_org_skill_versions_max: int = Field(default=20, ge=1)
+    # What `recall_preferences` may hand back, and the second half of the same finding.
+    # `user_preferences` is the other agent-writable table with no bound: `remember_preference`
+    # takes a **model-chosen** key, so the row count is not one-per-known-name, and the `SELECT …
+    # ORDER BY key` behind `recall_preferences` had no `LIMIT` at all — so every row a chemist has
+    # ever accumulated re-enters the prompt on every recall, for the life of the row.
+    #
+    # Two numbers because they bound different things. The row cap is storage and is enforced in
+    # the writer's own transaction; the recall cap is *prompt* spend and is enforced in the read,
+    # because a deployment that lowers the row cap still holds the rows it already wrote.
+    # 50 preferences at the measured ~44 characters each is ~2.2 kB of prompt — a paragraph, which
+    # is what "how this chemist works" should cost a turn.
+    preferences_max_per_owner: int = Field(default=200, ge=1)
+    preferences_recall_limit: int = Field(default=50, ge=1)
     # **How much of the chemist's own conversation stays quotable** — the ambient
     # `core/turn_text.py` binds and `agent/protocol_design_tools.require_quotes_are_verbatim`
     # checks a `basis="stated"` slot against.
@@ -456,16 +653,63 @@ class AgentSettings(BaseSettings):
     # `TodoListMiddleware` and the plan gate (a todo list + plan/execute approval + a counted
     # completion cap) over the *same* tools/skills/audit/compaction as the single-turn agent, with
     # every generic battery (file memory/access, web search, shell) OFF — capability comes from our
-    # MCP servers and tools, not from the harness. Off by default so the single-turn agent stays
-    # the safe fallback.
+    # MCP servers and tools, not from the harness.
     # `harness_autonomy` picks the starting mode: `plan_only` (default, the pharma-safe one)
     # starts in plan mode and presents a plan for human approval before any execution — the
     # pre-execution approval gate — and only loops once approval switches it to execute; `execute`
     # starts looping through the todo list immediately. `harness_max_loop_iterations` caps the
     # loop so a stuck plan aborts instead of spinning (the runaway guard).
-    harness_enabled: bool = False
+    #
+    # **On by default since D-2026-09-13, and the sentence above used to say the opposite** — "off
+    # by default so the single-turn agent stays the safe fallback". That framing had the safety
+    # backwards on the axis that turned out to matter, and three merged positions already said so
+    # while the default went on shipping `False`:
+    #
+    #   - `D-2026-09-06-the-write-gate-is-three-names-and-the-plan-gate-carries-the-rest` names this
+    #     gate as what covers the 29 write tools that are *not* in `DEFAULT_WRITE_TOOL_GATES`, and
+    #     names the shipped chart as what turns it on. Off, that cover is absent.
+    #   - `Settings._check` below refuses `entra_required` with this flag off under `plan_only`,
+    #     in as many words: the gate "is not attached at all and a turn can start state-changing
+    #     work with nothing to approve it".
+    #   - D-152 §3 found the consequence empirically — the chart ships `true` while "the code
+    #     default and every test run `false`", so the production agent-construction path had never
+    #     met a live model, and the first turn under the shipped configuration crashed.
+    #
+    # So the unsupervised posture was the one every test measured and the supervised one was the
+    # one every deployment ran. The default is now the chart's, and the chart's line is no longer
+    # load-bearing for it. What a deployment that wants the old behaviour sets is
+    # `CHEMCLAW_HARNESS_AUTONOMY=execute`, which keeps the todo list and drops the gate — stated
+    # that way round because dropping the *harness* also drops the plan, and a deployment asking
+    # for less supervision is not asking for less planning.
+    #
+    # A profile still overrides in both directions (`plan_gate.harness_enabled_for`), which is why
+    # `data/profiles/computation.yaml` needed no global flag to get the harness it argues for, and
+    # measured +0 tokens across this change while every other profile moved by 1,862.
+    harness_enabled: bool = True
     harness_autonomy: HarnessAutonomy = "plan_only"
     harness_max_loop_iterations: int = Field(default=25, ge=1)
+
+    # **What one `write_todos` call may declare.** Both halves of a plan were unbounded, and each
+    # sizes something that outlives the call: the step count sizes the row
+    # `api/routes/plan.py::decide_plan` writes, and the per-step declaration sizes the union that
+    # lands in `plan_approvals.scope` (`TEXT[]`) and then the sentence
+    # `plan_gate.out_of_scope_refusal` builds out of it. Measured on the shipped schema: 50,000
+    # ten-character names in one step validated, and the refusal came back at **600,192
+    # characters** — bounded to 60,000 by `agent/tool_authz._refusal_message` before the model
+    # reads it, and unbounded everywhere before that (the exception, the log, the audit row).
+    # 20,000 steps validated too, which is the half the backlog row that found this did not name.
+    #
+    # **Not an escalation, which is why these are bounds rather than a gate.** The scope only ever
+    # *narrows* what a call may do, and a name no tool answers to is refused by `enforce_tool_authz`
+    # regardless. What it is is an unpriced write a model can repeat.
+    #
+    # Refused at the tool's own argument validation on purpose: that is the one place the model
+    # reads the error and can act on it by splitting the plan, rather than the call succeeding and
+    # a person meeting the consequence later. The defaults are generous against real use — a step
+    # declares nought to a handful of tools, and the whole bound surface is ~113 — and far below
+    # what motivated them.
+    plan_max_steps: int = Field(default=64, ge=1)
+    plan_max_tools_per_step: int = Field(default=32, ge=1)
 
     # What one turn may **bill** before the runaway guard stops it, counting every dimension the
     # provider reports (input, output and cache) across every model call of the turn, the
@@ -482,19 +726,56 @@ class AgentSettings(BaseSettings):
     # forever; one turn can *spend* without a bound.
     #
     # **0 means no cap**, the convention `budget.py::_over` and `llm_context_window_tokens`
-    # already use, and it is the shipped default for the reason a wrong number here is worse than
-    # no number: the cap ends the turn, and a turn ended early on a corpus this setting was never
-    # sized against loses a chemist's work. A deployment sets it from what its own
-    # `turn_costs.total_tokens` rows actually show, which is the number `chemclaw.evals` and the
-    # cost ledger exist to give it. The iteration cap stays on regardless, so switching this off
-    # is not switching the runaway guard off.
+    # already use. It is no longer the shipped default, and the argument that made it one is kept
+    # here rather than deleted, because it is still true and is what bounds the number chosen.
+    #
+    # That argument ran: a wrong number is worse than no number, since the cap ends the turn and a
+    # turn ended early on a corpus this setting was never sized against loses a chemist's work.
+    # **Two things answer it.** The first is what "ends the turn" means — `spend_cap.py` jumps the
+    # graph `to end` rather than raising, and `api/runner.py` emits a `spend_cap_reached` error
+    # naming the answer as *partial*, so a capped turn hands back what it had. That is a smaller
+    # loss than the sentence above implies. The second is that the alternative was not "no cap"
+    # but an unbounded one: measured, a single turn billed **250,000 tokens against a 1,000-token
+    # session cap**, and neither half of `api/budget.py` can see it — `check()` runs before a turn
+    # and `record()` after it.
+    #
+    # **So this ships as a runaway backstop, not as a budget — and the first number chosen for it
+    # was not one.** 300,000 shipped here on the strength of that 250,000 measurement, and a review
+    # four days later found it sat *below an ordinary turn*. The error is worth stating exactly,
+    # because it is a class this tree keeps finding: the 250,000 was measured when a model call
+    # carried roughly 10,000 tokens (`agent/spend_cap.py` records the shape: "25 gateway calls of
+    # 10,000 tokens"), and the static prefix has since grown sevenfold. Carrying a number across
+    # that change is `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` happening to a
+    # config default instead of a docstring.
+    #
+    # **What the prefix does to the arithmetic.** `agent/turn_usage.graph_usage_tokens` takes the
+    # provider's `total_tokens` — prompt *and* completion, cached prompt tokens included — so the
+    # whole static prefix is charged on every model call and prefix caching cannot reduce it.
+    # Measured on the shipped basis: `tests/test_context_floor.PREFIX_BOUND` is the repo ceiling
+    # plus what the sibling fleet serves, and at that figure 300,000 funded **three** model calls
+    # while `harness_max_loop_iterations` permits 25. One guard had made the other unreachable: a
+    # plan/tool/answer turn with a single correction did not finish, and the loop cap could no
+    # longer move at all.
+    #
+    # **Derived now, not chosen.** The ceiling of a *lawful* turn is what the two guards above
+    # already authorise — `harness_max_loop_iterations` model calls, each bounded by
+    # `agent_context_token_budget` — so anything at or under that is work this system said it would
+    # do, and only a bug exceeds it. That is what "runaway backstop" has to mean if the sentence
+    # below is to stay true. `tests/test_spend_cap.py` holds the relation, the way
+    # `tests/test_compaction.py` holds the two compaction defaults against the same basis, so the
+    # next prefix or loop-cap change cannot strand this one silently again.
+    #
+    # A deployment wanting a real *cost* ceiling sets a smaller number from its own
+    # `turn_costs.total_tokens` distribution — but it should know it is then buying refusals, not
+    # a backstop. The iteration cap stays on regardless, so this is a second ceiling rather than
+    # the only one.
     #
     # Billed rather than estimated tokens, because this is a *cost* ceiling and the estimator is
     # measured to undercount by a quarter to two thirds on exactly the payload class a runaway turn
     # is made of (`agent/context_budget.py` carries the 2026-09-06 re-measurement; the 0.45x this
     # line used to name did not reproduce). No conversion is needed here and none is done: the
     # provider reports is the number this compares.
-    agent_max_turn_billed_tokens: int = Field(default=0, ge=0)
+    agent_max_turn_billed_tokens: int = Field(default=3_000_000, ge=0)
 
     # Supersteps one model call costs, for deriving the graph's own step ceiling below.
     #
@@ -544,6 +825,85 @@ class AgentSettings(BaseSettings):
     # itself. 0 removes the bound.
     agent_max_parallel_tool_calls: int = Field(default=8, ge=0)
 
+    # Which agent profiles a turn may delegate to, beside the unnamed `general-purpose` helper —
+    # the `task` roster (`agent/subagents.py`). A pathsep-delimited list of profile names, because
+    # these are bare names like `skills_enabled` rather than config-carrying objects.
+    #
+    # **Every entry is still an attenuation.** A rostered helper's surface is what its *caller*
+    # holds, intersected with the named profile's tools, minus everything that acts — so a name
+    # here can only ever make a helper narrower, never reach past the agent that spawned it, and
+    # `D-2026-08-10-a-subagent-is-an-attenuation-not-a-new-actor` needs no revisiting.
+    #
+    # **Which three, and why not the other three, is a measurement rather than a taste.** After
+    # `side_effecting_tools()` is subtracted, `reporting` keeps 3 of its 8 names and
+    # `property-lookup` 1 of 5, because their job *is* writing; `design` keeps 4 of 8 but loses
+    # `suggest_next_experiment`, which is the whole specialist. What is left coherent is `evidence`
+    # (14 of 15), `computation` (12 of 41 — the enumeration family, topology, the calibration
+    # ledger and calculation lookup, which is a real capability and is **not** "compute things")
+    # and `safety` (4 of 6). A name whose helper is empty is a menu entry that wastes a delegation.
+    #
+    # Empty disables the roster, leaving the single unnamed helper this repository shipped before —
+    # not a capability switch so much as the escape hatch for a deployment that measures the prefix
+    # and wants it back.
+    agent_helper_roster: str = "evidence" + os.pathsep + "computation" + os.pathsep + "safety"
+
+    # The agent profiles this deployment runs as **peers** — agents that hand the conversation to
+    # one another with `transfer_to_…` and each answer the chemist directly
+    # (`agent/turn_graph.py`). Empty is the shipped default and means no turn graph is built at
+    # all: `build_turn_graph` returns `None` and a turn runs the single agent it always did.
+    #
+    # **Empty rather than the three names `agent_helper_roster` ships with, and that asymmetry is
+    # the decision rather than an oversight.** A helper reads and reports, so a roster of them
+    # changes what a turn costs and not what it may do; a peer keeps the acting tools the root
+    # held and speaks to the chemist in its own voice, so a mesh that mis-routes is a worse
+    # product than the single agent it replaced. `D-2026-08-10-a-subagent-is-an-attenuation-not-a-
+    # new-actor` requires exactly this — measured hand-off accuracy before a team is turned on —
+    # and that measurement does not exist: `evals/delegation.py` has never run against a model.
+    # Turning this on is also a prefix cost a deployment should choose knowingly, because each
+    # peer binds one handoff tool per other peer and a first-party schema is charged against
+    # `tests/test_context_floor.py`'s ceiling with no allowance to absorb it.
+    #
+    # The root profile is a peer automatically and need not be named; naming it is ignored with a
+    # warning, since it would be a node the graph already has.
+    agent_peer_roster: str = ""
+
+    # How many times one **turn** may hand between peers before `transfer_to_…` refuses. 0 removes
+    # the bound.
+    #
+    # Per turn rather than per thread, and the distinction is the whole point: a conversation that
+    # moves between agents over twenty turns is working, while a turn that bounces four times is a
+    # model talking to itself through a routing table. `ChemclawState.handoffs` is untracked for
+    # that reason, so a thread cannot arrive at its fourth turn already capped —
+    # `agent/loop_cap.py`'s bricked-session defect, which is what happens when a per-turn quantity
+    # is stored per thread.
+    #
+    # Three because a legitimate chain is short: generalist → specialist → back, or generalist →
+    # one specialist → another. A fourth hop in one turn has not been observed to carry
+    # information, and the refusal leaves the agent holding control with everything else it had,
+    # so hitting the cap costs a chemist nothing but a handover they did not need.
+    agent_max_handoffs: int = 3
+
+    # How many of a rostered helper's tool names its `task` menu entry enumerates before it says
+    # "and N more".
+    #
+    # **A bound rather than a ratchet, because the thing that grows is not one this repository can
+    # measure.** `describe_helper` lists the surface the helper's graph *bound*, which is the right
+    # derivation — a profile edited next year cannot leave the menu stale — and it made `task`'s own
+    # schema a function of how many tools the sibling fleet serves. Measured: `task` is 897 tokens
+    # against `tests/test_context_floor.py`'s 900-token per-tool bound with the `safety` entry
+    # dropped (its whole surface is served out of `Chemclaw3-mcp`, so this repository's ratchet
+    # binds
+    # none of it); reconstructed with that entry's real surface it is ~1,009, over the bound, with
+    # the ratchet reading 897 and passing. That is
+    # `D-2026-09-05-a-ratchet-that-binds-no-connectors-measures-a-smaller-system` one level down, in
+    # the per-tool bound instead of the total — and the remedy that test names ("narrow the
+    # arguments or paginate") is unavailable for a description, so the bound has to be here.
+    #
+    # Twelve because the menu's job is to tell entries apart, and `D-2026-08-12`'s defect was a
+    # roster whose five entries were *identical*: a dozen names does that for any roster this
+    # repository ships, and the count that follows is honest about what it did not list.
+    agent_helper_menu_tools: int = 12
+
     # How many of one reply's unparseable tool calls are promoted onto `tool_calls` and refused
     # individually (`agent/model_calls.PromoteInvalidToolCalls`); the rest are counted and named
     # for the operator without becoming calls. 0 removes the bound.
@@ -563,6 +923,39 @@ class AgentSettings(BaseSettings):
     # them carries the same sentence. 20 is the old setting's value, kept so a deployment that
     # tuned it reads the same number.
     agent_max_promoted_invalid_calls: int = Field(default=20, ge=0)
+
+    # How many audit events `PostgresAuditSink` may hold before it starts shedding the oldest.
+    #
+    # **The buffer had no write-side bound at all, and its docstring is why that looked safe.** It
+    # argues — correctly — that a *failed* batch must be dropped rather than re-queued, "because
+    # re-queueing it would make a broken database grow the buffer without bound". That covers a
+    # database which is **down**. It says nothing about one which is merely **slow**: `record()`
+    # appends and returns while `_flush_all` drains at whatever rate the connection allows, so a
+    # database answering in seconds instead of milliseconds grows the list on the producer side,
+    # inside a pod the chart limits to 1 GiB, at roughly ninety rows a turn.
+    #
+    # Shedding the **oldest** is deliberate. Both ends lose a row, and the end worth keeping is the
+    # recent one: an operator reaching for this trail is asking what just happened. Nothing is lost
+    # silently either way — every event has already gone to the stdlib log by the time it is
+    # buffered, and `chemclaw_audit_events_shed_total` is a separate series from
+    # `chemclaw_audit_sink_failures_total` on purpose, because "the database is unreachable" and
+    # "the database cannot keep up" have different remedies and would be indistinguishable pooled.
+    #
+    # 50,000 is about 555 turns of backlog at the measured ~90 rows a turn — large enough that an
+    # ordinary slow patch never reaches it, small enough that it cannot be the thing that ends the
+    # process. 0 removes the bound and restores the old unbounded behaviour for a deployment that
+    # would rather have the OOM than the gap.
+    #
+    # **The memory figure is measured, because the sentence here first said "a few tens of MB" and
+    # that was wrong by 4x in the reassuring direction.** At the realistic row — `arguments` cut to
+    # `agent_audit_max_arg_chars`, i.e. 200 — 50,000 events is **1,672 B each, 80 MB**, which is 8%
+    # of the 1 GiB the chart gives a pod that is also holding the model context. That is the number
+    # this default is chosen against, and it is only 80 rather than 160 because `_shed_to_bound`
+    # charges the in-flight batch too: before that fix `_flush_all` swapped the list out and
+    # `record` refilled a fresh one the bound could not see, so the real ceiling was twice whatever
+    # this field said. Raising this field past ~150,000 puts the buffer alone over a quarter of the
+    # pod, which is the point at which it stops being a backstop and becomes the risk.
+    agent_audit_buffer_max_events: int = Field(default=50_000, ge=0)
 
     # How many times one turn may call a tool with the *identical* arguments before the call is
     # refused (`agent.repeat_guard`). The loop cap above bounds the harness's iterations and says
@@ -657,6 +1050,29 @@ class AgentSettings(BaseSettings):
         return [d for d in self.skills_dir.split(os.pathsep) if d]
 
     @property
+    def helper_roster(self) -> list[str]:
+        """The profile names offered as `task` helpers; empty leaves the single unnamed helper.
+
+        Read through this property, never raw, for the reason `skills_dirs` states: the delimited
+        string is the ENV shape and the list is what every caller wants.
+        """
+        # Stripped, unlike the other pathsep lists here, because this one is the first whose typo
+        # is fatal: `refuse_an_unknown_roster` raises at startup, so `"evidence: computation"` —
+        # spaced the way a person writes a list — would not start the front door. Elsewhere a stray
+        # space makes an entry inert; here it makes the deployment dead.
+        return [name.strip() for name in self.agent_helper_roster.split(os.pathsep) if name.strip()]
+
+    @property
+    def peer_roster(self) -> list[str]:
+        """The profile names run as peers; empty means no turn graph is built (the default).
+
+        Stripped for `helper_roster`'s reason and not a weaker one: `refuse_an_unknown_peer_roster`
+        also raises at startup, so a list written the way a person writes one —
+        `"evidence: safety"` — would stop the front door rather than make one entry inert.
+        """
+        return [name.strip() for name in self.agent_peer_roster.split(os.pathsep) if name.strip()]
+
+    @property
     def skills_enabled_list(self) -> list[str]:
         """The explicitly enabled skill names; empty means "every discovered skill" (the default).
 
@@ -713,7 +1129,16 @@ class AgentSettings(BaseSettings):
 
         At the shipped defaults this is `25 * 6 + 8 = 158` against the 132 a 25-iteration harness
         turn actually needs — so the cap fires first, which is the intent. The ceiling should never
-        be what stops a harness turn; it is what stops a turn that has no cap, because the loop cap
-        is attached only when the harness is on.
+        be what stops a turn at all; it is the backstop under the cap, sized so the cap always
+        fires first.
+
+        **This said "it is what stops a turn that has no cap, because the loop cap is attached only
+        when the harness is on", and that was the opposite of the code.** `_harness_middleware`
+        builds `[enforce_loop_cap, enforce_spend_cap, MeterTurnSpend()]` and returns them *before*
+        the harness branch, so every profile carries the cap — its own docstring says "the cap is
+        unconditional and the todo list is not, and they used to travel together", and this file
+        says it correctly 230 lines up ("the iteration cap stays on regardless"). There is no turn
+        with no cap, so a reader sizing this margin was being told to leave room for a case that
+        cannot arise.
         """
         return self.harness_max_loop_iterations * self.agent_supersteps_per_model_call + 8

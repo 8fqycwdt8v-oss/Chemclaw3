@@ -1,6 +1,6 @@
 """The agent's calculator tools: the surface did not move, and the cache still decides.
 
-These fifteen tools are named by string in profiles, eval probes and `SKILL.md`s, so their
+These tools are named by string in profiles, eval probes and `SKILL.md`s, so their
 signatures and return types are a contract this suite has to hold still even though everything
 underneath them changed: after `D-2026-08-16-the-physics-leaves-the-cache-stays` not one of them
 computes anything. The physics answers over MCP, this side keys it, stores it and composes it.
@@ -42,7 +42,7 @@ def shared_store(monkeypatch: pytest.MonkeyPatch) -> InMemoryStore:
     return store
 
 
-def test_compute_xtb_energy_tool_runs_and_caches(
+async def test_compute_xtb_energy_tool_runs_and_caches(
     server: FakeCalcServer, shared_store: InMemoryStore
 ) -> None:
     """The tool returns the parsed result and the second call is served from the store.
@@ -52,35 +52,29 @@ def test_compute_xtb_energy_tool_runs_and_caches(
     is one — if that ever became zero the client would be deriving keys locally, which is the thing
     the whole transport exists to prevent.
     """
+    first = await calc_tools.compute_xtb_energy("O")
+    second = await calc_tools.compute_xtb_energy("O")
+    assert first.method == "GFN2-xTB"
+    assert second.total_energy_hartree == first.total_energy_hartree
 
-    async def _run() -> None:
-        first = await calc_tools.compute_xtb_energy("O")
-        second = await calc_tools.compute_xtb_energy("O")
-        assert first.method == "GFN2-xTB"
-        assert second.total_energy_hartree == first.total_energy_hartree
-
-    asyncio.run(_run())
     assert server.count("compute_xtb_energy") == 1, "a persisted result was recomputed"
     assert server.count("calculation_key") == 2
 
 
-def test_electronic_properties_tool_returns_the_populated_result(
+async def test_electronic_properties_tool_returns_the_populated_result(
     server: FakeCalcServer, shared_store: InMemoryStore
 ) -> None:
     """The properties tool asks for one molecule and reuses the store on a repeat."""
+    result = await calc_tools.compute_electronic_properties("CCO")
+    again = await calc_tools.compute_electronic_properties("CCO")
+    assert len(result.atom_charges) == 9  # C2H6O with explicit hydrogens
+    assert result.bond_orders
+    assert again.total_energy_hartree == result.total_energy_hartree
 
-    async def _run() -> None:
-        result = await calc_tools.compute_electronic_properties("CCO")
-        again = await calc_tools.compute_electronic_properties("CCO")
-        assert len(result.atom_charges) == 9  # C2H6O with explicit hydrogens
-        assert result.bond_orders
-        assert again.total_energy_hartree == result.total_energy_hartree
-
-    asyncio.run(_run())
     assert server.count("compute_electronic_properties") == 1
 
 
-def test_the_two_binary_only_calculators_get_the_binary_s_own_wait_budget(
+async def test_the_two_binary_only_calculators_get_the_binary_s_own_wait_budget(
     server: FakeCalcServer,
 ) -> None:
     """The client must wait as long as the binary-only calculators' own server-side budget.
@@ -97,22 +91,20 @@ def test_the_two_binary_only_calculators_get_the_binary_s_own_wait_budget(
     """
     assert settings.calc_atomic_timeout_seconds >= settings.calc_server_timeout_seconds
 
-    async def _run() -> None:
-        for call in (
-            calc_tools.compute_atomic_descriptors,
-            calc_tools.compute_surface_potential,
-        ):
-            with pytest.raises(Exception):  # noqa: B017 - the fake server has no handler for either
-                await call("O")
+    for call in (
+        calc_tools.compute_atomic_descriptors,
+        calc_tools.compute_surface_potential,
+    ):
+        with pytest.raises(Exception):  # noqa: B017 - the fake server has no handler for either
+            await call("O")
 
-    asyncio.run(_run())
     assert server.timeouts[-2:] == [
         settings.calc_atomic_timeout_seconds,
         settings.calc_atomic_timeout_seconds,
     ]
 
 
-def test_a_second_fukui_mode_re_ranks_the_cached_result_rather_than_serving_the_first(
+async def test_a_second_fukui_mode_re_ranks_the_cached_result_rather_than_serving_the_first(
     server: FakeCalcServer, shared_store: InMemoryStore
 ) -> None:
     """The defect the split introduced and this is the guard against it.
@@ -127,25 +119,22 @@ def test_a_second_fukui_mode_re_ranks_the_cached_result_rather_than_serving_the_
     The fake ranks `f_minus` descending and `f_plus` ascending, so the two modes order the atoms
     oppositely and a mis-served ranking cannot look like a coincidence.
     """
+    electrophilic = await calc_tools.predict_site_reactivity("Oc1ccccc1", top_n=13)
+    nucleophilic = await calc_tools.predict_site_reactivity(
+        "Oc1ccccc1", mode="nucleophilic", top_n=13
+    )
+    assert electrophilic.mode == "electrophilic"
+    assert electrophilic.ranked_by == "f_minus"
+    assert nucleophilic.mode == "nucleophilic"
+    assert nucleophilic.ranked_by == "f_plus"
+    assert [site.index for site in nucleophilic.sites] == list(
+        reversed([site.index for site in electrophilic.sites])
+    )
 
-    async def _run() -> None:
-        electrophilic = await calc_tools.predict_site_reactivity("Oc1ccccc1", top_n=13)
-        nucleophilic = await calc_tools.predict_site_reactivity(
-            "Oc1ccccc1", mode="nucleophilic", top_n=13
-        )
-        assert electrophilic.mode == "electrophilic"
-        assert electrophilic.ranked_by == "f_minus"
-        assert nucleophilic.mode == "nucleophilic"
-        assert nucleophilic.ranked_by == "f_plus"
-        assert [site.index for site in nucleophilic.sites] == list(
-            reversed([site.index for site in electrophilic.sites])
-        )
-
-    asyncio.run(_run())
     assert server.count("predict_site_reactivity") == 1, "the second mode ran the calculation again"
 
 
-def test_site_reactivity_truncates_to_the_configured_default(
+async def test_site_reactivity_truncates_to_the_configured_default(
     server: FakeCalcServer, shared_store: InMemoryStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The truncation lives in the tool rather than in the cached row, on purpose.
@@ -155,19 +144,17 @@ def test_site_reactivity_truncates_to_the_configured_default(
     """
     monkeypatch.setattr(settings, "xtb_fukui_top_n", 3)
 
-    async def _run() -> None:
-        default = await calc_tools.predict_site_reactivity("Oc1ccccc1")
-        widened = await calc_tools.predict_site_reactivity("Oc1ccccc1", top_n=13)
-        assert len(default.sites) == 3
-        assert default.total_atoms == 13  # C6H6O with explicit hydrogens
-        assert len(widened.sites) == 13
+    default = await calc_tools.predict_site_reactivity("Oc1ccccc1")
+    widened = await calc_tools.predict_site_reactivity("Oc1ccccc1", top_n=13)
+    assert len(default.sites) == 3
+    assert default.total_atoms == 13  # C6H6O with explicit hydrogens
+    assert len(widened.sites) == 13
 
-    asyncio.run(_run())
     assert server.count("predict_site_reactivity") == 1
     assert all("top_n" not in args for args in server.arguments("predict_site_reactivity"))
 
 
-def test_predict_solubility_logs_the_version_the_result_was_computed_under(
+async def test_predict_solubility_logs_the_version_the_result_was_computed_under(
     server: FakeCalcServer, shared_store: InMemoryStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The single most load-bearing change in the tool layer, asserted on the value that is logged.
@@ -185,13 +172,11 @@ def test_predict_solubility_logs_the_version_the_result_was_computed_under(
 
     monkeypatch.setattr(calc_tools, "_log_prediction", _record)
 
-    async def _run() -> None:
-        result = await calc_tools.predict_solubility("CCO")
-        await calc_tools.predict_solubility("CCO")  # served from the store
-        assert result.model == "esol-delaney@2004"
-        assert result.uncertainty_log > 0
+    result = await calc_tools.predict_solubility("CCO")
+    await calc_tools.predict_solubility("CCO")  # served from the store
+    assert result.model == "esol-delaney@2004"
+    assert result.uncertainty_log > 0
 
-    asyncio.run(_run())
     assert logged == [("solubility", FAKE_VERSION), ("solubility", FAKE_VERSION)]
 
 
@@ -224,7 +209,7 @@ def test_predict_developability_profile_tool_flags_ro5(
     assert result.veber_pass is True
 
 
-def test_optimize_geometry_stores_the_full_result_and_summarizes_it_here(
+async def test_optimize_geometry_stores_the_full_result_and_summarizes_it_here(
     server: FakeCalcServer, shared_store: InMemoryStore
 ) -> None:
     """One key, one payload shape — the collision this tool would otherwise cause.
@@ -235,18 +220,15 @@ def test_optimize_geometry_stores_the_full_result_and_summarizes_it_here(
     validation error deep inside a reaction job, so this tool asks for the full result and drops the
     geometry here, where it costs nothing.
     """
+    summary = await calc_tools.optimize_geometry("CCO")
+    assert summary.structure_id.startswith("st_")
+    assert summary.energy_hartree < summary.energy_hartree + summary.relaxation_kcal
+    # The row a later thermochemistry will hit is the full one, so it validates.
+    from chemclaw.connectors.calc import compose
 
-    async def _run() -> None:
-        summary = await calc_tools.optimize_geometry("CCO")
-        assert summary.structure_id.startswith("st_")
-        assert summary.energy_hartree < summary.energy_hartree + summary.relaxation_kcal
-        # The row a later thermochemistry will hit is the full one, so it validates.
-        from chemclaw.connectors.calc import compose
+    _, cached = await compose.relax(shared_store, await compose.embed("CCO"), None)
+    assert cached is True
 
-        _, cached = await compose.relax(shared_store, await compose.embed("CCO"), None)
-        assert cached is True
-
-    asyncio.run(_run())
     assert server.count("relax_structure") == 1
     assert server.count("optimize_geometry") == 0, "the one-shot tool must not be used"
 
@@ -270,7 +252,7 @@ def test_compute_thermochemistry_composes_and_truncates_its_spectrum(
     assert result.mode_count > len(result.modes)  # the honest count of what was truncated
 
 
-def test_predict_logd_tool_defaults_ph_and_reuses_the_pka(
+async def test_predict_logd_tool_defaults_ph_and_reuses_the_pka(
     server: FakeCalcServer, shared_store: InMemoryStore
 ) -> None:
     """The logD tool defaults pH and reports the pKa uncertainty it was derived from.
@@ -279,16 +261,13 @@ def test_predict_logd_tool_defaults_ph_and_reuses_the_pka(
     term, both local. So asking again at a different pH costs no calculation at all — which is the
     whole reason this composite was decomposed instead of shipped.
     """
+    result = await calc_tools.predict_logd("OC(=O)c1ccccc1")
+    other_ph = await calc_tools.predict_logd("OC(=O)c1ccccc1", ph=2.0)
+    assert result.ph == settings.logd_default_ph
+    assert result.uncertainty > 0
+    # More of an acid is protonated at low pH, so logD rises.
+    assert other_ph.log_d > result.log_d
 
-    async def _run() -> None:
-        result = await calc_tools.predict_logd("OC(=O)c1ccccc1")
-        other_ph = await calc_tools.predict_logd("OC(=O)c1ccccc1", ph=2.0)
-        assert result.ph == settings.logd_default_ph
-        assert result.uncertainty > 0
-        # More of an acid is protonated at low pH, so logD rises.
-        assert other_ph.log_d > result.log_d
-
-    asyncio.run(_run())
     assert server.count("predict_pka") == 1, "the second pH recomputed the pKa"
     assert server.count("predict_logd") == 0, "logD is composed here, never asked for"
 

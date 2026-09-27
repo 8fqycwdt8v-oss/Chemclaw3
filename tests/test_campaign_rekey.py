@@ -13,8 +13,6 @@ needs and what SQL alone could never do.
 
 from __future__ import annotations
 
-import asyncio
-
 import psycopg
 import pytest
 
@@ -57,104 +55,88 @@ async def _seed(conn: psycopg.AsyncConnection[object], campaign_id: str) -> None
     await conn.commit()
 
 
-def test_a_campaign_recorded_under_the_old_id_moves_with_its_history() -> None:
+async def test_a_campaign_recorded_under_the_old_id_moves_with_its_history() -> None:
     """The whole point: the suggestions follow the campaign, and the old row goes."""
+    await migrated_db_or_skip()
+    stale = "campaign-stale-under-the-old-derivation"
+    current = campaign_id_for(_PROBLEM)
+    async with await psycopg.AsyncConnection.connect(settings.postgres_dsn) as conn:
+        await conn.execute("DELETE FROM bo_campaigns")
+        await conn.commit()
+        await _seed(conn, stale)
 
-    async def _drive() -> None:
-        await migrated_db_or_skip()
-        stale = "campaign-stale-under-the-old-derivation"
-        current = campaign_id_for(_PROBLEM)
-        async with await psycopg.AsyncConnection.connect(settings.postgres_dsn) as conn:
-            await conn.execute("DELETE FROM bo_campaigns")
-            await conn.commit()
-            await _seed(conn, stale)
+        examined, moved = await rekey(dry_run=True)
+        assert (examined, moved) == (1, 1)
+        # A dry run changes nothing, which is the only thing that makes it worth having.
+        row = await (
+            await conn.execute("SELECT count(*) FROM bo_campaigns WHERE campaign_id = %s", (stale,))
+        ).fetchone()
+        assert row is not None and row[0] == 1
 
-            examined, moved = await rekey(dry_run=True)
-            assert (examined, moved) == (1, 1)
-            # A dry run changes nothing, which is the only thing that makes it worth having.
-            row = await (
-                await conn.execute(
-                    "SELECT count(*) FROM bo_campaigns WHERE campaign_id = %s", (stale,)
-                )
-            ).fetchone()
-            assert row is not None and row[0] == 1
+        examined, moved = await rekey(dry_run=False)
+        assert (examined, moved) == (1, 1)
 
-            examined, moved = await rekey(dry_run=False)
-            assert (examined, moved) == (1, 1)
+        moved_rows = await (
+            await conn.execute(
+                "SELECT count(*) FROM bo_suggestions WHERE campaign_id = %s", (current,)
+            )
+        ).fetchone()
+        assert moved_rows is not None and moved_rows[0] == 1
+        gone = await (
+            await conn.execute("SELECT count(*) FROM bo_campaigns WHERE campaign_id = %s", (stale,))
+        ).fetchone()
+        assert gone is not None and gone[0] == 0
 
-            moved_rows = await (
-                await conn.execute(
-                    "SELECT count(*) FROM bo_suggestions WHERE campaign_id = %s", (current,)
-                )
-            ).fetchone()
-            assert moved_rows is not None and moved_rows[0] == 1
-            gone = await (
-                await conn.execute(
-                    "SELECT count(*) FROM bo_campaigns WHERE campaign_id = %s", (stale,)
-                )
-            ).fetchone()
-            assert gone is not None and gone[0] == 0
+        # Idempotent: a second run is a read, which is what makes it safe to leave in a deploy.
+        assert await rekey(dry_run=False) == (1, 0)
 
-            # Idempotent: a second run is a read, which is what makes it safe to leave in a deploy.
-            assert await rekey(dry_run=False) == (1, 0)
-
-            await conn.execute("DELETE FROM bo_campaigns")
-            await conn.commit()
-
-    asyncio.run(_drive())
+        await conn.execute("DELETE FROM bo_campaigns")
+        await conn.commit()
 
 
-def test_two_rows_that_differed_only_in_casing_merge_into_one_history() -> None:
+async def test_two_rows_that_differed_only_in_casing_merge_into_one_history() -> None:
     """A collision is the point, not a hazard: they *are* one campaign, and so is their history."""
+    await migrated_db_or_skip()
+    current = campaign_id_for(_PROBLEM)
+    async with await psycopg.AsyncConnection.connect(settings.postgres_dsn) as conn:
+        await conn.execute("DELETE FROM bo_campaigns")
+        await conn.commit()
+        await _seed(conn, "campaign-forked-a")
+        await _seed(conn, "campaign-forked-b")
 
-    async def _drive() -> None:
-        await migrated_db_or_skip()
-        current = campaign_id_for(_PROBLEM)
-        async with await psycopg.AsyncConnection.connect(settings.postgres_dsn) as conn:
-            await conn.execute("DELETE FROM bo_campaigns")
-            await conn.commit()
-            await _seed(conn, "campaign-forked-a")
-            await _seed(conn, "campaign-forked-b")
+        await rekey(dry_run=False)
 
-            await rekey(dry_run=False)
+        rows = await (await conn.execute("SELECT count(*) FROM bo_campaigns")).fetchone()
+        assert rows is not None and rows[0] == 1
+        merged = await (
+            await conn.execute(
+                "SELECT count(*) FROM bo_suggestions WHERE campaign_id = %s", (current,)
+            )
+        ).fetchone()
+        assert merged is not None and merged[0] == 2
 
-            rows = await (await conn.execute("SELECT count(*) FROM bo_campaigns")).fetchone()
-            assert rows is not None and rows[0] == 1
-            merged = await (
-                await conn.execute(
-                    "SELECT count(*) FROM bo_suggestions WHERE campaign_id = %s", (current,)
-                )
-            ).fetchone()
-            assert merged is not None and merged[0] == 2
-
-            await conn.execute("DELETE FROM bo_campaigns")
-            await conn.commit()
-
-    asyncio.run(_drive())
+        await conn.execute("DELETE FROM bo_campaigns")
+        await conn.commit()
 
 
-def test_a_row_with_no_stored_problem_is_left_alone(caplog: pytest.LogCaptureFixture) -> None:
+async def test_a_row_with_no_stored_problem_is_left_alone(caplog: pytest.LogCaptureFixture) -> None:
     """Predates migration 037's snapshot, so its id cannot be re-derived from anything.
 
     Guessing would attach real suggestions to an id nobody can reproduce, so it is named and left.
     """
-
-    async def _drive() -> None:
-        await migrated_db_or_skip()
-        async with await psycopg.AsyncConnection.connect(settings.postgres_dsn) as conn:
-            await conn.execute("DELETE FROM bo_campaigns")
-            await conn.execute(
-                "INSERT INTO bo_campaigns (campaign_id, objective, direction) VALUES (%s,%s,%s)",
-                ("campaign-no-problem", "yield", "maximize"),
-            )
-            await conn.commit()
-            with caplog.at_level("WARNING"):
-                assert await rekey(dry_run=False) == (1, 0)
-            assert "cannot be re-derived" in caplog.text
-            await conn.execute("DELETE FROM bo_campaigns")
-            await conn.commit()
-
-    asyncio.run(_drive())
+    await migrated_db_or_skip()
+    async with await psycopg.AsyncConnection.connect(settings.postgres_dsn) as conn:
+        await conn.execute("DELETE FROM bo_campaigns")
+        await conn.execute(
+            "INSERT INTO bo_campaigns (campaign_id, objective, direction) VALUES (%s,%s,%s)",
+            ("campaign-no-problem", "yield", "maximize"),
+        )
+        await conn.commit()
+        with caplog.at_level("WARNING"):
+            assert await rekey(dry_run=False) == (1, 0)
+        assert "cannot be re-derived" in caplog.text
+        await conn.execute("DELETE FROM bo_campaigns")
+        await conn.commit()
 
 
 def test_the_cli_previews_by_default_and_writes_only_when_told(

@@ -20,7 +20,7 @@ from datetime import date
 from itertools import zip_longest
 from typing import Any, Literal
 
-from pydantic import Field
+from pydantic import Field, computed_field
 
 from chemclaw.agent.framing import defang, frame_untrusted
 from chemclaw.core.config import settings
@@ -28,10 +28,14 @@ from chemclaw.core.errors import ChemclawError
 from chemclaw.core.tool_registry import tool
 from chemclaw.ingest.eln.records import default_record_store
 from chemclaw.ingest.rejections import IngestRejection, refusals_matching
-from chemclaw.ingest.sources.registry import active_retrieve_sources
+from chemclaw.ingest.sources.registry import active_retrieve_corpora, active_retrieve_sources
 from chemclaw.retrieval.evidence import EvidenceChunk, EvidenceSweep, Hits, SourceRetriever
 from chemclaw.retrieval.fanout import record_kept_chunks, sweep_sources
-from chemclaw.retrieval.hybrid import reciprocal_rank_fusion, restated_as_position
+from chemclaw.retrieval.hybrid import (
+    reciprocal_rank_fusion,
+    restated_as_position,
+    with_no_leg_cut_out,
+)
 from chemclaw.retrieval.retrievers import FingerprintReactionRetriever
 from chemclaw.science.fingerprints.store import default_reaction_store
 
@@ -64,9 +68,58 @@ class EvidenceSweepWithRefusals(EvidenceSweep):
     # tool return reaches the model as its `repr` (`tests/test_upstream_surface.py`), so this field
     # name and `IngestRejection`'s own `kind` are what the model actually reads.
     refused_on_ingest: list[IngestRejection] = Field(default_factory=list)
+    # How many refusals matched the question, which is not `len(refused_on_ingest)` once the
+    # ledger's own `_MAX_MATCHES` bites. That bound is argued and stays — it is prompt budget — but
+    # a bound applied silently made "the refusals" and "the top five refusals" the same list, which
+    # is the swallowing `rejections.py`'s own header refuses one category over. The same rule
+    # `total_before_cap` follows for the sweep beside it.
+    refusals_total: int = Field(default=0, ge=0)
     # Why the rejection ledger could not be asked; empty when it was. An unreachable ledger and a
     # clean corpus must not render alike — the same rule `sources_failed` exists for one field up.
     refusals_unavailable: str = ""
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def disputed(self) -> str:
+        """What a chunk's `conflicts_with` means, in the payload, when there is one to read.
+
+        **The marker shipped for a year with nothing anywhere saying what it was for.** Measured
+        across the whole conversational path: the words "conflict", "contradict" and "disput"
+        appear **zero** times in the assembled system prompt, zero times in this tool's own
+        description, zero times in any `SKILL.md`, and `EvidenceChunk`'s nine fields carried
+        `description=None` for all of them — so a model was handed a list of note ids and no
+        reason to chase them. The sibling control has a block of prompt to itself — the assembled
+        system prompt names `created_by` three times — and the note *that* labels is less
+        dangerous than a claim something in the corpus has refuted.
+
+        **Said here rather than in the `Returns:` paragraph, and the reason is a measured
+        constraint rather than a preference.** `gather_evidence`'s schema is 881 tokens against
+        `tests/test_context_floor.py`'s 900-token per-tool cap; the shortest honest version of
+        this cost 73 and put it at 954, which that ratchet refuses — correctly, because every
+        token of it is re-sent on every model call whether or not any chunk is marked. A computed
+        field costs **nothing** in the prefix and appears only when there is a disagreement to
+        report, which is also the argument `NoteSearch.verdict` and `FingerprintSearch.verdict`
+        already make: a docstring is read once when the tool is defined, and the payload is what
+        sits in the context window while the answer is being written.
+
+        The sentence is `retrieval/harness.py`'s own, verbatim, because the *report* path has
+        rendered exactly this per chunk since the marker existed and two renderings of one warning
+        would drift. What is added is the part only this path has: when the cap cuts the disputing
+        notes out of the sweep — measured, the refuted claim survived and **both** disputers were
+        cut — the ids in `conflicts_with` are the whole remaining trace, and they are reachable
+        only by `expand_note`.
+        """
+        marked = [chunk for chunk in self.chunks if chunk.conflicts_with]
+        if not marked:
+            return ""
+        ids = sorted({note for chunk in marked for note in chunk.conflicts_with})
+        return (
+            f"DISPUTED: {len(marked)} of these chunks come from a note that other notes disagree "
+            f"with ({', '.join(ids)}) — these notes disagree; do not read this and a conflicting "
+            "note as two independent confirmations. A disputing note is often not in this sweep "
+            "at all, because the cap cut it: expand_note each id in a chunk's conflicts_with "
+            "before you rest an answer on that chunk, and say the claim is disputed either way."
+        )
 
 
 def _text_retrievers() -> list[SourceRetriever]:
@@ -185,8 +238,11 @@ def _interleave_dedup(ranked_lists: list[list[EvidenceChunk]]) -> list[EvidenceC
     return merged
 
 
-async def _refused_on_ingest(query: str) -> tuple[list[IngestRejection], str]:
-    """The refused records this question matches, and why the ledger could not be asked if it was.
+async def _refused_on_ingest(query: str) -> tuple[list[IngestRejection], int, str]:
+    """The refused records this question matches, how many matched, and any read failure.
+
+    The three are one answer: which rows, how many there were, and why there were none when the
+    ledger could not be asked at all.
 
     Both halves are needed because an empty list has to keep meaning "nothing was refused". A
     ledger that cannot be reached would otherwise say the same thing as a clean corpus, which is
@@ -224,6 +280,10 @@ async def _refused_on_ingest(query: str) -> tuple[list[IngestRejection], str]:
     untouched: `kind="ingest-rejection"` leads the repr, the field is named `refused_on_ingest`,
     the envelope's own id says `refused-on-ingest:…` rather than naming a note a reader could
     expand, and `refusals_unavailable` still separates an unreachable ledger from a clean corpus.
+
+    The middle element is the ledger's own `total_matching`: `_MAX_MATCHES` cuts this list to five,
+    which is a deliberate prompt budget and was invisible, so a chemist shown five refusals had no
+    way to know twelve matched.
     """
     try:
         found = await refusals_matching(query)
@@ -232,25 +292,29 @@ async def _refused_on_ingest(query: str) -> tuple[list[IngestRejection], str]:
         # answer, and failing the whole turn over a data-quality annotation would be the larger
         # harm. Reported in the return value, never swallowed into an empty list.
         logger.warning("ingest rejection ledger could not be read: %s", exc)
-        return [], f"the ingest rejection ledger could not be read ({type(exc).__name__})"
-    return [
-        rejection.model_copy(
-            update={
-                # The content channel: framed, so the words an export wrote arrive as data the
-                # system prompt has already told the model not to obey. The id names the ledger
-                # row rather than a note, because there is nothing here to expand — the record is
-                # absent, which is the whole statement.
-                "reason": frame_untrusted(
-                    rejection.reason,
-                    note_id=f"refused-on-ingest:{rejection.source}:{rejection.entry_id}",
-                ),
-                # The label channels: neutralised, not wrapped.
-                "entry_id": defang(rejection.entry_id),
-                "source": defang(rejection.source),
-            }
-        )
-        for rejection in found
-    ], ""
+        return [], 0, f"the ingest rejection ledger could not be read ({type(exc).__name__})"
+    return (
+        [
+            rejection.model_copy(
+                update={
+                    # The content channel: framed, so the words an export wrote arrive as
+                    # data the system prompt has already told the model not to obey. The id
+                    # names the ledger row rather than a note, because there is nothing here to
+                    # expand — the record is absent, which is the whole statement.
+                    "reason": frame_untrusted(
+                        rejection.reason,
+                        note_id=f"refused-on-ingest:{rejection.source}:{rejection.entry_id}",
+                    ),
+                    # The label channels: neutralised, not wrapped.
+                    "entry_id": defang(rejection.entry_id),
+                    "source": defang(rejection.source),
+                }
+            )
+            for rejection in found.rejections
+        ],
+        found.total_matching,
+        "",
+    )
 
 
 def _as_date(value: str, field: str) -> date:
@@ -308,12 +372,11 @@ async def gather_evidence(
         chunks look.
 
         `refused_on_ingest` is **not evidence and not a result**. Each entry is a record an ingest
-        source offered and this system *refused*, with the reason — so it is absent from the
-        corpus however well it matches. Report it as what it is ("that entry was rejected on
-        ingest because …"); never present its id, its numbers or
-        its reason as something found in the corpus, and never fill the gap it names with a value.
-        `refusals_unavailable` is non-empty when that ledger could not be asked, in which case an
-        empty list says nothing about whether anything was refused.
+        source offered and this system *refused*, with the reason, so it is absent from the corpus
+        however well it matches. Say that ("rejected on ingest because …"); never present its id,
+        its numbers or its reason as something found in the corpus, and never fill the gap it names
+        with a value. The list is capped and `refusals_total` is how many matched;
+        `refusals_unavailable` is non-empty when the ledger could not be asked at all.
     """
     filters: dict[str, Any] = {}
     if note_type is not None:
@@ -365,10 +428,27 @@ async def gather_evidence(
     if settings.retrieval_mode == "hybrid":
         # RRF already produces the cross-source ranking (best first), so it *is* the order the cap
         # keeps — re-sorting by a single source's raw score would discard the fusion.
+        # `corpora` is what makes the fusion one-corpus-one-vote. `graph`, `lexical` and `vector`
+        # are three rankers over one note tree, and RRF's premise is independent ones — measured,
+        # their pairwise agreement on the shipped corpus is 47/55, 44/55 and 41/53, so the
+        # agreement term decides the order and the rank term barely participates. A source that
+        # declares no corpus is its own, so a deployment running one note leg fuses as before.
+        corpus_of = active_retrieve_corpora()
         merged = reciprocal_rank_fusion(
             ranked_lists,
             k=settings.retrieval_fusion_k,
             weights=settings.retrieval_source_weights_map,
+            corpora=[corpus_of.get(name, name) for name, _ in sources],
+        )
+        # The cut below is a prefix of this order, and a weight can make that prefix one leg.
+        # `with_no_leg_cut_out` is the RRF-side half of
+        # `D-2026-08-01-a-cap-that-starves-a-source` — see there for why the floor is one chunk
+        # rather than a share, and for the measurement that it changes nothing unless a leg is
+        # actually at zero. Applied here and not in the `else` arm because round-robin already
+        # gives every leg its best hit before any leg gets its second, which is the same
+        # guarantee arrived at by construction.
+        merged = with_no_leg_cut_out(
+            merged, ranked_lists, limit=settings.gather_evidence_max_chunks
         )
     else:
         # Round-robin, not a flat union re-sorted by score: the cap below has to be survivable by
@@ -433,10 +513,11 @@ async def gather_evidence(
     )
     # Counted before the refusals are read, deliberately: a rejection is not a retrieved chunk and
     # must not enter the accounting a starved-source alert reads.
-    refused, refusals_unavailable = await _refused_on_ingest(query)
+    refused, refusals_total, refusals_unavailable = await _refused_on_ingest(query)
     return EvidenceSweepWithRefusals(
         chunks=kept,
         refused_on_ingest=refused,
+        refusals_total=refusals_total,
         refusals_unavailable=refusals_unavailable,
         truncated_by=truncated_by,
         total_before_cap=len(framed),

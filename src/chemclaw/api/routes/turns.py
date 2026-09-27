@@ -1,8 +1,11 @@
 """The SSE turn stream — the one route with real concurrency machinery, kept in one place.
 
-`POST /sessions/{id}/messages` runs a turn under four guards that must compose exactly: the
-per-session in-process lease and the durable cross-process claim (both 409), the admission
-semaphore (queued/shed on the open stream, D-166), and the budget (429). The `_turn_events`
+`POST /sessions/{id}/messages` runs a turn under five guards that must compose exactly: the
+per-session in-process lease and the durable cross-process claim (both 409), the per-actor
+concurrent-turn cap (429, above the claim — `D-2026-09-19-a-pod-wide-cap-is-not-a-fair-one`), the
+admission semaphore (queued/shed on the open stream, D-166), and the budget (429). A sixth is
+spent before this module is reached at all: `api/rate_limit.py`'s token bucket, inside
+`require_principal`. The `_turn_events`
 generator stays **nested in the route on purpose**: everything it captures — the turn's session,
 body, principal, lease bookkeeping — is per-request state that exists nowhere but this request's
 frame, so hoisting it would mean re-threading eight arguments to move code that has exactly one
@@ -12,6 +15,8 @@ at request time, which is the seam that let this route leave `create_app` unchan
 
 import asyncio
 import logging
+import math
+import random
 import uuid
 from collections.abc import AsyncIterator
 
@@ -19,16 +24,18 @@ from fastapi import FastAPI, HTTPException, Request
 from sse_starlette.sse import EventSourceResponse, SendTimeoutError
 from starlette.types import Receive, Scope, Send
 
-from chemclaw.api.budget import BudgetExceeded
+from chemclaw.api.auth import DEV_PRINCIPAL_OID
+from chemclaw.api.budget import BudgetExceeded, check_thread_size, refused_metric
 from chemclaw.api.deps import CurrentSession, CurrentUser
 from chemclaw.api.detach import DetachableTurn
-from chemclaw.api.events import ErrorEvent, QueuedEvent
+from chemclaw.api.events import TURN_EVENT_REF, ErrorEvent, QueuedEvent, sse_frame
 from chemclaw.api.middleware import AT_CAPACITY
 from chemclaw.api.runner import failure_event, run_turn
 from chemclaw.api.schemas import MessageIn, session_title
 from chemclaw.api.state import (
     SessionTurns,
     TurnLease,
+    _actor_turns_in_flight,
     _claim_turn_slot,
     _hold_turn_claim,
     _release_turn_claim,
@@ -91,6 +98,20 @@ class _TurnStream(EventSourceResponse):
             )
 
 
+def _retry_after_hint() -> str:
+    """Seconds to suggest before a refused caller tries again — a cadence, with jitter.
+
+    The base is `service_turn_admission_timeout_seconds`, this system's existing answer to how long
+    waiting for a turn permit is reasonable, rather than a number chosen here. The jitter is up to
+    one further interval and exists for one reason: every client refused by this guard would
+    otherwise be handed the same constant and re-converge on a single cadence, arriving together at
+    the pod they were refused by. Ceilinged to at least 1, because `Retry-After: 0` means "retry
+    immediately" and would turn the hint into a spin.
+    """
+    base = settings.service_turn_admission_timeout_seconds
+    return str(max(1, math.ceil(base + random.random() * base)))
+
+
 async def post_message(
     request: Request,
     session_id: str,
@@ -131,10 +152,93 @@ async def post_message(
     claims: SessionTurns | None = front.turn_claims
     lease = settings.service_turn_claim_lease_seconds
     semaphore = front.turn_semaphore
+    # **Per actor — the half of a pair `src/chemclaw/api/routes/streams.py` already ships
+    # whole.** The semaphore below bounds this *process* and is actor-blind, so one principal
+    # opening
+    # `service_max_concurrent_turns` sessions holds every permit on the replica and every other
+    # chemist is shed `at_capacity` (`chemclaw.api.detach` has the measurement: one hang-up per
+    # permit). One bound does not imply the other.
+    #
+    # **Refused here rather than beside `semaphore.acquire()`, and that is not a re-litigation of
+    # D-166.** What D-166 moved onto the stream was the *wait*, which was invisible — up to
+    # `service_turn_admission_timeout_seconds` with no response at all. This is a refusal: decided
+    # by a dict scan, final for this request, and identical on a retry a millisecond later. So it
+    # gets a status code, like the durable 409 below and like the stream cap's own 429. Answering
+    # it with `at_capacity` would also name the wrong full resource — the replica may be idle; the
+    # caller's own turns are the limit — and `retryable=True` would tell a UI to keep hammering a
+    # condition only that client can clear.
+    #
+    # **`Retry-After` is sent, and the reason is the client rather than the server.** This process
+    # cannot predict when one of the caller's turns ends, so on its own terms the honest answer is
+    # "no number" — which is what this refusal shipped until the client was read. `Chemclaw3_ui`'s
+    # `errorFromStatus` splits 429 on the *presence* of the header: with one it renders a transient
+    # `rate_limited` banner with a countdown, without one it renders `budget_exhausted` — "the usage
+    # budget for this service is exhausted" — which locks the composer, is false here, and which
+    # that module's own comment says nothing in the UI clears. A machine-readable `code` cannot
+    # carry it either: `streamTurn.ts` does not pass `errorFromStatus` its `code` argument at all,
+    # so an older client would still lock. The admission timeout is the right hint because it is
+    # already this system's answer to "how long is it reasonable to wait for a turn permit" — it is
+    # a configured number rather than an invented one.
+    #
+    # **It is a "check back" cadence and not an estimate, and saying so matters**: what clears this
+    # is one of the caller's *own* turns ending, which is bounded by `service_turn_timeout_seconds`
+    # (600 s) rather than by the admission timeout (5 s). A compliant client can therefore retry
+    # many times before the condition can plausibly lift. That is the right trade only because the
+    # refusal is the cheapest thing this route does — it is raised above `set_title_if_absent`,
+    # above the durable claim and above `semaphore.acquire()`, so a refused retry takes no permit,
+    # no turn slot and no Postgres claim — and because a chemist's turn may finish in two seconds,
+    # which a 600-second countdown in the banner would hide. What is *not* defensible is a constant
+    # every refused client in a deployment shares, so it carries jitter: without it they re-converge
+    # on one cadence and arrive together.
+    #
+    # **Above `_claim_turn_slot`, and the line order is the guard.** That claim's reservation
+    # carries `deadline=math.inf` until `_start_turn_lease` starts its clock, so a raise between it
+    # and the `try` below leaks the session's slot with no expiry — 409-bricking that session for
+    # the pod's lifetime.
+    #
+    # **Inert under the shared dev principal, because there "per actor" means "everybody".** With
+    # `entra_required` false every caller is one fixed oid (`auth.DEV_PRINCIPAL_OID`), so this would
+    # stop dividing the pod between chemists and start capping the pod itself at this number — one
+    # client holding its share would refuse every other client, which is the starvation the guard
+    # exists to prevent, inverted. That configuration is reachable (`service_allow_insecure`), and a
+    # deployment fronting the API with one service credential for many humans is the same shape:
+    # the honest answer in both is that this guard has nothing to divide.
+    actor_cap = settings.service_max_concurrent_turns_per_actor
+    held = (
+        _actor_turns_in_flight(active_turns, principal.oid, besides=session_id)
+        if actor_cap and principal.oid != DEV_PRINCIPAL_OID
+        else 0
+    )
+    if actor_cap and held >= actor_cap:
+        METRICS.increment("chemclaw_turns_refused_actor_cap_total")
+        # The identity is logged at INFO and deliberately not a label. `/metrics` is
+        # unauthenticated, and an `oid`'s domain is unbounded — not *caller*-chosen, which this
+        # comment claimed until it was checked: the value is a tenant-issued claim off a validated
+        # token, so minting many needs tenant identities or a multi-tenant `entra_tenant_id`. The
+        # conclusion is unchanged, because the series cap is what decides it: a labelled counter
+        # would stop counting past its limit, exactly when a flood is what you are trying to read.
+        # INFO rather than WARNING matches `api/rate_limit.py`'s sibling refusal, and matters
+        # because the rate is the refused client's to choose while the request limiter that would
+        # bound it ships off in code.
+        # The *measured* count beside the cap, not the cap twice. `held` can legitimately read
+        # higher than `actor_cap` — the predicate is `>=` — and a count above it is the one
+        # observable symptom of a lease that outlived its turn, so logging the configured number
+        # in its place would hide exactly the failure this line exists to attribute.
+        logger.info(
+            "refusing a turn for %s: holding %d concurrent turn(s) against a per-actor cap of %d",
+            principal.oid,
+            held,
+            actor_cap,
+        )
+        raise HTTPException(
+            status_code=429,
+            detail="too many concurrent turns for this user; wait for one to finish",
+            headers={"Retry-After": _retry_after_hint()},
+        )
     # Nothing may sit between this claim and the `try` below — no `await`, and nothing that can
     # raise — because the reservation it takes does not expire until `_start_turn_lease` starts its
     # clock, and until then only that `try`'s `finally` gives it back.
-    slot = _claim_turn_slot(active_turns, session_id)
+    slot = _claim_turn_slot(active_turns, session_id, actor=principal.oid)
     if slot is None:
         METRICS.increment("chemclaw_turns_conflict_total", labels={"scope": "process"})
         raise HTTPException(status_code=409, detail="a turn is already running for this session")
@@ -198,7 +302,7 @@ async def post_message(
             if semaphore.locked():
                 METRICS.increment("chemclaw_turns_queued_total")
                 queued_event = QueuedEvent()
-                yield {"event": queued_event.type, "data": queued_event.model_dump_json()}
+                yield sse_frame(queued_event)
                 try:
                     await asyncio.wait_for(
                         semaphore.acquire(),
@@ -223,7 +327,7 @@ async def post_message(
                         retryable=True,
                         correlation_id=correlation_id,
                     )
-                    yield {"event": shed.type, "data": shed.model_dump_json()}
+                    yield sse_frame(shed)
                     return
             else:
                 await semaphore.acquire()
@@ -246,16 +350,17 @@ async def post_message(
             # budget is spent, so the next attempt fails identically until an operator raises the
             # cap or the counters reset.
             try:
-                front.budget.check(session_id, principal.oid)
+                await front.budget.check(session_id, principal.oid)
+                await check_thread_size(session_id)
             except BudgetExceeded as exc:
-                METRICS.increment("chemclaw_turns_refused_budget_total")
+                METRICS.increment(refused_metric(exc))
                 refused = ErrorEvent(
                     message=str(exc),
                     code="budget_exhausted",
                     retryable=False,
                     correlation_id=correlation_id,
                 )
-                yield {"event": refused.type, "data": refused.model_dump_json()}
+                yield sse_frame(refused)
                 return
             METRICS.increment("chemclaw_turns_started_total")
             try:
@@ -299,7 +404,7 @@ async def post_message(
                     ):
                         if event.type == "error":
                             turn_failed = True
-                        yield {"event": event.type, "data": event.model_dump_json()}
+                        yield sse_frame(event)
             except TimeoutError:
                 turn_failed = True
                 METRICS.increment("chemclaw_turn_timeouts_total")
@@ -320,7 +425,7 @@ async def post_message(
                     retryable=False,
                     correlation_id=correlation_id,
                 )
-                yield {"event": timeout_event.type, "data": timeout_event.model_dump_json()}
+                yield sse_frame(timeout_event)
         except Exception as exc:
             # **The stream's own catch-all, and it covers what `run_turn`'s cannot.** `run_turn`
             # turns any `Exception` into one user-safe `ErrorEvent`, but that guard starts inside
@@ -340,7 +445,7 @@ async def post_message(
             turn_failed = True
             logger.exception("turn stream failed for session %s", session_id)
             failed = failure_event(exc, session_id, correlation_id or uuid.uuid4().hex)
-            yield {"event": failed.type, "data": failed.model_dump_json()}
+            yield sse_frame(failed)
         finally:
             if turn_failed:
                 METRICS.increment("chemclaw_turns_failed_total")
@@ -374,9 +479,10 @@ async def post_message(
         # was never going to run. It is a fast path, not the guard: the binding check is the one
         # inside the stream, after the permit (see there for the measurement).
         try:
-            front.budget.check(session_id, principal.oid)
+            await front.budget.check(session_id, principal.oid)
+            await check_thread_size(session_id)
         except BudgetExceeded as exc:
-            METRICS.increment("chemclaw_turns_refused_budget_total")
+            METRICS.increment(refused_metric(exc))
             raise HTTPException(status_code=429, detail=str(exc)) from exc
         # Claimed here rather than inside the stream because it is a *refusal*, not a wait:
         # a turn already running elsewhere must be told 409 by a status code, which only
@@ -469,5 +575,18 @@ def register(app: FastAPI) -> None:
     Registering on the app keeps both exactly as they were when these handlers lived in
     `create_app`.
     """
-    app.post("/sessions/{session_id}/messages")(post_message)
+    app.post(
+        "/sessions/{session_id}/messages",
+        # The SSE body is `text/event-stream`, which FastAPI cannot infer from the
+        # return annotation — so without this the one artefact `Chemclaw3_ui` reads
+        # says nothing at all about what this route streams
+        # (`D-2026-09-14-a-contract-the-client-cannot-read-is-a-contract-one-side-remembers`).
+        # `create_app` is what merges the referenced components.
+        responses={
+            200: {
+                "description": "One SSE frame per turn event.",
+                "content": {"text/event-stream": {"schema": {"$ref": TURN_EVENT_REF}}},
+            }
+        },
+    )(post_message)
     app.post("/sessions/{session_id}/turn/stop")(stop_turn)

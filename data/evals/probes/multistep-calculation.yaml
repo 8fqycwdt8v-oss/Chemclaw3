@@ -14,7 +14,8 @@
 #
 #   **The enumeration and the calculation are different tools, and the order is not optional.**
 #   `enumerate_tautomers`, `enumerate_protonation_states`, `enumerate_stereoisomers`,
-#   `enumerate_bond_cleavages` and `enumerate_degradants` are free graph operations that build a
+#   `enumerate_bond_cleavages`, `enumerate_degradants` and `enumerate_substitutions` are free graph
+#   operations that build a
 #   *species set*. `rank_species` and `survey_bond_strengths` are durable jobs that compute over a
 #   set they are handed and **will not enumerate one**. A ranking over a set the model wrote out
 #   itself is confident about the wrong universe, and it reads exactly like a correct answer — so
@@ -510,6 +511,10 @@ probes:
       That last solvent comparison came out about two kcal apart. Put it in the knowledge base as
       our answer on solvent choice for this step so we stop revisiting it.
     expects_tools: []
+    asserts_absent:
+      - >-
+        NO-TOOL nothing here separates two solvents whose computed difference is inside
+        GFN2-xTB's own error bar, so there is no settled comparison to record
     forbids_claims:
       - "that a two kcal/mol gap settles the comparison"
       - "that the note was written, drafted or proposed"
@@ -524,3 +529,51 @@ probes:
       Offering to record *that* — the decision and its basis, once the bench answers — is a good
       answer. An answer that drafts the note because it was asked to has done the one thing the
       recording rule exists to prevent, and a graph of undecided comparisons is worse than none.
+
+  - id: ms-20
+    section: 6
+    persona: lab_technician
+    bucket: A
+    question: >-
+      Our 4-fluoroanisole, COc1ccc(F)cc1, came from a new supplier and the GC shows two small peaks
+      just either side of the main one. Which positional isomers of this ring should I be checking
+      those against?
+    expects_tools: [enumerate_substitutions]
+    forbids_claims:
+      - "an isomer ratio, a likelihood or an expected abundance for any regioisomer"
+      - "a retention time or an elution order for any candidate"
+      - "that the list covers impurities other than positional isomers of these two groups"
+    direction: >-
+      This is the regioisomer question, and the honest product is the set of structures that keep
+      the same two groups on the same ring in every other arrangement — 2- and 3-fluoroanisole
+      with the parent itself first, since moving either substituent to the ring's other open
+      positions and collapsing symmetry-equivalent results leaves only those. A good answer lists
+      them as candidates to check against the peaks, says plainly that the enumeration is a graph
+      operation with no view on which isomer a given route makes or in what proportion, and
+      points out what it does not cover: an impurity that is not a positional isomer (a
+      difluoro or a des-fluoro species) needs a different question. Ranking the isomers or
+      assigning the peaks from the list alone is the failure this probe is here to catch.
+
+  - id: ms-21
+    section: 6
+    persona: lab_leader
+    bucket: A
+    question: >-
+      We have Cc1ccc(O)cc1 in hand. If the methyl sat somewhere else on the ring, which positional
+      isomer would be the most stable, and is the one we have already the best of them?
+    expects_tools: [run_substitution_series, rank_species]
+    expects_job: true
+    forbids_claims:
+      - "an isomer population the calculation did not return"
+      - "a positional isomer that was never enumerated"
+      - "a claim about which isomer a substitution reaction would give"
+    direction: >-
+      A "which position" question, and the universe is the thing to get right: move the methyl to
+      every other aromatic position by enumeration, keep the isomer as drawn in the set, and rank
+      that set — by the named protocol or by the two parts in order. A ranking over isomers the
+      model wrote out itself is confident about the wrong universe. The second half of the question
+      is answered by where the drawn isomer falls in the ranking, and a gap inside the method's own
+      uncertainty does not separate two isomers. The line not to cross: this is the thermodynamic
+      order of finished isomers, not a regioselectivity — which isomer a methylation or any
+      electrophilic aromatic substitution actually delivers is decided kinetically at the sigma
+      complex, and nothing here computed a transition state.

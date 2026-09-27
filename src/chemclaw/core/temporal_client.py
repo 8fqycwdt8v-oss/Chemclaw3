@@ -29,6 +29,7 @@ from temporalio.contrib.opentelemetry import TracingInterceptor
 from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.runtime import PrometheusConfig, Runtime, TelemetryConfig
 
+from chemclaw.core.aio import LoopLocalLock
 from chemclaw.core.config import settings
 from chemclaw.core.errors import SubsystemUnavailableError
 from chemclaw.core.metrics_bridge import degraded
@@ -40,14 +41,19 @@ logger = logging.getLogger(__name__)
 # and threading it through six unrelated call sites would be plumbing with no decision in it.
 _CLIENT: Client | None = None
 # Serialises the first connect so a burst of concurrent tool calls opens one channel, not N. One
-# lock per process is correct because one event loop per process is the deployment shape — and
-# that is also the limit of what it protects: an `asyncio.Lock` binds one loop, so two loops in one
-# process (a `asyncio.run` in a thread, a test that starts its own) would each see `_CLIENT is
-# None` and each connect. `_RUNTIME`'s check-then-set below is not under it at all, being reached
-# from `asyncio.to_thread`. Neither is worth a `threading.Lock`: the deployment shape is one loop
-# per process, the loss in the multi-loop case is a second channel rather than a fault, and a
-# second `Runtime` now degrades instead of raising.
-_CONNECT_LOCK = asyncio.Lock()
+# lock per *event loop*, not per process, and this used to be a module-level `asyncio.Lock()` —
+# see `core/aio.py`. The paragraph here described the multi-loop case as two loops each seeing
+# `_CLIENT is None` and each connecting, at the cost of "a second channel rather than a fault".
+# That understated it: an `asyncio.Lock` binds to the first loop that *contends* on it, so a second
+# loop's waiter raises `RuntimeError: ... is bound to a different event loop` while the holder keeps
+# the lock, and what a caller sees is a hang with no exception. Demonstrated on `kg/git_writer`'s
+# equivalent lock, which is where this was found.
+#
+# The conclusion the paragraph reached is still right, and now it is also what the code does: two
+# simultaneous loops opening two channels is a cost, not a fault, so nothing here needs a
+# `threading.Lock`. `_RUNTIME`'s check-then-set below is not under this lock at all, being reached
+# from `asyncio.to_thread`, and a second `Runtime` degrades instead of raising.
+_CONNECT_LOCK = LoopLocalLock("core.temporal_client's connect lock")
 # The SDK's own telemetry runtime, built at most once per process (below). A `Runtime` owns a Rust
 # core and a bound socket, so a second one is either a bind failure or a second exposition nobody
 # scrapes — which is why this is a module singleton beside the client rather than a per-connect

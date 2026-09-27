@@ -94,51 +94,43 @@ def test_publishing_costs_nothing_when_no_sink_is_configured(
     assert asyncio.run(outbox.enqueue([_record("k")])) == 0
 
 
-def test_enqueueing_the_same_record_twice_queues_it_once(
+async def test_enqueueing_the_same_record_twice_queues_it_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The identity index is the idempotency, so the call sites need no coordination."""
+    await migrated_db_or_skip()
+    _with_sink(monkeypatch, "alpha")
+    async with outbox._connect("test_fixture") as conn:
+        await _reset(conn)
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        _with_sink(monkeypatch, "alpha")
-        async with outbox._connect("test_fixture") as conn:
-            await _reset(conn)
+    assert await outbox.enqueue([_record("dup")]) == 1
+    assert await outbox.enqueue([_record("dup")]) == 0, "a second enqueue writes nothing"
 
-        assert await outbox.enqueue([_record("dup")]) == 1
-        assert await outbox.enqueue([_record("dup")]) == 0, "a second enqueue writes nothing"
-
-        async with outbox._connect("test_fixture") as conn:
-            cursor = await conn.execute(
-                "SELECT count(*) FROM result_publications WHERE calc_ref = 'dup'"
-            )
-            row = await cursor.fetchone()
-            assert row is not None and row[0] == 1
-
-    asyncio.run(_run())
+    async with outbox._connect("test_fixture") as conn:
+        cursor = await conn.execute(
+            "SELECT count(*) FROM result_publications WHERE calc_ref = 'dup'"
+        )
+        row = await cursor.fetchone()
+        assert row is not None and row[0] == 1
 
 
-def test_one_record_is_queued_once_per_enabled_sink(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_one_record_is_queued_once_per_enabled_sink(monkeypatch: pytest.MonkeyPatch) -> None:
     """Two sinks are two rows, so one destination being down cannot hold up another."""
+    await migrated_db_or_skip()
+    _with_sink(monkeypatch, "alpha", "beta")
+    async with outbox._connect("test_fixture") as conn:
+        await _reset(conn)
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        _with_sink(monkeypatch, "alpha", "beta")
-        async with outbox._connect("test_fixture") as conn:
-            await _reset(conn)
-
-        assert await outbox.enqueue([_record("fan")]) == 2
-        alpha = await outbox.claim("alpha", 10)
-        beta = await outbox.claim("beta", 10)
-        assert [ref for _, ref, _ in alpha] == ["fan"]
-        assert [ref for _, ref, _ in beta] == ["fan"]
-        # Claiming for one sink must not consume the other's row.
-        assert {row[0] for row in alpha}.isdisjoint({row[0] for row in beta})
-
-    asyncio.run(_run())
+    assert await outbox.enqueue([_record("fan")]) == 2
+    alpha = await outbox.claim("alpha", 10)
+    beta = await outbox.claim("beta", 10)
+    assert [ref for _, ref, _ in alpha] == ["fan"]
+    assert [ref for _, ref, _ in beta] == ["fan"]
+    # Claiming for one sink must not consume the other's row.
+    assert {row[0] for row in alpha}.isdisjoint({row[0] for row in beta})
 
 
-def test_a_failed_delivery_leaves_the_row_pending_until_it_runs_out_of_attempts(
+async def test_a_failed_delivery_leaves_the_row_pending_until_it_runs_out_of_attempts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A destination being down must not lose the record, and must not retry forever.
@@ -146,60 +138,57 @@ def test_a_failed_delivery_leaves_the_row_pending_until_it_runs_out_of_attempts(
     The row stays `pending` and re-claimable while it has attempts left, then retires to `failed`
     — where it is kept, not deleted, because it is the record that something was never published.
     """
+    await migrated_db_or_skip()
+    _with_sink(monkeypatch, "alpha")
+    monkeypatch.setattr(settings, "result_publish_max_attempts", 2)
+    async with outbox._connect("test_fixture") as conn:
+        await _reset(conn)
+    await outbox.enqueue([_record("flaky")])
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        _with_sink(monkeypatch, "alpha")
-        monkeypatch.setattr(settings, "result_publish_max_attempts", 2)
-        async with outbox._connect("test_fixture") as conn:
-            await _reset(conn)
-        await outbox.enqueue([_record("flaky")])
+    claimed = await outbox.claim("alpha", 10)
+    assert len(claimed) == 1
+    await outbox.mark_failed([claimed[0].lease], "destination unreachable")
+    # Still claimable: one attempt spent of two.
+    reclaimed = await outbox.claim("alpha", 10)
+    assert len(reclaimed) == 1
 
-        claimed = await outbox.claim("alpha", 10)
-        assert len(claimed) == 1
-        await outbox.mark_failed([claimed[0][0]], "destination unreachable")
-        # Still claimable: one attempt spent of two.
-        assert len(await outbox.claim("alpha", 10)) == 1
+    # **The second mark carries the second claim's lease, not the first's.** A mark is fenced on the
+    # attempt the claim handing it out spent, so re-using `claimed[0].lease` here would be a
+    # superseded pass releasing a live one's row — which is the defect
+    # `test_a_superseded_pass_cannot_release_the_lease_the_live_pass_holds` drives, and which this
+    # test reproduced before the fence existed.
+    await outbox.mark_failed([reclaimed[0].lease], "destination unreachable")
+    assert await outbox.claim("alpha", 10) == [], "out of attempts, no longer claimed"
 
-        await outbox.mark_failed([claimed[0][0]], "destination unreachable")
-        assert await outbox.claim("alpha", 10) == [], "out of attempts, no longer claimed"
-
-        async with outbox._connect("test_fixture") as conn:
-            cursor = await conn.execute(
-                "SELECT state, attempts, last_error FROM result_publications "
-                "WHERE calc_ref = 'flaky'"
-            )
-            row = await cursor.fetchone()
-            assert row is not None
-            state, attempts, last_error = row
-        assert (state, attempts) == ("failed", 2)
-        assert "unreachable" in last_error, "the reason is kept for an operator to read"
-
-    asyncio.run(_run())
+    async with outbox._connect("test_fixture") as conn:
+        cursor = await conn.execute(
+            "SELECT state, attempts, last_error FROM result_publications WHERE calc_ref = 'flaky'"
+        )
+        row = await cursor.fetchone()
+        assert row is not None
+        state, attempts, last_error = row
+    assert (state, attempts) == ("failed", 2)
+    assert "unreachable" in last_error, "the reason is kept for an operator to read"
 
 
-def test_a_delivered_row_is_not_claimed_again(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_a_delivered_row_is_not_claimed_again(monkeypatch: pytest.MonkeyPatch) -> None:
     """Marking delivered removes the row from the queue without deleting it."""
+    await migrated_db_or_skip()
+    _with_sink(monkeypatch, "alpha")
+    async with outbox._connect("test_fixture") as conn:
+        await _reset(conn)
+    await outbox.enqueue([_record("done")])
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        _with_sink(monkeypatch, "alpha")
-        async with outbox._connect("test_fixture") as conn:
-            await _reset(conn)
-        await outbox.enqueue([_record("done")])
+    claimed = await outbox.claim("alpha", 10)
+    await outbox.mark_delivered([row_id for row_id, _, _ in claimed])
+    assert await outbox.claim("alpha", 10) == []
 
-        claimed = await outbox.claim("alpha", 10)
-        await outbox.mark_delivered([row_id for row_id, _, _ in claimed])
-        assert await outbox.claim("alpha", 10) == []
-
-        async with outbox._connect("test_fixture") as conn:
-            cursor = await conn.execute(
-                "SELECT state, delivered_at IS NOT NULL FROM result_publications "
-                "WHERE calc_ref = 'done'"
-            )
-            assert await cursor.fetchone() == ("delivered", True)
-
-    asyncio.run(_run())
+    async with outbox._connect("test_fixture") as conn:
+        cursor = await conn.execute(
+            "SELECT state, delivered_at IS NOT NULL FROM result_publications "
+            "WHERE calc_ref = 'done'"
+        )
+        assert await cursor.fetchone() == ("delivered", True)
 
 
 def test_a_broken_outbox_does_not_raise_into_the_calculation(
@@ -237,7 +226,7 @@ def test_an_unprojectable_payload_does_not_raise_into_the_calculation(
     assert written == 0
 
 
-def test_claiming_a_row_spends_its_attempt(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_claiming_a_row_spends_its_attempt(monkeypatch: pytest.MonkeyPatch) -> None:
     """The attempt is spent by the claim, not by the failure report.
 
     The increment has to happen in the claim rather than in `mark_failed`, because a pass that dies
@@ -252,71 +241,63 @@ def test_claiming_a_row_spends_its_attempt(monkeypatch: pytest.MonkeyPatch) -> N
     `attempts=2` for one delivery. So the second claim is the thing to refuse, and the assertion
     below is now the one this file should always have made — one delivery, one attempt.
     """
+    await migrated_db_or_skip()
+    _with_sink(monkeypatch, "alpha")
+    monkeypatch.setattr(settings, "result_publish_max_attempts", 5)
+    async with outbox._connect("test_fixture") as conn:
+        await _reset(conn)
+    await outbox.enqueue([_record("counted")])
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        _with_sink(monkeypatch, "alpha")
-        monkeypatch.setattr(settings, "result_publish_max_attempts", 5)
-        async with outbox._connect("test_fixture") as conn:
-            await _reset(conn)
-        await outbox.enqueue([_record("counted")])
+    # Two claims with no `mark_failed` between them — as two overlapping runs would do.
+    assert len(await outbox.claim("alpha", 10)) == 1
+    assert await outbox.claim("alpha", 10) == [], (
+        "the row is leased to the first claim; a second overlapping run must not take it"
+    )
 
-        # Two claims with no `mark_failed` between them — as two overlapping runs would do.
-        assert len(await outbox.claim("alpha", 10)) == 1
-        assert await outbox.claim("alpha", 10) == [], (
-            "the row is leased to the first claim; a second overlapping run must not take it"
+    async with outbox._connect("test_fixture") as conn:
+        cursor = await conn.execute(
+            "SELECT attempts FROM result_publications WHERE calc_ref = 'counted'"
         )
+        row = await cursor.fetchone()
+    assert row is not None and row[0] == 1, "one claim spends one attempt"
 
-        async with outbox._connect("test_fixture") as conn:
-            cursor = await conn.execute(
-                "SELECT attempts FROM result_publications WHERE calc_ref = 'counted'"
-            )
-            row = await cursor.fetchone()
-        assert row is not None and row[0] == 1, "one claim spends one attempt"
-
-        # And the attempt is still the claim's rather than the report's: the failure that follows
-        # records the reason without charging a second one. Shortened only here, because the
-        # exclusion above is exactly what a full-length lease is for.
-        _with_a_short_lease(monkeypatch)
-        claimed = await _claim_after_the_previous_pass_died("alpha")
-        await outbox.mark_failed([claimed[0][0]], "the destination said no")
-        async with outbox._connect("test_fixture") as conn:
-            cursor = await conn.execute(
-                "SELECT attempts FROM result_publications WHERE calc_ref = 'counted'"
-            )
-            row = await cursor.fetchone()
-        assert row is not None and row[0] == 2
-
-    asyncio.run(_run())
+    # And the attempt is still the claim's rather than the report's: the failure that follows
+    # records the reason without charging a second one. Shortened only here, because the
+    # exclusion above is exactly what a full-length lease is for.
+    _with_a_short_lease(monkeypatch)
+    claimed = await _claim_after_the_previous_pass_died("alpha")
+    await outbox.mark_failed([claimed[0].lease], "the destination said no")
+    async with outbox._connect("test_fixture") as conn:
+        cursor = await conn.execute(
+            "SELECT attempts FROM result_publications WHERE calc_ref = 'counted'"
+        )
+        row = await cursor.fetchone()
+    assert row is not None and row[0] == 2
 
 
-def test_marking_failed_does_not_double_count_the_attempt(
+async def test_marking_failed_does_not_double_count_the_attempt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A claim followed by its own failure report costs exactly one attempt, not two."""
+    await migrated_db_or_skip()
+    _with_sink(monkeypatch, "alpha")
+    monkeypatch.setattr(settings, "result_publish_max_attempts", 5)
+    async with outbox._connect("test_fixture") as conn:
+        await _reset(conn)
+    await outbox.enqueue([_record("once")])
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        _with_sink(monkeypatch, "alpha")
-        monkeypatch.setattr(settings, "result_publish_max_attempts", 5)
-        async with outbox._connect("test_fixture") as conn:
-            await _reset(conn)
-        await outbox.enqueue([_record("once")])
+    claimed = await outbox.claim("alpha", 10)
+    await outbox.mark_failed([row_id for row_id, _, _ in claimed], "nope")
 
-        claimed = await outbox.claim("alpha", 10)
-        await outbox.mark_failed([row_id for row_id, _, _ in claimed], "nope")
-
-        async with outbox._connect("test_fixture") as conn:
-            cursor = await conn.execute(
-                "SELECT attempts, state FROM result_publications WHERE calc_ref = 'once'"
-            )
-            row = await cursor.fetchone()
-        assert row is not None and row == (1, "pending")
-
-    asyncio.run(_run())
+    async with outbox._connect("test_fixture") as conn:
+        cursor = await conn.execute(
+            "SELECT attempts, state FROM result_publications WHERE calc_ref = 'once'"
+        )
+        row = await cursor.fetchone()
+    assert row is not None and row == (1, "pending")
 
 
-def test_one_unreadable_document_does_not_retire_its_whole_batch(
+async def test_one_unreadable_document_does_not_retire_its_whole_batch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A poison row is one row's problem, and which rows it took must not depend on claim order.
@@ -338,41 +319,38 @@ def test_one_unreadable_document_does_not_retire_its_whole_batch(
         async def aclose(self) -> None:
             """Holds nothing; present because `ResultSink` requires it of every sink."""
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        _with_sink(monkeypatch, "alpha")
-        async with outbox._connect("test_fixture") as conn:
-            await _reset(conn)
+    await migrated_db_or_skip()
+    _with_sink(monkeypatch, "alpha")
+    async with outbox._connect("test_fixture") as conn:
+        await _reset(conn)
 
-        assert await outbox.enqueue([_record("good-1"), _record("good-2")]) == 2
-        # A row this release cannot parse, written straight into the queue beside them.
-        async with outbox._connect("test_fixture") as conn:
-            await conn.execute(
-                "INSERT INTO result_publications (sink, calc_ref, document, schema_version) "
-                "VALUES ('alpha', 'poison', '{\"calc_ref\": \"poison\"}'::jsonb, '1')"
-            )
-            await conn.commit()
-
-        outcome = await publish_results._drain_one("alpha", _Sink(), 10)
-        assert sorted(delivered) == ["good-1", "good-2"], (
-            "the readable rows must still be delivered when a neighbour cannot be parsed"
+    assert await outbox.enqueue([_record("good-1"), _record("good-2")]) == 2
+    # A row this release cannot parse, written straight into the queue beside them.
+    async with outbox._connect("test_fixture") as conn:
+        await conn.execute(
+            "INSERT INTO result_publications (sink, calc_ref, document, schema_version) "
+            "VALUES ('alpha', 'poison', '{\"calc_ref\": \"poison\"}'::jsonb, '1')"
         )
-        assert outcome.delivered == 2
-        assert outcome.failed == 1, "exactly the unreadable row is charged an attempt"
+        await conn.commit()
 
-        async with outbox._connect("test_fixture") as conn:
-            cursor = await conn.execute(
-                "SELECT calc_ref, state, attempts FROM result_publications ORDER BY calc_ref"
-            )
-            rows = {row[0]: (row[1], row[2]) for row in await cursor.fetchall()}
-        assert rows["good-1"][0] == "delivered"
-        assert rows["good-2"][0] == "delivered"
-        assert rows["poison"][0] == "pending", "one failed attempt, not yet retired"
+    outcome = await publish_results._drain_one("alpha", _Sink(), 10)
+    assert sorted(delivered) == ["good-1", "good-2"], (
+        "the readable rows must still be delivered when a neighbour cannot be parsed"
+    )
+    assert outcome.delivered == 2
+    assert outcome.failed == 1, "exactly the unreadable row is charged an attempt"
 
-    asyncio.run(_run())
+    async with outbox._connect("test_fixture") as conn:
+        cursor = await conn.execute(
+            "SELECT calc_ref, state, attempts FROM result_publications ORDER BY calc_ref"
+        )
+        rows = {row[0]: (row[1], row[2]) for row in await cursor.fetchall()}
+    assert rows["good-1"][0] == "delivered"
+    assert rows["good-2"][0] == "delivered"
+    assert rows["poison"][0] == "pending", "one failed attempt, not yet retired"
 
 
-def test_the_drain_closes_every_sink_it_builds(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_the_drain_closes_every_sink_it_builds(monkeypatch: pytest.MonkeyPatch) -> None:
     """Built per run means closed per run, or a scheduled job leaks a connection per pass.
 
     `drain_result_publications` builds a sink each run deliberately, so a rotated credential takes
@@ -405,27 +383,22 @@ def test_the_drain_closes_every_sink_it_builds(monkeypatch: pytest.MonkeyPatch) 
         ResultSinkManifest(name="beta", description="x", driver="m:c"),
     ]
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        _with_sink(monkeypatch, "alpha", "beta")
-        async with outbox._connect("test_fixture") as conn:
-            await _reset(conn)
-        await outbox.enqueue([_record("shared")])
+    await migrated_db_or_skip()
+    _with_sink(monkeypatch, "alpha", "beta")
+    async with outbox._connect("test_fixture") as conn:
+        await _reset(conn)
+    await outbox.enqueue([_record("shared")])
 
-        monkeypatch.setattr(publish_results, "enabled", lambda: manifests)
-        monkeypatch.setattr(
-            publish_results, "build", lambda m: _Sink(m.name, fail=m.name == "beta")
-        )
-        outcome = await publish_results.drain_result_publications()
-        assert outcome.delivered == 1, "alpha delivers; beta is down"
-        assert sorted(closed) == ["alpha", "beta"], (
-            f"every sink built must be closed, including the one that failed; closed={closed}"
-        )
-
-    asyncio.run(_run())
+    monkeypatch.setattr(publish_results, "enabled", lambda: manifests)
+    monkeypatch.setattr(publish_results, "build", lambda m: _Sink(m.name, fail=m.name == "beta"))
+    outcome = await publish_results.drain_result_publications()
+    assert outcome.delivered == 1, "alpha delivers; beta is down"
+    assert sorted(closed) == ["alpha", "beta"], (
+        f"every sink built must be closed, including the one that failed; closed={closed}"
+    )
 
 
-def test_one_refused_record_does_not_retire_its_neighbours(
+async def test_one_refused_record_does_not_retire_its_neighbours(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The delivery side of the poison-row rule the parse side above already holds.
@@ -458,40 +431,37 @@ def test_one_refused_record_does_not_retire_its_neighbours(
         async def aclose(self) -> None:
             """Holds nothing; present because `ResultSink` requires it of every sink."""
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        _with_sink(monkeypatch, "alpha")
-        async with outbox._connect("test_fixture") as conn:
-            await _reset(conn)
-        # Enqueued in this order, so the refused one sits in the middle of the claim: the rows
-        # before it are the ones the batch-wide handler retired *after* they had been written.
-        assert await outbox.enqueue([_record(ref) for ref in ("a-1", "a-2", "poison", "z-1")]) == 4
+    await migrated_db_or_skip()
+    _with_sink(monkeypatch, "alpha")
+    async with outbox._connect("test_fixture") as conn:
+        await _reset(conn)
+    # Enqueued in this order, so the refused one sits in the middle of the claim: the rows
+    # before it are the ones the batch-wide handler retired *after* they had been written.
+    assert await outbox.enqueue([_record(ref) for ref in ("a-1", "a-2", "poison", "z-1")]) == 4
 
-        outcome = await publish_results._drain_one("alpha", _PickySink(), 10)
+    outcome = await publish_results._drain_one("alpha", _PickySink(), 10)
 
-        assert sorted(set(delivered)) == ["a-1", "a-2", "z-1"], (
-            "every record the sink accepts must be delivered, including the ones queued after "
-            f"the refused one; delivered={delivered}"
+    assert sorted(set(delivered)) == ["a-1", "a-2", "z-1"], (
+        "every record the sink accepts must be delivered, including the ones queued after "
+        f"the refused one; delivered={delivered}"
+    )
+    assert outcome.delivered == 3
+    assert outcome.failed == 1, "exactly the refused record is charged with the failure"
+
+    async with outbox._connect("test_fixture") as conn:
+        cursor = await conn.execute(
+            "SELECT calc_ref, state FROM result_publications ORDER BY calc_ref"
         )
-        assert outcome.delivered == 3
-        assert outcome.failed == 1, "exactly the refused record is charged with the failure"
-
-        async with outbox._connect("test_fixture") as conn:
-            cursor = await conn.execute(
-                "SELECT calc_ref, state FROM result_publications ORDER BY calc_ref"
-            )
-            rows = {row[0]: row[1] for row in await cursor.fetchall()}
-        assert rows == {
-            "a-1": "delivered",
-            "a-2": "delivered",
-            "poison": "pending",
-            "z-1": "delivered",
-        }, f"a row committed at the far end must never be booked failed; got {rows}"
-
-    asyncio.run(_run())
+        rows = {row[0]: row[1] for row in await cursor.fetchall()}
+    assert rows == {
+        "a-1": "delivered",
+        "a-2": "delivered",
+        "poison": "pending",
+        "z-1": "delivered",
+    }, f"a row committed at the far end must never be booked failed; got {rows}"
 
 
-def test_an_unreachable_destination_still_fails_the_whole_batch(
+async def test_an_unreachable_destination_still_fails_the_whole_batch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The other half of the same rule, and why it is not one handler.
@@ -514,22 +484,17 @@ def test_an_unreachable_destination_still_fails_the_whole_batch(
         async def aclose(self) -> None:
             """Holds nothing; present because `ResultSink` requires it of every sink."""
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        _with_sink(monkeypatch, "alpha")
-        async with outbox._connect("test_fixture") as conn:
-            await _reset(conn)
-        await outbox.enqueue([_record(ref) for ref in ("d-1", "d-2", "d-3")])
+    await migrated_db_or_skip()
+    _with_sink(monkeypatch, "alpha")
+    async with outbox._connect("test_fixture") as conn:
+        await _reset(conn)
+    await outbox.enqueue([_record(ref) for ref in ("d-1", "d-2", "d-3")])
 
-        outcome = await publish_results._drain_one("alpha", _DownSink(), 10)
+    outcome = await publish_results._drain_one("alpha", _DownSink(), 10)
 
-        assert attempts == [3], (
-            f"an outage must cost one delivery attempt, not one per row: {attempts}"
-        )
-        assert outcome.delivered == 0
-        assert outcome.failed == 3
-
-    asyncio.run(_run())
+    assert attempts == [3], f"an outage must cost one delivery attempt, not one per row: {attempts}"
+    assert outcome.delivered == 0
+    assert outcome.failed == 3
 
 
 def test_a_projection_that_cannot_succeed_is_not_counted_as_a_publish_failure(
@@ -570,7 +535,9 @@ def test_a_projection_that_cannot_succeed_is_not_counted_as_a_publish_failure(
     )
 
 
-def test_two_workers_claiming_at_once_split_the_queue(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_two_workers_claiming_at_once_split_the_queue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """`FOR UPDATE SKIP LOCKED` is the whole of "two publisher replicas drain one queue".
 
     Dropping it from `_CLAIM` passed all 35 tests in the outbox suite, `test_concurrency_claims.py`
@@ -588,36 +555,42 @@ def test_two_workers_claiming_at_once_split_the_queue(monkeypatch: pytest.Monkey
     that takes twice as long and, under `result_publish_max_attempts` plus a statement timeout,
     retires rows that were only ever blocked.
     """
+    await migrated_db_or_skip()
+    _with_sink(monkeypatch, "alpha")
+    monkeypatch.setattr(settings, "result_publish_max_attempts", 5)
+    async with outbox._connect("test_fixture") as conn:
+        await _reset(conn)
+    await outbox.enqueue([_record(f"race-{index}") for index in range(4)])
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        _with_sink(monkeypatch, "alpha")
-        monkeypatch.setattr(settings, "result_publish_max_attempts", 5)
-        async with outbox._connect("test_fixture") as conn:
-            await _reset(conn)
-        await outbox.enqueue([_record(f"race-{index}") for index in range(4)])
-
-        async with outbox._connect("test_fixture") as first:
-            # Worker A, mid-claim: rows updated, transaction still open, locks still held.
-            cursor = await first.execute(
-                outbox._CLAIM, ("alpha", 5, settings.result_publish_lease_seconds, 2)
-            )
-            mine = {str(row[1]) for row in await cursor.fetchall()}
-            # Worker B, on its own connection, against that live lock. Bounded well under the
-            # statement timeout so a blocked claim is reported as a blocked claim.
-            theirs = {ref for _, ref, _ in await asyncio.wait_for(outbox.claim("alpha", 2), 10)}
-            await first.commit()
-
-        assert len(mine) == 2 and len(theirs) == 2
-        assert mine.isdisjoint(theirs), "two concurrent workers delivered the same rows"
-        assert mine | theirs == {f"race-{index}" for index in range(4)}, (
-            "the two claims together did not cover the queue"
+    async with outbox._connect("test_fixture") as first:
+        # Worker A, mid-claim: rows updated, transaction still open, locks still held.
+        cursor = await first.execute(
+            outbox._CLAIM, ("alpha", 5, settings.result_publish_lease_seconds, 2)
         )
+        mine = {str(row[1]) for row in await cursor.fetchall()}
+        # Worker B, on its own connection, against that live lock. The bound separates
+        # *blocked* from *not blocked*, which is the only thing time can observe here — and it
+        # is deliberately close to `pg_statement_timeout_seconds` (30 s) rather than tight.
+        #
+        # **It was 10 s, and that made this test fail under load rather than under the
+        # defect.** Measured on an idle box, an unblocked claim is 0.9 ms; a blocked one holds
+        # until the statement timeout. So any bound between those two distinguishes the
+        # implementations, and the only thing a *tight* one adds is a second failure mode:
+        # connection acquisition that is merely slow. It fired once that way, in a full serial
+        # run on a machine also carrying a second suite, four subagents and two MCP servers —
+        # and `CLAUDE.md` names exactly that cost, about a different pair of tests: "a gate
+        # that reds for a scheduling artefact teaches everybody to re-run".
+        theirs = {ref for _, ref, _ in await asyncio.wait_for(outbox.claim("alpha", 2), 25)}
+        await first.commit()
 
-    asyncio.run(_run())
+    assert len(mine) == 2 and len(theirs) == 2
+    assert mine.isdisjoint(theirs), "two concurrent workers delivered the same rows"
+    assert mine | theirs == {f"race-{index}" for index in range(4)}, (
+        "the two claims together did not cover the queue"
+    )
 
 
-def test_a_row_out_of_attempts_is_not_claimed_again_even_while_it_is_pending(
+async def test_a_row_out_of_attempts_is_not_claimed_again_even_while_it_is_pending(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The attempt bound in the claim predicate, with `mark_failed` kept out of the way.
@@ -638,47 +611,43 @@ def test_a_row_out_of_attempts_is_not_claimed_again_even_while_it_is_pending(
     instead: the reap and the claim *partition* the pending set on the same bound, so a row one
     attempt short is still handed out and a row at the bound is retired.
     """
+    await migrated_db_or_skip()
+    _with_sink(monkeypatch, "alpha")
+    monkeypatch.setattr(settings, "result_publish_max_attempts", 2)
+    _with_a_short_lease(monkeypatch)
+    async with outbox._connect("test_fixture") as conn:
+        await _reset(conn)
+    await outbox.enqueue([_record("abandoned")])
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        _with_sink(monkeypatch, "alpha")
-        monkeypatch.setattr(settings, "result_publish_max_attempts", 2)
-        _with_a_short_lease(monkeypatch)
-        async with outbox._connect("test_fixture") as conn:
-            await _reset(conn)
-        await outbox.enqueue([_record("abandoned")])
-
-        # One claim short of the bound: still pending, still claimable, not reaped.
-        assert len(await outbox.claim("alpha", 10)) == 1
-        async with outbox._connect("test_fixture") as conn:
-            cursor = await conn.execute(
-                "SELECT state, attempts FROM result_publications WHERE calc_ref = 'abandoned'"
-            )
-            assert await cursor.fetchone() == ("pending", 1), (
-                "a row with attempts left must not be retired — the reap and the claim partition "
-                "the pending set on the bound, and this is the claim's side of it"
-            )
-
-        # The second claim spends the last attempt and reports no failure — a worker that died
-        # mid-delivery, which is a lease nobody comes back for.
-        assert len(await _claim_after_the_previous_pass_died("alpha")) == 1
-        assert await _claim_after_the_previous_pass_died("alpha") == [], (
-            "a row out of attempts was claimed again"
+    # One claim short of the bound: still pending, still claimable, not reaped.
+    assert len(await outbox.claim("alpha", 10)) == 1
+    async with outbox._connect("test_fixture") as conn:
+        cursor = await conn.execute(
+            "SELECT state, attempts FROM result_publications WHERE calc_ref = 'abandoned'"
+        )
+        assert await cursor.fetchone() == ("pending", 1), (
+            "a row with attempts left must not be retired — the reap and the claim partition "
+            "the pending set on the bound, and this is the claim's side of it"
         )
 
-        async with outbox._connect("test_fixture") as conn:
-            cursor = await conn.execute(
-                "SELECT state, attempts FROM result_publications WHERE calc_ref = 'abandoned'"
-            )
-            assert await cursor.fetchone() == ("failed", 2), (
-                "a spent row must come to rest where the dead-letter gauge and --requeue can see "
-                "it, not in a fourth state nothing names"
-            )
+    # The second claim spends the last attempt and reports no failure — a worker that died
+    # mid-delivery, which is a lease nobody comes back for.
+    assert len(await _claim_after_the_previous_pass_died("alpha")) == 1
+    assert await _claim_after_the_previous_pass_died("alpha") == [], (
+        "a row out of attempts was claimed again"
+    )
 
-    asyncio.run(_run())
+    async with outbox._connect("test_fixture") as conn:
+        cursor = await conn.execute(
+            "SELECT state, attempts FROM result_publications WHERE calc_ref = 'abandoned'"
+        )
+        assert await cursor.fetchone() == ("failed", 2), (
+            "a spent row must come to rest where the dead-letter gauge and --requeue can see "
+            "it, not in a fourth state nothing names"
+        )
 
 
-def test_a_document_this_system_already_queued_stays_readable(
+async def test_a_document_this_system_already_queued_stays_readable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A queued row is data, not a claim: the release that reads it may not refuse it.
@@ -694,40 +663,36 @@ def test_a_document_this_system_already_queued_stays_readable(
     The document below is exactly what this system wrote at contract version 2. A projection bug is
     caught where the projection happens (`project`), which is the only place it can be caused.
     """
+    await migrated_db_or_skip()
+    _with_sink(monkeypatch, "alpha")
+    async with outbox._connect("test_fixture") as conn:
+        await _reset(conn)
+        document = _record("species_ranking@1:abc:def").model_dump(mode="json")
+        document["contract_version"] = 2
+        document["properties"] = [
+            {
+                "property": "relative_energy",
+                "value": 0.0,
+                "unit": "kcal/mol",
+                "reported_value": 0.0,
+                "scope": "calculation",
+            }
+        ]
+        await conn.execute(
+            "INSERT INTO result_publications (sink, calc_ref, document, schema_version) "
+            "VALUES (%s, %s, %s, %s)",
+            ("alpha", document["calc_ref"], Jsonb(document), 2),
+        )
+        await conn.commit()
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        _with_sink(monkeypatch, "alpha")
-        async with outbox._connect("test_fixture") as conn:
-            await _reset(conn)
-            document = _record("species_ranking@1:abc:def").model_dump(mode="json")
-            document["contract_version"] = 2
-            document["properties"] = [
-                {
-                    "property": "relative_energy",
-                    "value": 0.0,
-                    "unit": "kcal/mol",
-                    "reported_value": 0.0,
-                    "scope": "calculation",
-                }
-            ]
-            await conn.execute(
-                "INSERT INTO result_publications (sink, calc_ref, document, schema_version) "
-                "VALUES (%s, %s, %s, %s)",
-                ("alpha", document["calc_ref"], Jsonb(document), 2),
-            )
-            await conn.commit()
-
-        claimed = await outbox.claim("alpha", 10)
-        assert len(claimed) == 1
-        stored = claimed[0][2]
-        record = ResultRecord.model_validate(stored)
-        assert [fact.property for fact in record.properties] == ["relative_energy"]
-
-    asyncio.run(_run())
+    claimed = await outbox.claim("alpha", 10)
+    assert len(claimed) == 1
+    stored = claimed[0].document
+    record = ResultRecord.model_validate(stored)
+    assert [fact.property for fact in record.properties] == ["relative_energy"]
 
 
-def test_a_row_that_spends_its_budget_without_an_outcome_is_retired_not_stranded(
+async def test_a_row_that_spends_its_budget_without_an_outcome_is_retired_not_stranded(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A pass that dies between the claim and the mark must not strand the row forever.
@@ -752,54 +717,51 @@ def test_a_row_that_spends_its_budget_without_an_outcome_is_retired_not_stranded
     """
     from chemclaw.publish import backfill
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        _with_sink(monkeypatch, "alpha")
-        _with_a_short_lease(monkeypatch)
-        async with outbox._connect("test_fixture") as conn:
-            await _reset(conn)
-        assert await outbox.enqueue([_record("stranded")]) == 1
+    await migrated_db_or_skip()
+    _with_sink(monkeypatch, "alpha")
+    _with_a_short_lease(monkeypatch)
+    async with outbox._connect("test_fixture") as conn:
+        await _reset(conn)
+    assert await outbox.enqueue([_record("stranded")]) == 1
 
-        for _ in range(settings.result_publish_max_attempts):
-            assert len(await _claim_after_the_previous_pass_died("alpha")) == 1, (
-                "the row must come back once the dead pass's lease expires"
-            )
-        # The pass that finds the budget spent is the one that has to say so.
-        assert await _claim_after_the_previous_pass_died("alpha") == []
-
-        async with outbox._connect("test_fixture") as conn:
-            cursor = await conn.execute(
-                "SELECT state, attempts, last_error FROM result_publications WHERE calc_ref = %s",
-                ("stranded",),
-            )
-            row = await cursor.fetchone()
-        assert row is not None
-        state, attempts, last_error = row
-        assert state == "failed", (
-            "a row whose budget is spent with no outcome recorded is a dead letter; leaving it "
-            "'pending' hides it from the dead-letter gauge and from --requeue while it pages "
-            "forever on the age gauge"
+    for _ in range(settings.result_publish_max_attempts):
+        assert len(await _claim_after_the_previous_pass_died("alpha")) == 1, (
+            "the row must come back once the dead pass's lease expires"
         )
-        assert attempts == settings.result_publish_max_attempts
-        assert "without an outcome" in last_error, (
-            "the retirement must say why, because this cause is not the destination's failure and "
-            "an operator reading `last_error` would otherwise see an empty string"
+    # The pass that finds the budget spent is the one that has to say so.
+    assert await _claim_after_the_previous_pass_died("alpha") == []
+
+    async with outbox._connect("test_fixture") as conn:
+        cursor = await conn.execute(
+            "SELECT state, attempts, last_error FROM result_publications WHERE calc_ref = %s",
+            ("stranded",),
         )
+        row = await cursor.fetchone()
+    assert row is not None
+    state, attempts, last_error = row
+    assert state == "failed", (
+        "a row whose budget is spent with no outcome recorded is a dead letter; leaving it "
+        "'pending' hides it from the dead-letter gauge and from --requeue while it pages "
+        "forever on the age gauge"
+    )
+    assert attempts == settings.result_publish_max_attempts
+    assert "without an outcome" in last_error, (
+        "the retirement must say why, because this cause is not the destination's failure and "
+        "an operator reading `last_error` would otherwise see an empty string"
+    )
 
-        # The documented remedy now reaches it, which is the whole point of the state it is in.
-        assert await backfill.requeue_failed(dry_run=True) == 1
-        assert await backfill.requeue_failed() == 1
-        async with outbox._connect("test_fixture") as conn:
-            cursor = await conn.execute(
-                "SELECT state, attempts FROM result_publications WHERE calc_ref = %s",
-                ("stranded",),
-            )
-            assert await cursor.fetchone() == ("pending", 0)
-
-    asyncio.run(_run())
+    # The documented remedy now reaches it, which is the whole point of the state it is in.
+    assert await backfill.requeue_failed(dry_run=True) == 1
+    assert await backfill.requeue_failed() == 1
+    async with outbox._connect("test_fixture") as conn:
+        cursor = await conn.execute(
+            "SELECT state, attempts FROM result_publications WHERE calc_ref = %s",
+            ("stranded",),
+        )
+        assert await cursor.fetchone() == ("pending", 0)
 
 
-def test_the_real_failure_reason_outranks_the_reaper_s_generic_one(
+async def test_the_real_failure_reason_outranks_the_reaper_s_generic_one(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A row that *did* record why it failed keeps that reason when it is retired.
@@ -808,36 +770,32 @@ def test_the_real_failure_reason_outranks_the_reaper_s_generic_one(
     the destination's own account of the failure — "connection refused", "no such column" — not
     this system's account of its own bookkeeping.
     """
-
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        _with_sink(monkeypatch, "alpha")
-        _with_a_short_lease(monkeypatch)
-        async with outbox._connect("test_fixture") as conn:
-            await _reset(conn)
-        await outbox.enqueue([_record("has-a-reason")])
-        claimed = await outbox.claim("alpha", 10)
-        await outbox.mark_failed([claimed[0][0]], "connection refused by the results warehouse")
-        # A reported failure releases the lease as it records the reason, so the retry is the next
-        # pass rather than the next lease period — claimed straight away, with no wait.
-        assert len(await outbox.claim("alpha", 10)) == 1
-        # Spend the rest of the budget the silent way, then let the next claim retire it.
-        for _ in range(settings.result_publish_max_attempts - 2):
-            await _claim_after_the_previous_pass_died("alpha")
+    await migrated_db_or_skip()
+    _with_sink(monkeypatch, "alpha")
+    _with_a_short_lease(monkeypatch)
+    async with outbox._connect("test_fixture") as conn:
+        await _reset(conn)
+    await outbox.enqueue([_record("has-a-reason")])
+    claimed = await outbox.claim("alpha", 10)
+    await outbox.mark_failed([claimed[0].lease], "connection refused by the results warehouse")
+    # A reported failure releases the lease as it records the reason, so the retry is the next
+    # pass rather than the next lease period — claimed straight away, with no wait.
+    assert len(await outbox.claim("alpha", 10)) == 1
+    # Spend the rest of the budget the silent way, then let the next claim retire it.
+    for _ in range(settings.result_publish_max_attempts - 2):
         await _claim_after_the_previous_pass_died("alpha")
+    await _claim_after_the_previous_pass_died("alpha")
 
-        async with outbox._connect("test_fixture") as conn:
-            cursor = await conn.execute(
-                "SELECT state, last_error FROM result_publications WHERE calc_ref = %s",
-                ("has-a-reason",),
-            )
-            row = await cursor.fetchone()
-        assert row == ("failed", "connection refused by the results warehouse")
-
-    asyncio.run(_run())
+    async with outbox._connect("test_fixture") as conn:
+        cursor = await conn.execute(
+            "SELECT state, last_error FROM result_publications WHERE calc_ref = %s",
+            ("has-a-reason",),
+        )
+        row = await cursor.fetchone()
+    assert row == ("failed", "connection refused by the results warehouse")
 
 
-def test_an_emptied_queue_reads_as_zero_seconds_behind_not_as_fifty_six_years(
+async def test_an_emptied_queue_reads_as_zero_seconds_behind_not_as_fifty_six_years(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The healthiest state the drain has must not be its worst gauge reading.
@@ -853,26 +811,22 @@ def test_an_emptied_queue_reads_as_zero_seconds_behind_not_as_fifty_six_years(
     `refresh_backlog`'s own docstring already claimed the fixed behaviour ("which reads as '0
     seconds behind', the honest answer for an empty queue"); the arithmetic said the opposite.
     """
+    await migrated_db_or_skip()
+    _with_sink(monkeypatch, "alpha")
+    async with outbox._connect("test_fixture") as conn:
+        await _reset(conn)
+    await outbox.enqueue([_record("drains-to-empty")])
+    await outbox.refresh_backlog()
+    assert outbox._oldest_pending_seconds()["alpha"] < 60.0
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        _with_sink(monkeypatch, "alpha")
-        async with outbox._connect("test_fixture") as conn:
-            await _reset(conn)
-        await outbox.enqueue([_record("drains-to-empty")])
-        await outbox.refresh_backlog()
-        assert outbox._oldest_pending_seconds()["alpha"] < 60.0
+    claimed = await outbox.claim("alpha", 10)
+    await outbox.mark_delivered([claimed[0].lease])
+    await outbox.refresh_backlog()
 
-        claimed = await outbox.claim("alpha", 10)
-        await outbox.mark_delivered([claimed[0][0]])
-        await outbox.refresh_backlog()
-
-        assert outbox._PENDING_GAUGE["alpha"] == 0.0, "the series must stay, reading zero"
-        assert outbox._oldest_pending_seconds()["alpha"] == 0.0, (
-            "an empty queue is zero seconds behind; anything else pages when nothing is wrong"
-        )
-
-    asyncio.run(_run())
+    assert outbox._PENDING_GAUGE["alpha"] == 0.0, "the series must stay, reading zero"
+    assert outbox._oldest_pending_seconds()["alpha"] == 0.0, (
+        "an empty queue is zero seconds behind; anything else pages when nothing is wrong"
+    )
 
 
 def test_all_three_backlog_gauge_families_are_actually_bound() -> None:
@@ -935,7 +889,7 @@ def test_a_row_enqueued_by_a_pod_whose_clock_runs_ahead_reads_as_zero_not_as_one
         outbox._OLDEST_ENQUEUED.pop(probe, None)
 
 
-def test_rows_for_a_disabled_sink_stop_paging_and_are_reported_instead(
+async def test_rows_for_a_disabled_sink_stop_paging_and_are_reported_instead(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Turning a destination off must not leave an alert nobody can silence.
@@ -950,26 +904,22 @@ def test_rows_for_a_disabled_sink_stop_paging_and_are_reported_instead(
     The rows are not forgotten: they are reported once per pass on the degradation series, which is
     a different fact wanting a different, non-paging rule.
     """
+    await migrated_db_or_skip()
+    _with_sink(monkeypatch, "alpha", "beta")
+    async with outbox._connect("test_fixture") as conn:
+        await _reset(conn)
+    assert await outbox.enqueue([_record("orphaned")]) == 2
 
-    async def _run() -> None:
-        await migrated_db_or_skip()
-        _with_sink(monkeypatch, "alpha", "beta")
-        async with outbox._connect("test_fixture") as conn:
-            await _reset(conn)
-        assert await outbox.enqueue([_record("orphaned")]) == 2
+    _with_sink(monkeypatch, "alpha")
+    with caplog.at_level(logging.WARNING):
+        await outbox.refresh_backlog()
 
-        _with_sink(monkeypatch, "alpha")
-        with caplog.at_level(logging.WARNING):
-            await outbox.refresh_backlog()
-
-        assert "beta" not in outbox._PENDING_GAUGE or outbox._PENDING_GAUGE["beta"] == 0.0, (
-            "a sink nothing drains must not be counted as a backlog the drain is behind on"
-        )
-        assert any("no longer enabled" in record.getMessage() for record in caplog.records), (
-            "the stranded rows must still be reported — silence is how they are forgotten"
-        )
-
-    asyncio.run(_run())
+    assert "beta" not in outbox._PENDING_GAUGE or outbox._PENDING_GAUGE["beta"] == 0.0, (
+        "a sink nothing drains must not be counted as a backlog the drain is behind on"
+    )
+    assert any("no longer enabled" in record.getMessage() for record in caplog.records), (
+        "the stranded rows must still be reported — silence is how they are forgotten"
+    )
 
 
 def test_two_overlapping_drains_do_not_both_deliver_one_row(
@@ -1034,7 +984,7 @@ def test_two_overlapping_drains_do_not_both_deliver_one_row(
     asyncio.run(_run())
 
 
-def test_a_lease_its_claimer_died_holding_returns_to_the_queue_on_the_next_claim(
+async def test_a_lease_its_claimer_died_holding_returns_to_the_queue_on_the_next_claim(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The crashed claimer, which is what a lease costs and has to pay for itself.
@@ -1049,43 +999,175 @@ def test_a_lease_its_claimer_died_holding_returns_to_the_queue_on_the_next_claim
     proves no other drain can take it while the lease holds, lets the lease expire, and claims
     again with nothing else having happened in between.
     """
+    await migrated_db_or_skip()
+    _with_sink(monkeypatch, "alpha")
+    monkeypatch.setattr(settings, "result_publish_max_attempts", 5)
+    # The lease is the drain activity's own ceiling; shortened here so the expiry is real
+    # rather than hand-written into `claimed_at`.
+    monkeypatch.setattr(settings, "result_publish_timeout_seconds", 0.5)
+    async with outbox._connect("test_fixture") as conn:
+        await _reset(conn)
+    assert await outbox.enqueue([_record("abandoned")]) == 1
 
-    async def _run() -> None:
+    assert len(await outbox.claim("alpha", 10)) == 1
+    assert await outbox.claim("alpha", 10) == [], (
+        "a second drain must not take a row the first is still delivering"
+    )
+    async with outbox._connect("test_fixture") as conn:
+        cursor = await conn.execute(
+            "SELECT state, attempts, claimed_at IS NOT NULL "
+            "FROM result_publications WHERE calc_ref = 'abandoned'"
+        )
+        # Still `pending`, which is the truth — it has not been delivered — and held by a
+        # lease, which is what the second claim above was refused by.
+        assert await cursor.fetchone() == ("pending", 1, True)
+
+    # The claimer died here: no `mark_delivered`, no `mark_failed`, ever.
+    await asyncio.sleep(settings.result_publish_lease_seconds + 0.1)
+
+    assert len(await outbox.claim("alpha", 10)) == 1, (
+        "an expired lease must return its row to the queue on the next ordinary claim"
+    )
+    async with outbox._connect("test_fixture") as conn:
+        cursor = await conn.execute(
+            "SELECT state, attempts FROM result_publications WHERE calc_ref = 'abandoned'"
+        )
+        assert await cursor.fetchone() == ("pending", 2), (
+            "the recovered row spends the second claim's attempt and no more"
+        )
+
+
+def test_one_unqueueable_record_costs_one_document_and_not_the_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A poison record must not take its siblings with it, and they are genuinely its siblings.
+
+    `records_for` decomposes one payload into several — a solvent screen queues the aggregate *and*
+    its parts — so a batch here is one calculation's own facts, not an unrelated grouping. The
+    whole loop ran inside one transaction with one `except Exception` around it, so a single
+    refused row rolled back every good row beside it and returned 0, logging only "could not queue
+    3 record(s)": the counter could not say how many good documents went with the bad one.
+
+    **A savepoint per record rather than a bare `try` per record**, and the two poisons below are
+    why: they fail on opposite sides of the wire. psycopg refuses the NUL in its own text dumper,
+    which leaves the transaction healthy and would survive a bare `try`; the out-of-range
+    `schema_version` is refused by Postgres, which aborts the transaction, so every later `INSERT`
+    fails with `InFailedSqlTransaction` and the final `COMMIT` takes the good rows with it. Only a
+    savepoint contains both, and a test carrying only the first would have passed the weaker fix.
+    """
+
+    async def _run() -> list[str]:
         await migrated_db_or_skip()
         _with_sink(monkeypatch, "alpha")
-        monkeypatch.setattr(settings, "result_publish_max_attempts", 5)
-        # The lease is the drain activity's own ceiling; shortened here so the expiry is real
-        # rather than hand-written into `claimed_at`.
-        monkeypatch.setattr(settings, "result_publish_timeout_seconds", 0.5)
         async with outbox._connect("test_fixture") as conn:
             await _reset(conn)
-        assert await outbox.enqueue([_record("abandoned")]) == 1
-
-        assert len(await outbox.claim("alpha", 10)) == 1
-        assert await outbox.claim("alpha", 10) == [], (
-            "a second drain must not take a row the first is still delivering"
+        server_side = _record("poison@v1:2:x").model_copy(update={"contract_version": 2**40})
+        written = await outbox.enqueue(
+            [
+                _record("good@v1:1:x"),
+                _record("poison@v1:\x00:x"),
+                server_side,
+                _record("good@v1:2:x"),
+            ]
         )
         async with outbox._connect("test_fixture") as conn:
-            cursor = await conn.execute(
-                "SELECT state, attempts, claimed_at IS NOT NULL "
-                "FROM result_publications WHERE calc_ref = 'abandoned'"
-            )
-            # Still `pending`, which is the truth — it has not been delivered — and held by a
-            # lease, which is what the second claim above was refused by.
-            assert await cursor.fetchone() == ("pending", 1, True)
+            rows = await (
+                await conn.execute("SELECT calc_ref FROM result_publications ORDER BY calc_ref")
+            ).fetchall()
+        assert written == 2, f"the return value does not count what was actually queued: {written}"
+        return [row[0] for row in rows]
 
-        # The claimer died here: no `mark_delivered`, no `mark_failed`, ever.
-        await asyncio.sleep(settings.result_publish_lease_seconds + 0.1)
+    assert asyncio.run(_run()) == ["good@v1:1:x", "good@v1:2:x"], (
+        "one refused document took the good records queued beside it"
+    )
 
-        assert len(await outbox.claim("alpha", 10)) == 1, (
-            "an expired lease must return its row to the queue on the next ordinary claim"
+
+def test_a_calculation_that_produced_a_non_finite_number_is_refused_at_projection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`NaN` is not JSON, so a document carrying one can never be queued — say so at projection.
+
+    A failed optimization or a division by zero inside a calculator produces `NaN` and `Infinity`
+    like any other float, and every model in `publish.record` took them. The document then reached
+    the `jsonb` column, which refused it as an `InvalidTextRepresentation` naming a *token* — a
+    write failure, counted as one, for a payload that will fail identically on every retry and
+    every re-publish.
+
+    Refusing it at projection puts it in the one series whose declared meaning is "this release
+    cannot project this shape until code changes", and leaves
+    `chemclaw_result_publish_failures_total` to mean what it says: a destination or a database
+    having a bad day.
+    """
+    from chemclaw.core.metrics import METRICS
+
+    _with_sink(monkeypatch, "alpha")
+    projection_before = METRICS.value("chemclaw_result_projection_failures_total")
+    publish_before = METRICS.value("chemclaw_result_publish_failures_total")
+
+    written = asyncio.run(
+        outbox.enqueue_payload(
+            calc_ref="nonfinite@v1:a:b",
+            calc_type="reaction.energy",
+            payload_kind="ReactionEnergyResult",
+            payload={
+                "reactants": ["CCO"],
+                "products": ["CC=O"],
+                "method": "GFN2-xTB",
+                "delta_e_kcal": float("nan"),
+            },
         )
-        async with outbox._connect("test_fixture") as conn:
-            cursor = await conn.execute(
-                "SELECT state, attempts FROM result_publications WHERE calc_ref = 'abandoned'"
-            )
-            assert await cursor.fetchone() == ("pending", 2), (
-                "the recovered row spends the second claim's attempt and no more"
-            )
+    )
 
-    asyncio.run(_run())
+    assert written == 0, "a document carrying a NaN was queued, and no column will take it"
+    assert METRICS.value("chemclaw_result_projection_failures_total") == projection_before + 1, (
+        "a value this release cannot publish at all must be counted as the permanent gap it is"
+    )
+    assert METRICS.value("chemclaw_result_publish_failures_total") == publish_before, (
+        "refused before the queue, so the destination-health counter must not move"
+    )
+
+
+def test_project_payload_separates_a_projector_that_raised_from_a_payload_with_nothing_to_queue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The three-state `enqueue_payload`'s `int` cannot carry, and why one caller needs it.
+
+    `enqueue_payload` returns 0 for "queued nothing", for "the projector raised" and for "no sink" —
+    which is correct for the three hooks behind a finished calculation, all of which are
+    best-effort and none of which reports a number to anyone. `backfill.py` is the caller that
+    *is* a report: it added that 0 to its `queued` counter and touched nothing else, so a row an
+    older calculator wrote landed in no bucket at all and the operator-facing line said "4 row(s)
+    seen, 2 queued, 1 skipped" over four rows.
+
+    `None` is that missing state. Asserted against the same payload through both entry points, so
+    the two cannot drift into disagreeing about what a failed projection is: `enqueue_payload`
+    still answers 0, and `project_payload` says why.
+    """
+    _with_sink(monkeypatch, "alpha")
+    monkeypatch.setattr(outbox, "enqueue", _counting_enqueue)
+
+    # `points[].energy_hartree` missing is the real legacy shape: `xtb.scan` rows written before
+    # the field was renamed carry `energy`, and `_scan` subscripts rather than `.get()`s it.
+    legacy_scan = {
+        "smiles": "CCO",
+        "coordinate": "dihedral",
+        "points": [{"value": 0.0, "energy": -1.0}],
+    }
+    assert (
+        outbox.project_payload(calc_ref="s1", calc_type="xtb.scan", payload=legacy_scan) is None
+    ), "a projector that raised must be distinguishable from one with nothing to queue"
+    counted = asyncio.run(
+        outbox.enqueue_payload(calc_ref="s1", calc_type="xtb.scan", payload=legacy_scan)
+    )
+    assert counted == 0, "the count-only entry point keeps its contract: never raises, answers 0"
+
+    good = {"smiles": "CCO", "pka": 4.2, "method": "empirical"}
+    records = outbox.project_payload(calc_ref="p1", calc_type="pka", payload=good)
+    assert records is not None and len(records) == 1, (
+        "a readable payload must come back as its records, not as the absence"
+    )
+
+
+async def _counting_enqueue(records: Any) -> int:
+    """Stand in for the queue write: this pair of assertions is about the projection."""
+    return len(records)

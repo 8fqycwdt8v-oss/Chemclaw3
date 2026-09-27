@@ -1,0 +1,67 @@
+{
+  "probe": {
+    "id": "kn-18",
+    "section": 15,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Can you turn what we know about stalled Pd couplings into something a new chemist can just follow, step by step?",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note",
+      "record_knowledge_note"
+    ],
+    "expects_job": false,
+    "expects_notes": [
+      "failure-aqueous-protodeboronation",
+      "playbook-pd-cross-coupling-scope"
+    ],
+    "forbids_claims": [
+      "that a newly drafted playbook already exists in the knowledge base",
+      "a step not supported by a retrieved note",
+      "a note id that was not retrieved"
+    ],
+    "direction": "Finds that playbook-pd-cross-coupling-scope already encodes this and gives its ordered rule rather than inventing a parallel one: bulkier biaryl phosphine → higher L:Pd → degas harder → only then more heat, with the reason (oxidative addition responds to ligand sterics far more than to temperature, and heat accelerates boronic-acid decomposition — see failure-aqueous-protodeboronation). Recording a refinement is welcome, and must be described as machine-written rather than as settled practice. Presenting a fresh invention while ignoring the existing playbook is the failure.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "kn-18",
+    "section": 15,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Can you turn what we know about stalled Pd couplings into something a new chemist can just follow, step by step?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": 0.0,
+    "expected_notes_missing": [
+      "failure-aqueous-protodeboronation",
+      "playbook-pd-cross-coupling-scope"
+    ],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.31,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "d0f1c5af549c47ffa7f6885ac0330461",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

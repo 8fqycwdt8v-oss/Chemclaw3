@@ -62,6 +62,7 @@ from chemclaw.core.config.eln import ElnSettings
 from chemclaw.core.config.entra import EntraSettings
 from chemclaw.core.config.evals import EvalSettings
 from chemclaw.core.config.fingerprints import FingerprintSettings
+from chemclaw.core.config.hypotheses import HypothesisSettings
 from chemclaw.core.config.kg import KgSettings
 from chemclaw.core.config.labels import LabelSettings
 from chemclaw.core.config.llm import LlmSettings
@@ -80,6 +81,7 @@ from chemclaw.core.config.store import StoreSettings
 from chemclaw.core.config.temporal import TemporalSettings
 from chemclaw.core.egress import pin_langsmith_egress
 from chemclaw.core.netguard import arm_from_settings as arm_egress_guard
+from chemclaw.core.netguard_preload import publish_state as publish_preload_state
 
 # The package's public surface, exactly what the single-file module exported: the composed class,
 # its singleton, every section mixin (a few are imported directly, e.g. `EvalSettings`), and the
@@ -127,9 +129,14 @@ PG_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1", ""}
 #
 # `ConnectorJobWorkflow` is bounded by `wrapper_execution_timeout()` — its child's whole ceiling
 # plus what the wrapper still owes after that child returns: settle the effect ledger, write the
-# durable record, offer the result, write the note, push back to the session. Each is a queue wait
-# plus a work budget, and the budgets differ — two of the writes are light enough to pass
-# `light_write_queue_wait_timeout()` while the others carry core's hour.
+# durable record, offer the result, write the note, push back to the session, and send the
+# `job-result` copy out of the building. Each is a queue wait plus a work budget, and the budgets
+# differ — **three** of the writes are light enough to pass `light_write_queue_wait_timeout()`
+# while the others carry core's hour.
+#
+# It said five steps and two light writes until 2026-09-14, when a sixth was added in `_finish`
+# and neither side of the restatement moved: 930 s of permitted spend outside a ceiling whose
+# whole job is to cover it.
 #
 # **This used to restate that as a count**, `activity_timeout_seconds * 4`, which bounds none of
 # them: it made every post-child step cost one activity's wall clock, and the validator below
@@ -250,6 +257,15 @@ def pg_endpoint(dsn: str) -> tuple[str, str] | None:
     is where a measurement could live, and `core/db._session_store_max_connections` deliberately
     reuses *this* comparison so the two halves cannot disagree about how many servers there are.
 
+    **The runtime half now has one** (`D-2026-09-23-the-server-says-which-server-it-is`).
+    `core/db.same_server` reads `system_identifier` off a borrow that has already succeeded and
+    caches it per endpoint, so the *gauge* can tell one box spelled two ways from two boxes while
+    this function keeps comparing strings — which is still the only thing it can do, for every
+    reason above. The two halves therefore *can* now disagree, deliberately and in one direction:
+    the startup check charges a phantom split to two ceilings, and the runtime half collapses it
+    back to one once a borrow has disproved it. Nothing here changes; this paragraph exists so the
+    next reader of "the two halves cannot disagree" knows where the exception is.
+
     Imported lazily for the reason `_pg_dial` gives: `chemclaw.core.config` is imported by the
     datasource manifests' offline validation, which may not have psycopg installed.
     """
@@ -340,6 +356,7 @@ class Settings(
     MemorySettings,
     RetrievalSettings,
     ReportSettings,
+    HypothesisSettings,
     DeliverySettings,
     PublishSettings,
 ):
@@ -680,6 +697,26 @@ class Settings(
                     "service_max_concurrent_turns or the replica ceiling, or raise "
                     "service_fleet_max_concurrent_turns if the LLM endpoint can serve it."
                 )
+        # **A fairness cap at or above the cap it divides refuses nothing while reading as
+        # protection**, and it publishes that reading on `chemclaw_turn_actor_capacity`. The chart's
+        # own pair is held apart by `tests/test_deploy_chart.py`, but that test reads `values.yaml`
+        # — so a `--set config.CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS=4` on a small node, or an env
+        # override of either key, escapes it entirely and ships a guard consulted on every request
+        # that can never fire. Checked here because this is the only place that sees the
+        # configuration a pod actually runs, which is the same argument the fleet product above
+        # makes. Zero is untouched: it is the documented off switch, not a narrow cap.
+        if (
+            self.service_max_concurrent_turns_per_actor
+            and self.service_max_concurrent_turns_per_actor >= self.service_max_concurrent_turns
+        ):
+            raise ValueError(
+                f"service_max_concurrent_turns_per_actor is "
+                f"{self.service_max_concurrent_turns_per_actor} against a per-process "
+                f"admission cap of {self.service_max_concurrent_turns}, so one actor may "
+                "hold every permit and "
+                "the guard refuses nothing. Set it strictly below "
+                "service_max_concurrent_turns, or to 0 to disable it deliberately."
+            )
         # The socket backstop against what this process's own caps can occupy — the cross-check
         # that was missing beside the three fleet ones below it.
         #
@@ -811,6 +848,27 @@ class Settings(
             raise ValueError(
                 "mid_turn_resume_timeout_seconds must be smaller than service_turn_timeout_seconds"
             )
+        # **A revision is a whole extra model round-trip, and nothing related it to the deadline.**
+        # Each round ends in a judge call of its own (`build_answer_event` re-scores the revised
+        # answer), so the loop adds `answer_review_max_rounds` model calls *and* that many judge
+        # calls to a turn that `service_turn_timeout_seconds` already bounds. The model half has no
+        # declared ceiling to multiply — a gateway call is bounded only by the turn deadline — so
+        # what is checkable is the half that does: if the judge calls alone can fill the turn's
+        # deadline, the rounds cannot finish and every one of them is spend bought for an answer
+        # the chemist will never see. `mid_turn_resume_timeout_seconds` above is the same shape of
+        # guard for the same reason.
+        if self.answer_review_max_rounds and self.verifier_enabled:
+            judging = (self.answer_review_max_rounds + 1) * self.verifier_timeout_seconds
+            if judging >= self.service_turn_timeout_seconds:
+                raise ValueError(
+                    f"answer_review_max_rounds={self.answer_review_max_rounds} grades the answer "
+                    f"{self.answer_review_max_rounds + 1} times at "
+                    f"verifier_timeout_seconds={self.verifier_timeout_seconds}s, which is "
+                    f"{judging}s of judging alone against a "
+                    f"service_turn_timeout_seconds of {self.service_turn_timeout_seconds}s — "
+                    "before a single revision's model call. Lower answer_review_max_rounds or "
+                    "verifier_timeout_seconds, or raise service_turn_timeout_seconds"
+                )
         if self.budget_enabled and not any(
             (
                 self.budget_max_turns_per_session,
@@ -1053,6 +1111,50 @@ class Settings(
                 )
         return self
 
+    def template_step_ceilings(self) -> dict[str, tuple[float, str]]:
+        """The longest one step of each kind may take, and the words that name the budget.
+
+        **One definition, two readers, because they ask different questions of it.** The validator
+        below asks for the *maximum* — the honest machine-checkable floor when the templates
+        themselves are invisible, which they are to this object. `cli/validate_templates.py` asks
+        for the *sum over the steps a file actually declares*, which is the bound that matters and
+        which only a reader holding the YAML can compute. Two copies of this arithmetic is the
+        defect class this repository keeps finding; `templates/registry.unrunnable_reason` says the
+        same thing about `step_problems` one seam over.
+
+        Keyed by the manifest's own `kind` values, so a new step kind that forgets to appear here
+        raises a `KeyError` at the gate rather than being silently counted as free.
+
+        `job` is not an activity and that is the whole reason this is not one number. It starts
+        `ConnectorJobWorkflow` as a child under `durable/connector_job.wrapper_execution_timeout()`
+        — `connector_job_timeout_seconds` plus what the wrapper still owes after the child returns,
+        which `finish_headroom` sums and this restates because `core` cannot import `durable` —
+        the module-level comment naming that restatement, near the top of this file, is the other
+        half of the same borrowing. The count of post-child steps is deliberately not written as a
+        number in either place: it was six, then it was not.
+
+        Returns:
+            `{kind: (seconds, why)}`, where `why` is phrased to be read inside a refusal.
+        """
+        return {
+            "tool": (self.template_step_timeout_seconds, "template_step_timeout_seconds"),
+            "agent": (self.template_step_timeout_seconds, "template_step_timeout_seconds"),
+            "job": (
+                self.connector_job_timeout_seconds
+                + (
+                    self.activity_queue_wait_seconds * 3
+                    + self.template_step_timeout_seconds * 3
+                    + self.activity_timeout_seconds * 2
+                    + self.job_record_timeout_seconds
+                    + self.result_publish_timeout_seconds
+                    + self.note_write_timeout_seconds
+                    + self.delivery_timeout_seconds
+                ),
+                "connector_job_timeout_seconds plus what the wrapper's post-child "
+                "steps may spend, the ceiling a `job` step carries",
+            ),
+        }
+
     @model_validator(mode="after")
     def _the_template_run_ceiling_covers_one_step(self) -> Self:
         """The same rule again, on the template run and the longest step it has to contain.
@@ -1068,9 +1170,11 @@ class Settings(
         `agent` or a `tool` step, both of which are activities. A `job` step is not an activity: it
         starts `ConnectorJobWorkflow` as a child under `wrapper_execution_timeout()`
         (`durable/template_job.py`), which is `connector_job_timeout_seconds` plus what the
-        wrapper's five post-child steps may spend — 18,120 s against a run ceiling of 7,200 s when
-        this was first measured, and more since, because that headroom was then found to be counted
-        rather than summed.
+        wrapper's post-child steps may spend — 18,120 s against a run ceiling of 7,200 s when this
+        was first measured, and more since, because that headroom was then found to be counted
+        rather than summed, and more again when a sixth step was added to it. The count is not
+        written here for that reason; `finish_headroom` sums it and this validator restates the
+        sum.
         So a CREST search well inside its own budget ended the whole run as a silent `TIMED_OUT`:
         an execution timeout is not delivered to workflow code, so `TemplateWorkflow`'s `except
         BaseException -> _notify_failure` never ran, the chemist was told nothing on the session
@@ -1083,31 +1187,17 @@ class Settings(
 
         Strictly greater rather than at least, because equality is the defect. Only one step is
         required rather than N: how many steps a template has is a property of a YAML file this
-        object cannot see, so the honest machine-checkable floor is "a single step fits", and the
-        setting's own comment carries the sizing advice for a longer procedure.
+        object cannot see, so the honest machine-checkable floor is "a single step fits".
+
+        **That floor is not the bound, and for a while it was the only check there was.** On the
+        shipped defaults one `job` step is 39,330 s against a run ceiling of 45,330 s, so this
+        validator passes and a file with *two* of them misses by 33,330 s — and misses silently,
+        because a workflow execution timeout is not delivered to workflow code. The N-step half
+        lives where the YAML is readable: `agent/template_surface.run_ceiling_problems`, read by
+        `make template-validate` and by `registry.unrunnable_reason`, over the step ceilings
+        `template_step_ceilings` defines once for this validator and that gate alike.
         """
-        # The max over the budgets a *step* can carry, the shape
-        # `_the_job_ceiling_covers_the_activity_it_bounds` already uses one level down: naming one
-        # step kind is how this rule came to be checking 900 s against an 18,120 s bound. A new
-        # step kind with its own ceiling gets covered by being added here.
-        job_step = self.connector_job_timeout_seconds + (
-            self.activity_queue_wait_seconds * 3
-            + self.template_step_timeout_seconds * 2
-            + self.activity_timeout_seconds * 2
-            + self.job_record_timeout_seconds
-            + self.result_publish_timeout_seconds
-            + self.note_write_timeout_seconds
-        )
-        longest, budget = max(
-            (
-                (self.template_step_timeout_seconds, "template_step_timeout_seconds"),
-                (
-                    job_step,
-                    "connector_job_timeout_seconds plus what the wrapper's five post-child "
-                    "steps may spend, the ceiling a `job` step carries",
-                ),
-            )
-        )
+        longest, budget = max(self.template_step_ceilings().values(), key=lambda pair: pair[0])
         if self.template_run_timeout_seconds <= longest:
             raise ValueError(
                 f"template_run_timeout_seconds={self.template_run_timeout_seconds} does not cover "
@@ -1276,6 +1366,16 @@ pin_langsmith_egress(allowed=settings.langsmith_tracing_allowed)
 # rather than of a launcher. The allowlist is derived from the destinations this deployment dials
 # (the LLM gateway, Postgres, Temporal, the connector endpoints, the IdP), so a host outside it —
 # a dependency fetching model weights, a usage ping, a DNS licence check — is refused. It is defence
-# in depth behind the NetworkPolicy for the "only LLM traffic leaves" invariant and cannot cover a
-# child process or a compiled extension's own syscalls; `chemclaw.core.netguard` documents both.
+# in depth behind the NetworkPolicy for the "only LLM traffic leaves" invariant. What *this* layer
+# cannot reach — a child process, a compiled extension's own syscalls — is `netguard_preload.c`'s
+# job, the `LD_PRELOAD` interposition `deploy/entrypoint.sh` arms; `chemclaw.core.netguard` and
+# `chemclaw.core.netguard_preload` document the split and what is left over after both.
 arm_egress_guard(settings)
+
+# And publish whether that second layer is actually loaded here, **unconditionally** — including
+# when `egress_guard_enabled` is false. Which layers a process has is a fact about the process, not
+# a consequence of a setting, and the finding that licensed the compiled layer is exactly that one
+# gauge reporting health while another path was open. `is_armed()` asks the dynamic linker rather
+# than reading `LD_PRELOAD`, because a preload naming a path that does not exist is ignored in
+# silence.
+publish_preload_state()

@@ -5,11 +5,14 @@ the anti-feedback rule, and the restatement matters** — D-161 wrote it as "rea
 already merged", which was true of the gated world and is no longer true of any world
 (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge` writes agent notes straight into the tree,
 so `load_notes` now returns them). The property that was doing the work was never the *merge*; it
-was the **kind** of thing counted. Support is a count of `reaction-<id>` records — deterministic
-transcriptions of experiments somebody ran (D-2026-08-25) — plus the `interaction` note recording a
-chemist's own confirmation. Neither is an agent assertion, so an observation still cannot be
-corroborated by the agent's output, which is the self-confirming loop migration `025` also forbids
-one level down. `mine_interactions` enforces it structurally rather than by intent: a cited id
+was the **kind** of thing counted. Support is a count of `reaction-<id>` records and nothing
+else — deterministic transcriptions of experiments somebody ran (D-2026-08-25). This sentence used
+to count the `interaction` note beside them as a chemist's own confirmation, which
+`mine_interactions` itself had already stopped doing: that note is `created_by: agent` and now
+reaches `load_notes` with no human step, so it is exactly the agent assertion the rule excludes
+(see the comment on its `evidence_note_ids` below). An observation therefore cannot be corroborated
+by the agent's output, which is the self-confirming loop migration `025` also forbids one level
+down. `mine_interactions` enforces it structurally rather than by intent: a cited id
 counts only `if c in project_of`, and `project_of` is built from the reaction corpus alone.
 
 Both miners answer the same question from opposite ends. The corpus miner asks "what does the
@@ -29,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 
 def _runs(count: int) -> str:
-    """`1 run` / `3 runs` — a record a human signs off on must not say "1 runs"."""
+    """`1 run` / `3 runs` — a record a chemist reads as evidence must not say "1 runs"."""
     return f"{count} run" if count == 1 else f"{count} runs"
 
 
@@ -50,17 +53,17 @@ def mine_corpus(reactions: list[OrdReaction]) -> list[Observation]:
     fingerprinting, so a cluster only ever contains non-successful runs — and a sentence like "on
     every recorded attempt" then asserted the opposite of the record for a transformation with five
     successes and two failures. `durable.observation_jobs._promotion_summary` copies this sentence
-    verbatim into a promoted playbook's PR body, cited only by the non-success runs, so the human at
-    the gate could not see what falsified it. It now names the failures, names the inconclusive runs
-    separately, and states that any success lies outside the cluster.
+    verbatim into a promoted playbook's body, cited only by the non-success runs, so the chemist
+    who meets that note as evidence could not see what falsified it. It now names the failures,
+    names the inconclusive runs separately, and states that any success lies outside the cluster.
 
     A cluster with no `FAILURE` in it is not emitted at all: `INCONCLUSIVE` means aborted,
     mis-charged or never assayed, which per `OutcomeClass` carries no evidence about the chemistry,
     so "nothing here succeeded" would read as a finding where there is none. **The same rule
     decides the cross-project count**, which is the tier's whole premise: a project that has only
     ever returned inconclusive runs has not failed at this, so it is not one of the projects the
-    recurrence spans. It stays in `evidence_note_ids` and in the aside, because it is a merged
-    record and part of the cluster's shape — what it may not do is be the second project.
+    recurrence spans. It stays in `evidence_note_ids` and in the aside, because it is a recorded
+    run and part of the cluster's shape — what it may not do is be the second project.
 
     Deterministic: same corpus in, same observations out, ordered by cluster anchor.
     """
@@ -141,11 +144,14 @@ def mine_corpus(reactions: list[OrdReaction]) -> list[Observation]:
 def mine_interactions(notes: list[Note], reactions: list[OrdReaction]) -> list[Observation]:
     """`interaction` notes whose own evidence already spans more than one project.
 
-    The half of the tier that answers "what have chemists actually asked". A confirmed answer is
-    already a merged note, so it is admissible support; what nothing reads today is the fact that
-    *its evidence crossed a project boundary*. When a chemist's question was answered from two
-    projects' reactions, the transfer already happened — in one conversation, invisibly, and
-    nowhere that a third project can find it.
+    The half of the tier that answers "what have chemists actually asked". The admissible support
+    is the *reactions* an `interaction` note cites, never the note itself — this line used to say
+    the confirmed answer "is already a merged note, so it is admissible support", and the code
+    below stopped counting it the day the note stopped passing a human on its way into the tree
+    (see the comment on `evidence_note_ids`). What nothing else reads is that *that evidence
+    crossed a project boundary*: when a chemist's question was answered from two projects'
+    reactions, the transfer already happened — in one conversation, invisibly, and nowhere that a
+    third project can find it.
 
     Project attribution is derived, not stored: an `interaction` note cites its evidence as
     wikilinks, and the reaction corpus knows each reaction's project. That indirection is why this

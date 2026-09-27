@@ -1,0 +1,64 @@
+{
+  "probe": {
+    "id": "kn-06",
+    "section": 1,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "For the 4-methoxybiphenyl step — what are we recommending right now, and is it written up anywhere I can circulate?",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "expects_notes": [
+      "report-biaryl-development"
+    ],
+    "forbids_claims": [
+      "a note id that was not retrieved",
+      "a document number, file path or report location",
+      "an approval or review status for the report"
+    ],
+    "direction": "Points at report-biaryl-development as the existing write-up, by id, and repeats its recommendation: 1.5 mol% Pd(OAc)2/SPhos, K2CO3, THF/water 4:1, 80 °C, rigorously degassed, 76% isolated — plus the instruction not to optimise on LCAP. It should name the note id as the circulable artifact rather than inventing a document number or a location on a shared drive.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "kn-06",
+    "section": 1,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "For the 4-methoxybiphenyl step — what are we recommending right now, and is it written up anywhere I can circulate?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": 0.0,
+    "expected_notes_missing": [
+      "report-biaryl-development"
+    ],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.45,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "7ac9fe449bd043768e6331ef3d86f28f",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

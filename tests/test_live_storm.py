@@ -420,3 +420,125 @@ def test_every_declared_behaviour_is_reached_by_some_check() -> None:
         "Wire a check that asserts something about them, or delete them — a catalogue entry that "
         "no run reaches is coverage the report cannot claim and a reader will assume."
     )
+
+
+def test_run_turn_reads_the_same_awkward_stream_the_probe_harness_does() -> None:
+    """One wire reader, three harnesses — and this is the half that proves it is one.
+
+    `run_turn` used to carry its own `line.startswith("data: ")` / `line[6:]` pair, a sixth-
+    character slice against a fifth-character slice in `cli/live_benchmark` and a third spelling in
+    `evals/live`. A storm grades a turn on whether it answered, so a reader that dropped a legal
+    frame reported a *system* that went silent under load, which is this harness's headline finding.
+    They now share `evals.live.decoded_events`; the fixture is shared too, so the three cannot
+    drift apart without one of the three tests going red.
+
+    No network, no broker — `httpx.MockTransport` serves the bytes, which is what the module
+    docstring's "a test of the harness that needed the stack the harness tests" rules out.
+    """
+    import httpx
+
+    from tests.test_live_probes import AWKWARD_STREAM, SSE_HEADERS
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/sessions":
+            return httpx.Response(200, json={"session_id": "s1"})
+        return httpx.Response(200, content=AWKWARD_STREAM, headers=SSE_HEADERS)
+
+    async def go() -> TurnResult:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="http://front-door"
+        ) as client:
+            return await live_storm.run_turn(client, "hello [[a-cheap]]")
+
+    result = asyncio.run(go())
+    assert result.status == 200
+    assert result.announced == 1
+    assert result.answered is True
+    assert result.transport_error is None
+
+
+def test_run_turn_keeps_the_answer_of_a_turn_whose_stream_was_cut_off() -> None:
+    """The harness that *makes* truncated streams must be the one that can read them.
+
+    A storm's finding is whether the front door still answers under load and under cancellation,
+    and a cancelled turn's stream ends after its last `data:` line with no blank line behind it.
+    The SSE grammar dispatches an event on that blank line, so a driver that does nothing at
+    end-of-stream drops the last frame of exactly the turns this harness exists to observe —
+    measured, one event where the reader it replaced yielded two. `answered` is the column that
+    moves, and it moves the wrong way: a turn that answered and was then cut reads as a turn that
+    went silent, which is this harness's headline finding being manufactured by its own reader.
+
+    The fixture is `tests/test_live_probes.TRUNCATED_STREAM`, imported rather than copied, for the
+    reason the awkward one above is.
+    """
+    import httpx
+
+    from tests.test_live_probes import SSE_HEADERS, TRUNCATED_STREAM
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/sessions":
+            return httpx.Response(200, json={"session_id": "s1"})
+        return httpx.Response(200, content=TRUNCATED_STREAM, headers=SSE_HEADERS)
+
+    async def go() -> TurnResult:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="http://front-door"
+        ) as client:
+            return await live_storm.run_turn(client, "hello [[a-cheap]]")
+
+    result = asyncio.run(go())
+    assert result.answered is True
+    assert result.transport_error is None
+
+
+def test_a_refused_turn_is_recorded_as_its_status_rather_than_as_a_transport_failure() -> None:
+    """The ordering that makes admission control measurable: status first, stream second.
+
+    Family A's whole subject is what the front door does at capacity, and it says so with a 429 and
+    a JSON body — not an event stream. `decoded_events` answers a body that is not a stream by
+    yielding nothing, which is the right answer for a 200 that is not a stream and says nothing at
+    all here: a shed turn would then be indistinguishable from a turn that answered nothing, which
+    takes it out of the `status` histogram the shedding check reads. So the status comes off the
+    response before the stream is touched, and this is the test that holds that ordering.
+    """
+    import httpx
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/sessions":
+            return httpx.Response(200, json={"session_id": "s1"})
+        return httpx.Response(429, json={"detail": "at capacity"})
+
+    async def go() -> TurnResult:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="http://front-door"
+        ) as client:
+            return await live_storm.run_turn(client, "hello [[a-cheap]]")
+
+    result = asyncio.run(go())
+    assert result.status == 429
+    assert result.transport_error is None
+    assert result.answered is False
+
+
+def test_the_calibration_check_reads_the_ratio_not_the_in_flight_estimate() -> None:
+    """Check H asked `turn_costs.estimated_tokens` to be positive on a turn that completed.
+
+    That column is only what nobody was billed *through* — an in-flight or cancelled prompt
+    (`agent/turn_usage.InFlightPrompts`) — so it is 0 on every completed turn and the check could
+    not pass. The property is the published ratio leaving its clamp, and exactly-1.0 is the clamp.
+    """
+    exposition = (
+        "# HELP chemclaw_context_estimator_ratio x\n"
+        "# TYPE chemclaw_context_estimator_ratio gauge\n"
+        "chemclaw_context_estimator_ratio 2.0625\n"
+        "chemclaw_context_estimator_ratio_other 9\n"
+    )
+    ratio = live_storm.metric_sample(exposition, live_storm.ESTIMATOR_RATIO_GAUGE)
+    assert ratio == 2.0625
+    assert live_storm.metric_sample("", live_storm.ESTIMATOR_RATIO_GAUGE) is None
+
+    assert live_storm._calibration_finding(200, 41_000, ratio).ok
+    assert not live_storm._calibration_finding(200, 41_000, 1.0).ok, "1.0 is the clamp itself"
+    assert not live_storm._calibration_finding(200, 41_000, None).ok, "unreadable is not a pass"
+    assert not live_storm._calibration_finding(200, 0, ratio).ok, "nothing billed, nothing shown"
+    assert not live_storm._calibration_finding(500, 41_000, ratio).ok

@@ -1,0 +1,56 @@
+{
+  "probe": {
+    "id": "pc-10",
+    "section": 11,
+    "persona": "lab_technician",
+    "bucket": "C",
+    "question": "We need to swap the solvent from DMF to 2-MeTHF by distillation before the crystallisation. How many theoretical stages and what is the expected DMF carry-over?",
+    "expects_tools": [],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a number of theoretical or actual stages",
+      "a residual solvent level in ppm or percent from a distillation calculation",
+      "a reflux ratio or a distillation temperature profile"
+    ],
+    "direction": "Refuses the sizing. `compare_solvents` can legitimately compare the two solvents' properties — boiling points, the relevant polarity descriptors — and that is useful input a good answer may offer while being explicit that it is not a distillation calculation. Residual DMF is an analytical question this system also cannot answer (see `analytical.yaml`), and a good answer does not silently jump there either.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "pc-10",
+    "section": 11,
+    "persona": "lab_technician",
+    "bucket": "C",
+    "question": "We need to swap the solvent from DMF to 2-MeTHF by distillation before the crystallisation. How many theoretical stages and what is the expected DMF carry-over?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.17,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "532170883ea64b6883e7e5e55a090923",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

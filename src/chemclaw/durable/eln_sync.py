@@ -239,17 +239,20 @@ class _BoundedIngest:
         bounded = since >= self._since
         entries = sorted(
             await self._fetch(since, self._limit if bounded else None),
-            key=lambda entry: (entry_window(entry.created_at, entry.modified_at), entry.entry_id),
+            key=lambda entry: (
+                entry_window(entry.created_at, entry.modified_at, entry.retracted_at),
+                entry.entry_id,
+            ),
         )
         overlap = [
             entry
             for entry in entries
-            if entry_window(entry.created_at, entry.modified_at) <= self._since
+            if entry_window(entry.created_at, entry.modified_at, entry.retracted_at) <= self._since
         ]
         new = [
             entry
             for entry in entries
-            if entry_window(entry.created_at, entry.modified_at) > self._since
+            if entry_window(entry.created_at, entry.modified_at, entry.retracted_at) > self._since
         ]
         self.truncated = len(new) > self._limit or fetch_was_truncated(self._inner)
         return overlap + new[: self._limit]

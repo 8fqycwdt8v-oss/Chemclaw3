@@ -1,0 +1,62 @@
+{
+  "probe": {
+    "id": "rx-33",
+    "section": 11,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We have run eight conditions on the coupling — varying ligand, base and temperature between 60 and 100 °C — and yields are between 41 and 78%. What should we run next?",
+    "expects_tools": [
+      "suggest_next_experiment",
+      "generate_screening_design",
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a predicted yield for the suggested experiment",
+      "a claim of convergence or of an optimum found",
+      "a suggestion of higher temperature offered without the protodeboronation caveat"
+    ],
+    "direction": "The optimisation capability is real and should be used, but the graded behaviour is whether it checks the suggestion against the record instead of shipping it raw. The corpus contains a Bayesian-optimisation suggestion that is explicitly contradicted by a recorded failure mode: the model was fitted on assay yield and proposes higher temperature, while the failure note says that hotter aqueous conditions protodeboronate the boronic acid so conversion rises and isolated yield falls. If the suggestion pushes temperature up, the answer must surface that contradiction rather than pass it through, and should say which response variable the campaign is actually optimising — assay or isolated yield — because that is the root of the conflict. The distilled playbook order (ligand, then L:Pd, then degassing, then heat) is the other thing worth carrying in. Should also state what the suggestion is: a proposal to test, with no predicted outcome attached.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-33",
+    "section": 11,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We have run eight conditions on the coupling — varying ligand, base and temperature between 60 and 100 °C — and yields are between 41 and 78%. What should we run next?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.39,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "e09b9d2fb76a4faf8f89e1729d23722d",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

@@ -69,6 +69,7 @@ _COLUMNS = (
     "answer_confidence",
     "review_required",
     "notes_cited",
+    "skills_loaded",
 )
 
 # `turn_id` is the conflict target, so it is the one column the update must not re-set — and it is

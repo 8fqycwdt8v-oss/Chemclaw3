@@ -85,10 +85,10 @@ def test_a_started_job_becomes_a_job_started_event() -> None:
     assert (started[0].job_id, started[0].kind) == ("qm-abc", "qm")
 
 
-def test_a_proposed_note_becomes_a_note_proposed_event() -> None:
+def test_a_recorded_note_becomes_a_note_recorded_event() -> None:
     """A chemist learns their contribution opened a branch, in the session that produced it."""
     events = _events(_SignallingAgent(jobs=[], proposals=[("playbook-1", "note/playbook-1")]))
-    proposed = [e for e in events if e.type == "note_proposed"]
+    proposed = [e for e in events if e.type == "note_recorded"]
     assert len(proposed) == 1
     assert (proposed[0].note_id, proposed[0].reference) == ("playbook-1", "note/playbook-1")
 
@@ -98,11 +98,11 @@ def test_signals_are_ordered_between_the_tokens_around_them() -> None:
 
     **The assertion is the invariant, not the transcript, and that is a measurement rather than a
     concession.** Under MAF the runner consumes the model's generator directly, so the sequence is
-    exactly `token, job_started, note_proposed, token, answer`. Under LangGraph the tokens travel
+    exactly `token, job_started, note_recorded, token, answer`. Under LangGraph the tokens travel
     through `astream`'s queue, and a fake model that never suspends between chunks fills that queue
     before the consumer is scheduled once: measured, the consumer needs four event-loop hops inside
     the model's reply to dequeue the first chunk, so the same turn reads `job_started,
-    note_proposed, token, token, answer`. That difference is a property of the stream's buffering —
+    note_recorded, token, token, answer`. That difference is a property of the stream's buffering —
     a real provider's chunks are separated by a network read — and not of the drain-first rule both
     engines implement, so pinning the exact list would pin the fake.
 
@@ -113,8 +113,8 @@ def test_signals_are_ordered_between_the_tokens_around_them() -> None:
         _SignallingAgent(jobs=[("report-1", "report")], proposals=[("r-1", "note/r-1")])
     )
     kinds = [e.type for e in events]
-    assert kinds.index("job_started") < kinds.index("note_proposed"), kinds
-    assert kinds[kinds.index("note_proposed") + 1] == "token", kinds
+    assert kinds.index("job_started") < kinds.index("note_recorded"), kinds
+    assert kinds[kinds.index("note_recorded") + 1] == "token", kinds
     assert kinds[-1] == "answer", kinds
 
 

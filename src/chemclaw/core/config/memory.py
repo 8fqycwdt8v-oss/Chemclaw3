@@ -27,17 +27,80 @@ class MemorySettings(BaseSettings):
     # the playbook floor: an optimization series is the same reaction re-run, not merely related
     # chemistry, so the grouping must be tight to avoid merging distinct transformations.
     optimization_similarity_threshold: float = Field(default=0.7, ge=0.0, le=1.0)
+    # How much memory one block of `memory.similarity`'s pairwise product may hold. **The clustering
+    # is O(n^2) in comparisons and this is what stops it being O(n^2) in *bytes*.** The sparse
+    # product was chosen over a dense `X @ X.T` partly on the argument that it "allocates one entry
+    # per bit-sharing pair rather than an n^2 float64 matrix, which at 10^4 reactions is 800 MB" —
+    # measured, a third to over a half of all DRFP pairs share at least one bit, so the sparse
+    # product is *larger* than the dense matrix it was contrasted with: at 10,000 synthetic
+    # 30-of-2048-bit fingerprints (36% of pairs sharing a bit) the whole-corpus form peaked at
+    # **1,339 MB** of traced allocation, and a real DRFP corpus at 55% is worse. That is the same
+    # quadratic the `memory_corpus_max_reactions` cap was calibrated against a *linear* ~40 kB per
+    # reaction, so the cap no longer bounded the job it was written to bound.
+    #
+    # Blocking the product keeps the peak at this budget plus O(n) for the partition, which is what
+    # makes the cap's arithmetic true again. 64 MB is chosen to be small beside the corpus read
+    # itself (~4 GB at the cap) and large enough that the per-block overhead does not show: measured
+    # at n=10,000, traced peak 1,339 MB -> 57 MB, clusters bit-identical, and wall clock 5.02 s ->
+    # 1.78 s rather than worse, because the whole-corpus form spent its time on the 1.3 GB.
+    # Raise it to trade memory for time if a profile ever shows the blocking costing any; it changes
+    # no result either way.
+    memory_similarity_block_bytes: int = Field(default=64 * 1024 * 1024, gt=0)
     memory_job_timeout_seconds: float = Field(default=300.0, gt=0)
-    # Most notes one synthesis run may propose (0 = unbounded). The three jobs rescan the whole
-    # corpus daily with no cursor, so a large import would open a PR per cluster on the first
-    # night. The window rotates by run date rather than truncating, so the cap bounds the flood
-    # without the tail of the corpus being proposed *never* — see `_slice_for_this_run`.
+    # Most notes one synthesis run may write (0 = unbounded). The three jobs rescan the whole
+    # corpus with no cursor, so a large import would write a note per cluster in one run. The
+    # window rotates by run date rather than truncating, so the cap bounds the flood without the
+    # tail of the corpus being written *never* — see `_slice_for_this_run`.
     memory_max_notes_per_run: int = Field(default=25, ge=0)
-    # The ungated observations tier (D-161). Off by default and deliberately: it is the first
-    # knowledge surface no human signs off before the agent can read it, and a deployment must
-    # choose that rather than inherit it. `promote_min_*` are the two thresholds at which an
-    # observation earns a human's review as a playbook PR — evidence count says the finding is not
-    # a coincidence, project count says it is not one team's local habit, and neither alone does.
+    # Most reactions one `read_corpus` may hold in memory (0 = unbounded). **The bound is memory,
+    # not time**, and that is measured rather than assumed: 10,000 ORD records read in 6.8 s and
+    # **397 MB** of traced peak — about 40 kB of resident `OrdReaction` per entry, because the
+    # miners are whole-corpus algorithms (DRFP fingerprinting, O(n^2) Tanimoto, NetworkX components)
+    # and take a `list`, not a stream. A decade of a real ELN is 500k entries, which is ~20 GB in
+    # one activity's process, so the read does not fail slowly — the pod is killed.
+    #
+    # Hitting the cap makes the read **incomplete** rather than raising, which is a mechanism
+    # `CorpusRead` already has and every miner already honours: a pass that saw part of the corpus
+    # must not be written down as the whole record. So a deployment over the bound gets partial
+    # knowledge that says it is partial, instead of a worker that dies with no note at all.
+    #
+    # **"Says it is partial" is `memory.jobs.PARTIAL_READ_CAVEAT`, and it is in the note's body
+    # rather than in a log**, which it was not when this sentence was first written: the flag
+    # skipped the retirement pass and logged a WARNING, while the note reaching `knowledge/` was
+    # byte-identical to one distilled from the whole record. The caveat names the id risk too — a
+    # truncation that drops a cluster's smallest member mints a different id, on the one run whose
+    # retirement pass is skipped.
+    #
+    # 100,000 is a bound, not a target: ~4 GB at the measured rate, which is a large worker rather
+    # than an impossible one. Lower it to fit the pod; the honest fix is streaming miners, and
+    # `docs/planning/BACKLOG.md` carries that with this measurement as its trigger.
+    memory_corpus_max_reactions: int = Field(default=100_000, ge=0)
+    # How many backfilled notes share one commit (`cli/backfill_corpus`, never the conversational
+    # path). One commit and one push per note is what bounds a backfill. **Two conditions, each
+    # with its own triple, because this comment and `.env.example` shipped quoting one number from
+    # each and disagreeing by 2x** — an operator sizing the knob read whichever file they opened:
+    #
+    #   local bare remote, empty corpus  140.9 ms/note  ->  15.8 at ten to a commit  ->  4.8 at 50
+    #   real remote, 10,000-note corpus  327.3 ms/note  ->  31.6 at ten to a commit  ->  8.5 at 50
+    #
+    # The first is `tests/test_backfill_batching.py`'s own lane; the second is
+    # `D-2026-09-13-the-lock-is-not-the-bound-the-commit-is`, and is the one a deployment should
+    # plan against. Batching the *conversational* path
+    # is declined and stays declined (`D-2026-09-13-the-lock-is-not-the-bound-the-commit-is`): a
+    # queued note is one a chemist cannot read yet. Nobody is mid-turn during a backfill.
+    #
+    # Fifty is where the measured curve flattens; lower it if a single commit touching that many
+    # files is awkward for the notes repository's reviewers.
+    backfill_commit_batch_size: int = Field(default=50, ge=2)
+    # The observations tier (D-161). Off by default and deliberately, though not for the reason
+    # this comment gave: "the first knowledge surface no human signs off before the agent can read
+    # it" stopped being a distinction when
+    # `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` made that true of every agent-written
+    # note. What the tier still is, is a pattern across projects that no single run supports, so a
+    # deployment chooses to have one rather than inheriting it (see `memory/observations.py`).
+    # `promote_min_*` are the two thresholds at which an observation is promoted into an ordinary
+    # playbook note — evidence count says the finding is not a coincidence, project count says it
+    # is not one team's local habit, and neither alone does.
     # `retire_after_days` is how long an observation nothing re-observes stays open; without it the
     # tier only ever grows and becomes a write-only log.
     observations_enabled: bool = False
@@ -46,8 +109,9 @@ class MemorySettings(BaseSettings):
     observation_retire_after_days: int = Field(default=30, ge=0)
     observation_max_results: int = Field(default=10, ge=1)
     # Cadence for the observation lifecycle job (mine, then retire). Daily, because it re-scans
-    # the whole corpus. Promotion is not on this timer — it opens pull requests, so it is started
-    # on demand (D-2026-08-25).
+    # the whole corpus. Promotion is not on this timer — it writes playbook notes nobody asked
+    # for, so it is started on demand (D-2026-08-25; it said "opens pull requests" until
+    # D-2026-09-05 deleted the gate).
     observation_schedule_minutes: float = Field(default=1440.0, gt=0)
     # Fraction of a Schedule's interval used as a deterministic per-job phase offset (gap
     # SCH-3). Two schedules sharing a cadence would otherwise fire together against one background
@@ -192,9 +256,27 @@ class MemorySettings(BaseSettings):
     # at the worst misses and asks what they have in common — and a hundred rows is not read, it is
     # scrolled past while spending the model's context.
     calc_outliers_max_results: int = Field(default=25, ge=1)
-    # Standing-query digests (gap IDEA-1). Off by default: it needs the `subscriptions` table
-    # (migration 017), and a deployment nobody has subscribed on would just run an empty sweep.
-    digest_enabled: bool = False
+    # Standing-query digests (gap IDEA-1). **On by default since
+    # `D-2026-09-15-a-watch-that-nothing-evaluates-is-a-promise-a-deployment-cannot-keep`, and both
+    # reasons it was off had expired.** The first — "it needs the `subscriptions` table (migration
+    # 017)" — is satisfied by any deployment that has migrated, which is all of them. The second —
+    # "a deployment nobody has subscribed on would just run an empty sweep" — was answered in code
+    # rather than in config: `digest._match_corpus` returns before `load_notes` when there are no
+    # subscriptions, and that early return's own comment says it exists "because a deployment with
+    # no subscriptions was paying for it in full". What is left with no subscribers is one daily
+    # workflow that does a single indexed read and stops.
+    #
+    # `D-2026-08-27-a-digest-nobody-can-read-is-not-delivered` is the condition that had to hold
+    # first, and it does: turning this on while nothing could read a digest *lost* matches, because
+    # the acknowledgement advanced a watermark `_is_new` can never re-qualify. `GET /digests` and
+    # the UI's `/review` card are that reader.
+    #
+    # What made this worth changing rather than leaving as an opt-in: `watch_for` is an agent tool
+    # a chemist reaches by asking, it writes the row, and it answers "you'll be told when something
+    # new matches". Off, nothing ever evaluated that row and nothing anywhere said so — so the one
+    # proactive capability in this system reported success and did nothing, on every shipped
+    # deployment. A deployment may still turn it off, and `watch_for` now says so when it has.
+    digest_enabled: bool = True
     digest_schedule_minutes: float = Field(default=1440.0, gt=0)
     digest_timeout_seconds: float = Field(default=300.0, gt=0)
     # Uploaded working files (gap AGT-3). Bounded in both directions: one oversized upload must
@@ -238,8 +320,24 @@ class MemorySettings(BaseSettings):
     # the cap itself punishes the ordinary burst (four spreadsheets dropped on the UI at once
     # measured as two 200s and two 503s) while doing nothing extra against a sustained flood.
     # Queueing is safe here only because a waiter holds a future rather than a thread.
-    # The timeout bounds the *wait*, not the thread: Python cannot kill one, so a parse past this
-    # limit is refused to its client while the thread runs to completion against the cap.
+    #
+    # **The timeout bounds the work, and for a long time it did not.** These three lines used to
+    # end "Python cannot kill one, so a parse past this limit is refused to its client while the
+    # thread runs to completion against the cap" — which was an accurate description of a liveness
+    # bug, written as though it were a design. A slot is released by its thread's completion
+    # callback, so a parse that never terminates held its slot for the life of the process: driven
+    # at this cap of 2, both callers were freed at their timeout, `in_flight` stayed at 2 five
+    # seconds later, and every later upload was shed. The replica's upload path was down for good.
+    # The parse now runs in a `forkserver` child that is killed on this deadline
+    # (`chemclaw.ingest.documents.isolate`), so the thread ends and the slot comes back — measured
+    # at 10 ms per parse once the forkserver is warm, against 0.97 s for a fresh interpreter.
     attachment_parse_timeout_seconds: float = Field(default=30.0, gt=0)
     attachment_parse_queue_seconds: float = Field(default=10.0, ge=0)
     attachment_max_concurrent_parses: int = Field(default=2, ge=1)
+    # What the caller waits *beyond* the parse deadline before giving up on its own worker thread.
+    # The thread enforces the deadline itself, so this is a backstop over the one thing that
+    # enforcement cannot see: the forkserver's first start, which happens before the child's clock
+    # begins and measured **0.86 s** on this tree. Five seconds is that with room, and it is the
+    # margin rather than a second parse budget — if this is ever what fires, the thread is still
+    # bounded and the slot still comes back.
+    attachment_parse_reap_grace_seconds: float = Field(default=5.0, ge=0)

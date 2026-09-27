@@ -36,6 +36,7 @@ from typing import Any
 import pytest
 
 from tests.calc_server_fake import _KEYED, _UNKEYED, embed
+from tests.siblings import SIBLING_SKIP
 from tests.test_context_floor import _sibling_python
 
 #: The program run inside the sibling checkout's interpreter. It derives one identity per compute
@@ -115,12 +116,32 @@ _VARIATIONS: dict[str, Any] = {
     "value": 1.9,
 }
 
-#: The tools whose identity the sibling refuses to derive without the `crest` binary, by design
-#: (`crest_search.require_crest()` — "the probe refuses precisely where the calculation would").
+#: The tools whose identity the sibling refuses to derive when the binary behind them is absent, by
+#: design — "the probe refuses precisely where the calculation would", because a well-formed key
+#: naming a program the pod lacks is worse than no key: it is a cache address for a row that can
+#: never be computed.
+#:
+#: **Two binaries, not one, and this set said `crest` for both.** It named only the CREST searches,
+#: and the sibling since extended the same rule to the two tools that need the `xtb` *binary* —
+#: `tblite` exposes no atomic multipoles, no polarisability and no potential grid, so there is no
+#: in-process fallback for them. Measured on a checkout with neither binary, the sibling refused
+#: four and this bound admitted two. That is this repository holding a stale claim about another
+#: repository's behaviour, which is the hazard `Chemclaw3-mcp`'s own sibling-agreement note names:
+#: nothing here can see that server's merge schedule.
+#:
 #: A bound rather than a list of expected refusals: a refusal from any *other* tool is a real
-#: divergence and fails below, and where a checkout does have crest these two are measured like
-#: everything else.
-_REFUSED_WITHOUT_CREST = frozenset({"search_conformer_ensemble", "search_binding_modes"})
+#: divergence and fails below, and where a checkout does have the binaries these four are measured
+#: like everything else.
+_REFUSED_WITHOUT_A_BINARY = frozenset(
+    {
+        # `crest`
+        "search_conformer_ensemble",
+        "search_binding_modes",
+        # the `xtb` binary, which `tblite` does not stand in for
+        "compute_atomic_descriptors",
+        "compute_surface_potential",
+    }
+)
 
 #: Arguments the server will not let a probe vary independently of the subject, with the reason.
 #: `charge` is folded into the *structure* on that side (it embeds the molecule and refuses a
@@ -186,17 +207,20 @@ def test_the_fake_keys_calculations_the_way_the_server_keys_them() -> None:
     answers, reason = _sibling_identities()
     if not answers:
         pytest.skip(
-            "the calc server's own key derivation was NOT measured: "
+            # The marker, so `tests/conftest.py`'s epilogue counts this one. It did not: the reason
+            # was worded from scratch, and the epilogue that exists to say what a run is *not*
+            # evidence about was silent about the most load-bearing skip in the set.
+            f"{SIBLING_SKIP} the calc server's own key derivation was NOT measured: "
             f"{reason}. `tests/calc_server_fake._KEYED` is a hand-written mirror of it, so every "
             "D-011 'a persisted result is never recomputed' assertion in this suite is unchecked "
             "against the server in this run."
         )
 
     refused = {tool: entry["error"] for tool, entry in answers.items() if "error" in entry}
-    assert set(refused) <= _REFUSED_WITHOUT_CREST, (
+    assert set(refused) <= _REFUSED_WITHOUT_A_BINARY, (
         "the sibling refused to derive an identity for "
-        f"{sorted(set(refused) - _REFUSED_WITHOUT_CREST)}: {refused}. Only the CREST searches may "
-        "refuse, and only for a missing binary"
+        f"{sorted(set(refused) - _REFUSED_WITHOUT_A_BINARY)}: {refused}. Only the tools that shell "
+        "out to a binary may refuse, and only for that binary being absent"
     )
 
     # Coverage, both directions. A tool the server keys must be in the fake's table, or a fake

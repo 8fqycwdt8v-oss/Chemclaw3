@@ -8,9 +8,11 @@ afterwards. These routes make the design a document with an address.
 **A human edit is a REST write, not a tool call composed by a click.** That distinction is the one
 `Chemclaw3_ui`'s own rule states (`docs/chemistry-aware-frontend.md` §9): everything the *agent*
 does reaches it as a chat turn, and a button that composed a tool call would be a surface deciding
-what the agent does. Editing a document is not that — it is the chemist authoring a revision, which
-is exactly what `POST /proposals/{id}/decision` already is for a note. So the write lands here,
-`author_kind` records that a person made it, and the agent is not involved.
+what the agent does. Editing a document is not that — it is the chemist authoring a revision, and
+a person's decision recorded over HTTP is exactly what `POST /sessions/{id}/plan/decision` already
+is. So the write lands here, `author_kind` records that a person made it, and the agent is not
+involved. (That comparison was `POST /proposals/{id}/decision` until it went with the PR-gate,
+`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`.)
 
 **The conflict is a 409 and it is bound to a revision**, the same shape `POST
 /sessions/{id}/plan/decision` uses for `plan_hash`: a caller says which revision they edited, and a
@@ -29,6 +31,7 @@ from datetime import datetime
 from fastapi import FastAPI, HTTPException, Response
 from pydantic import BaseModel, ConfigDict, Field
 
+from chemclaw.agent.protocol_design_tools import recorded_failures, uncited_precedent
 from chemclaw.api.auth import Principal
 from chemclaw.api.deps import (
     DESIGN,
@@ -40,6 +43,7 @@ from chemclaw.api.deps import (
 from chemclaw.core.errors import ChemclawError
 from chemclaw.protocols.checks import run_checks
 from chemclaw.protocols.diff import DesignDiff, diff_designs
+from chemclaw.protocols.export import run_sheet_csv, run_sheet_filename
 from chemclaw.protocols.models import (
     AuthorKind,
     DesignStatus,
@@ -72,9 +76,22 @@ class RevisionSummary(BaseModel):
 
 
 class DesignListOut(BaseModel):
-    """A page of designs."""
+    """A page of designs, **and how many designs that page is a page of**.
+
+    `designs` was the whole of this, and the route bounded it — default 50, clamped to 200 — so a
+    site with more designs than the page rendered the newest 50 as the corpus. `GET /sessions` in
+    this same package was fixed for exactly that ("it always bounded the answer, and nothing said
+    so"); the sibling listing route was not.
+
+    A `total` and a marker rather than the keyset cursor `GET /sessions` grew: see `list_protocols`
+    for why the cursor is a separate decision and what it would need.
+    """
 
     designs: list[DesignSummary] = Field(default_factory=list)
+    # Everything matching the same filters, before the page bound.
+    total: int = 0
+    # Whether matching designs exist that this page does not carry.
+    truncated: bool = False
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -117,7 +134,12 @@ class RevisionIn(BaseModel):
 
 
 class RevisionOut(BaseModel):
-    """What a stored edit hands back."""
+    """What a stored edit hands back.
+
+    `design_id` echoes the path parameter the caller sent, deliberately: this body is what a client
+    stores or logs against a saved revision, and a response that names only `revision: 4` cannot say
+    which document it is the fourth of once it is separated from its request URL.
+    """
 
     design_id: str
     revision: int
@@ -159,20 +181,31 @@ async def list_protocols(
     project: str = "",
     limit: int = 50,
 ) -> DesignListOut:
-    """Designs, newest first.
+    """One page of designs, newest first, with how many matched the same filters.
 
     A list route, so an empty result is an empty list rather than a 404 — the same policy the
     client's own `orEmpty()` expects of every listing here.
+
+    **It has always been a page and the response could not say so.** Driven on both backends: 60
+    designs stored, the default page returned 50 and the body's only key was `designs`, so a client
+    rendered "the stored experiment designs" over five sixths of them.
+
+    A `total` plus `truncated` rather than the `X-Next-Cursor` keyset `GET /sessions` grew, and
+    that is a decision rather than an omission: a second keyset cursor wants the same encoder
+    (`agent/session_store.encode_session_cursor`), whose only non-duplicating home is a shared
+    module, and copying it here is precisely the drift the DRY rule exists to stop for two things
+    that must agree forever. What the finding was about is the statement, and this is the
+    statement; `docs/planning/BACKLOG.md` is where paging past 200 belongs.
     """
     known = {"requested", "draft", "approved", "executed", "abandoned"}
     if status and status not in known:
         raise HTTPException(status_code=422, detail=f"unknown status {status!r}")
-    designs = await default_design_store().listing(
+    index = await default_design_store().listing(
         status=status or None,  # type: ignore[arg-type]
         project=project,
         limit=max(1, min(limit, 200)),
     )
-    return DesignListOut(designs=designs)
+    return DesignListOut(designs=index.designs, total=index.total, truncated=index.truncated)
 
 
 async def get_protocol(
@@ -234,10 +267,12 @@ async def _require_writable(design_id: str, principal: Principal) -> None:
     design opened by somebody else, then landed a revision on it as its author. A lab record saying
     an experiment was run is the most consequential thing this table holds.
 
-    Owner **or** reviewer, rather than the reviewer-only rule `POST /proposals/{id}/decision` uses.
-    That route's subject is machine-written knowledge entering a shared graph, where the whole point
-    is that the author does not decide. A design is a chemist's own experiment: they approve their
-    own plate, and a reviewer reaches other people's for the same reason `_is_reviewer` exists.
+    Owner **or** reviewer, rather than the reviewer-only rule the note decision route had: its
+    subject was machine-written knowledge entering a shared graph, where the whole point was that
+    the author does not decide, and it went with the PR-gate
+    (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`). A design is a chemist's own
+    experiment: they approve their own plate, and a reviewer reaches other people's for the same
+    reason `_is_reviewer` exists.
 
     Reads stay open on purpose. A design is a shared scientific artifact — the schema says so where
     it keeps `opened_by` through offboarding, and `find_experiment_protocols` lists the deployment's
@@ -293,8 +328,32 @@ async def post_revision(
     # that fires on the normal path is a blocker a reader learns to ignore, which is the property
     # the one real blocker depends on. The revision's `kind` is the same question and is no longer
     # any caller's to answer — `store.revision_kind` derives it from `has_protocol` there.
+    # **With the corpus, because a check that is handed none passes by construction.**
+    # `no_documented_failure` and `precedent_consulted` take their evidence as an argument —
+    # `run_checks`' own docstring says "a caller that skips the lookup therefore publishes a clean
+    # bill the corpus never gave" — and this route shipped calling it with neither. Measured on one
+    # document: the agent's two call sites reported "the corpus records 1 failure(s) bearing on
+    # this design" and "the record holds 1 similar run(s) this design does not cite", and this one
+    # reported "no recorded failure bears on this design". So a chemist fixing a typo on a design
+    # the agent had flagged republished it with a clean bill, overwriting the verdict — which is
+    # precisely the "two halves of the surface would grade the same document differently depending
+    # on who wrote it" this function's docstring exists to refuse.
+    #
+    # Awaited rather than threaded, and **only one of the two offloads its own work** — this said
+    # "each already offloads its own blocking read" and that is false for the second.
+    # `recorded_failures` wraps `load_notes` in `asyncio.to_thread`; `uncited_precedent` calls
+    # `drfp_bitstring` — synchronous RDKit — on the loop before it awaits the store. Measured:
+    # 4.72 ms worst loop stall, 3.70 ms of it the fingerprint. That is two orders below the 3.2 s
+    # that made `diff_designs` twenty lines down worth a thread, and it is still loop time on a
+    # process that also serves every other chemist's SSE stream and both kubelet probes, so it is
+    # stated rather than left to be rediscovered. Both answer `[]` instead of raising — including
+    # on a value their own models refuse, since the reductions moved inside the guards — so a
+    # corpus this deployment cannot reach costs a quieter check rather than a lost edit.
     checks = run_checks(
-        body.document, stage="protocol" if body.document.has_protocol else "request"
+        body.document,
+        stage="protocol" if body.document.has_protocol else "request",
+        failures=await recorded_failures(body.document),
+        precedent=await uncited_precedent(body.document),
     )
     # **In a thread, because what the diff itself could not remove is still seconds of loop.**
     # `diff_designs` now orders only the paths that differ, which took a chemist's edit at every
@@ -368,6 +427,55 @@ async def get_protocol_diff(
     )
 
 
+async def get_run_sheet(
+    design_id: str,
+    principal: CurrentUser,
+    revision: int = 0,
+) -> Response:
+    """The design's arms as a CSV run sheet — one row per arm, in run order.
+
+    **The one route here that is not JSON, because its consumer is not a browser rendering a
+    document.** A run sheet goes into instrument software, a LIMS import or a chemist's own
+    workbook, and each of those reads a file. A JSON body carrying CSV as a string would make every
+    one of those callers unwrap it first, which is a format that serves the transport rather than
+    the reader.
+
+    Read-only and `CurrentUser`-gated on the same footing as `GET /protocols/{design_id}`: this
+    hands back a projection of exactly what that route already returns, so gating it more tightly
+    would guard the format rather than the content.
+
+    Args:
+        design_id: The `design-…` id.
+        principal: The authenticated caller.
+        revision: A specific revision, or 0 for the head.
+
+    Returns:
+        `text/csv` with a `Content-Disposition` naming the design and the revision it is of — see
+        `protocols.export.run_sheet_filename`, which owns that spelling because the agent quotes
+        the same artefact's address and two copies of it drift.
+    """
+    stored = await default_design_store().read(design_id, revision or None)
+    if stored is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"no design {design_id!r}" + (f" at revision {revision}" if revision else ""),
+        )
+    # In a thread for the reason `get_protocol_diff` gives: this walks every arm and every factor
+    # of a document bounded at 1536 arms, and the event loop serves every other session meanwhile.
+    body = await asyncio.to_thread(run_sheet_csv, stored.design)
+    return Response(
+        content=body,
+        # `charset=utf-8` stated rather than left to the default: a solvent name, a ligand label or
+        # a chemist's note is routinely non-ASCII, and RFC 4180's own default is US-ASCII.
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{run_sheet_filename(design_id, stored.revision)}"'
+            )
+        },
+    )
+
+
 async def post_status(
     design_id: str,
     body: StatusIn,
@@ -424,4 +532,5 @@ def register(app: FastAPI) -> None:
     app.get("/protocols/{design_id}")(get_protocol)
     app.post("/protocols/{design_id}/revisions")(post_revision)
     app.get("/protocols/{design_id}/diff")(get_protocol_diff)
+    app.get("/protocols/{design_id}/run-sheet.csv")(get_run_sheet)
     app.post("/protocols/{design_id}/status", status_code=204)(post_status)

@@ -17,7 +17,7 @@ be wrong here**, in opposite ways, and this module is what the measurement left:
   `tests/test_tool_results.py::test_a_result_two_calls_produced_names_neither_of_them` proved this
   before this module existed. A year-long `immutable` would pin the withdrawn label in the client
   for a year, which is exactly the mispairing that store refuses on the write side.
-- A note id is *stable across edits* by construction: the graph is Markdown in Git, a PR-gate merge
+- A note id is *stable across edits* by construction: the graph is Markdown in Git, a later write
   rewrites a note's body under the same id, and the neighbourhood is other notes' business
   entirely — a new note linking here changes this response with nothing about this note touched.
   And `Note.is_current` is evaluated against `date.today()`, so a neighbour leaves the view on the

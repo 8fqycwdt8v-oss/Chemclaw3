@@ -1,0 +1,61 @@
+{
+  "probe": {
+    "id": "gr-10",
+    "section": 3,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We're starting the same C-N coupling on a new aryl chloride next month. Given the screening we already have, what should the first eight experiments be?",
+    "expects_tools": [
+      "suggest_next_experiment",
+      "start_optimization_campaign",
+      "gather_evidence",
+      "generate_screening_design"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "the proposed conditions described as validated, recommended or expected to work",
+      "a predicted yield for any proposed point",
+      "historic runs used as the prior without saying which and how many"
+    ],
+    "direction": "Thousands of records on this exact transformation are available as a prior. A good answer turns them into observations, proposes points, and lands the result as a proposal a human runs — with the reasoning for the decision space visible. Silently ignoring the historic data and proposing a generic grid is the weak outcome.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-10",
+    "section": 3,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We're starting the same C-N coupling on a new aryl chloride next month. Given the screening we already have, what should the first eight experiments be?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.24,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "5d7379fdfa55481c8f6b3bf870a4dd5d",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

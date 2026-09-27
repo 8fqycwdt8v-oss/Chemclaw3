@@ -12,7 +12,7 @@ not free:
   budget. A deploy therefore stalls a job by up to that timeout for no reason other than how it
   was killed.
 - The pod's own cleanup never runs: `db.pooling()`'s connections are dropped rather than closed, and
-  a git checkout the PR-gate submitter was mid-way through is abandoned in place.
+  a git checkout the note writer was mid-way through is abandoned in place.
 
 `Worker.shutdown()` is the supported alternative — stop polling for new tasks, let in-flight ones
 finish, then cancel what remains after `graceful_shutdown_timeout`. It just needs something to call
@@ -52,6 +52,48 @@ logger = logging.getLogger(__name__)
 # before the grace period; SIGINT is Ctrl-C, so a developer's local worker drains the same way the
 # cluster's does rather than through a different code path that has never been exercised.
 _STOP_SIGNALS = (signal.SIGINT, signal.SIGTERM)
+
+
+def refuse_unauthenticated_worker() -> None:
+    """Fail closed when a Temporal worker would run with sign-in off and nobody said so.
+
+    **What "exposed" means for a process that only makes outbound calls**, which the front door's
+    guard cannot answer. `api/middleware._refuse_unauthenticated_exposure` reads `service_host` —
+    a *bind* — and a worker binds no request surface, so that signal is meaningless here. What a
+    worker does have is the other half of the same posture: with `entra_required` False every
+    activity it runs resolves the shared dev principal, and every authorization gate an activity
+    asks is open. A deployment that forgot `CHEMCLAW_ENTRA_REQUIRED` used to start its workers in
+    exactly that state, silently, while its front door refused to boot.
+
+    So the posture is **stated**, the shape `core/llm_gateway.refuse_unconfigured_llm_gateway`
+    took for the same reason (`D-2026-09-26-a-worker-states-its-unauthenticated-posture`):
+    `worker_allow_unauthenticated`, default False, set by the local lanes that mean it
+    (`infra/live/processes.sh`, the suite's autouse fixture) and by nothing a deployment inherits.
+    With `entra_required` on this is a no-op, whatever the flag says.
+
+    Called at the top of each worker entrypoint, before `connect()`, so a refused worker never
+    polls — `tests/test_worker_posture.py` derives the entrypoints from every `Worker(` in `src/`
+    rather than trusting this sentence.
+
+    Raises:
+        RuntimeError: naming the setting that proceeds and the one that should be set instead.
+    """
+    if settings.entra_required:
+        return
+    if not settings.worker_allow_unauthenticated:
+        raise RuntimeError(
+            "SECURITY: this Temporal worker would run with CHEMCLAW_ENTRA_REQUIRED=false — every "
+            "activity it serves would run as the shared dev principal with all authorization "
+            "gates OPEN. Set CHEMCLAW_ENTRA_REQUIRED=true for any shared deployment, or set "
+            "CHEMCLAW_WORKER_ALLOW_UNAUTHENTICATED=true to state that an unauthenticated worker "
+            "(local dev) is what you mean."
+        )
+    logger.warning(
+        "SECURITY: this Temporal worker runs with entra_required=false and "
+        "CHEMCLAW_WORKER_ALLOW_UNAUTHENTICATED set — every activity runs as the shared dev "
+        "principal with all authorization gates OPEN. Right for local dev, wrong for anything "
+        "shared."
+    )
 
 
 def worker_interceptors() -> list[Interceptor]:

@@ -13,10 +13,15 @@ chosen to exercise it.
 """
 
 import asyncio
+import socket
+import threading
 from datetime import date
+from typing import Any
 
 import pytest
 
+from chemclaw.core.chem import STANDARDIZATION_VERSION
+from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.ingest.labels.enrich import label_stale
 from chemclaw.ingest.labels.labeller import (
@@ -25,14 +30,22 @@ from chemclaw.ingest.labels.labeller import (
     ReactionNaming,
     ReactionRepresentation,
     RxnLabelServer,
+    stamped,
 )
 from chemclaw.ingest.labels.merge import merge
 from chemclaw.science.labels.policy import LabelPolicy
 from chemclaw.science.labels.records import ReactionLabel, SpeciesLabel
 from chemclaw.science.labels.store import InMemoryLabelIndex
-from chemclaw.science.labels.vocabulary import LabelGroup, SpeciesRole
+from chemclaw.science.labels.vocabulary import VOCABULARY_VERSION, LabelGroup, SpeciesRole
 
 _VERSION = "rxnlabel@1:std5:roles1"
+#: The stamp a *current* labeller mints, in the shape `labeller_version` composes —
+#: `f"{remote}:{STANDARDIZATION_VERSION}:{VOCABULARY_VERSION}"`. Derived rather than written out,
+#: because the literal it replaced named `std7` and the labeller had moved to `std8`: the staleness
+#: assertion still passed (any version unequal to `_VERSION` is stale) while the string claimed to
+#: be a stamp nothing mints. This is the third place `STANDARDIZATION_VERSION` reaches, and
+#: `tests/test_compound_identity.py` pins the other two.
+_NEXT_VERSION = f"rxnlabel@2:{STANDARDIZATION_VERSION}:{VOCABULARY_VERSION}"
 
 # A Buchwald-Hartwig, because it is the reaction three of the six precedent questions name and the
 # only one where every role in the vocabulary is actually distinguishable.
@@ -221,29 +234,25 @@ def test_a_role_this_build_does_not_know_becomes_unknown_rather_than_a_failure()
 # --- the drain -----------------------------------------------------------------------------
 
 
-def test_a_drain_pass_labels_and_stamps_and_reports_more() -> None:
+async def test_a_drain_pass_labels_and_stamps_and_reports_more() -> None:
     """One bounded pass: label what is stale, stamp it, and say whether the backlog is drained."""
+    index = InMemoryLabelIndex()
+    for n in range(3):
+        await index.record(_row(f"r{n}"))
+    policies = {"pistachio": LabelPolicy(provides=frozenset({LabelGroup.NAMED_REACTION}))}
 
-    async def _run() -> None:
-        index = InMemoryLabelIndex()
-        for n in range(3):
-            await index.record(_row(f"r{n}"))
-        policies = {"pistachio": LabelPolicy(provides=frozenset({LabelGroup.NAMED_REACTION}))}
+    first = await label_stale(index, _FakeLabeller(), policies, _VERSION, limit=2)
+    assert (first.labelled, first.has_more) == (2, True)
+    second = await label_stale(index, _FakeLabeller(), policies, _VERSION, limit=2)
+    assert (second.labelled, second.has_more) == (1, False)
 
-        first = await label_stale(index, _FakeLabeller(), policies, _VERSION, limit=2)
-        assert (first.labelled, first.has_more) == (2, True)
-        second = await label_stale(index, _FakeLabeller(), policies, _VERSION, limit=2)
-        assert (second.labelled, second.has_more) == (1, False)
-
-        assert await index.stale(_VERSION, limit=10) == []
-        coverage = await index.coverage(_VERSION)
-        assert (coverage.labelled, coverage.total) == (3, 3)
-        assert coverage.verdict.startswith("COMPLETE")
-
-    asyncio.run(_run())
+    assert await index.stale(_VERSION, limit=10) == []
+    coverage = await index.coverage(_VERSION)
+    assert (coverage.labelled, coverage.total) == (3, 3)
+    assert coverage.verdict.startswith("COMPLETE")
 
 
-def test_one_unlabellable_reaction_does_not_stall_the_corpus_behind_it() -> None:
+async def test_one_unlabellable_reaction_does_not_stall_the_corpus_behind_it() -> None:
     """`stale()` is deterministic, so a refusal that failed the batch would repeat forever.
 
     This is the failure `reembed_stale` was changed to prevent one index over, where a single
@@ -251,37 +260,29 @@ def test_one_unlabellable_reaction_does_not_stall_the_corpus_behind_it() -> None
     still *stamped* — it leaves the stale set carrying nothing derived, which the coverage report
     counts honestly — because the alternative is a row the drain re-reads on every pass forever.
     """
+    index = InMemoryLabelIndex()
+    for n in range(3):
+        await index.record(_row(f"r{n}"))
+    labeller = _FakeLabeller(refuse={"r1"}, refuse_batches=True)
 
-    async def _run() -> None:
-        index = InMemoryLabelIndex()
-        for n in range(3):
-            await index.record(_row(f"r{n}"))
-        labeller = _FakeLabeller(refuse={"r1"}, refuse_batches=True)
+    report = await label_stale(index, labeller, {}, _VERSION, limit=10)
+    assert report.labelled == 3
+    assert report.unlabelled == 1
+    assert await index.stale(_VERSION, limit=10) == []
 
-        report = await label_stale(index, labeller, {}, _VERSION, limit=10)
-        assert report.labelled == 3
-        assert report.unlabelled == 1
-        assert await index.stale(_VERSION, limit=10) == []
-
-        rows = {r.reaction_id: r for r in await index.stale("next-version", limit=10)}
-        assert rows["r0"].named_reaction == "Buchwald-Hartwig amination"
-        assert rows["r1"].named_reaction is None
-
-    asyncio.run(_run())
+    rows = {r.reaction_id: r for r in await index.stale("next-version", limit=10)}
+    assert rows["r0"].named_reaction == "Buchwald-Hartwig amination"
+    assert rows["r1"].named_reaction is None
 
 
-def test_an_outage_propagates_instead_of_becoming_200_doomed_single_calls() -> None:
+async def test_an_outage_propagates_instead_of_becoming_200_doomed_single_calls() -> None:
     """A server that is not there is Temporal's problem, not something to retry per reaction."""
-
-    async def _run() -> None:
-        index = InMemoryLabelIndex()
-        await index.record(_row())
-        with pytest.raises(LabelServerError):
-            await label_stale(index, _FakeLabeller(outage=True), {}, _VERSION, limit=10)
-        # Nothing was stamped, so the next pass sees the same work.
-        assert len(await index.stale(_VERSION, limit=10)) == 1
-
-    asyncio.run(_run())
+    index = InMemoryLabelIndex()
+    await index.record(_row())
+    with pytest.raises(LabelServerError):
+        await label_stale(index, _FakeLabeller(outage=True), {}, _VERSION, limit=10)
+    # Nothing was stamped, so the next pass sees the same work.
+    assert len(await index.stale(_VERSION, limit=10)) == 1
 
 
 def test_a_short_species_list_costs_the_roles_and_not_the_atom_map(
@@ -363,24 +364,20 @@ def test_the_outage_error_is_not_bad_data() -> None:
     assert isinstance(LabelToolError("x"), ChemclawError)
 
 
-def test_the_drain_sends_one_batch_not_one_call_per_reaction() -> None:
+async def test_the_drain_sends_one_batch_not_one_call_per_reaction() -> None:
     """13M reactions at a round trip each is 13M round trips; at `label_batch_size` it is 65,000."""
-
-    async def _run() -> None:
-        index = InMemoryLabelIndex()
-        for n in range(5):
-            await index.record(_row(f"r{n}"))
-        labeller = _FakeLabeller()
-        await label_stale(index, labeller, {}, _VERSION, limit=5)
-        assert labeller.calls == [5]
-
-    asyncio.run(_run())
+    index = InMemoryLabelIndex()
+    for n in range(5):
+        await index.record(_row(f"r{n}"))
+    labeller = _FakeLabeller()
+    await label_stale(index, labeller, {}, _VERSION, limit=5)
+    assert labeller.calls == [5]
 
 
 # --- what the drain reads, and how it matches an answer back to a row -------------------------
 
 
-def test_a_source_that_declares_no_labels_block_is_still_drained() -> None:
+async def test_a_source_that_declares_no_labels_block_is_still_drained() -> None:
     """The requirement, as a test: every reaction corpus gets labelled, not only declaring ones.
 
     The drain used to narrow `stale()` to the sources that declared a `labels:` block. Exactly one
@@ -390,27 +387,23 @@ def test_a_source_that_declares_no_labels_block_is_still_drained() -> None:
 
     A block says what a source *carries*. It is read per row, as a policy, and never as permission.
     """
+    index = InMemoryLabelIndex()
+    await index.record(_row("e1", source="eln-json"))
+    await index.record(_row("p1", source="pistachio"))
+    # What `label_policies()` returns today: only Pistachio declares a block.
+    policies = {"pistachio": LabelPolicy()}
 
-    async def _run() -> None:
-        index = InMemoryLabelIndex()
-        await index.record(_row("e1", source="eln-json"))
-        await index.record(_row("p1", source="pistachio"))
-        # What `label_policies()` returns today: only Pistachio declares a block.
-        policies = {"pistachio": LabelPolicy()}
+    report = await label_stale(index, _FakeLabeller(), policies, _VERSION, limit=10)
 
-        report = await label_stale(index, _FakeLabeller(), policies, _VERSION, limit=10)
-
-        assert report.labelled == 2
-        assert {row.source for row in await index.stale("next-version", limit=10)} == {
-            "eln-json",
-            "pistachio",
-        }
-        assert await index.stale(_VERSION, limit=10) == []
-
-    asyncio.run(_run())
+    assert report.labelled == 2
+    assert {row.source for row in await index.stale("next-version", limit=10)} == {
+        "eln-json",
+        "pistachio",
+    }
+    assert await index.stale(_VERSION, limit=10) == []
 
 
-def test_two_sources_sharing_a_reaction_id_each_keep_their_own_labels() -> None:
+async def test_two_sources_sharing_a_reaction_id_each_keep_their_own_labels() -> None:
     """One batch, one id, two rows — and neither may be given the other's chemistry.
 
     `reaction_labels` keys on `(source, reaction_id)` precisely because two ELNs may use one entry
@@ -423,24 +416,329 @@ def test_two_sources_sharing_a_reaction_id_each_keep_their_own_labels() -> None:
     """
     ester = "CCO.CC(=O)O>>CCOC(C)=O"
 
-    async def _run() -> None:
+    index = InMemoryLabelIndex()
+    await index.record(_row("RXN-1", source="eln-a", record_smiles=ester))
+    await index.record(_row("RXN-1", source="eln-b"))
+
+    labeller = _FakeLabeller()
+    report = await label_stale(index, labeller, {}, _VERSION, limit=10)
+
+    assert report.labelled == 2 and report.unlabelled == 0
+    # Distinct ids went on the wire, which is what makes two answers possible at all.
+    assert len(set(labeller.sent[0])) == 2
+    rows = {r.source: r for r in await index.stale("next-version", limit=10)}
+    assert rows["eln-a"].record_smiles == ester
+    assert rows["eln-b"].record_smiles == _RECORD
+    # Each row carries the answer minted for its own id, not its neighbour's.
+    for row in rows.values():
+        assert row.mapped_smiles is not None
+        assert row.named_reaction == "Buchwald-Hartwig amination"
+        assert [s.derived_role for s in row.species][2] is SpeciesRole.LIGAND
+
+
+# --- a stamp is not a derivation --------------------------------------------------------
+# D-2026-09-09-a-rebuild-nothing-counts-reports-as-finished---------------
+
+
+async def test_a_pass_that_derived_nothing_does_not_report_the_corpus_complete() -> None:
+    """The re-label case the `std6`→`std7` bump made real, and what it used to answer.
+
+    `D-2026-09-09-a-map-number-is-not-a-molecule` moved `STANDARDIZATION_VERSION`, which is folded
+    into `labeller_version`, so **every** labelled row went stale at once. Drain that corpus while
+    the labelling server is degraded and `merge` keeps what the previous labeller derived, so the
+    row is written back unchanged — and it used to be stamped with the plain new version, which is
+    what `coverage` counts as labelled. Measured before the fix, on one row derived under std6:
+
+        coverage: 'COMPLETE: all 1 matching reaction(s) are labelled at the current version, so
+                   counts over this facet are totals rather than lower bounds.'
+        stored:   ('Buchwald-Hartwig amination', …, 'rxnlabel@1:std6:roles1' → new version)
+
+    On a Pistachio-scale re-label that makes any window where the server is degraded permanently
+    invisible: the rows claim currency under a standardization their content predates, and
+    `stale()` never returns them again. Two docstrings in `enrich.py` said the coverage report
+    counted them as unlabelled; `store.coverage` counted `labeller_version = version`, which is
+    counting them as labelled.
+    """
+    old_version = "rxnlabel@1:std6:roles1"
+
+    index = InMemoryLabelIndex()
+    await index.record(_row("r0"))
+    # Labelled under the superseded standardization, by a server that was working then.
+    await label_stale(index, _FakeLabeller(), {}, old_version, limit=10)
+    assert (await index.coverage(old_version)).labelled == 1
+
+    # The bump: every row is stale, and the server answers for nothing.
+    report = await label_stale(index, _FakeLabeller(refuse={"r0"}), {}, _VERSION, limit=10)
+    assert (report.labelled, report.unlabelled) == (1, 1)
+
+    coverage = await index.coverage(_VERSION)
+    assert (coverage.labelled, coverage.total) == (0, 1)
+    assert coverage.verdict.startswith("NOT ANSWERABLE YET")
+    assert "COMPLETE" not in coverage.verdict
+    # And the content really is the superseded labeller's, which is what makes the count right.
+    [row] = list(index._rows.values())
+    assert row.named_reaction == "Buchwald-Hartwig amination"
+
+
+async def test_a_degraded_answer_is_stamped_so_it_re_labels_against_a_healthy_pod() -> None:
+    """A component that ran and failed must not leave its row claiming a healthy labeller.
+
+    `Chemclaw3-mcp`'s `servers/rxnlabel` answers each reaction with `labeller_version(degraded)`
+    when a component was installed, ran on that reaction and threw — `mapper@failed` in the slot
+    where a pod that never installed a mapper says `mapper@absent`. It was built that way on
+    purpose, in the commit that added it, *"so it is stale against a healthy pod and re-labels"*.
+
+    This side threw both halves away. `ReactionRepresentation`/`ReactionNaming` declare
+    `extra="ignore"`, so `version` and `degraded` were **dropped in transit**, and
+    `label_stale` stamped every row with the pass-level string `plan_label_sync` read once — which
+    reports the components the server *probed*, not what happened on this call. Driven through this
+    drain before the fix: a row whose mapper failed was stamped
+    `…:mapper@absent:namer@absent`, identical to a healthy pass's, so `stale()` never returned it
+    and no later pass revisited it until the deployment's component versions moved.
+
+    **The assertion is that the row is still stale, not that the stamp differs.** A stamp that
+    differed for any *other* reason — a locally-derived string, a nonce, the remote version without
+    `stamped`'s two local halves — would also "differ", and one of those would make the row stale
+    forever instead of once. So both directions are checked: stale while the component is broken,
+    and *not* stale once the same pass version is answered by a healthy pod.
+
+    Both halves of an answer are exercised, because the two carry different components and a fix
+    that read only `representation.degraded` would leave a broken classifier stamping healthy.
+
+    **And the pod below answers through `model_validate` rather than `model_copy(update=…)`,
+    because the first version of this test did the latter and was green with both fields deleted
+    from the model.** `model_copy` assigns past validation, so the fixture was supplying the very
+    fields whose survival is the subject — a control whose fixture builds its own subject, which is
+    the shape `tasks/lessons.md` records. The answer arrives from another repository's pod as JSON
+    and `extra="ignore"` is what decides whether a field survives that crossing, so the fixture
+    crosses it too.
+    """
+    # The two shapes the server distinguishes, spelled the way it spells them.
+    healthy_remote = "rxnlabel@2:rdkit@2026.3.5:mapper@present:namer@present"
+    mapper_failed = "rxnlabel@2:rdkit@2026.3.5:mapper@failed:namer@present"
+    namer_failed = "rxnlabel@2:rdkit@2026.3.5:mapper@present:namer@failed"
+    # Folded through the *same* function `Labeller.version` folds with, so a stamp that skipped it
+    # could not match a healthy pass either and this test would not be able to tell the two apart.
+    healthy = stamped(healthy_remote)
+
+    class _Pod:
+        """A labelling server whose named component is installed and failing."""
+
+        def __init__(self, *, mapper: bool = True, namer: bool = True) -> None:
+            self._mapper = mapper
+            self._namer = namer
+
+        async def version(self) -> str:
+            return healthy
+
+        async def represent(
+            self, reactions: list[tuple[str, str, list[str]]]
+        ) -> dict[str, ReactionRepresentation]:
+            broken = not self._mapper
+            # **Built through `model_validate` over the wire shape, never `model_copy(update=…)`.**
+            # `model_copy` sets attributes without going through validation, so it attaches
+            # `version` and `degraded` to the instance whether or not the model declares them —
+            # which made the first version of this test pass with both fields deleted from
+            # `ReactionRepresentation`, i.e. green over the exact defect it names. The answer
+            # reaches this drain as JSON from another repository's pod, and `extra="ignore"` is what
+            # decides whether a field survives that, so the fixture has to cross the same boundary.
+            return {
+                rid: ReactionRepresentation.model_validate(
+                    {
+                        **_representation(rid).model_dump(),
+                        "version": mapper_failed if broken else healthy_remote,
+                        "degraded": ["atom_mapper"] if broken else [],
+                    }
+                )
+                for rid, _smiles, _species in reactions
+            }
+
+        async def name(self, reactions: list[tuple[str, str]]) -> dict[str, ReactionNaming]:
+            broken = not self._namer
+            return {
+                rid: ReactionNaming.model_validate(
+                    {
+                        **_naming(rid).model_dump(),
+                        "version": namer_failed if broken else healthy_remote,
+                        "degraded": ["reaction_namer"] if broken else [],
+                    }
+                )
+                for rid, _smiles in reactions
+            }
+
+    for label, pod, failed in (
+        ("mapper", _Pod(mapper=False), mapper_failed),
+        ("namer", _Pod(namer=False), namer_failed),
+    ):
         index = InMemoryLabelIndex()
-        await index.record(_row("RXN-1", source="eln-a", record_smiles=ester))
-        await index.record(_row("RXN-1", source="eln-b"))
+        await index.record(_row("r0"))
+        await label_stale(index, pod, {}, healthy, limit=10)
+        [row] = list(index._rows.values())
+        assert row.labeller_version == stamped(failed), (
+            f"a row whose {label} ran and failed was stamped {row.labeller_version!r}. The stamp "
+            "has to be the version the server derived for *this answer*, folded through "
+            "`labeller.stamped` — anything else either claims a healthy labeller or can never "
+            "match one"
+        )
+        assert await index.stale(healthy, 10), (
+            f"the row is not stale against a healthy pass although its {label} failed, so nothing "
+            "will ever re-label it and the degradation is permanent in the corpus"
+        )
+        # The other direction: once the component works, the same pass version settles the row.
+        await label_stale(index, _Pod(), {}, healthy, limit=10)
+        assert not await index.stale(healthy, 10), (
+            f"the row is still stale after a healthy pod answered it, so a {label} that recovered "
+            "leaves the drain re-reading the same batch forever"
+        )
 
-        labeller = _FakeLabeller()
-        report = await label_stale(index, labeller, {}, _VERSION, limit=10)
 
-        assert report.labelled == 2 and report.unlabelled == 0
-        # Distinct ids went on the wire, which is what makes two answers possible at all.
-        assert len(set(labeller.sent[0])) == 2
-        rows = {r.source: r for r in await index.stale("next-version", limit=10)}
-        assert rows["eln-a"].record_smiles == ester
-        assert rows["eln-b"].record_smiles == _RECORD
-        # Each row carries the answer minted for its own id, not its neighbour's.
-        for row in rows.values():
-            assert row.mapped_smiles is not None
-            assert row.named_reaction == "Buchwald-Hartwig amination"
-            assert [s.derived_role for s in row.species][2] is SpeciesRole.LIGAND
+async def test_an_underived_row_leaves_the_stale_set_and_returns_at_the_next_version() -> None:
+    """Both halves of the stamp, because a fix to one of them breaks the other.
 
-    asyncio.run(_run())
+    Stamping is what lets the drain advance past a reaction the server cannot answer for — remove
+    it and `stale()`'s deterministic first batch is re-read forever, which is the wedge
+    `reembed_stale` was changed to prevent one index over. Marking the stamp must therefore not
+    put the row back into the stale set at the *same* version, and must not keep it out at the
+    next one.
+    """
+    index = InMemoryLabelIndex()
+    await index.record(_row("r0"))
+    await label_stale(index, _FakeLabeller(refuse={"r0"}), {}, _VERSION, limit=10)
+
+    assert await index.stale(_VERSION, limit=10) == []
+    assert [r.reaction_id for r in await index.stale(_NEXT_VERSION, 10)] == ["r0"]
+
+
+async def test_a_degraded_pass_does_not_advance_the_version_every_tool_reads() -> None:
+    """`current_version()` must never hand back a stamp no row's *content* was derived under.
+
+    Every rxnfp tool calls it first and passes the answer to `coverage`/`select`, so a marked
+    stamp there would make the facet queries count only the rows nothing was derived for — the
+    original defect inverted. A corpus whose whole re-label found the server down therefore has
+    *no* current version, which is the honest answer: the tools report the corpus as unlabelled.
+    """
+    index = InMemoryLabelIndex()
+    await index.record(_row("r0"))
+    await label_stale(index, _FakeLabeller(), {}, "rxnlabel@1:std6:roles1", limit=10)
+    assert await index.current_version() == "rxnlabel@1:std6:roles1"
+
+    await label_stale(index, _FakeLabeller(refuse={"r0"}), {}, _VERSION, limit=10)
+    assert await index.current_version() is None
+
+
+async def test_a_partly_degraded_pass_reports_the_share_it_actually_derived() -> None:
+    """The case a Pistachio re-label really produces: some rows derived, some not.
+
+    The whole point of the fix is that this reads as PARTIAL rather than COMPLETE — a chemist told
+    "counts over this facet are totals" over a corpus two thirds of which carries superseded
+    content is the failure, and it is invisible in the answer itself.
+    """
+    index = InMemoryLabelIndex()
+    for n in range(3):
+        await index.record(_row(f"r{n}"))
+    await label_stale(index, _FakeLabeller(refuse={"r1"}), {}, _VERSION, limit=10)
+
+    coverage = await index.coverage(_VERSION)
+    assert (coverage.labelled, coverage.total) == (2, 3)
+    assert coverage.verdict.startswith("PARTIAL")
+    assert await index.current_version() == _VERSION
+
+
+# --- the labelling leg's identity on the wire ----------------------------------------------------
+
+
+class _UvicornServer:
+    """A uvicorn server on a background thread, started and stopped around one test.
+
+    Copied in shape from `tests/test_connector_transport.py::_Server` rather than imported: that
+    module is a heavyweight import (it discovers and builds every local bundle at module scope)
+    and this file needs nine lines of it.
+    """
+
+    def __init__(self, app: Any, port: int) -> None:
+        import uvicorn
+
+        self._server = uvicorn.Server(
+            uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
+        )
+        self._thread = threading.Thread(target=self._server.run, daemon=True)
+
+    def __enter__(self) -> "_UvicornServer":
+        """Start it and wait until it is actually accepting connections."""
+        self._thread.start()
+        for _ in range(200):  # ~10s worst case; a real start is tens of milliseconds
+            if self._server.started:
+                return self
+            threading.Event().wait(0.05)
+        raise RuntimeError("the labelling test server did not start")
+
+    def __exit__(self, *_exc: object) -> None:
+        """Ask uvicorn to exit and wait for the thread, so no server outlives its test."""
+        self._server.should_exit = True
+        self._thread.join(timeout=10)
+
+
+def _free_port() -> int:
+    """A port the OS has just confirmed is free."""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
+
+
+def test_the_labelling_leg_carries_the_turn_that_asked_for_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The one MCP leg in this system that went out anonymous, driven against a real listener.
+
+    `connectors/calc/remote.py` has always passed `turn_identity_hook`, so its calls carry the
+    actor, the session, the correlation id and a `traceparent`. This one passed no hook and could
+    not: the hook lived in `connectors/identity.py`, and `ingest -> connectors` is not an edge
+    `tests/test_layering.py` permits. So a labelling drain — which runs for *hours* inside a durable
+    activity — reached the server with `Authorization` and nothing else, and the trail stopped at
+    this process boundary
+    (`D-2026-09-14-identity-stamping-is-cores-not-a-connectors`).
+
+    Driven over HTTP against a real `FastMCP` on loopback rather than asserted about the source,
+    because the property is what arrives on the wire — and the module docstring of what is now
+    `core/call_identity.py` records a header mechanism that *is* invoked, with the right values,
+    and delivers nothing. Only a listener can tell those apart.
+    """
+    import asyncio
+
+    from mcp.server.fastmcp import FastMCP
+
+    from chemclaw.connectors.server import connector_app
+    from chemclaw.core.identity_context import set_current_correlation_id, set_current_identity
+    from chemclaw.core.session_context import set_current_session_id
+    from chemclaw.ingest.labels.labeller import RxnLabelServer
+
+    seen: list[dict[str, str]] = []
+    server = FastMCP("rxnlabel-probe")
+
+    @server.tool()
+    def labeller_version() -> dict[str, str]:
+        """Record what the caller sent, and answer the shape the service expects."""
+        from chemclaw.connectors.caller import caller_provenance
+
+        actor, session, correlation = caller_provenance()
+        seen.append({"actor": actor, "session": session, "correlation": correlation})
+        return {"version": "probe-1"}
+
+    port = _free_port()
+    monkeypatch.setenv("CHEMCLAW_RXNLABEL_TOKEN", "probe-secret")
+    monkeypatch.setattr(settings, "rxnlabel_server_url", f"http://127.0.0.1:{port}/mcp")
+    monkeypatch.setattr(settings, "rxnlabel_server_token_env", "CHEMCLAW_RXNLABEL_TOKEN")
+
+    async def drive() -> None:
+        set_current_identity("alice-oid", frozenset())
+        set_current_session_id("sess-42")
+        set_current_correlation_id("corr-7")
+        await RxnLabelServer().version()
+
+    with _UvicornServer(connector_app(server, name="rxnlabel-probe"), port):
+        asyncio.run(drive())
+
+    assert seen == [{"actor": "alice-oid", "session": "sess-42", "correlation": "corr-7"}], (
+        f"the labelling server saw {seen}; this leg is anonymous again and a drain that runs for "
+        "hours cannot be joined to the turn that started it"
+    )

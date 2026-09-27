@@ -155,7 +155,7 @@ def test_a_sample_on_a_boundary_lands_in_that_bucket() -> None:
     assert 'chemclaw_turn_duration_seconds_bucket{le="1"} 1' in metrics.render()
 
 
-def test_token_spend_is_counted_not_only_budgeted() -> None:
+async def test_token_spend_is_counted_not_only_budgeted() -> None:
     """The budget guard metered spend only to refuse a turn; the same number is now a rate."""
 
     class _MeteredAgent(ScriptedTurn):
@@ -167,16 +167,14 @@ def test_token_spend_is_counted_not_only_budgeted() -> None:
     before = METRICS.value("chemclaw_tokens_total")
     metered = _MeteredAgent()
 
-    async def _collect() -> None:
-        async for _ in run_turn(
-            TurnSession(session_id="s-f"),
-            "hi",
-            connectors=[],
-            graph_factory=metered.graph_factory,
-        ):
-            pass
+    async for _ in run_turn(
+        TurnSession(session_id="s-f"),
+        "hi",
+        connectors=[],
+        graph_factory=metered.graph_factory,
+    ):
+        pass
 
-    asyncio.run(_collect())
     assert METRICS.value("chemclaw_tokens_total") == before + 42
 
 

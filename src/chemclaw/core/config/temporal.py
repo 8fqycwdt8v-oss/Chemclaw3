@@ -164,6 +164,91 @@ class TemporalSettings(BaseSettings):
     # ends, so its ceiling is about memory, not connections, and its chart entry says so.
     worker_max_concurrent_activities: int = Field(default=8, ge=1)
 
+    # **What a worker holds between tasks, which no setting here chose until 2026-09-22.**
+    # `max_concurrent_activities` bounds activities and nothing bounded the workflow side, so the
+    # ceiling was whatever the SDK picks. Two of those defaults matter and neither is the one the
+    # constructor's docstring makes obvious:
+    #
+    # - **workflow-task slots default to 100**, not 500: `Worker.__init__` passes `None` through to
+    #   `WorkerTuner.create_fixed`, whose `or 100` is the real number.
+    # - **the 500 in that docstring is a *thread pool*, and it does apply here.** It is
+    #   `workflow_task_executor`'s: `_workflow.py` builds
+    #   `ThreadPoolExecutor(max_workers=max_concurrent_workflow_tasks or 500)`, so leaving the task
+    #   ceiling unset — which this deployment does, deliberately — gives a pool sized 500. A first
+    #   version of this comment dismissed that 500 as belonging to the resource-based tuner, which
+    #   is a different 500 in a different file (`_tuning.py`'s `_DEFAULT_RESOURCE_SLOTS_MAX`) and
+    #   is not in any constructor docstring. `max_workers` is a ceiling on threads created on
+    #   demand rather than an allocation, so it is recorded here rather than acted on.
+    #
+    # **The ceiling that holds memory is neither of those.** A task slot is occupied only while a
+    # workflow is being advanced; `max_cached_workflows` (SDK default 1,000) is what keeps a
+    # started workflow resident between its tasks. Driven: with the cache off, 200 started-and-
+    # parked workflows leave **zero** instances resident and the RSS delta falls from 70 MiB to 12.
+    #
+    # **Measured against the real broker, and the model has three terms because two were not
+    # enough.** Per cached workflow: a fixed overhead of **~70-85 KiB** (two runs, two park shapes,
+    # converging from 137 KiB at 50 cached to ~65-71 at 1,000); **~1.05x the workflow's own state**
+    # (at 200 cached: 16 KiB of state -> +17, 64 -> +66, 256 -> +275 over the zero-state figure);
+    # and **a history term**, which is the one the first version of this comment did not have.
+    #
+    # That first version said the excess over state was "the event history the cache keeps for
+    # replay" — and it cannot be, because the excess is *flat* in state. History is its own axis:
+    # at zero state, 200 cached workflows cost 69 KiB each with no signals, 199 with twenty, and
+    # 246 with a hundred. Two independent runs put the slope at 0.95 and at ~1.8 KiB per signal, so
+    # what is established is that the axis is real and can triple a low-state workflow, **not** its
+    # coefficient. A long-lived campaign parent is exactly the shape that lives on it.
+    #
+    # (The state arm read zero at every size until a live-object count caught the fixture:
+    # `["y" * 1024 for _ in range(n)]` is constant-folded into *n* references to one string.)
+    #
+    # **750 rather than the SDK's 1,000, and the third term is what moved it.** Under the two-term
+    # model this comment first carried, 1,000 workflows at 256 KiB of state came to ~340 MiB and
+    # fitted the shipped `resources.worker.requests.memory` of 1Gi with room to spare. Add the
+    # history allowance and the same 1,000 come to ~516 MiB — over half the worker's whole request
+    # before it has done anything else, and the inequality in `tests/test_workers.py` says so. 750
+    # of that shape is ~387 MiB.
+    #
+    # **Lowering the ceiling rather than raising the request**, because the request is the default
+    # for *every* worker Deployment, core's and each bundle's, so raising it costs scheduling
+    # density across the fleet to buy cache slots nobody has shown a queue needs. What a slot buys
+    # is avoiding one replay: an evicted workflow is re-created from its history on its next task,
+    # which is broker traffic and CPU, never a wrong answer. And the working set this cache is for
+    # is workflows being *advanced*, not workflows that are open — a durable wait parked for weeks
+    # under `awaiting_max_days` should be evicted, which is the behaviour a smaller cache gets
+    # right rather than the regression it looks like.
+    #
+    # 750 and not the 991 the inequality permits: the history coefficient is the term this file
+    # is least sure of (0.95 against ~1.8 KiB per signal, two runs), so the ceiling does not sit at
+    # the bar it is checked against. `tests/test_workers.py` holds that inequality against the
+    # chart rather than restating a number here, which is the shape
+    # `D-2026-09-18-a-second-process-in-the-pod-is-memory-the-chart-never-declared` uses.
+    worker_max_cached_workflows: int = Field(default=750, ge=1)
+
+    # The ceiling `durable/interceptor.py` holds every activity *result* to, measured as the
+    # serialized payload the worker is about to upload.
+    #
+    # **Two broker limits sit above this number and they have two different failure shapes**, which
+    # is why the check is here rather than left to either of them. Driven against a live broker on
+    # 2026-09-19:
+    #
+    # - Temporal's server-side **blob limit** (`limit.blobSize.error`, 2 MiB by default) refuses a
+    #   single payload over it. A 3,000,000-byte result failed the workflow immediately — but our
+    #   own `activity.finished` line had already said `completed`, because the upload happens after
+    #   the interceptor returns.
+    # - the SDK's **gRPC frame limit** (4 MiB after decompression) refuses the whole
+    #   `RespondActivityTaskCompleted` message. A 6,000,000-byte result made the worker retry the
+    #   attempt for ever against a `ResourceExhausted` it reports as a *network* error, and the
+    #   workflow sat `RUNNING` until its own timeout — the shape an operator cannot diagnose,
+    #   because no first-party series moves and no Python log line is written.
+    #
+    # 2 MiB, so the number this refuses at is the smaller of the two the broker enforces: a result
+    # this check admits is one the shipped broker accepts, and a result it refuses is one that was
+    # never going to arrive. A deployment that raises `limit.blobSize.error` (or installs a codec
+    # that compresses payloads) raises this to match; one that lowers the server's limit lowers this
+    # first, because a refusal *here* is counted, logged and attributed to a turn, and a refusal
+    # there is a Rust WARN with no correlation id.
+    activity_result_max_bytes: int = Field(default=2 * 1024 * 1024, gt=0)
+
     # The heartbeat timeout for core's own *long* background activities — the note reindex, the
     # retention sweep, the result-publication drain (`durable/note_index.py`,
     # `durable/retention.py`, `durable/publish_results.py`).
@@ -205,6 +290,50 @@ class TemporalSettings(BaseSettings):
     # `activity_timeout_seconds` so tightening the general budget cannot silently make a wait's
     # bookkeeping the thing that fails, on a workflow whose entire purpose is to survive.
     awaiting_activity_timeout_seconds: float = Field(default=30.0, gt=0)
+    # The collector for a wait whose run can no longer settle its own row — a child terminated
+    # rather than cancelled, a run failed or timed out, a history the broker no longer holds
+    # (`durable/orphaned_waits.py`, `D-2026-09-25-a-wait-nobody-can-settle-is-settled-by-a-sweep`).
+    # Hourly, because the cost of an orphan is a question somebody sees in their inbox and cannot
+    # answer; an hour of that is a nuisance and a day is a support ticket.
+    awaiting_orphan_sweep_minutes: float = Field(default=60.0, gt=0)
+    # How long a row must have been open before the sweep asks about its run. The row is written by
+    # the run itself, so a row younger than this is one whose run is almost certainly still in its
+    # opening activity — and a reopen rewrites `run_id`, which the settle guards on regardless.
+    awaiting_orphan_grace_seconds: float = Field(default=300.0, ge=0)
+    # Rows per keyset page of the orphan sweep, each one a `describe` against the broker. The sweep
+    # walks pages until the table is exhausted or it has spent half of `retention_timeout_seconds`
+    # (`orphaned_waits._PASS_BUDGET_FRACTION`); what is left is the next pass's.
+    awaiting_orphan_batch: int = Field(default=200, gt=0)
+    # The check-in over a requester's own blocked work
+    # (`D-2026-09-15-the-requester-hears-nothing-until-it-is-too-late`, `durable/check_in.py`).
+    # The wait above already re-notifies `asked_of` on `reminder_hours`; the *requester* is
+    # written to exactly once, on expiry — so with `awaiting_max_days` at 90 they can hear
+    # nothing about their own suspended campaign for three months and then hear it failed.
+    #
+    # **On by default, and the reason it was off is worth keeping because half of it was real.**
+    # It shipped off because the sweep delivers to a mailbox and an outbound channel, and a
+    # deployment that had configured neither would be writing where nobody reads — the mistake
+    # `D-2026-09-15-a-watch-that-nothing-evaluates-is-a-promise-a-deployment-cannot-keep` records.
+    #
+    # Two things changed. The mailbox now has a reader that ships: `GET /check-ins`
+    # (`api/routes/streams.py`), whose absence was the original defect and is asserted end to end.
+    # And the sweep no longer accumulates: it supersedes the unread notices of the page it is about
+    # to write, so a requester holds **one** row rather than one per night — measured before that
+    # fix at ~87 unprunable rows per requester over a 90-day wait, which is what made "writes
+    # somewhere nobody reads" a storage problem as well as a pointless one.
+    #
+    # What has *not* changed, and is the honest residual: `Chemclaw3_ui` does not call
+    # `GET /check-ins` yet (`docs/planning/BACKLOG.md` §5), so today a check-in reaches a chemist
+    # through the API or an outbound channel and not through the app. That is a surfacing gap with
+    # an owner, not a reason for the sweep to stay silent — the requester whose campaign is
+    # suspended is worse served by nothing at all than by a notice their client has yet to render.
+    check_in_enabled: bool = True
+    # How long a question must have been open before it is worth mentioning. A question asked
+    # this morning is not news to the person who asked it, and a check-in that said so on the
+    # first night would train its reader to ignore the second.
+    check_in_quiet_days: float = Field(default=3.0, gt=0)
+    check_in_schedule_minutes: float = Field(default=1440.0, gt=0)
+    check_in_timeout_seconds: float = Field(default=60.0, gt=0)
 
     # **The two halves of the calculation backend's admission budget**
     # (`D-2026-08-27-a-per-worker-cap-is-not-a-backend-ceiling`). Same shape as the fleet turn

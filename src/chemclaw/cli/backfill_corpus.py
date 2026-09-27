@@ -34,11 +34,12 @@ import sys
 from pathlib import Path
 
 from chemclaw.agent.attachments import AttachmentError, parse_attachment
+from chemclaw.core.config import settings
 from chemclaw.core.ids import stable_hash
 from chemclaw.core.logging import configure_logging
-from chemclaw.kg.git_writer import default_writer
+from chemclaw.kg.git_writer import BatchingNoteWriter, default_writer
 from chemclaw.kg.note import Note
-from chemclaw.kg.record import record_note
+from chemclaw.kg.record import count_notes_recorded, record_note
 
 logger = logging.getLogger(__name__)
 
@@ -69,20 +70,69 @@ async def backfill(directory: Path, *, tags: list[str], dry_run: bool) -> tuple[
     files (the reject-and-continue discipline the ELN sync uses).
     """
     written = skipped = 0
-    submitter = default_writer()
-    for path in sorted(p for p in directory.rglob("*") if p.is_file()):
-        try:
-            note = note_for_document(path, path.read_bytes(), tags)
-        except (AttachmentError, OSError) as exc:
-            logger.warning("skipping %s: %s", path.name, exc)
-            skipped += 1
-            continue
-        if dry_run:
-            logger.info("would write %s from %s (%d chars)", note.id, path.name, len(note.body))
-        else:
-            reference = await record_note(note, submitter)
-            logger.info("wrote %s from %s -> %s", note.id, path.name, reference)
-        written += 1
+    # **A backfill batches and the conversational path does not**, which is the whole of what
+    # `docs/planning/BACKLOG.md` meant by "a backfill and an incremental sync want different write
+    # shapes". Measured: one commit and one push per note is 140.8 ms against a local remote on an
+    # empty corpus and 327.3 ms at a 10,000-note corpus against a real one, against 31.6 ms per note
+    # at ten to a commit and 8.5 at fifty. `D-2026-09-13-the-lock-is-not-the-bound-the-commit-is`
+    # declined batching for the *conversational* path on the product — a queued note is one a
+    # chemist cannot read yet — and that argument does not reach an operator command over a
+    # directory of existing documents, where nobody is mid-turn and the wait is for the whole run.
+    submitter = BatchingNoteWriter(default_writer(), settings.backfill_commit_batch_size)
+    # **The trailing flush runs on both exits, and only one of them may swallow it.** Up to
+    # `batch_size - 1` notes are held in memory at every instant, so the flush shipped as a bare
+    # statement after the loop lost them to anything the inner `except` does not catch — a git
+    # failure, a `psycopg` error, a `KeyboardInterrupt` — *after* `written` had counted them and
+    # the log had reported each as written "(pending a batch)".
+    #
+    # **The first repair put it in a `finally` with a blanket `except`, and that was worse.**
+    # Measured through the real CLI with a failing inner writer: the loop completed, the flush
+    # raised, the exception was logged and swallowed, and `main` printed `wrote 4 note(s)` and
+    # returned **0** with nothing in git — the exact "reporting it as written" failure the
+    # paragraph above exists to prevent, now on the *common* path (a push rejection, an auth
+    # failure, a hook). Pre-fix that case at least exited non-zero.
+    #
+    # So the two exits are separated. When the loop finished, the flush is the last thing that can
+    # fail and its failure **is** the run's failure: it propagates. When the loop is already
+    # unwinding, the flush is best-effort — the run is ending badly, the original cause is the one
+    # an operator needs, and a flush that also raises would replace it — but it is still attempted
+    # and still logged, because dropping the batch in silence is what started all of this.
+    try:
+        for path in sorted(p for p in directory.rglob("*") if p.is_file()):
+            try:
+                note = note_for_document(path, path.read_bytes(), tags)
+            except (AttachmentError, OSError) as exc:
+                logger.warning("skipping %s: %s", path.name, exc)
+                skipped += 1
+                continue
+            if dry_run:
+                logger.info("would write %s from %s (%d chars)", note.id, path.name, len(note.body))
+            else:
+                reference = await record_note(note, submitter)
+                # A batched write's reference is empty until its commit lands, so the per-note line
+                # says what it can: the note, its source, and that the commit is still pending. The
+                # batch's own reference is logged when it flushes.
+                logger.info(
+                    "wrote %s from %s -> %s", note.id, path.name, reference or "(pending a batch)"
+                )
+            written += 1
+    except BaseException:
+        if not dry_run:
+            try:
+                await submitter.flush()
+            except Exception:
+                logger.exception(
+                    "the final batch could not be committed either; its notes are not in git"
+                )
+        raise
+    if not dry_run:
+        outcome = await submitter.flush()
+        # Booked here because this commit lands on a call `record_note` never sees: the final
+        # partial batch is flushed by the driver, so without this the tail of every run would be
+        # missing from `chemclaw_notes_recorded_total`.
+        count_notes_recorded(outcome)
+        if outcome.written:
+            logger.info("committed the final batch -> %s", outcome.reference)
     return written, skipped
 
 

@@ -1,0 +1,60 @@
+{
+  "probe": {
+    "id": "gr-32",
+    "section": 11,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "Plant equipment caps us at 70 C. Does that kill the conditions you'd otherwise recommend for the biaryl step?",
+    "expects_tools": [
+      "suggest_next_experiment",
+      "gather_evidence",
+      "compare_solvents",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a sub-70 C recommendation presented as evidenced when the evidence is all above it",
+      "an extrapolated yield at the lower temperature"
+    ],
+    "direction": "The seeded runs for this coupling sit at 80-82 C, so a 70 C cap excludes the entire evidence base. Saying that out loud is the core of the answer; proposing how to explore below the cap is the useful remainder, framed as untested.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "gr-32",
+    "section": 11,
+    "persona": "lab_leader",
+    "bucket": "B",
+    "question": "Plant equipment caps us at 70 C. Does that kill the conditions you'd otherwise recommend for the biaryl step?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.93,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "d2df62e6c14d44ecac2e97f3ea247dc2",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

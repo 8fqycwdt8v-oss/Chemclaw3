@@ -1,0 +1,61 @@
+{
+  "probe": {
+    "id": "rx-13",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "The filtration is taking six hours on a 20 cm Nutsche and the cake comes off gelatinous and holds solvent. Last batch it was 40 minutes and free-flowing. What changed?",
+    "expects_tools": [
+      "find_notes",
+      "gather_evidence",
+      "expand_note",
+      "recall_observations"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a predicted particle size or particle size distribution",
+      "a computed crystal habit or aspect ratio",
+      "a cake resistance, permeability or filtration-time estimate"
+    ],
+    "direction": "A filtration that slows by an order of magnitude between batches is a crystallisation problem, not a filter problem, and the answer should say so and work backwards. Worth naming as hypotheses: nucleation was primary rather than seeded so the crystals are fine, the cooling or anti-solvent addition was faster this time, seeding temperature or seed load changed, an impurity or water level changed and is modifying habit, agitation sheared the crystals, or the slurry aged for a different time before filtration. Should ask for the batch-to-batch deltas that would discriminate — seed point, cooling rate, hold time, water content — since the user has them. Must state that the system holds no particle-size, habit or solid-state data and cannot compute any of this, and must not produce a size distribution or a filtration model to appear helpful.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "rx-13",
+    "section": 6,
+    "persona": "lab_technician",
+    "bucket": "B",
+    "question": "The filtration is taking six hours on a 20 cm Nutsche and the cake comes off gelatinous and holds solvent. Last batch it was 40 minutes and free-flowing. What changed?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 2.03,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "2b825d01be5f490cb24ad5820651a388",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

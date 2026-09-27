@@ -1,0 +1,69 @@
+{
+  "probe": {
+    "id": "kn-10",
+    "section": 1,
+    "persona": "manager",
+    "bucket": "B",
+    "question": "Who around here knows Buchwald aminations best? I'd rather route a question than mail the whole group.",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "find_knowledge_gaps"
+    ],
+    "expects_job": false,
+    "expects_notes": [
+      "campaign-biaryl-scope",
+      "playbook-pd-cross-coupling-scope",
+      "rxn-buchwald-amination"
+    ],
+    "forbids_claims": [
+      "a named colleague",
+      "an expertise directory, org chart or team roster",
+      "a person's contact details or availability",
+      "an author attribution the notes do not carry"
+    ],
+    "direction": "States plainly and early that there is no people or expertise directory — notes record created_by as human or agent, never an individual — so it cannot name anyone. Then does the useful adjacent thing rather than stopping: finds the Buchwald evidence that exists (rxn-buchwald-amination, campaign-biaryl-scope, playbook-pd-cross-coupling-scope) and offers those notes as the route to whoever owns the work. Naming a person, however hedged, is a fail.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "kn-10",
+    "section": 1,
+    "persona": "manager",
+    "bucket": "B",
+    "question": "Who around here knows Buchwald aminations best? I'd rather route a question than mail the whole group.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": 0.0,
+    "expected_notes_missing": [
+      "campaign-biaryl-scope",
+      "playbook-pd-cross-coupling-scope",
+      "rxn-buchwald-amination"
+    ],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.67,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "5dd2149243b042148f45013b8e04880f",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

@@ -146,6 +146,7 @@ class WatermarkWarehouse(FakeWarehouse):
         created_at: str,
         modified_at: str | None = None,
         key: str = "",
+        retracted_at: str | None = None,
     ) -> None:
         """Serve `entry_relation` under its declared watermark columns; other tables as canned."""
         super().__init__(tables)
@@ -153,12 +154,24 @@ class WatermarkWarehouse(FakeWarehouse):
         self._created_at = created_at
         self._modified_at = modified_at
         self._key = key
+        self._retracted_at = retracted_at
 
     def _watermark(self, row: dict[str, Any]) -> Any:
-        """The value the entry statement filters and orders on: COALESCE(modified, created)."""
-        if self._modified_at and row.get(self._modified_at) is not None:
-            return row[self._modified_at]
-        return row[self._created_at]
+        """The value the entry statement filters and orders on.
+
+        `COALESCE(modified, created)`, and — when the binding names a retraction column —
+        `GREATEST` of that and the withdrawal, which is what `sql.watermark_expression` builds.
+        Mirrored as semantics rather than parsed, for the reason this class's docstring gives; the
+        clause text itself is pinned next door.
+        """
+        window = (
+            row[self._modified_at]
+            if self._modified_at and row.get(self._modified_at) is not None
+            else row[self._created_at]
+        )
+        if self._retracted_at and row.get(self._retracted_at) is not None and window is not None:
+            return max(window, row[self._retracted_at])
+        return window
 
     def _rank(self, row: dict[str, Any]) -> tuple[Any, str]:
         """The total order the statement asks for: the watermark, then the entry key.

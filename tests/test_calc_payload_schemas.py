@@ -124,7 +124,15 @@ RECORDED_SHAPES: dict[str, str] = {
     # `ThermochemistryResult.is_stationary=None` reports as its own answer rather than as "it was a
     # minimum". Discarding every cached Hessian in the system to learn a gradient the server will
     # send with the next one is the trade this note refuses.
-    "HessianPayload": "08c8ac9597753bda",
+    #
+    # Changed again by `ir_wavenumbers_cm`, on the same terms and for a sharper reason. The server
+    # sends the wavenumber it paired with each intensity, because pairing them by *position* is not
+    # safe: how many modes are external is a judgement about the molecule, and the two repositories
+    # make it by different criteria — measured against xtb 6.7.1 over a real O-C-O bend they agree
+    # at 180.0 and 175.0 degrees and disagree at 179.0, where every IR band shifted by one with
+    # nothing raised. Optional again, and again additive: a row cached before the field existed
+    # pairs by count exactly as it did, which is all that was ever available for it.
+    "HessianPayload": "e9833906f62fa505",
     "OptimizationResult": "3d934a3b36e47f11",
     "PkaResult": "f4928a91c06fc746",
     "SiteReactivityResult": "ddeb1c374840d99f",

@@ -40,20 +40,23 @@ from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse, SendTimeoutError
 from starlette.types import Receive, Scope, Send
 
-from chemclaw.agent.session_events import claim_unconsumed
+from chemclaw.agent.session_events import SessionEvent, claim_unconsumed
 from chemclaw.api import app as front_door
 from chemclaw.api.deps import CurrentUser, resolve_session
 from chemclaw.api.events import (
+    TURN_EVENT_REF,
     AwaitingAnswerEvent,
     ErrorEvent,
     JobCompletedEvent,
     JobFailedEvent,
+    sse_frame,
 )
 from chemclaw.api.state import state
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import get_current_correlation_id
 from chemclaw.core.metrics import METRICS
 from chemclaw.durable.awaiting import AWAITING_KIND
+from chemclaw.durable.check_in import CHECK_IN_KIND
 from chemclaw.durable.digest import DIGEST_KIND, digest_channel
 
 logger = logging.getLogger(__name__)
@@ -87,6 +90,64 @@ def _spread_poll_interval() -> float:
     """This stream's own poll interval: the configured one, off-phase from every other stream."""
     interval = settings.session_event_poll_seconds
     return interval * random.uniform(1.0 - _POLL_SPREAD, 1.0 + _POLL_SPREAD)
+
+
+def _newest_per_state(batch: list[SessionEvent]) -> list[SessionEvent]:
+    """One claim's `awaiting-answer` rows reduced to the newest frame of each request-and-state.
+
+    `D-2026-09-13-a-collapse-without-the-batch-keeps-the-oldest-frame`. Nothing prunes
+    `session_events` until it is consumed and `retention_session_events_days` defaults to 0, so the
+    first connect claims every row the wait has ever written: measured on one BO campaign opened,
+    chased daily and expired a month ago, **sixteen frames on a single poll**, fifteen of them
+    `waiting` for a question that is closed. A reminder carries no fact the open did not, so what a
+    surface needs is each request's current state rather than its log.
+
+    **Why this cannot be done in the consumer's loop, which is where it was.** The tailer yields row
+    by row, so a consumer that suppresses a state it has already reported keeps the row it saw
+    *first* — and the rows arrive oldest-first, so the surviving `waiting` frame carried
+    `reminders=0` where `reminders=14` was the truth at connect time. The batch exists only inside
+    one claim, which is why this is `stream_new_events`' `collapse` argument rather than a few lines
+    in the route.
+
+    **The surviving row is the last occurrence, emitted at the first occurrence's position**, and
+    each half of that is deliberate. Taking the *last object* keeps `payload` and `event_id`
+    consistent, so a consumer that drops mid-stream restores the newest row rather than a stale one
+    whose successors have already been consumed. Keeping the *first position* leaves the order of
+    two different requests exactly as the rows arrived, because nothing about one request's state is
+    news about another's and a reduction should not reorder them.
+
+    Rows of every other kind pass through untouched, in place: a `job_completed` and a
+    `job_failed` are distinct facts about distinct jobs and nothing here may fold them.
+    """
+    newest: dict[tuple[str, str], SessionEvent] = {}
+    for event in batch:
+        if event.kind == AWAITING_KIND:
+            newest[_awaiting_key(event)] = event
+    seen: set[tuple[str, str]] = set()
+    kept: list[SessionEvent] = []
+    for event in batch:
+        if event.kind != AWAITING_KIND:
+            kept.append(event)
+            continue
+        key = _awaiting_key(event)
+        if key in seen:
+            continue
+        seen.add(key)
+        kept.append(newest[key])
+    return kept
+
+
+def _awaiting_key(event: SessionEvent) -> tuple[str, str]:
+    """What makes two `awaiting-answer` rows the same fact: one request, one state.
+
+    A missing `state` reads as `waiting`, matching `_awaiting_event`'s own default — the expiry push
+    carries fewer fields than the open, and a row whose state this could not read would otherwise
+    become a key of its own and defeat the reduction for exactly the frame that matters.
+    """
+    return (
+        str(event.payload.get("request_id", "")),
+        str(event.payload.get("state", "waiting")),
+    )
 
 
 class _SlotBoundEventStream(EventSourceResponse):
@@ -195,8 +256,17 @@ async def session_events(
     at_pod_cap = sum(streams.values()) >= settings.service_max_event_streams_total
     if at_user_cap or at_pod_cap:
         METRICS.increment("chemclaw_event_streams_rejected_total")
+        # `Retry-After` for the reason the turn route's per-actor refusal documents at length:
+        # `Chemclaw3_ui`'s `errorFromStatus` splits 429 on the header's *presence*, and without one
+        # renders `budget_exhausted` — "the usage budget for this service is exhausted" — which
+        # locks the composer and which nothing in that UI clears. This cap clears the moment the
+        # client closes a stream, so both halves of that sentence are false here. Found while
+        # hardening the turn route against the identical mistake; fixing one and leaving the other
+        # would have been knowing about it.
         raise HTTPException(
-            status_code=429, detail="too many concurrent event streams; close one and retry"
+            status_code=429,
+            detail="too many concurrent event streams; close one and retry",
+            headers={"Retry-After": "1"},
         )
     streams[principal.oid] = streams.get(principal.oid, 0) + 1
 
@@ -225,6 +295,9 @@ async def session_events(
             async for pushed in front_door.stream_new_events(
                 session_id,
                 kinds=("job_completed", "job_failed", AWAITING_KIND),
+                # One claim's redundant `awaiting-answer` rows are one fact; see
+                # `_newest_per_state` and the comment on the per-connection suppression below.
+                collapse=_newest_per_state,
                 # This stream's own interval, so a pod's idle tabs do not poll as one wavefront —
                 # see `_POLL_SPREAD`. Chosen here rather than inside the tailer because this route
                 # is the only thing that runs many of them at once, and it is what caps how many
@@ -259,16 +332,15 @@ async def session_events(
                 # `expired`) is always sent, because that is the transition the whole feature is
                 # for. Per connection rather than per batch.
                 #
-                # **The frame that survives is the oldest of each run, not the newest**, and this
-                # comment said the opposite. The rows arrive oldest-first and the first of a state
-                # is what gets through, so the measured backlog — one open, fourteen chases, an
-                # expiry — emits `waiting reminders=0` and then `expired`, never the `waiting
-                # reminders=14` that was true when the client connected. The collapse is still
-                # right: fifteen frames saying "open" is the defect it was written for. What is
-                # lost is only the chase *count* on this channel, which a surface renders beside
-                # the deadline and which `GET /pending` still answers correctly. Emitting the
-                # newest instead needs a batch boundary the tailer does not expose — it yields row
-                # by row — so it is a `BACKLOG.md` row rather than a wider change made in passing.
+                # **The frame that survives is the newest of each run, and getting there needed
+                # the batch** (`D-2026-09-13-a-collapse-without-the-batch-keeps-the-oldest-frame`).
+                # This suppression alone can only keep the *first* row of a state run, because the
+                # rows arrive oldest-first and it decides one row at a time: the measured backlog —
+                # one open, fourteen chases, an expiry — emitted `waiting reminders=0` and then
+                # `expired`, never the `waiting reminders=14` that was true when the client
+                # connected. `_newest_per_state` is the other half, handed to the tailer as its
+                # `collapse` because the claim is the only place a batch exists; the two compose,
+                # and this one is still what stops a *second* poll re-reporting an unchanged state.
                 if pushed.kind == AWAITING_KIND:
                     frame = _awaiting_event(pushed.payload)
                     request_id = str(pushed.payload.get("request_id", ""))
@@ -293,7 +365,7 @@ async def session_events(
                     if failed
                     else JobCompletedEvent(job_id=job_id, summary=pushed.payload)
                 )
-                yield {"event": event.type, "data": event.model_dump_json()}
+                yield sse_frame(event)
         except Exception as exc:
             # **A stream that dies has to say so, and the registered handler cannot say it here.**
             # `create_app` turns a failed Postgres checkout into a retryable 503, but that handler
@@ -324,7 +396,7 @@ async def session_events(
                 retryable=True,
                 correlation_id=correlation_id,
             )
-            yield {"event": lost.type, "data": lost.model_dump_json()}
+            yield sse_frame(lost)
 
     handed_off = False
     try:
@@ -346,10 +418,47 @@ async def session_events(
 
 
 class Digest(BaseModel):
-    """One standing query's new matches, as the digest job left them in the caller's mailbox."""
+    """One standing query's new matches, as the digest job left them in the caller's mailbox.
+
+    **Two of the job's four fields used to stop here, and both were the ones a reader acts on.**
+    `collect_digests` has computed `disputed` since `D-2026-08-27` — which notes among the matches
+    the corpus now disagrees with — and writes it into the mailbox payload, and this model had no
+    such field and `_digest` never read the key. The outbound delivery channels rendered it, so a
+    deployment that had configured one saw "2 of 9 disagree with something already in the graph"
+    and a deployment that had not — the shipped default, `CHEMCLAW_DELIVERY_CHANNELS` empty — lost
+    it entirely on the only path a UI reads. `DigestItem`'s own docstring calls that asymmetry the
+    reason the field exists: "a chemist who happens to ask is told, and a chemist watching the
+    subject is not." It was still true, one layer further down.
+
+    `headlines` is the other: without it this route answers with note **ids** and a client can do
+    nothing but print them.
+    """
 
     query: str = ""
     note_ids: list[str] = Field(default_factory=list)
+    disputed: list[str] = Field(default_factory=list)
+    headlines: dict[str, str] = Field(default_factory=dict)
+
+
+def _whole(raw: object) -> int:
+    """A count out of a mailbox payload, with no input this can raise on.
+
+    **An `isinstance` test rather than `int(...)`, because `int()` is not total and three mappers in
+    this module promise that they are.** `int("many")` raises `ValueError`, `int({})` raises
+    `TypeError`, and every caller here runs *after* the claim that consumed the row — so a raise
+    does not defer the notice, it destroys it, and takes the rest of the claimed batch with it.
+    `_awaiting_event` measured that in full (the generator dies, the `except` above books it on
+    `chemclaw_db_unavailable_total`, `restore_unconsumed` puts the poisoned row back and the client
+    reconnects into it for ever) and then carried the guard inline, where the two conversions in
+    `_check_in` could not reach it and did not have it.
+
+    `bool` is excluded because it is an `int` in Python and `True` reminders is not a count.
+    Negatives are floored at zero: every count this reads is a duration or a tally, and a negative
+    one is a corrupt payload rather than a fact about the reader's work.
+    """
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return 0
+    return max(raw, 0)
 
 
 def _awaiting_event(payload: dict[str, Any]) -> dict[str, str]:
@@ -378,7 +487,6 @@ def _awaiting_event(payload: dict[str, Any]) -> dict[str, str]:
     `reminders` "and nothing else" and that the open did not send `subject` — both halves wrong,
     read off the two `_push` call sites in `durable/awaiting.py`.)
     """
-    raw_reminders = payload.get("reminders", 0)
     event = AwaitingAnswerEvent(
         request_id=str(payload.get("request_id", "")),
         state=str(payload.get("state", "waiting")),
@@ -386,15 +494,9 @@ def _awaiting_event(payload: dict[str, Any]) -> dict[str, str]:
         kind=str(payload.get("kind", "")),
         asked_of=str(payload.get("asked_of", "")),
         due_at=str(payload.get("due_at", "")),
-        # An `isinstance` test rather than a conversion, so there is no input this can raise on.
-        # `bool` is excluded because it is an `int` in Python and `True` reminders is not a count.
-        reminders=(
-            raw_reminders
-            if isinstance(raw_reminders, int) and not isinstance(raw_reminders, bool)
-            else 0
-        ),
+        reminders=_whole(payload.get("reminders")),
     )
-    return {"event": event.type, "data": event.model_dump_json()}
+    return sse_frame(event)
 
 
 def _digest(payload: dict[str, Any]) -> Digest:
@@ -404,11 +506,23 @@ def _digest(payload: dict[str, Any]) -> Digest:
     marked consumed and the subscription's watermark is long past the notes it names, so a payload
     that failed validation would take the digest with it and there would be nothing to re-deliver.
     A missing key costs one blank field; a raised `ValidationError` costs the whole digest.
+
+    That leniency is exactly why the two fields this used to drop were droppable in silence: a row
+    written before they existed is still read, and a row written after them was read as though it
+    had been. The `isinstance` guards are what keep both true at once.
     """
     note_ids = payload.get("note_ids")
+    disputed = payload.get("disputed")
+    headlines = payload.get("headlines")
     return Digest(
         query=str(payload.get("query", "")),
         note_ids=[str(note_id) for note_id in note_ids] if isinstance(note_ids, list) else [],
+        disputed=[str(note_id) for note_id in disputed] if isinstance(disputed, list) else [],
+        headlines=(
+            {str(key): str(value) for key, value in headlines.items()}
+            if isinstance(headlines, dict)
+            else {}
+        ),
     )
 
 
@@ -447,6 +561,115 @@ async def read_digests(principal: CurrentUser) -> list[Digest]:
     return [_digest(event.payload) for event in claimed]
 
 
+class CheckInOut(BaseModel):
+    """One question the caller asked that is still waiting on somebody.
+
+    The workflow's own `BlockedRequest` restated at the wire rather than imported, for the reason
+    every other model in this module is: `durable/check_in.py` is a worker-side shape free to gain
+    fields a client has no business seeing, and an API model that *is* a durable payload makes the
+    two impossible to move apart. The fields here are the ones a person acts on.
+
+    **Three of them were missing and each cost the surface one thing it already does elsewhere**:
+    without `kind` a check-in could not be badged by the class of answer it wants, while the
+    pending inbox on the same page badges every row by exactly that field off `GET /pending`;
+    without `session_id` a check-in row ended nowhere, where both other inboxes on that page end in
+    "open the conversation", and matching `request_id` against `GET /pending` instead would be a
+    join across two listings scoped to opposite people; and without `truncated` a chemist with more
+    than `durable/check_in._PAGE_ROWS` open questions was shown a list that looks complete.
+
+    Restating the worker's shape is what made adding them a decision rather than a leak, and it is
+    also why two of the three needed a change on the worker side first: `session_id` was a column
+    `_BLOCKED` did not select, and `truncated` was a `CheckIn` field `_tell` never wrote into the
+    payload. Nothing here could have dropped what never arrived.
+    """
+
+    request_id: str = ""
+    #: What class of answer the question wants — the same bounded vocabulary `GET /pending` sends.
+    kind: str = ""
+    subject: str = ""
+    rationale: str = ""
+    asked_of: str = ""
+    open_days: int = 0
+    days_left: int = 0
+    #: The conversation the question was asked in, or `""`. Always one of the caller's own: the
+    #: sweep's query is scoped to `requested_by` and this route claims only the caller's mailbox.
+    session_id: str = ""
+    #: Whether the notice this question arrived in was short of the asker's whole blocked set.
+    #:
+    #: A property of the claimed *row* rather than of the request, stamped onto every entry that
+    #: row carried, because the answer is unbounded and flattened across rows — a reader asking
+    #: "is this list complete" is looking at an entry, and that is where the answer has to be.
+    truncated: bool = False
+
+
+def _check_in(payload: dict[str, Any]) -> list[CheckInOut]:
+    """Read one claimed check-in row, tolerating a payload an older sweep wrote.
+
+    Lenient for exactly `_digest`'s reason and with a sharper edge: the claim has already consumed
+    the row by the time this runs, so a `ValidationError` here would destroy the notice rather than
+    defer it — and unlike a digest, there is nothing to re-find afterwards. A blocked question that
+    went unreported is one a chemist simply does not learn about until it expires, which is the gap
+    this whole feature exists to close.
+
+    **That was the docstring and not the code.** The two day counts went through `int(...)`, which
+    is not total: measured against this route, a text `open_days` raised `ValueError` and a dict
+    raised `TypeError` — a 500 with the row already gone, which is the one outcome the paragraph
+    above says cannot be allowed. They go through `_whole` now, the same guard `_awaiting_event`
+    already had for the same reason.
+    """
+    requests = payload.get("requests")
+    if not isinstance(requests, list):
+        return []
+    # `is True` rather than truthiness, for `_whole`'s reason one field over: the key is additive,
+    # so a row an older sweep wrote has none, and neither a missing key nor a stray string may
+    # become a claim that a chemist's list was short.
+    truncated = payload.get("truncated") is True
+    out: list[CheckInOut] = []
+    for item in requests:
+        if not isinstance(item, dict):
+            continue
+        out.append(
+            CheckInOut(
+                request_id=str(item.get("request_id", "")),
+                kind=str(item.get("kind", "")),
+                subject=str(item.get("subject", "")),
+                rationale=str(item.get("rationale", "")),
+                asked_of=str(item.get("asked_of", "")),
+                open_days=_whole(item.get("open_days")),
+                days_left=_whole(item.get("days_left")),
+                session_id=str(item.get("session_id", "")),
+                truncated=truncated,
+            )
+        )
+    return out
+
+
+async def read_check_ins(principal: CurrentUser) -> list[CheckInOut]:
+    """Claim and return the caller's own blocked work, as the check-in sweep left it.
+
+    **A route of its own rather than a second list on `/digests`**, and the alternative is worth
+    naming because it looks cheaper: `read_digests` answers `list[Digest]`, so folding these in
+    would mean either changing that response into an object — a breaking change for a client that
+    reads it today — or widening `Digest` with fields that have nothing to do with a standing
+    query. A check-in and a digest ask the reader for different things: one says somebody owes you
+    an answer, the other says the corpus learned something. They share a mailbox and nothing else.
+
+    Everything else is `read_digests`'s, deliberately: the channel is derived from the authenticated
+    principal rather than named by the caller, so there is nothing to authorize and no path segment
+    to get right; the read is the consume, scoped to `CHECK_IN_KIND` so claiming here cannot destroy
+    another consumer's rows; and the answer is unbounded because the claim has already run by the
+    time a slice could be taken.
+
+    **This is the reader `CHECK_IN_KIND` did not have when the sweep was written**, and shipping
+    without it would have been `D-2026-08-27-a-digest-nobody-can-read-is-not-delivered` a second
+    time — a job writing nightly into a mailbox nothing opens, reporting success. The sweep ships
+    **on** now that this route exists to read it and the sweep supersedes rather than stacks;
+    `check_in_enabled` is what a deployment turns off.
+    """
+    claimed = await claim_unconsumed(digest_channel(principal.oid), kinds=(CHECK_IN_KIND,))
+    return [item for event in claimed for item in _check_in(event.payload)]
+
+
 def register(app: FastAPI) -> None:
     """Attach this module's route to `app` — called once, by `create_app` only.
 
@@ -459,9 +682,22 @@ def register(app: FastAPI) -> None:
     Registering on the app keeps both exactly as they were when these handlers lived in
     `create_app`.
     """
-    app.get("/sessions/{session_id}/events", dependencies=[Depends(resolve_session)])(
-        session_events
-    )
+    app.get(
+        "/sessions/{session_id}/events",
+        dependencies=[Depends(resolve_session)],
+        # The same reason as `api/routes/turns.py`: a `text/event-stream` body is one FastAPI
+        # cannot infer, so the document `Chemclaw3_ui` reads said nothing about what this route
+        # streams — see
+        # `D-2026-09-14-a-contract-the-client-cannot-read-is-a-contract-one-side-remembers`.
+        responses={
+            200: {
+                "description": "One SSE frame per pushed-back session event.",
+                "content": {"text/event-stream": {"schema": {"$ref": TURN_EVENT_REF}}},
+            }
+        },
+    )(session_events)
     # No `dependencies=[Depends(resolve_session)]`, and that absence is the authorization model
     # rather than a gap in it: this route accepts no session id to resolve. See `read_digests`.
     app.get("/digests")(read_digests)
+    # Same absence of a session dependency, for the same reason, one mailbox kind over.
+    app.get("/check-ins")(read_check_ins)

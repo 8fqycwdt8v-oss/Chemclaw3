@@ -1,0 +1,59 @@
+{
+  "probe": {
+    "id": "op-10",
+    "section": 3,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Ran five conditions on the 4-bromoanisole / PhB(OH)2 Suzuki last week. Everything else held:\n1.5 mol% Pd(OAc)2, K2CO3 2.0 eq, THF/water 4:1, 12 h, degassed.\n\n  70 C, 1.0 eq boronic acid -> 48%\n  70 C, 1.5 eq             -> 61%\n  80 C, 1.5 eq             -> 76%\n  90 C, 1.5 eq             -> 72%\n  80 C, 2.0 eq             -> 79%\n\nWhere next? Give me two conditions I can set up tomorrow.",
+    "expects_tools": [
+      "suggest_next_experiment"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "these candidates are measured results",
+      "the campaign has converged",
+      "a yield figure for a candidate presented as observed rather than predicted",
+      "a sixth historic run that was not supplied"
+    ],
+    "direction": "Frames the problem from what was actually given: temperature and boronic-acid equivalents as continuous variables with bounds that a real run of this reaction in THF/water could survive, a single objective (maximize yield), and all five runs passed through as measured observations — none dropped, none invented. Calls the tool for two candidates and reports the points the tool returned, not points it reasoned to. Quotes the campaign_id back and explains that asking again with tomorrow's result appended accumulates onto the same campaign. Each candidate is presented as conditions to run, with the surrogate's predicted value and spread distinguished from a measurement, and any extrapolation past the observed range (or past what the solvent system tolerates) called out. Silently choosing an unsupportable bound is a miss.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "op-10",
+    "section": 3,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Ran five conditions on the 4-bromoanisole / PhB(OH)2 Suzuki last week. Everything else held:\n1.5 mol% Pd(OAc)2, K2CO3 2.0 eq, THF/water 4:1, 12 h, degassed.\n\n  70 C, 1.0 eq boronic acid -> 48%\n  70 C, 1.5 eq             -> 61%\n  80 C, 1.5 eq             -> 76%\n  90 C, 1.5 eq             -> 72%\n  80 C, 2.0 eq             -> 79%\n\nWhere next? Give me two conditions I can set up tomorrow.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.67,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "4875295441684626ae24366961227f3c",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

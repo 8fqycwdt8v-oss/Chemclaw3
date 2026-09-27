@@ -45,12 +45,14 @@ import threading
 import time
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
-from typing import Any
+from datetime import datetime
+from typing import Annotated, Any
 
 import psycopg
 from psycopg import conninfo
 from psycopg.rows import TupleRow
 from psycopg_pool import AsyncConnectionPool, PoolClosed, PoolTimeout
+from pydantic import BeforeValidator
 
 from chemclaw.core.config import pg_endpoint, settings
 from chemclaw.core.logging import log_event
@@ -583,6 +585,11 @@ async def connection(
         await pool.open()  # idempotent; the first caller starts the pool's background workers
         try:
             async with pool.connection() as conn:
+                # One round trip on the *first* borrow against this endpoint and none afterwards,
+                # which is what lets the fleet gauge tell one server spelled two ways from two
+                # servers. Here rather than in the gauge because a scrape must not make a network
+                # call; here rather than at pool construction because no connection exists yet.
+                await _learn_server_identity(conn, dsn)
                 yield conn
         except (PoolTimeout, PoolClosed) as exc:
             # Both are `psycopg.OperationalError` subclasses raised only by the checkout itself, so
@@ -625,7 +632,13 @@ def bind_pool_metrics() -> None:
     connections, and the checkpointer registers a third — and measured against a live server that
     was three pools and 48 connections reported as 16. That under-count reached the fleet
     validator too, which multiplied *processes* rather than pools: the shipped chart's floor was
-    **208** against the 136 its values file then provisioned. Both are fixed — `pg_fleet_pools`
+    **208** against the 136 its values file then provisioned. Those two are kept rather than
+    pointed at, and the distinction is worth stating because this docstring holds both kinds of
+    number: 48-as-16 is this function's own measurement and is *why* the gauge below sums over
+    pools instead of reading `settings.pg_pool_max_size`, so the derivation needs it at the call
+    site; 136 is `D-2026-08-05-the-connection-budget-is-a-fleet-number`'s figure, restated here
+    because the pair is what shows the size of the under-count, and the ADR is the frozen copy of
+    it. Neither is a current reading. Both are fixed — `pg_fleet_pools`
     counts pools, the readiness probe's pool is charged the one connection it asks for, and
     `postgres.maxConnections` provisions 256 — and the figure to trust is whichever
     `tests/test_deploy_chart.py` derives from the rendered chart, not this sentence. It has moved
@@ -638,10 +651,19 @@ def bind_pool_metrics() -> None:
     """
     from chemclaw.core.metrics import METRICS
 
-    METRICS.bind_gauge("chemclaw_pg_pool_size", lambda: float(pool_stats()["pool_size"]))
-    METRICS.bind_gauge("chemclaw_pg_pool_available", lambda: float(pool_stats()["pool_available"]))
+    # **`coherent_pool_stats` rather than `pool_stats`, and the difference is the whole point.**
+    # `render()` calls each gauge's source, so three lambdas over `pool_stats()` walked the pools
+    # three times per scrape — publishing a `pool_size`, a `pool_available` and a
+    # `requests_waiting` from three different instants. The saturation question these exist for is
+    # read across all three at once, so a triple that never held together is the one reading they
+    # must not give.
+    METRICS.bind_gauge("chemclaw_pg_pool_size", lambda: float(coherent_pool_stats()["pool_size"]))
     METRICS.bind_gauge(
-        "chemclaw_pg_pool_requests_waiting", lambda: float(pool_stats()["requests_waiting"])
+        "chemclaw_pg_pool_available", lambda: float(coherent_pool_stats()["pool_available"])
+    )
+    METRICS.bind_gauge(
+        "chemclaw_pg_pool_requests_waiting",
+        lambda: float(coherent_pool_stats()["requests_waiting"]),
     )
     METRICS.bind_gauge("chemclaw_pg_pool_max_size", lambda: float(_process_max_connections()))
     METRICS.bind_gauge(
@@ -675,6 +697,7 @@ async def pooling() -> AsyncIterator[None]:
         yield
     finally:
         _POOLING = False
+        reset_pool_snapshot()
         # **Only the pools this loop opened.** `psycopg_pool` schedules a pool's shutdown on the
         # loop it was opened in, so closing one built on a *different* loop raises
         # `RuntimeError: Event loop is closed` from inside the close — after the reference would
@@ -687,17 +710,53 @@ async def pooling() -> AsyncIterator[None]:
         # `clear()` below is the release rather than a tidy-up after one.
         # `_forget_pools_of_ended_loops` is the same act, performed as soon as the loop ends
         # instead of at shutdown. Production has one loop per process and closes what it opened.
-        here = asyncio.get_running_loop()
+        await close_pools_of_this_loop()
         with _POOL_REGISTRY_LOCK:
-            mine = [key for key in _POOLS if key[0] is here]
-            pools = [_POOLS.pop(key) for key in mine]
             abandoned = list(_POOLS.values())
             _POOLS.clear()
-        # Both drops happen outside the lock, for the reason `_forget_pools_of_ended_loops` gives:
-        # the release runs psycopg's five-second `__del__`, and `close()` awaits.
+        # The drop happens outside the lock, for the reason `_forget_pools_of_ended_loops` gives:
+        # a registry the request path reads should not be held across a refcount drop.
         abandoned.clear()
-        for pool in pools:
-            await pool.close()
+
+
+async def close_pools_of_this_loop() -> None:
+    """Close and forget every pool the *running* loop opened — before that loop ends.
+
+    **A loop that opened a pool and ends without closing it does not merely leak, it can hang**
+    (`D-2026-09-13-a-loop-that-abandons-its-pool-can-fail-to-end`). `asyncio.run` closes its loop
+    through `runners._cancel_all_tasks`, which cancels every remaining task and then *awaits* them
+    all; `psycopg_pool`'s background connect and health-check workers are tasks on that loop, and
+    one that is mid-reconnect does not come back. Measured inside a pooled process with a nested
+    `asyncio.run` on a second thread — the shape `evals/retrieval._run_sync` and
+    `durable/eval_drift` both produce — the nested thread never returned, stack in
+    `_cancel_all_tasks`:
+
+        min_size=1,  max_size=1   ->  0 of 8 rounds hung
+        min_size=2,  max_size=16  ->  3 of 8      (the shipped defaults)
+        min_size=8,  max_size=16  ->  8 of 8
+
+    `min_size=max_size=1` is the one configuration that does not hang, and it is the configuration
+    `tests/test_db_pool.py` pinned — which is why a defect reachable on the shipped defaults had a
+    green test sitting on top of it.
+
+    **This is the *pair* of `_forget_pools_of_ended_loops`, not a duplicate of it.** That function
+    reclaims a pool whose loop has *already* ended, which is all anybody can do by then: psycopg
+    schedules a pool's shutdown on its own loop, so `close()` on a dead one raises
+    `RuntimeError: Event loop is closed`. This one runs while the loop is still alive, which is the
+    only moment `close()` is available — so the abandon-and-reclaim path stays as the fallback for a
+    loop nobody closed, rather than being the plan.
+
+    Safe to call on a loop that opened nothing: it closes the pools keyed on this loop and there are
+    none. Called by `pooling()` on the way out, and by any caller that runs its own loop to
+    completion inside a process that pools.
+    """
+    here = asyncio.get_running_loop()
+    with _POOL_REGISTRY_LOCK:
+        mine = [key for key in _POOLS if key[0] is here]
+        pools = [_POOLS.pop(key) for key in mine]
+    # Outside the lock, because `close()` awaits and the registry is read from the request path.
+    for pool in pools:
+        await pool.close()
 
 
 def register_pool(pool: Any) -> None:
@@ -732,6 +791,168 @@ def unregister_pool(pool: Any) -> None:
             _FOREIGN_POOLS.remove(pool)
 
 
+# Dedicated connections a caller holds open and asked to be counted — see `register_connection`.
+# A list of `(connection, conninfo)` rather than a set, because `AsyncConnection` is unhashable
+# in psycopg 3 and the conninfo has to travel with it: the connection itself does not keep the
+# string it was dialled with in a form `pg_endpoint` can read.
+_HELD_CONNECTIONS: list[tuple[Any, str]] = []
+
+
+def register_connection(conn: Any, conninfo: str) -> None:
+    """Count one *dedicated* connection a caller holds open, for as long as it holds it.
+
+    **A pool is not the only thing that occupies a backend, and the budget could only see pools**
+    (`D-2026-09-13-a-connection-counted-where-the-budget-applies`). `publish/drivers/postgres.py`
+    opens a bare `AsyncConnection` and keeps it for the driver's life; it is in neither `_POOLS` nor
+    `_FOREIGN_POOLS`, so a process holding one reported a ceiling one lower than it could reach.
+    Registering it as a *pool* is what the `BACKLOG.md` row proposed and it raises:
+    `_process_max_connections` sums `pool.max_size`, and measured,
+    `AttributeError: 'AsyncConnection' object has no attribute 'max_size'`.
+
+    **Counted only where the budget it feeds applies, which is `postgres_dsn`'s server.**
+    `pg_fleet_max_connections` is a ceiling on *that* server, and a result sink points by design at
+    a database this system does not own (`D-2026-08-25-a-cache-is-not-a-record`). Charging a
+    foreign warehouse's connection to the primary's budget would be the same error as the
+    under-count, in the other direction — so the endpoint decides, through the same `pg_endpoint`
+    the session-store split already uses. A sink on its own server counts 0 here and is the
+    operator's to size; `deploy/README.md` says so.
+
+    Registration only: the caller keeps the lifecycle, exactly as `register_pool` leaves a foreign
+    pool's close to the module that opens it. A closed connection stops counting without being
+    unregistered, because the count reads `conn.closed` — but `unregister_connection` is still the
+    right call on a deliberate close, so the list does not grow by one per drain.
+
+    Args:
+        conn: The open connection. Counted while `conn.closed` is false.
+        conninfo: The connection string it was dialled with, so the endpoint can be compared.
+            Not read off the connection: psycopg keeps no such attribute.
+    """
+    with _POOL_REGISTRY_LOCK:
+        if all(held is not conn for held, _ in _HELD_CONNECTIONS):
+            _HELD_CONNECTIONS.append((conn, conninfo))
+
+
+def unregister_connection(conn: Any) -> None:
+    """Stop counting a dedicated connection — called when its holder closes it."""
+    with _POOL_REGISTRY_LOCK:
+        _HELD_CONNECTIONS[:] = [entry for entry in _HELD_CONNECTIONS if entry[0] is not conn]
+
+
+#: `pg_endpoint(dsn) -> system_identifier`, for every endpoint a borrow has already reached.
+#:
+#: **The measurement `pg_endpoint`'s docstring says cannot live there.** That docstring is right
+#: that `Settings()` runs at import with no loop and no pool, so a validator cannot dial; it named
+#: the runtime as the place a measurement could live and nothing had put one there, which is the
+#: `BACKLOG.md` row this closes. A string comparison reads one server spelled two ways as two, so
+#: a split whose halves name one box is charged to two ceilings and the real total is checked by
+#: nothing — a regression against the single summed expression that preceded the split gauge.
+#:
+#: `system_identifier` is the exact answer: assigned once at `initdb`, never changing for the life
+#: of a server, and readable by an unprivileged role — driven against a freshly created
+#: `NOSUPERUSER NOCREATEDB NOCREATEROLE` role, and 1.5 ms on the loopback server `make up` runs.
+#: `inet_server_addr()` is not: measured, one server answers `NULL` over a socket, `127.0.0.1` over
+#: loopback and its bridge address over the bridge, which is the DSN's own spelling laundered
+#: through the kernel.
+#:
+#: **Learned once per endpoint and kept, which is what makes this cost the alert nothing.** The
+#: gauge's own docstring refused a measured identity because it "would be unknown until a pool
+#: filled, so the fleet-ceiling alert would lose its series during a database outage" — true of an
+#: identity read at scrape time, and not of one cached. Before the first borrow this falls back to
+#: the string comparison, which is exactly today's behaviour; after it, the cached value answers,
+#: and it answers through an outage because the value cannot change while the server is the same
+#: server. So the trade the row framed as the decision is not forced, and neither branch is ever
+#: worse than what shipped.
+_SERVER_IDENTITY: dict[tuple[str, str], int] = {}
+
+#: Endpoints whose identity could not be read, so the attempt is made **once**. A role without the
+#: grant, or a fork of Postgres with no `pg_control_system()`, would otherwise pay a failed query on
+#: every borrow for the life of the process. One warning, then the string comparison for good.
+_IDENTITY_UNREADABLE: set[tuple[str, str]] = set()
+
+
+async def _learn_server_identity(conn: Any, dsn: str) -> None:
+    """Read one endpoint's `system_identifier`, at most once per process, never during a scrape.
+
+    Called from `connection()` on a borrow that has already succeeded, so it adds one round trip to
+    the *first* borrow against an endpoint and nothing to any later one. It is deliberately not
+    called from the gauge: a Prometheus gauge source is synchronous and a scrape must not make a
+    network call, which is the rule `jobs_in_flight_refresh_seconds` states one subject over.
+
+    Never raises. An endpoint whose identity cannot be read is recorded as unreadable and the
+    caller keeps the string comparison — a worse answer than a measured one and the same answer as
+    before this existed, which is the right direction for a failure in a path that only ever
+    *sharpens* an accounting.
+    """
+    endpoint = pg_endpoint(dsn)
+    if endpoint is None or endpoint in _SERVER_IDENTITY or endpoint in _IDENTITY_UNREADABLE:
+        return
+    try:
+        async with conn.cursor() as cur:
+            await cur.execute("SELECT system_identifier FROM pg_control_system()")
+            row = await cur.fetchone()
+        if row is None:
+            raise ValueError("pg_control_system() returned no row")
+        _SERVER_IDENTITY[endpoint] = int(row[0])
+    except Exception as exc:
+        _IDENTITY_UNREADABLE.add(endpoint)
+        logger.warning(
+            "postgres.identity_unreadable",
+            extra={
+                "endpoint": f"{endpoint[0]}:{endpoint[1]}",
+                "error": str(exc),
+                "consequence": (
+                    "two DSNs naming this server can no longer be recognised as one, so a split "
+                    "deployment is charged to two connection ceilings"
+                ),
+            },
+        )
+
+
+def same_server(one: str, other: str) -> bool:
+    """Whether two DSNs name one Postgres server, measured where a borrow has already answered.
+
+    Falls back to `pg_endpoint`'s string comparison when either side is unmeasured, so this is
+    never *less* able to tell two DSNs apart than the comparison it replaces. `None` endpoints keep
+    that comparison's strict branch: two DSNs this cannot compare are treated as one server, which
+    sums their pools against one ceiling rather than checking each against a ceiling that may not
+    exist.
+    """
+    here, there = pg_endpoint(one), pg_endpoint(other)
+    if here is not None and there is not None:
+        measured_here = _SERVER_IDENTITY.get(here)
+        measured_there = _SERVER_IDENTITY.get(there)
+        if measured_here is not None and measured_there is not None:
+            return measured_here == measured_there
+    return here == there
+
+
+def _live_held_connections() -> list[tuple[Any, str]]:
+    """Every registered connection this process still holds, dropping the closed ones as it goes.
+
+    A closed one is dropped rather than counted, so a holder that closed without unregistering
+    stops inflating the reading the moment it does — which is the direction that matters for a
+    gauge an alert compares against a ceiling.
+    """
+    with _POOL_REGISTRY_LOCK:
+        live = [(conn, info) for conn, info in _HELD_CONNECTIONS if not conn.closed]
+        _HELD_CONNECTIONS[:] = live
+    return live
+
+
+def _held_connections_on(endpoint: tuple[str, str] | None) -> int:
+    """How many live registered connections this process holds on one *endpoint*."""
+    return sum(1 for _, info in _live_held_connections() if pg_endpoint(info) == endpoint)
+
+
+def _held_connections_on_server(dsn: str) -> int:
+    """How many live registered connections this process holds on the *server* `dsn` names.
+
+    The endpoint form above is kept for `_process_max_connections`, whose question is about one
+    configured DSN rather than about whether two DSNs are one box.
+    """
+    return sum(1 for _, info in _live_held_connections() if same_server(info, dsn))
+
+
 def _all_pools() -> list[Any]:
     """Every pool this process holds: the ones built here, plus the registered foreign ones."""
     _forget_pools_of_ended_loops()
@@ -744,8 +965,13 @@ def _process_max_connections() -> int:
 
     Not `settings.pg_pool_max_size`, which is one pool's ceiling: see `bind_pool_metrics` for the
     measurement that separates the two.
+
+    **Plus the dedicated connections a caller registered**, each worth exactly one backend, and only
+    those on `postgres_dsn`'s server — see `register_connection` for why the endpoint decides.
     """
-    return sum(int(pool.max_size) for pool in _all_pools())
+    return sum(int(pool.max_size) for pool in _all_pools()) + _held_connections_on(
+        pg_endpoint(settings.postgres_dsn)
+    )
 
 
 def _session_store_max_connections() -> int:
@@ -766,13 +992,29 @@ def _session_store_max_connections() -> int:
     `chemclaw_pg_pool_max_size` answers "what may this process open", which is configuration and
     needs no database. A label carrying a measured cluster identity would be unknown until a pool
     filled, so the fleet-ceiling alert would lose its series during a database outage.
+
+    **Which servers there are is measured here, and that is new.** `pg_endpoint` compares strings,
+    so `localhost` against `127.0.0.1` — one server — split the fleet in two, each half charged to
+    its own ceiling and the real total checked by nothing. `same_server` answers it from the
+    `system_identifier` a borrow already read. The subtraction above still stands: what is measured
+    is *how many servers there are*, not what this process may open, so the gauge keeps needing no
+    database and keeps its series through an outage. See `_SERVER_IDENTITY`.
     """
     if not settings.fleet_connections_per_server()[1]:
         return 0
-    there = pg_endpoint(settings.session_store_dsn)
+    there = settings.session_store_dsn
+    # **A split the measurement disproves is not a split.** `fleet_connections_per_server` decided
+    # there were two servers from the two DSN strings, at import, with no database to ask. Once a
+    # borrow has answered and the two spellings turn out to name one box, carving anything out of
+    # the process total would charge the whole of it to a server that does not exist — measured,
+    # 32 of 32 against a `localhost`/`127.0.0.1` pair. Zero is the honest answer and it is the one
+    # that restores the pre-split behaviour for this configuration: one sum against one ceiling,
+    # which is the expression the row records as having been regressed.
+    if same_server(settings.postgres_dsn, there):
+        return 0
     return sum(
-        int(pool.max_size) for pool in _all_pools() if pg_endpoint(str(pool.conninfo)) == there
-    )
+        int(pool.max_size) for pool in _all_pools() if same_server(str(pool.conninfo), there)
+    ) + _held_connections_on_server(there)
 
 
 def pool_stats() -> dict[str, int]:
@@ -789,6 +1031,63 @@ def pool_stats() -> dict[str, int]:
         for name in total:
             total[name] += int(stats.get(name, 0))
     return total
+
+
+#: How long one walk of the pools stands in for the next, in seconds.
+#:
+#: **This is a coherence window, not a cache for speed.** `render()` reads every gauge by calling
+#: its own source, so three gauges bound to three `pool_stats()` lambdas walked the pools three
+#: times per scrape and published a triple that never existed together — harmless for a trend and
+#: wrong for the one question D-119 introduced them to answer, which is read across all three at
+#: once: is the pool full *and* are callers waiting.
+#:
+#: One second against a scrape interval of 15-30 s: long enough that the three reads of a single
+#: render see one instant, and far too short to make a scrape stale. The alternative the backlog
+#: row offered — collapsing the three into one labelled family — was declined because the names are
+#: what existing dashboards and alerts select on, and they are three quantities rather than three
+#: values of one.
+_POOL_SNAPSHOT_WINDOW_SECONDS = 1.0
+
+#: `(taken_at, stats)` for the most recent walk, or `None`. Guarded by `_POOL_SNAPSHOT_LOCK`
+#: because `/metrics` can be scraped concurrently and two renders must not interleave a half-built
+#: snapshot — which would reintroduce exactly the incoherence this exists to remove.
+_POOL_SNAPSHOT: tuple[float, dict[str, int]] | None = None
+_POOL_SNAPSHOT_LOCK = threading.Lock()
+
+
+def coherent_pool_stats() -> dict[str, int]:
+    """`pool_stats()`, but one walk per scrape rather than one per gauge.
+
+    Every gauge bound to this within `_POOL_SNAPSHOT_WINDOW_SECONDS` of the first reads the *same*
+    walk, so `pool_size`, `pool_available` and `requests_waiting` describe one instant.
+
+    Returns:
+        A copy, so a caller cannot mutate the shared snapshot for the gauges that follow it.
+    """
+    global _POOL_SNAPSHOT
+    now = time.monotonic()
+    with _POOL_SNAPSHOT_LOCK:
+        cached = _POOL_SNAPSHOT
+        if cached is not None and now - cached[0] < _POOL_SNAPSHOT_WINDOW_SECONDS:
+            return dict(cached[1])
+    # Walked outside the lock: `get_stats()` touches every pool, and holding the lock across it
+    # would serialise concurrent scrapes behind the walk rather than behind the snapshot. A race
+    # here costs one extra walk and stores whichever finished last, which is still one instant.
+    fresh = pool_stats()
+    with _POOL_SNAPSHOT_LOCK:
+        _POOL_SNAPSHOT = (now, fresh)
+    return dict(fresh)
+
+
+def reset_pool_snapshot() -> None:
+    """Drop the cached walk, so the next read takes a fresh one.
+
+    For tests, and for `pooling()`'s exit: a process that has closed its pools should not answer a
+    later scrape from a window opened while they were live.
+    """
+    global _POOL_SNAPSHOT
+    with _POOL_SNAPSHOT_LOCK:
+        _POOL_SNAPSHOT = None
 
 
 def vector_recall_settings() -> dict[str, str]:
@@ -893,3 +1192,24 @@ async def existing_tables(cur: Any, tables: Iterable[str]) -> set[str]:
         (names,),
     )
     return {str(row[0]) for row in await cur.fetchall()}
+
+
+def _iso_stamp(value: Any) -> Any:
+    """A `TIMESTAMPTZ` column as `datetime.isoformat()`'s string, NULL as `""`, else untouched.
+
+    **A validator rather than a SQL-side cast, because the string is on the wire.** `::text` would
+    convert in the server and spell the instant `2026-09-16 10:00:00+00`, where every reader of the
+    models that use this — `GET /pending`, the effect ledger, an evidence pack — has always been
+    handed `2026-09-16T10:00:00+00:00`. A row factory binds columns by name and converts nothing,
+    so the conversion lives in the model, and in one place so the spelling cannot drift per seam.
+    Anything that is neither a `datetime` nor `None` is left for pydantic to validate.
+    """
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return "" if value is None else value
+
+
+#: A `TIMESTAMPTZ` column carried as the ISO string the seams reading it have always exposed. A
+#: NULL reads as the empty string — "still waiting", "never settled", "recorded nothing" — rather
+#: than as `None`, which is what each model's own nullable field means by it.
+IsoStamp = Annotated[str, BeforeValidator(_iso_stamp)]

@@ -1,0 +1,57 @@
+{
+  "probe": {
+    "id": "ws-06",
+    "section": 17,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "What am I currently signed up to hear about? I set a few of these up weeks ago and I have stopped trusting that they are still live.",
+    "expects_tools": [
+      "list_watches"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a watch that does not exist",
+      "a delivery history, read receipt or notification that was sent"
+    ],
+    "direction": "A plain read of this asker's subscriptions. The distrust in the question is the thing to answer: say what is registered and what each one is watching, and if the answer is nothing, say nothing — a manager who believes three watches are live and has none is exactly the person this probe exists for. It must not claim anything about whether notifications were *delivered*; the register records subscriptions, not deliveries, and conflating the two is how the answer becomes reassuring and wrong.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "ws-06",
+    "section": 17,
+    "persona": "manager",
+    "bucket": "A",
+    "question": "What am I currently signed up to hear about? I set a few of these up weeks ago and I have stopped trusting that they are still live.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.53,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "33100bd8a67a442b8302ab32c6b620ce",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

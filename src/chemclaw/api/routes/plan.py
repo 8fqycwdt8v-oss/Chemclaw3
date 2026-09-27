@@ -18,9 +18,10 @@ from datetime import datetime
 from fastapi import FastAPI, HTTPException, Request
 from starlette.responses import Response
 
-from chemclaw.agent.plan_approval_store import ApprovalStore
+from chemclaw.agent.plan_approval_store import ApprovalStore, Decision
 from chemclaw.agent.plan_gate import EMPTY_PLAN_HASH, gate_applies, plan_identity
-from chemclaw.agent.plan_state import session_todos
+from chemclaw.agent.plan_scope import declared_scope
+from chemclaw.agent.plan_state import session_plan
 from chemclaw.agent.profiles import get_profile
 from chemclaw.agent.session_store import SessionOwnerStore, encode_session_cursor
 from chemclaw.api.deps import CurrentSession, CurrentUser
@@ -51,10 +52,14 @@ class _PlanRead:
     """
 
     todos: list[str] | None
+    # Every tool the plan's steps declare — what approving it would authorize, and what a surface
+    # has to show beside the steps for the decision to be an informed one
+    # (`D-2026-09-12-an-approval-that-names-no-tool-authorizes-every-tool`).
+    scope: list[str]
     # The identity a decision is recorded against, or `None` when there is nothing to decide on.
     approvable: str | None
-    # The latest *effective* `(approved, actor)`; `None` when nobody has decided at all.
-    decision: tuple[bool, str] | None
+    # The latest *effective* decision; `None` when nobody has decided at all.
+    decision: Decision | None
 
     @property
     def plan_hash(self) -> str:
@@ -72,10 +77,16 @@ async def _read_plan(session_id: str, approvals: ApprovalStore) -> _PlanRead:
     for an empty one and a row recorded against the empty-plan constant would say "someone approved
     the empty plan" — an identity every session in every deployment shares.
     """
-    todos = await session_todos(session_id)
-    approvable = plan_identity(todos or [])
+    plan = await session_plan(session_id)
+    todos = None if plan is None else [str(step["content"]) for step in plan]
+    approvable = plan_identity(plan or [])
     decision = await approvals.decision(session_id, approvable) if approvable else None
-    return _PlanRead(todos=todos, approvable=approvable, decision=decision)
+    return _PlanRead(
+        todos=todos,
+        scope=sorted(declared_scope(plan or [])),
+        approvable=approvable,
+        decision=decision,
+    )
 
 
 def _plan_gated(profile_name: str | None) -> bool:
@@ -88,9 +99,17 @@ def _plan_gated(profile_name: str | None) -> bool:
     `harness_autonomy="execute"` there is a plan but no gate — the agent acts without asking, so
     nothing about that plan is anyone's decision.
 
-    This is also the filter that keeps `GET /plans/pending` free in the default deployment, where
-    `harness_enabled` is off: a skipped session costs no checkpointer statement, and every
-    checkpointer statement is serialized against every concurrent turn on the pod.
+    This is also the filter that keeps `GET /plans/pending` cheap for every session the gate does
+    not govern: a skipped session costs no checkpointer statement, and every checkpointer statement
+    is serialized against every concurrent turn on the pod.
+
+    **It is not free in the *default* deployment, and this sentence said it was twice.** It first
+    said "where `harness_enabled` is off", which `D-2026-09-13-the-default-is-the-posture-every-
+    deployment-already-runs` falsified; the correction swapped the mechanism name to `gate_applies`
+    and left the premise standing. Measured at the shipped settings — `harness_enabled=True`,
+    `harness_autonomy="plan_only"` — `gate_applies(DEFAULT_PROFILE)` is **True**, so the default
+    deployment reads a checkpoint per session here. What the filter still saves is a session on a
+    profile that turns the harness off or sets `autonomy="execute"`.
 
     A profile the registry no longer knows is treated as gated rather than skipped: the deployment
     dropped a profile out from under an existing session, and guessing *away* from a plan that may
@@ -121,7 +140,8 @@ async def _owned_sessions(
     ceiling, and `unread` already says the answer is partial; a short page ends it too, which is
     the listing running out and the only case where the inbox can honestly claim to have seen
     everything. Neither of those can fire when *nothing* is gated — `_plan_gated` is False for
-    every session with `harness_enabled` off, which is the code's own default — so the walk used
+    every session where the gate does not apply — which, until D-2026-09-13 made the harness the
+    default, was every session under the shipped configuration — so the walk used
     to page through the caller's whole history on every request and return `plans: []`: measured
     at 5,000 sessions and the shipped page of 100, **51** keyset statements where the route before
     paging issued one, repeatable by the caller at will.
@@ -183,7 +203,7 @@ async def get_plan(
     written before the decision route refused to — must not come back as `approved=true` here
     either. The hash is still reported, because a client needs *an* identity to display.
 
-    **The plan is read from the checkpointer** (`agent/plan_state.session_todos`), not from an
+    **The plan is read from the checkpointer** (`agent/plan_state.session_plan`), not from an
     in-process session object. It used to come off `live.session`, the handle the front door held
     per live session, because MAF's harness kept its todo list inside it — and that handle is
     exactly what an LRU eviction or a pod roll dropped, which is half of why a rehydrated session
@@ -197,17 +217,24 @@ async def get_plan(
     what a surface renders is one fact seen twice.
     """
     read = await _read_plan(session_id, state(request).plan_approvals)
-    # One read, one question. Calling `plan_is_approved` here as well would issue a second query
-    # whose answer could differ from this one — a route reporting `approved=false` beside the
-    # name of whoever approved it is a worse surface than either fact alone.
+    # One read, one question. Calling `chemclaw.agent.plan_gate.approval_stands` here as well
+    # would issue a second query whose answer could differ from this one — a route reporting
+    # `approved=false` beside the name of whoever approved it is a worse surface than either fact
+    # alone.
     approved = bool(read.decision and read.decision[0])
     return PlanStatusOut(
         session_id=session_id,
         plan_hash=read.plan_hash,
         plan=read.todos or [],
+        # What approving this plan would authorize. Shown beside the steps because the decision is
+        # only informed if the person can see it: the gate refuses a state-changing tool no step
+        # declared, so a surface that rendered the steps alone would be asking for a yes to
+        # something it had not displayed
+        # (`D-2026-09-12-an-approval-that-names-no-tool-authorizes-every-tool`).
+        scope=read.scope,
         mode="execute" if approved else "plan",
         approved=approved,
-        decided_by=read.decision[1] if read.decision else None,
+        decided_by=read.decision.actor if read.decision else None,
     )
 
 
@@ -255,8 +282,11 @@ async def pending_plans(request: Request, principal: CurrentUser) -> PendingPlan
     Paging costs one indexed keyset statement per page and is bounded by the same
     `service_max_plan_scans` the reads are, counted in pages — a sentence that used to say the
     loop was "bounded by the work the route was already allowed to do" and was true only where
-    something is gated. With `harness_enabled` off nothing ever is, so the only remaining exit was
-    a short page and the walk ran the caller's whole history on every request; see
+    something is gated. Under the old `harness_enabled=False` default nothing ever was, so the only
+    remaining exit was a short page and the walk ran the caller's whole history on every request.
+    D-2026-09-13 inverted that: with the gate on by default the budget now binds on an ordinary
+    request, so the ceiling this paragraph describes is doing work it never used to do rather than
+    standing in for an exit that could not be reached. See
     `_owned_sessions` for the measurement and for why a page ceiling is the same budget rather
     than a second one. `truncated` is what that ceiling costs the answer, and it is a fourth
     reading of an empty `plans` rather than a fifth kind of `unread`. The expensive half is
@@ -287,6 +317,7 @@ async def pending_plans(request: Request, principal: CurrentUser) -> PendingPlan
                     updated_at=updated_at,
                     plan_hash=read.approvable,
                     plan=read.todos,
+                    scope=read.scope,
                 )
             )
     return PendingPlansOut(
@@ -307,17 +338,29 @@ async def decide_plan(
 ) -> Response:
     """Approve (or reject) a harness plan — the pre-execution gate, finally enforced.
 
-    Deliberately an HTTP route and **not** an agent tool, for the same reason
-    `POST /proposals/{id}/decision` is not (D-005): a model must never be able to authorize its
-    own plan. Under MAF that took work — the framework advertised a `mode_set` tool by default, so
-    the agent moved itself out of plan mode and the audit trail recorded it under the asking
-    chemist's identity, and `PlanApprovalModeProvider` had to subclass-and-mutate to retract it.
+    Deliberately an HTTP route and **not** an agent tool, for the reason D-005 gave for the note
+    decision this sentence used to name (`POST /proposals/{id}/decision`, deleted with the PR-gate
+    by `D-2026-09-05-the-gate-follows-behaviour-not-knowledge`): a model must never be able to
+    authorize its own plan. Under MAF that took work — the framework advertised a `mode_set` tool
+    by default, so the agent moved itself out of plan mode and the audit trail recorded it under
+    the asking chemist's identity, and `PlanApprovalModeProvider` had to subclass-and-mutate to
+    retract it.
     Nothing advertises such a tool here; the model is not given one, which is the same guarantee
     obtained by not building the thing rather than by removing it afterwards.
 
     The posted `plan_hash` must match the plan the session is proposing *now*. A mismatch is a
     409, not a silent approval of the current plan: it means the plan changed between being
     shown and being approved, and the human agreed to something else.
+
+    **"The plan" there includes what each step declares**, and for a while it did not
+    (`D-2026-09-13-a-plan-identity-that-omits-the-scope-approves-a-plan-nobody-read`). The guard
+    compared the posted hash against an identity taken over step *text*, while the scope recorded
+    below is read off the live plan — so a rewrite keeping every step's text and widening its
+    `tools` passed the guard on the chemist's own hash and was stamped as what they had approved.
+    Measured end to end: shown scope `[]`, rewritten scope `['record_knowledge_note', 'watch_for']`,
+    hash unchanged, 204, both tools then ran. No concurrency was needed — an unapproved plan is not
+    a hold, so any follow-up message takes a turn while the card is open, and `out_of_scope_refusal`
+    tells the model in as many words to make exactly that rewrite.
 
     A session proposing **no** work items has nothing to decide on, and this refused nothing:
     the empty todo list hashes to a global constant, so a decision could be recorded against
@@ -326,7 +369,8 @@ async def decide_plan(
     it is the same function the gate asks, so the route and the enforcement cannot disagree about
     what counts as a plan.
     """
-    plan_hash = plan_identity(await session_todos(session_id) or [])
+    plan = await session_plan(session_id) or []
+    plan_hash = plan_identity(plan)
     if plan_hash is None:
         raise HTTPException(
             status_code=409,
@@ -345,7 +389,22 @@ async def decide_plan(
     # used to need a separate `rearm_plan` call against session state, which is one more thing a
     # future route could forget to do.
     await state(request).plan_approvals.record(
-        session_id, plan_hash, principal.oid or "", body.approved
+        session_id,
+        plan_hash,
+        principal.oid or "",
+        body.approved,
+        # The scope is taken from the plan being decided on, here, once — not read back from the
+        # todo list when a call is gated. That is what stops the model widening an approval it
+        # already has: the gate reads this row and never the live declaration.
+        #
+        # **What stops it widening the approval being given is the guard above**, and that took a
+        # second decision (`D-2026-09-13-a-plan-identity-that-omits-the-scope-approves-a-plan-
+        # nobody-read`). This comment used to argue the opposite — that hashing `content` only was
+        # harmless here because the gate reads the row — and the hole was that this line derives the
+        # row from the *live* plan: a rewrite keeping every step's text and widening its `tools`
+        # hashed identically, so the chemist's own hash matched and the widened declaration was what
+        # got stamped. `plan_identity` covers the declaration now, so the 409 fires instead.
+        declared_scope(plan),
     )
     # Nothing else to flip. This used to call `grant_execute` as well, moving the session's MAF
     # mode — a second piece of state saying the same thing, on a different lifetime, which is what

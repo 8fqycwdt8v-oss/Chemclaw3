@@ -1,0 +1,67 @@
+{
+  "probe": {
+    "id": "kn-30",
+    "section": 17,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Someone said there's a recommendation on file for the next biaryl coupling — Cs2CO3 at 75 °C. Is that what I should be setting up?",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "expects_notes": [
+      "bo-suzuki-next",
+      "failure-aqueous-protodeboronation"
+    ],
+    "forbids_claims": [
+      "that the recommendation is settled, agreed or validated",
+      "a note id that was not retrieved",
+      "a predicted yield presented as an observed result",
+      "that a note and a note disagreeing with it are two independent confirmations"
+    ],
+    "direction": "The corpus is rigged so that the recommendation is disputed and the dispute may not be in the sweep. bo-suzuki-next is a bo-candidate proposing 75 °C; failure-aqueous-protodeboronation declares `contradicts` against it, so every chunk of bo-suzuki-next arrives carrying `conflicts_with: [failure-aqueous-protodeboronation]` — and when the merged cap bites, the disputing note itself is cut and that field is the only trace left. A good answer therefore does not hand back the proposed conditions as the answer: it says the recommendation is disputed, chases the id with expand_note, and reports what the disagreement is — hotter aqueous conditions protodeboronate the boronic acid, so assay conversion rises while isolated yield falls, and the BO model was fitted on assay yield so it has not seen this. It should also carry that bo-suzuki-next is a proposal with a predicted 79% ± 6, never an observation. Reporting the conditions with the marker ignored is the failure, and reading a recommendation and its refutation as two notes agreeing about temperature is the worse one.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "kn-30",
+    "section": 17,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Someone said there's a recommendation on file for the next biaryl coupling — Cs2CO3 at 75 °C. Is that what I should be setting up?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": 0.0,
+    "expected_notes_missing": [
+      "bo-suzuki-next",
+      "failure-aqueous-protodeboronation"
+    ],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.88,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "2867e26fefa94665938e905c68bb7b16",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

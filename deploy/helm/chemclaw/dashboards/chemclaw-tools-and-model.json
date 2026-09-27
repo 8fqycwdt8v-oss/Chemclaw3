@@ -463,6 +463,26 @@
           "expr": "sum(rate(chemclaw_tool_results_truncated_total[15m]))",
           "legendFormat": "tool results truncated",
           "refId": "I"
+        },
+        {
+          "expr": "sum by (template) (rate(chemclaw_template_prompt_truncated_total[15m]))",
+          "legendFormat": "template prompt truncated: {{template}}",
+          "refId": "J"
+        },
+        {
+          "expr": "topk(10, sum by (skill) (increase(chemclaw_skill_loads_total[30d])))",
+          "legendFormat": "skill loaded (30d): {{skill}}",
+          "refId": "K"
+        },
+        {
+          "expr": "sum(increase(chemclaw_local_skill_loads_total[30d]))",
+          "legendFormat": "personal skills loaded (30d)",
+          "refId": "L"
+        },
+        {
+          "expr": "sum by (outcome) (increase(chemclaw_behaviour_proposals_total[30d]))",
+          "legendFormat": "behaviour proposals (30d): {{outcome}}",
+          "refId": "M"
         }
       ]
     },
@@ -521,6 +541,56 @@
           "refId": "B"
         }
       ]
+    },
+    {
+      "type": "graph",
+      "title": "Helper files cut on the way into a caller's state",
+      "datasource": "prometheus",
+      "span": 12,
+      "fill": 0,
+      "stack": false,
+      "linewidth": 2,
+      "nullPointMode": "null",
+      "legend": {
+        "show": true,
+        "current": true,
+        "max": true,
+        "values": true
+      },
+      "tooltip": {
+        "shared": true,
+        "sort": 2,
+        "value_type": "individual"
+      },
+      "yaxes": [
+        {
+          "format": "short",
+          "show": true,
+          "min": 0
+        },
+        {
+          "format": "short",
+          "show": false
+        }
+      ],
+      "xaxis": {
+        "mode": "time",
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(chemclaw_subagent_file_truncations_total[1h]))",
+          "legendFormat": "files cut",
+          "refId": "A"
+        }
+      ],
+      "id": 10,
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 48
+      }
     }
   ],
   "refresh": "30s",

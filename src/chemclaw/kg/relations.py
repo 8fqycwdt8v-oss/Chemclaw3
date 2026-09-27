@@ -10,10 +10,12 @@ methods), CHEMINF (chemical information) and OntoRXN already name these relation
 knowledge graphs, and a bespoke set would be one more thing to map to a standard later.
 
 Enforced by `chemclaw.kg.validate`, not by the `Note` schema — exactly as `KNOWN_NOTE_TYPES` is,
-and for the
-same reason. The agent must be able to *propose* a relation this list does not have; the PR-gate is
-where a human decides whether it joins the vocabulary, and `kg-validate` runs on that same PR, so
-an unintended relation cannot reach the graph unreviewed while an intended one costs one line here.
+and for the same reason: a hard schema rejection would fail the agent's write at the tool, so
+`kg-validate` names an unknown relation over the whole corpus instead, once, while an intended one
+costs one line here. (This paragraph used to say the agent *proposes* a relation and that "the
+PR-gate is where a human decides whether it joins the vocabulary". There is no gate
+(`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`), so what buys the placement is what it
+costs a *write*, not what a reviewer sees.)
 """
 
 # The default relation. A bare `[[wikilink]]` is a citation and nothing stronger — which is what
@@ -69,6 +71,19 @@ RELATION_SIGNATURES: dict[str, tuple[frozenset[str] | None, frozenset[str] | Non
     "catalyzes": (frozenset({"compound"}), frozenset({"reaction"})),
     "solvent-for": (frozenset({"compound"}), frozenset({"reaction"})),
     "part-of": (None, frozenset({"campaign", "optimization-campaign", "report"})),
+    # Anything may rest on a measurement, so the source end is open; the target end is not, because
+    # this relation's own comment above names what it points at — "that experimental method or
+    # instrument". Unconstrained, it had no legal target at all until `analytical-method` existed,
+    # and the shipped corpus shows what that costs: its one `measured-by` edge pointed at
+    # `playbook-recrystallisation-purity`, a *transferable rule*, because that was the nearest
+    # thing in the vocabulary
+    # (`D-2026-09-15-a-relation-with-no-legal-target-is-a-question-nobody-can-answer`).
+    #
+    # A signature is what keeps that from recurring. The type existing makes the right edge
+    # *possible*; only this makes the wrong one refuse — which is the same argument the paragraph
+    # above makes about twelve backwards edges that merged green under a validator checking names
+    # only.
+    "measured-by": (None, frozenset({"analytical-method"})),
 }
 
 

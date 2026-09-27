@@ -19,14 +19,16 @@ answers about a molecule the chemist thinks it has already seen.
 conventional order, because a bespoke normalization is a bespoke notion of sameness:
 
 1. `Cleanup` — sanitize, disconnect metals, normalize functional-group spellings (nitro, N-oxide).
-2. `FragmentParent` — keep the largest organic fragment, which strips counterions.
+2. Keep the one fragment `_is_organic` names, plus any spectator that is neither charged nor on
+   RDKit's fragment list — which strips counterions and solvents while keeping adducts.
 3. `Uncharger` — neutralize what can be neutralized, so a carboxylate meets its acid.
 4. `TautomerEnumerator.Canonicalize` — one representative per tautomer set.
 
 Steps 2 and 3 say **"the counterion is not part of the identity"**, and that claim holds for an
 amine hydrochloride and for sodium benzoate but not for every species a chemist writes. It fails
-in four directions, each of which deletes the compound rather than normalizing it, and
-`standardize` holds them off with `_metal_is_the_compound` and a count of organic fragments:
+in five directions, each of which deletes something the compound is rather than normalizing it, and
+`standardize` holds them off with `_metal_is_the_compound`, a count of organic fragments and
+`_neutralization_is_protonation`:
 
 - **Nothing organic is left to be the compound.** A wholly inorganic reagent has no organic parent
   to keep, so the strip discards half the formula: NaOH and KOH both became water, CsF became a
@@ -45,16 +47,50 @@ in four directions, each of which deletes the compound rather than normalizing i
   organic partner, or a co-crystal has no counterion to discard: `standard_smiles("CCN.C1CCOC1")`
   returned `C1CCOC1`, so an ethylamine/THF solvate and neat THF shared one `compound_id` — the same
   note, the same fingerprint row. Nothing in the structure says which fragment is "the compound",
-  and `FragmentParent`'s answer — whichever weighs more — is a property of the *pair*, so adding a
-  bulkier solvent silently changes which substance the record is about
+  and the answer a largest-fragment chooser gives — whichever weighs more — is a property of the
+  *pair*, so adding a bulkier solvent silently changes which substance the record is about
   (`D-2026-08-27-a-solvate-is-not-its-solvent`).
 
-Three properties separate the four from the salts that must keep collapsing, and none is "does it
+- **Neutralizing the anion would take an atom away rather than add a proton.** "The counterion
+  meets its conjugate acid" assumes the anion can *be* protonated. Sodium triacetoxyborohydride's
+  charge sits on a boron with no room for a fourth substituent, so `Uncharger` reaches neutral by
+  removing the hydride: `CC(=O)O[BH-](OC(C)=O)OC(C)=O.[Na+]` became triacetoxyborane, a Lewis acid
+  that reduces nothing, sharing one `compound_id` with the reductive-amination reagent. The first
+  three guards all pass it, because none of them is about the neutralization step
+  (`_neutralization_is_protonation`).
+
+Four properties separate the five from the salts that must keep collapsing, and none is "does it
 contain a metal": a **d- or f-block metal** is what the flask is for, while a group-1/2 counterion
 only balances a charge (`_REACTIVE_METALS`); a **metal–carbon bond** is the reagent itself, while
 the same metals in an ionic salt have none (`_is_organometallic`); and a salt has **exactly one**
-organic fragment, while a solvate has two or more. Sodium benzoate and LDA fail all three and still
-collapse. See `_is_organic` for why "organic" is a C–H/C–C test and not "contains a carbon".
+organic fragment, while a solvate has two or more; and a real conjugate acid/base pair is one whose
+neutralization **adds** hydrogens rather than removing them. Sodium benzoate and LDA fail all four
+and still collapse. See `_is_organic` for why "organic" is a bond test — C–H, C–C, or a carbon
+holding two nitrogens — and not "contains a carbon".
+
+**What the fourth guard deliberately does not cover, stated because it is a decision and not an
+oversight** (`D-2026-09-09-a-map-number-is-not-a-molecule`). An alkali salt of an *organic*
+conjugate acid keeps collapsing whatever the acid's strength: KOtBu, NaOtBu and LiOtBu all reach
+tert-butanol, NaOMe reaches methanol, LiHMDS reaches HMDS and LDA reaches diisopropylamine. That is
+the same rule as sodium acetate and sodium benzoate — the counterion is not part of the identity —
+and it costs what D-2026-08-01 named: a base screen over NaOMe/NaOEt/KOtBu reads as three collapses
+onto three alcohols, with the counterion the chemist is varying discarded. Separating them needs a
+pKa-shaped predicate ("an anion whose conjugate acid is weak enough that the salt is the reagent"),
+and a bespoke normalization is a bespoke notion of sameness, which is what this module opens by
+refusing. `tests/test_compound_identity.py` asserts the collapse so that whoever revisits it finds
+a decision rather than a gap.
+
+**An atom map is not part of a structure at all**, and clearing it is the one step here that is not
+about counterions. RXNMapper stamps `[CH3:1][C:2](=[O:3])[OH:4]` onto every species of every corpus
+reaction; that is acetic acid, and it used to standardize to itself. DRFP shingles atom
+environments *as SMILES strings*, so the map numbers are inside the shingles: measured, a mapped
+reaction scored **0.0000** against its own unmapped form and 0.0000 against the same reaction
+renumbered, under a default threshold of 0.3 — a silent "we have no precedent" between the
+literature corpus and the ELN, for a reaction on file in both. The numbers are cleared in
+`standardize` rather than at the DRFP boundary because the same string is what mints `compound_id`,
+so the mapped and unmapped spellings were also two notes and two ECFP rows carrying identical bits.
+`canonical_smiles` is deliberately left alone: it answers "same structure" for the calculation
+cache, where the key is what the caller submitted.
 
 **There are two questions here, and conflating them is how this goes wrong in the other
 direction.** Applying the pipeline everywhere neutralizes species a chemist meant as ions, and a
@@ -89,7 +125,81 @@ from chemclaw.core.ids import stable_hash
 # search rather than being silently compared against rows built under a newer one — the guard
 # `science/fingerprints/store.py` already applies to a changed radius or bit width, extended to the
 # other thing that decides what a row *is*.
-STANDARDIZATION_VERSION = "std6"
+#
+# `std7` -> `std8` because `_neutralization_is_protonation` asked the hydrogen-count question of a
+# *cation*, which refused every protonated amine and pyridinium salt its docstring says must keep
+# working — so every `std7` row for such a salt is indexed under a `compound_id` that is not
+# the free base's. Bumping is what makes those rows fall out of similarity search instead of
+# being compared
+# against `std8` rows built under the corrected notion of sameness; re-indexing is what brings them
+# back. This is the same reason `std6` -> `std7` was owed, one notion of sameness later.
+#
+# `std8` -> `std9` because the exemption that fixed the amine salts read the **net** charge of the
+# whole string, and `standardize` keeps every fragment once two of them are organic — so for any
+# `.`-separated string with two or more organic fragments and a net positive charge, the cation arm
+# exempted the hydride check for the *anion* in the same string. Measured:
+# `[BH4-].CC[NH+](CC)CC.CC[NH+](CC)CC` standardized to **borane** and triacetoxyborohydride against
+# two triethylammonium ions to triacetoxyborane, which is the reducing-agent-as-Lewis-acid defect
+# the guard exists for, reintroduced by the fix for something else. Every `std8` row for that shape
+# is keyed under the wrong identity.
+#
+# **The bump was argued rather than assumed, because it is not free.** `durable/retention.py`
+# records that a bump is a *permanent* doubling of `molecule_fingerprints` and
+# `reaction_fingerprints` — `app_privileges.sql` grants those tables INSERT and UPDATE only, so
+# nothing reclaims the superseded generation — and the only recovery is the runbook's: delete the
+# corpus's `corpus_cursors` row and re-run the ELN sync. Measured against that: **zero** of the 68
+# distinct structures in the shipped reagent table and zero of the 15 multi-fragment charged SMILES
+# anywhere in `data/` or `knowledge/` match the affected shape, so in *this* repository's corpus the
+# bump retires everything to reclaim nothing.
+#
+# It is taken anyway, for three reasons. The corpus measured above is the seed data and not the
+# population at risk: the reachable writers are an ELN component, `memory/chains.py`,
+# `ingest/labels/record.py` and a model-authored `compound_smiles`, nothing validates charge balance
+# on ingest, and a charge-unbalanced multi-fragment string is exactly what a transcription of
+# "NaBH(OAc)3 / Et3N·HCl" produces. Whether a deployment has ingested one is not a question this
+# repository can answer, and "nobody ran `std8`" is precisely the kind of claim about production
+# state the tree refuses elsewhere. Second, the asymmetry: not bumping leaves a wrong row and a
+# corrected row *both current* under one definition, ranked against each other — worse than the
+# ordinary stale-row case, because neither is filtered out — while bumping costs disk and a
+# documented re-sync. Third, the cost is at its minimum today: `std8` shipped hours ago in the
+# commit this fixes, so the generation being retired is the smallest one that will ever exist, and
+# it grows every day the decision is deferred.
+#
+# `std9` -> `std10` because `_is_organic` was a C–H/C–C test and therefore called **urea**
+# inorganic (`D-2026-09-22-a-version-bump-costs-the-same-whenever-it-is-taken`). Guanidine,
+# thiourea, melamine, the cyanurates and the aminotetrazoles with it: their carbons hold nitrogens
+# and no hydrogen or carbon, so `standardize` returned before the strip and the neutralisation and
+# a bare guanidinium salt never collapsed onto its free base — while acetamidine and metformin
+# did, because their substituents happen to put a C–C bond elsewhere in the fragment. The widened
+# clause is a carbon with **three or more heavy neighbours, two of them nitrogen**; a
+# two-coordinate carbon is the linear family — cyanide, cyanate, thiocyanate, cyanamide — which
+# stays inorganic so its alkali salts stay distinct. `tests/test_compound_identity.py::
+# test_the_organic_line_is_where_the_version_says_it_is` is the drive, one row per species, and
+# `_STANDARDIZATION_AT_THIS_VERSION` pins what `standardize` then does.
+#
+# **The bump is not cheaper because the defect is latent, and the first draft of this paragraph
+# said it was.** A definition bump retires *every* row under the old definition, not the rows
+# whose standard form changed, because `STANDARDIZATION_VERSION` is a token in
+# `molecule_definition()` and `reaction_definition()` — so the cost is the same whenever it is
+# taken. What latency bounds is the damage of *not* taking it. The two together are still an
+# argument for now rather than later: the bill does not grow, and the population of rows keyed
+# under the wrong identity does.
+#
+# `std10` -> `std11` because the branch that keeps the organic fragment asked **RDKit** which
+# fragment that was (`D-2026-09-22-the-parent-is-the-fragment-this-module-calls-organic`).
+# `rdMolStandardize.FragmentParent`'s chooser counts atoms *including hydrogens* and defaults to
+# `preferOrganic=False`, so on `[NH4+].[O-]C=O` it kept the five-atom `[NH4+]` over the four-atom
+# formate and `Uncharger` made ammonium formate **ammonia**. This module has its own answer to
+# that question — `_is_organic`, argued at the top of this file — and now uses it. Measured over
+# every parseable carbon-bearing SMILES in the tree, **three** standard forms move.
+#
+# The other two are the second half of the same defect: the branch discarded every other fragment
+# on the strength of the count alone, without asking what a discarded one *is*, so urea hydrogen
+# peroxide became urea. A spectator is now discarded only if it carries a charge — an inorganic ion
+# beside one organic fragment is that fragment's counterion by construction — or if it is a solvent
+# RDKit's curated list knows. Asking that list *alone* was the first spelling and it regressed TBTU:
+# it is a pharmaceutical salt list and knows neither tetrafluoroborate nor hexafluorophosphate.
+STANDARDIZATION_VERSION = "std11"
 
 # The d- and f-block by atomic number — Sc→Zn, Y→Cd, La→Hg (lanthanides included) and Ac onward.
 # A block rather than a hand-picked element list, because the property being asserted is a block
@@ -136,6 +246,14 @@ _METALS = _REACTIVE_METALS | frozenset(
 # is folded into `compound_id`, into the ECFP4 and DRFP fingerprint rows, and into the knowledge
 # graph's note ids.
 #
+# **That sentence was false of ECFP4 for as long as it stood, and the fix is not here**
+# (`D-2026-09-09-a-map-number-is-not-a-molecule`). Preserving stereo in the *string* buys nothing in
+# a fingerprint that does not read it, and RDKit's Morgan generator defaults `includeChirality` to
+# False: every pair below produced byte-identical bits and tied at Tanimoto 1.0000, so a search for
+# one enantiomer returned the other as an exact match citing a different `compound_id`. The
+# generator now sets the flag and names it in its definition string — see
+# `science/fingerprints/molfp/fingerprint.py`, which is where a claim about the bits belongs.
+#
 # Left at the default, every stereocentre alpha to a carbonyl is erased, and that is most chiral
 # drug molecules. Measured on this tree: (S)- and (R)-naproxen, L- and D-alanine, and R- and
 # S-thalidomide each collapsed to one standardized string, one `compound_id`, one fingerprint row
@@ -148,6 +266,12 @@ _METALS = _REACTIVE_METALS | frozenset(
 # a transform actually fires, so it survives on a molecule with no enolizable centre and disappears
 # on one that has both — `C/C=C/CC(=O)C` and `C/C=C\CC(=O)C` both standardized to `CC=CCC(C)=O`.
 # Maleic and fumaric acid are not the same compound either.
+#: RDKit's curated salt and solvent list, the one thing this module delegates about a *discarded*
+#: fragment. Built once: `FragmentRemover()` parses its catalogue on construction. Used only to ask
+#: whether a **neutral** spectator is one it knows — the charged ones are read off their charge,
+#: because this list is a pharmaceutical salt list and does not know tetrafluoroborate.
+_KNOWN_SPECTATORS = rdMolStandardize.FragmentRemover()
+
 _TAUTOMERS = rdMolStandardize.TautomerEnumerator()
 _TAUTOMERS.SetRemoveSp3Stereo(False)
 _TAUTOMERS.SetRemoveBondStereo(False)
@@ -169,26 +293,52 @@ def _standardized(smiles: str) -> str | None:
 
 
 def _is_organic(fragment: Chem.Mol) -> bool:
-    """Whether a fragment is organic: does it hold a carbon bonded to hydrogen or to carbon?
+    """Whether a fragment holds a carbon bonded to hydrogen, to carbon, or to two nitrogens.
 
-    The C–H/C–C test rather than the obvious "does it contain a carbon", because the obvious one
-    calls carbonate and bicarbonate organic — and then `FragmentParent` keeps `[O-]C([O-])=O` as
-    the "parent" of K2CO3 and throws the potassium away, which is precisely how K2CO3, Cs2CO3,
-    Na2CO3 and NaHCO3 collapsed into one compound. Cyanide fails the test for the same reason and
-    equally correctly: NaCN and KCN are two reagents, not one.
+    The nitrogen clause carries a third condition — the carbon must have three or more heavy
+    neighbours — and that condition is the part a measurement decided; see below.
 
-    It is the classical organic/inorganic line (carbonates, cyanides, carbides and CO/CO2 are the
-    conventional carbon-containing exceptions), and it is deliberately a *structural* test rather
-    than an element list, so no table has to be kept in step with the reagents chemists write.
+    The C–H/C–C part is the test rather than the obvious "does it contain a carbon", because the
+    obvious one calls carbonate and bicarbonate organic — and then `FragmentParent` keeps
+    `[O-]C([O-])=O` as the "parent" of K2CO3 and throws the potassium away, which is precisely how
+    K2CO3, Cs2CO3, Na2CO3 and NaHCO3 collapsed into one compound. Cyanide fails it for the same
+    reason and equally correctly: NaCN and KCN are two reagents, not one.
+
+    **The third clause is there because C–H/C–C alone called urea inorganic**
+    (`D-2026-09-22-a-version-bump-costs-the-same-whenever-it-is-taken`). Guanidine's carbon has
+    three nitrogen neighbours and no hydrogen; urea's, thiourea's and melamine's have two
+    nitrogens and no carbon. So a bare guanidinium salt never reached the neutralisation branch
+    and did not collapse onto its free base, while acetamidine and metformin did — only because
+    their substituents happen to put a C–C bond somewhere else in the fragment. That is an
+    identity that turns on where the chemist drew a methyl.
+
+    **The clause reads the carbon's coordination as well as its nitrogens, and the coordination
+    is what keeps the cyanamides out.** Three heavy neighbours with two or more nitrogens is the
+    urea/guanidine/amidine family — planar or tetrahedral carbon, substituted. Two heavy
+    neighbours is the linear family: cyanide (`[C-]#N`), cyanate (`[N-]=C=O`), thiocyanate
+    (`[S-]C#N`), cyanamide (`N#CN`) and dicyanamide, which must stay inorganic so their alkali
+    salts stay distinct. Counting nitrogens alone was the first spelling and it swept the
+    cyanamides in: measured, `[Ca+2].[N-]=C=[N-]` then neutralised to the **carbodiimide**
+    tautomer while `[Na+].[NH-]C#N` gave the nitrile one, which `_TAUTOMERS.Canonicalize` does
+    not merge — so calcium cyanamide took the same `compound_id` as free HN=C=NH and a different
+    one from sodium cyanamide. Reading the degree costs nothing and never reaches that molecule.
+
+    It stays the classical organic/inorganic line (carbonates, cyanides and CO/CO2 are the
+    conventional carbon-containing exceptions, and urea has been the canonical organic compound
+    since 1828), and it stays a *structural* test rather than an element list, so no table has to
+    be kept in step with the reagents chemists write.
     """
-    return any(
-        atom.GetAtomicNum() == 6
-        and (
-            atom.GetTotalNumHs(includeNeighbors=True) > 0
-            or any(neighbor.GetAtomicNum() == 6 for neighbor in atom.GetNeighbors())
-        )
-        for atom in fragment.GetAtoms()
-    )
+    for atom in fragment.GetAtoms():
+        if atom.GetAtomicNum() != 6:
+            continue
+        if atom.GetTotalNumHs(includeNeighbors=True) > 0:
+            return True
+        neighbours = [neighbour.GetAtomicNum() for neighbour in atom.GetNeighbors()]
+        if 6 in neighbours:
+            return True
+        if len(neighbours) >= 3 and neighbours.count(7) >= 2:
+            return True
+    return False
 
 
 def _is_organometallic(mol: Chem.Mol) -> bool:
@@ -209,7 +359,7 @@ def _is_organometallic(mol: Chem.Mol) -> bool:
 def _metal_is_the_compound(original: Chem.Mol, cleaned: Chem.Mol) -> bool:
     """Whether the species' metal is the chemistry, so neither stripping nor neutralizing applies.
 
-    Two of the four failure modes in the module docstring are this one question asked of two
+    Two of the five failure modes in the module docstring are this one question asked of two
     different molecules, and each check deliberately asks the stage that still holds its evidence:
 
     - the **cleaned** one for a reactive metal, because `Cleanup` is what disconnects the metal into
@@ -231,6 +381,92 @@ def _metal_is_the_compound(original: Chem.Mol, cleaned: Chem.Mol) -> bool:
     return any(atom.GetAtomicNum() in _REACTIVE_METALS for atom in cleaned.GetAtoms())
 
 
+def _hydrogen_count(mol: Chem.Mol) -> int:
+    """Every hydrogen in a species, implicit on a heavy atom or an atom in its own right.
+
+    Both forms are counted because the pipeline meets both: `[BH4-]` carries its hydrogens as a
+    count on boron and `[H-]` is an atom, and a test that saw only one of them would read a
+    disappearing hydride as no change at all.
+    """
+    return sum(a.GetTotalNumHs() + (1 if a.GetAtomicNum() == 1 else 0) for a in mol.GetAtoms())
+
+
+def _neutralization_is_protonation(before: Chem.Mol, after: Chem.Mol) -> bool:
+    """Whether `Uncharger` reached the neutral species by *adding* protons, as the strip assumes.
+
+    "The counterion is not part of the identity" is a claim about a conjugate acid/base pair: a
+    carboxylate meets its acid, an alkoxide its alcohol, an amide its amine, and each of those adds
+    a proton. Sodium triacetoxyborohydride is the case where that assumption is false and nothing
+    else notices. Its charge sits on boron, which has no room for a fourth substituent, so the only
+    route to neutral is to *remove* the hydride: measured, `CC(=O)O[BH-](OC(C)=O)OC(C)=O.[Na+]`
+    standardized to triacetoxyborane, a Lewis acid that reduces nothing, sharing one `compound_id`
+    and one fingerprint row with the reductive-amination reagent. All three existing guards pass it
+    — one organic fragment, a group-1 counterion, no metal–carbon bond — because none of them is
+    about the neutralization step.
+
+    The test is the hydrogen count and not an element list or a pKa table, deliberately: the
+    property being asserted is what the *transformation* did, which the two molecules already carry
+    between them, and a rule written over boron would miss whatever the next such anion is made of.
+    Where it fails the species is kept as written, charge and all, which is exactly what
+    `[BH4-].[Na+]` already gets from the organic-fragment count one branch up.
+
+    **The hydrogen count alone is the wrong question for a *cation*, and asking it of one broke
+    every amine salt in the corpus.** A conjugate acid/base pair has two sides and the paragraph
+    above lists only one: a carboxylate, an alkoxide and an amide are all **anions**, and all three
+    are neutralised by *gaining* a proton. A protonated amine is the other side — it is neutralised
+    by *losing* one — so the hydrogen count falls and this guard refused a species the module
+    docstring names as the case that must keep working ("that claim holds for an amine
+    hydrochloride"). Measured across the standardization the window shipped (`std6` -> `std7`):
+
+    | written as | free base | salt |
+    | --- | --- | --- |
+    | ethylamine·HCl | `CCN` | `CC[NH3+]` |
+    | pyridinium chloride | `c1ccncc1` | `c1cc[nH+]cc1` |
+    | lidocaine·HCl | free base | cation |
+    | propranolol·HCl | free base | cation |
+    | metformin·HCl | free base | cation |
+
+    Two `compound_id`s for one substance, so two `compound_note`s; a cache miss on work D-011
+    promises never to repeat; and a molecule ranking against itself as merely similar. It reaches
+    the reaction fingerprint too, because `rxnfp._standardize_species` standardizes one
+    `.`-separated
+    token at a time, so a bare `C[NH3+]` token arrives here with `organic == 1` — driven, a DRFP
+    Tanimoto between the ionised and neutral spellings of one reaction fell from 0.9444 to 0.6957.
+
+    So the charge decides which question to ask, and it is the charge of the species *before*
+    neutralisation because that is what names the side of the pair. A cation that cannot be
+    neutralised at all, a quaternary ammonium, is unaffected either way: `Uncharger` leaves it
+    alone, so the two molecules are the same one.
+
+    **`Chem.GetFormalCharge` is the *net* charge of everything in the string, and asking the
+    exemption of that number reintroduced the defect this guard exists for.** `standardize` runs
+    the spectator strip only when exactly one fragment is organic, so a string with two or more
+    organic fragments keeps every one of them — and then one net number decides a question about
+    each. Measured: `[BH4-].CC[NH+](CC)CC.CC[NH+](CC)CC` is net +1, so the cation arm exempted it
+    and borohydride came back as **borane**; so did triacetoxyborohydride against two
+    triethylammonium ions. That is the reducing agent sharing a `compound_id` with a Lewis acid
+    that reduces nothing, arriving through the exemption written to fix something else. So the arm
+    is conditioned on there being no anionic fragment in the string at all: a lone cation, or a
+    cation beside neutral fragments and metal counterions, is the only shape whose net positive
+    charge is a statement about the species being neutralised.
+
+    **The narrowness that leaves, stated rather than implied**: a string carrying *both* an anion
+    and a cation falls to the hydrogen count, which is a net quantity over a mixture and therefore
+    the wrong question for either species — measured, acetate against two ethylammonium ions
+    (net +1, charge-unbalanced) is kept charged where a per-fragment count would neutralise both.
+    It is the only difference the two forms have over 40 salts, hydrides, zwitterions and
+    ion-pair spellings, and it is on the side this module already chose: keeping a species as
+    written costs a cache miss, and D-2026-08-01 weighed that against writing a false record. A
+    per-fragment form would have to pair the fragments of `before` with those of `after` by index,
+    and a mispairing fails in the *other* direction — a wrong molecule, silently.
+    """
+    if Chem.GetFormalCharge(before) > 0 and not any(
+        Chem.GetFormalCharge(f) < 0 for f in Chem.GetMolFrags(before, asMols=True)
+    ):
+        return True
+    return _hydrogen_count(after) >= _hydrogen_count(before)
+
+
 def standardize(mol: Chem.Mol) -> Chem.Mol:
     """Apply the standardization pipeline to a parsed molecule (see the module docstring).
 
@@ -238,16 +474,18 @@ def standardize(mol: Chem.Mol) -> Chem.Mol:
     wants to check one stage — does not have to round-trip through a string.
 
     **The number of organic fragments is what decides whether the strip runs**, because that number
-    is the difference between a salt and a solvate. Exactly one organic fragment means every other
-    fragment is a counterion or a water of crystallization, and discarding them is what the pipeline
-    is for. **Two or more means the structure names no winner**: an ethylamine/THF solvate, a
-    co-crystal and an organic-acid salt all read alike, so `FragmentParent`'s tiebreak — whichever
-    fragment weighs more — makes the compound the record is about a property of the *pair* rather
-    than of the compound (`D-2026-08-27-a-solvate-is-not-its-solvent`). Keeping the species whole
-    costs a cache miss; picking wrong writes a false record into the graph behind a human signature,
-    and D-2026-08-01 already chose which of those to pay. Zero organic fragments is the wholly
-    inorganic reagent D-2026-08-01 rescued — there is no parent to keep, so the strip is skipped for
-    a third reason.
+    is the difference between a salt and a solvate. Exactly one organic fragment means the string
+    is a salt, a solvate or an adduct *of* that fragment — and **which** of the others then go is a
+    second question, answered per spectator below (charged, or on RDKit's fragment list), because a
+    neutral co-former is not a counterion and discarding one made urea hydrogen peroxide into urea.
+    **Two or more means the structure names no winner**: an ethylamine/THF solvate, a
+    co-crystal and an organic-acid salt all read alike, so a largest-fragment tiebreak — whichever
+    fragment weighs more — would make the compound the record is about a property of the *pair*
+    rather than of the compound (`D-2026-08-27-a-solvate-is-not-its-solvent`). Keeping the species
+    whole costs a cache miss; picking wrong writes a false record into the graph behind a human
+    signature, and D-2026-08-01 already chose which of those to pay. Zero organic fragments is the
+    wholly inorganic reagent D-2026-08-01 rescued — there is no parent to keep, so the strip is
+    skipped for a third reason.
 
     **`Uncharger` is gated on the same count, one step looser**, and the two thresholds are
     different questions rather than one written twice. It runs whenever *some* fragment is organic,
@@ -261,16 +499,83 @@ def standardize(mol: Chem.Mol) -> Chem.Mol:
     reappearing an ion at a time. A wholly inorganic ion's charge balances a counterion that may
     already have been split off it; only an organic acid/base pair can be neutralized without
     inventing a different reagent.
+
+    **And it is gated a second time on what the neutralization actually did**, because "an organic
+    acid/base pair" is a claim the fragment count cannot check. `_neutralization_is_protonation`
+    reads the two molecules and refuses the result when `Uncharger` reached neutral by *removing* a
+    hydrogen — sodium triacetoxyborohydride is the measured case, and the species is then kept with
+    its charge, which is what `[BH4-].[Na+]` already gets one branch up for the same reason.
     """
     cleaned = rdMolStandardize.Cleanup(mol)
+    # Atom maps go first and unconditionally, before any branch: they are a reaction's bookkeeping
+    # rather than a property of the compound, and every exit below returns a molecule that becomes a
+    # `compound_id` and a fingerprint row. Cleared on `cleaned` rather than on the argument because
+    # `Cleanup` hands back a copy this function owns, and a caller that passed its own molecule in
+    # must get it back unmodified.
+    for atom in cleaned.GetAtoms():
+        atom.SetAtomMapNum(0)
     if _metal_is_the_compound(mol, cleaned):
         return _TAUTOMERS.Canonicalize(cleaned)
-    organic = sum(1 for f in Chem.GetMolFrags(cleaned, asMols=True) if _is_organic(f))
-    if organic == 0:
+    organic_fragments = [f for f in Chem.GetMolFrags(cleaned, asMols=True) if _is_organic(f)]
+    if not organic_fragments:
         return _TAUTOMERS.Canonicalize(cleaned)  # no organic parent to keep, nothing to neutralize
-    if organic == 1:
-        cleaned = rdMolStandardize.FragmentParent(cleaned)  # the rest are counterions
-    return _TAUTOMERS.Canonicalize(rdMolStandardize.Uncharger().uncharge(cleaned))
+    if len(organic_fragments) == 1:
+        # **The one organic fragment *is* the parent — asked here rather than of RDKit.** This used
+        # to call `rdMolStandardize.FragmentParent`, whose `LargestFragmentChooser` defaults to
+        # counting atoms *including hydrogens* and to `preferOrganic=False`. Measured, the two
+        # disagree: on `[NH4+].[O-]C=O` the chooser keeps `[NH4+]` — five atoms against formate's
+        # four — and `Uncharger` then makes ammonium formate **ammonia**. This module already has
+        # a notion of which fragment is the compound, stated at the top of this file and tested in
+        # `_THE_ORGANIC_LINE`, so delegating the same question to a heuristic with a different
+        # answer was the defect. See
+        # `D-2026-09-22-the-parent-is-the-fragment-this-module-calls-organic`.
+        #
+        # **And the rest are counterions only if something says so.** This branch used to discard
+        # every other fragment on the strength of the count alone, without asking what a discarded
+        # fragment *is* — so urea hydrogen peroxide, a bench oxidant, became urea, and ethylamine
+        # with it. Two ways a fragment earns discarding, and between them they need no list of this
+        # repository's own:
+        #
+        # - **It carries a charge.** The string balances, so an inorganic ion beside one organic
+        #   fragment is that fragment's counterion by construction — bromide, chloride, sodium,
+        #   nitrate, tetrafluoroborate, hexafluorophosphate. Reading the charge rather than a table
+        #   is what keeps TBTU's BF4 and HATU's PF6 strippable without naming either: measured,
+        #   RDKit's curated list is a *pharmaceutical salt* list and knows neither.
+        # - **It is a solvent RDKit's list knows** — water, and the small neutrals beside it. A
+        #   solvate of one organic fragment is that fragment; this is the only thing here delegated
+        #   upstream, and it is delegated because a solvent list is exactly the table
+        #   `D-2026-08-01-a-reagent-is-not-its-largest-fragment` refuses to keep in step by hand.
+        #
+        # Anything else neutral and unrecognised — H2O2, a co-crystal former, a second reagent —
+        # leaves the string whole, which is what `standardize` already does for two organic
+        # fragments.
+        # Asked of **each** spectator, not of the set. A first spelling was `all(...)` over them,
+        # which coupled them: one unrecognised neutral preserved every other fragment too, so
+        # `CC[NH3+].[Cl-].OO` kept its chloride and TBTU with a peroxide kept its BF4. Whether a
+        # bromide is a counterion cannot depend on what else is in the string.
+        survived = {
+            Chem.MolToSmiles(f)
+            for f in Chem.GetMolFrags(_KNOWN_SPECTATORS.remove(cleaned), asMols=True)
+        }
+        kept = [organic_fragments[0]] + [
+            f
+            for f in Chem.GetMolFrags(cleaned, asMols=True)
+            if not _is_organic(f)
+            and Chem.GetFormalCharge(f) == 0
+            and Chem.MolToSmiles(f) in survived
+        ]
+        # Rebuilt rather than edited in place: `Chem.MolFromSmiles` over the kept fragments is one
+        # sanitized molecule, and the common case (everything discarded) is the organic fragment
+        # itself, which needs no round trip.
+        cleaned = (
+            organic_fragments[0]
+            if len(kept) == 1
+            else Chem.MolFromSmiles(".".join(Chem.MolToSmiles(f) for f in kept))
+        )
+    uncharged = rdMolStandardize.Uncharger().uncharge(cleaned)
+    if not _neutralization_is_protonation(cleaned, uncharged):
+        return _TAUTOMERS.Canonicalize(cleaned)  # not a conjugate acid; keep the anion as written
+    return _TAUTOMERS.Canonicalize(uncharged)
 
 
 class InvalidSmilesError(ChemclawError):
@@ -493,7 +798,7 @@ def compound_id(smiles: str) -> str:
     (`chemclaw.ingest.eln.compound`) and the fingerprint connectors that *cite* it
     (`chemclaw.science.fingerprints.molfp.search`, `chemclaw.connectors.bo.knowledge`). A connector
     must not import the knowledge graph (D-115), and the id is a pure function of the structure — no
-    graph needed to derive it, only to confirm the note has been merged.
+    graph needed to derive it, only to confirm the note exists.
     """
     return f"compound-{stable_hash(require_standard_smiles(smiles), chars=12)}"
 

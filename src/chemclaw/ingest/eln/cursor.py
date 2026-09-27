@@ -11,14 +11,33 @@ harmless.
 concurrently** — not that the write would be safe if something did. The scheduled sync is one
 Temporal Schedule under `ScheduleOverlapPolicy.SKIP` firing one workflow whose activities are
 strictly sequential, and the only other starter (`cli.live_data.backfill`) passes an explicit
-`since`, so it never reads or writes this table. The write itself is last-writer-wins: two drains
-that both loaded one mark leave the *lagging* one's value, measured in `tests/test_cursor.py`
-against overlapping transactions on real Postgres. What makes that acceptable rather than merely
-unreached is its direction — every stored value is a mark somebody had already ingested through,
-so a lost update moves the cursor *back* and costs a re-ingest; it can never move it past an entry
-nobody read. The tests pin both halves, so a later high-water spelling of the upsert has to be a
-decision rather than a drift. See
-`docs/decisions/D-2026-08-27-what-a-second-background-worker-would-race-on.md`.
+`since`, so it never reads or writes this table.
+
+**The write is a high-water mark anyway, and `GREATEST` is the whole of it.**
+`D-2026-08-27-what-a-second-background-worker-would-race-on` measured the blind
+`DO UPDATE SET cursor = EXCLUDED.cursor` under two overlapping transactions on real Postgres — the
+row lock serializes them and then applies the *lagging* value — and left it there, on the argument
+that the direction is harmless: every stored value is a mark somebody had already ingested through,
+so a lost update costs a re-ingest and can never move the cursor past an entry nobody read. That
+argument is correct and it rests entirely on the ingest being idempotent, which is a property of a
+different module that nothing at this level asserts. `GREATEST(sync_cursors.cursor,
+EXCLUDED.cursor)` makes the guarantee a property of the statement instead, for one word. It is not
+a lock and adds no contention — it takes the same row lock the blind form already took — which is
+why it does not reopen that ADR's decision to add none.
+
+**What it costs is that `store_cursor` can no longer rewind a cursor**: a store behind the stored
+mark is a no-op rather than a regression. Nothing in `src/` wants to — the backfill CLI passes an
+explicit `since` and never touches this table — and the supported way to force a re-drain is to
+delete the row, exactly as `ingest/labels/cursor.py` documents for its own. Stated because it is a
+real behavioural change: `tests/test_cursor.py` used `store_cursor(source, _EPOCH)` as a reset, and
+that spelling silently stops resetting anything.
+
+**It does not carry over to `ingest/labels/cursor.py`, whose upsert reads identically.** That
+column is `TEXT` holding a keyset position in the source's own domain, so `GREATEST` compares it
+lexicographically: measured on this repository's own Postgres, `GREATEST('9'::text, '10'::text)` is
+`'9'`. A bigint keyset would pin at the first single-digit id it reached and *skip* every row past
+it — forwards, which is the direction that loses data, and the reverse of the trade being made
+here.
 """
 
 from datetime import UTC, datetime
@@ -34,7 +53,13 @@ _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 _SELECT = "SELECT cursor FROM sync_cursors WHERE source = %s"
 _UPSERT = (
     "INSERT INTO sync_cursors (source, cursor, updated_at) VALUES (%s, %s, now()) "
-    "ON CONFLICT (source) DO UPDATE SET cursor = EXCLUDED.cursor, updated_at = now()"
+    "ON CONFLICT (source) DO UPDATE SET "
+    "cursor = GREATEST(sync_cursors.cursor, EXCLUDED.cursor), updated_at = now() "
+    # The *stored* mark, which is no longer necessarily the one the caller passed. Without it
+    # `store_cursor` would feed `observe_cursor` its own argument, so a lagging writer whose
+    # value `GREATEST` discarded would still move `chemclaw_ingest_cursor_lag_seconds`
+    # backwards — the gauge reporting a regression the table refused.
+    "RETURNING cursor"
 )
 
 
@@ -110,12 +135,20 @@ async def load_cursor(source: str, dsn: str | None = None) -> datetime:
 
 
 async def store_cursor(source: str, cursor: datetime, dsn: str | None = None) -> None:
-    """Persist the advanced high-water `cursor` for `source` (upsert)."""
+    """Advance `source`'s high-water cursor to `cursor` (a store behind the mark is a no-op).
+
+    What is *observed* for the lag gauge is the mark the statement returns, not the argument: under
+    `GREATEST` those differ exactly when a lagging writer loses, and feeding the gauge the losing
+    value would report a regression the table refused.
+    """
     target = dsn if dsn is not None else settings.postgres_dsn
     async with db.connection(target, operation="sync_cursor_store") as conn:
-        await conn.execute(_UPSERT, (source, cursor))
+        result = await conn.execute(_UPSERT, (source, cursor))
+        row = await result.fetchone()
         await conn.commit()
-    observe_cursor(source, cursor)
+    # `DO UPDATE` is unconditional, so the statement always writes a row and always returns one;
+    # the fallback exists for the type checker, not for a state this can reach.
+    observe_cursor(source, row[0] if row is not None else cursor)
 
 
 # Bound at import rather than from a startup hook, for the reason `db.bind_pool_metrics` is bound

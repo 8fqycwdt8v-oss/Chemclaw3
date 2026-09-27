@@ -110,19 +110,39 @@ repository has twice discovered the right answer for those and written it down: 
 and let a test assert it. A regex cannot count, and teaching one to try would produce a rule that is
 wrong more often than the prose.
 
+**Rule 11 is about a marker rather than a text.** Prompt prose written as a constant outside
+`agent/chemclaw_agent.py` carries `core/model_prose.ModelProse`, and `marked_prose` is the loader
+the prose guards in `tests/test_prose_contract.py` read it through. The rule here is only that a
+marker sits where that loader can read it. Rules 1-4 are deliberately *not* run over it: these are
+templates that name a job's argument fields in `snake_case` (`subject_note_id`, `sweep_values`),
+which rule 2 would read as unknown tools — the corpus split the paragraph above argues, one class
+over.
+
 Run via `make prose-validate`; gated in CI beside `kg-validate` and `skill-validate`.
 """
 
 import argparse
+import ast
+import importlib
 import re
 import sys
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from pathlib import Path
+from typing import TypeGuard
 
-from chemclaw.agent.chemclaw_agent import _INSTRUCTIONS, available_tool_names
+from chemclaw.agent.chemclaw_agent import (
+    _INSTRUCTION_BLOCKS,
+    _SAFETY_BLOCKS,
+    PromptBlock,
+    declared_tool_names,
+    harness_tool_names,
+    skill_tool_names,
+    subagent_tool_names,
+)
 from chemclaw.connectors.registry import skills_dirs as connector_skills_dirs
 from chemclaw.core.config import Settings, settings
 from chemclaw.core.metrics import declared_histogram_names, declared_metric_names
+from chemclaw.core.model_prose import ModelProse
 from chemclaw.kg.note import known_note_types
 
 # Symbols a skill may legitimately name in call form that are not agent tools: library/graph
@@ -192,7 +212,7 @@ def taught_tool_names(text: str, known: Collection[str]) -> set[str]:
     loose pattern; checking that an unknown name is absent needs a strict one** — is
     D-2026-08-05's, which measured the widening and rejected it for rule 2 alone.
 
-    `known` is a parameter rather than a call to `available_tool_names()` here so the filter is
+    `known` is a parameter rather than a call to `declared_tool_names()` here so the filter is
     part of the contract instead of a caller's afterthought: there is no way to use this
     extractor without one.
     """
@@ -340,13 +360,233 @@ _NON_SETTINGS_ENV = frozenset(
 )
 
 
+def _block_groups() -> tuple[tuple[str, tuple[PromptBlock, ...]], ...]:
+    """Every group of `PromptBlock`s a prompt is assembled from, by the symbol that holds it.
+
+    Two, and the second is the whole reason this is a function rather than one tuple.
+    `_SAFETY_BLOCKS` is the floor appended to a profile that replaces the default prose, and it was
+    a single un-narrowed string until 2026-09-10 — so rule 10 had never seen the text that reaches
+    every specialist, and the `record_knowledge_note` sentence in it was being sent to five shipped
+    profiles that cannot call the tool. A rule that checks one of two groups is a rule with a blind
+    spot the size of the other, which is this file's own recurring subject.
+
+    Read at call time rather than baked into a constant, so a test can substitute either group by
+    patching this module's own name for it.
+    """
+    return (("_INSTRUCTION_BLOCKS", _INSTRUCTION_BLOCKS), ("_SAFETY_BLOCKS", _SAFETY_BLOCKS))
+
+
+def _block_origin(symbol: str, index: int, blocks: tuple[PromptBlock, ...]) -> str:
+    """How one prompt block is named in a problem line — the symbol, index and opening words.
+
+    The index alone is a coordinate that shifts whenever a block is inserted above; the opening
+    words are what makes a failure findable by search. Both, because either alone is worse: the
+    words are not unique enough to address a block and the index is not stable enough to cite. The
+    symbol joined them once there were two groups to be in.
+    """
+    opening = " ".join(blocks[index].text.split()[:6])
+    return f"src/chemclaw/agent/chemclaw_agent.py::{symbol}[{index}] ({opening}…)"
+
+
 def _prose_sources() -> dict[str, str]:
-    """The agent-facing prose to check: every SKILL.md plus the built-in instructions."""
-    sources = {"src/chemclaw/agent/chemclaw_agent.py::_INSTRUCTIONS": _INSTRUCTIONS}
+    """The agent-facing prose to check: every SKILL.md plus the built-in instructions.
+
+    **Block by block rather than as one string**, which is what makes rules 1-4 and rule 10 ask the
+    same question of the same text. `_INSTRUCTIONS` is now an assembly of `PromptBlock`s and the
+    *maximal* one — the log-only traceability block is not in it, so checking the joined string
+    would leave one of the two paragraphs a deployment can be sent outside every rule here.
+    """
+    sources = {
+        _block_origin(symbol, index, blocks): block.text
+        for symbol, blocks in _block_groups()
+        for index, block in enumerate(blocks)
+    }
     for skills_dir in [*settings.skills_dirs, *connector_skills_dirs()]:
         for path in sorted(Path(skills_dir).glob("*/SKILL.md")):
             sources[str(path)] = path.read_text()
     return sources
+
+
+#: The package every marked constant lives under, which is also the tree `marked_prose` walks.
+_PACKAGE = Path(__file__).resolve().parents[1]
+
+
+def _is_marker_call(node: ast.AST) -> TypeGuard[ast.Call]:
+    """Whether `node` is a `ModelProse(...)` call, the one spelling a marker takes."""
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == ModelProse.__name__
+    )
+
+
+def _marked_sites(path: Path) -> tuple[list[str], list[int]]:
+    """The module-level names `path` marks, and the lines of any marker a loader cannot reach.
+
+    A marker is reachable when it is the value of a module-level assignment or sits inside one —
+    a mapping's value, a tuple's member. Anywhere else (inside a function, a class, a default
+    argument) it is evaluated when code runs, so no loader reads it without running that code, and
+    it would look applied while guarding nothing.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    names: list[str] = []
+    reachable: set[int] = set()
+    for statement in tree.body:
+        if isinstance(statement, ast.Assign):
+            targets, value = statement.targets, statement.value
+        elif isinstance(statement, ast.AnnAssign) and statement.value is not None:
+            targets, value = [statement.target], statement.value
+        else:
+            continue
+        calls = [node for node in ast.walk(value) if _is_marker_call(node)]
+        if not calls:
+            continue
+        reachable.update(id(call) for call in calls)
+        names.extend(target.id for target in targets if isinstance(target, ast.Name))
+    stray = [
+        node.lineno
+        for node in ast.walk(tree)
+        if _is_marker_call(node) and id(node) not in reachable
+    ]
+    return names, stray
+
+
+def _marked_files() -> list[Path]:
+    """Every module under the package that spells the marker at all — a cheap text prefilter."""
+    marker = f"{ModelProse.__name__}("
+    return [
+        path
+        for path in sorted(_PACKAGE.rglob("*.py"))
+        if marker in path.read_text(encoding="utf-8")
+    ]
+
+
+def marked_prose() -> dict[str, str]:
+    """Every string a module marks as model-facing, by `prose:<module>:<name>[<key>]`.
+
+    **The loader the prose guards read the marked class through**
+    (`tests/test_prose_contract.py::_marked_prose`). The names are found by parsing each module
+    and the values read by importing it, so a template assembled with `+` or `str.format` at module
+    scope is read as the string it evaluates to — which is the text a model is sent, placeholders
+    and all — rather than as the literal pieces in the source.
+
+    A mapping or tuple of markers contributes one entry per member, keyed by its key or index, so a
+    finding names the one hint that carried it rather than the whole table.
+    """
+    found: dict[str, str] = {}
+    for path in _marked_files():
+        names, _stray = _marked_sites(path)
+        if not names:
+            continue
+        dotted = ".".join(path.relative_to(_PACKAGE.parent).with_suffix("").parts)
+        module = importlib.import_module(dotted)
+        for name in names:
+            value = getattr(module, name)
+            members: Iterable[tuple[object, object]]
+            if isinstance(value, ModelProse):
+                found[f"prose:{dotted}:{name}"] = str(value)
+                continue
+            if isinstance(value, Mapping):
+                members = value.items()
+            elif isinstance(value, tuple | list):
+                members = enumerate(value)
+            else:
+                continue
+            for key, member in members:
+                if isinstance(member, ModelProse):
+                    found[f"prose:{dotted}:{name}[{key}]"] = str(member)
+    return found
+
+
+def check_marked_prose_is_reachable() -> list[str]:
+    """Rule 11: a `ModelProse` marker sits where `marked_prose` can read it, or it is refused.
+
+    The marker is only a guard if the loader sees it, and the loader reads module-level constants.
+    One written inside a function body is evaluated per call and read by nobody, so it would be the
+    shape this whole module exists to catch: a control that reads as applied and checks nothing.
+    """
+    problems: list[str] = []
+    for path in _marked_files():
+        _names, stray = _marked_sites(path)
+        problems.extend(
+            f"{path.relative_to(_ROOT)}:{line}: `{ModelProse.__name__}` is not a module-level "
+            "constant, so no prose guard reads it — hoist it to module scope"
+            for line in stray
+        )
+    return problems
+
+
+def check_instruction_blocks() -> list[str]:
+    """Rule 10: a block declares exactly the tools its own text names, from a bindable name space.
+
+    **The rule that makes block-dropping a control rather than a decoration.** A `PromptBlock` is
+    dropped when the graph does not bind everything in its `requires`
+    (`chemclaw_agent.PromptBlock`), so a block that names `screen_hazards` and requires nothing is
+    the original defect with an extra step: it never drops, and it reads — in the declaration, to a
+    reviewer — as though it does. Equality rather than containment, because the other direction is
+    a defect too: a block requiring a tool it does not mention disappears from deployments that had
+    no reason to lose it, and nothing in the text would tell anyone why.
+
+    The second half is about which name space a requirement may come from.
+    `build_langgraph_agent` narrows the prompt against the tools it *binds* — the registry, the
+    connectors and the template launchers — and the three middleware name spaces
+    (`skill_tool_names`, `harness_tool_names`, `subagent_tool_names`) are attached afterwards by
+    middleware, so they are never in that set. A block requiring `read_file` or `task` would
+    therefore pass rules 1-2 (those are real tools) and be silently dropped from every deployment
+    that exists. That is exactly D-117's shape — a name space a checker cannot see — arriving from
+    the other side, so it is named here rather than left to be discovered.
+
+    **The unconditional half of that name space may still be *named*, and the equality is what had
+    to move.** `skill_tool_names()` and `subagent_tool_names()` are attached to every agent this
+    deployment builds — `FilesystemMiddleware` unconditionally, `SubAgentMiddleware` because
+    `_apply_excluded_middleware` refuses to strip it — so a block describing `write_file` and
+    `/scratch/` is not a promise that can fail, and requiring the name would drop the block from
+    everywhere instead. Equality is therefore over `named` minus those two, and requiring one is
+    still refused. `harness_tool_names()` stays out of both halves: `write_todos` is attached only
+    when the harness is on, and the prompt is narrowed against nothing that can tell.
+
+    **And `absent_unless` is checked from the other side, because it fails the other way round.**
+    Its names must be bindable for the same reason `requires` must — a denial keyed on a name
+    nothing can bind never drops — and the two sets must be disjoint, since a block that both
+    requires a tool and is false when that tool is bound is a block no deployment ever sees. What no
+    rule here can check is *coverage*: whether a denial clause somebody writes next year declares
+    the tool that would refute it. A denial names a capability in English, not a function, so there
+    is no authoritative resolver for it and this file does not pretend otherwise
+    (`tests/test_prose_contract.py` asserts the shipped two both ways instead).
+    """
+    always_bound = skill_tool_names() | set(subagent_tool_names())
+    # Declared, for the reason `check_prose_contract` gives: with an opt-in bundle in the tree a
+    # deployment *can* bind these, so a block keyed on one is a control whose condition occurs —
+    # which is exactly what `D-2026-09-15-a-capability-in-the-fleet-cannot-refute-a-denial-this-
+    # tree-declares-no-bundle-for` refused when no manifest existed here to make it possible.
+    bindable = declared_tool_names() - always_bound - harness_tool_names()
+    problems: list[str] = []
+    for symbol, blocks in _block_groups():
+        for index, block in enumerate(blocks):
+            origin = _block_origin(symbol, index, blocks)
+            named = referenced_tool_names(block.text) - always_bound
+            if named != block.requires:
+                problems.append(
+                    f"{origin}: names {sorted(named)} and requires "
+                    f"{sorted(block.requires)}. A block must require exactly the tools it names — "
+                    "one it names but does not require is never dropped, and one it requires but "
+                    "does not name is dropped from deployments with no reason to lose it."
+                )
+            unreachable = sorted((block.requires | block.absent_unless) - bindable)
+            if unreachable:
+                problems.append(
+                    f"{origin}: keys on {unreachable}, which `build_langgraph_agent` never binds — "
+                    "a middleware's tool (a filesystem verb, `write_todos`, `task`) is attached "
+                    "after the surface the prompt is narrowed against, so this block would be "
+                    "dropped from every deployment (or, for `absent_unless`, from none)."
+                )
+            both = sorted(block.requires & block.absent_unless)
+            if both:
+                problems.append(
+                    f"{origin}: requires {both} and is also declared false when they are bound, so "
+                    "no deployment is ever sent it. A block is a promise or a denial, not both."
+                )
+    return problems
 
 
 def _operator_sources() -> dict[str, str]:
@@ -639,7 +879,13 @@ def check_prose_contract() -> list[str]:
     """Return one problem string per violation; empty means the prose matches the tool surface."""
     # One definition of the union, shared with the two other validators and the agent itself, so a
     # tool cannot be "available" to one checker and unknown to another (D-117).
-    tools = available_tool_names()
+    #
+    # **Declared rather than bound**, since `ConnectorManifest.default_enabled` exists: prose naming
+    # `mtsr` is a claim about this repository, and an opt-in bundle's tools are absent from
+    # `enabled()` on every checkout that has not turned it on. Checking against the bound set would
+    # report a correct reference as unknown everywhere, which is the D-117 defect with a new cause.
+    # Deletion is still caught: a tool no manifest declares is in neither set.
+    tools = declared_tool_names()
     problems: list[str] = []
     for origin, text in _prose_sources().items():
         for name in sorted(referenced_tool_names(text) - tools):
@@ -675,6 +921,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     problems = (
         check_corpus_is_assembled()
         + check_prose_contract()
+        + check_instruction_blocks()
+        + check_marked_prose_is_reachable()
         + check_operator_prose()
         + check_metric_citations()
     )

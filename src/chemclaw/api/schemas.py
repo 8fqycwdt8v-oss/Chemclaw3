@@ -3,9 +3,11 @@
 These models are the wire contract a browser (or the companion UI repo) programs against, kept
 apart from the routes that serve them (R3.2) because a shape change is an API-compatibility
 decision while a route change is a behavior one — a reviewer should see each kind of diff on its
-own. Nothing here touches `app.state`, the database or Temporal: the two functions beside the
-models (`_transcript`, `_proposal_summary`) are pure projections from stored records onto these
-shapes, which is what lets `tests/test_jobs_api.py` drive them without an app.
+own. Nothing here touches `app.state`, the database or Temporal: the functions beside the models
+(`_transcript` and its helpers) are pure projections from stored records onto these shapes, which is
+what lets `tests/test_jobs_api.py` drive them without an app. That list named a second projection,
+`_proposal_summary`, until the PR-gate it summarised was deleted
+(`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`).
 
 `content_address` is imported for the same reason and is no exception to it: it is `hashlib` over a
 string, and the *decision* it feeds — whether a past tool call's full result is still fetchable —
@@ -17,8 +19,10 @@ from collections.abc import Collection, Sequence
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, computed_field, field_validator
 
+from chemclaw.agent.session_store import stored_correlation_id
+from chemclaw.agent.tool_result_size import full_result_ref, was_cut
 from chemclaw.api.tool_results import content_address
 from chemclaw.core.config import settings
 
@@ -122,12 +126,18 @@ class TranscriptToolCall(BaseModel):
     only consumer that acts on this — there is nothing to fetch — and telling them apart would
     mean keeping a tombstone per expired blob, which is a durable record of a rendering, on the one
     table in the schema that grows per tool call.
+
+    `result_cut` is `ToolResultEvent.result_cut` recovered from the stored message, with the same
+    meaning: the model was shown a cut of this result, and `result_ref` (when set) opens the full
+    text the tool returned rather than the cut — `result` stays the model's text, like the stream's
+    `preview` does.
     """
 
     tool: str
     arguments: str = ""
     result: str | None = None
     result_ref: str = ""
+    result_cut: bool = False
 
 
 class TranscriptMessage(BaseModel):
@@ -151,6 +161,11 @@ class TranscriptMessage(BaseModel):
     role: str
     text: str
     tool_calls: list[TranscriptToolCall] = []
+    # The turn that stored this message (`session_messages.correlation_id`), so a client whose
+    # stream detached recovers that turn's answer by identity rather than by matching its text.
+    # `None` for a row stored off the request path or before the column existed. Optional and
+    # additive: a client that does not read it sees the contract it always did.
+    correlation_id: str | None = None
 
 
 class PlanDecisionIn(BaseModel):
@@ -165,8 +180,112 @@ class PlanDecisionIn(BaseModel):
     plan_hash: str
 
 
+class WorkflowApprovalIn(BaseModel):
+    """A person's Yes to the durable jobs one composed workflow may launch, bound to its version.
+
+    `fingerprint` is required and is not defaulted to "whatever the workflow is now", for the
+    reason `PlanDecisionIn.plan_hash` is not: the binding is the whole control. A workflow that
+    changed after being displayed is a different procedure, and approving it because it happens to
+    share a name is approving something nobody read.
+    """
+
+    fingerprint: str = Field(min_length=1)
+
+
+class WorkflowSummaryOut(BaseModel):
+    """One composed workflow in a listing: enough to choose one, not enough to approve it."""
+
+    name: str
+    summary: str = ""
+    step_count: int = 0
+    # The subset that costs compute, so a listing can show what still needs a decision without a
+    # second request per row.
+    job_steps: list[str] = Field(default_factory=list)
+    # Whether this version's job steps may run. Derived, not stored: a row whose document changed
+    # after approval is not approved, and a listing that reported the stored flag would say it was.
+    approved: bool = False
+
+
+class WorkflowListOut(BaseModel):
+    """A caller's own composed workflows, most recently changed first."""
+
+    workflows: list[WorkflowSummaryOut] = Field(default_factory=list)
+    # Says this is a page rather than the whole set, the way `PendingRequestsOut` does: the store
+    # clamps at `composed.MAX_PER_OWNER`, and a caller that could not tell would report a truncated
+    # list as a complete one.
+    truncated: bool = False
+
+
+class WorkflowStepOut(BaseModel):
+    """One step of a composed workflow, as the person approving it needs to see it.
+
+    Ids alone are what this used to be, and they are not a procedure: a person shown
+    `["rank", "say"]` and asked to authorize real compute has approved a name the model chose.
+    That is `D-2026-09-12-an-approval-that-names-no-tool-authorizes-every-tool` one layer over —
+    an approval that names no job authorizes every job — and it contradicted the sentence the
+    widening rests on, that "the job's name and its arguments are in the document they approved".
+    """
+
+    id: str
+    kind: str
+    # The tool or job this step calls, empty for a reasoning step. **The field that makes an
+    # approval an approval**: it is what the run will actually invoke.
+    calls: str = ""
+    # The arguments as written, `${…}` references and all, so a reader sees what is passed and
+    # what is carried from an earlier step.
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    # An agent step's prompt. Shown because a reasoning step is where the model's judgment enters
+    # a procedure a person is being asked to stand behind.
+    prompt: str = ""
+
+
+class WorkflowApprovalOut(BaseModel):
+    """What a person is being asked to approve: the procedure, not a list of names."""
+
+    name: str
+    summary: str = ""
+    description: str = ""
+    # The whole procedure in order, each step naming what it calls and with what.
+    steps: list[WorkflowStepOut] = Field(default_factory=list)
+    # The ids of the subset that costs compute — what approving this actually releases.
+    job_steps: list[str] = Field(default_factory=list)
+    # Whether *this* version's job steps may run. Derived like `WorkflowSummaryOut.approved`, and
+    # for a sharper reason here: `approved_by` and `approved_at` describe whichever version
+    # `approved_fingerprint` names, which a re-composed document no longer is. A client rendering
+    # the two person-fields on their own would show "approved by Alice" over a document Alice never
+    # saw — so the comparison ships as a field rather than as something every client re-derives.
+    approved: bool = False
+    # Which conversation this procedure was composed in, so an approver looking at steps they did
+    # not write can find the exchange that asked for them. Empty off the service path, where there
+    # is no session.
+    composed_in_session: str = ""
+    # Who approved that version and when, kept beside `approved_fingerprint` rather than alone.
+    # Read at all so the audit the row *is* has a reader: a column written and never selected is an
+    # attribution nothing can see.
+    approved_at: datetime | None = None
+    # What to post back. The approval binds to this, so a client that renders one version and posts
+    # another gets a 409 rather than a silent approval of the version it did not show.
+    fingerprint: str = ""
+    approved_fingerprint: str = ""
+    approved_by: str = ""
+
+
 class PendingRequestOut(BaseModel):
-    """One held-open question, as an inbox renders it."""
+    """One held-open question, as an inbox renders it.
+
+    **Narrower than the stored record, and that is the shape rather than an omission.** It is built
+    from `durable.pending_store.PendingRequest` by `**model_dump()`, and it used to restate that
+    record's `answered_at`, `answered_by` and `answer` too — three fields the only route that builds
+    this model cannot ever fill: `pending_store.open_requests` is `WHERE state = 'waiting'` in SQL,
+    so an answered row never reaches here. A response field that is structurally always empty is not
+    a quiet feature a client might one day read, it is boilerplate, and a surface that does serve
+    answered rows will need to say what an answer *is* — whose payload it carries, who may see it —
+    which is a decision to take then rather than a default to inherit now.
+
+    `reminders` stays, and it is the one field here that earns its place by saying something the
+    rest cannot: on a waiting row it separates "asked an hour ago" from "asked on Tuesday and
+    chased three times", which is the difference between an inbox and a list.
+    """
 
     request_id: str
     kind: str
@@ -178,21 +297,52 @@ class PendingRequestOut(BaseModel):
     state: str = "waiting"
     due_at: str = ""
     reminders: int = 0
-    answered_at: str = ""
-    answered_by: str = ""
-    answer: dict[str, Any] = Field(default_factory=dict)
     created_at: str = ""
 
 
 class PendingRequestsOut(BaseModel):
-    """Everything waiting on this caller, soonest deadline first.
+    """One page of what is waiting on this caller, soonest deadline first.
 
     `count` is the length of `requests` rather than a total, and the list is bounded by the store.
     An inbox that said "12" over five rows would be describing a page as a population.
+
+    **That was honest to a code reader and silent on the wire**, which is the same defect one
+    remove: the docstring reasoned carefully about the distinction and the JSON carried only the
+    page, so a client with 35 waiting rows rendered 20 as the whole inbox with nothing to say
+    otherwise. `total_routed_to_you` and `truncated` are that reasoning made into fields.
+
+    `total_routed_to_you` is counted over the store's **routing** predicate, before separation of
+    duties is applied — so it can exceed `count` for two different reasons, and `verdict` says
+    both: rows the page did not reach, and rows this caller may not answer (an approval they
+    raised themselves). Not counted post-gate, because the gate turns on the *kind* and the
+    requester, which no SQL predicate here expresses.
     """
 
     requests: list[PendingRequestOut] = Field(default_factory=list)
     count: int = 0
+    # Everything matching this caller's routing, before the page bound and before the gate.
+    total_routed_to_you: int = 0
+    # Whether waiting rows exist that this page did not carry.
+    truncated: bool = False
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def verdict(self) -> str:
+        """What this page is, in one sentence a client can render above the list."""
+        if self.truncated:
+            return (
+                f"PARTIAL: {self.count} shown of {self.total_routed_to_you} routed to you, "
+                "soonest deadline first. The rest are still waiting — ask for a larger `limit`."
+            )
+        if self.total_routed_to_you > self.count:
+            return (
+                f"COMPLETE: every request you may answer is shown. "
+                f"{self.total_routed_to_you - self.count} further request(s) are routed to you "
+                "but not yours to answer (you raised them)."
+            )
+        if not self.count:
+            return "NOTHING WAITING: no open request is routed to you."
+        return "COMPLETE: every request waiting on you is shown."
 
 
 class PendingAnswerIn(BaseModel):
@@ -207,11 +357,19 @@ class PendingAnswerIn(BaseModel):
 
 
 class PlanStatusOut(BaseModel):
-    """The plan a session is currently proposing, its hash, and who (if anyone) approved it."""
+    """The plan a session is currently proposing, its hash, and who (if anyone) approved it.
+
+    `scope` is what approving it would authorize: every tool the plan's steps declare
+    (`D-2026-09-12-an-approval-that-names-no-tool-authorizes-every-tool`). It belongs in the same
+    payload as the steps because the gate enforces it — a state-changing tool no step declared is
+    refused even under a live approval — so a surface that showed the steps alone would be asking
+    a person to approve a thing it had not shown them.
+    """
 
     session_id: str
     plan_hash: str
     plan: list[str]
+    scope: list[str] = []
     mode: str
     approved: bool
     decided_by: str | None = None
@@ -237,6 +395,10 @@ class PendingPlan(BaseModel):
     updated_at: datetime
     plan_hash: str
     plan: list[str]
+    # What approving this plan would authorize — see `PlanStatusOut.scope`. The inbox carries it
+    # for the same reason the card does: it is the half of the plan a person is deciding about
+    # that the steps do not say.
+    scope: list[str] = []
 
 
 class PendingPlansOut(BaseModel):
@@ -325,7 +487,7 @@ def _transcript(
     rather than queried here so this stays a pure projection the tests can drive without an app,
     and so the one database read happens once per transcript rather than once per tool call.
     """
-    results: dict[str, tuple[str, str]] = {}
+    results: dict[str, tuple[str, str, bool]] = {}
     for message in stored:
         call_id = getattr(message, "tool_call_id", None)
         if not call_id:
@@ -334,24 +496,32 @@ def _transcript(
         # when the turn ran, which is the whole reason the computed ref matches a stored blob. A
         # result that came back empty gets no ref here: there is nothing for a surface to fetch,
         # and `fetchable` is what decides in every other case.
+        #
+        # **A cut result names its full text by the stamp, not by hashing** — the text in this
+        # row is the model's cut, and the stream named the full text the cut kept
+        # (`tool_result_size.FULL_RESULT_REF_KEY`, which the row's JSON round trip preserves).
+        # Falling back to the hash when the stamp is empty is the stream's own fallback: the full
+        # text was not kept, so the stream stored the cut, and this names that.
         text = message_text(message)
-        ref = content_address(text) if text else ""
+        ref = full_result_ref(message) or (content_address(text) if text else "")
         results[str(call_id)] = (
             _truncate_for_transcript(text),
             ref if ref in fetchable else "",
+            was_cut(message),
         )
     transcript: list[TranscriptMessage] = []
     for index, message in enumerate(stored):
         calls: list[TranscriptToolCall] = []
         for call in getattr(message, "tool_calls", None) or []:
             paired = results.get(str(call.get("id", "")))
-            result, ref = paired if paired is not None else (None, "")
+            result, ref, cut = paired if paired is not None else (None, "", False)
             calls.append(
                 TranscriptToolCall(
                     tool=str(call.get("name", "")),
                     arguments=_truncate_for_transcript(call.get("args", "")),
                     result=result,
                     result_ref=ref,
+                    result_cut=cut,
                 )
             )
         # A tool message is the carrier for a result that has already been attached to its call,
@@ -360,7 +530,13 @@ def _transcript(
         if role == "tool" and not calls:
             continue
         transcript.append(
-            TranscriptMessage(index=index, role=role, text=message_text(message), tool_calls=calls)
+            TranscriptMessage(
+                index=index,
+                role=role,
+                text=message_text(message),
+                tool_calls=calls,
+                correlation_id=stored_correlation_id(message),
+            )
         )
     return transcript
 

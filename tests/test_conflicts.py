@@ -20,7 +20,12 @@ from chemclaw.core.errors import ChemclawError
 from chemclaw.kg.conflicts import Conflict, conflicts_by_note, find_conflicts
 from chemclaw.kg.note import Note, Relation
 from chemclaw.kg.relations import KNOWN_RELATIONS
-from chemclaw.memory.failure import close_refuted_note, failure_note
+from chemclaw.memory.failure import (
+    close_refuted_note,
+    failure_note,
+    failures_against,
+    observation_of,
+)
 
 
 def _note(note_id: str, **kwargs: object) -> Note:
@@ -502,32 +507,129 @@ def test_a_run_note_and_a_retired_note_pair_when_their_windows_intersect() -> No
     assert find_conflicts([later, retired]) == []
 
 
-def test_a_disjoint_dated_corpus_scans_in_linear_time() -> None:
+#: How many times the sweep read the two fields it decides overlap on, across one `find_conflicts`.
+#:
+#: Module-level rather than a class attribute on `_CountingNote`. A `ClassVar[int]` would work;
+#: an underscore-prefixed one is a `ModelPrivateAttr` and silently is not a counter, which is how
+#: this started life as a module global. Kept there because the counter outlives any one instance
+#: and belongs to the measurement rather than to the note.
+_FIELD_READS = [0]
+
+
+class _CountingNote(Note):
+    """A note that counts reads of `valid_from` and `valid_to`, which is the sweep's own work.
+
+    Counting rather than timing, for the reason `tests/test_compaction.py::_CountingEstimator`
+    gives about the same class of claim: a ratio of two wall clocks on a shared runner has no safe
+    place to sit, and a count does not move. These two fields are the right quantity because they
+    are what `_conditional_disagreements` reads per active note per event — the exact loop whose
+    complexity is the subject — so the count is the work rather than a proxy for it.
+    """
+
+    def __getattribute__(self, name: str) -> object:
+        if name in ("valid_to", "valid_from"):
+            _FIELD_READS[0] += 1
+        return object.__getattribute__(self, name)
+
+
+def _sweep_work(size: int, *, disjoint: bool) -> tuple[int, int]:
+    """The field reads one `find_conflicts` costs over `size` dated notes, and what it found.
+
+    **Both, because the count alone lost half the old test.** The wall-clock version this replaced
+    also asserted `find_conflicts(4000 disjoint notes) == []`, and the first draft of the counted
+    version dropped it — so a regression that started *reporting* conflicts on a one-note-per-day
+    corpus would have passed at every size above two. The conflicts are returned rather than
+    asserted here because the overlapping arm is supposed to find plenty.
+    """
+    base = date(2020, 1, 1)
+    notes: list[Note] = []
+    for i in range(size):
+        start = base + timedelta(days=i)
+        notes.append(
+            _CountingNote(
+                id=f"d{i}",
+                type="reaction",
+                compound_smiles="CCO",
+                confidence=(i % 10) / 10,
+                valid_from=start,
+                # Disjoint: a one-day window per note, the structure `knowledge/README.md`
+                # advertises. Otherwise: every window spans every later one, so every pair is
+                # genuinely examined.
+                valid_to=start if disjoint else base + timedelta(days=size + i),
+            )
+        )
+    _FIELD_READS[0] = 0
+    found = find_conflicts(notes)
+    return _FIELD_READS[0], len(found)
+
+
+def test_a_disjoint_dated_corpus_does_a_linear_amount_of_work() -> None:
     """The regression the review measured: closed non-overlapping windows restored O(N²).
 
     The old walk's `_overlaps` rejection consumed a step without ending the walk, so a
     one-note-per-day corpus — the exact structure `knowledge/README.md` advertises — walked its
-    whole group per note: 714 ms at 2,000 notes, 3.1 s at 4,000, clean 4× per doubling, returning
-    zero conflicts for the work. The sweep never examines a disjoint pair, so this corpus now
-    scans in ~10 ms. The ceiling is two orders of magnitude above the fixed cost and one below
-    the quadratic one, so it discriminates without being flaky on a slow runner.
-    """
-    import time as _time
+    whole group per note: 714 ms at 2,000 notes, 3.1 s at 4,000, clean 4x per doubling, returning
+    zero conflicts for the work. The sweep never examines a disjoint pair.
 
-    base = date(2020, 1, 1)
-    notes = [
-        _note(
-            f"d{i}",
-            compound_smiles="CCO",
-            confidence=(i % 10) / 10,
-            valid_from=base + timedelta(days=i),
-            valid_to=base + timedelta(days=i),
-        )
-        for i in range(4000)
-    ]
-    start = _time.perf_counter()
-    assert find_conflicts(notes) == []
-    assert _time.perf_counter() - start < 1.5
+    **A count, not a wall clock, and that is a correction.** This asserted `perf_counter() < 1.5`
+    over one corpus size, and on 2026-09-20 it took **1.84 s** inside a 46-minute run competing
+    with three subagents and reddened `check` on a pull request containing zero files under
+    `src/` — a gate reddening for machine load, which teaches everybody to re-run. The property
+    was never a duration anyway: its own docstring states it as *"went on matching every remaining
+    record"*, which is a claim about work.
+
+    Measured: field reads are **9,998 / 19,998 / 39,998 / 79,998** at 1,000 / 2,000 / 4,000 /
+    8,000 notes — exactly 2.00x per doubling, byte-identical run to run. Eight times the corpus is
+    therefore **8.0014x** the work, and the quadratic arm this exists to catch is 64x.
+
+    **The bar is 10, and the figure it replaces was wrong in the reassuring direction.** This said
+    16 and called it "two-and-a-half orders clear of both ends"; 16 is 2.0x above the linear end
+    and 4.0x below the quadratic one — 0.3 and 0.6 orders. Since the quantity is a deterministic
+    count rather than a duration, it needs none of the slack that sentence was claiming: 10 leaves
+    25% over the measured 8.0014 and, solving `(8 + 64f) / (1 + f)` for a quadratic confined to a
+    fraction `f` of the corpus, catches anything touching more than **0.05%** of it, where 16
+    caught only above 0.5%.
+    """
+    small, small_found = _sweep_work(1_000, disjoint=True)
+    large, large_found = _sweep_work(8_000, disjoint=True)
+    ratio = large / small
+
+    assert (small_found, large_found) == (0, 0), (
+        f"a corpus of closed non-overlapping windows produced {small_found} and {large_found} "
+        "conflicts. The sweep never examines a disjoint pair, so every one of these is a pair "
+        "whose windows do not overlap being reported as a contradiction"
+    )
+    assert ratio < 10, (
+        f"eight times the corpus cost {large:,} field reads against {small:,} — {ratio:.4f}x, "
+        "where linear is 8.0014 and quadratic is 64. The disjoint sweep is examining pairs whose "
+        "windows do not overlap again"
+    )
+
+
+def test_the_work_counter_can_see_the_quadratic_arm_it_is_bounding() -> None:
+    """The control, because a bound satisfied by measuring nothing is not a bound.
+
+    `_FIELD_READS` returning a small number for every corpus would pass the test above for the
+    wrong reason — the shape `D-2026-09-18-a-mutation-watched-failing-is-half-a-guard` is about.
+    So the same counter runs over a corpus where **every** window overlaps every later one, which
+    is the work the disjoint case is claimed not to do.
+
+    Measured, overlapping against disjoint at the same size: 81,200 / 1,998 at 200 notes,
+    322,400 / 3,998 at 400, 1,284,800 / 7,998 at 800 — 4.00x per doubling against 2.00x, which is
+    the difference the assertion above rests on being able to see.
+    """
+    disjoint, _ = _sweep_work(400, disjoint=True)
+    overlapping, overlapping_found = _sweep_work(400, disjoint=False)
+
+    assert overlapping_found > 0, (
+        "the overlapping arm found no conflicts, so it is not the populated corpus this control "
+        "needs to be one"
+    )
+    assert overlapping > disjoint * 8, (
+        f"a corpus where every window overlaps cost {overlapping:,} field reads against the "
+        f"disjoint corpus's {disjoint:,}, so this counter cannot tell the two shapes apart and "
+        "the linearity assertion beside it is vacuous"
+    )
 
 
 def test_two_spellings_of_one_molecule_land_in_one_conflict_group() -> None:
@@ -545,3 +647,158 @@ def test_a_self_contradiction_is_not_a_conflict() -> None:
     """`[[contradicts:itself]]` is an authoring mistake, not a disagreement a reader can act on."""
     note = _note("a", body="[[contradicts:a]]")
     assert find_conflicts([note]) == []
+
+
+def test_failures_against_finds_what_a_design_cites_and_what_it_charges() -> None:
+    """`memory/failure.py` was a builder with no query side, which is most of why it did not work.
+
+    A `failure-mode` note could be written, indexed and retrieved by anyone who went looking, and
+    nothing went looking at the moment it mattered. Two joins, and both arms matter:
+
+    - **citation** is exact: a failure's `contradicts` edge names a note id, and a design's
+      `EvidenceRef.ref` is such an id. No resemblance, no threshold.
+    - **structure** is weaker and is why the check it feeds is a note rather than a blocker: one
+      molecule appearing in two routes is not the same claim twice.
+
+    The negative arm is the one that earns its place — a corpus full of failures about other work
+    must come back empty, or the check becomes noise a chemist learns to skip.
+    """
+    cited = failure_note(
+        refutes="playbook-suzuki-a",
+        what_happened="the catalyst died above 60 C",
+        reported_by="ana",
+    )
+    structural = failure_note(
+        refutes="some-other-note",
+        what_happened="the amine oxidised on standing",
+        reported_by="ben",
+        compound_smiles="CCN",
+    )
+    unrelated = failure_note(
+        refutes="playbook-nothing-to-do-with-us",
+        what_happened="a different route entirely",
+        reported_by="cat",
+    )
+    corpus = [cited, structural, unrelated]
+
+    by_citation = failures_against(corpus, cited=["playbook-suzuki-a"])
+    assert [note.id for note in by_citation] == [cited.id]
+
+    by_structure = failures_against(corpus, structures=["CCN"])
+    assert [note.id for note in by_structure] == [structural.id]
+
+    both = failures_against(corpus, cited=["playbook-suzuki-a"], structures=["CCN"])
+    assert {note.id for note in both} == {cited.id, structural.id}
+
+    assert failures_against(corpus, cited=["playbook-unheard-of"]) == []
+    assert failures_against(corpus) == [], "asking about nothing must not return everything"
+
+
+def test_a_failure_matches_a_design_whatever_spelling_the_smiles_arrived_in() -> None:
+    """The structural arm compared raw strings, under an Args block saying "Canonical SMILES".
+
+    Nothing canonicalizes a note's `compound_smiles` on the way in — a chemist writes whatever their
+    ELN exported — so a failure recorded against `OCC`, `C(O)C` or `[CH3][CH2][OH]` was invisible to
+    a design charging `CCO`, and `no_documented_failure` came back clean over a corpus that held the
+    warning. Driven on those four spellings of ethanol before the fix: one of four matched. The
+    sibling this function's own docstring names as "the same shape", `kg/conflicts.py`, has keyed on
+    `canonical_smiles` since it was written.
+
+    The negative arm is asserted too, because "canonicalize both sides" is one line away from
+    "match everything": ethanol must still not match ethylamine.
+    """
+    spellings = ["OCC", "C(O)C", "[CH3][CH2][OH]", "CCO"]
+    corpus = [
+        failure_note(
+            refutes=f"some-note-{index}",
+            what_happened="the alcohol was the wrong nucleophile",
+            reported_by="ana",
+            compound_smiles=spelling,
+        )
+        for index, spelling in enumerate(spellings)
+    ]
+    other = failure_note(
+        refutes="some-other-note",
+        what_happened="the amine oxidised on standing",
+        reported_by="ben",
+        compound_smiles="CCN",
+    )
+
+    found = failures_against([*corpus, other], structures=["CCO"])
+
+    assert {note.compound_smiles for note in found} == set(spellings), (
+        "every spelling of the molecule the design charges has to be the same join key"
+    )
+    assert failures_against([*corpus, other], structures=["OCC"]) != [], (
+        "and the design's own spelling is canonicalized too, not only the note's"
+    )
+    assert [note.id for note in failures_against([*corpus, other], structures=["CCN"])] == [
+        other.id
+    ], "ethanol is not ethylamine — canonicalizing must not widen the join to everything"
+
+
+def test_only_failure_notes_answer_a_failure_query() -> None:
+    """A playbook that happens to cite the same id is not a record of it failing.
+
+    The type filter is what keeps this a failure memory rather than a citation index — without it
+    the check would report every note that mentions the design's evidence, which is most of a
+    healthy corpus.
+    """
+    failure = failure_note(refutes="playbook-a", what_happened="it did not hold", reported_by="ana")
+    # **A `contradicts` edge on a note that is not a failure**, which is the case that actually
+    # exercises the type filter. The first version of this test used a `cites` edge, and the
+    # relation check alone refused it — so deleting the type filter left the test green, measured.
+    # A correction legitimately contradicts what it corrects, and it is not a record of a failure.
+    correction = Note(
+        id="correction-b",
+        type="correction",
+        created_by="human",
+        source="test",
+        body="The published value was wrong: [[contradicts:playbook-a]].\n",
+    )
+
+    found = failures_against([failure, correction], cited=["playbook-a"])
+    assert [note.id for note in found] == [failure.id], (
+        "a correction contradicting the same note is not a record of that note having failed"
+    )
+
+
+def test_a_failure_that_merely_cites_a_note_is_not_a_failure_of_it() -> None:
+    """The relation filter, which the type filter does not cover.
+
+    `outgoing_relations` returns every edge a note asserts, and a failure-mode note legitimately
+    carries more than one: it contradicts what failed and may cite the background it was read
+    against. Matching on any edge would report the *background* as having failed — which is the
+    opposite of what happened, and the kind of wrong that makes a chemist stop trusting the check.
+    """
+    failure = Note(
+        id="failure-multi",
+        type="failure-mode",
+        created_by="agent",
+        source="feedback:ana",
+        tags=["failure-mode"],
+        body=(
+            "[[contradicts:playbook-a]] did not hold.\n\n"
+            "Read against [[cites:review-b]], which is fine.\n"
+        ),
+    )
+
+    assert [note.id for note in failures_against([failure], cited=["playbook-a"])] == [failure.id]
+    assert failures_against([failure], cited=["review-b"]) == [], (
+        "the note this failure was read against did not fail; only what it contradicts did"
+    )
+
+
+def test_the_observation_is_what_a_chemist_reads_not_the_provenance_line() -> None:
+    """`failure_note` writes the reporter and the date first, then what was seen.
+
+    Surfacing the first line would tell a chemist who filed it and nothing about what happened,
+    which is the half with the value in it.
+    """
+    note = failure_note(
+        refutes="playbook-a",
+        what_happened="the catalyst died above 60 C",
+        reported_by="ana",
+    )
+    assert observation_of(note) == "the catalyst died above 60 C"
+    assert "Reported by" not in observation_of(note)

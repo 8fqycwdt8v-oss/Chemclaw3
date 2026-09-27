@@ -24,7 +24,6 @@ from temporalio.exceptions import WorkflowAlreadyStartedError
 
 from chemclaw.agent.authz import AuthorizationError, side_effecting_tools
 from chemclaw.agent.tool_authz import DryRunRefusal, refuse_writes_on_dry_run
-from chemclaw.agent.turn_flags import reset_dry_run, set_dry_run
 from chemclaw.connectors.jobs import (
     ConnectorJobError,
     build_job_tool,
@@ -35,6 +34,7 @@ from chemclaw.connectors.manifest import JobSpec
 from chemclaw.connectors.registry import enabled
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
+from chemclaw.core.turn_flags import reset_dry_run, set_dry_run
 from chemclaw.core.turn_signals import JobSignal
 from chemclaw.durable.connector_job import ConnectorJobInput
 from tests.middleware import run_middleware, tool_request

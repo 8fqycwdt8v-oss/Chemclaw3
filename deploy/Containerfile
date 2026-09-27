@@ -16,6 +16,7 @@
 # record what a build actually contained: if the bytes cannot be pinned in advance, they must at
 # least be *named* afterwards.
 ARG BASE_IMAGE=registry.access.redhat.com/ubi9/python-311:latest
+
 FROM ${BASE_IMAGE}
 
 # uv drives the install to match local/CI exactly (same lockfile). Copy metadata first for layer reuse.
@@ -96,17 +97,68 @@ COPY schema ./schema
 COPY deploy/entrypoint.sh /usr/local/bin/chemclaw-entrypoint
 COPY deploy/knowledge-sync.sh /usr/local/bin/chemclaw-knowledge-sync
 
+# The compiled half of the egress guard (`src/chemclaw/core/netguard_preload.c`): an `LD_PRELOAD`
+# interposition on libc's `connect`, `getaddrinfo`, `sendto` and `sendmsg`, which is the only layer
+# that reaches grpc's C-core and Temporal's Rust sdk-core — the two destinations `netguard.py`
+# measurably cannot bound, and the ones that carry prompts when `otel_include_sensitive_data` is on.
+# `deploy/entrypoint.sh` arms it; `D-2026-09-12-the-layer-that-binds-grpc-is-libc-not-socket-py`
+# records what it covers and what it does not.
+#
+# **The base image's own compiler, and no `dnf install`.** Measured against the base this file
+# defaults to: `gcc` is already at `/usr/bin/gcc` (11.5.0, glibc 2.34) because the s2i Python image
+# ships a toolchain for building wheels — so a `dnf` line would add a network dependency to the build
+# for something already present, and a builder stage would exist to keep a compiler out of a runtime
+# image that ships one regardless. A base that drops it fails *this* line, loudly, which is the
+# behaviour a missing build dependency should have.
+#
+# The flags are in `deploy/build-netguard-preload.sh` rather than on this line, because
+# `tests/test_netguard_preload.py` compiles the same source to drive its four-arm measurement: two
+# `gcc` invocations would let that suite prove a binary this image does not ship.
+#
+# The destination is `chemclaw.core.netguard_preload.LIBRARY_PATH`, the path the entrypoint
+# preloads. An `LD_PRELOAD` naming a file that is not there is ignored by the loader **in silence**,
+# so the two spellings are pinned against each other by a test rather than kept equal by hand.
+COPY deploy/build-netguard-preload.sh ./build-netguard-preload.sh
+RUN sh ./build-netguard-preload.sh \
+      src/chemclaw/core/netguard_preload.c /app/lib/libchemclaw_netguard.so \
+    && rm ./build-netguard-preload.sh
+
 # Install into a project venv; --frozen fails if the lockfile drifted (reproducible builds).
 #
 # `uv cache clean` is not housekeeping. uv extracts every wheel it downloads into
 # `$HOME/.cache/uv/archive-v0/`, each with its own `dist-info`, and that cache was shipping inside
-# the runtime image — build-time scratch in a production artifact. The image scan is what found it,
-# and found it the hard way: it reported `setuptools` 70.3.0 and `msgpack` 1.1.2, neither of which
-# is *installed* anywhere (uv.lock pins setuptools 83.0.0 and has no msgpack at all), so two rounds
-# of "upgrade it wherever it lives" correctly did nothing — there was nothing to upgrade. They were
-# cached copies of build dependencies, and the fix is to not ship the cache.
+# the runtime image — build-time scratch in a production artifact. Worth removing on its own terms.
+#
+# **What it did not fix, and this comment said it did**
+# (`D-2026-09-14-the-phantom-packages-were-pips-vendored-manifest`). It used to end: the scan's
+# `setuptools` 70.3.0 and `msgpack` 1.1.2 "were cached copies of build dependencies, and the fix is
+# to not ship the cache". Measured 2026-09-14 on an image built *with* this clean in place, trivy
+# 0.58.2 reports both, unchanged. They live in one file:
+#
+#     /opt/app-root/lib/python3.11/site-packages/pip/_vendor/vendor.txt
+#       msgpack==1.1.2
+#       setuptools==70.3.0
+#
+# — pip's own vendored manifest, with the code beside it (`pip/_vendor/msgpack`,
+# `pip/_vendor/pkg_resources`), in pip **26.2.1**, the current release. No pip upgrade moves them
+# and no lockfile change reaches them. They are argued in `.trivyignore.yaml` with an expiry.
+# The `find` two blocks down could not see them because it searches for `setuptools-[0-9]*`, a
+# `dist-info`/wheel naming convention that a line in a text file does not have — so "the scanner
+# contradicts the artifact" was the search being narrower than the scan, which is a different
+# problem and a fixable one.
 RUN uv sync --frozen --no-dev \
     && uv cache clean \
+    # **Bake the BPE merge table, because the alternative is a request-time fetch.**
+    # `agent/context_budget.py` counts the request prefix exactly where an encoding resolves, and
+    # tiktoken downloads its merge table on first use — which the no-egress posture forbids and
+    # `core/netguard.py` would refuse. Fetched here, at build time, where a network is legitimate:
+    # ~3.6 MB, once. Without it the budget logs one INFO line and falls back to its chars/4
+    # estimator, which is correct but leaves the measured 1,161 tokens of thread on the table.
+    && mkdir -p /opt/tiktoken \
+    && TIKTOKEN_CACHE_DIR=/opt/tiktoken /app/.venv/bin/python -c \
+       "import tiktoken; tiktoken.get_encoding('o200k_base')" \
+    && chown -R 1001:0 /opt/tiktoken \
+    && chmod -R g=u /opt/tiktoken \
     && chmod +x /usr/local/bin/chemclaw-entrypoint /usr/local/bin/chemclaw-knowledge-sync \
     && chown -R 1001:0 /app \
     && chmod -R g=u /app
@@ -118,6 +170,12 @@ RUN uv sync --frozen --no-dev \
 # in the *base image's* Python environments — the UBI9 layer ships more than one interpreter, each
 # with its own `site-packages` — which is exactly the class of finding a lockfile audit is blind to
 # and the reason the row asked for an image scan as well as a dependency scan.
+#
+# **This loop does not fix those two, and never could.** They are `pip/_vendor/vendor.txt` lines
+# (see the `uv cache clean` block above); `pip show setuptools` reports the *installed* 84.0.0, so
+# the condition below is true and the upgrade is a no-op against the finding. What the loop does
+# earn its place for is the base's own interpreters: UBI9 ships setuptools 65.5.1, which carries
+# two HIGH advisories, and this is what moves them.
 #
 # Upgraded rather than removed, and only where already installed: `--upgrade` on an absent package
 # would *add* it, growing the closure to fix a vulnerability that was not there. Something in the
@@ -131,11 +189,13 @@ RUN uv sync --frozen --no-dev \
 # quietly is the same shape of bug as a probe that always passes.
 #
 # The trailing `find` is the diagnostic half and stays in the build. It matched `*.dist-info` at
-# first, which was too narrow to answer the question it was added for: the scan kept reporting a
-# `setuptools` 70.3.0 that the listing did not contain, because that copy carries no `dist-info`.
-# Widened to any versioned artifact, so a bundled seed wheel or an `egg-info` shows up too — the
-# whole point is that the build names what it left rather than a scanner naming a version with no
-# address.
+# first, which was too narrow to answer the question it was added for, and **widening it to
+# `setuptools-[0-9]*` was still too narrow for the same reason**: every pattern it has ever carried
+# assumes a package announces its version *in a filename*, and the copies that kept being reported
+# announce theirs in a line of `pip/_vendor/vendor.txt`. So the `vendor.txt` files are listed too,
+# with their contents — the whole point is that the build names what it left rather than a scanner
+# naming a version with no address, and for three rounds the build's answer was "nothing here" when
+# the right answer was two lines of a text file.
 RUN set -eux; \
     interpreters="$(find /usr/bin /usr/local/bin /opt -maxdepth 4 -name 'python3*' -type f \
       -perm -u+x -print 2>/dev/null | sort -u)"; \
@@ -151,7 +211,10 @@ RUN set -eux; \
     done; \
     echo "every versioned setuptools/msgpack artifact left in the image:"; \
     find / -xdev \( -name 'setuptools-[0-9]*' -o -name 'msgpack-[0-9]*' \) -print 2>/dev/null \
-      || true
+      || true; \
+    echo "every vendored manifest that names one, and what it names:"; \
+    find / -xdev -name 'vendor.txt' -print -exec grep -iE '^(setuptools|msgpack)==' {} \; \
+      2>/dev/null || true
 
 # The revision this image was built from, stamped onto every audit record (AG-14 / REV-17). The
 # config docstring has always said "the F6 image build injects the digest" and no build ever did —
@@ -171,6 +234,7 @@ USER 1001
 ENV PATH="/app/.venv/bin:${PATH}" \
     PYTHONUNBUFFERED=1 \
     CHEMCLAW_COMPONENT=service \
-    CHEMCLAW_DEPLOYMENT_REVISION=${CHEMCLAW_REVISION}
+    CHEMCLAW_DEPLOYMENT_REVISION=${CHEMCLAW_REVISION} \
+    TIKTOKEN_CACHE_DIR=/opt/tiktoken
 
 ENTRYPOINT ["/usr/local/bin/chemclaw-entrypoint"]

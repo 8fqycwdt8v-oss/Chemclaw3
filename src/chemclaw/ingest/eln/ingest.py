@@ -11,13 +11,16 @@ used to be true of the first two only, while the third was proposed as a `create
 for a human to merge — a reviewer asked to approve a rendering of data the source system had
 already signed off on. The argument the fingerprint half always made now covers the whole function:
 nothing here infers anything, so there is nothing to decide. A knowledge *claim* about these runs
-is still a playbook or a campaign, still gated, citing these records.
+is still a playbook or a campaign citing these records — and since
+`D-2026-09-05-the-gate-follows-behaviour-not-knowledge` that is not gated either, which this line
+used to say it was.
 
 Stores are injected, so the flow is testable with in-memory ones. Every write is an id-keyed
 upsert, so re-ingesting is safe and an amended entry simply overwrites its record.
 """
 
 import logging
+from datetime import datetime
 
 from chemclaw.core.chem import standard_smiles
 from chemclaw.core.errors import ChemclawError
@@ -46,6 +49,7 @@ async def ingest_reaction(
     *,
     label_index: LabelIndex,
     source: str,
+    retracted_at: datetime | None = None,
 ) -> ReactionRecord:
     """Validate, index (reaction + compounds + impurities + labels), store the record; return it.
 
@@ -102,7 +106,14 @@ async def ingest_reaction(
     # other.
     await label_index.record(record_phase(reaction, source))
 
+    # The withdrawal is stamped here rather than inside `record_from_ord_reaction`, because that
+    # function maps an `OrdReaction` and a retraction is not in the reaction — it is something the
+    # *source* said about the entry, and `RawEntry` is where the source speaks. Keeping the mapping
+    # pure is also what keeps it the deterministic transcription
+    # `D-2026-08-25-an-eln-transcription-is-data-not-a-claim` argues it is.
     record = record_from_ord_reaction(reaction)
+    if retracted_at is not None:
+        record = record.model_copy(update={"retracted_at": retracted_at})
     await record_store.record([record], source)
     return record
 

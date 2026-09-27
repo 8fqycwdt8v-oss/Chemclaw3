@@ -1,0 +1,61 @@
+{
+  "probe": {
+    "id": "op-31",
+    "section": 2,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Before I commit the team to a ligand screen — what don't we know that we should? Point me at the actual holes in what we hold on Pd cross-coupling.",
+    "expects_tools": [
+      "find_knowledge_gaps",
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a note id that does not exist",
+      "the literature does not cover this",
+      "a gap in the science, asserted from a gap in the graph"
+    ],
+    "direction": "Answers from the graph rather than reciting generic chemistry gaps: names specific structural holes it can actually see — a transformation with no failure-mode note attached, a compound referenced but with no linked reaction, a playbook with no run supporting it — and for each, the experiment or note that would close it. The distinction that matters: a gap in what *we have recorded* is not a gap in what is *known*, and the answer must not slide from one to the other. Prioritising the gaps by what a ligand screen would actually depend on is the good version.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "op-31",
+    "section": 2,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "Before I commit the team to a ligand screen — what don't we know that we should? Point me at the actual holes in what we hold on Pd cross-coupling.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.29,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "4e5e108327704e108b458a41951a18bb",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

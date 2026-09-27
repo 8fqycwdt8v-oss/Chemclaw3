@@ -137,8 +137,22 @@ class CalculatorSettings(BaseSettings):
     # refusal sooner while a deployment that raises it simply falls through to the server's.
     calc_hessian_max_atoms: int = Field(default=150, ge=1)
     # xTB semiempirical calculator (plan step 1c.2). Method is the GFN parametrization
-    # (latest: GFN2-xTB). `xtb_embed_seed` fixes RDKit 3D embedding so results are
-    # reproducible; it is part of the cache key so changing it recomputes.
+    # (latest: GFN2-xTB).
+    #
+    # **There is no embedding seed here and there never was a field to delete.** This comment said
+    # `xtb_embed_seed` "fixes RDKit 3D embedding so results are reproducible; it is part of the
+    # cache key so changing it recomputes" — naming a setting no `Settings` has ever declared.
+    # `tasks/audit-2026-08-16/findings/round1/core-kernel--correctness.md` found that and it was
+    # not fixed, which is why it is written out rather than quietly deleted: a knob named in prose
+    # and declared nowhere is a control an operator goes looking for, does not find, and cannot
+    # tell from one they failed to set.
+    #
+    # What this repository does about embedding determinism is **nothing, deliberately**. 3D
+    # embedding is the server's `embed_structure` (ETKDG plus a force-field cleanup), reached
+    # through `chemclaw.connectors.calc.remote.remote_call` and carrying no cache row of its own
+    # — and that is the reason it lives there: a geometry embedded by a different RDKit build is
+    # a different `structure_id`, so the embedding and every key derived from it must come off one
+    # side. A seed on this side would address nothing on the side that does the embedding.
     xtb_method: str = "GFN2-xTB"
     # `xtb_geometry_decimals` was here and is now `science.calc.models._GEOMETRY_DECIMALS`. It
     # rounds the coordinates the *server* derives `input_hash` from, so a deployment that set it
@@ -174,11 +188,26 @@ class CalculatorSettings(BaseSettings):
     # rather than reading from here, because it is a definition and not a deployment's choice.
     xtb_thermo_temperature_k: float = 298.15
     xtb_thermo_pressure_pa: float = 101325.0
-    # Quasi-RRHO damping frequency (cm^-1, Grimme 2012): below it a vibration is treated
-    # as a free rotor for the entropy, because a harmonic oscillator's entropy diverges
-    # as the frequency goes to zero and low modes are exactly where the harmonic
-    # approximation fails. 25 cm^-1 is the published value and what xtb itself uses.
-    xtb_rrho_cutoff_cm: float = 25.0
+    # Quasi-RRHO damping frequency (cm^-1, Grimme 2012): the frequency at which a vibration's
+    # entropy is an equal mixture of the harmonic and free-rotor expressions, because a harmonic
+    # oscillator's entropy diverges as the frequency goes to zero and low modes are exactly where
+    # the harmonic approximation fails.
+    #
+    # **50 is xtb's own `--sthr` default, and it is chosen for that reason.** The value shipped
+    # here was 25, under a comment claiming it was "the published value and what xtb itself uses" —
+    # false in both halves: Grimme 2012 (Chem. Eur. J. 18, 9955) publishes w0 = 100 cm^-1 and xtb's
+    # `--sthr` defaults to 50. Every Hessian this arithmetic runs on comes from the GFN2-xTB tier,
+    # so matching the reference implementation is the one choice a chemist can check: a plain
+    # `xtb --ohess` on the same geometry now agrees with what this system reports, where 25 agreed
+    # with nothing.
+    #
+    # It is not free. On eight low modes of an ordinary flexible drug-sized molecule the shift from
+    # 25 to 50 raises -T·S by ~1.1 kcal/mol — a third of `xtb_reaction_uncertainty_kcal` — and it
+    # does **not** cancel across a reaction that changes flexibility. Nothing cached is stale:
+    # `ThermoSettings` is deliberately not part of the Hessian's cache key (D-132), so the free
+    # energy is recomposed from the cached second derivatives on every call and no stored row
+    # carries the old convention. Results already *published* to a result sink do.
+    xtb_rrho_cutoff_cm: float = 50.0
     # A negative Hessian eigenvalue below this magnitude (cm^-1) is numerical noise from
     # the finite differences, not a real imaginary mode. Above it the geometry is a
     # saddle point and the thermochemistry says so.

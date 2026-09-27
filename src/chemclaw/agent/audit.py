@@ -9,7 +9,8 @@ tool uniformly — the audit trail is a single reusable piece (DRY), like `kg/re
 It is observe-only: it never alters the arguments or the result. Each call records the
 correlation id (which conversation), the actor (who — a Phase-6 seam, the configured
 `service_actor_id` until Entra identity lands), the tool name, its truncated arguments, the
-outcome and a short effect summary (e.g. the PR ref a `propose_*` tool returned), and the latency.
+outcome and a short effect summary (e.g. the commit ref a `record_*` tool returned), and the
+latency.
 Records go to the stdlib log always, and additionally to a durable `AuditSink` when one is
 supplied (the Postgres append-only trail) — the log is the floor, the sink is the durable record.
 
@@ -247,7 +248,7 @@ class AuditEvent(BaseModel):
     # be read from had no setter in `src/`, so the column was empty on every row ever written
     # while three docstrings said the trail named the agent beside the human, and
     # `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution` deleted the plumbing and
-    # pinned the absence. What changed is that there is now exactly one subagent, spawned on
+    # pinned the absence. What changed is that a subagent is now spawned on
     # every turn (`D-2026-08-29-a-helper-is-cheaper-and-narrower-than-its-caller`), and its tool
     # calls were landing in the trail as the chemist's own with nothing marking them.
     #

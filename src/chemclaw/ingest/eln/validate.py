@@ -14,8 +14,10 @@ fingerprint index (G4):
    **What this therefore does not catch, stated plainly** because it reads stronger than it
    is: any fabrication whose product is built from elements the inputs already supply.
    `aniline + methanol >> paracetamol` validates. So does `methane >> eicosane`, and
-   `glucose >> cholesterol`. Only a product introducing a *new element* is rejected — which
-   is why the reviewer, not this function, is the gate on whether a reaction is real.
+   `glucose >> cholesterol`. Only a product introducing a *new element* is rejected, so this is a
+   soundness filter and never a check that a reaction is real. That check used to be the reviewer's
+   at the PR-gate; `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` removed the reviewer and
+   nothing replaced them here — a transcription is trusted because a source system recorded it.
 
    Two stronger checks were considered and neither is available on this data. Comparing
    heavy-atom counts needs a ceiling on how many times an input may repeat in a product, and
@@ -36,6 +38,7 @@ from rdkit import Chem
 
 from chemclaw.ingest.eln.adapter import ElnAdapter, ElnMappingError
 from chemclaw.ingest.eln.ord import OrdReaction
+from chemclaw.ingest.eln.warehouse.expr import pattern_budget
 
 
 def _elements(smiles_list: list[str]) -> tuple[set[str], list[str]]:
@@ -90,11 +93,11 @@ def _validate_source(adapter: ElnAdapter, label: str) -> int:
     from the image, therefore reported OK while the structure and mass-balance gate on everything
     entering the graph and the fingerprint index had quietly stopped running.
 
-    Zero is not legitimate here, and the difference from `main`'s empty *enabled set* is worth
-    stating: no sources enabled is a configuration a deployment chose and can read off
-    `CHEMCLAW_DATA_SOURCES`, so that is announced and exits 0. A source that is attached and
-    supplies nothing is a claim that failed — and nothing available here distinguishes a genuinely
-    empty ELN from a mis-mounted one, which is exactly why it must not pass quietly.
+    Zero is not legitimate here, and `main`'s empty *enabled set* is now the same answer for a
+    related reason rather than the opposite one: neither state is a run of this gate, so neither
+    may exit 0. What differs is only the sentence an operator reads — this one names a source to go
+    and fix, that one names the enable list — because nothing available here distinguishes a
+    genuinely empty ELN from a mis-mounted one.
     """
     entries = asyncio.run(adapter.fetch_new_entries(datetime.min.replace(tzinfo=UTC)))
     if not entries:
@@ -104,16 +107,22 @@ def _validate_source(adapter: ElnAdapter, label: str) -> int:
         )
         return 1
     problems = 0
-    for raw in entries:
-        try:
-            issues = validate_ord(adapter.map_to_ord(raw))
-        except ElnMappingError as exc:
-            print(f"{label}/{raw.entry_id}: unmappable — {exc}")
-            problems += 1
-            continue
-        for issue in issues:
-            print(f"{label}/{raw.entry_id}: {issue}")
-        problems += len(issues)
+    # The same page-wide regex budget an ingest runs under, so `make eln-validate` fails on a
+    # binding whose patterns cost more than a page may spend rather than passing a manifest that
+    # then wedges the sync activity. Found by `tests/test_warehouse_binding.py`'s derived guard over
+    # every module that maps entries in a loop — which is the whole reason that guard is derived
+    # rather than a list of the callers somebody remembered.
+    with pattern_budget():
+        for raw in entries:
+            try:
+                issues = validate_ord(adapter.map_to_ord(raw))
+            except ElnMappingError as exc:
+                print(f"{label}/{raw.entry_id}: unmappable — {exc}")
+                problems += 1
+                continue
+            for issue in issues:
+                print(f"{label}/{raw.entry_id}: {issue}")
+            problems += len(issues)
     if not problems:
         print(f"OK: {len(entries)} entr(ies) from {label} are valid")
     return problems
@@ -123,7 +132,9 @@ def main() -> int:
     """CLI: map and validate every entry from the *enabled* ingest sources (plan 4.4).
 
     Run as `python -m chemclaw.ingest.eln.validate`. Exits non-zero if any entry is unmappable or
-    fails structure/mass-balance validation.
+    fails structure/mass-balance validation — and equally if there was nothing to check at all,
+    from either end: no source enabled that declares an ingest half, or an attached source that
+    offered no entries. Exit 0 means this gate ran.
 
     **It asks the registry which adapters are attached rather than naming two of them.** This used
     to construct `JsonExportAdapter` and `OrdJsonAdapter` by name and validate those, which was
@@ -142,13 +153,26 @@ def main() -> int:
 
     names = active_ingest_source_names()
     if not names:
-        # Not a failure — a retrieve-only deployment is a legitimate configuration — but it must not
-        # read as a pass. "OK" over an empty set is exactly what this rewrite exists to stop.
+        # **The sentence and the exit code have to agree, and they did not.** This printed "This is
+        # not a pass: nothing was checked" and returned 0 — so the only channel a caller reads by
+        # machine said the opposite of the only channel a human reads, and CI is a machine. Both
+        # siblings that print that sentence exit 1 (`validate_kg` appends it as a problem,
+        # `validate_sinks` returns it as one).
+        #
+        # The argument for 0 was that a retrieve-only deployment is a configuration rather than a
+        # failure, which is true and is not what this branch measures. `active_manifests` raises on
+        # an *unknown* name, so a typo is already loud; what reaches here silently is a name that is
+        # known and declares no `ingest:` half — an operator who meant `graph,eln-json` and wrote
+        # `graph` gets this line and a green gate, with the structure and mass-balance check on
+        # everything entering the graph and the fingerprint index having quietly stopped running.
+        # That mistake costs the corpus; the other costs a deployment with no ELN one line in its
+        # pipeline, which is why the message says to remove the target.
         print(
             "No ingest sources are enabled (CHEMCLAW_DATA_SOURCES), so no ELN entries were "
-            "validated. This is not a pass: nothing was checked."
+            "validated. This is not a pass: nothing was checked. If this deployment has no ELN, "
+            "drop this gate from its pipeline rather than reading a green line off it."
         )
-        return 0
+        return 1
     total = 0
     for name in names:
         source = make_data_source(name)

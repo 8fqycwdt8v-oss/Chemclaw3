@@ -274,6 +274,13 @@ _CYCLE_EDGES: dict[Edge, str] = {
     ("chemclaw.connectors", "chemclaw.agent"): (
         "connector jobs and identity plumbing authorize against agent's authz/identity context"
     ),
+    ("chemclaw.connectors", "chemclaw.ingest"): (
+        "a bundle serving structural hits asks the transcription store whether the source has "
+        "withdrawn the run a hit stands for — the one question a fingerprint index cannot answer "
+        "about its own contents (`connectors/rxnfp/server/tools.py::similar_reactions`, "
+        "D-2026-09-13-a-withdrawal-is-a-fact-a-source-reports). The reverse edge stays undeclared: "
+        "ingestion must not reach into a bundle"
+    ),
 }
 
 # The full declared graph: every module-scope edge the codebase is allowed to have. `core` has no
@@ -307,6 +314,13 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
     ("chemclaw.api", "chemclaw.durable"),
     ("chemclaw.api", "chemclaw.kg"),
     ("chemclaw.api", "chemclaw.protocols"),
+    # The same edge as `protocols` beside it, and for the same reason: a front-door route
+    # reads and decides on a stored document this layer owns. `api/routes/workflows.py` serves
+    # the human approval a composed workflow needs before it may launch a durable job
+    # (`D-2026-09-15-an-approval-is-for-one-version-of-one-workflow`), and that approval is a
+    # column on `composed_workflows` — so the route reaches the store directly rather than
+    # through `agent`, which would be indirection with no second caller to justify it.
+    ("chemclaw.api", "chemclaw.templates"),
     ("chemclaw.cli", "chemclaw.agent"),
     # `cli.leak_probe` builds the *real* front door in its own process — that is the whole point:
     # the leak it measures is in what a turn retains, and an in-process repro that faked the app
@@ -324,6 +338,10 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
     ("chemclaw.cli", "chemclaw.evals"),
     ("chemclaw.cli", "chemclaw.ingest"),
     ("chemclaw.cli", "chemclaw.kg"),
+    # `cli/propose_profile.py` mines `audit_events.tool`, the same model-written column
+    # `operations.activity.safe_tool_name` bounds for its own readers — and a bound applied to one
+    # reader of a column is not a bound, which that function's docstring argues.
+    ("chemclaw.cli", "chemclaw.operations"),
     # `cli/verifier_margin.py` measures the judge's roll-to-roll margin
     # (D-2026-08-27-a-verdict-at-the-margin-is-a-coin-toss), and the judge's input type is
     # `retrieval.evidence.EvidenceChunk` — building the pairs from anything else would measure a
@@ -345,6 +363,7 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
     ("chemclaw.durable", "chemclaw.connectors"),
     ("chemclaw.durable", "chemclaw.core"),
     ("chemclaw.durable", "chemclaw.evals"),
+    ("chemclaw.durable", "chemclaw.hypotheses"),
     ("chemclaw.durable", "chemclaw.ingest"),
     ("chemclaw.durable", "chemclaw.kg"),
     ("chemclaw.durable", "chemclaw.memory"),
@@ -354,9 +373,11 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
     ("chemclaw.evals", "chemclaw.agent"),
     ("chemclaw.evals", "chemclaw.api"),
     ("chemclaw.evals", "chemclaw.core"),
+    ("chemclaw.evals", "chemclaw.hypotheses"),
     ("chemclaw.evals", "chemclaw.kg"),
     ("chemclaw.evals", "chemclaw.retrieval"),
     ("chemclaw.evals", "chemclaw.science"),
+    ("chemclaw.hypotheses", "chemclaw.kg"),
     ("chemclaw.ingest", "chemclaw.core"),
     ("chemclaw.ingest", "chemclaw.kg"),
     ("chemclaw.ingest", "chemclaw.retrieval"),
@@ -391,6 +412,17 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
     # and a measurement in one model.
     ("chemclaw.protocols", "chemclaw.core"),
     ("chemclaw.protocols", "chemclaw.science"),
+    # The narrowest package in the tree, and deliberately: `analytical` reads `core.units` and
+    # nothing else. It imports no `science` — there is no chemistry in "is this number under that
+    # number" — and no `kg` or `ingest`, for the same reason `protocols` does not: a specification
+    # is prescriptive and a `reaction_records` row is descriptive, so a shared shape would put a
+    # limit and a measurement in one model. If a second edge ever appears here, the question to ask
+    # is whether the thing being added is a verdict about numbers or a judgment about a batch.
+    ("chemclaw.analytical", "chemclaw.core"),
+    # The agent reaches the analytical tier the same way it reaches `protocols`: one tools module
+    # over the models, with no logic of its own beyond parsing what the model wrote into the
+    # `Measurement`s the tier takes.
+    ("chemclaw.agent", "chemclaw.analytical"),
     ("chemclaw.publish", "chemclaw.core"),
     ("chemclaw.publish", "chemclaw.ingest"),
     ("chemclaw.durable", "chemclaw.publish"),
@@ -428,6 +460,15 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
 # exception_and_the_dict_says_which` is the same claim in a form that fails when it stops being
 # true.
 _ALLOWED_LAZY_EDGES: dict[Edge, str] = {
+    ("chemclaw.hypotheses", "chemclaw.core"): (
+        "`dispatch.structure_of` validates a subject's SMILES with `core.chem`, which imports "
+        "RDKit. Lazy rather than module-scope because `hypotheses` is imported inside Temporal's "
+        "workflow sandbox: that is exactly where `hypotheses.rating`'s module-scope numpy reached "
+        "`os.putenv` and was refused "
+        "(`D-2026-09-20-a-ranking-is-evidence-a-critic-is-not-a-gate`), and a second heavy C "
+        "extension at import time is the same bet twice. The call sites are "
+        "all in activities, where the import is free"
+    ),
     ("chemclaw.science", "chemclaw.publish"): (
         "cached_compute offers a freshly computed primitive to the external results store. Lazy "
         "for two reasons that both matter: `science` is the pure-computation layer and must not "
@@ -455,7 +496,11 @@ _ALLOWED_LAZY_EDGES: dict[Edge, str] = {
         "`live_judge` read `llm_base_url` and ignored `llm_tls_ca_bundle`, so grading against "
         "exactly the internal gateway that setting exists for died at TLS. Lazy so that importing "
         "the eval package costs neither a model client nor a connection pool - and because a "
-        "graded run is the only thing in `evals` that needs the agent's provider seam at all"
+        "graded run is the only thing in `evals` that needs the agent's provider seam at all. "
+        "A second use rides the same edge and is not the provider seam: `live._tool_expectation_"
+        "applies` reads `available_tool_names()` to decide whether a probe's `expects_tools` could "
+        "have been met, so a question about a tool the fleet serves and this tree does not declare "
+        "scores as untested rather than as a miss"
     ),
     ("chemclaw.kg", "chemclaw.connectors"): (
         "known_note_types/known_relations union core's closed vocabulary with what the enabled "

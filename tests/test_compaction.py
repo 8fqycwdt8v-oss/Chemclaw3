@@ -19,11 +19,15 @@ Three things are worth proving here and they are not the same thing:
 
 import asyncio
 import json
+import random
 import re
-from typing import Any
+import threading
+from dataclasses import dataclass
+from typing import Any, cast
+from unittest import mock
 
 import pytest
-from langchain.agents.middleware import ClearToolUsesEdit
+from langchain.agents.middleware import ClearToolUsesEdit, ContextEditingMiddleware
 from langchain_core.language_models import GenericFakeChatModel
 from langchain_core.messages import (
     AIMessage,
@@ -41,7 +45,9 @@ from chemclaw.agent.compaction import (
     TOOL_RESULT_PLACEHOLDER,
     ClearOlderToolResultsEdit,
     KeepLastConversationGroupsEdit,
+    OffLoopContextEditing,
     RecordContextCompaction,
+    _clear_older_tool_results,
     _placeholder,
     cited_note_ids,
     context_compaction_middleware,
@@ -49,6 +55,7 @@ from chemclaw.agent.compaction import (
 )
 from chemclaw.agent.context_budget import (
     MeasureRequestPrefix,
+    _message_tokens,
     effective_trigger,
     estimate_tool_schemas,
     reset_calibration,
@@ -65,6 +72,22 @@ from chemclaw.core.metrics import METRICS
 def _count(messages: Any) -> int:
     """The estimator the middleware uses, so a test's trigger arithmetic matches production's."""
     return count_tokens_approximately(messages)
+
+
+def _measured_prefix(system: list[Any]) -> int:
+    """The prefix as production measures it, through production's own two functions.
+
+    **Not `_count(system) + estimate_tool_schemas(...)`, which is what this file used to write.**
+    `MeasureRequestPrefix._measure` counts the system message with `_message_tokens` — the
+    configured BPE encoding where one is baked — and the estimator over the same prompt measures
+    ~15% higher. A budget written here as "the prefix plus n" is wrong by that whole difference:
+    measured, the lossless edit stopped firing at all in
+    `test_the_lossless_edit_fires_alone_between_its_trigger_and_the_budget`, because its trigger
+    was ~1,200 tokens above the thread it was written to sit under. The same re-derivation defect
+    `_graph_prefix`'s own docstring records one file over, arriving through the counter instead of
+    through the tool surface.
+    """
+    return sum(_message_tokens(message) for message in system) + estimate_tool_schemas(_BOUND)
 
 
 def _group(index: int, *, with_tool_call: bool = False, filler: str = "") -> list[AnyMessage]:
@@ -389,7 +412,7 @@ def _graph_prefix() -> int:
         )
         asyncio.run(graph.ainvoke({"messages": [HumanMessage(content="hello")]}))
         system = [m for m in _RECEIVED if isinstance(m, SystemMessage)]
-        _PREFIX.append(_count(system) + estimate_tool_schemas(_BOUND))
+        _PREFIX.append(_measured_prefix(system))
     return _PREFIX[0]
 
 
@@ -959,7 +982,7 @@ def _drive(window: int, thread: list[AnyMessage]) -> tuple[int, int, float]:
     asyncio.run(graph.ainvoke({"messages": list(thread)}))
     system = [m for m in _RECEIVED if isinstance(m, SystemMessage)]
     rest = [m for m in _RECEIVED if not isinstance(m, SystemMessage)]
-    prefix = _count(system) + estimate_tool_schemas(_BOUND)
+    prefix = _measured_prefix(system)
     delta = METRICS.value("chemclaw_context_unreducible_total") - before
     return prefix, _count(rest), delta
 
@@ -1005,7 +1028,15 @@ def test_the_prefix_is_charged_whether_or_not_a_window_is_declared(
     from tests.test_context_floor import _connector_tools, _tool_name
 
     budget = settings.agent_context_token_budget
-    thread: list[AnyMessage] = [HumanMessage(content="q" + "y" * 60_000) for _ in range(8)]
+    # **Sixteen smaller messages rather than eight large ones, and the size is the point.** The
+    # policy drops whole conversation groups, so the fixture's message size is the granularity the
+    # cut can move in. At 60,000 characters the thread allowance — `budget` less a prefix that grows
+    # every time a tool is added — reached the point where only one message fitted, and a *tighter*
+    # window then produced the identical cut: the last assertion below compared 15,005 against
+    # 15,005 and failed, reporting that the window had stopped binding when what had actually
+    # happened is that the thread could not be cut any finer. Same total size, half the step, so the
+    # control it exists to prove survives the next tool as well as this one.
+    thread: list[AnyMessage] = [HumanMessage(content="q" + "y" * 30_000) for _ in range(16)]
 
     open_prefix, open_sent, open_delta = _drive(0, thread)
 
@@ -1122,7 +1153,31 @@ def test_the_overrun_indicator_can_fire_at_the_shipped_budget_with_no_window(
 #: ceiling and not a measurement). It is written here rather than imported because the config
 #: comment is prose and this is the assertion: if the two ever disagree, one of them is a claim
 #: nobody checked.
-CLEAR_TRIGGER_THREAD_ALLOWANCE = 30_000
+#:
+#: **Both allowances drop 800 for `rescale_experiment_protocol`, and the thread is what pays.**
+#: `CEILINGS["__default__"]` rose from 70,600 to 71,400 for that tool
+#: (`tests/test_context_floor.py` carries the entry), so `PREFIX_BOUND` rose with it. Raising the
+#: two defaults to keep these numbers whole is exactly what the paragraph above records being tried
+#: and reverted: `agent_context_token_budget` is pinned by the smallest target window, not by the
+#: prefix, and `test_the_budget_leaves_room_for_an_answer_on_the_smallest_window_we_target` fails
+#: outright when it moves. The clear trigger could have moved alone, and did not, because splitting
+#: the two would make the thread allowance mean one thing for the lossless edit and another for the
+#: window — the pair is the claim. So the prefix grew and the thread absorbed it, which is the
+#: trade a tool that costs 948 tokens on every call actually makes.
+#:
+#: Both drop a further 600 when the ceiling goes to 72,000 for the six process-development
+#: skills, on the same argument and with the same arithmetic: the prefix grew, the window did
+#: not, so the thread is the term that moves.
+#:
+#: And a further 1,100 at 73,100 for the plate-results loop. The branch total is **2,500**, all
+#: of it taken from the thread — which is the number a reviewer should weigh rather than any
+#: single entry, and the reason the ceiling's own comment says a fourth raise here should be
+#: refused.
+#:
+#: **Both gain 250 back** when `SkillManifest.requires` takes three largely-inert skills out of
+#: the default listing — the same arithmetic run the other way, and the only part of this
+#: branch's 2,500 that was ever refundable.
+CLEAR_TRIGGER_THREAD_ALLOWANCE = 27_750
 
 #: The thread allowance `agent_context_token_budget`'s default is derived to leave.
 #:
@@ -1134,7 +1189,47 @@ CLEAR_TRIGGER_THREAD_ALLOWANCE = 30_000
 #:
 #: Written here rather than imported, for the same reason as the constant above: this is the
 #: assertion and `core/config/agent.py` is the prose.
-BUDGET_THREAD_ALLOWANCE = 43_000
+#: **40,500 since D-2026-09-13, and the 2,000 is the ceiling's price rather than a re-derivation.**
+#: `CEILINGS["__default__"]` rose 65,500 → 67,500 to seat `write_todos` and the todo prompt in every
+#: profile's prefix once `harness_enabled` became the default — measured at 1,862 tokens on every
+#: profile but `computation` (which already set the flag itself and moved 0) and `safety` (1,863).
+#: The trigger rose with it and kept
+#: its allowance whole, because nothing bounds it from above; this one cannot, because the budget is
+#: derived *downwards* from the 128k window. So the thread loses 2,000 tokens — **4.7%** — and it is
+#: recorded here, at the assertion, rather than left as a claim in prose.
+#:
+#: Wave 13 paid 500 here for eight record-surface reads and called it 1.16%. This is four times that
+#: for one middleware's schema, which is worth saying plainly rather than burying: a todo list is
+#: expensive, and what it buys is the plan gate attached in the posture every supported deployment
+#: already ran while no test measured it.
+#: **38,700 since `D-2026-09-15-an-agent-authored-workflow-is-read-only-by-construction`**, down
+#: 1,800 because `CEILINGS["__default__"]` rose by that to hold `compose_workflow` and
+#: `run_composed_workflow`. This is the number that *falls* when the prefix grows: the trigger
+#: above is derived upwards from `PREFIX_BOUND` and nothing bounds it, while the budget is derived
+#: downwards from the 128k window and has nothing above it to take from — so a token of prefix is
+#: a token of thread, here, every time. 4.4% of the thread for the composed-workflow seam, stated
+#: where the constraint is rather than spread until nobody can see it.
+#:
+#: **37,900 on the merged tree**, down a further 800 for the analytical tier's two tools
+#: (`D-2026-09-15-a-comparison-with-no-caller-is-a-promise-about-a-check-that-does-not-exist`) —
+#: the same rule applied a second time in the same day, by a second branch, which is worth leaving
+#: visible rather than folding into one figure. Two branches each added a pair of tools measuring
+#: 978 and 730, each raised the ceiling for its own pair against a tree that did not hold the
+#: other's, and the merge is where the thread pays for both. The alternative was raising the budget
+#: to keep this number whole, and it is refused for the reason the paragraph above gives: the window
+#: is the input and this is the dependent number, so a budget that rose with the prefix would be
+#: spending head-room under a 128k model that the provider, not this repository, decides.
+#:
+#: **37,100 since `D-2026-09-16-a-roster-varies-the-two-dimensions-that-carry-no-authority`**, down
+#: a further 800 because the `task` roster took `CEILINGS["__default__"]` to 70,600. The same rule
+#: a third time, and this is the branch where following it was a live temptation rather than a
+#: formality: the roster's own measured cost is 305 tokens and the ceiling rose 1,188, because this
+#: ratchet under-charges a roster whose descriptions name what each helper *binds* and so grow with
+#: the bundles a deployment enables. Raising the budget to keep this number whole was tried in the
+#: commit before this one and reverted on the argument directly above — the window is the input, so
+#: a budget that rises with the prefix spends head-room a provider decides, and what buys the
+#: thread back is a narrower prefix rather than a raise here.
+BUDGET_THREAD_ALLOWANCE = 34_850
 
 #: The smallest context window this stack is designed against, in billed tokens.
 #:
@@ -1522,7 +1617,7 @@ def test_a_calibrated_process_does_not_bill_past_its_budget(
             asyncio.run(graph.ainvoke({"messages": list(thread)}))
         billed = _BILLED[-1]
         system = [m for m in _RECEIVED if isinstance(m, SystemMessage)]
-        prefix = _count(system) + estimate_tool_schemas(_BOUND)
+        prefix = _measured_prefix(system)
         sent = _count([m for m in _RECEIVED if not isinstance(m, SystemMessage)])
     finally:
         reset_calibration()
@@ -1615,7 +1710,18 @@ def test_a_maximal_request_at_the_shipped_budget_fits_the_smallest_window_it_tar
         f"a budget 10% above {budget} would still fit {input_ceiling}, so this test has so much "
         "headroom that it is not the bound it claims to be; tighten it or say why."
     )
-    assert input_ceiling - budget == 4_904, (
+    # **Back to 5,204 on the merged tree, and the round trip is the record worth keeping.** One
+    # branch raised the budget 800 to hold its thread allowance whole when the analytical tier's
+    # tools landed, which narrowed this margin to 4,404 — the direction this arm exists to make
+    # somebody state. Merging with the composed-workflow branch, which had grown the prefix as well
+    # and had *not* raised the budget, made that choice the wrong one: two raises would have spent
+    # 1,600 of head-room under a window the provider decides, to protect a number the paragraph at
+    # `BUDGET_THREAD_ALLOWANCE` says is the dependent one. So the budget is back where the window
+    # put it and the thread absorbs both pairs of tools. What buys the thread back is a narrower
+    # prefix — profile routing, or
+    # `D-2026-08-29-a-tool-schema-nobody-calls-is-still-paid-for`'s deferred schemas — not a raise
+    # here, because every raise is measured against the same unmoved window.
+    assert input_ceiling - budget == 5_204, (
         "the margin under the smallest window this stack targets moved; say which of the two "
         "numbers changed and why"
     )
@@ -1828,3 +1934,438 @@ def test_a_note_body_cannot_forge_a_citation_through_the_tool_that_may_write_one
         "a note body named itself as a citation in this system's own placeholder"
     )
     assert named == ["rxn-real"], f"the real citation stopped being read back: {named}"
+
+
+# ---------------------------------------------------------------------------------------------
+# What the strategy *costs*. It runs on every model call, over a thread that never shrinks, on the
+# event loop of a pod serving other sessions — so its complexity is a property worth asserting,
+# and it was asserted nowhere until upstream's `apply` turned out to be quadratic in thread length.
+# ---------------------------------------------------------------------------------------------
+
+
+def _long_thread(turns: int) -> list[AnyMessage]:
+    """`turns` one-call turns: the shape a long research session actually grows into.
+
+    Deliberately not `_thread` above. That fixture is built to be read; this one is built to be
+    *large* — thousands of messages, where the quadratic term is the whole of the measurement and
+    an inline fixture would be unreadable at the sizes that show it.
+    """
+    messages: list[AnyMessage] = []
+    for turn in range(turns):
+        call_id = f"long-{turn}"
+        messages += [
+            HumanMessage(content=f"question {turn} " + "x" * 100),
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "find_notes", "args": {"n": turn}, "id": call_id}],
+            ),
+            ToolMessage(content="r" * 400, tool_call_id=call_id, name="find_notes"),
+            AIMessage(content="answer " + "a" * 200),
+        ]
+    return messages
+
+
+class _CountingEstimator:
+    """The estimator, wrapped so the *work* asked of it is measurable rather than timed.
+
+    `messages_counted` is the total number of messages handed to it across a whole `apply` — the
+    quantity that is linear in one implementation and quadratic in the other, and the one that is
+    99.7% of the wall-clock difference between them. Counting it instead of timing it is what makes
+    the assertion below deterministic: a ratio of two durations on a shared runner was measured at
+    2.97-6.23 for the linear arm on an idle machine and 11.74-19.68 while the box was busy, which
+    is a bound with no safe place to sit. A count does not move.
+    """
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.messages_counted = 0
+
+    def __call__(self, messages: Any) -> int:
+        """Count `messages`, recording how much was asked of the estimator on the way."""
+        listed = list(messages)
+        self.calls += 1
+        self.messages_counted += len(listed)
+        return count_tokens_approximately(listed)
+
+
+def _clearing_work(turns: int) -> int:
+    """Messages handed to the estimator by one `ClearOlderToolResultsEdit.apply` over `turns` turns.
+
+    `trigger=1` puts the whole thread over budget and makes `clear_at_least` the entire overshoot,
+    which is the worst case and the one that was quadratic: every reclaimable result is a candidate.
+    """
+    estimator = _CountingEstimator()
+    edit = ClearOlderToolResultsEdit(trigger=1, keep=3, placeholder=TOOL_RESULT_PLACEHOLDER)
+    edit.apply(_long_thread(turns), count_tokens=estimator)
+    return estimator.messages_counted
+
+
+def test_clearing_tool_results_does_not_cost_the_square_of_the_thread() -> None:
+    """Four times the thread costs about four times the work, not sixteen.
+
+    **A scaling assertion, and deliberately not a wall-clock one.** The machine's speed is not the
+    property under test, and a duration ratio on a shared CI runner cannot separate the two
+    implementations reliably — measured on this very fixture, the linear arm ranged 2.97-6.23 idle
+    and 11.74-19.68 under load, straddling the 16 a quadratic implementation would produce. So the
+    ratio is taken over the *work* asked of the estimator, which is the same property and does not
+    move: linear lands at 4.02, quadratic at 16.06, and the bound sits at 8.
+
+    What this catches is a re-delegation to upstream's `ClearToolUsesEdit.apply`, which is quadratic
+    twice over: it re-slices the entire message prefix per candidate to find the assistant message
+    that made the call, and — the term this test measures, at 99.7% of the wall clock — it re-counts
+    the *whole thread* after each cleared result to decide whether `clear_at_least` is satisfied.
+    Both terms live in the same loop, so a re-delegation brings back both and this sees it.
+
+    The seconds, since a count is easier to dismiss: against upstream on this fixture, 320 ms at 250
+    turns, 1,310 at 500, 5,600 at 1,000, 23,851 at 2,000 and 96,070 at 4,000 — every doubling
+    quadrupling — against 5.5, 11.4, 24.2 and 57.7 ms for the same sizes here. The trigger engages
+    at roughly 130 turns of a real session and nothing shrinks the thread from there. Not a
+    micro-optimisation dressed as a test: this runs on **every model call**, synchronously, inside
+    `awrap_model_call`, so on a pod it is time no other session is served.
+    """
+    small = _clearing_work(200)
+    large = _clearing_work(800)
+    ratio = large / small
+    assert ratio < 8.0, (
+        f"clearing 800 turns asked the estimator for {large:,} messages against {small:,} for 200 "
+        f"— {ratio:.1f}x the work for 4x the thread, which is the quadratic scaling "
+        "agent/compaction.py::_clear_older_tool_results exists to avoid. Something re-delegated to "
+        "upstream's ClearToolUsesEdit.apply, or reintroduced a full-thread count inside the "
+        "per-candidate loop."
+    )
+
+
+def _awkward_thread(rnd: random.Random, length: int) -> list[AnyMessage]:
+    """A thread built to hit every branch the clearing can take, including the malformed ones.
+
+    Orphan tool results whose call id no assistant message ever made, results whose call was made by
+    an assistant message that is *not* the one immediately before them, results already stamped as
+    cleared, assistant messages with zero to three calls, and payloads small enough that the
+    placeholder costs more than the content it replaces (a negative reclaim). None of these is
+    hypothetical — a fan-out interleaves results, a re-derived reduction re-reads its own
+    placeholders, and `agent/tool_result_size.py` can leave a result of a handful of characters.
+    """
+    messages: list[AnyMessage] = []
+    minted: list[str] = []
+    for index in range(length):
+        roll = rnd.random()
+        if roll < 0.2:
+            messages.append(HumanMessage(content="h" * rnd.randint(1, 300)))
+        elif roll < 0.5:
+            calls = [
+                {"name": f"tool_{slot}", "args": {}, "id": f"id{index}_{slot}"}
+                for slot in range(rnd.randint(0, 3))
+            ]
+            minted += [str(call["id"]) for call in calls]
+            messages.append(AIMessage(content="a" * rnd.randint(0, 200), tool_calls=calls))
+        else:
+            known = minted and rnd.random() < 0.8
+            metadata = (
+                {"context_editing": {"cleared": True, "strategy": "clear_tool_uses"}}
+                if rnd.random() < 0.1
+                else {}
+            )
+            messages.append(
+                ToolMessage(
+                    content="r" * rnd.choice([1, 5, 400, 4000]),
+                    tool_call_id=rnd.choice(minted) if known else f"orphan{index}",
+                    name="tool_0",
+                    response_metadata=metadata,
+                )
+            )
+    return messages
+
+
+def test_the_first_party_clearing_is_upstreams_clearing() -> None:
+    """`_clear_older_tool_results` produces exactly what `ClearToolUsesEdit.apply` produces.
+
+    **This is the price of not delegating, and it is paid here rather than argued in a docstring.**
+    `D-2026-08-14-the-coupling-is-the-cost-not-the-line-count` says the cost of a first-party copy
+    is not its line count but the number of places reading a shape upstream never promised; a copy
+    of a whole *strategy* is that risk in its largest form, because it can drift in behaviour while
+    every other test in this file goes on passing. A differential over threads built to be awkward
+    is what makes the drift loud: if upstream changes what it clears, this goes red and a reviewer
+    decides whether to follow.
+
+    Seeded, so a failure is reproducible rather than a story about one run. Swept over every `keep`
+    and every `clear_at_least` regime that matters — none, the tightest possible floor, two middling
+    ones, and more than the thread can ever reclaim.
+
+    Compared on content, on the cleared stamp and on `artifact`, which is the whole of what either
+    implementation writes.
+    """
+    placeholder = "[a placeholder deliberately long enough to sometimes cost more than it saves]"
+    rnd = random.Random(20260909)
+    compared = 0
+    for _ in range(120):
+        base = _awkward_thread(rnd, rnd.randint(1, 60))
+        for keep in (0, 1, 3, 8):
+            for clear_at_least in (0, 1, 50, 500, 10**9):
+                theirs: list[AnyMessage] = [message.model_copy() for message in base]
+                ours: list[AnyMessage] = [message.model_copy() for message in base]
+                ClearToolUsesEdit(
+                    trigger=-1,
+                    keep=keep,
+                    clear_at_least=clear_at_least,
+                    placeholder=placeholder,
+                ).apply(theirs, count_tokens=_count)
+                _clear_older_tool_results(
+                    ours,
+                    count_tokens=_count,
+                    keep=keep,
+                    clear_at_least=clear_at_least,
+                    placeholder=placeholder,
+                )
+                assert [_shape(message) for message in ours] == [
+                    _shape(message) for message in theirs
+                ], (
+                    f"the first-party clearing diverged from upstream's at keep={keep}, "
+                    f"clear_at_least={clear_at_least}. agent/compaction.py copied "
+                    "ClearToolUsesEdit.apply to make it linear; if upstream's behaviour has moved, "
+                    "decide whether to follow it rather than letting the copy drift."
+                )
+                compared += 1
+    assert compared == 120 * 4 * 5
+
+
+def _shape(message: AnyMessage) -> tuple[Any, Any, Any]:
+    """Everything either clearing implementation writes to a message: content, stamp, artifact."""
+    return (
+        message.content,
+        message.response_metadata.get("context_editing"),
+        getattr(message, "artifact", None),
+    )
+
+
+def test_the_estimator_adds_up_one_message_at_a_time() -> None:
+    """A message list costs what its messages cost separately.
+
+    That is the property the linear fix rests on.
+
+    `_clear_older_tool_results` decides whether `clear_at_least` is satisfied from the difference
+    between the result it replaced and the placeholder that replaced it, instead of re-counting the
+    whole thread. That is exact only because `count_tokens_approximately` rounds *per message*, and
+    its own NOTE says it does so precisely to make individual counts add up. Asserting it is what
+    turns "upstream's comment says so" into evidence: if the rounding moves, the clearing stops at
+    the wrong point and reclaims too much or too little, silently.
+    """
+    thread = _thread(4, with_tool_calls=True, filler="x" * 137)
+    assert _count(thread) == sum(_count([message]) for message in thread)
+
+
+def test_the_context_edits_do_not_run_on_the_event_loop() -> None:
+    """The edits are pure CPU over a growing list; they belong in a worker thread.
+
+    Upstream's `awrap_model_call` deep-copies the message list and calls each `apply` inline, so
+    every millisecond of it is a millisecond this pod serves no other session. Measured after the
+    linear fix, per model call: 128 ms at 2,000 messages, 234 at 8,000, 491 at 20,000 — and three
+    quarters of that is upstream's `deepcopy`, not the edits, which is why `OffLoopContextEditing`
+    moves the whole call rather than the edits alone.
+
+    Asserted on the thread identity rather than on a duration, for the reason the scaling test
+    above gives: a stopwatch on a shared runner measures the runner.
+    """
+    probe = _ThreadProbe()
+    handed: list[Any] = []
+
+    async def handler(request: Any) -> str:
+        handed.append(request)
+        return "answered"
+
+    request = _StubRequest(messages=[HumanMessage(content="go")])
+    middleware = OffLoopContextEditing(edits=[probe])
+    answer = asyncio.run(middleware.awrap_model_call(cast(Any, request), handler))
+
+    assert answer == "answered"
+    assert probe.threads, "the edit never ran"
+    assert probe.threads[0] != threading.get_ident(), (
+        "a context edit ran on the event loop's own thread; OffLoopContextEditing exists so that "
+        "the per-model-call deepcopy and the two edits cannot starve this pod's other sessions."
+    )
+    assert [message.content for message in handed[0].messages] == ["go", "edited"], (
+        "the edited request did not reach the handler, so the compaction ran and was discarded"
+    )
+
+
+def test_an_editor_that_hands_nothing_on_is_reported_rather_than_silently_skipped() -> None:
+    """`OffLoopContextEditing` depends on upstream calling its handler; a change to that is loud.
+
+    The class reuses upstream's own synchronous `wrap_model_call` and steals the request it was
+    about to send, which is what keeps it from copying that method's body. The contract it rests on
+    is that the handler is called at all. If upstream ever stops calling it, the request goes out
+    uncompacted — the safe direction — but a compaction that silently stops running is the exact
+    defect `agent/compaction.py` was written to end, so it is counted and reported instead.
+
+    Driven red as well as green: without the `if not edited` branch this passes the request through
+    and moves no counter.
+    """
+    middleware = OffLoopContextEditing(edits=[_ThreadProbe()])
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(ContextEditingMiddleware, "wrap_model_call", lambda self, request, handler: None)
+    handed: list[Any] = []
+
+    async def handler(request: Any) -> str:
+        handed.append(request)
+        return "answered"
+
+    request = _StubRequest(messages=[HumanMessage(content="go")])
+    before = METRICS.value("chemclaw_degraded_total")
+    try:
+        asyncio.run(middleware.awrap_model_call(cast(Any, request), handler))
+    finally:
+        monkey.undo()
+
+    assert handed[0] is request, "the uncompacted request should still be sent"
+    assert METRICS.value("chemclaw_degraded_total") > before, (
+        "an editing middleware that handed nothing on was not reported"
+    )
+
+
+class _ThreadProbe:
+    """A `ContextEdit` that records which thread ran it and leaves a mark on the message list."""
+
+    def __init__(self) -> None:
+        self.threads: list[int] = []
+
+    def apply(self, messages: list[AnyMessage], *, count_tokens: Any) -> None:
+        """Record the calling thread and append a message, so the caller can see the edit landed."""
+        self.threads.append(threading.get_ident())
+        messages.append(AIMessage(content="edited"))
+
+
+@dataclass
+class _StubRequest:
+    """The `ModelRequest` members upstream's `wrap_model_call` touches under approximate counting.
+
+    Two of them: the message list and `override`.
+
+    A stub rather than a real `ModelRequest`, because building one needs a model, a runtime and a
+    state, none of which this assertion is about — and the shape being depended on is exactly the
+    two members named here.
+    """
+
+    messages: list[AnyMessage]
+
+    def override(self, **updates: Any) -> "_StubRequest":
+        """Upstream's own way of producing the edited request; only `messages` is ever changed."""
+        return _StubRequest(messages=updates.get("messages", self.messages))
+
+
+def test_no_shipped_producer_of_a_human_message_reaches_the_offload_threshold() -> None:
+    """The inequality that keeps a third reducer out of every deployment's way.
+
+    `deepagents.FilesystemMiddleware` offloads an oversized `HumanMessage` to a file and hands the
+    model a pointer plus a head-and-tail preview. That preview is **not** defanged, and it is
+    harmless for one reason only: it is a strict substring of a message that sat in the model's
+    context verbatim one call earlier, because a chemist's own message is not framed as untrusted
+    data. The moment a producer *other than a chemist* can push a `HumanMessage` past the threshold
+    — a connector result interpolated into a template step, say — that argument stops holding.
+
+    Today it holds, and it holds by coincidence: three separate settings each happen to sit below
+    the threshold, and none of them was chosen with it in mind. So the relation is asserted rather
+    than left to be rediscovered. Raising any one of them past 200,000 fails here instead of
+    silently routing a chemist's message through an offload nobody designed for.
+
+    Read off the installed distribution rather than transcribed, so an upstream change to either
+    constant moves this test rather than stranding it.
+    """
+    from deepagents.middleware.filesystem import NUM_CHARS_PER_TOKEN, FilesystemMiddleware
+
+    limit = FilesystemMiddleware.__init__.__kwdefaults__
+    tokens = (limit or {}).get("human_message_token_limit_before_evict")
+    assert isinstance(tokens, int), (
+        "upstream's human-message eviction limit is no longer an int keyword default; the offload "
+        "threshold this file reasons about cannot be derived, so re-read FilesystemMiddleware"
+    )
+    threshold = NUM_CHARS_PER_TOKEN * tokens
+
+    # **Summed, not compared one at a time, because one producer appends to another.**
+    # `_with_pushed_job_results` takes the front door's message and adds the job-push-back block to
+    # it, so what reaches the model is their total — and asserting each half separately passed
+    # while the sum was 235,377 characters, measured
+    # (`D-2026-09-16-a-mailbox-nobody-bounded-is-a-human-message-nobody-bounded`). That producer is
+    # also the one the argument above does not cover at all: the block is framed *because* it is
+    # untrusted, so "a strict substring of the chemist's own words" is false of it, and the
+    # preview's head-and-tail cut is by lines — with a five-line question it keeps the closing
+    # delimiter and drops the opening one.
+    #
+    # `cli/chat.py` is deliberately absent: it is an operator pasting into their own REPL, not a
+    # surface a deployment exposes, and bounding it would be a different decision from this one.
+    producers = {
+        "service_max_message_chars (the front door, a 422)": settings.service_max_message_chars,
+        "agent_max_tool_result_chars (template steps via bounded_prompt, and the job push-back "
+        "block `_with_pushed_job_results` appends to the front door's message)": (
+            settings.agent_max_tool_result_chars
+        ),
+    }
+    total = sum(producers.values())
+    assert total < threshold, (
+        f"the producers that can appear in one HumanMessage sum to {total}, at or above "
+        f"deepagents' {threshold}-character offload threshold: "
+        + "; ".join(f"{name} = {value}" for name, value in producers.items())
+        + ". A message that large is written to a file and summarised back to the model with an "
+        "undefanged preview — safe for a chemist's own words, and not for the framed workflow "
+        "output that rides along with them."
+    )
+
+
+def test_the_job_push_back_block_is_bounded_before_it_is_framed() -> None:
+    """The producer the inequality above did not cover, driven end to end.
+
+    `_with_pushed_job_results` is the only producer here that can make a `HumanMessage` of any size:
+    `claim_unconsumed` takes no limit and `ConnectorJobResult.summary` declares no maximum, so the
+    block it appends is as long as the mailbox happens to be. Measured before the bound, with one
+    unbounded summary beside a maximum-length chemist message: **235,377 characters**, past the
+    200,000-character offload threshold.
+
+    Two things make that worse than it is for the other producers, and both are asserted here:
+
+    1. The block is **not** the chemist's words. The safety argument for the undefanged preview is
+       that it is "a strict substring of a message that sat in the model's context verbatim", which
+       holds for a chemist and not for workflow output that is framed *because* it is untrusted.
+    2. The preview is head-and-tail **by lines**. With a five-line question the opening delimiter
+       falls in the truncated middle and the closing one survives — measured — so the model is
+       handed unframed job output terminated by a stray tag.
+
+    So the bound goes on the block, inside the frame, and the message stays one well-formed
+    envelope. `test_no_shipped_producer_of_a_human_message_reaches_the_offload_threshold` is the
+    arithmetic; this is the behaviour, because a sum of settings is satisfied by a setting that
+    nothing reads.
+    """
+    from deepagents.middleware.filesystem import NUM_CHARS_PER_TOKEN, FilesystemMiddleware
+
+    import chemclaw.api.runner as runner
+    from chemclaw.agent.session_events import SessionEvent
+
+    limit = FilesystemMiddleware.__init__.__kwdefaults__ or {}
+    threshold = NUM_CHARS_PER_TOKEN * limit["human_message_token_limit_before_evict"]
+
+    waiting = [
+        SessionEvent(
+            event_id=index,
+            session_id="s",
+            kind="job_completed",
+            payload={"job_id": f"j{index}", "summary": "S" * 400},
+        )
+        for index in range(600)
+    ]
+
+    async def claimed(*_args: object, **_kwargs: object) -> list[SessionEvent]:
+        return waiting
+
+    # `settings` is re-exported through `runner` rather than being its own name, so the module
+    # object is not where mypy will let a test reach it; patch the one both sides read.
+    with (
+        mock.patch.object(settings, "session_store", "postgres"),
+        mock.patch.object(runner, "claim_unconsumed", claimed),
+    ):
+        chemist = "x" * settings.service_max_message_chars
+        message = asyncio.run(runner._with_pushed_job_results("s", chemist))
+
+    assert len(message) < threshold, (
+        f"the turn's input is {len(message)} characters against a {threshold}-character offload "
+        "threshold; an unbounded mailbox is back and the undefanged preview comes with it"
+    )
+    assert message.count("<retrieved-note-") == 1, "the push-back block lost its opening delimiter"
+    assert message.count("</retrieved-note-") == 1, "the push-back block lost its closing delimiter"
+    assert message.startswith(chemist), "the chemist's own words must still lead"

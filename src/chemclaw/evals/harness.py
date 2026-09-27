@@ -19,13 +19,14 @@ from pydantic import BaseModel, Field, ValidationError
 
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
+from chemclaw.core.markdown import MISSING, render_table
 from chemclaw.evals.baseline import (
     CaseSetMismatchError,
     compare_to_baseline,
     load_baseline,
     render_comparison,
 )
-from chemclaw.evals.metric import EvalCase, get_metric
+from chemclaw.evals.metric import EvalCase, gated_names, get_metric
 
 
 class ScoredResult(BaseModel):
@@ -65,6 +66,46 @@ class EvalReport(BaseModel):
         every failure as a regression would have been red from the day they were written.
         """
         return [r for r in self.failed() if r.case_id not in self._demonstrations()]
+
+    def gates_no_demonstration_can_fire(self) -> list[str]:
+        """Gated metrics that no demonstration case actually fails — gates that cannot go red.
+
+        **The hole `expect_pass` left open, read from the metric's side instead of the case's.**
+        `inert_demonstrations` asks, per *case*, whether a case declared `expect_pass: false` still
+        fails something. That catches a threshold loosened until one particular case stops firing,
+        and it structurally cannot catch the thing this whole layer exists to prevent: a **metric**
+        with no demonstration behind it at all. Such a metric is scored only over cases written to
+        pass, so a version of it that stopped measuring and answered "perfect" would move nothing —
+        `make eval-strict` stays green, and `make eval-baseline-check` compares one constant
+        against the same constant.
+
+        Measured on the shipped case-set the day this was written: six metrics are gated and two of
+        them — `runaway_rate` and `prediction_error` — had no case anywhere in `data/evals/cases/`
+        that made them report a failure. Both had been green since the day they were written, and
+        neither had ever been observed to fail.
+
+        So a gated metric owes the set one case that fails it, the same way a fix owes the suite a
+        test that goes red without it. An ungated metric owes nothing: it reports a number rather
+        than a verdict, and there is no gate to demonstrate.
+
+        **Which metrics are gated comes from the registry, not from this run's results**, and that
+        is the whole of `D-2026-09-14-a-gate-with-no-case-is-absent-not-satisfied`. Derived from
+        the results, a metric no case scores contributes no row, so it was not in `gated` and this
+        list stayed empty — the one arrangement the check exists to catch is the one where its
+        input disappears. Driven: moving both `runaway_rate` cases out of `data/evals/cases/` left
+        `make eval-strict` at **exit 0** while `make eval-baseline-check` said
+        "Worsened: runaway_rate (0.25 → absent)" — and the documented response to a case-set change
+        is to re-record the baseline, which erases the only control that saw it.
+
+        Name-sorted, so the list reads the same on every run.
+        """
+        demonstrations = self._demonstrations()
+        fired = {
+            r.result_metric
+            for r in self.results
+            if r.passed is False and r.case_id in demonstrations
+        }
+        return sorted(gated_names() - fired)
 
     def inert_demonstrations(self) -> list[str]:
         """Demonstration cases that no longer fail anything — the other half of `expect_pass`.
@@ -157,31 +198,34 @@ def _load_case(path: Path) -> EvalCase:
         raise EvalCaseError(f"{path}: invalid eval case: {exc}") from exc
 
 
-def _cell(text: str) -> str:
-    """Escape Markdown table delimiters so cell content cannot split its row.
-
-    Provenance legitimately contains literal pipes (the set-cardinality/absolute-value
-    notation of `precision`/`recall`/`prediction_error`), which would otherwise shift
-    values under the wrong headers of the citable table (G5).
-    """
-    return text.replace("|", "\\|")
-
-
 def render_report(report: EvalReport) -> str:
-    """Render the report as a citable Markdown table (case id + provenance per row)."""
+    """Render the report as a citable Markdown table (case id + provenance per row).
+
+    The escaping this used to carry itself is `core.markdown`'s: provenance legitimately contains
+    literal pipes (the set-cardinality/absolute-value notation of
+    `precision`/`recall`/`prediction_error`), which would otherwise shift values under the wrong
+    headers of the citable table (G5). A metric with no unit now renders `MISSING` rather than a
+    blank cell, which is the one deliberate change here — a blank reads as a measured nothing and
+    is the second spelling of absence this tree had.
+    """
     lines = [
         f"# Eval report (case-set {report.case_set_version})",
         "",
-        "| Case | Metric | Value | Unit | Pass | Provenance |",
-        "| --- | --- | --- | --- | --- | --- |",
+        render_table(
+            ["Case", "Metric", "Value", "Unit", "Pass", "Provenance"],
+            [
+                [
+                    r.case_id,
+                    r.result_metric,
+                    f"{r.value:.4g}",
+                    r.unit or "",
+                    MISSING if r.passed is None else ("pass" if r.passed else "**FAIL**"),
+                    r.provenance,
+                ]
+                for r in report.results
+            ],
+        ),
     ]
-    for r in report.results:
-        gate = "—" if r.passed is None else ("pass" if r.passed else "**FAIL**")
-        unit = _cell(r.unit or "")
-        lines.append(
-            f"| {_cell(r.case_id)} | {_cell(r.result_metric)} | {r.value:.4g} | {unit} | {gate} "
-            f"| {_cell(r.provenance)} |"
-        )
     failed = report.failed()
     regressions = report.regressions()
     demonstrated = len(failed) - len(regressions)
@@ -191,6 +235,16 @@ def render_report(report: EvalReport) -> str:
         # know which of them are the case-set demonstrating that a gate can fire at all.
         summary += f" — {demonstrated} of them by design, {len(regressions)} regression(s)"
     lines += ["", summary + "."]
+    unfireable = report.gates_no_demonstration_can_fire()
+    if unfireable:
+        # Beside the failure table rather than only in the exit code, for the same reason the
+        # inert list is: nothing appears in a report to point at a gate that was never exercised.
+        lines += [
+            "",
+            f"**{len(unfireable)} gated metric(s) have no demonstration case**: "
+            f"{', '.join(unfireable)}. Each is scored only over cases written to pass, so a "
+            "version of it that stopped measuring and answered perfectly would move nothing here.",
+        ]
     inert = report.inert_demonstrations()
     if inert:
         # In the report, not only in the exit code: a gate that stopped firing is invisible by
@@ -239,6 +293,12 @@ def main(argv: list[str] | None = None) -> int:
     `EvalReport.inert_demonstrations`. Without that half, loosening a threshold silently removes
     coverage and the command stays green, which is the failure the strict mode exists to prevent
     read from the other direction.
+
+    **And so is a gate that never fired at all**, which is the same argument one level up:
+    `inert_demonstrations` asks whether a *case* still fails, and therefore cannot see a **metric**
+    that no case has ever failed. `--strict` fails on that too — see
+    `EvalReport.gates_no_demonstration_can_fire`, and the two metrics the shipped set was missing
+    when it was written.
 
     **`--baseline` answers a third question: "did anything get *worse* than last time?"** The gates
     `--strict` reads are absolute lines — they cannot see an `f1` sliding from 0.95 to 0.70 as long
@@ -289,7 +349,11 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     print(render_report(report), end="")
     baseline_code = _baseline_check(report) if args.baseline else 0
-    if args.strict and (report.regressions() or report.inert_demonstrations()):
+    if args.strict and (
+        report.regressions()
+        or report.inert_demonstrations()
+        or report.gates_no_demonstration_can_fire()
+    ):
         return 1
     return baseline_code
 

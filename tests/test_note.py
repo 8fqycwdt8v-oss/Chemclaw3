@@ -384,3 +384,43 @@ def test_a_note_written_to_the_graph_carries_no_credential(
     assert "CX-4711" in content
     assert "created_by: agent" in content
     assert "id: leaky-note" in content
+
+
+def test_a_committed_note_carries_no_credential_a_driver_quoted_back_as_json() -> None:
+    r"""The same guarantee for a credential this process does *not* hold, in the escaped spelling.
+
+    The test above holds the **value** inventory: two credentials this deployment configured, which
+    `redact_secrets` matches by exact string. This one holds the **structural** half, which is the
+    only one that can reach a credential belonging to somebody else — a warehouse driver quoting its
+    own `key=value` binding back in an error, which a turn then records as what it learned.
+
+    **Measured leaking, and the escaping is the reason.** A driver's message routinely carries a
+    JSON document *inside* a JSON string, so the body reaches the rules as
+    `{\"connection\": {\"password\": \"...\"}}` — and every key-anchored rule framed its separator
+    `["']?\s*[=:]`, which a literal backslash defeats. The note is committed and pushed, and
+    `_note_file`'s own docstring is explicit that a merged commit is append-only in practice: no
+    later correction can reach it. `core/logging._KEY_FRAMING` is the fix, and this is the exit path
+    that makes it more than log hygiene.
+    """
+    import json
+
+    from chemclaw.kg.record import _note_file
+
+    # Two credentials from the two different key-anchored rules, so a regression in either is
+    # visible on *this* exit path rather than only in `tests/test_logging.py`: `password` belongs to
+    # the libpq rule, `api_key` to the compound key-name rule.
+    quoted = json.dumps(
+        json.dumps({"connection": {"password": "W4rehousePw1", "api_key": "sk_live_9f3a2b1c8d7"}})
+    )
+    note = Note(
+        id="driver-error-note",
+        type="observation",
+        created_by="agent",
+        body=f"The warehouse refused the binding for CX-4711. Its error was: {quoted}",
+    )
+
+    content = _note_file(note, "knowledge").content
+
+    for credential in ("W4rehousePw1", "sk_live_9f3a2b1c8d7"):
+        assert credential not in content, content
+    assert "CX-4711" in content, content

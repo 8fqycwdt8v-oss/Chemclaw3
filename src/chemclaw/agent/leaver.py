@@ -35,15 +35,17 @@ them, and this database holds two spellings of the same id (see `_actor_forms`).
 dry run.
 """
 
+import asyncio
 import logging
 import uuid
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Sequence
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 
 import psycopg
 
 from chemclaw.agent.checkpointer import CHECKPOINT_TABLES, checkpoint_thread_delete_statements
+from chemclaw.agent.local_skills import local_skills_prefix
 from chemclaw.agent.scratchpad import memory_prefix
 from chemclaw.agent.session_store import (
     SessionTurnClaims,
@@ -154,7 +156,10 @@ _SESSION_SCOPED = "SELECT session_id FROM session_owners WHERE owner = ANY(%(act
 _CHECKPOINT_ERASE: tuple[tuple[str, str], ...] = checkpoint_thread_delete_statements(
     f"thread_id IN ({_SESSION_SCOPED})"
 )
-# The agent's durable memories, which are **not** session-scoped and so cannot ride the pass above.
+
+
+# The agent's durable memories **and the chemist's own skills**, neither session-scoped and so
+# neither able to ride the pass above.
 # A memory outlives the session it was written in — that is the whole point of it — so the only key
 # that finds a departing person's is the one `agent/scratchpad.py` deliberately put in the store's
 # namespace. `store.prefix` holds the dotted namespace, and `memory_prefix` builds the same string
@@ -173,6 +178,34 @@ _CHECKPOINT_ERASE: tuple[tuple[str, str], ...] = checkpoint_thread_delete_statem
 # Skipped when absent, for the reason `_CHECKPOINT_ERASE` is: `AsyncPostgresStore.setup()` creates
 # these, not a migration, so a deployment that never enabled memories does not have them and
 # erasure must not be the one operation it cannot perform.
+def store_prefixes(actors: Sequence[str]) -> list[str]:
+    """Every `store.prefix` a departing person's rows live under, across both tiers.
+
+    **Both tiers, because they are erased by the same predicate and written by different modules.**
+    The agent's durable memories and the chemist's own skills share the `store` table under
+    different first namespace components, so a sweep that built only the memory prefixes would
+    leave behind the one kind of row this system lets a person author about *themselves* — judgment
+    that was still shaping their turns.
+
+    Built from the two functions the writers write under rather than by re-deriving the dotted join
+    here, which is the defect class where two modules agree about a key until one of them is
+    edited. One digest per *spelling* of the id, for the reason `actors` is a list of them: a row
+    written on the `unverified:` path is under a different namespace from one written on the
+    authenticated path, and both are the same chemist's.
+
+    A function rather than an expression inline because it is the thing a test can hold —
+    `tests/test_local_skills.py` asserts both tiers appear, which an inline list comprehension
+    could only be checked by re-reading the source.
+
+    Args:
+        actors: Every spelling of the departing person's id.
+
+    Returns:
+        The prefixes `_MEMORY_ERASE`'s statements delete by.
+    """
+    return [memory_prefix(form) for form in actors] + [local_skills_prefix(form) for form in actors]
+
+
 _MEMORY_ERASE: tuple[tuple[str, str], ...] = (
     ("store_vectors", "DELETE FROM store_vectors WHERE prefix = ANY(%(memory_prefixes)s)"),
     ("store", "DELETE FROM store WHERE prefix = ANY(%(memory_prefixes)s)"),
@@ -257,6 +290,31 @@ _ERASE: tuple[tuple[str, str], ...] = (
     ),
     ("subscriptions", "DELETE FROM subscriptions WHERE owner = ANY(%(actors)s)"),
     ("user_preferences", "DELETE FROM user_preferences WHERE owner = ANY(%(actors)s)"),
+    # **Erasable rather than retained, and the line this module draws is what decides it.** A
+    # `budget_usage` row is a rate-limiting counter keyed by a principal — how much of a rolling
+    # window they have spent — and says nothing about the science: it is not an attributable record
+    # of who did what, it is the operational meter that decides whether the next turn is admitted.
+    # `turn_costs` sits on the other side of the same line and stays in `_RETAINED` because it says
+    # what a *turn* cost and who ran it, which is the spend record a deployment answers questions
+    # from. Deleting this row hands the departing person's successor a fresh window, which is the
+    # correct outcome: there is nobody left to meter.
+    ("budget_usage", "DELETE FROM budget_usage WHERE actor = ANY(%(actors)s)"),
+    # A composed workflow is the departing person's own working procedure, not a record of
+    # what they did to the science: it names no result, cites no evidence and nobody else can
+    # reach it (the store resolves `(owner, name)` against the caller). So it goes with the
+    # conversation rather than staying as an attribution — the same tier, and the same
+    # argument, as the preference row beside it.
+    #
+    # **`approved_by` names a person too, and this predicate reaches it**, which is a claim worth
+    # making explicitly rather than leaving to the table-level match the completeness test uses.
+    # That column can only ever hold the *owner*: `ComposedStore.approve` takes no approver, and
+    # `POST /workflows/{name}/approval` resolves the workflow against the caller's own rows, so a
+    # name that is not yours is a 404 and there is no third party to record. A departing approver
+    # is therefore a departing owner, and `WHERE owner = ANY(...)` takes their approval with their
+    # workflow. It had a fourth parameter once, and with it this comment would have been a position
+    # taken by omission — a person in a column an erase predicate could not see, exactly the
+    # `note_proposals.decided_by` defect `tests/test_leaver.py` was written for.
+    ("composed_workflows", "DELETE FROM composed_workflows WHERE owner = ANY(%(actors)s)"),
     ("session_owners", "DELETE FROM session_owners WHERE owner = ANY(%(actors)s)"),
 )
 
@@ -278,6 +336,18 @@ _RETAINED: tuple[tuple[str, tuple[str, ...], str], ...] = (
         "actions are recorded at all, and the credential writing it has no DELETE either",
     ),
     ("plan_approvals", ("actor",), "who approved a plan before it was allowed to spend anything"),
+    (
+        "behaviour_proposals",
+        ("actor", "decided_by"),
+        "who proposed a change to what the agent does, and who decided it — the row above's "
+        "reason one layer up, since this is about the agent's behaviour rather than one plan's "
+        "spend. **It retains more than that row and the report says so rather than letting it "
+        "ride**: a plan approval is a hash and a verdict, while a proposal keeps `content` — a "
+        "whole document a model wrote about this person's chemistry, held after they leave. That "
+        "is justified (a rejection is only evidence if the text it rejected is still there) and "
+        "it is a larger claim, which is exactly why it is printed with a count rather than "
+        "assumed",
+    ),
     (
         "note_proposals",
         ("actor", "decided_by"),
@@ -306,6 +376,13 @@ _RETAINED: tuple[tuple[str, tuple[str, ...], str], ...] = (
         "is deliberately not here — it is advisory routing rather than an act, and it may hold "
         "an entitlement rather than a person",
     ),
+    (
+        "pending_request_answers",
+        ("requested_by", "answered_by"),
+        "the same answer, archived when the question was asked again — `pending_requests`' row one "
+        "hop later, so scrubbed on the same columns and for the same reason. `asked_of` stays here "
+        "for the reason it stays there",
+    ),
     ("turn_costs", ("actor",), "what a person's turns cost, the record an operator bills against"),
     # The three prescriptive-tier columns, retained on `bo_campaigns.opened_by`'s line: a design is
     # a shared scientific artifact and who framed it is part of its provenance, not an incidental
@@ -330,6 +407,13 @@ _RETAINED: tuple[tuple[str, tuple[str, ...], str], ...] = (
         ("author",),
         "who wrote each revision of a design — with `author_kind`, the thing that makes an "
         "expert's correction of a generated protocol attributable at all",
+    ),
+    (
+        "experiment_arm_results",
+        ("author",),
+        "who attached a measured outcome to a designed arm — the provenance of a number a "
+        "laboratory acts on, and with `author_kind` the thing that says whether a person or this "
+        "system put it there",
     ),
     (
         "experiment_protocol_status_events",
@@ -410,6 +494,25 @@ _BEYOND_REACH: dict[str, str] = {
     "the audit hash chain, so this deployment's copy is empty; a schema is forward-only, so a "
     "database that ran the pre-removal build needs an operator with owner rights to check",
 }
+
+
+# How many sessions one claim, refresh or release statement covers.
+#
+# **A module constant rather than a `Settings` field, deliberately, and the reason is the one
+# `api/state._CLAIM_REFRESHES_PER_LEASE` gives beside it**: this is a property of how the statement
+# is written, not something a deployment tunes. It bounds two things at once — how long one
+# statement holds row locks on `session_turns`, and how much of a fleet is re-claimed if the
+# statement fails — and neither has a per-deployment answer. A thousand is far enough above any
+# real fleet that a large actor is one or two statements, and far enough below "all of them" that
+# a single lock window stays short.
+CLAIM_BATCH = 1000
+
+# The claim is refreshed this many times per lease, exactly as a running turn's is
+# (`api/state._CLAIM_REFRESHES_PER_LEASE`, whose reasoning is the same one: two consecutive
+# refreshes may fail before the lease is genuinely at risk). Not imported from there — `agent/`
+# sits below `api/` and `tests/test_layering.py` enforces that direction — and not a config knob,
+# for the reason `CLAIM_BATCH` is not.
+_CLAIM_REFRESHES_PER_LEASE = 3
 
 
 # The holder name this sweep takes a session's durable turn claim under. A fresh id per run, so a
@@ -650,6 +753,16 @@ async def _sessions_held(sessions: list[str]) -> AsyncIterator[None]:
     release in this system is, and identity-checked by `_erasure_holder`'s per-run id, so a late
     release cannot revoke a successor's claim (`api/state.TurnLease.token`'s rule).
 
+    **Taken in batches and then kept alive, because a guard that expires under its own sweep is not
+    a guard.** One statement per session ran at ~56 sessions/s, so claiming a 6,000-session fleet
+    took 104 s against a 60 s lease — the claims taken first had already lapsed before the last one
+    was taken, and nothing refreshed any of them for the rest of the run. Measured at 600 sessions
+    with a 10 s lease: 37 claims expired before the loop finished, 113 by the time the erase
+    transaction would have run, and a second pod took the first session at t+10.3 s while the sweep
+    was still going. Both halves are needed and neither is sufficient — `CLAIM_BATCH` turns the
+    loop into one statement per thousand (0.51 s for 6,000, measured) and `_keep_claims_alive`
+    holds what it took for as long as the deletion takes.
+
     Raises:
         ErasureError: a turn holds one of these sessions.
     """
@@ -660,16 +773,16 @@ async def _sessions_held(sessions: list[str]) -> AsyncIterator[None]:
     holder = _erasure_holder()
     lease = settings.service_turn_claim_lease_seconds
     held: list[str] = []
+    heartbeat: asyncio.Task[None] | None = None
     try:
         busy: list[str] = []
-        for session_id in sessions:
+        for batch in _batches(sessions):
             try:
-                if await claims.claim(session_id, holder, lease):
-                    held.append(session_id)
-                else:
-                    busy.append(session_id)
+                taken = await claims.claim_many(batch, holder, lease)
             except psycopg.Error as exc:
                 raise ErasureError(f"the database refused the erasure: {exc}") from exc
+            held.extend(session_id for session_id in batch if session_id in taken)
+            busy.extend(session_id for session_id in batch if session_id not in taken)
         if busy:
             raise ErasureError(
                 "a turn is running on "
@@ -678,22 +791,98 @@ async def _sessions_held(sessions: list[str]) -> AsyncIterator[None]:
                 "Erasing a session while a turn writes to it leaves a copy of the conversation "
                 "that no later erasure can reach."
             )
+        heartbeat = asyncio.create_task(_keep_claims_alive(claims, list(held), holder, lease))
         yield
     finally:
-        for session_id in held:
+        if heartbeat is not None:
+            heartbeat.cancel()
+            with suppress(asyncio.CancelledError):
+                await heartbeat
+        for batch in _batches(held):
             try:
-                await claims.release(session_id, holder)
+                await claims.release_many(batch, holder)
             except psycopg.Error:
                 # The lease is the backstop, exactly as it is for a worker that was SIGKILLed
                 # mid-turn: an unreleased claim costs that session one lease of unavailability
                 # rather than a permanent refusal, which is why the claim expires at all.
                 logger.warning(
-                    "could not release the erasure's turn claim on session %s; it expires on "
-                    "its own after %ss",
-                    session_id,
+                    "could not release the erasure's turn claim on %d session(s) (%s ...); they "
+                    "expire on their own after %ss",
+                    len(batch),
+                    batch[0],
                     lease,
                     exc_info=True,
                 )
+
+
+def _batches(sessions: list[str]) -> list[list[str]]:
+    """`sessions` in `CLAIM_BATCH`-sized batches, each free of repeats.
+
+    The de-duplication is `_TURN_CLAIM_MANY`'s requirement rather than defensiveness: `ON CONFLICT
+    … DO UPDATE` refuses to touch one row twice in a statement, so a repeated session id would end
+    the whole erasure with `CardinalityViolation`. Both callers pass ids read out of a primary key
+    and so cannot repeat one today — which is exactly the property that would go unnoticed the day
+    a third caller does not have it.
+    """
+    unique = list(dict.fromkeys(sessions))
+    return [unique[start : start + CLAIM_BATCH] for start in range(0, len(unique), CLAIM_BATCH)]
+
+
+async def _keep_claims_alive(
+    claims: SessionTurnClaims, sessions: list[str], holder: str, lease: float
+) -> None:
+    """Push this sweep's claims out for as long as the sweep runs, and say what it loses.
+
+    **The claim has to outlast the erasure, and nothing made it.** The lease is
+    `service_turn_claim_lease_seconds` (60 by default) and an applied sweep is a claim loop plus
+    one transaction that measured 85 s for 400k rows — so on any fleet worth the guard, the claims
+    taken at the start had lapsed by the time the deletion ran, and `_TURN_CLAIM`'s
+    `WHERE session_turns.expires_at <= now()` hands a lapsed slot to whoever asks next. Measured
+    at 600 sessions against a 10 s lease: 113 of them expired mid-run and a second pod took the
+    first one at t+10.3 s. This is the same heartbeat a running turn keeps
+    (`api/state._hold_turn_claim`), at the width the sweep holds.
+
+    A refresh that does not come back is *not* by itself a takeover: the erase transaction locks —
+    and then deletes — the very rows this refreshes, so the ordinary end of every applied run is
+    that these stop being ours. Only a session a *different* holder now names is worth a warning,
+    and a session lost that way is dropped from the heartbeat rather than asked about every tick,
+    for `_hold_turn_claim`'s reason: a heartbeat that cannot succeed is a timer burning a
+    connection.
+
+    Cancelled by `_sessions_held`'s `finally`, so it lives exactly as long as the claims do.
+    """
+    interval = lease / _CLAIM_REFRESHES_PER_LEASE
+    alive = list(sessions)
+    while alive:
+        await asyncio.sleep(interval)
+        try:
+            refreshed: set[str] = set()
+            for batch in _batches(alive):
+                refreshed |= await claims.refresh_many(batch, holder, lease)
+            missing = [session_id for session_id in alive if session_id not in refreshed]
+            taken_over: set[str] = set()
+            for batch in _batches(missing):
+                taken_over |= await claims.other_holders(batch, holder)
+            if taken_over:
+                logger.warning(
+                    "the erasure's turn claim on %d session(s) was taken over while the sweep was "
+                    "running (%s); a turn may be writing to a session this run is erasing, so "
+                    "check the residue this run reports",
+                    len(taken_over),
+                    ", ".join(sorted(taken_over)[:10]),
+                )
+                alive = [session_id for session_id in alive if session_id not in taken_over]
+        except psycopg.Error:
+            # Warned rather than fatal, for `api/state._hold_turn_claim`'s reason: the erasure is
+            # already running, and ending it here would leave a half-deleted fleet to be found by
+            # the residue count instead of by a report. The lease is what is at risk, and the
+            # residue count is what says whether that cost anything.
+            logger.warning(
+                "could not refresh the erasure's turn claims; if this keeps failing they lapse "
+                "after %ss and a turn may start on a session this run is erasing",
+                lease,
+                exc_info=True,
+            )
 
 
 async def _erase_within_claims(actors: list[str], report: ErasureReport, *, apply: bool) -> None:
@@ -716,7 +905,7 @@ async def _erase_within_claims(actors: list[str], report: ErasureReport, *, appl
         # One digest per spelling of the id, for the reason `actors` is a list of spellings: a
         # memory written on the `unverified:` path is under a different namespace from one written
         # on the authenticated path, and both are the same chemist's.
-        memory_prefixes = [memory_prefix(form) for form in actors]
+        memory_prefixes = store_prefixes(actors)
         # The mailbox ids, one per spelling, minted by the function the writer and the reader both
         # use rather than re-spelled here — a second spelling of this string is a mailbox somebody
         # writes to and nobody erases, which is the defect this line closes.

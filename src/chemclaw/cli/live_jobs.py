@@ -51,6 +51,7 @@ from chemclaw.core.db import _redact
 from chemclaw.core.db import connection as db_connection
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 from chemclaw.core.logging import configure_logging
+from chemclaw.core.markdown import render_table
 from chemclaw.core.temporal_client import connect as temporal_connect
 
 logger = logging.getLogger(__name__)
@@ -194,6 +195,32 @@ async def _workflow_status(workflow_id: str) -> WorkflowExecutionStatus | None:
     return description.status
 
 
+#: Between two asks of the broker while waiting on a workflow. A describe is one cheap RPC, and a
+#: second is well under the resolution anyone reads a job's duration at.
+_POLL_SECONDS = 1.0
+
+
+async def _await_terminal(workflow_id: str) -> tuple[WorkflowExecutionStatus | None, float]:
+    """Poll until the workflow reaches a terminal state or the wait runs out; say which and when.
+
+    Any terminal state ends the wait, not only the one being hoped for — a run that failed while
+    this polled for COMPLETED would otherwise be reported as "never completed", which sends the
+    reader looking for a hang instead of reading the failure Temporal already has. The bound is
+    `live_jobs_terminal_wait_seconds`, so a job that is genuinely stuck is still reported, with the
+    state it was stuck in.
+
+    Returns:
+        The last status the broker reported, and the seconds this waited for it.
+    """
+    started = time.monotonic()
+    deadline = started + settings.live_jobs_terminal_wait_seconds
+    while True:
+        status = await _workflow_status(workflow_id)
+        if status in _TERMINAL or time.monotonic() >= deadline:
+            return status, time.monotonic() - started
+        await asyncio.sleep(_POLL_SECONDS)
+
+
 async def _scalar(sql: str, params: tuple[Any, ...] = ()) -> Any:
     """One value from the live database, using the application's own connection helper."""
     async with db_connection(settings.postgres_dsn) as conn:
@@ -205,17 +232,24 @@ async def _scalar(sql: str, params: tuple[Any, ...] = ()) -> Any:
 async def check_workflow_completed(run: SmokeRun) -> Check:
     """The wrapper workflow reached COMPLETED, as Temporal reports it.
 
+    **Waited for, then judged.** The launch returns a bare workflow id when the job outlives the
+    tool's `inline_wait_seconds` — the pending outcome `connectors/jobs.py` is designed to give a
+    turn — and this used to describe the workflow at that instant: a cold first launch took 20.2 s,
+    read RUNNING, and failed a job that completed moments later (3/5, then 5/5 on the rerun).
+    `_await_terminal` polls to a terminal state inside `live_jobs_terminal_wait_seconds` first.
+
     The start time is reported alongside the status, so the record dates itself: a reader can see
     the execution belongs to this run rather than to some earlier one it rejoined.
     """
+    status, waited = await _await_terminal(run.workflow_id)
     client = await temporal_connect()
     description = await client.get_workflow_handle(run.workflow_id).describe()
     started = description.start_time.isoformat(timespec="seconds")
-    status = description.status
+    still = "" if status in _TERMINAL else f" after waiting {waited:.0f}s"
     return Check(
         name="workflow reached COMPLETED",
         passed=status == WorkflowExecutionStatus.COMPLETED,
-        observed=f"{status.name if status else 'not found'}, started {started}",
+        observed=f"{status.name if status else 'not found'}{still}, started {started}",
         detail=run.workflow_id,
     )
 
@@ -330,25 +364,23 @@ async def check_pending_when_worker_wedged(run_dir: Path) -> Check:
             ),
         )
     # And it really is only pending: once the worker is polling again the same run finishes.
-    # Any *terminal* state ends the wait, not just the one being hoped for — a run that failed
-    # while this polled for COMPLETED would otherwise be reported as "never completed", which
-    # sends the reader looking for a hang instead of reading the failure Temporal already has.
-    for _ in range(60):
-        status = await _workflow_status(expected_id)
-        if status in _TERMINAL:
-            return Check(
-                name="wedged worker yields a pending job",
-                passed=status == WorkflowExecutionStatus.COMPLETED,
-                observed=(
-                    f"returned the id after {waited:.0f}s, "
-                    f"then {status.name if status else 'gone'} once resumed"
-                ),
-            )
-        await asyncio.sleep(1)
+    status, resumed = await _await_terminal(expected_id)
+    if status in _TERMINAL:
+        return Check(
+            name="wedged worker yields a pending job",
+            passed=status == WorkflowExecutionStatus.COMPLETED,
+            observed=(
+                f"returned the id after {waited:.0f}s, "
+                f"then {status.name if status else 'gone'} once resumed"
+            ),
+        )
     return Check(
         name="wedged worker yields a pending job",
         passed=False,
-        observed=f"returned the id after {waited:.0f}s but was still running 60s after SIGCONT",
+        observed=(
+            f"returned the id after {waited:.0f}s but was still "
+            f"{status.name if status else 'not found'} {resumed:.0f}s after SIGCONT"
+        ),
     )
 
 
@@ -379,12 +411,14 @@ def report(run: SmokeRun) -> str:
         "# Live durable-job smoke\n",
         f"Job `{SMOKE_JOB}` · workflow `{run.workflow_id}` · launched in {run.seconds:.1f}s",
         f"· Temporal `{settings.temporal_address}` · Postgres `{_redact(settings.postgres_dsn)}`\n",
-        "| check | result | observed |",
-        "| --- | --- | --- |",
+        render_table(
+            ["check", "result", "observed"],
+            [
+                [check.name, "PASS" if check.passed else "**FAIL**", check.observed]
+                for check in run.checks
+            ],
+        ),
     ]
-    for check in run.checks:
-        verdict = "PASS" if check.passed else "**FAIL**"
-        lines.append(f"| {check.name} | {verdict} | {check.observed} |")
     passed = sum(1 for check in run.checks if check.passed)
     lines.append(f"\n**{passed}/{len(run.checks)} checks passed.**")
     return "\n".join(lines)

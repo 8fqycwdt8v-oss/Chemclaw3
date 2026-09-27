@@ -4,7 +4,10 @@ import ast
 import os
 import pathlib
 import re
+import shutil
 import socket
+import subprocess
+import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -90,8 +93,8 @@ def test_localhost_suffix_is_not_trusted() -> None:
 # parsed, so `127.0.0.2`, `0.0.0.0`, `::` and a bracketed `[::1]` were loopback to one and not to
 # the other. The consequence was not cosmetic — a pod with the shipped `service_host="0.0.0.0"`
 # bind and `CHEMCLAW_LLM_BASE_URL=http://127.0.0.2:8820/v1` passed
-# `api.middleware._refuse_unconfigured_llm_gateway`, the guard added to catch exactly that, and
-# then failed every turn on a refused connection.
+# `refuse_unconfigured_llm_gateway` (then in `api.middleware`, now `core.llm_gateway`), the guard
+# added to catch exactly that, and then failed every turn on a refused connection.
 _ADDRESSES: list[tuple[str, bool]] = [
     ("127.0.0.1", True),
     ("127.0.0.2", True),  # was: loopback to the guard, network-exposed to the front door
@@ -108,6 +111,19 @@ _ADDRESSES: list[tuple[str, bool]] = [
     ("0.0.0.0", False),
     ("::", False),
     ("", False),
+    # The short, decimal, octal and hexadecimal spellings `inet_aton(3)` accepts and
+    # `ipaddress.ip_address` does not. Every one was driven against a real listener and reached
+    # `('127.0.0.1', <port>)`, while this predicate called all four network-reachable — so a
+    # gateway named any of these booted past `core.llm_gateway` and sent every prompt to whatever
+    # answered inside the pod. `0177.1` is the fifth and was found by taking the measurement
+    # rather than by reading the four in the report.
+    ("127.1", True),
+    ("2130706433", True),
+    ("0x7f.1", True),
+    ("0177.1", True),
+    # And the other direction, so the fallback cannot be read as "any number is loopback":
+    # `inet_aton` accepts this one too, as 0.0.48.57.
+    ("12345", False),
     ("exfil.localhost", False),  # a suffix is never resolved, never trusted
     ("127.0.0.1.nip.io", False),
     # An IPv4-mapped literal follows its mapped address, both ways. This row was written the
@@ -242,6 +258,7 @@ def test_the_allowlist_is_derived_from_the_dialled_destinations() -> None:
         vector_store_provider = "pgvector"
         vector_store_url = ""
         egress_allow = "mirror.internal"
+        egress_ssh_resolve_timeout_seconds = _SSH_TIMEOUT
 
     hosts = netguard.derive_allowed(_S())
     assert "llm.internal.example" in hosts
@@ -630,9 +647,14 @@ def _proxy_settings(**overrides: object) -> Settings:
 
 
 def _entra_settings(**overrides: object) -> Settings:
-    """A deployment in the enforced identity posture, whose JWKS fetch goes out through urllib."""
+    """A deployment in the enforced identity posture — `entra_required`, tenant, loopback infra.
+
+    `entra_required` is poppable like the other defaults because it is the *gate* the ambient arm
+    of `refuse_proxied_egress` turns on, so an arm that measures the gate has to be able to flip it
+    on this fixture rather than on a differently-shaped one.
+    """
     return _proxy_settings(
-        entra_required=True,
+        entra_required=bool(overrides.pop("entra_required", True)),
         # Loopback, because `entra_required` refuses a plaintext broker channel and this fixture is
         # about the JWKS fetch rather than about Temporal's transport.
         temporal_address="127.0.0.1:7233",
@@ -797,32 +819,98 @@ def test_a_bare_host_port_otlp_endpoint_is_not_dropped(monkeypatch: pytest.Monke
     assert _refuses(settings)
 
 
-def test_the_jwks_fetch_is_charged_by_its_own_scheme(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`PyJWKClient` goes through `urllib`, which *does* resolve per scheme — unlike grpc.
+def test_the_jwks_fetch_is_no_longer_a_charged_destination() -> None:
+    """An *absence* test, because the destination that used to be here is now immune.
 
-    The two readers in this check disagree about the environment and both are reproduced rather
-    than averaged: an `https` JWKS endpoint is carried by `https_proxy` or `all_proxy` and not by
-    `http_proxy`, while the exporter beside it is carried by any of them.
+    `api/auth.py` fetched the tenant key set through `urllib.request.urlopen`, which takes no
+    `trust_env` and was measured following `HTTP_PROXY` — on the anchor every bearer token is
+    validated against — so `_env_reading_destinations` charged it. `_HttpxJwkClient` now fetches it
+    with httpx and `trust_env=False`, so there is nothing left to charge, and a row for it would
+    refuse a pod over a hazard that no longer exists.
+
+    **The positive control is the second half of this test rather than `_assert_live`.** This arm
+    is about *charging*, not about refusing, so the helper — which re-runs a refusal with the
+    bypass removed — structurally cannot serve it: `_env_reading_destinations` with its body
+    deleted returns `[]`, and the version of this test that shipped asserted `charged == []` and
+    "not refused", both of which a gutted function passes. So the control is a configuration that
+    must charge something through the same call: with `otel_enabled` on, the OTLP exporter's row
+    has to come back, and an emptied function fails here instead of quietly agreeing.
+
+    What used to be this test's second assertion — an enforced-identity deployment behind a proxy
+    boots — is now false for a reason that is not the JWKS fetch, and
+    `test_the_enforced_posture_is_refused_behind_an_undeclared_proxy` below is where it lives.
     """
-    settings = _entra_settings()
-    for variable in ("https_proxy", "all_proxy"):
-        _proxy_env(monkeypatch, **{variable: "http://sidecar.internal:15001"})
-        assert _refuses(settings), f"{variable} must charge the JWKS fetch"
-    _proxy_env(monkeypatch, HTTP_PROXY="http://sidecar.internal:15001")
-    assert not _refuses(settings), "an https JWKS endpoint is not carried by HTTP_PROXY"
-    _assert_live(monkeypatch, settings)
+    charged = [reason for _, reason, _ in netguard._env_reading_destinations(_entra_settings())]
+    assert charged == [], f"the enforced posture charges a destination nothing proxies: {charged}"
+    control = [
+        reason
+        for _, reason, _ in netguard._env_reading_destinations(_entra_settings(otel_enabled=True))
+    ]
+    assert control == ["the OTLP span exporter"], (
+        f"the positive control charged {control}, so the empty result above is evidence about "
+        "this function having a body, not about the JWKS row being absent from it"
+    )
 
 
-def test_an_unenforced_identity_posture_has_no_jwks_fetch_to_charge(
+def test_the_enforced_posture_is_refused_behind_an_undeclared_proxy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`entra_required=False` means nothing fetches the key set, so nothing is proxied."""
-    settings = _proxy_settings(
-        otel_enabled=False, entra_jwks_url="https://login.microsoftonline.com/t/keys"
+    """Deleting the JWKS row emptied the charge sheet for a whole class of deployment.
+
+    Measured on the commit that removed it, with `entra_required=True`, `otel_enabled=False` and
+    `HTTPS_PROXY=http://sidecar.internal:15001`: `charged: []`, boot proceeds — where the same
+    settings refused the day before. The premise of the removal is sound and is asserted above; the
+    consequence was that `entra_required` charged **nothing**, so the only thing still refusing in
+    the shipped OpenShift topology was the chart's unrelated `CHEMCLAW_OTEL_ENABLED: "true"`, and
+    `make chat`, `make connectors`, CI and a hand-started worker in the enforced posture all booted
+    proxied.
+
+    What is refused is not the JWKS fetch — that destination is immune and must stay uncharged.
+    It is the carriers with no derivable destination, measured rather than argued:
+    `kg/git_writer._git_child_env` keeps every proxy variable in the `git` child's environment on
+    purpose (verified: `HTTPS_PROXY` survives it while `CHEMCLAW_LLM_API_KEY` is scrubbed), and a
+    `git ls-remote` behind a loopback recorder standing in for a sidecar sent it
+    `CONNECT notes.example.invalid:443`. The `git` destination is explicitly not on the allowlist's
+    derivation, and the LD_PRELOAD interposer exempts loopback by construction, so for a loopback
+    sidecar no layer below this one sees that push or its credential.
+    """
+    settings = _entra_settings()
+    for proxy in ("http://sidecar.internal:15001", "http://127.0.0.1:15001"):
+        _proxy_env(monkeypatch, HTTPS_PROXY=proxy)
+        assert netguard.proxied_destinations(settings) == {}, (
+            "the premise: nothing is charged here, so this refusal is the ambient arm rather than "
+            "the JWKS row having come back"
+        )
+        assert _refuses(settings), f"the enforced posture booted with {proxy} carrying its git push"
+
+
+def test_the_ambient_arm_is_the_enforced_posture_and_not_a_proxy_ban(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every way out of the arm above, because a refusal with no escape is an outage.
+
+    The three that must work, and the one that must not. `egress_allow` naming the proxy is the
+    operator saying the mesh is intended — the same escape the charged arm takes. `NO_PROXY=*` is
+    honoured because it is measured to work on the carrier this arm is about: with it set, the same
+    `git ls-remote` resolved the host directly and the loopback recorder saw nothing. And with
+    identity off — a developer's checkout, `make chat`, CI — an ambient corporate proxy is expected
+    and says nothing about undeclared egress, so nothing is refused; that arm is
+    `test_the_shipped_defaults_start_behind_a_corporate_proxy`, re-run here against the enforced
+    fixture so the gate itself is what is measured rather than the fixture's other fields.
+    """
+    proxy = "http://sidecar.internal:15001"
+    _proxy_env(monkeypatch, HTTPS_PROXY=proxy)
+    assert not _refuses(_entra_settings(egress_allow="sidecar.internal"))
+    assert not _refuses(_entra_settings(entra_required=False))
+    _proxy_env(monkeypatch, HTTPS_PROXY=proxy, NO_PROXY="*")
+    assert not _refuses(_entra_settings())
+    _proxy_env(monkeypatch)
+    assert not _refuses(_entra_settings()), "no proxy at all must stay the silent case"
+    _proxy_env(monkeypatch, HTTPS_PROXY=proxy)
+    assert _refuses(_entra_settings()), (
+        "the positive control did not fire, so the four negative arms above prove nothing about "
+        "whether the enforced posture is checked at all"
     )
-    _proxy_env(monkeypatch, HTTPS_PROXY="http://sidecar.internal:15001")
-    assert not _refuses(settings)
-    _assert_live(monkeypatch, _entra_settings())
 
 
 def test_a_proxy_named_in_the_allowlist_is_the_operators_decision(
@@ -867,31 +955,57 @@ def test_two_readers_on_one_host_do_not_collapse(monkeypatch: pytest.MonkeyPatch
     """A declared proxy must not hide an undeclared one reaching the same host by another reader.
 
     An earlier version keyed `carried` by destination host alone, so two entries for one host
-    overwrote each other and only the survivor was compared against the allowlist. **The first
-    test written for this could not fail**, because it varied two variables on *one* reader — and a
+    overwrote each other and only the survivor was compared against the allowlist. **The first test
+    written for this could not fail**, because it varied two variables on *one* reader — and a
     reader takes the first variable that hits and stops, so it can only ever record one proxy. The
-    collision needs two readers, which is what this deployment has: the gRPC exporter and the
-    `urllib` JWKS fetch, resolving different variables, both able to name the same host.
+    collision needs two readers.
 
-    Here the exporter is carried by an **undeclared** proxy and the JWKS fetch by a declared one,
-    on one host. Keyed by host, whichever landed second wins the comparison and the process starts
-    with the exporter's spans — prompts, under `otel_include_sensitive_data` — going to a host
-    nobody declared.
+    **This deployment no longer has two**, which is why the pair is injected rather than taken from
+    the shipped list. The second reader used to be `api/auth.py`'s `urllib` JWKS fetch, which now
+    passes `trust_env=False` and is not charged at all. Losing the fixture must not lose the
+    invariant: `proxied_destinations` is still keyed per destination *and reader and variable*, a
+    second reader is one ADR away, and the property is a property of that function rather than of
+    the list it happens to be handed today. So the real function is driven, with the input it can
+    no longer be given by configuration.
     """
-    shared = _entra_settings(
-        otel_enabled=True,
-        otel_endpoint="https://shared.internal:4317",
-        entra_jwks_url="https://shared.internal/tenant/keys",
-        egress_allow="gateway.internal,declared.corp",
+    monkeypatch.setattr(
+        netguard,
+        "_env_reading_destinations",
+        lambda _settings: [
+            ("https://shared.internal:4317", "the OTLP span exporter", ("grpc_proxy",)),
+            ("https://shared.internal/tenant/keys", "a second reader", ("https_proxy",)),
+        ],
     )
     _proxy_env(
         monkeypatch,
         GRPC_PROXY="http://undeclared.corp:3128",
         HTTPS_PROXY="http://declared.corp:3128",
     )
-    carried = netguard.proxied_destinations(shared)
+    settings = _proxy_settings(egress_allow="gateway.internal,declared.corp")
+    carried = netguard.proxied_destinations(settings)
     assert len(carried) == 2, f"one reader's entry was overwritten by the other's: {carried}"
-    assert _refuses(shared), "the undeclared proxy on the exporter was hidden by the declared one"
+    proxies = {proxy for proxy, _ in carried.values()}
+    assert proxies == {"undeclared.corp", "declared.corp"}, (
+        f"both readers' proxies must survive into the comparison, got {proxies}"
+    )
+
+    # **And the invariant is about the refusal, not about this dict.** The rebuilt version of this
+    # test stopped at `proxied_destinations`, which means it held the keying and nothing else:
+    # `refuse_proxied_egress` filters `carried` down to the entries whose proxy is *undeclared*,
+    # and that filter is where a collapsed key would actually do the damage — the declared proxy
+    # wins the comparison and the undeclared one carries the traffic, silently. Driven to the
+    # raise: one proxy declared, one not, and the refusal must fire and name the undeclared one.
+    with pytest.raises(RuntimeError, match="SECURITY: a proxy is configured") as refusal:
+        netguard.refuse_proxied_egress(settings)
+    assert "undeclared.corp" in str(refusal.value)
+    assert "declared.corp" not in str(refusal.value).replace("undeclared.corp", ""), (
+        "the declared proxy is the operator's decision and must not be reported as the offender"
+    )
+
+    # The control that makes the raise above mean something: declare both and it goes silent, so
+    # what fired was the `undeclared` filter rather than "two entries exist".
+    both = _proxy_settings(egress_allow="gateway.internal,declared.corp,undeclared.corp")
+    netguard.refuse_proxied_egress(both)
 
 
 def test_no_proxy_configured_is_the_silent_case(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -947,9 +1061,10 @@ def test_arm_from_settings_is_where_the_refusal_is_wired(monkeypatch: pytest.Mon
     """The tests above call the function; this one pins that anything *calls the function*.
 
     `arm_from_settings` is the single call `chemclaw.core.config` makes, which is what puts this
-    refusal in front of the durable worker as well as the front door — the gap
-    `api/middleware._refuse_unconfigured_llm_gateway` has by construction, since its signal is a
-    non-loopback *bind* and a worker does not bind.
+    refusal in front of the durable worker as well as the front door. The gateway guard reached the
+    front door only, for a whole year, because it lived in `api/middleware.py` with one caller;
+    `core/llm_gateway.py` plus a call in each entrypoint is the other way to close that, and
+    `tests/test_llm_gateway_guard.py` drives the processes to prove it.
     """
     _proxy_env(monkeypatch, HTTPS_PROXY="http://127.0.0.1:15001")
     with pytest.raises(RuntimeError, match="SECURITY: a proxy is configured"):
@@ -1191,36 +1306,71 @@ def test_the_environment_store_is_read_the_way_httpx_reads_it(
         )
 
 
-# The modules that build an httpx client without `trust_env=False`, each with the reason it is
-# tolerated. Every one is a *lane*, never a served path: `cli/live_*` and `evals/live.py` drive the
-# live/e2e lane against a loopback mock or a named gateway, and `cli/phoenix_publish.py` posts an
-# eval run to a locally-run Phoenix. None of them runs inside a pod that serves a chemist.
-#
-# It is a list rather than an absence because the fix belongs in those files and this file does not
-# own them; `docs/planning/BACKLOG.md` carries the row. What the list does buy is the ratchet: a
-# *new* client anywhere else fails on the day it is written, which is what the claim in
-# `core/netguard.py`'s docstring was standing in for and could not do.
-_TRUST_ENV_LANE_EXEMPTIONS = {
-    "src/chemclaw/cli/live_probes.py",
-    "src/chemclaw/cli/live_storm.py",
-    "src/chemclaw/cli/phoenix_publish.py",
-    "src/chemclaw/evals/live.py",
-}
+#: The module-level request verbs. Each builds a throwaway `Client` internally and takes the same
+#: `trust_env`, defaulting to True — so `httpx.get(url)` is a client construction wearing a
+#: different name, and a scan that matched only the class names could not see one.
+_HTTPX_VERBS = (
+    "get",
+    "post",
+    "put",
+    "patch",
+    "delete",
+    "head",
+    "options",
+    "request",
+    "stream",
+)
+
+
+def _httpx_module_names(tree: ast.Module) -> tuple[set[str], set[str]]:
+    """This module's aliases for `httpx` itself, and its names imported *from* `httpx`.
+
+    The verbs need qualifying and the classes do not: `Client` is distinctive enough to match on
+    the bare name anywhere, while `get` is `dict.get`, `os.environ.get` and a hundred other things.
+    So the verbs are matched only as `<httpx alias>.<verb>` or as a name imported straight out of
+    `httpx`, which is what these two sets are for.
+    """
+    aliases: set[str] = set()
+    imported: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            aliases |= {a.asname or a.name for a in node.names if a.name == "httpx"}
+        elif isinstance(node, ast.ImportFrom) and node.module == "httpx":
+            imported |= {a.asname or a.name for a in node.names if a.name in _HTTPX_VERBS}
+    return aliases, imported
 
 
 def _httpx_client_constructions() -> list[tuple[str, int, bool]]:
-    """Every `httpx.Client`/`AsyncClient` construction in `src/`, and whether it refuses the env.
+    """Every httpx client construction in `src/`, class and verb, and whether it refuses the env.
+
+    **The verbs are here because this ratchet was blind to the call shape the tree had just grown.**
+    It matched `Client`/`AsyncClient` only, and `api/auth.py` is this tree's first module-level
+    `httpx.get(...)` — the tenant JWKS fetch, on the anchor every bearer token is validated against,
+    and the whole argument for deleting that destination's row from `core/netguard.py`
+    rests on its `trust_env=False`. Measured against the scan as it stood: that line was invisible
+    to it, so the property the deletion depends on was held by a keyword nobody was watching and a
+    second such call would have arrived exempt. `httpx.get` builds a `Client` per call and defaults
+    `trust_env` to True exactly as the class does, so nothing about the narrow reading was safer —
+    it was the same decay by omission one name further out.
 
     A `**gateway_client_kwargs(...)` unpacking counts as compliant, whether inline or through a
     local name bound to that call: that mapping's whole point is that `trust_env=False` is
     unconditional in it (`core/http.py`), and the two call sites that use it are the LLM gateway
     and the embeddings client — the two the proxy ADR was written about. Bare `**kwargs` from
     anywhere else does *not* count, so the escape hatch is one named function rather than a shape.
+
+    **An `http_client=` delegation counts too, and it has to.** The scan keys on the bare name
+    `Client`, so it also catches an SDK's own client — `phoenix.client.Client` was in this list for
+    that reason, having no `trust_env` of its own to pass. What such an SDK offers instead is a
+    seam to hand it a transport, and handing it one that refuses the environment is the same
+    property reached one call deeper; the delegate is checked by this same function rather than
+    accepted on the strength of the keyword's name.
     """
     src = Path(__file__).resolve().parents[1] / "src" / "chemclaw"
     found: list[tuple[str, int, bool]] = []
     for path in sorted(src.rglob("*.py")):
         tree = ast.parse(path.read_text())
+        aliases, imported = _httpx_module_names(tree)
         bound = {
             target.id
             for node in ast.walk(tree)
@@ -1230,30 +1380,47 @@ def _httpx_client_constructions() -> list[tuple[str, int, bool]]:
             for target in node.targets
             if isinstance(target, ast.Name)
         }
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            func = node.func
-            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
-            if name not in ("Client", "AsyncClient"):
-                continue
-            refuses = any(
-                keyword.arg == "trust_env"
-                and isinstance(keyword.value, ast.Constant)
-                and keyword.value.value is False
-                for keyword in node.keywords
-            ) or any(
-                keyword.arg is None
-                and (
+
+        def refuses_the_environment(call: ast.Call, bound: set[str] = bound) -> bool:
+            """Whether this client construction cannot read a proxy variable."""
+            for keyword in call.keywords:
+                if (
+                    keyword.arg == "trust_env"
+                    and isinstance(keyword.value, ast.Constant)
+                    and keyword.value.value is False
+                ):
+                    return True
+                if keyword.arg == "http_client" and isinstance(keyword.value, ast.Call):
+                    return refuses_the_environment(keyword.value)
+                if keyword.arg is None and (
                     (
                         isinstance(keyword.value, ast.Call)
                         and getattr(keyword.value.func, "id", "") == "gateway_client_kwargs"
                     )
                     or (isinstance(keyword.value, ast.Name) and keyword.value.id in bound)
+                ):
+                    return True
+            return False
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+            qualified = (
+                isinstance(func, ast.Attribute)
+                and isinstance(func.value, ast.Name)
+                and func.value.id in aliases
+            ) or (isinstance(func, ast.Name) and func.id in imported)
+            if name not in ("Client", "AsyncClient") and not (name in _HTTPX_VERBS and qualified):
+                continue
+            found.append(
+                (
+                    path.relative_to(src.parents[1]).as_posix(),
+                    node.lineno,
+                    refuses_the_environment(node),
                 )
-                for keyword in node.keywords
             )
-            found.append((path.relative_to(src.parents[1]).as_posix(), node.lineno, refuses))
     return found
 
 
@@ -1267,10 +1434,18 @@ def test_every_served_http_client_refuses_the_ambient_proxy() -> None:
     the socket guard cannot see it either, because a proxy moves the destination out of the
     address (`D-2026-09-05-a-proxy-moves-the-destination-out-of-the-address`).
 
-    Measured when this test was written, the sentence was false for six clients. All six are in the
-    live/eval lane, so the *served* half of the claim held — but nothing was keeping it true, and
-    the next client to be added would have been the one that mattered. `httpx` defaults
+    Measured when this test was written, the sentence was false for eight constructions across four
+    live/eval-lane modules, so the *served* half of the claim held — but nothing was keeping it
+    true, and the next client to be added would have been the one that mattered. `httpx` defaults
     `trust_env` to True, so this is a property that decays by omission rather than by edit.
+
+    **The named exemption list those four modules sat in is gone**
+    (`D-2026-09-12-an-ambient-proxy-is-a-destination-nobody-declared`), and deleting it is what
+    closes the hole *in the ratchet itself*: the list keyed on a **module path**, so every later
+    client added inside one of those four files was exempt on the day it was written — the exact
+    property this test exists to deny. There is now no exemption at all, so the scan is wider than
+    its own name: **`served` no longer narrows anything here**, and the name is kept only because
+    merged ADRs and `core/netguard.py` cite it, and a merged ADR is not edited.
 
     Verified to bite: deleting `"trust_env": False` from `core/http.gateway_client_kwargs` turns
     this red. The first version of this test did *not* — it accepted the unpacking on the strength
@@ -1283,9 +1458,7 @@ def test_every_served_http_client_refuses_the_ambient_proxy() -> None:
         "refusing the environment, every client built from it reads a proxy variable again."
     )
     offenders = sorted(
-        f"{module}:{line}"
-        for module, line, refuses in _httpx_client_constructions()
-        if not refuses and module not in _TRUST_ENV_LANE_EXEMPTIONS
+        f"{module}:{line}" for module, line, refuses in _httpx_client_constructions() if not refuses
     )
     assert not offenders, (
         f"{offenders} build an httpx client without `trust_env=False`. A proxy variable on the pod "
@@ -1327,3 +1500,438 @@ def test_a_loopback_name_does_not_seed_the_resolved_ip_allowlist() -> None:
         netguard._resolved_ips.clear()
         netguard._resolved_ips.update(saved)
         netguard._reset_for_tests(netguard.derive_allowed(settings))
+
+
+# --- the git note remote, the one destination that is a *name* rather than a field --------------
+
+#: The shipped bound on `ssh -G`, read off `Settings` so these tests exercise the default a
+#: deployment runs with rather than a second copy of it.
+_SSH_TIMEOUT: float = Settings.model_fields["egress_ssh_resolve_timeout_seconds"].default
+
+
+def _clone_with_remote(tmp_path: Path, url: str, *, name: str = "origin", push: str = "") -> str:
+    """A real checkout with a real remote, so the resolution is driven rather than mocked."""
+    repo = tmp_path / f"notes-{abs(hash((url, name, push))) % 10**8}"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "remote", "add", name, url], check=True, capture_output=True
+    )
+    if push:
+        subprocess.run(
+            ["git", "-C", str(repo), "config", "--add", f"remote.{name}.pushurl", push],
+            check=True,
+            capture_output=True,
+        )
+    return str(repo)
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://git.example.com/org/notes.git", {"git.example.com"}),
+        ("git@git.example.com:org/notes.git", {"git.example.com"}),
+        ("ssh://git@git.example.com:2222/org/notes.git", {"git.example.com"}),
+        ("https://GIT.EXAMPLE.COM/org/notes.git", {"git.example.com"}),
+        ("ssh://git@[2001:db8::1]:2222/org/notes.git", {"2001:db8::1"}),
+        # No credential reaches the allowlist, which is a host list and not a connection string.
+        ("https://user:pw@creds.example.com/org/notes.git", {"creds.example.com"}),
+        # Every spelling of "nowhere off this box". `_host_from_url` reads `../notes` as the host
+        # `..`, which is why the path forms are refused before it rather than after.
+        ("/srv/notes.git", set()),
+        ("file:///srv/notes.git", set()),
+        ("../notes", set()),
+        ("~/notes", set()),
+        ("notes", set()),
+    ],
+)
+def test_the_git_note_remote_resolves_to_the_hosts_it_would_push_to(
+    tmp_path: Path, url: str, expected: set[str]
+) -> None:
+    """Driven against real `git remote add`, because the scp-like form is the one that surprises.
+
+    `git@host:path` has no scheme, so anything reading it as a URL sees no host unless it is asked
+    the right way; `/srv/notes.git` and `../notes` have no host at all and must not contribute one.
+    """
+    netguard._push_hosts.cache_clear()
+    assert (
+        netguard._push_hosts_for(_clone_with_remote(tmp_path, url), "origin", _SSH_TIMEOUT)
+        == expected
+    )
+
+
+def test_the_push_url_is_what_is_derived_when_it_differs_from_the_fetch_url(
+    tmp_path: Path,
+) -> None:
+    """`git push` uses `remote.<name>.pushurl`, and plain `get-url` returns the *fetch* URL.
+
+    A review drove this: with a `pushurl` set, the first version of this derivation was wrong in
+    both directions at once — the host that would actually be dialled was **missing** from the
+    allowlist, so the deployment's own guard refused its own push, and a host nothing dials was
+    **added** to it. `--push` is the fix, and `--all` is for the several-push-URL case git allows.
+    """
+    netguard._push_hosts.cache_clear()
+    one = _clone_with_remote(
+        tmp_path, "https://fetch.example.com/o/n.git", push="https://push.example.com/o/n.git"
+    )
+    assert netguard._push_hosts_for(one, "origin", _SSH_TIMEOUT) == {"push.example.com"}, (
+        "the fetch host was derived, so the guard would refuse the push it is meant to permit"
+    )
+    netguard._push_hosts.cache_clear()
+    several = _clone_with_remote(
+        tmp_path, "https://fetch.example.com/o/n.git", push="https://p1.example.com/o/n.git"
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            several,
+            "config",
+            "--add",
+            "remote.origin.pushurl",
+            "https://p2.example.com/o/n.git",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    assert netguard._push_hosts_for(several, "origin", _SSH_TIMEOUT) == {
+        "p1.example.com",
+        "p2.example.com",
+    }
+
+
+def test_a_remote_url_git_accepts_and_urlsplit_refuses_does_not_crash_the_process(
+    tmp_path: Path,
+) -> None:
+    """`derive_allowed` runs at `chemclaw.core.config` import, so a raise here is a crashloop.
+
+    `urlsplit` raises `ValueError` on an unbalanced `[`, and `git remote add` accepts one — so the
+    first version of this function, which called `_host_from_url` outside its `try`, would have
+    failed every component's import on a `.git/config` a deployment could write by accident.
+    """
+    netguard._push_hosts.cache_clear()
+    for url in ("https://[oops/path", "ssh://[2001:db8::1/x"):
+        repo = _clone_with_remote(tmp_path, url)
+        netguard._push_hosts.cache_clear()
+        assert netguard._push_hosts_for(repo, "origin", _SSH_TIMEOUT) == set()
+
+
+def test_a_derived_host_can_never_carry_the_compiled_layers_separator(tmp_path: Path) -> None:
+    """A comma in one entry is *two* allowed hosts on the compiled layer and none on this one.
+
+    `core/netguard_preload.c::parse_allowlist` splits `CHEMCLAW_NETGUARD_PRELOAD_ALLOW` on commas,
+    while `_check` here compares whole strings — so a single derived entry containing a comma is
+    permitted by one layer and refused by the other, which is the divergence this function sits in
+    `derive_allowed` to prevent. Refused at the source rather than escaped at each layer.
+    """
+    netguard._push_hosts.cache_clear()
+    repo = _clone_with_remote(tmp_path, "https://harmless,target.example.com/n.git")
+    assert netguard._push_hosts_for(repo, "origin", _SSH_TIMEOUT) == set()
+    netguard._push_hosts.cache_clear()
+    multiline = _clone_with_remote(tmp_path, "https://evil.example.com\nhttps://good.example.com/x")
+    assert not any(
+        "," in host for host in netguard._push_hosts_for(multiline, "origin", _SSH_TIMEOUT)
+    )
+
+
+@pytest.mark.parametrize("spelling", [".", "./", "././", "src/..", "{cwd}", "{cwd}/"])
+def test_no_spelling_of_this_processes_own_checkout_derives_a_git_host(spelling: str) -> None:
+    """The dev checkout must not put the *source* repository's host on the allowlist.
+
+    At any of these the writer refuses the write before it can push — `git_writer` commits into the
+    running application's own tree and would push to the source repository — so there is no
+    destination to allow. The first version compared the string to `"."` and a review drove every
+    row here through it: all of them derived this repository's own remote while the writer went on
+    refusing them, which is the widening the guard was written to prevent. `core/checkout.py` is
+    now the one predicate both sides ask.
+    """
+    netguard._push_hosts.cache_clear()
+    assert (
+        netguard._push_hosts_for(spelling.format(cwd=os.getcwd()), "origin", _SSH_TIMEOUT) == set()
+    )
+
+
+def test_the_derivation_and_the_writers_refusal_ask_the_same_question(tmp_path: Path) -> None:
+    """They disagreed once, and the disagreement was the widening above.
+
+    `git_writer._require_dedicated_checkout` raises for exactly the directories
+    `is_the_processes_own_checkout` reports, so "the writer refuses anyway, therefore there is no
+    destination" is a claim this test holds rather than a sentence in a comment.
+    """
+    from chemclaw.core.checkout import is_the_processes_own_checkout
+    from chemclaw.kg.git_writer import GitWriteError, _require_dedicated_checkout
+
+    for spelling in (".", "./", "src/..", os.getcwd(), str(tmp_path)):
+        refused = False
+        try:
+            _require_dedicated_checkout(spelling)
+        except GitWriteError:
+            refused = True
+        assert refused == is_the_processes_own_checkout(spelling), spelling
+
+
+def test_an_unresolvable_remote_contributes_nothing_rather_than_failing(tmp_path: Path) -> None:
+    """Absent beats wrong: a deployment can still name the host in `egress_allow`.
+
+    Three ways to have no answer — a directory that is not a checkout, a directory that is not
+    there, and a checkout with no such remote. None of them may raise, because `derive_allowed`
+    runs at import in every process and a raise there is a crashloop.
+    """
+    netguard._push_hosts.cache_clear()
+    plain = tmp_path / "not-a-checkout"
+    plain.mkdir()
+    assert netguard._push_hosts_for(str(plain), "origin", _SSH_TIMEOUT) == set()
+    assert (
+        netguard._push_hosts_for(str(tmp_path / "does-not-exist"), "origin", _SSH_TIMEOUT) == set()
+    )
+    repo = _clone_with_remote(tmp_path, "https://git.example.com/org/notes.git", name="upstream")
+    assert netguard._push_hosts_for(repo, "origin", _SSH_TIMEOUT) == set()
+    assert netguard._push_hosts_for(repo, "upstream", _SSH_TIMEOUT) == {"git.example.com"}
+
+
+def test_a_remote_named_like_a_flag_is_a_remote(tmp_path: Path) -> None:
+    """`--` before the name, so a `.git/config` cannot turn the resolution into a git option.
+
+    Driven by creating the remote git would otherwise be asked to *run*: without the separator,
+    `get-url --upload-pack=...` is an unknown option rather than an unknown remote, and a future
+    git that accepted it would be executing a string from a config file.
+    """
+    netguard._push_hosts.cache_clear()
+    repo = _clone_with_remote(tmp_path, "https://git.example.com/o/n.git")
+    subprocess.run(
+        ["git", "-C", repo, "config", "--add", "remote.--upload-pack=id.url", "https://x.test/n"],
+        check=True,
+        capture_output=True,
+    )
+    without = subprocess.run(
+        ["git", "-C", repo, "remote", "get-url", "--push", "--all", "--upload-pack=id"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert "unknown option" in (without.stderr + without.stdout).lower(), (
+        "git no longer reads this as an option without the separator, so what `--` protects has "
+        "changed; re-read it rather than deleting it"
+    )
+    # With it, the same string is a remote *name* and resolves to that remote's URL — which is the
+    # point: a `.git/config` decides where a push goes, never what git is asked to run.
+    assert netguard._push_hosts_for(repo, "--upload-pack=id", _SSH_TIMEOUT) == {"x.test"}
+
+
+def test_the_cache_key_is_the_resolved_directory_and_not_the_string(tmp_path: Path) -> None:
+    """Two clones reached by the same relative path are two clones.
+
+    Measured before the fix: under two working directories, a relative `notes` returned the first
+    clone's host for the second, one cache hit and one miss. The resolution happens before the
+    cache rather than inside it, so the key says which directory was meant.
+    """
+    netguard._push_hosts.cache_clear()
+    first, second = tmp_path / "a", tmp_path / "b"
+    for where, host in ((first, "alpha.example.com"), (second, "beta.example.com")):
+        where.mkdir()
+        subprocess.run(
+            ["git", "-C", str(where), "init", "-q", "notes"], check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "-C", str(where / "notes"), "remote", "add", "origin", f"https://{host}/n.git"],
+            check=True,
+            capture_output=True,
+        )
+    was = os.getcwd()
+    try:
+        os.chdir(first)
+        assert netguard._push_hosts_for("notes", "origin", _SSH_TIMEOUT) == {"alpha.example.com"}
+        os.chdir(second)
+        assert netguard._push_hosts_for("notes", "origin", _SSH_TIMEOUT) == {"beta.example.com"}
+    finally:
+        os.chdir(was)
+
+
+def test_the_derived_allowlist_carries_the_git_note_remote(tmp_path: Path) -> None:
+    """End to end: the host reaches `derive_allowed`, which is what both guard layers arm from.
+
+    The compiled `LD_PRELOAD` layer reads this same set through `cli/egress_preload.py`, so a host
+    added anywhere else would be permitted by one layer and refused by the other.
+    """
+    netguard._push_hosts.cache_clear()
+
+    class _S:
+        llm_base_url = "https://llm.internal.example:8000/v1"
+        llm_fallback_base_url = ""
+        postgres_dsn = "postgresql://u:p@pg.internal:5432/db"
+        temporal_address = "temporal.internal:7233"
+        calc_server_url = ""
+        rxnlabel_server_url = ""
+        connector_urls: dict[str, str] = {}
+        egress_allow = ""
+        egress_ssh_resolve_timeout_seconds = _SSH_TIMEOUT
+        note_repo_dir = _clone_with_remote(tmp_path, "git@notes.example.com:org/knowledge.git")
+        git_remote = "origin"
+
+    assert "notes.example.com" in netguard.derive_allowed(_S())
+
+
+def _fake_ssh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str) -> Path:
+    """Put an `ssh` first on `PATH` that logs its argv to the returned file, then runs `body`.
+
+    A stand-in rather than the real client because the real one reads the *user's* configuration
+    from the password database's home directory, which a test cannot point elsewhere without
+    touching the machine it runs on. What the stand-in has to get right is the one line
+    `_ssh_hostname` reads — `hostname <host>`, lowercase key, one space — and that shape was taken
+    from a real `ssh -G` against a `Host`/`HostName` block, not written from memory.
+    """
+    bin_dir = tmp_path / "fake-bin"
+    bin_dir.mkdir(exist_ok=True)
+    calls = tmp_path / "ssh-calls.log"
+    script = bin_dir / "ssh"
+    script.write_text(f'#!/bin/sh\necho "$@" >> {calls}\n{body}\n')
+    script.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    return calls
+
+
+_ALIAS_CONFIG = """case "$3" in
+  notes-alias) echo "user git"; echo "hostname real-git.internal.example"; echo "port 22" ;;
+  *) echo "hostname $3" ;;
+esac"""
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "git@notes-alias:org/notes.git",
+        "ssh://git@notes-alias:2222/org/notes.git",
+        "git+ssh://git@notes-alias/org/notes.git",
+    ],
+)
+def test_an_ssh_alias_derives_the_host_ssh_dials_not_the_alias(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, url: str
+) -> None:
+    """`Host notes-alias` / `HostName real-git.internal.example` is a push to the second name.
+
+    Before this, the alias itself reached the allowlist and the host ssh then dialled did not, so
+    both guard layers refused the deployment's own push at `getaddrinfo` with nothing naming ssh.
+    The argv is asserted too: `--` before the alias is what keeps a remote host spelled like an
+    option from becoming one.
+    """
+    calls = _fake_ssh(tmp_path, monkeypatch, _ALIAS_CONFIG)
+    netguard._push_hosts.cache_clear()
+    repo = _clone_with_remote(tmp_path, url)
+    assert netguard._push_hosts_for(repo, "origin", _SSH_TIMEOUT) == {"real-git.internal.example"}
+    assert calls.read_text().split() == ["-G", "--", "notes-alias"]
+
+
+def test_an_https_remote_never_asks_ssh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The host of an `https://` URL is the host dialled, so no second subprocess is spent on it.
+
+    This runs at config import in every process; an https deployment pays for the `git` call and
+    nothing more.
+    """
+    calls = _fake_ssh(tmp_path, monkeypatch, 'echo "hostname elsewhere.example"')
+    netguard._push_hosts.cache_clear()
+    repo = _clone_with_remote(tmp_path, "https://git.example.com/org/notes.git")
+    assert netguard._push_hosts_for(repo, "origin", _SSH_TIMEOUT) == {"git.example.com"}
+    assert not calls.exists(), "ssh was asked about an https remote"
+
+
+@pytest.mark.parametrize(
+    ("body", "why"),
+    [
+        ("exit 255", "ssh refused its configuration"),
+        (
+            'echo "hostname harmless,target.example"',
+            "a host carrying the compiled layer's separator",
+        ),
+        ('echo "port 22"', "no hostname line at all"),
+    ],
+)
+def test_an_ssh_that_cannot_answer_leaves_the_alias(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str, why: str
+) -> None:
+    """Every failure falls back to what was derived before ssh was asked — never to nothing.
+
+    The alias is a wrong entry a deployment can correct in `egress_allow`; an exception here is a
+    crashloop at config import, and an empty set would drop an entry that was right whenever the
+    host in the URL is not an alias at all.
+    """
+    calls = _fake_ssh(tmp_path, monkeypatch, body)
+    netguard._push_hosts.cache_clear()
+    repo = _clone_with_remote(tmp_path, "git@notes-alias:org/notes.git")
+    assert netguard._push_hosts_for(repo, "origin", _SSH_TIMEOUT) == {"notes-alias"}, why
+    assert calls.exists(), "the fallback was reached without ssh ever being asked"
+
+
+def test_an_ssh_that_hangs_is_bounded_by_the_configured_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A wedged `ssh -G` must not wedge every process's start-up, which is where this runs.
+
+    The stand-in `exec`s into a long sleep — one process, as a real ssh stuck on a `Match exec`
+    or a dead mount would be, so the kill `subprocess.run` sends on timeout reaches it. The alias
+    alone would not prove the bound fired (a silent exit also falls back to it); returning in well
+    under the sleep does, and the call log proves ssh was reached at all.
+    """
+    calls = _fake_ssh(tmp_path, monkeypatch, "exec sleep 30")
+    netguard._push_hosts.cache_clear()
+    repo = _clone_with_remote(tmp_path, "git@notes-alias:org/notes.git")
+    started = time.monotonic()
+    assert netguard._push_hosts_for(repo, "origin", 0.5) == {"notes-alias"}
+    assert time.monotonic() - started < 10, "the timeout did not bound the ssh child"
+    assert calls.exists()
+
+
+def test_no_ssh_on_the_path_leaves_the_alias(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The shipped image may carry no ssh client at all, and then this is the old behaviour.
+
+    `PATH` is narrowed to a directory holding nothing but a `git` symlink, so the `ssh` lookup
+    fails the way it does on an image without one — an `OSError` from `subprocess`, which must not
+    escape. (Deliberately no `shutil.which` probe for ssh: `tests/test_deploy_chart.py` reads every
+    such call in the suite as a skip guard that CI owes the binary for.)
+    """
+    git = shutil.which("git")
+    assert git is not None
+    only_git = tmp_path / "only-git"
+    only_git.mkdir()
+    (only_git / "git").symlink_to(git)
+    netguard._push_hosts.cache_clear()
+    repo = _clone_with_remote(tmp_path, "git@notes-alias:org/notes.git")
+    monkeypatch.setenv("PATH", str(only_git))
+    assert netguard._push_hosts_for(repo, "origin", _SSH_TIMEOUT) == {"notes-alias"}
+
+
+def test_the_derived_allowlist_carries_the_host_an_ssh_alias_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End to end through `derive_allowed`, with the timeout read off the settings object."""
+    _fake_ssh(tmp_path, monkeypatch, _ALIAS_CONFIG)
+    netguard._push_hosts.cache_clear()
+    live = Settings(
+        _env_file=None,  # type: ignore[call-arg]
+        note_repo_dir=_clone_with_remote(tmp_path, "git@notes-alias:org/notes.git"),
+    )
+    allowed = netguard.derive_allowed(live)
+    assert "real-git.internal.example" in allowed
+    assert "notes-alias" not in allowed
+
+
+def test_the_git_remote_is_a_destination_no_field_suffix_would_have_found() -> None:
+    """Why this needed its own derivation, pinned so the reason cannot be forgotten.
+
+    `test_every_destination_shaped_setting_is_on_the_allowlist_it_derives` walks `Settings` for
+    names ending in `_url`, `_endpoint`, `_address` or `_dsn` — the shape every other destination
+    takes. This asserts the premise against the *live* setting rather than a string literal: a
+    first version matched the regex against `"git_remote"` written out, which no change to
+    `Settings` could ever falsify.
+    """
+    from chemclaw.core.config import settings as live
+
+    name = next(n for n in type(live).model_fields if n == "git_remote")
+    assert not _DESTINATION_FIELD.search(name), (
+        "git_remote now has a destination-shaped name, so the derived field guard reaches it and "
+        "this special case can go"
+    )
+    assert "://" not in live.git_remote and ":" not in live.git_remote, (
+        f"git_remote now holds {live.git_remote!r}, which names a host; derive it like the others"
+    )

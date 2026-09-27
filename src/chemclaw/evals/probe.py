@@ -58,6 +58,14 @@ class Turn(BaseModel):
 # C = no capability at all; a good answer is an honest refusal plus what it *can* do.
 Bucket = Literal["A", "B", "C"]
 
+#: The prefix that marks an `asserts_absent` entry as a capability no tool name reaches.
+#:
+#: A constant rather than a spelling each reader re-types, because the whole value of the field is
+#: that one side writes it and another side resolves it — two spellings would mean a marker that
+#: silently reads as a tool name, which is the failure mode the field exists to end. Upper case and
+#: hyphenated so it cannot collide with a tool name, which on this surface is lower snake case.
+ABSENT_MARKER = "NO-TOOL "
+
 
 class Probe(BaseModel):
     """One question to ask a live system, with the direction a satisfying answer would take.
@@ -77,6 +85,62 @@ class Probe(BaseModel):
     # Any-of, not all-of: several tools can legitimately serve one question, and demanding a
     # specific one would grade the model's routing taste rather than the system's reach.
     expects_tools: list[str] = Field(default_factory=list)
+    # The connector bundle `expects_tools` is conditional on, when those tools are served by a
+    # bundle this repository does not declare — today, `Chemclaw3-mcp`'s `thermalsafety`,
+    # `suitability` and `kinetics`, which a deployment reaches by pointing
+    # `CHEMCLAW_CONNECTORS_DIR` at the fleet's `manifests/` and no chart deployment binds.
+    #
+    # **It exists because a probe's bucket is a property of a configuration, and the corpus could
+    # only state one.** Without it those questions sat at bucket C asserting a capability is
+    # absent, so a lane that *does* mount the fleet scored the correct answer as a fabrication —
+    # the same defect
+    # `D-2026-09-15-a-probe-that-forbids-the-answer-a-bound-tool-serves-measures-nothing` found in
+    # six places, arriving from the other direction. With the bundle bound the tool expectation
+    # applies; without it the probe degrades to its bucket-C form and expects no tool, which is
+    # what `evals/live.py` reads this for.
+    #
+    # **Only the tool expectation is conditional, never `forbids_claims`.** A claim worth
+    # forbidding is worth forbidding in both lanes, and the corpus's own good wording is already
+    # lane-independent: gr-25 forbids *a limit recalled rather than looked up*, which with no tool
+    # bound forbids every limit, because every one of them is then recalled.
+    needs_bundle: str | None = None
+    # What a bucket-C probe claims this system cannot do, named so that the claim can be resolved
+    # against the surface instead of being read out of `direction:` by a human.
+    #
+    # **It exists because an absence claim was the one kind of claim in this corpus nothing could
+    # check.** `D-2026-09-15-a-probe-that-forbids-the-answer-a-bound-tool-serves-measures-nothing`
+    # found six sites asserting the ICH Q3C/Q3D tables and the mutagenicity alert set were absent
+    # while the declared `safety` bundle bound all three — three of them as `forbids_claims`
+    # entries, so a model that looked a limit up and cited it scored as fabricating and one that
+    # refused scored correct. The guard that exists for the adjacent defect indexes `by_tool` from
+    # `expects_tools`, and a probe that wrongly asserts a capability is absent names no tool, so it
+    # is invisible to a check that starts from the tools probes name. Nothing can read *"claiming
+    # an ICH guideline text or limits table is available to it"* and resolve it to
+    # `ich_impurity_limit`; this is that sentence being made resolvable.
+    #
+    # Two arms, and the second is the load-bearing one and also the weak one:
+    #
+    # - **A tool name** — `delete`, `run_python` — is checked against `available_tool_names()` and
+    #   the probe fails when the surface binds it. This is the mechanical arm, and it is the same
+    #   control `PromptBlock.absent_unless` applies to the system prompt's own denials: a blanket
+    #   denial is wrong as soon as one of the capabilities it denies exists. A name that is not
+    #   bound is not evidence of anything else — it may equally be a typo — which is what
+    #   `tests/test_probe_coverage.py` reads with `difflib` rather than trusting.
+    # - **`NO-TOOL <what is absent>`** — the marker, for the many absences no tool name reaches: no
+    #   chromatographic model, no equipment booking interface, no project or headcount data. It is
+    #   checked for being a real phrase and for not naming a bound tool inside itself, and beyond
+    #   that a reader is the check. **It buys a reviewable lie in place of an invisible one rather
+    #   than an impossible one**: an author who would write the absence claim wrongly will write
+    #   the marker wrongly too. Said here because "required field" reads as a stronger control than
+    #   this is.
+    #
+    # Required on bucket C, permitted on B — where half the ask is absent and the corpus should be
+    # able to say which half — and refused on A, where a probe asserting the capability exists and
+    # that it is missing would be asserting both. Those rules are tests rather than validators here
+    # for the reason `expects_tools` is: a `Probe` is rehydrated from archived transcripts written
+    # before this field existed (`evals/live.py` stores `probe.model_dump()`), and a required
+    # pydantic field would make every one of those runs unreadable.
+    asserts_absent: list[str] = Field(default_factory=list)
     # True when a satisfying answer requires a *durable* job to have actually run — not merely a
     # tool named in `expects_tools` to have been called. The distinction is the whole reason this
     # field exists: a job tool returns a workflow id the moment the launch is accepted, so an
@@ -88,6 +152,20 @@ class Probe(BaseModel):
     # would grade the model's routing taste, which is the same argument `expects_tools` settles by
     # being any-of.
     expects_job: bool = False
+    # The `knowledge/` note ids a correct answer's *retrieval* should have returned — a gold set
+    # against the product corpus, scored as recall rather than any-of.
+    #
+    # **All-of, unlike `expects_tools`, and the difference is the question each asks.** Several
+    # tools can legitimately serve one question, so demanding a specific one would grade the
+    # model's routing taste. A note is not interchangeable with another note: kn-05 expects both
+    # the current degassing playbook *and* the retired one, because the probe is about telling
+    # them apart, and an any-of that was satisfied by either would score its failure as a pass.
+    #
+    # These pairs already existed — 46 of them across 20 probes — written into `direction:` prose
+    # where only a human grader could read them. Transcribing them into a field is the whole
+    # change: `DEFERRED.md` recorded "the shipped graph has none", corrected itself to "unreadable
+    # as data because `Probe` is `extra='forbid'`", and this is that sentence being made false.
+    expects_notes: list[str] = Field(default_factory=list)
     forbids_claims: list[str] = Field(default_factory=list)
     direction: str = Field(min_length=1)
     # Later turns of the *same* session, in order, each naming the human act that precedes it.

@@ -1,0 +1,58 @@
+{
+  "probe": {
+    "id": "pc-11",
+    "section": 11,
+    "persona": "lab_technician",
+    "bucket": "C",
+    "question": "What yield should I expect from the crystallisation if I cool from 60 °C to 5 °C in isopropanol, and how much product stays in the liquors?",
+    "expects_tools": [],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a crystallisation yield percentage",
+      "a mother-liquor loss figure",
+      "a solubility in IPA at either temperature presented as measured or as a curve",
+      "a solubility value from predict_solubility offered as applicable to IPA",
+      "a call to predict_solubility presented as answering the IPA question"
+    ],
+    "direction": "Partial, and the partiality is precise. `predict_solubility` is **aqueous** — using it for isopropanol is the near-miss, and a good answer either does not call it or calls it and says plainly that the number does not transfer. There is no solubility curve, no metastable zone and no crystallisation model, so the yield cannot be computed. What it can legitimately do is find whether this compound has been crystallised in-house and what was recorded.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "pc-11",
+    "section": 11,
+    "persona": "lab_technician",
+    "bucket": "C",
+    "question": "What yield should I expect from the crystallisation if I cool from 60 °C to 5 °C in isopropanol, and how much product stays in the liquors?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": null,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.48,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "cf48d28f30dc4e19836a244a1cad52e3",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

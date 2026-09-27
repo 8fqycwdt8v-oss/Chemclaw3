@@ -1,0 +1,20 @@
+-- `reaction_labels.confidence` was the schema's only single-precision column.
+--
+-- `grep -rn '\bREAL\b' infra/sql schema` matched one line — 051's `confidence REAL` — against a
+-- `ReactionLabel.confidence: float`, which is an IEEE double everywhere else in this tree. So the
+-- store wrote a double, Postgres rounded it to 24 bits, and the read handed back a different
+-- number: measured, `1/3` came back `0.3333333432674408` and `0.95` came back `0.949999988079071`.
+--
+-- **Nothing compares it today, which is why it stayed invisible and is also why this is worth
+-- fixing now rather than after something does.** A labeller's confidence is exactly the kind of
+-- column a facet query grows a `WHERE confidence >= 0.95` on, and the row stored *as* 0.95 would
+-- not be in that answer — silently, with the stored value giving no hint why. Rounding a
+-- likelihood is not a rounding a chemist can see.
+--
+-- Widening only: every value already in the column is representable as a double, the previous
+-- image writes a Python float into it exactly as before, and no reader changes. There is nothing
+-- to roll back and nothing to rebuild — but note this is a table rewrite under an ACCESS EXCLUSIVE
+-- lock, which on a Pistachio-scale corpus is minutes rather than milliseconds. That is affordable
+-- here for the reason `infra/sql/README.md` gives this table under Disposal: it is derived and
+-- rebuildable, and the drain that fills it is already interruptible.
+ALTER TABLE reaction_labels ALTER COLUMN confidence TYPE DOUBLE PRECISION;

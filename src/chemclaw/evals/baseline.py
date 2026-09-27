@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel, Field
 
 from chemclaw.core.errors import ChemclawError
+from chemclaw.core.markdown import MISSING, render_table
 from chemclaw.evals.metric import Direction, direction_of, is_live
 
 if TYPE_CHECKING:  # pragma: no cover - `EvalReport` is needed only as an annotation here.
@@ -278,18 +279,23 @@ def render_comparison(comparison: BaselineComparison) -> str:
         f"# Baseline comparison (case-set {comparison.case_set_version}, "
         f"epsilon {comparison.epsilon:g})",
         "",
-        "| Metric | Kind | Better | Baseline | Current | Delta | Band | Verdict |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- |",
+        render_table(
+            ["Metric", "Kind", "Better", "Baseline", "Current", "Delta", "Band", "Verdict"],
+            [
+                [
+                    row.metric,
+                    "live" if row.live else "pinned",
+                    MISSING if row.direction is None else row.direction.value,
+                    f"{row.baseline_value:.6g}",
+                    MISSING if row.current_value is None else f"{row.current_value:.6g}",
+                    MISSING if row.current_value is None else f"{row.delta:+.4g}",
+                    f"{row.band:.4g}",
+                    _verdict(row),
+                ]
+                for row in comparison.rows
+            ],
+        ),
     ]
-    for row in comparison.rows:
-        current = "—" if row.current_value is None else f"{row.current_value:.6g}"
-        delta = "—" if row.current_value is None else f"{row.delta:+.4g}"
-        better = "—" if row.direction is None else row.direction.value
-        lines.append(
-            f"| {row.metric} | {'live' if row.live else 'pinned'} | {better} "
-            f"| {row.baseline_value:.6g} | {current} "
-            f"| {delta} | {row.band:.4g} | {_verdict(row)} |"
-        )
     worsened = comparison.worsened()
     live = len(comparison.live_rows())
     pinned = len(comparison.rows) - live

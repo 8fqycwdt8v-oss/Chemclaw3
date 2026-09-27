@@ -42,12 +42,15 @@ from typing import Any
 from langchain_core.messages import AIMessageChunk, ToolMessage
 
 from chemclaw.agent.plan_gate import plan_identity
-from chemclaw.agent.state import turn_input
+from chemclaw.agent.plan_scope import declared_scope
+from chemclaw.agent.state import PEER_DEPTH_ATTR, turn_input
+from chemclaw.agent.tool_result_size import full_result_ref, was_cut
 from chemclaw.api.events import (
     Event,
     EvidenceSourceEvent,
+    HandoffEvent,
     JobStartedEvent,
-    NoteProposedEvent,
+    NoteRecordedEvent,
     PlanEvent,
     QuestionEvent,
     TokenEvent,
@@ -58,18 +61,65 @@ from chemclaw.api.runner_usage import graph_usage_tokens
 from chemclaw.api.schemas import message_text
 from chemclaw.core.turn_signals import _KEY as _SIGNAL_KEY
 from chemclaw.core.turn_signals import (
+    HandoffSignal,
     JobSignal,
     QuestionSignal,
     Signal,
+    SkillLoadedSignal,
     ToolFailureSignal,
 )
 
 logger = logging.getLogger(__name__)
 
-# The three modes, as a list. `astream` tests `isinstance(stream_mode, list)` literally, so a tuple
+# The four modes, as a list. `astream` tests `isinstance(stream_mode, list)` literally, so a tuple
 # here silently changes the yielded tuple's arity — a bug that would look like a stream shape
 # mismatch rather than a type mistake.
-_MODES = ["messages", "updates", "custom"]
+#
+# **`values` is here for the carry and for nothing else**, and it is the only route to the number:
+# the carried channels are `UntrackedValue` subclasses, so `aget_state(config).values` does not
+# carry them at all (driven — `model_calls` reads `ABSENT` off a snapshot of a run that returned 3),
+# and no arithmetic over `updates` can reconstruct them (see `_carry_forward`). Measured cost on a
+# 30-superstep turn: +4 to +12 ms, flat in thread length (same delta at 10, 60 and 400 messages in
+# the thread), because the payload holds the channels' own objects rather than copies of them.
+_MODES = ["messages", "updates", "custom", "values"]
+
+
+def root_depth(graph: Any) -> int:
+    """How many namespace frames a turn's *own* agent sits behind on this graph.
+
+    **The whole attribution in this module is a root/non-root test, and wrapping the agent inverts
+    it.** Until the turn graph existed there was exactly one shape — the compiled agent *was* the
+    stream's root — so `bool(namespace)` meant "below the root" and nothing else could. With
+    `agent/turn_graph.py` a peer is a node of an enclosing graph, so **every** event a peer
+    produces arrives one frame down. Measured on a compiled mesh: the outer graph's own updates
+    come at depth 0 and every peer's tokens and updates at depth 1, tagged with the peer's node
+    name. Under the old predicate that marks the agent the chemist is talking to as `"subagent"` —
+    and the runner concatenates *unattributed* `TokenEvent`s into the answer, so the turn answers
+    with nothing at all and is classified `empty_answer`, while the plan is withheld because
+    `emit_plan=not below_root`. Three quiet failures from one `bool`.
+
+    So the predicate becomes a *depth* test, and the depth is read off the graph rather than passed
+    in: a call site that had to say "this one is wrapped" is a call site that can be wrong, and
+    there are four of them, while the graph itself always knows.
+
+    **It is a stamp and not a derivation, and the derivation was tried first.** The obvious marker
+    — "a turn graph is the one with an `active_agent` channel" — is wrong, and wrong in the
+    direction that breaks every existing deployment rather than the new feature: `ChemclawState`
+    declares that channel, so **every** compiled agent has it, and a single agent measured
+    `root_depth == 1`. That would have marked every token of every shipped turn as a subagent's
+    and answered every turn empty. Node names are no better a basis — upstream names them, and
+    `_apply_custom_middleware` puts a middleware's own name in the list, so the set moves when a
+    dependency does. What the builder knows for certain is what the builder built, so the builder
+    says so.
+
+    Args:
+        graph: The compiled graph a turn runs on.
+
+    Returns:
+        0 for a single agent (the shipped default and anything without the stamp), 1 for a turn
+        graph whose peers are its nodes.
+    """
+    return int(getattr(graph, PEER_DEPTH_ATTR, 0))
 
 
 async def graph_events(
@@ -131,6 +181,9 @@ async def graph_events(
     # By call id rather than tool name, because a model may issue two calls to one tool in a single
     # batch and only one of them fail.
     failed_calls: set[str] = set()
+    # Read once per turn rather than per event: it is a property of the compiled object, and
+    # re-deriving it 400 times a turn would be the same answer 400 times.
+    depth = root_depth(graph)
     async for namespace, mode, payload in graph.astream(
         {**turn_input(message), **(carry or {})}, config, stream_mode=_MODES, subgraphs=True
     ):
@@ -154,7 +207,7 @@ async def graph_events(
             #
             # The usage is counted either way: a specialist's tokens cost the same money.
             if text:
-                yield TokenEvent(text=text, agent="subagent" if namespace else "")
+                yield TokenEvent(text=text, agent="subagent" if len(namespace) > depth else "")
         elif mode == "custom":
             if isinstance(signal := (payload or {}).get(_SIGNAL_KEY), ToolFailureSignal):
                 # **Every id, the empty one included, and that is a decision rather than an
@@ -208,9 +261,10 @@ async def graph_events(
             # so a helper's todo list has nowhere to say whose it is, and a surface showing it as
             # the
             # turn's plan is worse than a surface not showing it.
-            below_root = bool(namespace)
-            if carry is not None:
-                _carry_forward(carry, payload)
+            # `> depth` rather than truthiness: on a turn graph a peer *is* the agent the chemist
+            # is talking to and sits one frame down, while a `task` helper spawned inside that peer
+            # sits two. See `root_depth`.
+            below_root = len(namespace) > depth
             async for event in _from_update(
                 payload,
                 "subagent" if below_root else "",
@@ -221,31 +275,71 @@ async def graph_events(
                 emit_plan=not below_root,
             ):
                 yield event
+        elif mode == "values":
+            # **The outermost graph's own channels, which is where the carry comes from.** The
+            # namespace test is `not namespace` rather than `> depth`: a peer's or a helper's state
+            # has already been folded into the enclosing graph's channels by the reducer that owns
+            # them (`ChemclawState.TurnTotal`), so the shallowest frame is the only one holding the
+            # turn's total and every deeper frame holds a part of it. Nothing else reads this mode.
+            if carry is not None and not namespace:
+                _carry_forward(carry, payload)
 
 
 # The channels a mid-turn resume has to continue from rather than restart, and nothing else. Named
 # rather than "every int in the update", because the carry is fed back into the graph's *input* and
 # a channel copied there by accident is a caller overriding state the graph owns.
-_CARRIED_CHANNELS = ("model_calls", "billed_tokens")
+#
+# **`handoffs` is here for exactly the reason the other two are**, and leaving it out would have
+# been the same defect one channel over. `_resume_on_job_results` describes itself as continuing
+# "the same turn", and an untracked channel starts at 0 on a second invocation of the graph — so a
+# turn that had already bounced its way to `agent_max_handoffs` would come back from a job result
+# with a fresh allowance, which is the bound not existing for precisely the turns long enough to
+# need one. `active_agent` needs no entry: it is checkpointed, so the resume restores it.
+_CARRIED_CHANNELS = ("model_calls", "billed_tokens", "handoffs")
 
 
 def _carry_forward(carry: dict[str, Any], payload: Any) -> None:
-    """Record this update's per-turn counters, so a resume continues them instead of restarting.
+    """Copy the turn's per-turn counters off the graph's own channels, so a resume continues them.
 
-    **The highest value wins rather than the latest**, because these arrive from every node of a
-    fan-out and `TurnTotal` folds concurrent writes additively — a later update from a helper that
-    started earlier would otherwise walk the count backwards and hand the resume a larger
-    allowance than the turn has left. A cap may bind one call early; it must never bind late.
+    **Read from the channel, because nothing derived from the `updates` stream can reconstruct
+    it.** Two shapes were tried here and both were measured wrong, in the same direction:
+
+    - `max` over the values in one payload, and
+    - the `TurnTotal` fold (`base + Σ max(value - base, 0)`) over the same values.
+
+    Both assume one `updates` payload is a whole superstep — node name onto that node's own
+    update — and in this LangGraph version it is not: with `subgraphs=True` the stream yields **one
+    node per payload**. Driven on four parallel nodes writing one `TurnTotal` through this module's
+    own call shape, the five payloads arrive as `{'start': …}`, `{'a': …}`, `{'b': …}`, `{'c': …}`,
+    `{'d': …}`; the channel's own total is **5** and *both* shapes answered **2**, because `base`
+    has already advanced past every writer after the first, so each later one contributes
+    `max(value - base, 0) == 0`. The two were therefore behaviourally indistinguishable for exactly
+    the fan-out the fold was written for, and `subgraphs=True` makes the real `task` case worse
+    rather than better — every helper gets its own namespace and so its own payload.
+
+    The scenario that makes the undercount matter: a turn spends 25 calls across 8 helpers, the
+    request dies, and `api/runner._resume_on_job_results` reseeds the graph from this dict — a carry
+    of 2 is 23 calls of fresh allowance on a turn that had already exhausted its budget.
+
+    So the number is taken from the graph's `values` stream instead, which is the channel's own
+    value after the superstep and therefore cannot disagree with the reducer. `aget_state` is not
+    an option and was checked: every carried channel is an `UntrackedValue` subclass, so a snapshot
+    of a finished run reads `ABSENT` for all of them (driven against a run that returned 3).
+
+    `max` against what the carry already holds for the same reason `TurnTotal.update` clamps its
+    own advances: this count is what a cap is compared against, and no payload may walk it back.
+
+    Args:
+        carry: The turn's carry, updated in place.
+        payload: One `values` payload from the outermost namespace — the whole state, keyed by
+            channel.
     """
     if not isinstance(payload, dict):
         return
-    for update in payload.values():
-        if not isinstance(update, dict):
-            continue
-        for channel in _CARRIED_CHANNELS:
-            value = update.get(channel)
-            if isinstance(value, int) and not isinstance(value, bool):
-                carry[channel] = max(carry.get(channel, 0), value)
+    for channel in _CARRIED_CHANNELS:
+        value = payload.get(channel)
+        if isinstance(value, int) and not isinstance(value, bool):
+            carry[channel] = max(value, int(carry.get(channel, 0)))
 
 
 def _custom_event(payload: Any, on_signal: Any) -> Event | None:
@@ -365,9 +459,15 @@ async def _from_update(
                 if call_id in failed_calls or getattr(message, "status", "success") == "error":
                     logger.debug("tool call %s failed; already reported as tool_failed", call_id)
                 else:
+                    # `cut`/`full_ref` read off the message rather than recomputed: the cut
+                    # happened inside the tool chain, which is the only place that saw both texts,
+                    # and it left its verdict and the full text's ref on `response_metadata`.
                     yield _attributed(
                         await trace.returned(
-                            str(getattr(message, "tool_call_id", "")), message_text(message)
+                            str(getattr(message, "tool_call_id", "")),
+                            message_text(message),
+                            cut=was_cut(message),
+                            full_ref=full_result_ref(message),
                         ),
                         agent,
                     )
@@ -378,15 +478,29 @@ async def _from_update(
             # its list rather than a plan worth rendering.
             todos[:] = plan
             if plan:
-                # **Hashed over the bare contents, not over `plan` — the two are different
-                # strings and only one of them is the identity.** `plan` carries `_todo_titles`'s
-                # checkbox rendering, while `plan_identity` is fed `plan_state.session_todos`,
-                # which returns `content` alone. Hashing what is displayed would emit a
-                # `plan_hash` that no decision could ever match, and it would look authoritative
-                # while being wrong on every plan — worse than the missing field it replaces.
+                # **Hashed over the steps, not over `plan` — the two are different values and only
+                # one of them is the identity.** `plan` carries `_todo_titles`'s checkbox
+                # rendering, while `plan_identity` is fed the steps the way
+                # `plan_state.session_plan` answers them: `content` beside the `tools`
+                # declaration. Hashing what is displayed would emit a `plan_hash` that no decision
+                # could ever match, and it would look authoritative while being wrong on every
+                # plan — worse than the missing field it replaces.
                 # Non-empty by construction: `plan_identity` returns `None` only for an empty
                 # plan, which this branch has already excluded.
-                yield PlanEvent(todos=plan, plan_hash=plan_identity(_todo_contents(update)) or "")
+                #
+                # **One read of the steps feeds both fields**, for the reason the pair exists:
+                # `plan_hash` is what a decision is posted against and `scope` is what that
+                # decision would authorize, and the gate binds them together — the identity covers
+                # each step's declaration, so a scope taken over a *second* read of the plan could
+                # name tools the hash beside it was not computed over. The two functions are the
+                # ones `routes/plan._read_plan` calls, in the same order, so the stream and the
+                # fetch cannot describe one plan differently.
+                steps = _plan_steps(update)
+                yield PlanEvent(
+                    todos=plan,
+                    plan_hash=plan_identity(steps) or "",
+                    scope=sorted(declared_scope(steps)),
+                )
         logger.debug("graph node %r produced %d event source(s)", node, len(update))
 
 
@@ -428,10 +542,10 @@ def _todo_titles(update: dict[str, Any]) -> list[str] | None:
     is re-emitted on every change, giving a client churn it could not interpret. Completion state is
     the one thing a surface must not have to infer.
 
-    The checkbox is a *rendering*; `agent/plan_gate.plan_identity` hashes the bare `content`, and
-    `evals/autonomy._plan_steps` strips the prefix before scoring. So the approval a chemist gives
-    is bound to the work, not to how far along it was when they looked — which is what lets a plan
-    stay approved while its steps tick over.
+    The checkbox is a *rendering*; `agent/plan_gate.plan_identity` hashes each step's `content` and
+    its declaration and never its `status`, and `evals/autonomy._plan_steps` strips the prefix
+    before scoring. So the approval a chemist gives is bound to the work, not to how far along it
+    was when they looked — which is what lets a plan stay approved while its steps tick over.
     """
     todos = update.get("todos")
     if todos is None:
@@ -443,24 +557,27 @@ def _todo_titles(update: dict[str, Any]) -> list[str] | None:
     ]
 
 
-def _todo_contents(update: dict[str, Any]) -> list[str]:
-    """The plan's bare step text — what a decision is hashed against, not what is displayed.
+def _plan_steps(update: dict[str, Any]) -> list[dict[str, Any]]:
+    """The plan's steps as the identity reads them — not what is displayed.
 
     The sibling of `_todo_titles`, and the pair exists because the two answers differ by exactly the
-    checkbox. `agent/plan_state.session_todos` — which is what the gate and the decision route feed
-    to `plan_identity` — returns `content` alone, so an identity derived from the rendered lines
+    checkbox. `agent/plan_state.session_plan` — which is what the gate and the decision route feed
+    to `plan_identity` — answers the steps whole, so an identity derived from the rendered lines
     would agree with nothing. Written as its own function rather than by stripping the prefix off
     `_todo_titles`, because a strip is a second, weaker copy of the rendering rule: it goes wrong
     silently the day the rendering changes, where reading the field cannot.
+
+    **It hands the steps over rather than reducing them to text**, which is what it did until
+    `D-2026-09-13-a-plan-identity-that-omits-the-scope-approves-a-plan-nobody-read` made the
+    declaration part of the identity: a reduction here would emit a `plan_hash` no decision matches,
+    which is the defect the paragraph above exists to have already prevented once.
     """
     return [
-        str(todo["content"])
-        for todo in update.get("todos") or []
-        if isinstance(todo, dict) and "content" in todo
+        todo for todo in update.get("todos") or [] if isinstance(todo, dict) and "content" in todo
     ]
 
 
-def _signal_event(signal: Signal) -> Event:
+def _signal_event(signal: Signal) -> Event | None:
     """Map one out-of-band turn signal to its stream event (one place, so the two cannot drift).
 
     It used to live in `chemclaw.api.runner` and be imported here at call time, because the runner
@@ -472,6 +589,20 @@ def _signal_event(signal: Signal) -> Event:
         return JobStartedEvent(job_id=signal.job_id, kind=signal.kind, plan_step=signal.plan_step)
     if isinstance(signal, QuestionSignal):
         return QuestionEvent(question=signal.question, options=signal.options)
+    if isinstance(signal, HandoffSignal):
+        # Raised by the transfer tool itself, so it arrives once per call and carries the peer's
+        # real name — `core/turn_signals.HandoffSignal` records what the two attempts at
+        # reconstructing it from a completed node's update got wrong (seven events for two hops,
+        # and a name no profile has).
+        #
+        # Placed above the tail deliberately: this branch was first written into the stream loop
+        # instead, and the signal then fell through *this* chain to the unguarded
+        # `NoteRecordedEvent` below — raising `AttributeError: 'HandoffSignal' object has no
+        # attribute 'note_id'`. Which is precisely what the comment on `SkillLoadedSignal` warns
+        # happens to a new member of this union, in the function it warns about.
+        return HandoffEvent(
+            from_agent=signal.from_agent, to_agent=signal.to_agent, reason=signal.reason
+        )
     if isinstance(signal, ToolFailureSignal):
         # The classification rides on the signal, made from the exception by
         # `agent/audit.refusal_reason` where the exception still existed. This used to re-derive it
@@ -481,4 +612,16 @@ def _signal_event(signal: Signal) -> Event:
         # field is now the same verdict the audit row records, rather than a second opinion.
         #
         return ToolFailedEvent(tool=signal.tool, message=signal.message, reason=signal.reason)
-    return NoteProposedEvent(note_id=signal.note_id, reference=signal.reference)
+    if isinstance(signal, SkillLoadedSignal):
+        # **The one member of the union with no event, and the only one that must not have one.**
+        # Every other signal exists because something happened that the chemist should see; this one
+        # is bookkeeping the turn's own cost row absorbs (`turn_costs.skills_loaded`, for the
+        # self-confirmation guard). Rendering "loaded a skill" into the transcript would put the
+        # progressive-disclosure mechanism on the screen on every turn that used it.
+        #
+        # Returning `None` rather than falling through, because the fall-through below is
+        # `NoteRecordedEvent` — a chain of `isinstance` ending in an unguarded default is exactly
+        # how a new member of a union gets silently rendered as the last one, which is what
+        # `mypy --strict` caught here the moment this signal was added.
+        return None
+    return NoteRecordedEvent(note_id=signal.note_id, reference=signal.reference)

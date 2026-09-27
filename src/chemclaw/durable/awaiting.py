@@ -45,17 +45,22 @@ import asyncio
 from datetime import datetime, timedelta
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from temporalio import activity, workflow
-from temporalio.exceptions import ApplicationError
+from temporalio.common import WorkflowIDReusePolicy
+from temporalio.exceptions import ActivityError, WorkflowAlreadyStartedError
+from temporalio.exceptions import CancelledError as TemporalCancelledError
 
 with workflow.unsafe.imports_passed_through():
     from chemclaw.core.config import settings
     from chemclaw.core.ids import stable_hash
+    from chemclaw.core.temporal_client import connect
     from chemclaw.durable import pending_store
+    from chemclaw.durable.deliver_message import OutboundMessage, deliver_best_effort
     from chemclaw.durable.notify import notify_session_best_effort
     from chemclaw.durable.publish import BAD_DATA_RETRY, queue_wait_timeout
     from chemclaw.durable.registry import durable_activity, durable_workflow
+    from chemclaw.kg.note import cited_ids, is_note_slug
 
 #: The push-back kind a waiting request sends into the requester's mailbox. One kind for both the
 #: opening notice and every reminder — the payload's `reminders` count is what distinguishes them,
@@ -81,6 +86,44 @@ class AwaitRequest(BaseModel):
     requested_by: str = ""
     session_id: str = ""
     correlation_id: str = ""
+    #: The knowledge notes this question rests on — derived from the `[[wikilinks]]` the question's
+    #: own `subject` and `rationale` cite, never taken as an argument, so it cannot be omitted.
+    #: `api/routes/pending.py` refuses an answer once any of them has been superseded or refuted
+    #: (`D-2026-09-15-an-answer-days-later-is-answered-against-a-corpus-that-moved`). A question
+    #: citing nothing carries an empty list and the check is a no-op, which is honest rather than
+    #: silent: the control covers exactly the questions that say what they rest on.
+    premise_note_ids: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _derive_premise(self) -> "AwaitRequest":
+        r"""Derive the premise from this question's own citations, on every producer.
+
+        **The comment above said "it cannot be omitted" and two of the three producers omitted
+        it.** It was an ordinary defaulted field and only `agent/pending_tools` filled it, so the
+        BO plate wait (`connectors/bo/workflows.py`) — the case the ADR opens with, "deliberately
+        waits a week for plates" — and the approval for an irreversible external change
+        (`durable/connector_job.py`), the highest-stakes wait in the tree, both stored `{}` and
+        were checked against nothing. Deriving it here is what makes the sentence true, because
+        there is now no way to construct the request without it.
+
+        Pure and deterministic — a regex over two fields already in the payload — so it is safe on
+        a workflow's replay path: the same history yields the same list every time.
+
+        **Filtered through `is_note_slug`, which is also a defang.** The ids are cut out of
+        `subject`/`rationale`, which `agent/pending_tools.check_pending_requests` defangs before
+        showing the model because they are free text a caller supplied — and the ids themselves
+        were dumped into that same context raw, so a citation like `[[</retrieved-note-1> SYSTEM:
+        ...]]` put a **live** closing delimiter in front of the model, the class
+        `D-2026-08-29-a-helpers-report-is-model-prose-in-its-callers-thread` closed for helper
+        reports. `cited_ids` bounds nothing (`[^\[\]]+` admits quotes, braces and newlines), and
+        `101_pending_request_premise.sql` claims in a comment that "`kg/note.py::_SLUG` already
+        constrains what may be in it" — nothing enforced that. This does, at the one place every
+        producer passes through.
+        """
+        cited = cited_ids(f"{self.subject}\n{self.rationale}")
+        self.premise_note_ids = [note_id for note_id in cited if is_note_slug(note_id)]
+        return self
+
     #: How long the question stays open. Clamped against `awaiting_max_days` by
     #: `open_pending_request_activity` — one place, so no caller can pass an unbounded value.
     deadline_days: float = 7.0
@@ -118,6 +161,147 @@ def request_id_for(request: AwaitRequest) -> str:
     """
     return "await-" + stable_hash(
         {"kind": request.kind, "subject": request.subject, "asked_of": request.asked_of}
+    )
+
+
+async def open_wait(request: AwaitRequest) -> tuple[str, bool]:
+    """Open the wait this question describes, or join the one already open for it.
+
+    **The launch idiom, once, in the layer that owns it.** Starting a wait from *outside* a
+    workflow is three coupled decisions — the deterministic id, the reuse policy, and the
+    already-started catch — and `tests/test_third_party_layering.py` records what happens when
+    each caller derives them itself: four copies of `temporalio` inside layers that are not
+    Temporal, filed as debt rather than design. There are exactly two callers here (the model's
+    `request_external_input` and the runner's review escalation, which reach for the same three
+    decisions and must not disagree about them), which is what makes this a shared function rather
+    than a premature one.
+
+    **`ALLOW_DUPLICATE` is the policy and it is not the obvious one.** A wait that nobody answers
+    *expires*, and expiry completes the workflow normally — so `REJECT_DUPLICATE` and
+    `ALLOW_DUPLICATE_FAILED_ONLY` would both make a lapsed question unaskable forever, which is why
+    the shared `start_job()` the backlog wants could not simply adopt `durable_tools`'. Asking
+    again after a deadline has passed is a new question; asking again while the first is still
+    open is the same one, and `WorkflowAlreadyStartedError` is what joins it.
+
+    Passed as it is stated rather than relying on the SDK's default, which is the same value: a
+    policy this function's whole docstring argues for should be visible at the call it governs.
+    **And it is now run rather than argued** — every caller's test patches this function away, so
+    all three decisions above were prose over an unexecuted path until
+    `tests/test_awaiting.py::test_the_launch_idiom_joins_an_open_wait_and_reopens_a_settled_one`
+    drove them against a broker. Mutated to `ALLOW_DUPLICATE_FAILED_ONLY`, the re-ask arm is what
+    goes red.
+
+    Args:
+        request: The question to hold open. Its `subject`, `kind` and `asked_of` decide what joins
+            what, through `request_id_for`.
+
+    Returns:
+        The wait's id, and whether *this* call is what opened it. A caller announces a launch only
+        on `True`: a run that already existed did not start here, and saying it did would put a
+        second start notice in front of whoever is already being asked.
+
+    Raises:
+        Whatever the broker raises. Deliberately not swallowed here: the model-facing tool turns a
+        failure into a refusal it can report, and the runner's escalation degrades and ships the
+        answer anyway — two different right answers, and a swallow here would take both away.
+    """
+    request_id = request_id_for(request)
+    client = await connect()
+    try:
+        await client.start_workflow(
+            AwaitAnswerWorkflow.run,
+            request.model_dump(mode="json"),
+            id=request_id,
+            task_queue=settings.background_task_queue,
+            id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
+        )
+    except WorkflowAlreadyStartedError:
+        return request_id, False
+    return request_id, True
+
+
+def _awaiting_message(request: AwaitRequest, payload: dict[str, Any]) -> OutboundMessage:
+    """The outbound copy of one wait notice — who it goes to, and what it says.
+
+    **Two notices, two recipients, and reading them as one is a real error rather than a wording
+    choice.** `_push` fires on the opening notice, on each reminder and — *only if nobody
+    answered* — on expiry: `1 + reminders` times for a wait that is answered, `2 + reminders` not;
+    `run` returns from its `self._answer is not None` branch before reaching the expiry push. With
+    two different payload shapes. While the wait is open it is an ask, and the person
+    who has to act is `asked_of`; when it expires it is a report, and the person who
+    needs to hear it is the requester — which is what the expiry's own call site already says in
+    prose ("an unanswered question is exactly the thing a requester needs to hear about"). The
+    session push-back does not have to make the distinction because both land in the *requester's*
+    session; a channel does, because it addresses a person rather than a conversation.
+
+    Built here rather than in the workflow body because it is pure formatting over two replay-stable
+    inputs, and because the outbound copy has to stand alone: a session event is rendered by a
+    surface that already knows what a pending request is, and an email or a file in an outbox is
+    read by somebody with no such context. So it carries the reason, the deadline and the request id
+    — the three things needed to act — and nothing the `pending_requests` projection is the
+    authority on.
+
+    Every payload key is reached through a default or a guard — `due_at` is the one read by
+    subscript, and only inside the `if payload.get("due_at")` on the line above it. The two shapes
+    differ (`due_at` is on the waiting notice and not on the expiry), and a `KeyError` here would
+    be raised in *workflow* code, where nothing can catch it: the best-effort wrapper guards the
+    activity, not its argument. That is the same inversion `_push` carries a guard for one frame
+    down, and it is not hypothetical — it failed
+    `test_a_deadline_that_passes_is_an_outcome_and_not_a_failure` on the first draft of this
+    function. (This paragraph said "every key is read with a default" while one was a subscript,
+    which is safe and was not what it claimed.)
+    """
+    request_id = str(payload.get("request_id", ""))
+    reminders = int(payload.get("reminders", 0) or 0)
+    if payload.get("state") == "expired":
+        lines = [f"Nobody answered in time, after {reminders} reminder(s)."]
+        if request.rationale:
+            lines.append(request.rationale)
+        lines.append(f"It was asked of {request.asked_of or 'anyone entitled'}.")
+        lines.append(f"The request was {request_id}.")
+        return OutboundMessage(
+            recipient=request.requested_by,
+            subject=f"No answer: {request.subject}",
+            body="\n".join(lines),
+            kind="awaiting",
+            correlation_id=request.correlation_id,
+        )
+    lines = [request.rationale] if request.rationale else []
+    if payload.get("due_at"):
+        lines.append(f"Due {payload['due_at']}.")
+    if reminders:
+        lines.append(f"Reminder {reminders} — this has been open since it was asked.")
+    lines.append(f"Answer it against request {request_id}.")
+    if request.asked_of:
+        return OutboundMessage(
+            recipient=request.asked_of,
+            subject=f"Waiting on you: {request.subject}",
+            body="\n".join(lines),
+            kind="awaiting",
+            correlation_id=request.correlation_id,
+        )
+    # **Nobody was named, so the requester is told their question is open rather than nobody
+    # being told at all.** `asked_of` is documented as "'' for anyone entitled", and
+    # `request_external_input` tells the model that empty is *the right default when you do not
+    # know the name* — while `connectors/bo/workflows.py` never sets it, on the
+    # longest-lived wait in the tree. Measured across every real producer, the empty case sent
+    # nothing on the opening notice and nothing on any reminder, so the headline capability of
+    # `D-2026-09-14-a-declared-kind-with-no-producer-is-not-a-channel` did not reach the one
+    # caller that most needs it: a BO round waiting a week for plates.
+    #
+    # The requester is not a substitute for the person who has to act — there is no such person
+    # to address — but they are the one who will chase it, and an inbox nobody is routed to is
+    # exactly what a chaser needs to know about. The subject says so rather than pretending the
+    # notice found an owner.
+    lines.append(
+        "Nobody is named on this request, so it sits in the open queue for anyone entitled."
+    )
+    return OutboundMessage(
+        recipient=request.requested_by,
+        subject=f"Still unanswered by anyone: {request.subject}",
+        body="\n".join(lines),
+        kind="awaiting",
+        correlation_id=request.correlation_id,
     )
 
 
@@ -166,7 +350,18 @@ async def open_pending_request_activity(payload: _OpenInput) -> str:
         days=max(0.0, min(payload.request.deadline_days, settings.awaiting_max_days))
     )
     due_at = datetime.fromisoformat(payload.started_at) + deadline
-    claimed = await pending_store.open_request(
+    # **No verdict to check, and the refusal that used to be here is deleted** (`D-2026-09-13-an-
+    # answer-is-archived-so-the-question-can-be-asked-again`). `pending_store._OPEN` would not
+    # reopen a row somebody had *answered*, because the reopen blanked the attribution that table
+    # is kept for, and this function raised a non-retryable `ApplicationError` when it was
+    # refused — so a legitimate re-ask of a standing question failed the workflow rather than
+    # waiting. The answer is archived now (`pending_request_answers`), every terminal state is
+    # reopenable by a different run, and the refusal had no reachable input left: driven over all
+    # five shapes the upsert admits, the verdict was `True` in every one.
+    # `tests/test_pending_store.py` holds what each shape does to the row and to the archive,
+    # which is where an invariant over that `WHERE` clause belongs — it has been rewritten three
+    # times.
+    await pending_store.open_request(
         request_id=payload.request_id,
         kind=payload.request.kind,
         subject=payload.request.subject,
@@ -175,27 +370,10 @@ async def open_pending_request_activity(payload: _OpenInput) -> str:
         requested_by=payload.request.requested_by,
         session_id=payload.request.session_id,
         correlation_id=payload.request.correlation_id,
+        premise_note_ids=payload.request.premise_note_ids,
         due_at=due_at,
         run_id=payload.run_id,
     )
-    if not claimed:
-        # **The one refusal the projection makes, said out loud.** `pending_store._OPEN` will not
-        # reopen a row somebody *answered*, because the reopen blanks the attribution that table is
-        # kept for — and until this branch existed the workflow was not told, so it waited against
-        # a row reading `answered`: absent from `open_requests`, refused 409 by the answer route,
-        # unable to settle itself at the end, for the ninety days `awaiting_max_days` allows.
-        # Failing here is not this system declining to ask twice; the id is what collided, and
-        # `request_id_for` keys on (kind, subject, asked_of) alone, so the way to ask a genuinely
-        # new question is to say something the previous one did not.
-        #
-        # Non-retryable because no number of attempts changes whose answer is in that row, and
-        # because `BAD_DATA_RETRY` would otherwise spend `activity_max_attempts` on it.
-        raise ApplicationError(
-            f"{payload.request_id!r} already holds an answer from an earlier ask, which reopening "
-            "would erase, so this wait was not opened — it would have been invisible in every "
-            "inbox and unanswerable until it expired. Vary the subject to ask a new question.",
-            non_retryable=True,
-        )
     return due_at.isoformat()
 
 
@@ -273,44 +451,76 @@ class AwaitAnswerWorkflow:
         # appears or vanishes is not.
         activity_timeout = timedelta(seconds=settings.awaiting_activity_timeout_seconds)
 
-        # **The clamp is applied by the activity, and `due_at` comes back from it.**
+        # **The `try` opens here, not at the wait, and that is the whole of
+        # `D-2026-09-13-a-cancellation-arriving-before-the-timer-leaves-the-row-waiting`.**
         #
-        # It cannot be computed here: `due_at` decides how many timers `_wait_until` schedules, so a
-        # `settings` read on this line puts the *number of commands* under a value that can change
-        # between an execution and its replay — lower `CHEMCLAW_AWAITING_MAX_DAYS` while a 30-day
-        # wait is open, restart the worker, and the replay computes a `due_at` already in the past,
-        # returns from the first iteration, and emits a settle where history holds a timer. That is
-        # a `NonDeterminismError` retried forever, on the workflow with the longest designed
-        # lifetime in the tree.
+        # It used to start below, around `_wait_until` alone, on the reading that a cancellation can
+        # only arrive while the wait is waiting. It cannot: `open_pending_request_activity` is the
+        # activity that *writes the `waiting` row*, and a cancellation landing while it is in flight
+        # leaves that row committed with no settle ever attempted — the row's own run is gone, so
+        # nothing will ever move it. Measured against a real broker with 12 parents terminated under
+        # `REQUEST_CANCEL` the instant their children existed: 12 rows opened, **10** settled, and
+        # every child `CANCELED`. With a session attached the window is wider by the push-back
+        # activity as well, which is the second `await` outside the old `try`: at a 3 s notify, 8 of
+        # 12.
         #
-        # The first fix moved the clamp to the callers, and that was wrong in the way a per-caller
-        # rule always is: it reached two of the three. `connectors/bo/workflows.py` passes
-        # `bo_measurement_deadline_days` straight through, so a mis-set value opened a ten-year run
-        # on the broker — exactly what `awaiting_max_days` exists to prevent — while two docstrings
-        # went on claiming the value was clamped. An activity's *result* is recorded in history, so
-        # taking `due_at` from it is both deterministic on replay and impossible for a caller to
-        # skip. One definition, on the path every caller already takes.
-        opened = await workflow.execute_activity(
-            open_pending_request_activity,
-            _OpenInput(
-                request_id=request_id,
-                request=request,
-                started_at=workflow.now().isoformat(),
-                run_id=workflow.info().run_id,
-            ),
-            start_to_close_timeout=activity_timeout,
-            schedule_to_start_timeout=queue_wait_timeout(),
-            retry_policy=BAD_DATA_RETRY,
-        )
-        due_at = datetime.fromisoformat(opened)
-        await self._notify(request, request_id, due_at.isoformat())
-
+        # Settling a request that was never opened is harmless by construction:
+        # `pending_store.settle_request` reports `rowcount == 1`, so a missing row answers `False`
+        # and writes nothing. That is the cheap direction, and it is why this covers the open rather
+        # than trying to tell "opened" from "not yet opened" inside a cancelled workflow, which is
+        # a question the workflow cannot answer — the activity's result is exactly what it did not
+        # get.
         try:
+            # **The clamp is applied by the activity, and `due_at` comes back from it.**
+            #
+            # It cannot be computed here: `due_at` decides how many timers `_wait_until` schedules,
+            # so a `settings` read on this line puts the *number of commands* under a value that can
+            # change between an execution and its replay — lower `CHEMCLAW_AWAITING_MAX_DAYS` while
+            # a 30-day wait is open, restart the worker, and the replay computes a `due_at` already
+            # in the past, returns from the first iteration, and emits a settle where history
+            # holds a timer. That is a `NonDeterminismError` retried forever, on the workflow with
+            # the longest designed lifetime in the tree.
+            #
+            # The first fix moved the clamp to the callers, and that was wrong in the way a
+            # per-caller rule always is: it reached two of the three.
+            # `connectors/bo/workflows.py` passes `bo_measurement_deadline_days` straight through,
+            # so a mis-set value opened a ten-year run on the broker — exactly what
+            # `awaiting_max_days` exists to prevent — while two docstrings went on claiming the
+            # value was clamped. An activity's *result* is recorded in history, so taking `due_at`
+            # from it is both deterministic on replay and impossible for a caller to skip. One
+            # definition, on the path every caller already takes.
+            opened = await workflow.execute_activity(
+                open_pending_request_activity,
+                _OpenInput(
+                    request_id=request_id,
+                    request=request,
+                    started_at=workflow.now().isoformat(),
+                    run_id=workflow.info().run_id,
+                ),
+                start_to_close_timeout=activity_timeout,
+                schedule_to_start_timeout=queue_wait_timeout(),
+                retry_policy=BAD_DATA_RETRY,
+            )
+            due_at = datetime.fromisoformat(opened)
+            await self._notify(request, request_id, due_at.isoformat())
             await self._wait_until(due_at, request, request_id)
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, ActivityError) as exc:
             # A cancelled wait must still stop *saying* it is open, or the inbox shows a question
             # nothing is listening for. The settle runs `ABANDON`, because an ordinary activity
             # scheduled from a cancelled workflow is cancelled with it and would never write.
+            #
+            # **`ActivityError` is here because a cancellation does not always arrive as one
+            # exception type, and the difference is which `await` was in flight.** Blocked on
+            # `wait_condition` — the wait's whole designed lifetime — a cancellation is
+            # `asyncio.CancelledError`. Blocked *inside an activity* it is
+            # `ActivityError(cause=CancelledError)`, so the clause above caught nothing: measured
+            # against a real broker, a parent terminated while the child sat in the open activity
+            # left the child `CANCELED` with **no settle attempted**. Everything else an activity
+            # can raise is re-raised unchanged, so a genuine activity failure still fails the wait
+            # rather than being absorbed as a wait that quietly reports itself cancelled — a
+            # `BAD_DATA_RETRY` exhaustion on the open, say, or a projection the database refused.
+            if isinstance(exc, ActivityError) and not isinstance(exc.cause, TemporalCancelledError):
+                raise
             await self._settle(request_id, "cancelled", activity_timeout, detached=True)
             raise
 
@@ -397,7 +607,7 @@ class AwaitAnswerWorkflow:
         )
 
     async def _push(self, request: AwaitRequest, payload: dict[str, Any]) -> None:
-        """Push back into the requester's mailbox, when there is one.
+        """Tell whoever should know: the requester's mailbox, and the channel out.
 
         **A wait with no session is the ordinary case, not an edge one.** A campaign resumed by a
         Schedule, an effect approved out of an inbox, a question raised by a workflow rather than by
@@ -409,10 +619,38 @@ class AwaitAnswerWorkflow:
 
         The request is still open, still in the inbox and still on its deadline; what is skipped is
         a notification with no addressee.
+
+        **The outbound copy is not the same skip, and that asymmetry is the point.** The
+        paragraph above is right that a wait usually has no session — and a person who is not in
+        a session is exactly the person a question has to travel to reach. `asked_of` is an
+        addressee where `session_id` is not: `deliver/message.py` states that resolving one to an
+        address is the driver's job, so an actor id and an entitlement both pass through here
+        unread. It goes out on the opening notice and on every reminder, because that repetition
+        *is* the escalation property 3 describes; `payload['reminders']` is what lets a reader
+        tell the fourth from the first. On the *expiry* notice it goes to the requester instead,
+        because that one is a report rather than an ask — see `_awaiting_message`.
         """
-        if not request.session_id:
-            return
-        await notify_session_best_effort(request.session_id, AWAITING_KIND, payload)
+        if request.session_id:
+            await notify_session_best_effort(request.session_id, AWAITING_KIND, payload)
+        # **Behind a patch, because adding this `await` broke every wait already open.**
+        # `_push` runs *before* `_wait_until`, so a run opened on the previous release has a
+        # `TimerStarted` where this now emits `ActivityTaskScheduled`. Replayed, that is
+        # `[TMPRL1100] Nondeterminism error: Activity machine does not handle this event` — and
+        # this workflow is `failure_exception_types=[Exception]`, so a `NondeterminismError` is an
+        # `ApplicationError` that **fails the wait outright** rather than parking it, past the
+        # `except (asyncio.CancelledError, ActivityError)` below. The `pending_requests` row is
+        # left `waiting` with no run that will ever settle it, on the workflow whose designed
+        # lifetime is `awaiting_max_days`. That is verbatim the state
+        # `D-2026-09-13-a-cancellation-arriving-before-the-timer-leaves-the-row-waiting` exists to
+        # prevent, and `run`'s own comment already stated the rule — *"a timeout that changed
+        # between runs is tolerated and a timer that appears or vanishes is not"*.
+        #
+        # `workflow.patched` is the tree's first: `grep -rn "workflow.patched\|get_version" src/`
+        # returned nothing before this line, which is why nobody reached for it. A run opened
+        # before this release replays with no marker, takes the old path and matches its history;
+        # a run opened after it records the marker and delivers. The id may never be reused.
+        if workflow.patched("awaiting-outbound-delivery"):
+            await deliver_best_effort(_awaiting_message(request, payload))
 
     async def _settle(
         self,

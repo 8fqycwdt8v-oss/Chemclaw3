@@ -1,0 +1,115 @@
+{
+  "probe": {
+    "id": "an-09",
+    "section": 8,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "What is the ionisation state of Nc1ccc(O)cc1C(=O)O across pH 2 to 8? I need to know which species I am actually injecting.",
+    "expects_tools": [
+      "predict_pka",
+      "predict_logd"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "reporting one pKa as 'the pKa of the compound' when the molecule has more than one site",
+      "constructing a modified structure to get at the basic site and reporting the result as this compound's",
+      "a speciation percentage presented as accurate to better than the model's stated uncertainty"
+    ],
+    "direction": "Recognises this is amphoteric: the tool returns the acid site (the phenol or carboxylic acid) and silently skips the basic aniline nitrogen. Says which site the returned value belongs to, that the other site was not evaluated, and that the compound may be zwitterionic — for which the neutral-form model is the wrong physical picture. Gives the qualitative speciation picture across the range, flags that the exact crossover pH needs measurement, and does not edit the structure to force a second number.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "an-09",
+    "section": 8,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "What is the ionisation state of Nc1ccc(O)cc1C(=O)O across pH 2 to 8? I need to know which species I am actually injecting.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [
+      "render_structure",
+      "describe_topology",
+      "read_file",
+      "run_microspecies_profile",
+      "enumerate_protonation_states",
+      "rank_species",
+      "predict_pka",
+      "find_notes",
+      "write_todos",
+      "rank_species",
+      "write_todos",
+      "write_todos"
+    ],
+    "tool_results": [
+      {
+        "tool": "render_structure",
+        "preview": "<retrieved-note-802678ad5c37acd3 id=\"chem:render_structure\">\n<?xml version='1.0' encoding='iso-8859-1'?>\n<svg version='1.1' baseProfile='full'\n              xmlns='http://www.w3.org/2000/svg'\n        "
+      },
+      {
+        "tool": "describe_topology",
+        "preview": "<retrieved-note-802678ad5c37acd3 id=\"chem:describe_topology\">\n{\n  \"smiles\": \"Nc1ccc(O)cc1C(=O)O\",\n  \"atom_count\": 18,\n  \"heavy_atom_count\": 11,\n  \"rotatable_bonds\": 1,\n  \"rings\": 1,\n  \"formal_charge\":"
+      },
+      {
+        "tool": "read_file",
+        "preview": "  1  ---\n  2  name: ionization-and-partitioning\n  3  description: >-\n  4    Judgment for using a predicted pKa in process decisions — extraction and wash pH, salt\n  5    and counterion questions, ioni"
+      },
+      {
+        "tool": "enumerate_protonation_states",
+        "preview": "<retrieved-note-802678ad5c37acd3 id=\"chem:enumerate_protonation_states\">\n{\n  \"smiles\": [\n    \"Nc1ccc(O)cc1C(=O)O\",\n    \"Nc1ccc([O-])cc1C(=O)O\",\n    \"Nc1ccc(O)cc1C(=O)[O-]\",\n    \"[NH3+]c1ccc(O)cc1C(=O)"
+      },
+      {
+        "tool": "find_notes",
+        "preview": "matches=[NoteRef(id='compound-acetylsalicylic-acid', type='compound', compound_smiles='CC(=O)Oc1ccccc1C(=O)O', tags=['api', 'ester'], created_by='human', source='seed-corpus', confidence=0.95, valid_f"
+      },
+      {
+        "tool": "write_todos",
+        "preview": "Updated todo list to [{'content': 'Rank the four protonation microstates (neutral, phenolate, carboxylate, anilinium) by free energy in water to determine their relative stabilities', 'status': 'in_pr"
+      },
+      {
+        "tool": "write_todos",
+        "preview": "Updated todo list to [{'content': 'Rank the four protonation microstates (neutral, phenolate, carboxylate, anilinium) by free energy in water to determine their relative stabilities', 'status': 'compl"
+      },
+      {
+        "tool": "write_todos",
+        "preview": "Updated todo list to [{'content': 'Rank the four protonation microstates (neutral, phenolate, carboxylate, anilinium) by free energy in water to determine their relative stabilities', 'status': 'compl"
+      }
+    ],
+    "tools_failed": [],
+    "expected_tools_met": true,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "empty_answer",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 80.21,
+    "event_counts": {
+      "token": 179,
+      "tool_call": 12,
+      "tool_result": 8,
+      "tool_failed": 4,
+      "plan": 3,
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "1f841c9c52c94ce58dc21bce6410dd43",
+    "first_degraded_index": null,
+    "first_output_index": 1,
+    "specialists": [],
+    "plan_refusals": [
+      "run_microspecies_profile",
+      "rank_species",
+      "predict_pka",
+      "rank_species"
+    ],
+    "tool_refusals": []
+  }
+}

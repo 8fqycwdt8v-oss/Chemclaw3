@@ -74,10 +74,11 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable, Iterator
+from contextlib import contextmanager
 from functools import cache
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
@@ -97,9 +98,10 @@ from chemclaw.agent.langgraph_agent import (
 )
 from chemclaw.agent.profile_discovery import load_profiles
 from chemclaw.agent.profiles import get_profile, registered_profile_names
-from chemclaw.connectors.registry import enabled, server_tools_module
+from chemclaw.agent.skill_manifest import MAX_SKILL_DESCRIPTION_CHARS
+from chemclaw.connectors.registry import discovered, enabled, server_tools_module
 from chemclaw.connectors.transport import _allowed
-from chemclaw.core.config import Settings
+from chemclaw.core.config import Settings, settings
 from tests.siblings import (
     SIBLING_SKIP,
     bundles_declared_here,
@@ -361,7 +363,253 @@ load_profiles()
 #: the property every entry above was chosen for. Stated as a relation rather than as two figures:
 #: `_floor("default")` measures both, and the pair drifts on every merge that touches a tool
 #: schema — the paragraph above is about exactly that.
-CEILINGS: dict[str, int] = {"__default__": 65_000}
+#: **The basis moved again on 2026-09-09, and this time the prompt is what changed shape**
+#: (`chemclaw_agent.PromptBlock`). The default instructions are now assembled per graph from blocks
+#: that declare the tools they name, so what a deployment is *sent* varies with what it binds, and
+#: `_floor` charges `_maximal_instructions` — the worst of both trail variants, every block — rather
+#: than what this fixture can observe. It has to: the fixture binds no `SERVED_ELSEWHERE` bundle, so
+#: the prompt it sees is missing the `screen_hazards` and `resolve_compound` blocks a served fleet
+#: is sent, and charging the observation would be this file measuring a smaller system for the
+#: fourth time. That difference is **206 tokens**, carried as its own line so nobody has to trust
+#: this sentence for it.
+#:
+#: Measured four ways in one commit, because the ceiling did **not** move and the reason matters:
+#:
+#: - merged `main`, old basis: **64,720** over 92 tools — under this ceiling by 280.
+#: - this branch's working tree with the prompt change *reverted*, old basis: **65,755**. The whole
+#:   +1,035 is tool-schema growth from other modules edited on the same branch
+#:   (`agent/graph_tools.py`, `agent/durable_tools.py`, `connectors/calc/server/tools.py` and four
+#:   more), which is this file's standing lesson arriving inside one afternoon: the floor moves on
+#:   somebody else's diff, and the only honest form of the number is the measurement.
+#: - this branch with the prompt change, old basis: **65,578** — the text actually sent is **177**
+#:   tokens narrower (upstream's Deepagents/Agents source-label sentence, 44, plus the two blocks
+#:   this fixture's surface drops, 174, less the 32 the log-only trail block costs over the durable
+#:   one).
+#: - this branch with the prompt change, this basis: **65,784**.
+#:
+#: The tool half moved **three times in that one session** — 57,137, then 58,172, then 57,580 — as
+#: sibling waves merged into the same tree, which is why the durable claim here is the two *deltas*
+#: this change is answerable for (−177 sent, +206 previously unbanked) rather than any total. Read
+#: the totals as of their measurement and re-measure before quoting one.
+#:
+#: **So the ceiling is breached and raising it is not this file's decision to take alone.**
+#: `PREFIX_BOUND` below is this ceiling plus `SERVED_ELSEWHERE_ALLOWANCE`, and
+#: `tests/test_compaction.py` holds `agent_tool_result_clear_trigger` and
+#: `agent_context_token_budget` at their claimed allowances above it, so raising this number is
+#: never free: it moves `PREFIX_BOUND`, and every token of prefix is a token of thread the policy
+#: no longer has. `core/config/agent.py` states the same rule the other way round — *"the
+#: instrument for wanting more is a narrower prefix"*.
+#:
+#: **65,500, and what the 500 cost.** Wave 13 made eight record-surface reads able to say their
+#: answer was only a page, which is prefix a chemist gets a truthful "have we done this before?"
+#: for. Narrowing paid part of it back — the wave's prompt blocks give back 177, and a
+#: `report_measurement` paragraph that was a correction to a *previous docstring's wording* rather
+#: than anything about the tool gave back 75 more, in a schema the model pays for on every call.
+#: The remainder is bought, not found:
+#:
+#: * `agent_tool_result_clear_trigger` rises 500 with it, so the lossless edit keeps the full
+#:   `CLEAR_TRIGGER_THREAD_ALLOWANCE` it was derived to have. Nothing bounds that setting from
+#:   above, so it costs nothing to move.
+#: * `agent_context_token_budget` does **not** rise, because it is derived downwards from the 128k
+#:   window and there is nothing above it to take from. So the budget's thread allowance falls
+#:   43,000 → 42,500 — **1.16% of the thread**, and that is the price of this ceiling, paid where
+#:   the constraint actually is rather than spread until nobody can see it.
+#:
+#: Set with headroom on purpose. A ceiling 23 tokens above a measurement is a tripwire that the
+#: next unrelated merge trips; this left ~420 for ordinary drift when it was set, which is what
+#: makes it a ratchet rather than a trap. **The live headroom is this ceiling minus what the test
+#: below measures, and it moves in both directions** — it read 610 three waves later, because a
+#: bound tool's schema *shrank*. That is why the figure is dated here rather than stated: a
+#: headroom transcribed as current is a claim about a commit, which is the defect the paragraph
+#: above spends fifteen lines on.
+#:
+#: **67,500 since D-2026-09-13, and this one was bought outright.** Turning `harness_enabled` on by
+#: default puts `write_todos` and upstream's todo prompt into every profile's prefix: measured both
+#: ways in one process, +1,372 for `tool:write_todos` and +490 for `prompt:middleware-sections`,
+#: **1,862 on every profile except two**: `computation`, which already sets the flag itself and so
+#: moved by 0, and `safety`, which moved 1,863. The odd token is in the ADR's own table and was
+#: rounded away by every prose statement of it, this one included, until a review read the table.
+#: Only `default` was near enough to matter — 64,907 → 66,769, over the old ceiling by 1,269.
+#:
+#: Nothing was narrowed to pay for it, and that is deliberate rather than lazy: the narrowing this
+#: wants is §5's `default`-profile allow-list, worth a measured -5,787, and it is blocked on a live
+#: lane that can show every probe still reaching its tool. Buying the ceiling now and narrowing
+#: later is the right order; narrowing blind to buy a ceiling is how a cheaper prompt stops finding
+#: tools.
+#:
+#: The price, by the rule stated above: `agent_tool_result_clear_trigger` rises 2,000 with it and
+#: costs nothing, while `agent_context_token_budget` cannot follow, so the thread allowance falls
+#: 42,500 → 40,500 — **4.7% of the thread**, an order of magnitude more than wave 13's 500 paid.
+#: What it buys is the plan gate attached in the posture every supported deployment already runs,
+#: which `D-2026-09-06-the-write-gate-is-three-names-and-the-plan-gate-carries-the-rest` names as
+#: the only cover over 29 write tools.
+#:
+#: **67,200 since `D-2026-09-14-a-lowering-that-loses-a-merge-is-a-raising`**, which is the 300 this
+#: ceiling should have fallen by when `D-2026-09-14-a-docstring-is-a-prompt-and-a-comment-is-not`
+#: moved 309 tokens of developer rationale out of three tool descriptions. Two changes landed in one
+#: wave — the harness default above, +2,000, and that lowering, -300 — and the merge that resolved
+#: them took the first and dropped the second, leaving three documents asserting a lowering the tree
+#: did not carry. The two are independent and both belong, so the ceiling is their sum.
+#: **Two branches added tools on the same day and each raised this ceiling for its own pair; the
+#: merged tree carries both, so neither number survived and this one is measured on the union.**
+#:
+#: `D-2026-09-15-an-agent-authored-workflow-is-read-only-by-construction` adds `compose_workflow`
+#: and `run_composed_workflow` — **978 tokens**, 752 and 226. The split is its argument:
+#: `run_composed_workflow` takes a name and a dict, while `compose_workflow` publishes the step and
+#: input models a workflow is *written* in and cannot be smaller without the model guessing the
+#: shape. What it buys is the only path by which a procedure this system works out becomes one it
+#: can re-run.
+#:
+#: `D-2026-09-15-a-comparison-with-no-caller-is-a-promise-about-a-check-that-does-not-exist` adds
+#: `check_against_specification` and `estimate_stability_trend` — **730 tokens**, 316 and 414.
+#: **Those were trimmed before their ceiling moved**, which is the order this file's history sets:
+#: the first description went from 1,266 characters to 844 and the prefix was still 316 over,
+#: because a tool's description is counted twice — once as itself and once inside the schema that
+#: embeds it — so trimming cannot close a 300-token overage without gutting the prompt the model
+#: reads. All four are under `MAX_SINGLE_TOOL_TOKENS`.
+#:
+#: **The merge is the lesson, not the arithmetic.** Each branch measured honestly against a tree
+#: that did not contain the other's tools, so each ceiling was right when written and wrong on
+#: `main` — which is this file's own standing warning ("the floor moves on somebody else's diff")
+#: arriving as a merge conflict rather than as a red build. The number below is re-measured on the
+#: union and neither branch's: **68,908**, which is 67,200 plus both pairs exactly. 69,800 leaves
+#: 892 of headroom — the ~856 the workflow branch argued for, restored on the merged basis, where
+#: its own 69,000 leaves 92 and is the 34-token tripwire it was written to escape.
+#: **Raised to 70,600 by the `task` roster**
+#: (`D-2026-09-16-a-roster-varies-the-two-dimensions-that-carry-no-authority`). Measured on this
+#: commit: 69,107 without the roster and **69,412** with it, +305, all of it the `task` tool's own
+#: description growing 592 -> 897 as upstream folds each entry's `{name}: {description}` into
+#: `{available_agents}`.
+#:
+#: The raise is 1,188 rather than 305, and the difference is stated because it is not slack.
+#: **This ratchet under-charges the roster by construction**, for the reason
+#: `D-2026-09-05-a-ratchet-that-binds-no-connectors-measures-a-smaller-system` gives one level out:
+#: each entry's description names the tools that entry's helper *binds*, and what a helper binds
+#: depends on which connector bundles a deployment enables. Here `safety` binds nothing and is not
+#: offered at all, and `computation` lists what this repository serves rather than what the fleet
+#: does. Measured against the full declared surface the `task` description is **902** tokens rather
+#: than 710 — so a real deployment pays ~192 tokens this file cannot see, and `safety` alone is
+#: +107 of them. That excess belongs to the `task` tool, which is first-party and inside this
+#: ceiling, so `SERVED_ELSEWHERE_ALLOWANCE` cannot absorb it and was not moved.
+#:
+#: 388 tokens of headroom was the alternative, against a file whose own history records a
+#: neighbouring merge drifting this floor by 326 on a `Raises:` paragraph
+#: (`D-2026-09-14-a-lowering-that-loses-a-merge-is-a-raising`). That is a tripwire rather than a
+#: bound. What the turn buys for it is in the ADR; what it costs every deployment is 1,188 tokens
+#: of thread allowance, and `core/config/agent.py` derives both compaction defaults from
+#: `PREFIX_BOUND`, so they move with it.
+#:
+#: **Not raised by the durable-memory flip, and the headroom is where it went**
+#: (`D-2026-09-20-a-tier-every-prefix-pays-is-still-not-a-ceiling`). `agent_memory_enabled` going
+#: True binds `propose_skill` on every request, and this file could not see it: `_observed_prefix`
+#: built under the code default of `session_store="memory"` while the shipped chart pins
+#: `postgres`, so `personal_skills_available()` was False here and True in the fleet — the shape
+#: `D-2026-09-05-a-ratchet-that-binds-no-connectors-measures-a-smaller-system` names, one predicate
+#: over. `_as_a_deployment_runs` is the correction. Measured on this commit with the corrected
+#: basis: **69,872**, of which `propose_skill` is **462** — 728 of headroom left, so the number
+#: below does not move and neither do the two compaction defaults derived from it.
+#:
+#: The two *stored* skills tiers are deliberately still outside this, each with its own allowance:
+#: they are a deployment's bytes rather than this repository's, and folding a worst case nobody has
+#: into `PREFIX_BOUND` costs every deployment on earth the same thread allowance. See
+#: `LOCAL_SKILLS_ALLOWANCE` and `ORG_SKILLS_ALLOWANCE`.
+#: **Raised to 71,400 when `rescale_experiment_protocol` landed. The figure this entry first gave
+#: was wrong, and correcting it is the point of the correction.**
+#:
+#: It said the tool "wanted 948" and that every deployment pays "948 more tokens" for it. 948 was
+#: that commit's whole-prefix delta (69,872 -> 70,820), not the tool's schema. Re-derived on
+#: 2026-09-21 with this file's own counter: `rescale_experiment_protocol` is **300** and its skill's
+#: listing entry (`protocol-scale-translation`) is **127** — 427 of the 948, and the remainder is
+#: **not attributed here**, because the honest thing to write in this file is the number that was
+#: measured rather than a plausible split for the rest.
+#:
+#: That is the mistake this file exists to prevent, made inside it:
+#: `D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose` is about exactly this, and
+#: `test_the_recorded_cost_of_a_known_oversized_tool_is_still_true` was written because the figures
+#: beside `KNOWN_OVERSIZED` drifted unasserted. A per-tool figure in *this* comment has no such
+#: assertion behind it — the ceiling is asserted, the attribution is prose — so a reader should
+#: treat any per-tool number in these entries as a claim about the afternoon it was taken and
+#: re-derive it before relying on it. The ceiling itself was measured correctly against the real
+#: prefix total on each raise, which is why the constant is right and the sentence was not.
+#:
+#: What the turn buys is unchanged and is the reason the raise stands: taking a procedure from the
+#: scale it was run at to the scale it will be run at is the defining kilo-lab task, and before this
+#: the model could only do it by multiplying numbers in prose, where the failure is silent and
+#: specific — everything gets multiplied, including the addition time and the filtration, and the
+#: scaled document then prescribes a time-temperature history no experiment ever produced.
+#:
+#: **Why the prose was not trimmed further instead**, since that is the cheaper answer when it
+#: works: it was, twice, and the second pass bought **22 tokens** (70,842 -> 70,820). The schema
+#: wrapper, the name and two string arguments are the floor for any tool at all, and
+#: `test_no_single_tool_schema_dominates_the_floor` passes, so this is an ordinary tool's price
+#: rather than a badly-shaped one.
+#: **And to 72,000 for six process-development skills, which is a different kind of raise.**
+#: A skill costs the prompt its *name and description* — the `skills-listing` contributor — and
+#: nothing else until a turn loads it, which is what makes layer 3 cheap. Six of them
+#: (`crystallisation-design`, `solvent-swap-and-distillation`, `impurity-fate-and-purge`,
+#: `analytical-readiness`, `scale-up-readiness-review`, `robustness-and-edge-of-failure`) measured
+#: **594** together. Measured on this commit: **71,414**, so the raise is that plus a tripwire's
+#: worth of headroom rather than the round number it looks like.
+#:
+#: The descriptions were trimmed twice first, because that is the answer that costs nothing when it
+#: works: 830 tokens down to 594. It stopped there on purpose. A skill's description is the only
+#: thing deciding whether the model loads it at all, so trimming past the trigger phrases buys
+#: prefix by making the judgment unfindable — which is a worse outcome than the prefix, and an
+#: invisible one.
+#:
+#: **Why these are global rather than bundled**, since a bundled skill would have cost nothing on a
+#: deployment that binds no process-development bundle: four of the six span two or more bundles
+#: (`crystallisation-design` reads `unitops` and `props`; `scale-up-readiness-review` reads
+#: everything), and a bundled skill belongs to one capability. The other two name only
+#: default-enabled tools. Splitting judgment across bundles to save prefix would put the same
+#: skill in two places, which is the duplication `connectors/README.md`'s ownership rule exists to
+#: prevent.
+#:
+#: The cost, stated: every deployment pays 594 more tokens on every model call and the thread
+#: allowance drops by the same amount again — `tests/test_compaction.py`'s two allowances carry it,
+#: for the reason the entry there gives about the window being the input.
+#: **And to 73,100 for the plate-results loop — the third raise on this branch, and the one with
+#: the best case.** `attach_plate_results` cost **606** (a nested `list[ArmResult]` argument) and
+#: `read_plate_results` **257**. Measured on this commit: **72,641**. Re-measured after the
+#: tool's own top-level `note` argument was removed (each arm keeps `ArmResult.note`):
+#: `attach_plate_results` **592**, `read_plate_results` unchanged, prefix **72,384**.
+#:
+#: The case is better than the two above it for one reason worth stating rather than assuming: both
+#: tools work in **every** deployment. They touch only core's design store, so unlike the six
+#: process-development skills — whose judgment is about tools most deployments do not bind — and
+#: unlike the template that was parked for exactly this, the prefix here buys something every turn
+#: can actually use.
+#:
+#: What it buys is the loop that was open since `D-2026-08-28` built the prescriptive tier: a
+#: design reached `executed` and nothing attached the outcome, so the round trip
+#: `skills/hte-campaign-design` promises in its own closing section was a person retyping a table,
+#: and the `DEFERRED.md` row on mining the agent-to-human protocol diff had no corpus because
+#: nothing could tell which designs had ever been run.
+#:
+#: **The running total is the thing to look at, not this entry.** This branch has taken
+#: 70,600 -> 73,100, which is **2,500 tokens of thread allowance from every deployment on earth**,
+#: and `tests/test_compaction.py`'s two allowances carry all of it because the budget is pinned by
+#: the window rather than the prefix. A fourth raise on one branch should be refused; what buys it
+#: back is `D-2026-08-29-a-tool-schema-nobody-calls-is-still-paid-for`'s deferred schemas, or
+#: profile routing, neither of which is a raise.
+#: **Lowered to 72,850, which is the first entry here that gives something back.**
+#:
+#: Three of the six skills above turned out to be largely inert in a default deployment: their
+#: *central* tools ship with the opt-in process-development bundles, so what a default turn paid
+#: for was judgment about a path it cannot take. `solvent-swap-and-distillation` is the clearest —
+#: six of its twelve tools are the `props` chain plus `shortcut_distillation`, so a default
+#: deployment can execute one step of its five-step answer.
+#:
+#: `SkillManifest.requires` names the subset without which a skill is *misleading* rather than
+#: merely narrower, and `ToolScopedSkills` hides the skill when one of them is absent. Measured:
+#: `skills-listing` 3,785 -> 3,542, so **243 tokens come back on every model call** in every
+#: deployment that does not enable those bundles, and nothing changes for one that does. Total on
+#: this commit: **72,398**.
+#:
+#: The ceiling drops by 250 rather than by the whole branch's 2,500, and the difference is worth
+#: being plain about: the other raises bought capability every deployment can use, this one bought
+#: capability most of them cannot, and only that part is refundable.
+CEILINGS: dict[str, int] = {"__default__": 72_850}
 
 #: How much of the floor one tool may be. A schema above this is not expensive, it is *badly
 #: shaped* — the fix is pagination, a narrower argument, or splitting a tool that does two things.
@@ -444,8 +692,59 @@ MAX_SINGLE_TOOL_TOKENS = 900
 #: cross-tool sharing at any price. What multiplies is the model, so what pays back five times is
 #: narrowing the model.
 KNOWN_OVERSIZED: dict[str, int] = {
+    # **The one entry here whose cost is not ours to narrow, recorded on 2026-09-13 when
+    # `harness_enabled` became the default and bound it on every profile.** The rule above says
+    # narrow the arguments or paginate the result, and neither is available: decomposed on the
+    # bound object with this file's own counter, the 1,372 below is **973 of upstream's own tool
+    # description**, 152 of `plan_scope._SCOPE_GUIDANCE`, and 252 of parameters and envelope. So
+    # 71% of it is somebody else's prose, arriving through a middleware
+    # `_apply_excluded_middleware` refuses to let a profile strip, and the first-party half is 404.
+    #
+    # **Those three sum to 1,377 against a whole of 1,372, and the +5 is the counter rather than
+    # the arithmetic.** `_count` wraps its argument in a `HumanMessage`, and
+    # `count_tokens_approximately` charges 4 tokens of per-message envelope — measured on the empty
+    # string — so three fragments counted separately pay it three times where the whole pays once.
+    # Named because the paragraph below closes on "a decomposition whose parts do not sum to its
+    # whole is arithmetic nobody checked", and leaving a 5-token residual under that sentence is
+    # the same defect at a smaller scale: the parts are each exact, and what does not sum is the
+    # measurement, not the schema.
+    #
+    # **That split shipped wrong and the error is worth naming.** It read "1,115 of upstream's own
+    # tool description, 206 of parameters and 147 of `_SCOPE_GUIDANCE`" against a whole it called
+    # 1,367 — three mistakes in one sentence. 1,115 is the *scoped* description,
+    # `self.tool_description` after `__init__` has appended the guidance to upstream's, so the
+    # guidance was counted twice and the parts summed to 1,468 against a whole of 1,367. And 1,367
+    # was chars/4 where the dict value beside it is this file's counter, which the `_count`
+    # docstring argues at length must be the basis. A decomposition whose parts do not sum to its
+    # whole is arithmetic nobody checked.
+    #
+    # **Forking that description to trim it was considered and rejected, and the argument is
+    # already in the tree**: `_SCOPE_GUIDANCE` is appended to upstream's text rather than replacing
+    # it because "everything upstream says about when to plan and how to keep the list current is
+    # as true here as there, and a fork of that text is a paragraph that goes stale on the next
+    # bump with nothing to notice". Trimming is the same fork with a smaller diff.
+    #
+    # This is therefore the case this dict's warning did not anticipate — debt taken on knowingly,
+    # by adopting a required upstream middleware, rather than first-party bloat being hidden. The
+    # lever that *is* available is the profile allow-list in § 5: `write_todos` is bound on every
+    # profile that runs the harness, so a narrowed surface pays this back on each of them.
+    "write_todos": 1_372,
     "suggest_next_experiment": 2_951,
-    "generate_screening_design": 2_309,
+    # **2,309 -> 2,673 on 2026-09-21, and the +364 bought a design family rather than drifting.**
+    # `D-2026-09-21-a-design-is-a-criterion-not-a-second-tool` folded BoFire's `DoEStrategy` into
+    # this tool as a `criterion` argument instead of shipping a second one. The alternative was
+    # measured: a standalone `generate_optimal_design` cost **1,435**, of which **1,367 was a second
+    # copy of the `OptimizationProblem` schema this entry is already paying for** — so the fold is
+    # 364 against 1,435, and it needed no ceiling raise where the standalone needed 1,147.
+    #
+    # It stays on this list rather than joining it, which is the distinction the dict's own warning
+    # draws: growing debt already taken on, re-recorded in the commit that moved it, is the
+    # mechanism working. Narrowing is still unavailable for the reason the two entries above share —
+    # the cost is a nested union of parameter and constraint types, not prose, so **no tool taking
+    # an `OptimizationProblem` can clear the 900-token cap**. Two docstring trims on the standalone
+    # took
+    # it 1,733 -> 1,435 and could touch no more.
+    "generate_screening_design": 2_673,
     "predict_outcome": 2_201,
     "campaign_progress": 2_087,
     # **2,307 on `main`, 1,532 here, and the difference is this branch rather than drift.** That
@@ -557,6 +856,24 @@ def _tool_schema(tool: Any) -> str:
 #: Named rather than left implicit, and asserted below, for the reason
 #: `cli/validate_connectors.py::unverified_tool_surfaces` gives about the identical blind spot one
 #: layer over: a check that quietly shrinks is worse than one that says what it did not look at.
+#: **A fifth reason this set did not grow, and the first one that is not "we declare no bundle".**
+#: `D-2026-09-20-declaring-a-capability-and-binding-it-are-different-decisions` declares five of the
+#: fleet's bundles here — `thermalsafety`, `kinetics`, `unitops`, `props`, `suitability` — so the
+#: four entries below that say "this tree declares no such bundle" have stopped being true, and
+#: the set they were protecting still must not move.
+#:
+#: What keeps it right is that the allowance was never really about *declaring*. It prices what a
+#: turn is **sent**, and a turn is sent what `enabled()` binds. All five declare
+#: `default_enabled: false`, so an empty `connectors_enabled` — a fresh checkout, `make test`, CI,
+#: and every chart release that has not asked — binds none of them and pays for none of them.
+#: Their 21,913 tokens are charged to whoever names them in `CHEMCLAW_CONNECTORS_ENABLED`, which
+#: is a line in a values file rather than a property of this repository.
+#:
+#: So the membership rule is now two predicates rather than one: declared in **both** trees *and*
+#: bound by silence. `test_the_bundles_both_repositories_declare_are_the_ones_charged_to_the_
+#: allowance` asserts exactly that pair, and it is what would red if somebody flipped one of those
+#: five to `default_enabled: true` without raising the allowance in the same commit — which is the
+#: whole point of the flag being in the manifest rather than in a deployment's head.
 SERVED_ELSEWHERE = frozenset({"chem", "rxnpredict", "safety"})
 
 #: What to allow for `SERVED_ELSEWHERE`'s schemas when a *bound* on the whole prefix is needed.
@@ -601,10 +918,14 @@ SERVED_ELSEWHERE_ALLOWANCE = 11_000
 #: surface it never sends.
 #:
 #: **But one configuration in this tree does mount the whole directory.**
-#: `infra/live/e2e-full-stack/up.sh` puts `$MCP_REPO/manifests` on `CHEMCLAW_CONNECTORS_DIR`, so
-#: that lane also binds `props` and `pyexec` — and its prefix is over `PREFIX_BOUND` by roughly
-#: those two bundles' schemas, which leaves the clear trigger's thread allowance short of the
-#: 30,000 `core/config/agent.py` derives it to be. That is stated rather than absorbed: raising
+#: `infra/live/e2e-full-stack/up.sh` puts `$MCP_REPO/manifests` on `CHEMCLAW_CONNECTORS_DIR` —
+#: *after* this tree's own directory, and discovery is first-directory-wins, so every name this
+#: tree declares resolves to this tree's manifest. That lane also names every discovered bundle in
+#: `CHEMCLAW_CONNECTORS_ENABLED` — it is the full-stack test, and with the list empty it started
+#: five opt-in servers the front door never bound — so it binds the fleet-only `pyexec` *and* the
+#: five `default_enabled: false` process-development bundles, and its prefix is over `PREFIX_BOUND`
+#: by roughly their schemas. That leaves the clear trigger's thread allowance well short of the
+#: 30,000 `core/config/agent.py` derives it to be. It is stated rather than absorbed: raising
 #: `SERVED_ELSEWHERE_ALLOWANCE` to cover it would move both defaults for every deployment on
 #: account of a lane that talks to `chemclaw.cli.mock_llm`.
 #:
@@ -614,7 +935,104 @@ SERVED_ELSEWHERE_ALLOWANCE = 11_000
 #: also added its manifest here. Measured 2026-09-07 against the checkout beside this one: 13,942
 #: tokens over 28 tools (`chem` 5,577 / 12, `props` 2,936 / 6, `pyexec` 1,142 / 1, `rxnpredict`
 #: 2,655 / 6, `safety` 1,632 / 3). The headroom is the same 11.5% and for the same reason.
-FLEET_PUBLISHED_ALLOWANCE = 15_500
+#:
+#: **It did exactly that on 2026-09-15, which is the first time this bound has been the thing that
+#: noticed.** The fleet gained a `thermalsafety` server — runaway arithmetic from calorimetry, seven
+#: tools — and the directory went to **17,835 over 35 tools** (`chem` 5,577 / 12, `props` 2,936 / 6,
+#: `pyexec` 1,142 / 1, `rxnpredict` 2,784 / 6, `safety` 1,632 / 3, `thermalsafety` 3,764 / 7),
+#: 2,335 over the 15,500 that stood. Raised to 19,800, which is the same 11% headroom over the new
+#: measurement.
+#:
+#: The cost is stated rather than absorbed, because raising a bound quietly is how one stops being
+#: one: a deployment that mounts this directory and enables the bundle pays 3,764 more tokens on
+#: every model call. (`infra/live/e2e-full-stack/up.sh` mounts it and, as the note above says,
+#: enables it — this tree's copy of the manifest is the one bound there.) At 538 tokens a tool
+#: `thermalsafety` is in the band its siblings occupy (`safety` 544, `props` 489, `chem` 465)
+#: rather than an outlier, and the length is the fleet's own rule about a tool docstring stating
+#: what the tool is *not* — which for a server that answers "what happens if the cooling fails" is
+#: the paragraph that keeps a Semenov estimate from being quoted as an SADT. Trimming to fit would
+#: have cost ~330 tokens a tool, which is that paragraph.
+#:
+#: `SERVED_ELSEWHERE_ALLOWANCE` deliberately did **not** move with it: `thermalsafety` is not a
+#: bundle this tree declares, so no chart deployment binds it, and charging `PREFIX_BOUND` for it
+#: would tighten both compaction defaults everywhere on account of a lane that talks to
+#: `chemclaw.cli.mock_llm`. That is the same argument this entry opens with, arriving for real.
+#:
+#: **It happened again the same day, which is what a bound that works looks like.** The fleet
+#: gained a `suitability` server — USP <621> chromatographic system suitability, seven tools — and
+#: the directory went to **22,306 over 42 tools** (`chem` 5,577 / 12, `props` 2,936 / 6, `pyexec`
+#: 1,142 / 1, `rxnpredict` 2,784 / 6, `safety` 1,632 / 3, `suitability` 4,471 / 7, `thermalsafety`
+#: 3,764 / 7), 2,506 over the 19,800 that stood. Raised to 24,800, the same ~11% headroom over the
+#: new measurement.
+#:
+#: The cost again stated rather than absorbed: a deployment that mounts that directory and enables
+#: the bundle pays 4,471 more tokens on every model call. At 639 tokens a tool `suitability` is
+#: **above** the band its siblings occupy (`thermalsafety` 538, `safety` 544, `props` 489, `chem`
+#: 465) — the first entry here where that is true — and the reason is one tool rather than a verbose
+#: server. Six of its seven cost 458-614, inside the band; `system_suitability_report` costs 1,171,
+#: being the only composite in the fleet that takes a nested model (a peak table) plus nine named
+#: criteria. That server's README argues why it is kept at that price: the alternative is the model
+#: decomposing a pasted table across the single-peak tools, which means pairing widths with
+#: retention times and resolving *adjacent* pairs, and a resolution computed between the wrong two
+#: peaks looks exactly like a correct one.
+#:
+#: `SERVED_ELSEWHERE_ALLOWANCE` again did not move, for the reason given directly above: this tree
+#: declares no `suitability` bundle, so no chart deployment binds it.
+#:
+#: **And a third time the same day, which is what makes this a bound rather than a number.** The
+#: fleet gained `kinetics` — isothermal rate and ideal-reactor arithmetic, six tools — and the
+#: directory went to **25,695 over 48 tools** (`chem` 5,577 / 12, `kinetics` 3,389 / 6, `props`
+#: 2,936 / 6, `pyexec` 1,142 / 1, `rxnpredict` 2,784 / 6, `safety` 1,632 / 3, `suitability`
+#: 4,471 / 7, `thermalsafety` 3,764 / 7), 895 over the 24,800 that stood. Raised to 28,500, the
+#: same ~11% headroom.
+#:
+#: Three consecutive fleet additions, each caught here rather than noticed later, is the argument
+#: for the bound existing at all: nothing in this tree builds those servers or watches their
+#: merges, so the only thing standing between a sibling's pull request and a silently larger
+#: prefix on every model call is this assertion failing.
+#:
+#: The cost again stated rather than absorbed: 3,389 more tokens on every model call for a
+#: deployment that mounts that directory and enables the bundle. At 565 tokens a tool `kinetics` is
+#: **inside** the band its siblings occupy (`thermalsafety` 538, `safety` 544, `props` 489, `chem`
+#: 465) — unlike `suitability` above, and for a reason worth keeping: its six tools are
+#: single-purpose, where `suitability`'s seventh is a composite taking a nested model plus nine
+#: named criteria.
+#:
+#: `SERVED_ELSEWHERE_ALLOWANCE` did not move for the third time, and for the third time because
+#: this tree declares no such bundle.
+#:
+#: **A fourth, and this one is the most expensive server in the fleet per tool.** `unitops` —
+#: scale-up and unit-operation sizing, seven tools — took the directory to **33,048 over 55 tools**
+#: (`chem` 5,577 / 12, `kinetics` 3,389 / 6, `props` 2,936 / 6, `pyexec` 1,142 / 1,
+#: `rxnpredict` 2,784 / 6, `safety` 1,632 / 3, `suitability` 4,471 / 7, `thermalsafety` 3,764 / 7,
+#: `unitops` 7,353 / 7), 4,548 over the 28,500 that stood. Raised to 36,700, the same ~11% headroom.
+#:
+#: The cost stated rather than absorbed: 7,353 more tokens on every model call for a deployment that
+#: mounts that directory and enables the bundle. At **1,050 tokens a tool** it is nearly double
+#: `suitability`'s 639, which was itself the first entry here to sit above the band — and the shape
+#: of the two is different in a way that decides whether to trim. `suitability`'s total is one
+#: composite (`system_suitability_report`, 1,171) over six tools at 458-614. `unitops` is
+#: **uniform**: measured per tool, 958 to 1,148 across all seven, with no outlier to remove.
+#:
+#: **So the price is the fleet's own two rules meeting a server whose subject is measurements.**
+#: Every tool there takes several physical quantities, each required with no default — that is
+#: deliberate, because a correlation handed a defaulted `U` or `alpha` returns a plausible number
+#: nobody measured — and this fleet requires every argument to state its units and every docstring
+#: to state what the tool is *not*. Seven tools x several required quantities x a sentence each is
+#: 1,050 tokens, and none of the three factors is the one to drop. Trimming here would buy ~2,500
+#: tokens by deleting the units from a scale-up correlation's arguments, which is the trade this
+#: entry exists to make visible rather than take quietly.
+#:
+#: **And the six library adoptions that landed next door in the same week moved this by zero.**
+#: Subtract `unitops` and the fleet is 25,695 — the exact figure the paragraph above recorded
+#: before either merge. A review that replaced a periodic table, an optimizer and a set of physical
+#: constants across seven servers changed no tool's schema, which is what a dependency swap behind
+#: a stable surface is supposed to look like and is not something anybody could have asserted
+#: without measuring it here. The whole breach is `unitops`.
+#:
+#: `SERVED_ELSEWHERE_ALLOWANCE` did not move for the fourth time, and for the fourth time because
+#: this tree declares no such bundle.
+FLEET_PUBLISHED_ALLOWANCE = 36_700
 
 #: The whole static prefix a shipped `default` turn may cost, as a bound: this file's ceiling plus
 #: the allowance for what it cannot see.
@@ -756,6 +1174,30 @@ class _CapturingModel(GenericFakeChatModel):
         return super()._generate(messages, stop=stop, run_manager=run_manager, **kw)
 
 
+@contextmanager
+def _as_a_deployment_runs() -> Iterator[None]:
+    """Build under `session_store="postgres"`, which is what every real deployment sets.
+
+    **Without this the ratchet measures a system no deployment runs**, and it is the same defect
+    `D-2026-09-05-a-ratchet-that-binds-no-connectors-measures-a-smaller-system` names, one predicate
+    over. `tests/conftest.py` sets no `session_store`, so the suite runs at the code default of
+    `"memory"` — and `local_skills.personal_skills_available()` reads
+    `agent_memory_enabled and session_store == "postgres"`, so `build_langgraph_agent` strips
+    `propose_skill` from every graph this file compiles while the shipped chart
+    (`deploy/helm/chemclaw/values.yaml`) pins `CHEMCLAW_SESSION_STORE: "postgres"` and pays for it.
+    Measured: the tool's schema is ~462 tokens of prefix on every request, charged to nothing here.
+
+    It is a pure predicate — no database is opened by setting it, because the store only ever
+    arrives as an argument — so this costs nothing and buys the one thing this file exists for.
+    """
+    original = settings.session_store
+    settings.session_store = "postgres"
+    try:
+        yield
+    finally:
+        settings.session_store = original
+
+
 def _observed_prefix(profile: Any) -> tuple[SystemMessage, list[Any], list[Any]]:
     """One real model call: the system message as sent, the tools as bound, the node's own list.
 
@@ -775,12 +1217,13 @@ def _observed_prefix(profile: Any) -> tuple[SystemMessage, list[Any], list[Any]]
         holds. The last two are the same surface seen from two places, and
         `test_the_ratchet_charges_at_least_what_the_model_is_sent` is what keeps them honest.
     """
-    graph = build_langgraph_agent(
-        model=_CapturingModel(messages=iter([AIMessage(content="")])),
-        profile=profile,
-        audit_sink=NullAuditSink(),
-        connectors=_connector_tools(profile),
-    )
+    with _as_a_deployment_runs():
+        graph = build_langgraph_agent(
+            model=_CapturingModel(messages=iter([AIMessage(content="")])),
+            profile=profile,
+            audit_sink=NullAuditSink(),
+            connectors=_connector_tools(profile),
+        )
     bound = _bound_tools(graph)
     _RECEIVED.clear()
     _BOUND.clear()
@@ -793,18 +1236,39 @@ def _observed_prefix(profile: Any) -> tuple[SystemMessage, list[Any], list[Any]]
     return system[0], list(_BOUND), bound
 
 
-def _skills_listing(profile: Any, tools: list[Any]) -> str:
+def _skills_listing(profile: Any, tools: list[Any], available: Collection[str]) -> str:
     """The skills block exactly as `SkillsMiddleware` publishes it into the system prompt.
 
     Built through the real middleware rather than re-derived from the `SKILL.md` frontmatter,
     because a second implementation of upstream's formatting is a second thing to keep in step —
     and the number this file gates on has to be the number the model is actually sent.
     `before_agent` on an empty state is upstream's own load path: what a first turn runs.
+
+    `available` is the surface the graph binds, passed for the same reason
+    `build_langgraph_agent` passes it: the capability predicate that decides which skills are listed
+    reads it, and a listing derived from the manifests instead would split the observed total by a
+    number production does not produce.
     """
     labelled = _labelled(_skill_dirs())
-    middleware = _skills_middleware(skills_backend(profile, tools, labelled=labelled), labelled)
+    backend = skills_backend(profile, tools, labelled=labelled, available=available)
+    middleware = _skills_middleware(backend, labelled, profile)
     loaded = middleware.before_agent({}, None, None) or {}
     return str(middleware._format_skills_list(loaded.get("skills_metadata", [])))
+
+
+def _maximal_instructions(profile: Any) -> int:
+    """The most expensive instruction text any deployment of this profile can be sent.
+
+    Two axes make the prompt vary, and a bound has to take the worst of both. The blocks a graph
+    binds nothing for are dropped, so `available=None` — every block — is one end of the first
+    axis. The second is the audit trail: the two traceability blocks are alternatives rather than
+    one block and its absence, and the log-only one is the longer of the two, so a fixture that
+    only ever measured the durable prompt would under-charge every deployment that has not set
+    `session_store="postgres"` — which is `.env.example`'s default.
+    """
+    return max(
+        _count(instructions_for(profile, durable_trail=durable)) for durable in (True, False)
+    )
 
 
 def _floor(profile_name: str) -> tuple[int, dict[str, int]]:
@@ -817,20 +1281,38 @@ def _floor(profile_name: str) -> tuple[int, dict[str, int]]:
     contributions, measured the way `build_langgraph_agent` builds them, and the third is the
     remainder — every deepagents middleware's prompt section, named rather than uncounted.
 
-    The two derived halves stay measured from the *capability* tools deliberately.
-    `build_langgraph_agent` hands `skills_backend` the raw callables, so narrowing the skills
-    listing by the bound list would measure a backend production never builds. A negative remainder
-    would mean those two halves are no longer what production puts in the prompt — the split has
-    gone wrong, not the total, which is still what the model was sent.
+    The skills listing is derived from the *capability* tools and narrowed by the *bound* names,
+    which is exactly the pair `build_langgraph_agent` passes: it hands `skills_backend` the raw
+    callables and, since 2026-09-10, the surface the graph binds — because the capability predicate
+    that decides which skills are listed had been reading the manifests, which do not move when a
+    server is unreachable. Deriving either half differently here would split the observed total by
+    a number production does not produce. A negative remainder would mean these halves are no
+    longer what production puts in the prompt — the split has gone wrong, not the total, which is
+    still what the model was sent.
+
+    **The instructions are the one part charged at more than this fixture observes, and that is
+    deliberate — the alternative is the 2026-09-05 defect again.** Since the prompt became
+    `PromptBlock`s the model is sent only the blocks whose tools this graph binds
+    (`chemclaw_agent.PromptBlock`), and this fixture binds no `SERVED_ELSEWHERE` bundle: it cannot
+    bind `screen_hazards` or `resolve_compound`, so the prompt it observes is *missing* two blocks
+    that a deployment with the fleet is sent. Charging what was observed would make the ratchet
+    measure a smaller system for the fourth time. `_maximal_instructions` is the bound instead —
+    the most expensive prompt any deployment of this profile can be sent, over both trail variants
+    — and the difference is a named line rather than a silent absorption into the remainder, which
+    is what it would have been if `instructions` alone were left maximal.
     """
     profile = get_profile(profile_name)
     system, _sent, bound = _observed_prefix(profile)
-    instructions = _count(instructions_for(profile))
-    listing = _count(_skills_listing(profile, _capability_tools(profile)))
+    observed = _count(instructions_for(profile, {_tool_name(tool) for tool in bound}))
+    maximal = _maximal_instructions(profile)
+    listing = _count(
+        _skills_listing(profile, _capability_tools(profile), {_tool_name(tool) for tool in bound})
+    )
     parts = {
-        "instructions": instructions,
+        "instructions": observed,
+        "instructions:blocks-only-a-served-fleet-binds": maximal - observed,
         "skills-listing": listing,
-        "prompt:middleware-sections": _count(system) - instructions - listing,
+        "prompt:middleware-sections": _count(system) - observed - listing,
     }
     for tool in bound:
         parts[f"tool:{_tool_name(tool)}"] = _count(_tool_schema(tool))
@@ -1163,11 +1645,15 @@ def test_the_bundles_both_repositories_declare_are_the_ones_charged_to_the_allow
 
     **What it does not do is widen the allowance to cover the fleet's own bundles**, and that is a
     decision rather than an omission (`D-2026-09-07-a-claim-about-another-repository-is-checked-by-
-    reading-it`). `props` and `pyexec` are declared only in `Chemclaw3-mcp`; no chart entry mounts
-    them and no `enabled()` here returns them, so charging them to `PREFIX_BOUND` would raise both
-    compaction defaults for every deployment on account of two bundles those deployments do not
-    bind. What they cost is bounded by `FLEET_PUBLISHED_ALLOWANCE` below instead, which is where
-    the configuration that *does* mount them — `infra/live/e2e-full-stack/up.sh` — is priced.
+    reading-it`). `pyexec` is declared only in `Chemclaw3-mcp`, and the five process-development
+    bundles are declared here but `default_enabled: false`; no chart entry mounts the first and no
+    default `enabled()` returns any of them, so charging them to `PREFIX_BOUND` would raise both
+    compaction defaults for every deployment on account of bundles those deployments do not
+    bind. What they cost is bounded by `FLEET_PUBLISHED_ALLOWANCE` below instead, which prices a
+    deployment that mounts the fleet's directory *and enables them* — which is what the e2e lane
+    (`infra/live/e2e-full-stack/up.sh`) does: it mounts that directory after this tree's own, so
+    this tree's copies of the shared manifests win the names, and names every discovered bundle in
+    `CHEMCLAW_CONNECTORS_ENABLED`, so it binds the five and the fleet-only `pyexec` too.
 
     Needs a checkout and not a built `.venv`: reading the fleet's manifests is a shallow clone's
     worth of work, which is the half of this file that could plausibly run in CI.
@@ -1180,46 +1666,86 @@ def test_the_bundles_both_repositories_declare_are_the_ones_charged_to_the_allow
             "repositories declare is unchecked in this run."
         )
     published = set(fleet_published_bundles(root))
-    assert published & set(bundles_declared_here()) == SERVED_ELSEWHERE, (
-        f"the fleet publishes {sorted(published)} and this repository declares "
-        f"{sorted(set(bundles_declared_here()))}; the names in both are "
-        f"{sorted(published & set(bundles_declared_here()))} where SERVED_ELSEWHERE says "
-        f"{sorted(SERVED_ELSEWHERE)}. A name in both trees is a bundle this repository declares "
-        "and does not serve, so its schemas are charged to SERVED_ELSEWHERE_ALLOWANCE and through "
-        "it to PREFIX_BOUND and both compaction defaults."
+    bound_by_silence = {m.name for _, m in discovered().values() if m.default_enabled}
+    charged = published & set(bundles_declared_here()) & bound_by_silence
+    assert charged == SERVED_ELSEWHERE, (
+        f"the fleet publishes {sorted(published)}, this repository declares "
+        f"{sorted(set(bundles_declared_here()))} and binds {sorted(bound_by_silence)} by silence; "
+        f"the names in all three are {sorted(charged)} where SERVED_ELSEWHERE says "
+        f"{sorted(SERVED_ELSEWHERE)}. A name in both trees that an empty `connectors_enabled` "
+        "still binds is a bundle this repository declares, does not serve, and pays for on every "
+        "model call — so its schemas are charged to SERVED_ELSEWHERE_ALLOWANCE and through it to "
+        "PREFIX_BOUND and both compaction defaults. A bundle declaring `default_enabled: false` "
+        "is declared and not charged; flipping one to true means raising the allowance in the "
+        "same commit."
     )
 
 
-def _sibling_tool_tokens(names: Iterable[str]) -> tuple[dict[str, tuple[int, int]], str]:
-    """Per-bundle `(tools, tokens)` for `names`, or an empty mapping and the reason there is none.
+def _one_sibling_dump(interpreter: Path, name: str) -> tuple[list[dict[str, Any]] | None, str]:
+    """`tools/list` for one bundle, or `None` and the reason that bundle could not be measured.
 
-    Never raises for a missing or broken sibling: this file's job is to bound *this* repository's
-    prefix, and a checkout somebody has not built is a fact about their laptop rather than a
-    regression. It raises for nothing at all — a failure to run the dump is returned as the reason
-    string, so the caller decides between skipping and failing.
+    One subprocess per bundle, which is the whole shape of this function. `_SIBLING_DUMP` takes
+    `*names` and imports them inside one dict comprehension, so the first `ImportError` kills the
+    process before anything is printed — and the caller then had nothing for *any* bundle.
+    Observed 2026-09-16: the sibling's `.venv` lacked `molmass`, which its own newest commit had
+    just added to `servers/thermalsafety/pyproject.toml`, and the allowance bound went unchecked
+    for all three.
     """
     import subprocess
 
-    interpreter, reason = _sibling_python()
-    if interpreter is None:
-        return {}, reason
-    wanted = sorted(names)
     try:
         completed = subprocess.run(
-            [str(interpreter), "-c", _SIBLING_DUMP, *wanted],
+            [str(interpreter), "-c", _SIBLING_DUMP, name],
             capture_output=True,
             text=True,
-            timeout=300,
+            # Per bundle, where it used to bound the whole batch — so the helper's own worst case
+            # is now this times the bundle count. Inert rather than dangerous: pytest's global
+            # `timeout = 180` bites first, and a dump that takes even 30 s is a finding.
+            timeout=60,
             cwd=str(interpreter.parents[2]),
         )
     except (OSError, subprocess.SubprocessError) as error:  # pragma: no cover - environment
-        return {}, f"could not run the sibling's interpreter: {error}"
+        return None, f"could not run the sibling's interpreter: {error}"
     if completed.returncode != 0:
-        return {}, f"the sibling's tools/list dump failed: {completed.stderr.strip()[-400:]}"
+        return None, f"its tools/list dump failed: {completed.stderr.strip()[-400:]}"
     try:
         listed = json.loads(completed.stdout)
     except ValueError as error:  # pragma: no cover - environment
-        return {}, f"the sibling's dump was not JSON: {error}"
+        return None, f"its dump was not JSON: {error}"
+    tools = listed.get(name)
+    if not isinstance(tools, list):  # pragma: no cover - the program above prints one key
+        return None, f"the dump printed {sorted(listed)} rather than {name!r}"
+    return [dict(tool) for tool in tools], ""
+
+
+def _sibling_tool_tokens(
+    names: Iterable[str],
+) -> tuple[dict[str, tuple[int, int]], dict[str, str]]:
+    """Per-bundle `(tools, tokens)`, and per-bundle reasons for the ones that went unmeasured.
+
+    Never raises for a missing or broken sibling: this file's job is to bound *this* repository's
+    prefix, and a checkout somebody has not built is a fact about their laptop rather than a
+    regression. It raises for nothing at all — a failure to run a dump is returned as a reason
+    string, so the caller decides between skipping and failing.
+
+    **The partition is per bundle, and that is what changed.** This used to pass every name to one
+    subprocess and return `{}` on any non-zero exit, so one bundle that would not import took the
+    bound for all of them — and `SERVED_ELSEWHERE_ALLOWANCE`, and therefore `PREFIX_BOUND`, and
+    therefore both compaction defaults `core/config/agent.py` derives from it, went unchecked while
+    the run said only that there was a sibling problem. This file's own header argues the rule it
+    was breaking: a check that quietly shrinks is worse than one that says what it did not look at.
+
+    The cost is one process spawn per bundle where there was one per call, and it is measured
+    rather than called expensive: on the sibling's own `.venv`, three names in one process is
+    1.37 s against 2.61 s in three, and nine names is 1.27 s against 6.48 s — about **0.7 s a
+    spawn**. Over this file that is 3 subprocesses becoming 16 and roughly **+9.5 s** on a ~290 s
+    file. What it buys is that a bundle's schemas stop being unwatched because a *different*
+    bundle grew a dependency.
+    """
+    interpreter, reason = _sibling_python()
+    wanted = sorted(names)
+    if interpreter is None:
+        return {}, dict.fromkeys(wanted, reason)
 
     from langchain_core.tools import StructuredTool
 
@@ -1227,7 +1753,12 @@ def _sibling_tool_tokens(names: Iterable[str]) -> tuple[dict[str, tuple[int, int
         """A body these tools never get: only their published schema is measured."""
 
     measured: dict[str, tuple[int, int]] = {}
-    for name, tools in listed.items():
+    unmeasured: dict[str, str] = {}
+    for name in wanted:
+        tools, why = _one_sibling_dump(interpreter, name)
+        if tools is None:
+            unmeasured[name] = why
+            continue
         total = 0
         for tool in tools:
             built = StructuredTool(
@@ -1237,8 +1768,8 @@ def _sibling_tool_tokens(names: Iterable[str]) -> tuple[dict[str, tuple[int, int
                 func=_unused,
             )
             total += _count(_tool_schema(built))
-        measured[str(name)] = (len(tools), total)
-    return measured, ""
+        measured[name] = (len(tools), total)
+    return measured, unmeasured
 
 
 def test_the_allowance_for_the_bundles_this_ratchet_cannot_serve_is_still_a_bound() -> None:
@@ -1261,22 +1792,15 @@ def test_the_allowance_for_the_bundles_this_ratchet_cannot_serve_is_still_a_boun
     evidence about instead of implying it checked. That reporter is newer than this sentence,
     which asserted it for a day while `grep` for a sibling in `tests/conftest.py` found nothing.
     """
-    measured, reason = _sibling_tool_tokens(SERVED_ELSEWHERE)
-    if not measured:
-        pytest.skip(
-            f"{SIBLING_SKIP} the {len(SERVED_ELSEWHERE)} bundles served from Chemclaw3-mcp "
-            f"({', '.join(sorted(SERVED_ELSEWHERE))}) were NOT measured: {reason}. "
-            f"SERVED_ELSEWHERE_ALLOWANCE ({SERVED_ELSEWHERE_ALLOWANCE}) and therefore PREFIX_BOUND "
-            f"({PREFIX_BOUND}) are unchecked in this run, and both compaction defaults are derived "
-            "from them."
-        )
-    assert set(measured) == set(SERVED_ELSEWHERE), (
-        f"measured {sorted(measured)} where SERVED_ELSEWHERE names {sorted(SERVED_ELSEWHERE)}"
-    )
+    measured, unmeasured = _sibling_tool_tokens(SERVED_ELSEWHERE)
     total = sum(tokens for _tools, tokens in measured.values())
     breakdown = ", ".join(
         f"{name} {tokens} / {tools}" for name, (tools, tokens) in sorted(measured.items())
     )
+    # **Asserted before the skip, because what was measured is evidence whether or not the rest
+    # was.** A partial total is a *lower* bound on the real one, so a partial run can still fail
+    # this honestly — and a bundle whose schemas grew past the allowance on its own is exactly the
+    # case a sibling problem in a *different* bundle used to hide.
     assert total <= SERVED_ELSEWHERE_ALLOWANCE, (
         f"the bundles this ratchet cannot serve now cost {total} tokens ({breakdown}) against an "
         f"allowance of {SERVED_ELSEWHERE_ALLOWANCE}. That allowance is half of PREFIX_BOUND "
@@ -1285,16 +1809,71 @@ def test_the_allowance_for_the_bundles_this_ratchet_cannot_serve_is_still_a_boun
         "what every request may cost, not a bump. Raise all three together, or narrow a schema in "
         "Chemclaw3-mcp."
     )
+    if unmeasured:
+        pytest.skip(
+            f"{SIBLING_SKIP} {len(unmeasured)} of the {len(SERVED_ELSEWHERE)} bundles served from "
+            "Chemclaw3-mcp were NOT measured — "
+            + "; ".join(f"{name}: {why}" for name, why in sorted(unmeasured.items()))
+            + f". The {len(measured)} that were cost {total} tokens ({breakdown or 'none'}), "
+            f"which is a lower bound. SERVED_ELSEWHERE_ALLOWANCE ({SERVED_ELSEWHERE_ALLOWANCE}) "
+            f"and therefore PREFIX_BOUND ({PREFIX_BOUND}) are unchecked in this run, and both "
+            "compaction defaults are derived from them."
+        )
+
+
+def test_one_unmeasurable_bundle_does_not_take_the_measurement_of_the_others() -> None:
+    """The partition the two tests above rest on, driven rather than read off the helper.
+
+    Observed 2026-09-16: the sibling's `.venv` lacked `molmass`, which its own newest commit had
+    just added to `servers/thermalsafety/pyproject.toml` — a bundle neither test names — and
+    `_sibling_tool_tokens` passed every name to one subprocess whose dict comprehension died on the
+    first `ImportError`. So the allowance bound, `PREFIX_BOUND` and both compaction defaults went
+    unchecked because a *different* bundle grew a dependency, and the run said only that there was
+    a sibling problem.
+
+    A name no module answers to reproduces that cause exactly — an import that raises inside the
+    dump — without depending on which dependency the sibling's tree happens to be missing today.
+    """
+    interpreter, reason = _sibling_python()
+    if interpreter is None:
+        pytest.skip(f"{SIBLING_SKIP} {reason}, so the partition cannot be driven")
+
+    alone, _ = _sibling_tool_tokens(SERVED_ELSEWHERE)
+    beside, unmeasured = _sibling_tool_tokens([*SERVED_ELSEWHERE, "notabundle"])
+
+    # **The property is "a broken name costs its own measurement and no other", and it is stated
+    # against what this checkout could measure rather than against `SERVED_ELSEWHERE`.** The first
+    # spelling asserted `set(unmeasured) == {"notabundle"}`, which reds whenever a *real* bundle is
+    # also unmeasurable — the 2026-09-16 case this whole change is about, had the missing
+    # dependency been in one of these three rather than in `thermalsafety` — and reds with the
+    # wrong diagnosis, saying the broken bundle took the other down when it failed on its own. It
+    # would also have been the one cross-repository check in this file that fails rather than
+    # skips, against the helper's own rule that somebody's unbuilt checkout is not a regression.
+    assert set(beside) == set(alone), (
+        f"measuring {sorted(SERVED_ELSEWHERE)} beside a bundle that cannot be imported returned "
+        f"{sorted(beside)} where measuring them without it returned {sorted(alone)}: the broken "
+        "name took another bundle down with it, which is the all-or-nothing behaviour this "
+        "partition replaced"
+    )
+    assert "notabundle" in unmeasured, "the unimportable bundle was reported as measured"
+    assert all(tokens > 0 for _tools, tokens in beside.values()), (
+        "a bundle measured at zero tokens is a dump that returned nothing, which would satisfy "
+        "the allowance bound by measuring nothing at all"
+    )
+    assert "notabundle" in unmeasured["notabundle"], (
+        "the reason must name the bundle it is about, or a partial skip says less than the "
+        "all-or-nothing one it replaced"
+    )
 
 
 def test_the_whole_directory_the_e2e_lane_mounts_is_bounded_too() -> None:
     """`FLEET_PUBLISHED_ALLOWANCE` bounds every bundle the fleet publishes, not only the shared.
 
     The test above bounds what `PREFIX_BOUND` is built from and therefore what a chart deployment
-    pays. This one bounds what `infra/live/e2e-full-stack/up.sh` puts on
-    `CHEMCLAW_CONNECTORS_DIR` — the fleet's whole `manifests/` directory — because that lane binds
-    two bundles no `enabled()` in this suite returns, and nothing in this repository was watching
-    their schemas grow at all.
+    pays. This one bounds the fleet's whole `manifests/` directory — what a deployment that mounts
+    it and enables its bundles would pay — because nothing in this repository was watching those
+    schemas grow at all. `infra/live/e2e-full-stack/up.sh` mounts that directory after this tree's
+    own and enables every bundle it discovers, so this bound is the price of that lane's fleet half.
 
     It is a bound on somebody else's tree and it can only skip or fail; it can never be the thing
     that *sets* a default here, which is why it is a second constant rather than a larger first
@@ -1303,23 +1882,44 @@ def test_the_whole_directory_the_e2e_lane_mounts_is_bounded_too() -> None:
     """
     root, reason = sibling_root("CHEMCLAW_MCP_REPO", "Chemclaw3-mcp")
     published = sorted(fleet_published_bundles(root)) if root is not None else []
-    measured, dump_reason = _sibling_tool_tokens(published) if published else ({}, reason)
-    if not measured:
-        pytest.skip(
-            f"{SIBLING_SKIP} the fleet's published bundles were NOT measured: {dump_reason}. "
-            f"FLEET_PUBLISHED_ALLOWANCE ({FLEET_PUBLISHED_ALLOWANCE}) is unchecked in this run, "
-            "so nothing here is evidence about what `infra/live/e2e-full-stack/up.sh` binds."
-        )
+    measured, unmeasured = (
+        _sibling_tool_tokens(published)
+        if published
+        # `reason` is empty when the checkout resolved but publishes nothing this can read — a
+        # manifests-only clone whose symlinks do not resolve. Saying so beats printing a skip whose
+        # reason is a full stop, which is what naming `reason` unconditionally produced.
+        else ({}, {"the fleet's published bundles": reason or "the checkout publishes none"})
+    )
+    # A bundle whose dump returns an empty tool list lands in `measured` at zero tokens and raises
+    # no reason, so the allowance below would pass having measured nothing. The sibling test above
+    # asserts this for `SERVED_ELSEWHERE`; this is the same guard over the wider set.
+    hollow = sorted(name for name, (tools, _tokens) in measured.items() if not tools)
+    assert not hollow, (
+        f"{hollow} published no tools at all, so the allowance below would be satisfied by a dump "
+        "that returned nothing rather than by a bundle that is small"
+    )
     total = sum(tokens for _tools, tokens in measured.values())
     breakdown = ", ".join(
         f"{name} {tokens} / {tools}" for name, (tools, tokens) in sorted(measured.items())
     )
     assert total <= FLEET_PUBLISHED_ALLOWANCE, (
         f"the fleet's published manifests now cost {total} tokens ({breakdown}) against an "
-        f"allowance of {FLEET_PUBLISHED_ALLOWANCE}. Every deployment that points "
-        "CHEMCLAW_CONNECTORS_DIR at that directory — `infra/live/e2e-full-stack/up.sh` does — pays "
-        "this on every model call, on top of what this file's own ceiling bounds."
+        f"allowance of {FLEET_PUBLISHED_ALLOWANCE}. A deployment that points "
+        "CHEMCLAW_CONNECTORS_DIR at that directory and enables its bundles pays this on every "
+        "model call, on top of what this file's own ceiling bounds."
     )
+    # A partial total compared against the *whole* allowance is the second hazard of the old
+    # all-or-nothing helper, in the direction that reassures: the assertion above still holds
+    # honestly on a lower bound, and this is what stops the run reading it as a verdict.
+    if unmeasured:
+        pytest.skip(
+            f"{SIBLING_SKIP} {len(unmeasured)} of the fleet's published bundles were NOT "
+            "measured — "
+            + "; ".join(f"{name}: {why}" for name, why in sorted(unmeasured.items()))
+            + f". The {len(measured)} that were cost {total} tokens ({breakdown or 'none'}), so "
+            f"FLEET_PUBLISHED_ALLOWANCE ({FLEET_PUBLISHED_ALLOWANCE}) is unchecked in this run and "
+            "nothing here is evidence about what the fleet's directory costs a deployment."
+        )
 
 
 # --------------------------------------------------------------------------------------------
@@ -1351,14 +1951,15 @@ def sent_prefix(actor: str, correlation_id: str) -> str:
 
     _RECEIVED.clear()
     _BOUND.clear()
-    graph = build_langgraph_agent(
-        model=_CapturingModel(messages=iter([AIMessage(content="done")])),
-        profile="default",
-        actor=actor,
-        correlation_id=correlation_id,
-        audit_sink=NullAuditSink(),
-        connectors=_connector_tools(get_profile("default")),
-    )
+    with _as_a_deployment_runs():
+        graph = build_langgraph_agent(
+            model=_CapturingModel(messages=iter([AIMessage(content="done")])),
+            profile="default",
+            actor=actor,
+            correlation_id=correlation_id,
+            audit_sink=NullAuditSink(),
+            connectors=_connector_tools(get_profile("default")),
+        )
     asyncio.run(
         graph.ainvoke(
             {"messages": [HumanMessage(content="hello")]},
@@ -1415,6 +2016,7 @@ _CHILD = """
 import hashlib, json, sys
 sys.path.insert(0, "tests")
 from chemclaw.agent.framing import ENVELOPE_TAG, SYSTEM_SPEECH_MARK
+from chemclaw.core.config import settings
 from test_context_floor import sent_prefix
 prefix = sent_prefix("alice@example.com", "corr-a")
 prefix = prefix.replace(SYSTEM_SPEECH_MARK, "<MARK>").replace(ENVELOPE_TAG, "<TAG>")
@@ -1510,4 +2112,246 @@ def test_a_narrowing_profile_is_actually_cheaper_than_the_default() -> None:
     assert not not_narrowing, (
         f"the default profile's prefix is {default_total} tokens and these are not below it: "
         f"{not_narrowing}. A profile that advertises fewer tools should cost fewer tokens."
+    )
+
+
+def test_a_helpers_prefix_is_bounded_by_the_one_this_file_already_ratchets() -> None:
+    """The helper is a second graph with a second prefix, and since 2026-09-15 not a small one.
+
+    `D-2026-09-15-a-helper-shares-the-session-its-caller-already-opened` gave a helper its caller's
+    *reading* connector tools, which is a real per-model-call cost this file did not previously
+    bound: every ceiling here is the prefix of the graph a chemist talks to, and a helper's schemas
+    are never on that wire. A fan-out of four helpers is four of these prefixes.
+
+    **The answer is not a second ceiling, and the reason is why this is an assertion rather than a
+    number.** A helper's surface is a *strict subset* of its caller's
+    (`tests/test_subagents.py::test_a_helper_holds_no_tool_its_caller_does_not`), and its prompt is
+    its caller's plus `HELPER_BRIEF` minus the harness block it is built without. So the caller's
+    ceiling already bounds it — as an inequality, which holds under every future edit to either
+    side, where a transcribed helper ceiling would be a second number to keep true. Measured here
+    the day it was written: **26,626 against 66,316**, 40%.
+
+    What this catches is the direction that would break the argument: a helper prompt that grows
+    past what the harness block pays for, or a tool source that reaches a helper without reaching
+    its caller. Either turns the inequality red and this file's single ceiling stops covering two
+    graphs.
+    """
+    import inspect
+
+    profile = get_profile("default")
+    connectors = _connector_tools(profile)
+    caller = build_langgraph_agent(
+        model=_CapturingModel(messages=iter([AIMessage(content="") for _ in range(8)])),
+        profile=profile,
+        audit_sink=NullAuditSink(),
+        connectors=connectors,
+    )
+    task = caller.nodes["tools"].bound.tools_by_name["task"]
+    body = cast(Any, getattr(task, "coroutine", None) or getattr(task, "func", None))
+    helper = inspect.getclosurevars(body).nonlocals["subagent_graphs"]["general-purpose"]
+
+    def prefix(graph: Any) -> int:
+        _RECEIVED.clear()
+        _BOUND.clear()
+        graph.invoke({"messages": [HumanMessage("what does this turn cost?")]})
+        system = [message for message in _RECEIVED if isinstance(message, SystemMessage)][0]
+        content = system.content if isinstance(system.content, str) else str(system.content)
+        return _count(content) + sum(_count(_tool_schema(tool)) for tool in _BOUND)
+
+    caller_prefix, helper_prefix = prefix(caller), prefix(helper)
+    assert helper_prefix < caller_prefix, (
+        f"a helper's static prefix is {helper_prefix} tokens against its caller's {caller_prefix}, "
+        "so the ceilings in this file no longer bound it — and a fan-out pays that prefix once per "
+        "helper. Either the helper's prompt has outgrown the harness block it is built without, or "
+        "something now binds a tool to a helper that it does not bind to its caller"
+    )
+
+
+#: What a chemist's own skills may add to the prefix of every one of their model calls, in tokens.
+#:
+#: **A bound on a tier this ratchet's ceilings deliberately do not hold, and the distinction is the
+#: reason it is a separate number.** `CEILINGS` bounds what *this repository* ships — the same
+#: prefix for every deployment and every person. The personal-skills tier is neither: it is per
+#: actor, it is empty on a fresh deployment, and the bytes in it were written by a chemist. Folding
+#: its worst case into `PREFIX_BOUND` would take 5,600 tokens of thread allowance from every
+#: deployment on earth for a tier almost all of them will never fill.
+#:
+#: Nothing is lost by keeping it out, because the *runtime* charges the real thing:
+#: `agent/context_budget.prefix_tokens` reads the prefix of the call in flight, so a chemist who
+#: fills their tier is compacted against what they actually send. What this number holds is the
+#: other question — how large can that get — and it is derived rather than picked:
+#: `agent_local_skills_max` rows, each contributing the name and the description that deepagents
+#: truncates at its spec limit of 1,024 characters. Measured 2026-09-18 on a compiled graph with
+#: the connector surface bound: an empty mounted tier costs **6** tokens, and a maximal one
+#: **5,571**.
+#:
+#: Raising it means one of the two bounds moved, which is a decision about how much of a person's
+#: own context their own judgment may take.
+LOCAL_SKILLS_ALLOWANCE = 5_700
+
+#: What the organisation's skills may add to the prefix of every model call **every chemist** makes.
+#:
+#: A separate number from `LOCAL_SKILLS_ALLOWANCE` because it bounds a different population, not a
+#: different mechanism: a personal tier is one person's and usually empty, while whatever an
+#: administrator publishes is in everybody's prefix and in every helper a turn spawns — a
+#: four-helper fan-out sends it five times, since a helper is compiled through the same builder over
+#: the same backend.
+#:
+#: **Outside `CEILINGS` for `LOCAL_SKILLS_ALLOWANCE`'s reason, and the "every user pays it"
+#: difference does not flip it.** That difference makes the worst case uniform *within* a
+#: deployment, which is a reason to bound the tier tightly — `agent_org_skills_max` is 12 rather
+#: than the personal tier's 20 — and not a reason to charge every deployment on earth the same
+#: thread allowance for a tier most of them will never publish to. The runtime already charges the
+#: real thing: `agent/context_budget.prefix_tokens` reads the prefix of the call in flight.
+#:
+#: Derived, then measured on this tier's own mount rather than carried across from the neighbouring
+#: one — the mount path differs (`/org/` against `/mine/`), so the listing's scaffolding does too,
+#: and a number moved between two tiers is a claim about the wrong commit. The derivation said 3,345
+#: (12 rows at the ~278 tokens `LOCAL_SKILLS_ALLOWANCE` measures per maximal row, plus the empty
+#: mount); measured 2026-09-20 on a compiled graph with the connector surface bound, a maximal tier
+#: costs **3,330** over an empty one. The allowance is the measurement plus ~3.6%, which is the
+#: headroom `LOCAL_SKILLS_ALLOWANCE` leaves over its own.
+ORG_SKILLS_ALLOWANCE = 3_450
+
+
+def test_a_chemists_own_skills_cost_no_more_prefix_than_their_cap_allows() -> None:
+    """The one part of the prefix a *person* writes, bounded and measured rather than assumed.
+
+    **This ratchet was blind to it**, for the reason `_bound_tools` and `_observed_prefix` were
+    blind to their own halves: `_observed_prefix` passes no `store=`, so the graph it measures
+    mounts no personal tier and the figure it charges is a deployment with the feature off. That is
+    the same shape as
+    `D-2026-09-05-a-ratchet-that-binds-no-connectors-measures-a-smaller-system`, one tier over.
+
+    It is asserted here rather than folded into `CEILINGS` because the two bound different things —
+    see `LOCAL_SKILLS_ALLOWANCE`. What would make this fail is a raised row cap, a longer permitted
+    description, or a listing format that grew: each of those is a real change in what a chemist's
+    own judgment costs them on every turn, and each would otherwise be invisible.
+    """
+    import asyncio
+
+    from langgraph.store.memory import InMemoryStore
+
+    from chemclaw.agent.local_skills import save_local_skill
+    from chemclaw.core.config import settings
+    from chemclaw.core.identity_context import reset_current_identity, set_current_identity
+
+    profile = get_profile("default")
+    connectors = _connector_tools(profile)
+
+    def prefix(store: Any) -> int:
+        tokens = set_current_identity("a-chemist", frozenset())
+        try:
+            graph = build_langgraph_agent(
+                model=_CapturingModel(messages=iter([AIMessage(content="")])),
+                profile=profile,
+                audit_sink=NullAuditSink(),
+                connectors=connectors,
+                store=store,
+            )
+            _RECEIVED.clear()
+            graph.invoke({"messages": [HumanMessage("what does this turn cost?")]})
+            system = [message for message in _RECEIVED if isinstance(message, SystemMessage)][0]
+            return _count(
+                system.content if isinstance(system.content, str) else str(system.content)
+            )
+        finally:
+            reset_current_identity(tokens)
+
+    # Maximal by the tier's own two bounds: every row the cap permits, each with the longest
+    # description deepagents will publish rather than truncate.
+    filled = InMemoryStore()
+    description = "x" * MAX_SKILL_DESCRIPTION_CHARS
+    for index in range(settings.agent_local_skills_max):
+        name = f"local-skill-{index:03d}"
+        asyncio.run(
+            save_local_skill(
+                filled,
+                "a-chemist",
+                name,
+                f"---\nname: {name}\ndescription: {description}\n---\n\nbody\n",
+            )
+        )
+
+    empty, full = prefix(InMemoryStore()), prefix(filled)
+    cost = full - empty
+
+    assert cost <= LOCAL_SKILLS_ALLOWANCE, (
+        f"a full personal skills tier adds {cost} tokens to every one of that chemist's model "
+        f"calls, over the {LOCAL_SKILLS_ALLOWANCE} this file allows it. Either "
+        "`agent_local_skills_max` rose, the permitted description grew, or upstream's listing "
+        "format did — each is a real change in what a person's own judgment costs them per turn"
+    )
+    assert cost > 0, (
+        "a full personal tier costs nothing, which means it is not reaching the system message at "
+        "all — the feature is mounted and invisible to the model, so this asserts nothing"
+    )
+
+
+def test_the_organisations_skills_cost_no_more_prefix_than_the_cap_allows() -> None:
+    """The part of the prefix an *administrator* writes, bounded and measured rather than assumed.
+
+    The twin of `test_a_chemists_own_skills_cost_no_more_prefix_than_their_cap_allows`, and it needs
+    to exist separately for the reason `ORG_SKILLS_ALLOWANCE` gives: this tier is paid by everybody
+    rather than by its author, so its cap is the deployment's bill rather than one person's worst
+    case.
+
+    **This ratchet is blind to it by construction**, exactly as it was to the personal tier:
+    `_observed_prefix` passes no `store=`, so the graph it measures mounts no stored tier at all.
+    What would make this fail is a raised row cap, a longer permitted description, or a listing
+    format that grew — each a real change in what every chemist pays on every turn, and each
+    otherwise invisible.
+    """
+    import asyncio
+
+    from langgraph.store.memory import InMemoryStore
+
+    from chemclaw.agent.org_skills import save_org_skill
+
+    profile = get_profile("default")
+    connectors = _connector_tools(profile)
+
+    def prefix(store: Any) -> int:
+        # No ambient identity: the organisation's tier needs none, and measuring it without one is
+        # also what keeps this figure free of the personal tier, which needs an actor to mount.
+        with _as_a_deployment_runs():
+            graph = build_langgraph_agent(
+                model=_CapturingModel(messages=iter([AIMessage(content="")])),
+                profile=profile,
+                audit_sink=NullAuditSink(),
+                connectors=connectors,
+                store=store,
+            )
+        _RECEIVED.clear()
+        graph.invoke({"messages": [HumanMessage("what does this turn cost?")]})
+        system = [message for message in _RECEIVED if isinstance(message, SystemMessage)][0]
+        return _count(system.content if isinstance(system.content, str) else str(system.content))
+
+    # Maximal by the tier's own two bounds: every row the cap permits, each with the longest
+    # description deepagents will publish rather than truncate.
+    filled = InMemoryStore()
+    description = "x" * MAX_SKILL_DESCRIPTION_CHARS
+    for index in range(settings.agent_org_skills_max):
+        name = f"org-skill-{index:03d}"
+        asyncio.run(
+            save_org_skill(
+                filled,
+                name,
+                f"---\nname: {name}\ndescription: {description}\n---\n\nbody\n",
+                activated_by="an-admin",
+            )
+        )
+
+    empty, full = prefix(InMemoryStore()), prefix(filled)
+    cost = full - empty
+
+    assert cost <= ORG_SKILLS_ALLOWANCE, (
+        f"a full organisation skills tier adds {cost} tokens to every model call every chemist in "
+        f"this deployment makes, over the {ORG_SKILLS_ALLOWANCE} this file allows it. Either "
+        "`agent_org_skills_max` rose, the permitted description grew, or upstream's listing format "
+        "did — and this one is paid by everybody, and again by every helper a turn spawns"
+    )
+    assert cost > 0, (
+        "a full organisation tier costs nothing, which means it is not reaching the system message "
+        "at all — the tier is mounted and invisible to the model, so this asserts nothing"
     )

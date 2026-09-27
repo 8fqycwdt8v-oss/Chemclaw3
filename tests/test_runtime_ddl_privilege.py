@@ -40,6 +40,7 @@ bare `GRANT INSERT ON audit_events` resolves through the *connection's* search_p
 file would grant on one schema's tables and the blanket statements on another's.
 """
 
+import asyncio
 import re
 import uuid
 from collections.abc import Iterator
@@ -48,7 +49,7 @@ import psycopg
 import pytest
 
 from chemclaw.core.config import settings
-from chemclaw.core.grants import grant_files
+from chemclaw.core.grants import apply_grants, grant_files
 from tests.test_database_privileges import verbs_the_grant_allows
 
 # The role constant `app_privileges.sql` declares. Substituting it is what lets the live test run
@@ -75,6 +76,48 @@ def _grants_sql() -> str:
     return files[0].read_text(encoding="utf-8")
 
 
+def _reconciliation_for(role: str) -> str:
+    """The grant file with its role constant rewritten to `role`.
+
+    Asserted to have substituted exactly once, so a test that silently stopped rewriting the file —
+    and therefore interrogated a role the file never granted — fails instead of passing.
+    """
+    rewritten, substitutions = re.subn(_ROLE_CONSTANT, f"'{role}'", _grants_sql())
+    assert substitutions == 1, (
+        f"expected exactly one {_ROLE_CONSTANT} constant in app_privileges.sql, rewrote "
+        f"{substitutions} — this test would otherwise interrogate a role the file never granted"
+    )
+    return rewritten
+
+
+def _reconcile_reporting(connection: psycopg.Connection, role: str, drift: list[str]) -> list[str]:
+    """Apply `drift`, reconcile, and return what the reconciliation reported — all rolled back.
+
+    Every statement runs inside one transaction that is discarded, `GRANT`/`REVOKE`/`CREATE TABLE`
+    and `ALTER DEFAULT PRIVILEGES` all being transactional in PostgreSQL. That matters more here
+    than in the tests above: two of these drifts are grants to `PUBLIC` and to a role's
+    *membership*, neither scoped to the probe role, which would outlive the run on a shared
+    database.
+    """
+    reported: list[str] = []
+
+    def collect(diagnostic: psycopg.errors.Diagnostic) -> None:
+        reported.append(str(diagnostic.message_primary))
+
+    connection.add_notice_handler(collect)
+    connection.autocommit = False
+    try:
+        with connection.cursor() as cur:
+            for statement in drift:
+                cur.execute(statement)
+            cur.execute(_reconciliation_for(role))
+    finally:
+        connection.rollback()
+        connection.autocommit = True
+        connection.remove_notice_handler(collect)
+    return reported
+
+
 @pytest.fixture
 def granted_probe_role() -> Iterator[tuple[psycopg.Connection, str]]:
     """A throwaway role with `app_privileges.sql` applied to it, on a `public`-pinned connection.
@@ -93,11 +136,7 @@ def granted_probe_role() -> Iterator[tuple[psycopg.Connection, str]]:
         pytest.skip(f"Postgres unavailable (start it: sudo dockerd; make up): {exc}")
 
     role = f"chemclaw_app_probe_{uuid.uuid4().hex[:8]}"
-    rewritten, substitutions = re.subn(_ROLE_CONSTANT, f"'{role}'", _grants_sql())
-    assert substitutions == 1, (
-        f"expected exactly one {_ROLE_CONSTANT} constant in app_privileges.sql, rewrote "
-        f"{substitutions} — this test would otherwise interrogate a role the file never granted"
-    )
+    rewritten = _reconciliation_for(role)
     try:
         with connection.cursor() as cur:
             cur.execute("SET search_path TO public")
@@ -332,3 +371,121 @@ def test_read_is_uniform_and_reaches_the_migration_ledger(
         "is what makes read uniform, and a table it misses is an outage on first use"
     )
     assert "schema_migrations" in tables, "public holds no migration ledger to check"
+
+
+# The four ways the role's effective privileges move without any `GRANT` in `app_privileges.sql`
+# changing, each with the drift that creates it and the phrase the reconciliation must report it
+# under. `app_privileges.sql` says it "states the whole matrix", which is true of the direct table
+# grants it enumerates and false of every row here — measured as the role after a full
+# reconciliation: `UPDATE audit_events` succeeds under a `PUBLIC` write and under role membership,
+# and `DROP TABLE audit_anchors` succeeds under membership, so two of these silently retire the one
+# control D-2026-08-14 left standing.
+_DRIFT: dict[str, tuple[list[str], str]] = {
+    # Membership carries the other role's privileges wholesale, so it reaches every table this file
+    # withholds a verb on. `pg_read_all_data` is a predefined role: harmless, always present on
+    # PostgreSQL 14+, and enough to put a row in `pg_auth_members`.
+    "role membership": (['GRANT pg_read_all_data TO "{role}"'], "is a member of"),
+    # A write granted to `PUBLIC` is held by every role in the cluster, and no `REVOKE … FROM
+    # <role>` reaches it.
+    "a PUBLIC write": (
+        ["GRANT UPDATE ON audit_events TO PUBLIC"],
+        "PUBLIC holds",
+    ),
+    # Default privileges apply to tables created *after* they are set, so they re-widen every table
+    # a later migration adds, in between two deploys that both looked clean.
+    "default privileges": (
+        ['ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO "{role}"'],
+        "default privileges",
+    ),
+    # The other direction, and the one that is this file's own doing: `REVOKE ALL ON ALL TABLES` is
+    # indiscriminate, so a table the app role created and owns — a ninth checkpointer table, say —
+    # loses even its owner's DML on the *second* deploy, having installed fine on the first.
+    # Guarded per table for the eight that exist; nothing guards a ninth.
+    "an owned table this file does not name": (
+        [
+            'SET LOCAL ROLE "{role}"',
+            "CREATE TABLE public.checkpoint_ninth (v integer primary key)",
+            "RESET ROLE",
+        ],
+        "cannot write",
+    ),
+}
+
+
+@pytest.mark.parametrize("channel", sorted(_DRIFT))
+def test_the_reconciliation_reports_the_drift_it_cannot_revoke(
+    granted_probe_role: tuple[psycopg.Connection, str], channel: str
+) -> None:
+    """A full restatement is not a full reconciliation, and the difference must not be silent.
+
+    `REVOKE ALL ON ALL TABLES … FROM <role>` reaches exactly one of the four ACL sources that decide
+    what the role may do. Two of the other three hand back `UPDATE`/`DELETE` on `audit_events` — the
+    whole of the trail's integrity claim since the hash chain was removed (D-2026-08-14) — and one
+    of them also allows `DROP TABLE`. Measured as the role after a reconciliation, both succeed.
+
+    **Reported rather than refused**, and the choice is argued rather than defaulted
+    (D-2026-09-09-a-grant-set-that-contracts-is-not-a-pre-upgrade-step): raising here fails the
+    `pre-upgrade` hook, which blocks the release — and the operator whose hand-grant caused it is
+    the one person who cannot fix it from the deploy. A refusal wants an opt-out, an opt-out wants a
+    setting, and this file is applied by `psql`-equivalent with no settings in it. So CI fails and
+    the deploy reports: this assertion is the hard half, and the `WARNING` is the half that can see
+    a live database's hand-grants, which no test can.
+    """
+    connection, role = granted_probe_role
+    drift, phrase = _DRIFT[channel]
+    reported = _reconcile_reporting(connection, role, [s.format(role=role) for s in drift])
+    assert any(phrase in message for message in reported), (
+        f"the reconciliation reported nothing about {channel}. It ran to completion and returned "
+        f"the role to what app_privileges.sql declares, while {channel} left it holding privileges "
+        f"no GRANT in that file names. Reported: {reported}"
+    )
+
+
+def test_a_clean_reconciliation_reports_no_drift(
+    granted_probe_role: tuple[psycopg.Connection, str],
+) -> None:
+    """The other direction, without which the four assertions above prove only that it warns.
+
+    A report that fires on a database nobody has touched is a report an operator learns to ignore,
+    which is the failure mode of every check that cannot say *nothing is wrong*. This is also what
+    holds the shipped grant file to its own claim: after it runs against a migrated schema, the role
+    holds what it declares and nothing from anywhere else.
+    """
+    connection, role = granted_probe_role
+    assert _reconcile_reporting(connection, role, []) == []
+
+
+def test_what_the_reconciliation_reports_reaches_the_deploy_log(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The audit is only a report if something reads it, and nothing else in that process does.
+
+    `app_privileges.sql` raises its drift findings as server `WARNING`s, which psycopg collects into
+    a diagnostics channel that is discarded unless a handler is attached. So the wiring in
+    `chemclaw.core.grants` is load-bearing rather than cosmetic: without it the audit runs on every
+    deploy, finds a `PUBLIC` write on `audit_events`, and says so to nobody — the "a control exists"
+    claim this repository keeps deleting, in its purest form.
+
+    Driven through the one message this file can raise on a database with no runtime role, because
+    that costs nothing and mutates nothing: the reconciliation returns at its first statement.
+    Whether the *drift* findings are raised at all is the parametrised test above; this one is only
+    about whether a server message on that connection reaches stdout.
+    """
+    try:
+        connection = psycopg.connect(settings.postgres_dsn, autocommit=True)
+    except psycopg.OperationalError as exc:  # pragma: no cover - env-dependent
+        pytest.skip(f"Postgres unavailable (start it: sudo dockerd; make up): {exc}")
+    with connection:
+        with connection.cursor() as cur:
+            cur.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (_ROLE_CONSTANT.strip("'"),))
+            if cur.fetchone():  # pragma: no cover - env-dependent
+                pytest.skip(
+                    "this database splits its principal, so the reconciliation does not take its "
+                    "no-op branch and would write to a role the suite does not own"
+                )
+
+    asyncio.run(apply_grants(settings.postgres_dsn))
+    assert "does not exist" in capsys.readouterr().out, (
+        "app_privileges.sql raised a message the deploy log never saw; `apply_grants` is not "
+        "attaching a notice handler, so the drift audit at the end of that file reports to nobody"
+    )

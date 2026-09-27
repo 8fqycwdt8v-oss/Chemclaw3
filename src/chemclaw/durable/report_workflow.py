@@ -3,7 +3,7 @@
 The report is a graph of sections; here each section is a Temporal activity, so a
 long report (hundreds of retrievals over years of data) is resumable and survives worker
 restarts — the same fire-and-forget durability as the QM spine (Phase 1). The workflow
-retrieves section by section, then a final activity renders the draft and proposes it through
+retrieves section by section, then a final activity renders the draft and records it through
 the note-write path (5b.7). Retriever construction (the production sources) lives in the activities;
 the factory is module-level so tests swap it.
 """
@@ -17,6 +17,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.core.config import settings
     from chemclaw.core.identity_context import reset_current_identity, set_current_identity
     from chemclaw.durable.connector_job import ConnectorJobResult
+    from chemclaw.durable.observation_jobs import workflow_safe_today
     from chemclaw.durable.registry import durable_activity, durable_workflow
     from chemclaw.ingest.eln.records import default_record_store
     from chemclaw.ingest.sources.registry import active_retrieve_sources
@@ -35,6 +36,11 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.retrieval.retrievers import FingerprintReactionRetriever
     from chemclaw.science.fingerprints.store import default_reaction_store
 
+from chemclaw.durable.deliver_message import (
+    OutboundAttachment,
+    OutboundMessage,
+    deliver_best_effort,
+)
 from chemclaw.durable.orchestrator import fan_out
 from chemclaw.durable.publish import (
     BAD_DATA_RETRY,
@@ -95,8 +101,18 @@ async def retrieve_section(request: SectionRequest) -> SynthesizedSection:
 
 @durable_activity("background")
 @activity.defn
-async def propose_report(report: Report, requested_by: str = "", correlation_id: str = "") -> str:
+async def record_report_note(
+    report: Report, requested_by: str = "", correlation_id: str = ""
+) -> str:
     """Render the gathered report as a recorded `report` note; return the reference.
+
+    **It was called `propose_report` and it proposed nothing**
+    (`D-2026-09-14-an-activity-name-is-a-wire-name-so-it-is-renamed-in-two-releases`).
+    `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` removed the gate and the proposal queue
+    behind it; wave 15 corrected every docstring on this path and could not correct this, because
+    the name is not prose — it is the string a Temporal history schedules against. `propose_report`
+    below is the compatibility alias that keeps an in-flight history resolvable for one deployment
+    cycle, and the release procedure for removing it is in that ADR.
 
     `correlation_id` is never read in this body, and that is the shape rather than an oversight:
     `durable/interceptor.py` binds an activity's ids from its *own* arguments, reading the four
@@ -112,13 +128,42 @@ async def propose_report(report: Report, requested_by: str = "", correlation_id:
     is `core/logging.ContextFilter`, so the stamp is what ties a durable note write's log lines back
     to the chemist and the turn that asked for it.
     """
+    # `drafted_on` is what gets the note past `durable/digest._is_new`, which reads an absent
+    # `valid_from` as open-ended and therefore as "not news" — so an undated report is delivered
+    # only to a subscriber who has never been told anything. A report's validity date and its
+    # arrival date are the same day by construction, and this is activity code, so it may read a
+    # clock: `workflow_safe_today` is the named seam for exactly that.
+    drafted = report_note(report, drafted_on=workflow_safe_today())
     if not requested_by:
-        return await record_note(report_note(report), default_writer())
+        return await record_note(drafted, default_writer())
     token = set_current_identity(requested_by, frozenset())
     try:
-        return await record_note(report_note(report), default_writer())
+        return await record_note(drafted, default_writer())
     finally:
         reset_current_identity(token)
+
+
+@durable_activity("background")
+@activity.defn(name="propose_report")
+async def propose_report(report: Report, requested_by: str = "", correlation_id: str = "") -> str:
+    """The old Temporal name for `record_report_note`, kept for exactly one deployment cycle.
+
+    **A registered activity name is a wire name.** An in-flight `DevelopmentReportWorkflow` history
+    that has scheduled `propose_report` and not yet completed it resolves against whichever worker
+    picks the task up next; a worker that no longer offers the name fails the activity with
+    `NotFoundError` and the workflow retries it forever. So the rename is two releases, not a
+    commit: this release offers **both** names and schedules the new one, and a later release —
+    after `background-jobs` has drained every history that scheduled the old one — deletes this
+    function. `docs/planning/DEFERRED.md` carries the trigger.
+
+    The signature is identical on purpose, including `correlation_id`, which no body reads:
+    `durable/interceptor.py` binds an activity's ids by *parameter name* off the signature, so an
+    alias that dropped it would make a replayed old task the one unattributed write on this path.
+
+    Delegates rather than duplicating: two functions writing a note is two chances for them to
+    disagree about what a `report` note is.
+    """
+    return await record_report_note(report, requested_by, correlation_id)
 
 
 @durable_workflow("background")
@@ -135,8 +180,8 @@ class ReportSectionWorkflow:
     Each section is its own child workflow so a long report resumes section by section after a
     worker restart. A section whose retrieval exhausts its retries does not fail (and so is not
     silently dropped) the report: the child degrades to a placeholder section marked
-    `retrieval_failed`, so the assembled draft shows the gap explicitly for the chemist at the
-    PR-gate. The activity carries the single retry boundary (`BAD_DATA_RETRY`); the fan-out does not
+    `retrieval_failed`, so the assembled draft shows the gap explicitly for the chemist who reads
+    it. The activity carries the single retry boundary (`BAD_DATA_RETRY`); the fan-out does not
     layer a second child-level retry on top.
     """
 
@@ -218,11 +263,11 @@ def _reconcile(
 # D-2026-08-27.
 @workflow.defn(failure_exception_types=[Exception])
 class DevelopmentReportWorkflow:
-    """Draft a report durably, fanning sections out to child workflows, then PR-gate the draft."""
+    """Draft a report durably, fanning sections out to child workflows, then record the draft."""
 
     @workflow.run
     async def run(self, request: ReportRequest) -> ConnectorJobResult:
-        """Fan each section out to a child workflow, then propose the assembled draft note.
+        """Fan each section out to a child workflow, then record the assembled draft note.
 
         Sections are retrieved as independent child workflows (bounded parallelism). Each child owns
         its own retry (the activity's `BAD_DATA_RETRY`) and degrades a failed section to a visible
@@ -237,7 +282,7 @@ class DevelopmentReportWorkflow:
         closure (the graph, the retrievers, the fingerprint store) is what core keeps for
         `gather_evidence` regardless.
 
-        It still publishes its own note rather than returning one for core to gate, and that is
+        It still writes its own note rather than returning one for core to write, and that is
         correct here for the reason it would be wrong in a bundle: the note *reference* is this
         workflow's result, so publishing is the work, not a side effect — and this is core's own
         workflow, on the side of the boundary the note-write path lives on.
@@ -256,10 +301,56 @@ class DevelopmentReportWorkflow:
             id_prefix="section",
         )
         report = Report(title=request.title, sections=_reconcile(request.sections, sections))
+        # Rendered once, and read for both halves: the activity records it as a note, and the
+        # delivery below attaches the same bytes. `report_note` is pure rendering over a value this
+        # workflow already holds, so calling it in workflow code emits no command.
+        drafted = report_note(report)
         # The note reference *is* this workflow's result, so the publish is not
         # best-effort — but it shares the bounded-attempts discipline (G4).
         note_ref = await publish_note(
-            propose_report, [report, request.requested_by, request.correlation_id]
+            record_report_note, [report, request.requested_by, request.correlation_id]
+        )
+        # **Out of the building too, when a deployment has said where.** A report is the one
+        # durable job whose product is a document a chemist asked for by name, and until this
+        # line the `report` kind `deliver/message.py` declares had no producer at all: the
+        # finished draft reached `session_events` and stopped there, so a chemist who closed
+        # the tab while the fan-out ran learned about it by asking. Best-effort and last,
+        # because the note is the durable handover and this is the courtesy copy.
+        await deliver_best_effort(
+            OutboundMessage(
+                recipient=request.requested_by,
+                subject=f"Report drafted: {request.title}",
+                body=(
+                    f"{len(report.sections)} section(s), recorded as {note_ref}.\n"
+                    "The draft is attached; open it beside its citations in the knowledge graph."
+                ),
+                kind="report",
+                correlation_id=request.correlation_id,
+                # **The draft itself, because a note id is not a deliverable.** This message went
+                # out saying "recorded as `report-…`" to the one reader who by construction is not
+                # looking at the graph — a chemist who closed the tab while the fan-out ran. The
+                # note stays the durable handover and the citation trail; the attachment is the
+                # document they asked for, in a form they can open.
+                #
+                # Rendered above rather than returned by `propose_report`: the activity's contract
+                # is the note *reference*, and widening its return to carry the body would change
+                # a durable payload for a courtesy copy. This adds a field to an activity argument
+                # and not a new `await`, so no patch is needed (contrast
+                # `D-2026-09-14-the-seam-shipped-a-replay-break-and-the-adr-said-nothing-changes`).
+                attachments=[
+                    OutboundAttachment(
+                        # The note's **id**, not `note_ref`. That reference is the writer's — a
+                        # commit sha, or the unchanged tree — so a file named after it tells a
+                        # chemist nothing and is not this artefact's identity. `_report_id` slugs
+                        # to `[a-z0-9-]` plus a hash, which is inside `Attachment`'s pattern by
+                        # construction; a name that was not would raise inside the activity, where
+                        # it is caught, and cost the whole message rather than the file.
+                        filename=f"{drafted.id}.md",
+                        media_type="text/markdown",
+                        content=drafted.body.encode("utf-8"),
+                    )
+                ],
+            )
         )
         return ConnectorJobResult(
             summary=(
@@ -267,8 +358,15 @@ class DevelopmentReportWorkflow:
                 # per requested section, so the count the chemist is told is the count they asked
                 # for. Reading the short list is how "Drafted 'X' with 2 section(s)" came to be a
                 # true sentence about a report that was missing one.
+                # **"opened for review" until D-2026-09-05 deleted the gate it named.** This is
+                # the one place that claim survived wave 15's sweep, because it is neither a
+                # docstring nor the `propose_report` symbol name the queue already tracks — it is
+                # the sentence the chemist reads in the job result, telling them a person would
+                # look before the report counted. Nobody does: `record_note` writes it, and it is
+                # readable beside its own citations the moment this returns. A control a chemist
+                # believes in is worse than one they know they do not have.
                 f"Drafted {request.title!r} with {len(report.sections)} section(s); "
-                f"opened for review as {note_ref}."
+                f"recorded as {note_ref}."
             ),
             data={"note_ref": note_ref, "title": request.title, "sections": len(report.sections)},
         )

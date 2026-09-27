@@ -6,7 +6,6 @@ one note per campaign. Also covers the shared clustering helper. All in-memory (
 git).
 """
 
-import asyncio
 import re
 from datetime import date
 
@@ -85,25 +84,19 @@ def test_note_lays_out_runs_with_citations() -> None:
     assert set(note.outgoing_links()) == {"reaction-run-1", "reaction-run-2"}
 
 
-def test_job_pr_gates_one_note_per_campaign() -> None:
+async def test_job_pr_gates_one_note_per_campaign() -> None:
     """The optimization job proposes exactly one note per detected campaign.
 
     Driven as the durable job drives it — `build_optimization_notes`, then one PR-gate proposal per
     note — rather than through the whole-batch `synthesize_optimization_campaigns` wrapper, which
     nothing in `src/` had called since F10-D2 and which is now gone.
     """
-
-    async def _run() -> None:
-        reactions = [_ester("run-1", 80, 85), _ester("run-2", 100, 92), _suzuki()]
-        submitter = FakeWriter()
-        refs = [
-            await record_note(unit.note, submitter) for unit in build_optimization_notes(reactions)
-        ]
-        assert len(refs) == 1
-        assert len(submitter.writes) == 1
-        assert submitter.writes[0].files[0].path.startswith("knowledge/optimization-campaign/")
-
-    asyncio.run(_run())
+    reactions = [_ester("run-1", 80, 85), _ester("run-2", 100, 92), _suzuki()]
+    submitter = FakeWriter()
+    refs = [await record_note(unit.note, submitter) for unit in build_optimization_notes(reactions)]
+    assert len(refs) == 1
+    assert len(submitter.writes) == 1
+    assert submitter.writes[0].files[0].path.startswith("knowledge/optimization-campaign/")
 
 
 def test_clustering_drops_degenerate_reactions() -> None:
@@ -125,9 +118,9 @@ def test_clustering_drops_degenerate_reactions() -> None:
 def _cells(line: str) -> list[str]:
     r"""Split a rendered row into cells the way a Markdown reader does.
 
-    On *unescaped* pipes only: `render_table` escapes a `|` inside a value, and a reader sees
-    `des-ethyl \| 99.9` as one cell. Splitting on every pipe would count an escaped one as a column
-    boundary, which is exactly the misreading the escaping exists to prevent.
+    On *unescaped* pipes only: `core.markdown.render_table` escapes a `|` inside a value, so a
+    reader sees `des-ethyl \| 99.9` as one cell. Splitting on every pipe would count an escaped one
+    as a column boundary, which is exactly the misreading the escaping exists to prevent.
     """
     return [cell.strip() for cell in re.split(r"(?<!\\)\|", line.strip("|"))]
 
@@ -270,8 +263,9 @@ def test_an_impurity_name_cannot_add_a_column_to_the_campaign_table() -> None:
     An impurity name is whatever the source instrument or analyst typed, and it lands in a cell. A
     `|` in it does not render badly — it renders as another column, silently shifting every value
     after it under the wrong heading, which in this artifact means reading one run's impurity area
-    as another run's yield. The fix is in `memory.comparison.render_table` rather than at either
-    caller, and this is the second caller proving it.
+    as another run's yield. The fix is in `core.markdown.render_table` rather than at either caller,
+    and this is the second caller proving it — the renderer moved out of `memory.comparison` when
+    nineteen other tables in this tree turned out to need the same rule.
     """
     runs = [
         _ester("run-1", 80, 85).model_copy(

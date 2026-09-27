@@ -17,11 +17,12 @@ from chemclaw.agent import plan_approval_store as store_module
 from chemclaw.agent import plan_state
 from chemclaw.agent.checkpointer import process_checkpointer
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
-from chemclaw.agent.plan_approval_store import InMemoryPlanApprovalStore
+from chemclaw.agent.plan_approval_store import Decision, InMemoryPlanApprovalStore
 from chemclaw.agent.plan_gate import EMPTY_PLAN_HASH, plan_identity
 from chemclaw.cli import chat as cli
 from chemclaw.core.config import settings
 from chemclaw.core.turn_text import get_current_user_texts
+from tests.fakes_langgraph import ScriptedChatModel
 
 
 def test_admin_identity_is_the_configured_actor_holding_the_configured_roles(
@@ -110,7 +111,7 @@ def test_converse_returns_the_final_assistant_text() -> None:
             assert state["messages"] == [("user", "hi")]
             return {"messages": [AIMessage(content="  55% yield  ")]}
 
-    assert asyncio.run(cli.converse(_Agent(), "hi")).strip() == "55% yield"
+    assert asyncio.run(cli.converse(_Agent(), "hi")).answer.strip() == "55% yield"
 
 
 def test_a_capped_turn_never_answers_with_a_tool_result() -> None:
@@ -135,7 +136,7 @@ def test_a_capped_turn_never_answers_with_a_tool_result() -> None:
                 ]
             }
 
-    assert asyncio.run(cli.converse(_Agent(), "hi")) == "checking the notes"
+    assert asyncio.run(cli.converse(_Agent(), "hi")).answer == "checking the notes"
 
 
 def test_successive_turns_continue_one_thread() -> None:
@@ -232,16 +233,22 @@ def cli_approvals(monkeypatch: pytest.MonkeyPatch) -> Iterator[InMemoryPlanAppro
 def cli_plan(monkeypatch: pytest.MonkeyPatch) -> Callable[[list[str]], None]:
     """Set what the CLI's session is proposing, at the seam `_plan_command` reads it through.
 
-    The plan lives in the checkpointer now, and reading it is `agent/plan_state.session_todos`'s
+    The plan lives in the checkpointer now, and reading it is `agent/plan_state.session_plan`'s
     job — tested against a real one in `tests/test_plan_state.py`. What these tests are about is
     what `/plan` and `/approve` *decide* given a plan, so the read is the input, not the subject.
+
+    Each step declares `record_knowledge_note`, which is what makes the recorded approval's scope
+    non-empty and therefore worth asserting on; what a scope *does* is `tests/test_plan_scope.py`.
     """
 
     def _set(titles: list[str]) -> None:
-        async def _todos(session_id: str, **_kwargs: object) -> list[str]:
-            return list(titles)
+        async def _plan(session_id: str, **_kwargs: object) -> list[dict[str, object]]:
+            return [
+                {"content": t, "status": "pending", "tools": ["record_knowledge_note"]}
+                for t in titles
+            ]
 
-        monkeypatch.setattr(plan_state, "session_todos", _todos)
+        monkeypatch.setattr(plan_state, "session_plan", _plan)
 
     return _set
 
@@ -265,7 +272,7 @@ def test_approve_refuses_a_session_with_no_plan(
     """
     cli_plan([])
 
-    async def _run() -> tuple[str, tuple[bool, str] | None]:
+    async def _run() -> tuple[str, Decision | None]:
         reply = await cli._plan_command("/approve", settings.cli_admin_actor, saver=None)
         return reply, await cli_approvals.decision(cli._CLI_SESSION_ID, EMPTY_PLAN_HASH)
 
@@ -283,10 +290,18 @@ def test_approve_records_and_arms_a_real_plan(
     """
     titles = ["screen the species", "compute the barrier"]
     cli_plan(titles)
+    # The steps the fixture feeds the command, in `session_plan`'s shape: the identity covers each
+    # step's declaration as well as its content
+    # (`D-2026-09-13-a-plan-identity-that-omits-the-scope-approves-a-plan-nobody-read`), so a hash
+    # taken over the titles alone would be one the command never records against.
+    steps = [
+        {"content": title, "status": "pending", "tools": ["record_knowledge_note"]}
+        for title in titles
+    ]
 
-    async def _run() -> tuple[str, str, tuple[bool, str] | None]:
+    async def _run() -> tuple[str, str, Decision | None]:
         reply = await cli._plan_command("/approve", "alice@lab", saver=None)
-        plan_hash = plan_identity(titles) or EMPTY_PLAN_HASH
+        plan_hash = plan_identity(steps) or EMPTY_PLAN_HASH
         return reply, plan_hash, await cli_approvals.decision(cli._CLI_SESSION_ID, plan_hash)
 
     reply, plan_hash, recorded = asyncio.run(_run())
@@ -296,7 +311,13 @@ def test_approve_records_and_arms_a_real_plan(
     # identity every audit row and `requested_by` reads, and the approval used to hardcode the
     # default instead — so the durable record of a sign-off named someone who took no action and
     # disagreed with the audit rows for its own session.
-    assert recorded == (True, "alice@lab")
+    assert recorded is not None and (recorded.approved, recorded.actor) == (True, "alice@lab")
+    # And the approval carries what the plan's steps declared: the gate reads this column rather
+    # than the live todo list, so a decision recorded with an empty scope authorizes nothing
+    # (`D-2026-09-12-an-approval-that-names-no-tool-authorizes-every-tool`).
+    assert recorded.scope == frozenset({"record_knowledge_note"}), (
+        f"the terminal recorded an approval that authorizes {sorted(recorded.scope)}"
+    )
 
 
 def test_plan_shows_no_approvable_identity_rather_than_the_empty_constant(
@@ -320,7 +341,7 @@ def test_plan_shows_no_approvable_identity_rather_than_the_empty_constant(
 # --- The checkpointer the CLI documented and did not have -------------------------------------
 
 
-def test_a_second_turn_continues_the_first(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_a_second_turn_continues_the_first(monkeypatch: pytest.MonkeyPatch) -> None:
     """The CLI is a multi-turn conversation, which it was not.
 
     `converse` documented that reusing one `session_id` "continues the thread the last one left",
@@ -342,16 +363,13 @@ def test_a_second_turn_continues_the_first(monkeypatch: pytest.MonkeyPatch) -> N
 
     _Recording.seen = []
 
-    async def _run() -> None:
-        saver = await process_checkpointer()
-        agent = build_langgraph_agent(
-            model=_Recording(messages=iter([AIMessage(content="one"), AIMessage(content="two")])),
-            checkpointer=saver,
-        )
-        await cli.converse(agent, "first question")
-        await cli.converse(agent, "second question")
-
-    asyncio.run(_run())
+    saver = await process_checkpointer()
+    agent = build_langgraph_agent(
+        model=_Recording(messages=iter([AIMessage(content="one"), AIMessage(content="two")])),
+        checkpointer=saver,
+    )
+    await cli.converse(agent, "first question")
+    await cli.converse(agent, "second question")
 
     second = _Recording.seen[1]
     assert any("first question" in str(m.content) for m in second), (
@@ -386,7 +404,19 @@ def test_the_plan_command_reads_the_store_the_turns_wrote_to(
                         tool_calls=[
                             {
                                 "name": "write_todos",
-                                "args": {"todos": [{"content": plan, "status": "pending"}]},
+                                "args": {
+                                    "todos": [
+                                        # `tools` is required: a step declares what it will call
+                                        # and the approval is scoped to the union
+                                        # (`agent/plan_scope.py`). Omitting it here is a tool
+                                        # validation error, not a plan.
+                                        {
+                                            "content": plan,
+                                            "status": "pending",
+                                            "tools": ["record_knowledge_note"],
+                                        }
+                                    ]
+                                },
                                 "id": "call-1",
                             }
                         ],
@@ -403,6 +433,10 @@ def test_the_plan_command_reads_the_store_the_turns_wrote_to(
 
     assert plan in reply, f"/plan did not show the plan the turn proposed: {reply!r}"
     assert "(no plan yet)" not in reply
+    # And what approving it would authorize, because that is half of what the person is deciding.
+    assert "declares: record_knowledge_note" in reply, (
+        f"/plan showed the steps without what they declared: {reply!r}"
+    )
 
 
 class _WriteTodosThenAnswer(GenericFakeChatModel):
@@ -445,6 +479,155 @@ def test_the_console_script_returns_an_exit_code_on_the_happy_path_too(
     a caller had no way to tell a refused startup from an answered question except by reading the
     traceback. Asserted beside the failure case so the error path cannot be satisfied by returning
     1 unconditionally.
+
+    **`main` now passes `_run`'s status through rather than discarding it**, which is what makes
+    the degraded exit reachable at all: it used to run `_run` for effect and `return 0`, so a
+    one-shot run that printed an incomplete answer exited exactly as a whole one did.
     """
-    monkeypatch.setattr(cli, "_run", lambda _args: asyncio.sleep(0))
+
+    async def _clean(_args: object) -> int:
+        return 0
+
+    async def _degraded(_args: object) -> int:
+        return cli._DEGRADED_EXIT
+
+    monkeypatch.setattr(cli, "_run", _clean)
     assert cli.main(["--admin", "-m", "hello"]) == 0
+    monkeypatch.setattr(cli, "_run", _degraded)
+    assert cli.main(["--admin", "-m", "hello"]) == cli._DEGRADED_EXIT
+
+
+# --- a capped turn stops printing as a finished one ----------------------------------------------
+
+
+def _capped_script(first: str) -> Iterator[AIMessage]:
+    """A model that keeps calling `ls` and only eventually answers.
+
+    `first` is the content of the tool-calling turns, so the same script covers both shapes the
+    cap can leave behind: a partial sentence, and nothing at all.
+    """
+    usage = {"input_tokens": 50, "output_tokens": 10, "total_tokens": 60, "input_token_details": {}}
+    calls = [
+        AIMessage(
+            content=first,
+            tool_calls=[{"name": "ls", "args": {"path": "."}, "id": f"c{index}"}],
+            usage_metadata=usage,
+        )
+        for index in range(6)
+    ]
+    answer = "FINAL: pKa 3.49, confirmed against ELN batch 12."
+    done = AIMessage(content=answer, usage_metadata=usage)
+    return iter([*calls, *([done] * 41)])
+
+
+def _cli_turn(
+    monkeypatch: pytest.MonkeyPatch, cap: int, first: str = "Still checking; one more source."
+) -> cli.CliTurn:
+    """Drive `converse` on a **real compiled graph** at `cap`, and report the turn.
+
+    The graph is real for the reason `agent/loop_cap.py` gives about its own `can_jump_to`: calling
+    the hook proves the decision, and only a compiled graph proves the decision is connected to
+    anything. The cap's flag lives on an untracked channel, so nothing short of a real run leaves
+    it where `converse` reads it.
+    """
+    monkeypatch.setattr(settings, "harness_max_loop_iterations", cap)
+    monkeypatch.setattr(settings, "agent_max_turn_billed_tokens", 0)
+    model = ScriptedChatModel(messages=_capped_script(first))
+    monkeypatch.setattr("chemclaw.agent.langgraph_agent.build_chat_model", lambda *_a, **_k: model)
+    agent = build_langgraph_agent(actor="chemist-1")
+    return asyncio.run(cli.converse(agent, "what is the pKa of CCO?", session_id=f"cli-{cap}"))
+
+
+def test_a_capped_cli_turn_says_so_and_a_whole_one_says_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The defect and its control arm, both on a real graph with a real cap.
+
+    Measured before the fix:
+
+        === CLI, LOOP-CAPPED (cap=2) ===  stdout: 'Still checking; one more source.'
+        === CLI, COMPLETE   (cap=20) ===  stdout: 'FINAL: pKa 3.49, confirmed against ELN batch 12.'
+
+    Exit code 0 in both. The control arm is here because a notice on every turn would satisfy the
+    first assertion and mean nothing.
+    """
+    capped = _cli_turn(monkeypatch, 2)
+    assert capped.answer == "Still checking; one more source."
+    assert capped.notice == "incomplete: the turn reached its model-call cap before it finished"
+
+    whole = _cli_turn(monkeypatch, 20)
+    assert whole.answer == "FINAL: pKa 3.49, confirmed against ELN batch 12."
+    assert whole.notice == ""
+
+
+def test_a_turn_that_answered_nothing_is_not_a_blank_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """At a cap of 1 over a silent first turn the CLI printed `''` and exited 0.
+
+    The cap outranks the empty answer, which is `api/runner._settle_outcome`'s ranking rather than
+    a second one: a turn stopped by its cap is a capped turn whether or not it managed prose.
+    """
+    turn = _cli_turn(monkeypatch, 1, first="")
+
+    assert turn.answer == ""
+    assert turn.notice == "incomplete: the turn reached its model-call cap before it finished"
+
+
+def test_the_notice_names_the_spend_cap_and_the_silent_turn_apart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other two endings a returned state can carry, read off the state rather than a graph.
+
+    Driven on states rather than a graph because the *readers* are what is under test here and the
+    graph arm above already proves they are wired to a real run — and because reaching the spend
+    cap through a real turn needs a billed-token budget, which is what the cap arm above sets to 0
+    precisely so the loop cap is the one that fires.
+    """
+    assert cli.turn_notice({"spend_capped": True}, "partial") == (
+        "incomplete: the turn reached its token budget before it finished"
+    )
+    assert cli.turn_notice({}, "") == "incomplete: the turn produced no answer"
+    assert cli.turn_notice({}, "a whole answer") == ""
+
+
+def test_a_one_shot_run_exits_nonzero_when_the_answer_it_printed_is_incomplete(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The exit code is the only channel a piped `-m` run has, and it said success.
+
+    stdout keeps the answer — a degraded answer is delivered, marked, not withheld — the reason
+    goes to stderr beside the connector warnings this function already writes there, and the status
+    is `_DEGRADED_EXIT` so a script can tell it from both a clean answer and a refused startup.
+    """
+    monkeypatch.setattr(cli, "resolve_identity", lambda **_k: ("admin@localhost", frozenset()))
+    monkeypatch.setattr(cli, "process_checkpointer", _none)
+    monkeypatch.setattr(cli, "open_connector_specs", _no_connectors)
+    monkeypatch.setattr(cli, "_build_cli_agent", lambda *_a, **_k: object())
+
+    async def _capped(_agent: object, _prompt: str, **_kwargs: object) -> cli.CliTurn:
+        return cli.CliTurn("  Still checking; one more source.  ", "incomplete: capped")
+
+    monkeypatch.setattr(cli, "converse", _capped)
+    code = asyncio.run(cli._run(cli._parse_args(["--admin", "-m", "pKa of CCO?"])))
+    captured = capsys.readouterr()
+
+    assert code == cli._DEGRADED_EXIT
+    assert captured.out == "Still checking; one more source.\n"
+    assert "warning: incomplete: capped" in captured.err
+
+    async def _whole(_agent: object, _prompt: str, **_kwargs: object) -> cli.CliTurn:
+        return cli.CliTurn("FINAL: pKa 3.49.", "")
+
+    monkeypatch.setattr(cli, "converse", _whole)
+    assert asyncio.run(cli._run(cli._parse_args(["--admin", "-m", "pKa of CCO?"]))) == 0
+
+
+async def _none() -> None:
+    """No checkpointer — this CLI run takes one turn against a stand-in agent."""
+    return None
+
+
+async def _no_connectors(_stack: object, _specs: object) -> tuple[list[Any], list[str]]:
+    """No MCP subprocesses, and none reported unreachable: the notice under test is the turn's."""
+    return [], []

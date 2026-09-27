@@ -110,9 +110,9 @@ def _fresh_discovery() -> Iterator[None]:
     These tests move `data_sources_dir`, and a cached entry would answer for the wrong directory —
     silently, by returning a plausible set of sources.
     """
-    registry.discovered.cache_clear()
+    registry.forget_discovered()
     yield
-    registry.discovered.cache_clear()
+    registry.forget_discovered()
 
 
 @pytest.fixture

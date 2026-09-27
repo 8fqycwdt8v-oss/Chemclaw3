@@ -1,0 +1,61 @@
+{
+  "probe": {
+    "id": "op-25",
+    "section": 4,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Which deoxyfluorination conditions in our data give the best yield on electron-poor substrates? I've got a nitro-substituted phenol to do.",
+    "expects_tools": [
+      "similar_reactions",
+      "similar_molecules",
+      "substructure_matches",
+      "gather_evidence"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a yield quoted without the record it came from",
+      "this will give you X% on your substrate",
+      "a condition set that does not appear in the retrieved records"
+    ],
+    "direction": "Retrieves from the indexed deoxyfluorination records by structure and reaction similarity, ranks the retrieved conditions by their recorded yields, and cites each. The judgment that matters is transfer: it must say how close the retrieved substrates actually are to a nitro-substituted phenol, and that a similarity neighbour is precedent, not a prediction — an electron-poor phenol may behave differently from anything in the set, and the answer should say what specifically would make it do so. Recommending one condition set to try first with a reason, while stating the caveat, is a good answer; quoting yields as if they were this substrate's is not.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "op-25",
+    "section": 4,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "Which deoxyfluorination conditions in our data give the best yield on electron-poor substrates? I've got a nitro-substituted phenol to do.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.49,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "5a6d59a09e3d4eb0a9ce6658baac52da",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

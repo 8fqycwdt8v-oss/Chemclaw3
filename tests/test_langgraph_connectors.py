@@ -32,11 +32,11 @@ from chemclaw.agent.audit import NullAuditSink
 from chemclaw.agent.chemclaw_agent import connector_specs
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
 from chemclaw.agent.profiles import AgentProfile
-from chemclaw.connectors.identity import HEADER_ACTOR
 from chemclaw.connectors.manifest import ConnectorManifest, HttpEndpoint
 from chemclaw.connectors.registry import _mcp_connection, open_connector_specs
 from chemclaw.connectors.server import connector_app
 from chemclaw.connectors.transport import ConnectorSpec
+from chemclaw.core.call_identity import HEADER_ACTOR
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 from tests.conftest import _free_port
 from tests.fakes_langgraph import ScriptedChatModel, tool_outputs

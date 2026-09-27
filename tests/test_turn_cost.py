@@ -73,33 +73,31 @@ def test_the_metric_registry_refuses_an_unbounded_label_which_is_why_this_is_a_t
     assert len(series) < 200, "the registry accepted unbounded label cardinality"
 
 
-def test_a_turn_cost_carries_the_identity_the_metric_cannot(
+async def test_a_turn_cost_carries_the_identity_the_metric_cannot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The gap the table closes: spend booked against an actor, not only a profile."""
     sink = _RecordingSink()
     monkeypatch.setattr("chemclaw.agent.turn_cost.default_turn_cost_sink", lambda: sink)
 
-    async def _run() -> None:
-        record_turn_cost(
-            TurnCost(
-                correlation_id="cid-1",
-                session_id="s-1",
-                actor="oid-abc",
-                profile="synthesis",
-                input_tokens=100,
-                output_tokens=20,
-                duration_seconds=4.5,
-            )
+    record_turn_cost(
+        TurnCost(
+            correlation_id="cid-1",
+            session_id="s-1",
+            actor="oid-abc",
+            profile="synthesis",
+            input_tokens=100,
+            output_tokens=20,
+            duration_seconds=4.5,
         )
-        await _drain()
+    )
+    await _drain()
 
-    asyncio.run(_run())
     assert [c.actor for c in sink.costs] == ["oid-abc"]
     assert sink.costs[0].input_tokens == 100
 
 
-def test_recording_a_cost_never_awaits(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_recording_a_cost_never_awaits(monkeypatch: pytest.MonkeyPatch) -> None:
     """The runner books this from a `finally` in which an `await` re-raises a pending cancellation.
 
     That block runs on the disconnect path too (D-130), and an `await` there would skip the five
@@ -110,27 +108,25 @@ def test_recording_a_cost_never_awaits(monkeypatch: pytest.MonkeyPatch) -> None:
     sink = _RecordingSink()
     monkeypatch.setattr("chemclaw.agent.turn_cost.default_turn_cost_sink", lambda: sink)
 
-    async def _run() -> None:
-        async def _turn() -> None:
-            try:
-                await asyncio.Event().wait()  # never completes; cancelled from outside
-            finally:
-                record_turn_cost(TurnCost(correlation_id="cid-cancelled", actor="oid-x"))
+    async def _turn() -> None:
+        try:
+            await asyncio.Event().wait()  # never completes; cancelled from outside
+        finally:
+            record_turn_cost(TurnCost(correlation_id="cid-cancelled", actor="oid-x"))
 
-        task = asyncio.create_task(_turn())
-        await asyncio.sleep(0)
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        await _drain()
+    task = asyncio.create_task(_turn())
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await _drain()
 
-    asyncio.run(_run())
     assert [c.correlation_id for c in sink.costs] == ["cid-cancelled"], (
         "a turn torn down by a disconnect was not billed — the runaway case the ledger exists for"
     )
 
 
-def test_a_failed_write_is_logged_and_never_escapes(
+async def test_a_failed_write_is_logged_and_never_escapes(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Telemetry booked off the hot path must not escalate into the turn's teardown.
@@ -140,12 +136,10 @@ def test_a_failed_write_is_logged_and_never_escapes(
     """
     monkeypatch.setattr("chemclaw.agent.turn_cost.default_turn_cost_sink", _FailingSink)
 
-    async def _run() -> None:
-        with caplog.at_level(logging.WARNING):
-            record_turn_cost(TurnCost(correlation_id="cid-doomed"))
-            await _drain()
+    with caplog.at_level(logging.WARNING):
+        record_turn_cost(TurnCost(correlation_id="cid-doomed"))
+        await _drain()
 
-    asyncio.run(_run())
     assert "cid-doomed" in caplog.text
 
 
@@ -272,8 +266,8 @@ def test_the_runtime_counter_is_declared_on_the_process_registry() -> None:
     assert "chemclaw_job_runtime_seconds_total" in METRICS.render()
 
 
-def test_the_turn_cost_ledger_has_exactly_one_reader_and_it_has_a_surface() -> None:
-    """The ledger's reader is `operations/activity.py`, and `review_activity` is what asks it.
+def test_every_turn_cost_reader_has_the_surface_that_asks_it() -> None:
+    """Each reader of the ledger ships with the route, command or report that asks it.
 
     This began as an *absence* pin. `turn_costs` had two readers and neither had a caller:
     `turn_cost_store.read_spend_by_actor` described itself as "the whole point of the table" and was
@@ -285,10 +279,36 @@ def test_the_turn_cost_ledger_has_exactly_one_reader_and_it_has_a_surface() -> N
 
     The rule that absence enforced was never "no reader" — it was *a query function needs the route,
     command or report that asks it, in the same change*
-    (`D-2026-08-29-a-trail-nobody-can-read-answers-no-question`). So the pin now states the rule
-    directly: exactly one module reads the table, and a registered agent tool reaches it. Both
-    halves matter. Drop the tool and this is the 2026-08-27 shape again; add a second reader and the
-    single-reader property this package was built to have is gone.
+    (`D-2026-08-29-a-trail-nobody-can-read-answers-no-question`). This pin used to state it as
+    "exactly one module reads the table", which is a **proxy** for the rule rather than the rule,
+    and the proxy failed the first time the rule was satisfied by somebody else: a wave-14 review
+    found that a turn stopped by its model-call cap reconstructed identically to a clean one in
+    `cli/explain.py` and assembled an identical evidence pack in `operations/evidence_pack.py` —
+    because `outcome` lives in this table and neither surface read it. Both fixes ship *with* their
+    surface, which is what the rule asks; refusing them for the count would have been the proxy
+    outranking the thing it stands for.
+
+    The list is exhaustive and each entry is named with what asks it, so a reader added with no
+    surface still fails here — which is the half that matters:
+
+    - `operations/activity.py` — the aggregate read model, reached by the `review_activity` tool.
+    - `operations/evidence_pack.py` — `assemble`, the context-of-use record for one session.
+    - `cli/distill.py` — `make distill`, which reads `skills_loaded` and nothing else: it is the
+      self-confirmation guard's input, and the guard is why that column exists at all
+      (`D-2026-09-18-a-guard-with-nothing-to-read-is-not-a-guard`).
+    - `cli/explain.py` — `python -m chemclaw.cli.explain`, the audit reconstruction.
+    - `cli/live_turn_cost.py` — `make live-turn-cost`, which drives a fixed workload and scores
+      what the ledger says it cost. Its surface is the command itself, and it reads back only the
+      session it just opened.
+    - `evals/delegation_run.py` — `make live-delegation`, which reads back only the sessions it just
+      drove, one arm-run at a time. `ArmRun.billed_tokens`' own comment is why it has to come from
+      here: the delegation experiment's cost claim is about what a turn *billed*, and an estimator
+      would measure the wrong thing through a ratio `agent/context_budget.py` has twice found to be
+      content-dependent.
+
+    Note what the count never protected: `evidence_pack.py` has always read `audit_events`,
+    `job_records`, `effects` and `plan_approvals` with its own SQL, so "operations/activity.py is
+    the only reader" was never true of this system's tables generally — only of this one.
 
     `tests/test_postgres_turn_cost_store.py` reads the table with its own SQL, which is where a
     test's read-back belongs.
@@ -299,9 +319,17 @@ def test_the_turn_cost_ledger_has_exactly_one_reader_and_it_has_a_surface() -> N
         for path in src.rglob("*.py")
         if "FROM turn_costs" in path.read_text(encoding="utf-8")
     )
-    assert readers == ["operations/activity.py"], (
-        f"{readers} reads `turn_costs`. Exactly one module may: `chemclaw.operations.activity`, "
-        "which `review_activity` reaches. A reader with no surface is the 2026-08-27 defect."
+    assert readers == [
+        "cli/distill.py",
+        "cli/explain.py",
+        "cli/live_turn_cost.py",
+        "evals/delegation_run.py",
+        "operations/activity.py",
+        "operations/evidence_pack.py",
+    ], (
+        f"{readers} reads `turn_costs`. Each reader must ship with the route, command or report "
+        "that asks it, and be listed here with it. A reader with no surface is the 2026-08-27 "
+        "defect."
     )
     import chemclaw.agent.operations_tools  # noqa: F401  (registers the tool)
     from chemclaw.core.tool_registry import registered_tool_names

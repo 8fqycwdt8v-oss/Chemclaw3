@@ -1,0 +1,61 @@
+{
+  "probe": {
+    "id": "op-01",
+    "section": 2,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We're picking the 4-bromoanisole Suzuki back up for a new analogue series. Before I write the study plan — what do we already know about this coupling in-house? Conditions, yields, what went wrong. I want the plan grounded in our own runs, not a textbook.",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note",
+      "similar_reactions"
+    ],
+    "expects_job": false,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a run, yield or condition set that is not in a cited note",
+      "a literature or patent reference as the source",
+      "we have no records on this coupling"
+    ],
+    "direction": "Reconstructs what the record actually holds for this transformation and cites each note it used: the Suzuki biaryl run (its base, solvent system, temperature, degassing and isolated yield), the aqueous-protodeboronation failure mode, and the degassing / Pd cross-coupling scope playbooks. Every number traces to a note; anything the notes do not record is said to be not recorded rather than filled in. It then turns that into the shape of a study plan — what is already settled and therefore not worth re-running, and what is genuinely open. An answer that asks the chemist to supply the history it could have retrieved is a miss.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "op-01",
+    "section": 2,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We're picking the 4-bromoanisole Suzuki back up for a new analogue series. Before I write the study plan — what do we already know about this coupling in-house? Conditions, yields, what went wrong. I want the plan grounded in our own runs, not a textbook.",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.21,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "5c76ba3cec2646dcb6e6c7ff2bae4c1c",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

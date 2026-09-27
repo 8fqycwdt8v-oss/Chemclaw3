@@ -85,7 +85,10 @@ moved into the chart and its test: a number written in prose is a number that go
   **refuses to start** when that mode is bound to a non-loopback interface (the `0.0.0.0` default) —
   it exits with `SECURITY: entra_required is False but the service binds a non-loopback interface …`
   instead of silently serving an open deployment. `CHEMCLAW_SERVICE_ALLOW_INSECURE=true` is the deliberate opt-out (boots with a
-  loud warning) and belongs in local dev only. Under `entra_required`, `CHEMCLAW_ENTRA_TENANT_ID`
+  loud warning) and belongs in local dev only. The **workers** bind no request surface, so that
+  refusal cannot reach them; each refuses to start with sign-in off on its own (`SECURITY: this
+  Temporal worker would run with CHEMCLAW_ENTRA_REQUIRED=false …`), and
+  `CHEMCLAW_WORKER_ALLOW_UNAUTHENTICATED=true` is its opt-out, local dev only. Under `entra_required`, `CHEMCLAW_ENTRA_TENANT_ID`
   and `CHEMCLAW_ENTRA_AUDIENCE` must also be set — a half-configured identity setup fails fast at
   startup rather than at the first request.
 - **`CHEMCLAW_ENTRA_CLIENT_ID` no longer exists. Drop it before upgrading, because nothing will
@@ -277,6 +280,33 @@ half-written.
   and pydantic-settings ignores an unknown prefixed environment variable, so a typo used to satisfy
   the gate, report retention on, and leave every window disabled. A key that is not one of the nine
   `CHEMCLAW_RETENTION_*` fields now refuses to render, naming the set it is not in.
+- **Stating windows does not bound the artifact store, so it is asked for separately.**
+  `artifact_blobs` — a calculation's Hessians, geometries and conformer ensembles — is swept by its
+  own job under `CHEMCLAW_ARTIFACT_STORE_MAX_BYTES` / `CHEMCLAW_ARTIFACT_EVICT_IDLE_DAYS`, both of
+  which default to 0 (off), and none of the nine windows reaches it. A release that carefully
+  stated a retention posture therefore still grew that table forever and was never asked. So on the
+  `retention.windows` arm the chart also requires exactly one of `retention.artifactStore` (either
+  bound) or `retention.artifactGrowthAccepted: true`. **Only on that arm**: `unboundedGrowthAccepted`
+  already says everything grows, which is true of this table too — which is why the shipped
+  defaults still render with two `--set`s and not three.
+- **Which Temporal namespace this release owns must be stated, and there is no default.**
+  `CHEMCLAW_TEMPORAL_ADDRESS` names one broker for the whole cluster (its own `temporal` Kubernetes
+  namespace, not one per release). Inside that broker the Temporal namespace is the only boundary
+  there is: the background task queue is the constant `background-jobs`, every Schedule id
+  `durable/schedules.py` owns is a bare constant, and a job's workflow id carries no site. Measured
+  against a live broker through the shipped applier, a second release's `helm upgrade` rewrote the
+  first's `eln-sync` Schedule to fire a different workflow type at a different interval, and — having
+  `eval_drift_enabled: false` — deleted the first's `eval-drift` Schedule outright, because `_prune`
+  removes every owned id *this* release did not plan and cannot tell a peer's Schedule from a
+  leftover of its own. Beyond Schedules, workers on one queue take each other's tasks and a
+  deduplicated job resolves to a peer's completed execution. The namespace was a constant inside
+  `config`; it is now `temporal.namespace` with no default, because a default is exactly what two
+  releases would share. `helm template` on the shipped defaults therefore takes a third flag,
+  `--set temporal.namespace=chemclaw`, and a real release names one per environment — the release's
+  own Kubernetes namespace is unique by construction — and registers it on the broker.
+  **A shared Postgres is the same hazard and this knob does not cover it**: 44 tables carry no
+  deployment discriminator and the retention sweep's expired-thread predicate would prune a peer's
+  live threads, so two ChemClaw releases need their own database as well as their own namespace.
 - **`/metrics` is on the public host, and the NetworkPolicy is not what bounds it.** The Route
   declares no `spec.path`, and neither a Route nor a NetworkPolicy filters by path — the ingress
   rule must allow the router, and the router publishes every path. What makes an unauthenticated
@@ -308,8 +338,15 @@ half-written.
   unfetchable metric blocks scale-*down* only, never a scale-up driven by one that reads).
   `service.autoscaling.occupancy.enabled: false` renders the CPU-only HPA exactly as before.
 - **Request bounds** (D-2026-08-01-a-cheap-request-is-still-a-request): uvicorn is launched with
-  `--limit-concurrency`, `--timeout-keep-alive` and `--h11-max-incomplete-event-size` (all from
-  `CHEMCLAW_SERVICE_*` settings, none of which the app can impose on itself); an ASGI middleware
+  `--limit-concurrency`, `--timeout-keep-alive` and `--h11-max-incomplete-event-size`, all from
+  `CHEMCLAW_SERVICE_*` settings. This line used to add "none of which the app can impose on
+  itself", and that was true of an ASGI *application* and false of `uvicorn.run()` — which takes
+  all three as keyword arguments. Measured on 2026-09-11, the sentence had cost something: the
+  front door was the only one of four HTTP surfaces that had them, and the MCP face, every
+  `connector-*` pod and the worker probe server ran at uvicorn's defaults — unlimited concurrency,
+  a 5 s keep-alive, a 16 KiB header ceiling. `chemclaw.core.asgi.transport_bounds` is the one
+  place they are now decided, applied at every launcher, and
+  `tests/test_transport_bounds.py` fails a launcher added without them. An ASGI middleware
   (`chemclaw.core.asgi.BodySizeLimit`) refuses a body over `CHEMCLAW_SERVICE_MAX_REQUEST_BYTES`
   with 413 before it is read; and a per-principal token bucket refuses with 429, on in the chart
   and off in code. Every connector server installs the same middleware over its own, smaller
@@ -523,6 +560,20 @@ undeclared — the whole fleet's 278 against `256 + 0` — while the primary sat
 `chemclaw_pg_session_pool_max_size` is the part of the live left-hand side that lands on the split
 store, so the primary's side is the difference; with no split it is 0 in every pod and both
 branches are the original comparison.
+
+**A result sink's connection is counted only when its warehouse is `postgres_dsn`'s own server, and
+a sink elsewhere is yours to size** (`D-2026-09-13-a-connection-counted-where-the-budget-applies`).
+`publish/drivers/postgres.py` holds one un-pooled connection per enabled sink for the life of each
+drain pass, and it used to be invisible to the left-hand side of that alert — a pool-shaped reading
+of a thing that is not a pool. It now registers itself with `core/db` and counts as exactly one
+backend, on the endpoint it dials: a sink pointed at `postgres_dsn` raises
+`chemclaw_pg_pool_max_size` by one in the worker that holds it, and a sink pointed at a warehouse of
+its own contributes **nothing** here. That second half is deliberate rather than an omission. A
+result sink writes to a database this system does not own (`D-2026-08-25-a-cache-is-not-a-record`),
+`postgres.maxConnections` is a ceiling on *this* deployment's server, and charging a foreign
+warehouse's backend to it would be the same error as the under-count in the other direction. So the
+arithmetic for a sink on its own database is the operator's: one connection per worker replica that
+runs the drain, per enabled sink on that server, held for the pass.
 
 The last of those reads *held sessions* rather than a configured capacity, and the difference is
 forced rather than stylistic: two kinds of process dispatch to the calculation backend and they do

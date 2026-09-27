@@ -19,7 +19,10 @@ test asserts it.
 **What this does and does not claim to be.** It is a retriever over a local corpus, so a vendored
 reagent table can be *cited* like any other evidence. It is not an ingest half: vendored data is
 reference material, not experiments, and giving it a write path into the knowledge graph would put
-unreviewed third-party records behind the PR-gate's back.
+third-party records into `knowledge/` wearing this system's own provenance. That used to read
+"behind the PR-gate's back"; `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` removed the
+gate, which makes the argument stronger rather than weaker — nothing now stands between a written
+note and the chemist who reads it as evidence.
 """
 
 import csv
@@ -28,7 +31,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
@@ -53,6 +56,14 @@ class DatasetManifest(BaseModel):
 
     `retrieved_from` is documentation of where a human obtained the file, recorded so provenance
     survives. Nothing reads it as an address and nothing here can fetch it.
+
+    **`mirrored` is the question a manifest must answer before it can go stale**
+    (`D-2026-09-14-a-mirror-with-no-owner-goes-stale-in-silence`). A corpus copied from somewhere
+    else has an upstream that moves; the copy does not, and nothing in this system can tell. So a
+    mirrored corpus must also name `refresh_owner` and `refresh_cadence`, and the field is required
+    rather than defaulted because a default answers the question on the author's behalf — which is
+    the one thing a provenance model must never do. First-party content (`mirrored: false`) has no
+    upstream and needs neither.
     """
 
     name: str = Field(min_length=1)
@@ -60,12 +71,49 @@ class DatasetManifest(BaseModel):
     licence: str = Field(min_length=1)
     retrieved_from: str = Field(min_length=1)
     description: str = Field(min_length=1)
+    # Is this a copy of a corpus maintained somewhere else? Required, never defaulted — see above.
+    mirrored: bool
+    # Who re-takes the snapshot, and how often. Required exactly when `mirrored` is true.
+    refresh_owner: str | None = None
+    refresh_cadence: str | None = None
     # SHA-256 of `records.csv`, so the file the deployment ships is provably the file that was
     # reviewed. Verified on load when `vendored_dataset_verify` is on.
     sha256: str = Field(min_length=64, max_length=64)
     # Column holding the text a query matches against, and the one holding the structure.
     text_column: str = Field(min_length=1)
     smiles_column: str | None = None
+
+    @model_validator(mode="after")
+    def _a_mirror_names_who_refreshes_it(self) -> "DatasetManifest":
+        """A mirrored corpus without an owner and a cadence is a stale corpus waiting to happen.
+
+        The fleet's `MODULES.md` states the rule and nothing enforced it on either side: "a stale
+        patent index that nobody knows is stale is worse than no patent index". Enforced at load
+        rather than in a review checklist, because a review that has to remember a rule is the
+        control this repository keeps finding gone.
+
+        Refused in the other direction too: naming a refresh owner for first-party content is a
+        claim about an upstream that does not exist, and the next reader would go looking for it.
+        """
+        named = [
+            field
+            for field in ("refresh_owner", "refresh_cadence")
+            if (getattr(self, field) or "").strip()
+        ]
+        if self.mirrored and len(named) < 2:
+            missing = sorted({"refresh_owner", "refresh_cadence"} - set(named))
+            raise ValueError(
+                f"dataset {self.name!r} is mirrored from somewhere else and does not say "
+                f"{' or '.join(missing)}. A snapshot with no named owner and no cadence goes "
+                "stale with nobody knowing it has."
+            )
+        if not self.mirrored and named:
+            raise ValueError(
+                f"dataset {self.name!r} is not mirrored and names {', '.join(sorted(named))}. "
+                "First-party content has no upstream to refresh from, and saying otherwise sends "
+                "the next reader looking for one."
+            )
+        return self
 
 
 class VendoredRecord(BaseModel):
@@ -83,6 +131,18 @@ def _read_manifest(directory: Path) -> DatasetManifest:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except OSError as exc:
         raise VendoredDatasetError(f"no vendored dataset manifest at {path}: {exc}") from exc
+    # `UnicodeDecodeError` is a *sibling* of `json.JSONDecodeError` under `ValueError`, not a child,
+    # and not an `OSError` — so a manifest that is not UTF-8 left this module as a bare
+    # `UnicodeDecodeError`, past the promise in this function's own name, and past
+    # `durable/publish._BAD_DATA_TYPES`, which classifies by class name and lists
+    # `VendoredDatasetError` precisely because "a retry re-reads the same bytes from the same image
+    # layer". The same sentence is what makes the decode error the *most* certain bad data here.
+    except UnicodeDecodeError as exc:
+        raise VendoredDatasetError(
+            f"{path} is not UTF-8: byte {exc.object[exc.start]:#04x} at offset {exc.start} is "
+            f"not valid ({exc.reason}). The manifest is part of the image, so rebuild it rather "
+            "than retrying"
+        ) from exc
     except json.JSONDecodeError as exc:
         raise VendoredDatasetError(f"{path} is not valid JSON: {exc}") from exc
     try:
@@ -110,13 +170,29 @@ def _read_records(directory: Path, manifest: DatasetManifest) -> list[VendoredRe
                 "reviewed — rebuild the image rather than editing the manifest."
             )
 
-    rows = list(csv.DictReader(data.decode("utf-8").splitlines()))
+    try:
+        text = data.decode("utf-8")
+    # The checksum has already passed at this point, so these bytes are provably the ones the review
+    # approved — which makes this a *permanent* property of the image and the one case
+    # `_BAD_DATA_TYPES` exists to fail fast on. Driven before this existed: a latin-1 `records.csv`
+    # whose manifest checksum matched raised a bare `UnicodeDecodeError`, which that list does not
+    # match, so Temporal burned `activity_max_attempts` re-reading identical bytes from an immutable
+    # image layer. The byte and its offset are named because "not UTF-8" over a 40 MB corpus is not
+    # something an operator can act on.
+    except UnicodeDecodeError as exc:
+        raise VendoredDatasetError(
+            f"vendored dataset {manifest.name} has a {path.name} that is not UTF-8: byte "
+            f"{exc.object[exc.start]:#04x} at offset {exc.start} is not valid ({exc.reason}). "
+            "The file is in the image and its checksum matched, so this is what was reviewed — "
+            "re-export it as UTF-8 and rebuild"
+        ) from exc
+    rows = list(csv.DictReader(text.splitlines()))
     if rows and manifest.text_column not in rows[0]:
         raise VendoredDatasetError(
             f"vendored dataset {manifest.name} declares text_column "
             f"{manifest.text_column!r}, which {path} does not have"
         )
-    return [
+    records = [
         VendoredRecord(
             text=row[manifest.text_column],
             smiles=row.get(manifest.smiles_column) if manifest.smiles_column else None,
@@ -125,6 +201,24 @@ def _read_records(directory: Path, manifest: DatasetManifest) -> list[VendoredRe
         for row in rows
         if row.get(manifest.text_column)
     ]
+    # A row whose text cell is empty has nothing to retrieve, so it is dropped rather than refused —
+    # one blank line must not cost a corpus its whole load. But it was dropped with **no log, no
+    # count and no error, immediately after the checksum passed**: the bytes are provably the ones
+    # the review approved, and the loader then served fewer rows than the reviewed file holds, which
+    # is the one loss this module's own checksum argument cannot explain away. Measured: 3 rows in,
+    # 2 loaded, nothing said. One aggregated line per load, for `warn_late_arrivals`' reason — the
+    # count is what a reader needs and a line per row would be a storm on a broken export.
+    if len(records) != len(rows):
+        logger.warning(
+            "vendored dataset %s: %d of %d rows in %s have an empty %r and were not loaded, so "
+            "this corpus serves fewer rows than the file its checksum verified",
+            manifest.name,
+            len(rows) - len(records),
+            len(rows),
+            path.name,
+            manifest.text_column,
+        )
+    return records
 
 
 class VendoredDatasetRetriever:

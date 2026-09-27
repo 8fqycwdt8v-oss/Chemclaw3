@@ -147,7 +147,9 @@ async def fork_session_route(
     # Nothing may sit between this claim and the `try` — the rule `delete_session` states: the
     # reservation has no expiry until `_start_turn_lease` starts one, which nothing here ever does,
     # so only that `finally` gives it back.
-    slot = _claim_turn_slot(front.active_turns, session_id)
+    # `actor=None`: a momentary hold taken to *exclude* a turn is not a turn, so it must not
+    # count against this caller's per-actor concurrent-turn cap (`_actor_turns_in_flight`).
+    slot = _claim_turn_slot(front.active_turns, session_id, actor=None)
     if slot is None:
         raise HTTPException(
             status_code=409,
@@ -351,7 +353,8 @@ async def delete_session(
     # Nothing may sit between this claim and the `try` — the same rule the turn route states: the
     # reservation it takes has no expiry until `_start_turn_lease` starts one, which nothing here
     # ever does, so only that `finally` gives it back.
-    slot = _claim_turn_slot(front.active_turns, session_id)
+    # `actor=None`, the same reason the fork route gives: this hold excludes a turn, it is not one.
+    slot = _claim_turn_slot(front.active_turns, session_id, actor=None)
     if slot is None:
         raise HTTPException(
             status_code=409,
@@ -419,9 +422,10 @@ async def upload_attachment(
     assistant.
 
     Session-scoped and in-memory by design: an attachment is working material for a
-    conversation, not knowledge. Anything in it worth keeping goes through the PR-gate like
-    every other machine-touched write; routing uploads into the graph would bypass the review
-    line.
+    conversation, not knowledge. Anything in it worth keeping is written to the graph the way
+    every other machine-touched note is — through `kg/record.py`, carrying `created_by: agent` and
+    its citations — and routing uploads straight in would skip the step that gives them either
+    (D-2026-09-05-the-gate-follows-behaviour-not-knowledge).
 
     Unsupported formats are refused with a message naming what *is* supported (422), never
     silently half-parsed — a PDF "read" by scraping whatever bytes look like text would

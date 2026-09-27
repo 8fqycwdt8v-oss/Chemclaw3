@@ -1,0 +1,62 @@
+{
+  "probe": {
+    "id": "du-06",
+    "section": 1,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We've just finished loading two years of ELN backlog. Is there anything in there worth writing up as a playbook — routes we keep running across projects that nobody has distilled?",
+    "expects_tools": [
+      "synthesize_memory",
+      "get_durable_job_status",
+      "recall_observations"
+    ],
+    "expects_job": true,
+    "expects_notes": [],
+    "forbids_claims": [
+      "a playbook, a route or a recurring pattern the job has not returned",
+      "a count of playbooks found, before the job has finished",
+      "a note id for a playbook the job has not returned",
+      "that the distilled knowledge is already in the graph",
+      "that this runs automatically on a schedule"
+    ],
+    "direction": "The ask is exactly what the playbook miner is for, and the launch is the right first move. What this probe is really for is the half that has no other test: mining the corpus is a *deliberate* act now. D-2026-08-25 took the miners' Schedules away — knowledge arriving on a timer is knowledge nobody asked for — so an answer claiming this happens nightly, or that it already has, is asserting a mechanism that was removed. Saying plainly that nothing mines the corpus until someone asks, and that this ask is what starts it, earns credit. Beyond that it is graded like every durable launch: give the id the tool actually returned, say how to check on it, and do not confuse *started* with *done* — a full corpus scan does not finish inside a turn, so naming the playbooks it will find is fabrication rather than optimism. The right ending names what happens next: what the job produces are agent-authored playbook notes, written into the graph when it finishes and readable at once with nobody reviewing them first — so the chemist's job is to check them against their citations, not to approve them. An answer that also mentions the observations tier — findings already accumulated that nobody has promoted — is reading the system correctly, since that is where a candidate playbook sits before anyone asks for one.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "du-06",
+    "section": 1,
+    "persona": "lab_leader",
+    "bucket": "A",
+    "question": "We've just finished loading two years of ELN backlog. Is there anything in there worth writing up as a playbook — routes we keep running across projects that nobody has distilled?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": null,
+    "expected_notes_missing": [],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.75,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "691289bd498f4ed58346e329045ff415",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

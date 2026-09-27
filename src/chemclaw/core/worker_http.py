@@ -8,7 +8,7 @@ that recording a metric elsewhere "is a no-op — there is no registry and no HT
 processes". Half of that was never true: the registry (`core/metrics.py`) is a stdlib-only module
 singleton, so it exists in every process that imports it. So the background worker and every
 connector worker have been incrementing counters into a live registry that nothing could read.
-Every durable job launched, every note proposed from a workflow, every audit-sink failure inside a
+Every durable job launched, every note recorded from a workflow, every audit-sink failure inside a
 background activity: recorded, and invisible.
 
 **"Liveness is the Temporal poll itself"** was asserted in three chart templates and enforced
@@ -49,6 +49,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse, Response
 from starlette.routing import Route
 
+from chemclaw.core.asgi import transport_bounds
 from chemclaw.core.config import settings
 from chemclaw.core.metrics import CONTENT_TYPE, METRICS
 
@@ -151,6 +152,10 @@ async def worker_http(*, component: str, ready: Callable[[], bool]) -> AsyncIter
             # are off because every line would be a kubelet probe.
             log_config=None,
             access_log=False,
+            # No concurrency bound here: this server answers the two kubelet probes, and a liveness
+            # probe *refused* because the limit is full restarts a pod that is merely busy. The
+            # other two apply — an idle socket and an oversized header are hazards on any surface.
+            **transport_bounds(concurrency=False),
         )
     )
     serving = asyncio.create_task(server.serve())

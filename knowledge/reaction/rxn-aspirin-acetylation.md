@@ -27,7 +27,7 @@ Acetylation of salicylic acid with acetic anhydride to give aspirin.
 - conditions: 60 °C, 2 h, neat anhydride as both reagent and medium
 - isolated yield: 88%
 
-Yield determined by mass after recrystallisation from ethanol/water; see
-[[measured-by:playbook-recrystallisation-purity]].
+Yield determined by [[measured-by:method-yield-by-mass-after-recrystallisation]]; the rule about
+quoting a yield with the purification that produced it is [[playbook-recrystallisation-purity]].
 
 The teaching run behind [[part-of:campaign-aspirin-teaching]].

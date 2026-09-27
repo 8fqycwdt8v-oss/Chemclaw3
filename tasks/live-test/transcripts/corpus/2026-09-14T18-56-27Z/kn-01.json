@@ -1,0 +1,69 @@
+{
+  "probe": {
+    "id": "kn-01",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "We've got the 4-bromoanisole + PhB(OH)2 coupling on the plan for next week. Has anyone here run that before, and what conditions did they end up on?",
+    "expects_tools": [
+      "gather_evidence",
+      "find_notes",
+      "expand_note"
+    ],
+    "expects_job": false,
+    "expects_notes": [
+      "opt-suzuki-conditions",
+      "report-biaryl-development",
+      "rxn-suzuki-biaryl"
+    ],
+    "forbids_claims": [
+      "a note id that was not retrieved",
+      "a yield, catalyst loading or temperature not stated in the retrieved notes",
+      "a literature reference",
+      "a run or campaign that is not in the record"
+    ],
+    "direction": "Cites rxn-suzuki-biaryl by id (and plausibly opt-suzuki-conditions or report-biaryl-development) and gives the conditions actually on file: Pd(OAc)2 at 1.5 mol% Pd, K2CO3 2.0 equiv, THF/water 4:1, 80 °C, 12 h, degassed, 76% isolated. A good answer adds the recorded reason this substrate is awkward — an electron-rich aryl bromide makes oxidative addition the slow step, so it is unusually ligand- and temperature-sensitive. Every number must trace to a cited note.",
+    "follow_ups": []
+  },
+  "outcome": {
+    "probe_id": "kn-01",
+    "section": 1,
+    "persona": "lab_technician",
+    "bucket": "A",
+    "question": "We've got the 4-bromoanisole + PhB(OH)2 coupling on the plan for next week. Has anyone here run that before, and what conditions did they end up on?",
+    "profile": "",
+    "answer": "",
+    "answered": false,
+    "tools_called": [],
+    "tool_results": [],
+    "tools_failed": [],
+    "expected_tools_met": false,
+    "expected_notes_recall": 0.0,
+    "expected_notes_missing": [
+      "opt-suzuki-conditions",
+      "report-biaryl-development",
+      "rxn-suzuki-biaryl"
+    ],
+    "uncited_note_ids": [],
+    "verified_numbers": [],
+    "failed_loudly": true,
+    "error_code": "internal",
+    "degraded": [],
+    "jobs_started": [],
+    "job_outcomes": {},
+    "notes_proposed": [],
+    "asked_clarifying": false,
+    "asked_clarifying_in_prose": false,
+    "latency_seconds": 1.78,
+    "event_counts": {
+      "error": 1
+    },
+    "transport_error": null,
+    "session_id": "7372e214c75741699f3e7f388e5efd1a",
+    "first_degraded_index": null,
+    "first_output_index": null,
+    "specialists": [],
+    "plan_refusals": [],
+    "tool_refusals": []
+  }
+}

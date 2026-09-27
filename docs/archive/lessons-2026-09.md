@@ -1,0 +1,2924 @@
+# Lessons, full text — 2026-08 to 2026-09
+
+**The long form of every lesson `tasks/lessons.md` now carries as one rule.** Eighty-eight
+sections, written as they were learned, in the order they were learned. Nothing here is deleted or
+corrected; where two sections say the same thing, both are kept, because *how many times* a lesson
+had to be learned is itself the finding.
+
+**Why it moved.** This is the second time. `docs/archive/lessons-2026-08.md` holds the first eighty
+sections, moved out when the file reached 1,937 lines and stopped being readable at session start.
+The digest that replaced it opened by saying so — *"Do not append a dated section — that is how the
+old file grew"* — and then grew the same way: 3,212 lines, of which these 2,891 were dated
+append-only narrative, **1.66× the length the restructure existed to escape**. The rules the
+narrative carried are folded into `tasks/lessons.md`; the incidents are here.
+
+The strongest single finding is visible only in the aggregate, which is the argument for keeping
+these files rather than deleting them: **twenty separate sections across the two archives record a
+destructive git verb eating uncommitted work** — nine in `lessons-2026-08.md`, eleven here — and the
+digest's own paragraph about it was being read by the sessions that then did it again. A rule that
+has to be recorded twenty times is not a memory problem.
+
+(That sentence said "fourteen" when this file was extracted, written from a reading rather than a
+count. Measured over both archives it is twenty, and the figure is now derived by
+`tests/test_lessons_stay_a_digest.py::test_rule_1_states_the_recurrence_count_the_archives_hold`
+rather than restated here — which is `tasks/lessons.md` rule 71 applied to the file that records it.
+Thirteen of the twenty record work actually lost; the rest record the near-miss or the hazard, and
+that split is a judgement the archives do not label, so it is not what the test counts.)
+
+`tasks/lessons.md` is the digest: one short paragraph per distinct lesson, short enough to read in
+full. Come here when a rule's paragraph is not enough and you want the incident that produced it —
+the concrete failure, the measurement, and what was tried first.
+
+---
+
+## 2026-08-16 — a timing taken on a loaded machine is not a measurement
+
+**Pattern.** Measuring `compute_thermochemistry` cold-vs-repeat through the new remote path, the
+cold number came back at 115 s and then 147 s for ethanol against an in-process baseline of 0.816 s.
+The obvious reading was a defect — a refinement loop that never converged, or a cache key that
+missed every time — and I started instrumenting the loop to find it. There was no defect: two
+abandoned background `pytest` runs were pinning all four cores at 124% CPU each. With the machine
+idle the same call took 0.856 s.
+
+**Rule for myself.** Before reporting or acting on any wall-clock number, check `uptime` and the top
+CPU consumers, and kill anything I started in the background that should have finished. And where
+the question is "was this recomputed?", assert the **call count**, not the clock: the count is
+immune to load and is what D-011 actually claims. I did eventually measure it that way (`0 computed`
+on the repeat) and that is the number that belongs in the report.
+
+**It is not only the clock, and one reading of a stable-looking quantity is not a measurement
+either (2026-09-19).** Re-deriving `FORKSERVER_RSS_CEILING_MIB`, a single reading of the `jinja2`
+arm at load average ~10 came back 121.9 MiB and I wrote a paragraph explaining a "+5.8 MiB, ~10%
+allocator scaling" from it. Four repeats at load 1.1 read 117.7–117.9 — **+1.6 MiB, exactly the
+increment the record already held** — and the shipped arm read 116.2 at both loads, so the
+inference was built on the one arm that happened to be noisy. `VmRSS` is stable to 0.1 MiB when it
+is repeated and was not stable when it was not. **Repeat every arm you are going to compare, not
+just the one you expect to move**, and when a difference has to be explained, first check whether
+it survives a repeat.
+
+## 2026-08-16 — when a key is derived on the other side of a wire, ask what it names
+
+**Pattern.** Three defects in one migration, all the same shape: the cache key is derived by the
+*server* and the payload is stored by the *client*, so the client cannot see which arguments the key
+names. `optimize_geometry` and `relax_structure` share one key and return different payloads; a
+Fukui key does not name the mode; `multiplicity=None` means the opposite on the two sides. None of
+the three raises anything — they produce a wrong answer, a stale ranking, and a refused embed with a
+misleading message.
+
+**Rule for myself.** When adopting a remote cache, do not infer the key from the tool's arguments.
+Ask the server for the key of every *pair* of calls that could plausibly collide, and diff them —
+`calculation_key` is cheap and the answer is a fact rather than an inference. Any two tools whose
+keys are equal must return the same payload shape, and any argument the key does *not* name must
+either be omitted from the request or re-applied locally after the cache.
+
+32. **A lesson written down is not a lesson learned — #28 recurred, in the same session that could
+    quote it.** Lesson 28 says `git add <explicit paths>` does not bound a commit, the index does.
+    I ran `git add CLAUDE.md tests/pg.py` and committed a two-file docs change; the commit contains
+    **38 files and 9385 deletions**, because a subagent had already staged its `git rm` of the calc
+    engine and `git commit` ships the whole index. The commit titled "Record that the sandbox is not
+    offline" now carries the deletion of twenty engine modules.
+
+    What made it recur is worth more than the rule: lesson 28 is filed under *parallel agents*, and
+    I did not think of myself as being in that situation — I was doing a small documentation fix
+    while an agent happened to be working. The trigger is not "am I coordinating with others", it is
+    **"is anything else able to write this index"**, and a running subagent always is. The mechanism
+    is unchanged and cheap: `git status --short` before every commit, read the *staged* column, and
+    if it holds anything you did not stage, use `git stash --keep-index` or commit from a worktree.
+
+    Second-order: I decided *not* to rewrite the history, because every merge in this repo is a
+    squash, so the misattribution never reaches `main` and rewriting a 101-file branch to fix a
+    record that does not survive the merge is unnecessary risk. Put it in the PR body instead. The
+    general form — **fix a record where the record will actually be read** — is the part to keep.
+
+33. **Verify a claim at the layer the defect lives in, not at the layer that is convenient.** A
+    subagent reported that the answer judge never ran, measured 8/8 against a live model. The model
+    credential was exhausted by then, so re-measuring was impossible — but the *cause* was one line
+    with no network: `convert_to_openai_tool(VerificationResult)["function"]["parameters"]` has
+    `required == ["confidence"]`. Confirming that took one command and settled the question.
+
+    The same move then produced a better test than the one I first wrote. My first attempt asserted
+    the *fixed* schema required every field, which is false — `claims` has a default, so it is
+    optional in pydantic's own schema too, and `method="json_schema"` buys strict provider-side
+    enforcement rather than a different required-set. The failing assertion is what corrected my
+    model of the fix. **When a test you wrote to prove a fix fails, consider that it may be telling
+    you the fix works for a different reason than you thought** — before assuming the test is
+    wrong.
+
+34. **A null control is what turns "it helped 26% of the time" into a decision.** The brief for the
+    answer-revision measurement asked for before/after scores and a substance check. A subagent
+    added something I had not specified: re-score the *unchanged* answers, three more times. Doing
+    nothing cleared the flag 5.1% of the time; revising and keeping the substance cleared it 5.1%
+    of the time. Without that arm the honest write-up would have been "revision clears a quarter of
+    flagged answers, most by deletion" — suggestive, arguable, and probably enough to justify
+    building something. With it the answer is *zero measured benefit*, and the decision is made.
+
+    **The rule: whenever a measurement scores an intervention against a stochastic judge, measure
+    the judge alone on the same inputs.** The null arm costs one extra pass and is the difference
+    between an effect size and an anecdote.
+
+35. **Do not report a subagent's headline finding without probing it yourself — and when your probe
+    disagrees, that is information, not a refutation.** The same agent reported the judge scoring
+    `1.0, 0.0, 1.0, 0.5, 0.5` on five identical calls, which would make `review_required` noise. Two
+    probes here — one trivial, one a realistic multi-claim fully grounded answer — both returned
+    1.00 six times out of six. Neither of us was wrong: the judge is stable where the answer is
+    unambiguous and unstable at the margin, which is exactly where the 0.7 threshold sits, and the
+    null control had already measured that margin at 5.1% per roll.
+
+    Reporting either number alone would have been misleading — "the judge is unreliable" overstates
+    it, "I could not reproduce it" buries it. The characterization that survives contact with both
+    observations is narrower and more useful than either.
+
+36. **"Run the full suite" is per repository, and the second repository is the one you forget.**
+    Adding `revision` to the mcp fleet's `/healthz` payload, I ran `ruff`, `make type` and
+    `uv run pytest -q tests` — the fleet directory, where my new tests lived. CI went red on five
+    per-server `test_healthz_answers_and_names_the_server`, each an exact dict comparison, all of
+    which a bare `uv run pytest -q` would have shown in 40 seconds.
+
+    This is not lesson 29 (a `tail` swallowing an exit code) or lesson 30 (skipping `make type`).
+    It is narrower and it is specific to this family of four repos: I had *just* run the full
+    Chemclaw3 suite, and the discipline did not transfer across the `cd`. The path-scoped run is
+    also what made it feel complete — the subset I chose was exactly the subset containing my new
+    tests, which is the least informative one available.
+
+    **The rule: a change to shared infrastructure gets the repository's whole default test command,
+    unscoped, before the commit — and when the change touches a payload, a signature or a schema,
+    assume the assertions that break are in files you have never opened.** `packages/` in that repo
+    is imported by all five servers, so "I edited one file in `packages/`" is exactly the case where
+    a scoped run proves the least.
+
+37. **`git checkout <file>` is how you lose a mutation-check's subject.** Verifying a fix by
+    reverting it and watching a test go red is the right discipline, and I used `cp` to a backup for
+    four of five checks. For the fifth I reached for `git checkout src/.../live.py` to restore — and
+    the file's fix was *uncommitted*, so the checkout restored HEAD and silently deleted the work
+    the mutation was testing. The follow-up "restore" script then found no mutation to undo and
+    printed success anyway.
+
+    The tell was there and I nearly missed it: the test stayed red after the "restore". Had the
+    assertion been weaker, the defect would have gone back into the branch under a green line.
+
+    **The rule: restore a mutation from a copy you made yourself (`cp file /tmp/x.bak` → `cp back`),
+    never from git, unless the file is committed.** And a restore script must *assert* it found what
+    it was undoing — print-on-success outside the conditional is how a no-op reports as a fix. The
+    same assert-the-target rule already applies to applying a mutation (a ruff reflow once made one
+    silently not apply); it applies just as hard to undoing one.
+
+38. **A test with a timeout is a timing measurement, and running two repositories' suites at once
+    invalidates it.** `tests/test_reizman.py::test_bo_campaign_finds_high_yield` failed on a
+    `Timeout` in a full run. I had started `Chemclaw3-mcp`'s suite concurrently on the same four
+    cores. Alone, the same test passes in 68 s.
+
+    `tasks/todo.md` already carried this as a failed approach — "a wall-clock number taken while the
+    test suite is running is not a measurement" — recorded after two abandoned background pytest runs
+    made a 0.8 s calculation look like 147 s. What is new is only that it now reaches *test outcomes*
+    rather than reported timings, and that the contending load came from a sibling repository, where
+    I was not thinking about this machine's cores at all.
+
+    **The rule: before treating a timeout or a slow-test failure as a finding, check `uptime` and
+    re-run it alone.** And do not start a second repository's full suite while one is running — the
+    time saved is not real, and a false failure costs more than the wait.
+
+39. **A check that has never run is not a passing check, and turning it on is a change with
+    findings.** I added `fetch-depth: 0` as a one-line CI fix — the migration-immutability test could
+    not run on a depth-1 clone, where every file compares equal to itself. My local suite stayed
+    green because *this sandbox's clone is also shallow*, so the test skipped here too and I never
+    saw its first real execution.
+
+    CI did, and it found two migrations whose `CREATE TABLE` had been edited after merge. That is the
+    check working on its first run, not a regression — but I had shipped the enabling line as though
+    it were free, and it was not: it was a change whose whole purpose was to surface something, and I
+    did not go looking for what.
+
+    **The rule: when you enable a check that was previously inert, run it locally under the
+    conditions that make it real *before* pushing** — here, `git fetch --unshallow` first. And expect
+    a finding: a guard nobody has been able to violate-and-fail against has, in this repo's
+    experience, always had something behind it.
+
+40. **This sandbox's clone is shallow, and the migration-immutability check reads that as a
+    finding — recognize it instead of re-diagnosing it.**
+    `tests/test_migrations_are_additive.py::test_no_grandfathered_edit_outlives_its_reason` reported
+    `002_molecule_fingerprints.sql` / `003_reaction_fingerprints.sql` as exemptions with nothing left
+    to permit. The cause is lesson 39's, seen from the other side: nothing differs from the commit
+    that introduced it when the history is not there.
+
+    **What makes it easy to misread is that it presents two ways depending on how deep the clone
+    happens to be.** At 170 commits the `compared < 30` skip guard did not fire, so it *failed*.
+    After merging `origin/main`, only 8 migrations could be compared, the guard fired, and the same
+    check *skipped*. Same cause, opposite symptom, and neither is about the code under review.
+
+    **The rule: when a suite comes back with exactly one failure that is nowhere near what you
+    touched, stash and re-run before reading a line of the diff.** It cost me one round here and it
+    is a two-command check: `git stash -u && pytest <the one test> && git stash pop`. Then say in the
+    PR that it is pre-existing *and how you verified that*, because "unrelated" asserted without the
+    stash is indistinguishable from not having looked.
+
+## A line count is not a measure of reading cost (2026-08-17)
+
+**What happened.** Asked to make the agentic backend "lean to read", I profiled it, found `agent/`
+at 58% prose (11,217 lines, 2,895 of them code) and a 165-module import fan-out, and proposed three
+fixes — one structural, two derived from those two ratios. The user approved all three. Both
+ratio-derived ones then failed on measurement: relocating the biggest docstring yielded **0 lines**
+once readability was held constant, and the best available import work reached 37% only by moving
+eight dependencies into function bodies, which makes the tree *harder* to read. The structural one
+— a single 483-line function — was the entire real problem and went to 194.
+
+**The rule.** Measure a candidate *before* pitching it, not after it is approved. A ratio is a
+smell, not a finding: prose that records a measurement is not overhead, and this tree's long
+docstrings are mostly that. What actually costs a reader is structure — a function too big to hold
+in your head, a duplicated loop, a rule stated as a comment where it could be a type.
+
+**The tell I should have caught.** I had already measured the docstring distribution — median 9
+lines, mean 12.8 — which says the prose is healthy and the mass sits in a tail of deliberate
+records. I read that number and still proposed a mass relocation, because the *total* looked large.
+Medians answer "is this bloated"; totals do not.
+
+## A green readiness route is evidence about connectors, not about dependencies (2026-08-17)
+
+`/readyz` reported every connector `healthy` while two things were broken underneath it, and I
+believed it both times before measuring:
+
+- `chem`/`safety` read `healthy` because `/healthz` is unauthenticated. The front door held no
+  token for them, so every `/mcp` call was rejected and turns degraded with nothing naming a
+  credential. A health route that does not exercise the credential cannot report on it.
+- The `calc` server was down and `/readyz` was *entirely* green, because `calc` is dialled from
+  inside a tool rather than probed as a connector. Every calculator tool failed at call time.
+
+**Rule for myself:** when a probe says a system is healthy and a turn says otherwise, the turn is
+the measurement and the probe is a claim about a narrower thing than I assumed. Find out exactly
+what the probe covers before using it as evidence — and specifically, never infer "the dependency
+is up" or "the caller is authorized" from a health route.
+
+## Do not accept a subagent's ranked root causes without checking the mechanism (2026-08-17)
+
+A subagent returned three confident, well-formatted candidate root causes for the UI defect, all
+three built on the premise that zustand's `persist` middleware suppresses subscriber notification
+for non-persisted fields. It does not — `partialize` decides what is written to storage, not who
+gets notified. Every candidate was wrong, and the real cause was two layers away (`http-proxy`
+emits `proxyRes` before copying headers, so an early `flushHeaders()` silently voids the copy).
+
+What the subagent *was* good for was the inventory it gathered along the way — zustand version,
+every selector expression, the exact reducer code. **Rule for myself:** take facts from a subagent,
+take its conclusions as hypotheses, and check any mechanism claim against how the library actually
+behaves before building on it. This is the same failure mode CLAUDE.md already names for prose —
+articulate is uncorrelated with true — and it applies to my own subagents too.
+
+## Start the long gate early, and never `pkill -f` a pattern that matches my own shell (2026-08-17)
+
+Two process mistakes in one session, both cheap to avoid:
+
+- I ran `make test` under a 900 s `timeout` and reported the result as a failure. Exit 143 is
+  SIGTERM — *my own timeout*, not the suite. The full suite is 4,178 tests and takes hours here
+  with Docker up. **Rule:** check whether a non-zero exit is 143/144 before calling anything
+  failed, and start a known-long gate in the background at the *start* of a session, not the end.
+- `pkill -f "pytest -q"` matched the bash wrapper the harness runs my own commands in, killing my
+  waiters (exit 144). **Rule:** kill by pid from `pgrep -f "python3 -m pytest" | head -1`, never by
+  a loose pattern that my own command line also contains.
+
+## "Not answering" is a claim about the network; check the server's own log (2026-08-17)
+
+Four storm checks failed with `CalcServerError: the calculation service is not answering`. I was
+one step from filing a Temporal durability defect. The server's access log said `401 Unauthorized`
+— it was answering every single call, and refusing the credential.
+
+Two rules from it. **When an error message names a subsystem's state, verify that state at the
+subsystem**, not from the message: the message is the caller's belief, and here the caller could
+not tell a refused connection from a refused credential. And **a retryable error class is an
+assertion that waiting helps** — misclassifying a 401 as an outage does not just mislead a reader,
+it spends the whole retry budget proving the same thing.
+
+I also killed my own shell with `pkill -f` a second time, after writing the rule not to. Use
+`pgrep -f <pattern> | head -1` and kill the pid.
+
+## `x or default` erases a legitimate zero, and I shipped it into my own checker (2026-08-18)
+
+The first script written to verify the seeded corpus scored `abs((rx.yield_percent or -1) - want)`
+and reported 21 of 400 records as yield mismatches. There were none. `0.0 or -1` is `-1`, and 236
+of the 3,955 published Buchwald-Hartwig wells are exactly 0.00% — a *real* result meaning that
+combination failed, not a missing one.
+
+I nearly filed it as an adapter defect. What caught it was that 21/400 ≈ 5.3% matched the corpus's
+own 6% zero-yield rate too well to be a coincidence.
+
+**Rule:** never use `or` to default a numeric that can legitimately be zero — `is None`, always.
+And when a defect rate looks suspiciously close to some *proportion of the data*, suspect the
+measurement before the system. The lane now pins this invariant in a test, because the bug is one
+keystroke away and silent in both directions.
+
+## Measure the behaviour a fix depends on, even when the code reads clearly (2026-08-18)
+
+I re-targeted a probe (`gr-03`) from an unreachable dataset to a reachable one, on the assumption
+that *reachable* implies *findable*. Then I noticed the ingested notes were unmerged proposals — 39
+note files in the knowledge repo against 2,000+ ingested reactions — and that
+`FingerprintReactionRetriever._eligible` drops matches whose note is not on disk. That reads like
+the fix does not work.
+
+Running it showed **both** are true, depending on the path: an unfiltered `similar_reactions`
+returns 10 real wells, and the same search narrowed by `{"type": "reaction"}` returns 0. The probe
+names the unfiltered tool, so the re-target holds — but I only know that because I ran it, and the
+opposite conclusion was equally available from reading either function alone.
+
+**Rule:** a fix that depends on a system behaviour is not done until that behaviour is measured,
+however clearly the code reads. Two correct functions can compose into a consequence neither
+docstring states.
+
+## Read the bound; do not extrapolate the counter (2026-08-18)
+
+I estimated a corpus drain at ~43 chunks from `ingested=100` log lines and told the user so. The
+real number was ~108: `_BoundedIngest` caps a chunk at 100 *entries fetched*, not 100 ingested, so
+the drain walks all 10,011 exports rather than only the 4,251 that map. The counter I extrapolated
+from was reporting a different quantity than the one that governs the loop.
+
+Related, same session: I grepped a background log for an auth error, found none, and briefly
+concluded a test had failed for a different reason. The capture had been piped through `tail -12`
+and the traceback was cut. **Rule:** a conclusion from a truncated capture is not a measurement —
+re-run the specific thing.
+
+## 2026-08-21 — a review is not finished until you have read the other side of the wire
+
+**The pattern.** I published a deep review of how information moves between agentic steps, and it
+was right about the shape of the problem and wrong or incomplete on five specifics — every one of
+which I found in twenty minutes of reading `Chemclaw3-mcp` and running one more measurement:
+
+- I named `predict_site_reactivity` as a place to accept a geometry. The calculation server has
+  `compute_properties_at` and **no `compute_fukui_at`**, so the argument would have been a promise
+  this repository cannot keep.
+- I named `QmJobSpec` first in the recommendation and used it as the worked example. Its geometry
+  contract lives in a Nextflow pipeline on a cluster, and Nextflow *silently ignores* a param no
+  process consumes — so the recommendation as written would have shipped a silent wrong answer.
+- I called `sample_conformers` the worst payload. `find_calculations` is **28x worse**
+  (~831,000 tokens against ~7,400) and I had not measured it.
+- I did not notice that `calculation_key` already returns `structure_id` and the client drops it —
+  the exact fact that made the whole fix cheap.
+- I did not notice that the server's `Structure.structure_id` is a `computed_field` and ours is a
+  plain property, so the authoritative address arrives on every payload and is discarded.
+
+**The rule.** *When a finding is about a boundary, read both sides before writing the
+recommendation.* Four of the five errors were the same error: reasoning about a contract from one
+end of it. The companion repos are two minutes away (`add_repo` + `git clone`), and this repository's
+CLAUDE.md says so in its own "Related repositories" section.
+
+**The second rule, which is older and I broke again.** *Measure the tool you did not think of.* I
+measured five durable job payloads carefully and never ran the one read-only tool that could return
+fifty of them. The prompt "which surfaces return a stored payload of unbounded size?" would have
+caught it; "how big is this result?" did not.
+
+## 2026-08-21 — a shape test proves the field exists, not that anything fills it
+
+**What happened.** `ConnectorJobResult.calc_refs` was added, the collector was written, the field
+was on the envelope, and a test asserted the envelope carried what it was given. All green. The
+first time I drove the actual chain end to end, a conformer job that had plainly reached a cached
+calculation reported **`calc_refs: []`** — the one line that records a key had failed to land,
+because a scripted string replacement matched a fragment `ruff format` had already reflowed.
+
+**Two rules, and the second is the one that generalises.**
+
+1. **A scripted edit that does not `assert` its target is an edit that may not have happened.**
+   Every `str.replace` in a batch script needs `assert old in s` before it, or a grep after it.
+   I asserted most of them and not that one, and that is exactly the one that silently vanished.
+   The cheap systematic check is a grep audit at the end: one line per intended change, printing
+   OK/MISS. It found nothing else — but it could only say so because it was run.
+
+2. **A test that constructs the model proves the shape; only a test that runs the code proves the
+   wiring.** `test_the_envelope_carries_the_calculations_a_note_would_cite` builds a
+   `ConnectorJobResult(calc_refs=[...])` and asserts it round-trips. It cannot fail on a missing
+   producer, and it did not. The replacement drives `run_xtb_calculation` and asserts the refs are
+   *non-empty* — a property of a run, so the test has to be a run. Whenever a change adds a field
+   that something else is supposed to fill, at least one test must exercise the filler.
+
+## 2026-08-21 — "targeted runs passed" is not "the suite passed"
+
+**What happened.** I reported the gate as lint-green, type-green, and the suite "still running,
+every touched area passed on targeted runs". The full run then found **three** failures I had
+caused or exposed, none of them in a file I had thought to run:
+
+- `test_calc_remote` asserted on `remote_key`'s return, whose *type* I had changed. I ran the calc
+  tools, jobs, compose and find tests — not the one named after the module I edited.
+- `test_layering` needed the new `cli -> science` edge declared. A structural test, invisible to
+  any per-feature run.
+- `test_suite_timeouts` failed only under `PYTEST_TIMEOUT_SCALE=4` — which is what the suite's own
+  timeout banner tells you to set. A pre-existing hermeticity bug that only bites the person
+  following the advice.
+
+**The rule.** *A change that alters a function's signature or adds an import edge has a blast
+radius no per-feature test selection covers.* Two cheap checks close most of it before the full
+run: `git diff --name-only | sed 's|src/chemclaw/|tests/test_|'`-style name mapping to find the
+test file named after each edited module, and running the structural suite —
+`test_layering`, `test_repo_map`, `test_schema_inventory`, `test_database_privileges`,
+`test_decision_log`, `test_prose_contract`, `test_docstring_paths` — on every change, because those
+fail on the *shape* of a diff rather than on its behaviour.
+
+**And the honest-reporting half.** Saying "green" before the run finishes is a claim about the
+future. The right sentence is the one I used — "still running, I will report exactly what it says" —
+and then actually reporting it, including the three that were mine.
+
+## 2026-08-21 — never `cd` inside a compound command that also runs git
+
+**What happened.** To check whether two failures were pre-existing, I made a worktree at the base
+commit:
+
+    git stash -u -q && git worktree add -q /tmp/basecheck e5f1f67 && cd /tmp/basecheck && ln -s …; git stash pop -q
+
+The shell's working directory **persists across the whole command**, so `git stash pop` ran from
+`/tmp/basecheck` and applied my three uncommitted test fixes to *that* worktree. `git worktree
+remove --force` then deleted them. The next commit carried only the lessons file while its message
+described three fixes that were no longer in the tree — and `git status` had told me so in one line
+I read past.
+
+**Three rules, in order of how much they would have saved.**
+
+1. **Use `git -C <path>` instead of `cd`.** Every git subcommand takes it, it cannot leak into the
+   next command, and it makes the target explicit at the call site.
+2. **Never stash across an operation that changes worktrees.** A stash is repository-global and
+   pops into whichever worktree asks. Committing to a scratch branch, or just reading the base
+   version with `git show <rev>:<path>`, has no such failure mode.
+3. **Read `git status --short` before writing the commit message, not after.** It printed exactly
+   one file where I expected four. The message I then wrote was a description of intent rather than
+   of the diff — which is the worst kind of commit message, because it reads as verified.
+
+The generalisation, and it is the same one as the silent `str.replace`: **an edit is not done
+because you made it — it is done because you checked it is there.** Both losses this session were
+invisible for the same reason, and both were one `grep` away.
+
+## 2026-08-25 — measure the mechanism, not only the outcome
+
+Four defects in one session were invisible to reasoning and obvious to a five-line measurement.
+Each had a plausible argument behind it that was simply wrong.
+
+- **A de-overlapping rule inferred from content.** "Strip the longest repeat, bounded by
+  `overlap_chars`" is correct-sounding and deleted 2,400 of 5,000 characters on a repetitive line.
+  Adding a one-character periodicity shift fixed that case and still deleted 2,800 of 6,000 on
+  period-10 content. *Rule for myself: when a rule infers a boundary from content, generate the
+  adversarial content before writing the rule — repetition, periodicity, and the empty case.*
+- **A payload that said everything twice.** The condensation returned the rendered table and the
+  rows it was rendered from. The design read fine; the number was 1.4x, which would not have been
+  worth building. *Rule: measure the thing the change exists to improve, before believing it
+  improved.*
+- **Two orderings of one list.** `rows` came back in input order while the renderer sorted
+  internally — so a column that says "changed vs previous" would have been a claim about a
+  different row. Caught by a test asserting the returned order, not by reading the code.
+- **A test that passed against the mutant it was written to catch.** The starvation guard asserted
+  only that one source survived; the shape it was guarding against starves the *other* one.
+  *Rule: after writing a regression test, break the code the way the test describes and watch it
+  fail. If it does not, the test is documentation.*
+
+The generalisation, which the repository already says and I had to relearn by doing: **prose is
+evidence about what its author believed, never about what the code does.** Three of these four had
+a docstring or a comment asserting the correct behaviour at the moment the behaviour was wrong.
+
+## 2026-08-25 — do not answer a second problem as a side effect of the first
+
+Building the condenser surfaced `read_corpus`'s full-rescan of the ELN. A derived store of mapped
+`OrdReaction`s would have closed it — and would also have been the easiest way to give the
+condenser its structured fields. Two problems, one store, and the store would have been built
+without anyone deciding to build it.
+
+Note frontmatter answered the condenser's need with no new store and no migration, and the rescan
+is now a `BACKLOG.md` row with its own anchor and its own trigger. *Rule: when one change would
+close a second, unrelated problem as a side effect, that is a signal to check whether the second
+problem is driving the design — and to file it rather than ride it.*
+
+## 2026-08-25 — a fixture that never varies is a test that never tests
+
+Reviewing my own merged diff found four defects, two of them producing confidently wrong output.
+Every one had a test nearby that passed, and every one got through for the same reason: **the
+fixtures never varied along the axis that broke.**
+
+- Every condenser fixture was a reaction note with the same fields. The heterogeneous case — a
+  share document beside reaction notes — fabricated four condition changes.
+- Every fake client always succeeded. One failing extraction fabricated two solvent swaps.
+- Every budget test used chunks with default provenance. A chunk carrying conflicts and a real
+  source label was charged 47% less than it costs.
+- Every document read was of a document that fits. An oversized one fetched all 16 of 16 pieces
+  past a ceiling whose comment says it prevents exactly that.
+
+*Rule for myself: for each new test, name the axis the fixture holds constant, and ask whether the
+code behaves differently at the other end of it. Absent-vs-present, fails-vs-succeeds,
+small-vs-over-the-limit, homogeneous-vs-mixed — those four axes account for all four defects.*
+
+The sharper lesson is about where the knowledge already was. `changes_between`'s docstring names
+the absent-is-not-a-value hazard exactly, and excludes fields for it. I read that docstring, quoted
+its reasoning into `_changes`'s own docstring about reagents — and then wrote the unsafe comparison
+for the three columns immediately below it. **Citing a rule is not applying it.** When I find myself
+writing "this is the hazard X avoids", the next step is to check that the code I am writing avoids
+it too, not to treat the citation as the check.
+
+And: `tasks/lessons.md`'s previous entry — measure the mechanism, not the outcome — was written in
+the same session as the code that failed it four times. A lesson recorded is not a lesson applied.
+
+## 2026-08-25 — a plan that says "zero new code" is a claim, and mine were wrong twice
+
+**What happened.** Planning the Databricks work, I wrote two confident structural claims into the
+plan and both were false:
+
+- *"Pistachio is zero new code — one manifest."* The `vector:` half of the warehouse binding runs
+  `VECTOR_COSINE_SIMILARITY(col, ?::VECTOR(FLOAT, n))`, which is Snowflake's function and Snowflake's
+  type. Databricks has neither, and — the part I would not have guessed — no array *parameter* type
+  at all, so a 1536-float query vector cannot be bound as a list on any statement.
+- *"The vendor shapes go in `tests/test_upstream_surface.py`."* That file's assertions import their
+  package unconditionally and its version floor calls `version(package)`. These clients are
+  deliberately not installed here, so entries there would have made the suite depend on them.
+
+Neither survived contact with the file. Both were plausible because I had read the *neighbourhood*
+— the seam's README, the sibling adapter — and inferred the rest.
+
+**The rule.** Before writing "no change needed to X" into a plan, open X and read the specific lines
+that would have to hold. A README describes intent; the function body is what runs. For a *test*
+file, read its docstring's statement of what belongs in it — three of this repository's test files
+say so explicitly, and one of them said the opposite of what I planned.
+
+**The second rule, which is the more expensive one.** I nearly shipped the Databricks score straight
+through as a cosine. It is `1/(1 + d²)` over *Euclidean* distance, and `VectorMatch.score` is
+contractually a cosine that the fusion layer ranks on. Nothing would have raised; a corpus would
+just have been ranked slightly wrong forever. **When adapting a vendor to a numeric contract, look
+up what the number actually means, and write down the boundary values** — identical, orthogonal,
+opposing. Three lines of arithmetic turned an assumption into a test.
+
+**And the thing that made all of it visible:** a review pass over my own plan, run against the real
+files rather than my memory of them, before writing any code. It found five real problems, of which
+I had independently caught three. The two I had not were the two that would have shipped.
+---
+
+## 2026-08-25 — Test against the real model, not against your reading of it
+
+Building the result-publication projectors, I read `science/calc/models.py` carefully, wrote
+seventeen projectors from that reading, and then ran them against real model instances. Three
+things I had "verified" by reading were wrong:
+
+- `Conformer` has no `energy_hartree` — only `EnsembleMember` does. My projector required it, which
+  would have made every *returned* ensemble unpublishable while every cached one worked.
+- `EnsemblePayload` has no `smiles` — it is keyed by `structure_id`. The subject builder raised.
+- `DescriptorProfile` has `fraction_csp3`, which I had simply not seen, and so did not publish.
+
+Each took one execution to surface and would have taken a long time to find in production, because
+the failure mode of the third is *silence*: a field nobody publishes looks exactly like a field
+nobody has.
+
+**The rule: a projector is not written until it has been run against an instance of what it
+projects.** `model_fields` is one line and a constructed instance is three; that is cheaper than
+any amount of re-reading, and it is the only thing that distinguishes a field you decided not to
+publish from one you never noticed.
+
+**The stronger form, which is what I should have started with.** Reading catches what you look for.
+A *coverage check* catches what you did not: wrap the payload in a dict that records which keys were
+read, run the projector, and diff the read set against the model's fields. That found three more
+gaps — including an exotherm boolean published without the threshold it was judged against, which
+would have been uninterpretable the moment an operator changed the setting. It is now
+`tests/test_publish_projection.py::test_every_model_field_is_read_or_deliberately_ignored`, with an
+explicit exemption list so a deliberate omission carries its reason and an accidental one fails.
+
+The same shape generalizes: **wherever one model is projected into another, assert the mapping is
+total or explicitly partial.** A partial mapping nobody declared is indistinguishable from a
+complete one, right up until someone asks for the missing half.
+
+## 2026-08-25 — A position-matched zip between two independently produced lists
+
+`ReactionEnergyResult` carries `reactants`/`products` and, separately, a `species` list. I zipped
+the second onto the members built from the first by index. They are produced independently — a
+`quick`-level run returns *no* species at all — so a two-species breakdown over a three-member
+equation attached cyclohexane's free energy to butadiene.
+
+What makes this worth recording is that it is **silent by construction**: both values are plausible
+energies in the same units, on the same reaction, so nothing downstream — not a type, not a range
+check, not a reviewer's eye — would have caught it.
+
+**The rule: never zip two lists by position unless one is documented as derived from the other.**
+Match on identity. And where a test can distinguish the two, make the fixture *disagree* on order
+deliberately — mine now lists its species product-first, so a reintroduced index match fails
+immediately rather than passing on a coincidence.
+
+## 2026-08-25 — take the number off the wire, not off a serializer you chose
+
+I measured the condenser's saving with `model_dump_json()` and shipped the figure in a commit, an
+ADR and a PR body. Production never calls it: LangChain's `_stringify` tries `json.dumps`, fails on
+a pydantic model, and falls back to `str()`. The real saving was **2.7×**, not 9.1× — and the
+`Field(exclude=True)` the measurement was built on had no effect at all.
+
+The tell was available the whole time and I did not look for it: I never once read a `ToolMessage`.
+Every measurement went through an object I built and a serializer I picked.
+
+*Rule for myself: when measuring what something costs a model, obtain the bytes from the production
+path — drive the compiled graph, read the message it produced — and never from a representation I
+selected. If I cannot name the function that turns my return value into what the model sees, I have
+not measured it.*
+
+This is the same error as the previous entry, one level up. There I charged `content` instead of the
+serialized chunk; here I serialized with the wrong function entirely. Both are "I measured the
+mechanism I assumed was running." The previous entry's rule — measure the mechanism, not the outcome
+— was necessary and not sufficient, because I did measure a mechanism. It was the wrong one, and
+what distinguishes the right one is that **something else in the system actually calls it.**
+
+An honest note on sequence: three review passes over the same diff found three defects of this
+family, each after I had written a lesson about the family. Recording a rule and applying it are
+different acts, and the second one has to happen at the moment of writing the code, not afterwards.
+## 2026-08-25 — a check that skips is not a check that passes
+
+**What happened.** I edited migration `050` after committing it, to add a column. Locally
+`tests/test_migrations_are_additive.py` was green; CI failed on it. The test *skips* on a shallow
+checkout ("truncated history: ... this check would compare files against themselves") and runs
+under CI's `fetch-depth: 0`. I read the green line as "this passed" when it said "this did not
+run".
+
+The same session had already stated the general form of this — CLAUDE.md's "never report a local
+run as green without saying what it skipped" — and I applied it to the Postgres tests I *knew*
+about while missing the one that announced itself in the skip reason.
+
+Worse, the defect had already shown itself: applying the edited `050` broke `make db-migrate` on my
+own dev database with "was edited after being applied". I reset the table by hand and moved on. The
+error message was the test's message, one layer down, and I treated it as an environment chore.
+
+**The rule.** When a local run is green and CI is red on the same commit, suspect a *skip* before
+suspecting the environment — read the skip reasons, not just the count. And when a local command
+fails in a way that needs a manual workaround to proceed, that workaround is evidence about the
+change, not a chore: ask what the failure is telling you before undoing it.
+
+**Concretely for this repo:** `git fetch --unshallow` before trusting
+`test_migrations_are_additive`, `test_no_merged_migration_had_its_statements_changed` or anything
+else whose skip mentions truncated history.
+
+## 2026-08-26 — I tested the mechanism I wrote, not the one that calls it
+
+I shipped a publish seam whose headline claim was "every composite reaches the results store", and
+the composite path published nothing. All four shipped jobs resolved to no projector. The suite was
+green: 72 publish tests, four files, every result shape round-tripped.
+
+Every one of them started at `project()`. They passed `payload_kind="ReactionEnergyResult"` by hand
+— and no production call site set `payload_kind` at all. One test file called
+`records_from_solvent_screen()` directly; nothing else in the tree called it. `grep` for the
+composite hook across `tests/` returned zero hits.
+
+So the suite proved the projectors work. It said nothing about whether anything reaches them, and
+that was the only interesting question.
+
+This is the previous entry's rule one level up, and I want to be precise about why I missed it.
+That entry says *measure the mechanism, not the outcome*. I did measure a mechanism. A projector
+**is** a mechanism — it just isn't the one under test when the claim is about a path. What makes a
+mechanism the right one is not that it is concrete, it is that **something else in the system calls
+it**, and I get to choose my test's entry point exactly the way I got to choose that serializer.
+
+*Rule for myself: a test of a seam starts at the outermost thing production calls — the envelope a
+job returns, the row a walker reads — never at the function I am proud of. If I cannot name the
+production caller of the function my test invokes first, I have tested my own intentions.*
+
+The cheap check that would have caught all of it, in one line:
+`grep -rn "<the hook>" tests/` — if the hook has no test, the feature has no test, whatever the
+count of green assertions downstream says.
+
+**And the corollary, which cost me two more defects before I learned it.** Fixing the nine did not
+prove the path worked. *Assembling* it did — and it failed twice before it passed, on two things
+that make the feature completely unusable and that no unit test could have seen:
+
+- The one driver I ship failed the one sink I ship, because `Warehouse` is `@runtime_checkable` and
+  a runtime Protocol check tests for the presence of **every** member. Mine was missing one it had
+  no use for. Every delivery died at the connect.
+- Every drain pass leaked a database connection, because "build the sink per run" and "hold the
+  connection for the sink's life" are each correct alone and nothing closed the sink. Four an hour
+  against a default `max_connections` of 100.
+
+Both are invisible to a test that delivers to a stub and to a test that never builds a driver. Both
+are unmissable the first time two real pieces are put together.
+
+*Rule: for any seam with more than one part, one test must assemble all of them against something
+real — a database, not a fake — even when every part has its own test. The unit tests answer "does
+this piece work"; only the assembled one answers "is this a system".*
+
+Two smaller lessons from the same review, both about declarations:
+
+- **A field with no reader is a lie with a schema.** `required_roles` on the sink manifest was
+  documented as an access control and read by nothing. I had even cited the ADR
+  (`D-2026-08-07`) about the *exact* failure — an entitlement defaulting to `[]` — while writing a
+  version that defaulted to `[]` and had no `_entitled()` at all. Citing a lesson is not applying it.
+- **Prose describing a capability reads as a claim that it exists.** A docstring said Snowflake and
+  Oracle "spell it `MERGE`" beside an emitter that only writes `ON CONFLICT`. Nobody lied; the
+  sentence was about SQL dialects in general and read as being about this module. When a docstring
+  names a thing the code does not do, say which half is true.
+## 2026-08-26 — the fixture held constant the axis the function branches on
+
+A third review pass over the same merged work found two more defects, and both are the same shape as
+the three before them.
+
+`Condensation.degraded` was overloaded with two facts — "its prose could not be read" (has a row)
+and "it resolved to nothing" (has no row) — and the rendered payload then told the model that a
+reference nobody could resolve had "recorded figures above", and that a comparison of two protocols
+covered the three it was handed. `render_table` placed cells verbatim, so an `observations` value
+extracted from a share document, carrying a `|` and a newline, rendered a `rxn-FORGED | 99 | 99 |
+best result on file` row that the object does not contain.
+
+Neither was caught, and the reason is one reason. Every fixture in this work is homogeneous on the
+axis its function branches on:
+
+- all conditions present, or all absent — never a mix (the fabricated `solvent — → 2-MeTHF`)
+- every extraction succeeds, or one fails in isolation (the phantom swaps)
+- every protocol under the limit, or one over (the oversize path)
+- every reference resolves, or none does — **never the mix** (this pass)
+- every cell first-party — **never one that tries to be structure** (this pass)
+
+Five defects, five held-constant axes. The lesson written after each one was about *that* defect;
+the family kept shipping because the family was never named.
+
+*Rule for myself: before writing a fixture, list the branches the function under test takes, and
+build the collection so its members differ on every one of them. When the function renders text
+someone else wrote into a structured format, one member's content must try to be structure. A
+fixture where every member takes the same branch proves the branch works, and nothing else — and
+that is what "tested" has meant in this whole body of work.*
+
+The corollary, from the same pass: `Field(exclude=True)`, a budget in the wrong currency, and a
+renderer that "only places" cells are all the same mistake as a homogeneous fixture — an assumption
+about a mechanism, never crossed with the case that would disprove it. The check is cheap and I keep
+not running it: **construct the input that would break the belief, and look at the output.**
+
+
+## 2026-08-25 — A companion-repo change that cannot be pushed is not a deliverable
+
+**What happened.** The GFN multi-step work spanned two repositories by design: the primitives
+belong on `Chemclaw3-mcp` under `D-2026-08-16-the-physics-leaves-the-cache-stays`, the composition
+belongs here. I built and verified both halves, then discovered at push time that the session's
+GitHub scope covered only this repository and `add_repo` with push access needed an approval that
+never came. `main` now declares eight tools that no running server answers.
+
+**The rule for next time: check write access to every repository a task spans, before writing code
+in any of them.** One `git push --dry-run` at the start would have cost seconds and changed the
+plan — the enumerations could have been argued into this tree, or the templates held back until the
+companion PR existed. Discovering it after the work is done leaves only bad options.
+
+**A second, smaller one from the same session: `git push --delete` is 403 through the agent proxy**
+even where `git push` succeeds. Do not claim a branch was deleted without reading the push output;
+`mcp__github__list_branches` is what confirms it.
+
+**And a third: verify mergeability early, not at merge time.** `main` moved three times during this
+task's CI runs, each lap costing ~16 minutes, because I only fetched when the merge API refused.
+Fetching `origin/main` before opening the PR — and again before each long wait — turns a race into
+one rebase.
+
+## 2026-08-26 — a backlog row is a hypothesis, and two of seven were wrong
+
+Working seven queued rows in one pass, two of them turned out to specify the wrong change, and both
+failures were the same shape: **a rule stated correctly about one kind of value, then generalized to
+a kind it does not fit.**
+
+- `BACKLOG.md` asked for the "compare a field only when both sides recorded it" rule over the two
+  setpoints *and* the species sets. It fits a setpoint, where `None` means nobody wrote the number
+  down. It does not fit a species set, which is derived from a components list that is present
+  either way — so an empty `reagent` set is the record saying *this run used no reagent*, and
+  suppressing it erases the most common real change a run-to-run series carries. An existing test
+  said so within a minute of applying it.
+- The credentials row named three fields. The three were the ones somebody had grepped for; the
+  class is seven, and the two the row omitted were the interesting ones — `llm_fallback_api_key`,
+  which no redaction list contained *at all*, and `framing_envelope_secret`, which is not a
+  credential to anything and is the key an injected envelope would be forged with.
+
+The file's header already says a row is a claim about the code and claims go stale. What this pass
+adds is that a row can be *fresh and still wrong*: it is one person's design sketch, and the tree is
+what decides. Both corrections cost minutes because a test failed immediately; the cost of not
+noticing would have been a merged change that erases data and a redaction that reports success while
+matching asterisks.
+
+*Rule for myself: before implementing a queued row, restate its rule in my own words and name the
+kinds of value it will apply to. If any two of them differ in what "absent" means, the row is
+covering two rules and I am about to ship one of them wrongly. Then run the existing tests for the
+function before writing new ones — the test that disagrees with the row is the cheapest review
+there is.*
+
+**The corollary, from row 7 and worth more than the row was.** Hardening `llm_api_key` to
+`SecretStr` would have silently disabled the log redaction for every credential, because both
+readers in `core/logging.py` test `isinstance(value, str)` and a `SecretStr` is not one — and
+`str(SecretStr("k"))` is `"**********"`, so the filter would have gone on matching asterisks against
+log lines and reporting success. Two protections that look like one, where the stronger-looking one
+turns the other off. **When strengthening a type, grep for every `isinstance` on the old one before
+touching anything** — the places that check a type are exactly the places that will stop seeing the
+value.
+
+**Adding an agent-callable tool touches six declarations, and none of them is in the code you
+wrote.** A rotational-profile job passed its own tests, `mypy`, `ruff` and four validators, and the
+full suite then failed **eight** ways — every one a guard on a declaration rather than on behaviour:
+`.env.example` mirrors every setting, `test_context_floor` caps the static prompt prefix *and*
+refuses a single tool over 900 tokens, `test_probe_coverage` wants an eval probe per agent-callable
+tool, `test_solvents` pins the count of solvent-taking jobs, `test_templates` pins which templates
+cannot be argument-checked, `test_docstring_paths` resolves every backticked path, and a profile's
+`tool_names` is an **allow-list** — so the job was reachable and unusable until it was named there.
+Two of those were load-bearing: the tool arrived at 1,499 tokens because pydantic publishes a
+model's docstring as its JSON-schema `description`, so a nested pair of well-documented specs is
+bound to the model on every turn; and the allow-list would have shipped a capability nothing could
+call.
+
+*Rule for myself: the moment a new tool, job or template exists, run the declaration guards by name
+— `pytest tests/test_context_floor.py tests/test_probe_coverage.py tests/test_solvents.py
+tests/test_templates.py tests/test_config.py tests/test_docstring_paths.py` — and grep
+`data/profiles/` for the allow-list. Do not wait for the ten-minute sweep to find them, and never
+call a change verified on a targeted run: in this tree the interesting tests are the ones guarding
+what a change **declares**, not what it computes.*
+
+---
+
+## 2026-08-26 — Deleting a capability: what to keep, and the guard that goes dark
+
+Removing the HPC/DFT tier (`D-2026-08-26-semiempirical-is-the-whole-tier`) was mostly mechanical.
+The three parts that were not are the parts worth a rule.
+
+**A guard named after the thing it guards disappears with it, silently.** The `qm` bundle's
+"a bundle cannot publish a note itself" test read `assert not hasattr(qm_knowledge,
+"write_knowledge_node")`. Delete the module and the assertion becomes vacuously true — no failure,
+no signal, and a control that still *reads* like one in review. This is exactly the
+`map_to_hpc_identity` shape CLAUDE.md already records, reached from the other direction.
+
+> **Rule.** When deleting a module, grep the suite for tests that name it and ask of each: *would
+> this still fail if the invariant were violated by something else?* If not, rewrite it over the
+> whole set (an AST walk, a registry scan) before deleting — never delete it with the module, and
+> never leave it asserting an absence that nothing can restore.
+
+**An invariant usually outlives the thing it was written against.** The parent-ceiling validator was
+phrased against the DFT poll's 24 h budget. The poll is gone; the *rule* — a workflow's execution
+timeout must exceed the longest activity under it, or the retry budget is unreachable and the error
+names neither setting — applies verbatim to the CREST search that is longest now.
+
+> **Rule.** Before deleting a validator with its subject, restate the rule without naming the
+> subject. If it still says something true, it is not the subject's validator — rewrite it. The same
+> question re-derived a *default*: `connector_job_timeout_seconds` was 90,000 s because of the DFT
+> poll, and every other job had silently inherited a ceiling sized for a tier that never ran.
+
+**A cache outlives the code that filled it.** `calculation_results` is never pruned, so the `dft`
+projector had to stay even though nothing can write a `dft` row again — while the `QMJobResult`
+entry beside it, keyed by a model name, had to go. "Delete the calculator, keep the reader" is the
+rule the module already stated; I nearly deleted both because they sit four lines apart.
+
+**And: run the validators, not just the gate.** `make lint type test` was green with five live false
+claims still in the tree — two skills declaring a deleted tool in frontmatter, three backticked
+paths naming deleted files. `make prose-validate` and `make skill-validate` found all five. A
+capability removal touches *declarations* more than it touches code, and the declaration checkers
+are a different make target.
+
+**I declared an environment limitation without checking it, and it was false.** I shipped the
+rotational profile saying no barrier had been computed against real xTB and that closing that
+"needs the live lane" — a cluster. `tblite` *is* the GFN2 Hamiltonian, ships as a PyPI wheel, and
+was **already installed** in the sibling repo's venv; only the `xtb`/`crest` binaries are conda-only,
+which the calc server's own `pyproject.toml` says costs speed and the conformer search rather than
+the physics. One `import tblite` would have settled it. Running it took twenty minutes and found
+two real defects, both on the flagship case: a torsion with one well per period reported **no
+barrier at all**, and the discontinuity warning fired on exactly the hindered rotations the feature
+exists for. This is the same failure as `CLAUDE.md`'s own "the sandbox is not offline" note, one
+level out: I inherited a belief about what the environment could not do from prose rather than from
+a probe.
+
+*Rule for myself: an "it needs X" in my own summary is a claim about the environment, and claims
+about the environment are cheap to test — check the import, the binary, the port, before writing it
+down. And a synthetic fixture can only express failures of the shape it was built in: the fake here
+had three wells because n-butane has three, so the one-well case — an amide, the whole point of the
+capability — was untestable by construction and passed. When a fake is shaped after one real case,
+name the shapes it cannot produce and go find a real instance of each.*
+
+## 2026-08-26 — a grep that lists a file is not a grep that read it
+
+Tightening `_check_classification` to refuse an empty `tools` list broke five
+tests in `tests/test_langgraph_connectors.py`, and CI found them rather than I
+did. The file *was* in my first grep's output. I looked at the hit
+(`tools=list(allowed)`), saw a variable being passed through, and moved on
+without asking what `allowed` defaults to — which was `()`, the exact value the
+change makes illegal.
+
+Two more of the same shape landed earlier in the pass (`test_capability_degradation`,
+`test_hot_path_caching`), and I only learned about those because a reviewer
+working a different lens mentioned "10 pre-existing HttpEndpoint-validation
+failures" in passing.
+
+**The rule for myself: when a change makes a previously-legal value illegal,
+the search is for every site that can *produce* that value, not for every site
+that names the type.** Grep the constructor, then read each hit to the point
+where the argument's value is decided — a default, a fixture, a parametrisation
+— rather than to the point where it is passed along. And when the changed thing
+is a validation rule, run the whole suite before pushing rather than the suites
+that obviously relate to it: four of the five files that broke had nothing to do
+with connectors.
+
+## 2026-08-27 — a bound's name is prose, and my own guard proved it
+
+**The pattern.** Four defects fixed in the BO layer this session were one shape: *a quantity that is
+checked and a quantity that is spent, differing by a factor nobody multiplied.* `bo_max_rounds`
+bounded rounds while `batch` made a round cost N evaluations. The exhaustion test counted feasible
+cells on one side and every distinct run on the other. The progress report divided those same two
+mismatched counts and could print "7 out of 6". Each one reads correctly at the call site; each one
+is wrong by a factor that lives somewhere else.
+
+**The correction I had to apply to myself.** The guard I wrote to bound screening-design size — the
+fix for one of those four — shipped in its first version with the same defect *inside it*: it
+stopped multiplying once the running product passed the ceiling, and a partial product shifted right
+by `n_generators` lands back under the ceiling. Measured: 40 two-level factors at one generator
+passed a 4 096 ceiling on a partial product of 8 192, against a true design of 2^39 rows. I did not
+catch it by re-reading the code. I caught it by writing the arithmetic into a script and running it.
+
+**The rule for next time.** When a fix introduces a bound, compute the bounded quantity out loud —
+in a script, with a real adversarial input — before believing the guard. Reading a bound tells you
+what its author meant; running it tells you what it does. This repo already says that about prose
+and docstrings. A bound's *name* is prose too: `bo_max_rounds` reads as a cost ceiling and is a loop
+counter, and the gap between those two readings survived for as long as batching existed.
+
+**Second rule, from the same session.** Three of my six audit findings were partly or wholly wrong
+when checked against the code — a "missing" `TOOL_METHOD` entry that was present, a "never fixed"
+MOBO gap that was a deliberate argued refusal, a retention premise that understated the problem
+tenfold. A research pass produces hypotheses, not findings. Verify each against the source before
+fixing it, and be willing to report "this one was wrong" — the subagents that did exactly that
+produced the most useful work of the session.
+
+## 2026-08-27 — run the gate, not a subset of it (twice in one branch)
+
+Two CI/full-suite failures on this branch, same shape both times: **I verified with a narrower
+command than the one that decides.**
+
+1. `mypy --strict src/` was clean; `make type` runs `mypy src examples tests` and found a
+   `tuple[int, bool] == int` left over from a signature change, *in a test file*.
+2. A 486-test scoped run was clean; the whole-repo run found three new settings undocumented in
+   `.env.example`, which no BO test could have seen.
+
+Both were caught downstream, both were trivial to fix, and both were avoidable by typing eight
+more characters. The rule: **before pushing, run the repo's own gate target verbatim** — here
+`make lint type test` — rather than the scoped equivalent I reached for while iterating. A scoped
+run is the right tool *while* iterating and the wrong evidence for "this is done". CLAUDE.md
+already says a step is done only when `make lint type test` is green; the failure was reading that
+as a description of CI rather than as an instruction to me.
+
+## 2026-08-28 — a guess about which test failed is not a diagnosis
+
+Mid-run, the streaming pytest output showed one `F` at the 16% mark. Rather than wait for the
+summary — twelve minutes off, and it names the test — I mapped 16% onto `pytest --collect-only`'s
+ordering, landed on `test_connector_transport.py`, noticed it holds wall-clock tests, and ran that
+file alone. It passed, and I recorded the failure as a timing flake under load. Both halves of that
+were wrong: the file was never the failing one, and its passing was evidence about nothing.
+
+The actual failure was `test_config.py::test_env_example_documents_every_field` — a new
+`service_max_plan_scans` setting that I had not documented in `.env.example`. A real gap in my own
+change, one line to fix, and I had classified it away as somebody else's flakiness.
+
+The mechanism is worth naming, because "I was impatient" is not it. **A percentage in a progress
+bar is a position in an ordering I reconstructed, not an identifier.** Two of the steps between it
+and a test name are my own inference, and running the guessed file can only ever *fail* to falsify
+the guess — a pass is consistent with "not this file" as well as with "flaky here". I built a test
+whose green result told me nothing and then read it as confirmation.
+
+The rule: **when a run reports a failure, get the failure's name from the run.** If waiting is not
+acceptable, re-run the suspect *with the same seed and load*, or grep the partial log — do not
+index a progress percentage into a collection listing. And never let "flake" be the conclusion of a
+chain that starts with a guess about identity; it is the one classification that requires knowing
+exactly which test, since the whole claim is about that test's history.
+
+## 2026-08-28 — a subagent's baseline claim is a claim, and the baseline is cheap
+
+Four parallel audits produced unusually good work on this branch — three of the four defects they
+found were real, verified against a live database, and are now closed with tests that go red
+without the fix. One claim was not: an agent reported a named test as "failing on a clean
+baseline too — pre-existing, unrelated". I had started `make lint type test` on the untouched tree
+before any of them reported, and it came back **5,444 passed, 11 skipped, exit 0**.
+
+Had I not had that run in hand, the cheap move would have been to believe it — it is exactly the
+shape of a true statement, it names a real test, and accepting it costs nothing in the moment. What
+it would have cost later is a whole class of failure classified away in advance: every subsequent
+red in that file would have read as "the known pre-existing one".
+
+The rule is not "distrust subagents" — this session's evidence runs the other way. It is:
+**take the baseline before the first edit, always, and let it be the thing that adjudicates any
+claim about what was already broken.** It costs one backgrounded command started at the moment the
+work begins, and it is the only artifact that can tell "my change broke this" from "this was
+already broken" without argument. Related to the 2026-08-27 lesson about running the gate rather
+than a subset of it: same command, one run earlier.
+
+## 2026-08-28 — the tests I wrote alongside a change cannot find the defects in it
+
+The memory-bounds change merged green: `make lint type test` with Postgres up, 5,532 passed, eight
+new tests, three of them proven red against the pre-fix code. An adversarial review then found
+**three real defects in it**, including one that made erasure impossible for a whole deployment —
+`jsonb_array_elements` raises on a JSON `null`, and one such row in a table the sweep does not even
+erase aborted every actor's erasure, permanently.
+
+Every one of my tests passed with that defect present. Not because they were careless: because I
+wrote them from the same understanding that produced the defect. I tested the payload shape I had
+in mind (`{"publications": [...]}`) and never asked what the other shapes of a `JSONB NOT NULL`
+column with no CHECK would do. Same shape for the blob anti-join: I tested "another person's
+session spares the blob" and never "an orphan session spares it", which is the case that keeps the
+*leaver's own* data alive.
+
+The rule: **when a change adds a predicate, enumerate the inputs that predicate cannot read, and
+parametrize over them.** Not "add an edge case" — enumerate the domain and cover the part outside
+what the happy path constructs. For SQL over a payload, that means every `jsonb_typeof`. For an
+anti-join, it means every reason the join might or might not find a row, including the rows nothing
+owns.
+
+And the second-order rule, which is the one that actually caught these: **review your own merged
+work adversarially, against a live system, with someone else's eyes.** Four parallel passes cost
+one message and found what one careful author plus a green gate did not. The gate proves the change
+did not break what was already tested; it says nothing about what the change itself introduced.
+
+## 2026-08-28 — `git stash -u` is `git add -A` wearing a different verb
+
+I ran `git stash -u` to check whether a suite failure was pre-existing, **while three subagents were
+writing files in the tree**. It worked — the pop restored everything and the stash list came back
+empty — and that is luck rather than evidence. Rule 4 says the working tree is not mine when other
+agents are in it and names `git add -A` as the weapon; `stash -u` is strictly worse, because it
+*removes* their untracked files for the duration and a write landing in that window has nowhere to
+go. Two hundred tests were untracked at the time.
+
+The check I wanted was cheap and safe: run the failing test alone against the current tree first,
+and only reach for a clean baseline once the tree is mine. As it turned out I did not need a
+baseline at all — the failure was the docker daemon dying mid-run, which rule 3 already predicts and
+which `docker info` answers in one call.
+
+**Before any command that rewrites the working tree wholesale — `stash`, `clean`, `checkout .`,
+`reset --hard` — run `ListAgents`.** If anything is running, the command is not available to me.
+
+## 2026-08-28 — a count in prose went stale inside one hour
+
+I wrote "thirteen deterministic verdicts" in a package README, a module docstring and an ADR. Two
+hours later I added a fourteenth check and all three were false. `D-2026-08-01-the-count-lives-in-
+the-test-not-in-the-prose` is about exactly this and I had read it that morning.
+
+The tell is that I *derived* the number by counting a tuple I had just written, which is the same
+act as hardcoding it. Three of the four numbers I have written this session went stale or were wrong
+(the fourth, a token measurement, only survived because I re-ran it). A number in prose is a claim
+that needs a producer; where there is none, name the producer instead — "`check_ids()` is the list"
+costs the same characters and cannot rot.
+
+**Corollary that bit separately:** I then described severities *per check* ("charge_is_consistent is
+a warning") when the function returns `blocker` on three branches and `warning` on two. A property
+that varies by branch cannot be summarised by listing function names, and deriving it from one
+empty-design call — which is what I did — samples exactly one branch.
+
+## 2026-08-28 — a clean rebuild is not a neutral act when a harness serves the build
+
+I ran `rm -rf dist && npm run build` to check a security gate honestly, and eight Playwright tests
+went red. Nothing was broken: the e2e `webServer` serves `dist/server.js` and `dist/client`, and that
+suite runs unauthenticated, so it needs the `ALLOW_DEV_AUTH=true` build that CI makes for it — my
+production build had correctly stripped the dev auth provider out.
+
+I nearly filed it as a UI regression. What stopped it was reading the browser console line in the
+Playwright output instead of the assertion: `AUTH_MODE=dev is not permitted in this production
+build`, which names the cause exactly. **Rule 12 again — read the failure before classifying it —
+and one specific to build artefacts: when a test harness consumes a build directory, the build flags
+are part of the fixture.** Rebuild the way the harness does, and check `.github/workflows/` for
+which flags that is rather than guessing.
+
+## 2026-08-29 — a test written by the author inherits the author's belief
+
+Seven reviewers with fresh context read a change I had just shipped green — `make lint type test`
+passing with Postgres and Temporal up, every declaration gate held, and six defects I had already
+found while building it. They found about thirty more, and I reproduced every one before acting.
+
+The pattern in almost all of them: **a docstring stating the correct control, beside code that does
+not implement it.** Not a control I forgot — one I described. The MCP face documented its read-only
+export surface and served *zero* tools in production. The pending route says "'I asked the QA lead
+to approve this' must not mean 'and I may approve it myself'" and the only producer of approvals
+left the routing unset, so the requester could self-approve. The evidence tool claimed an ownership
+check that lives on a FastAPI route it never touches. The digest's comment says delivery runs after
+the acknowledgement; it ran before.
+
+The rule I need, because it is the mechanism rather than the symptom:
+
+**When I write a test for code I just wrote, it inherits what I believed the code does — so it
+proves the mechanism and never the instance.**
+
+Three of my own tests demonstrate it exactly:
+
+- `test_mcp_face.py` imports `chemclaw_agent` to populate the tool registry. That import is what
+  production lacked. The test could not fail.
+- `test_operations.py` asserts no caller free text escapes a reading, and writes its marker into
+  four columns the reading never selects — while seeding the one column that *is* attacker-
+  influenceable with a safe literal.
+- `test_units.py` proves case separates molarity from length using `M`/`m` and `mM`/`mm`. Those two
+  rungs were right. `nM` resolved to nanometre and `µm` to micromolar.
+
+So, concretely, for the next change:
+
+1. **Test the production entrypoint, not a convenient import of it.** If a module is populated by
+   import side effect, assert it in a subprocess that imports only what the deployment imports.
+2. **Seed the adversarial value into the field the code actually reads**, and check the read path
+   selects that field. A marker in a column nobody selects proves nothing.
+3. **When a mechanism has a series (a prefix ladder, a state vocabulary, a status set), test the
+   whole series or state which rungs are untested.** Two examples prove the mechanism exists, not
+   that the table is right.
+4. **When a docstring names a control, go and find the code that enforces it before believing the
+   docstring** — including, especially, my own from an hour ago.
+
+And the cheap fix that found all of it: fan reviewers out over a diff with **fresh context**, scoped
+by failure domain. A reviewer who shares my belief about the code cannot see any of these; one who
+has only the code can.
+
+## 2026-08-29 — a red check is a claim about the system *or* about the check, and the odds are even
+
+A four-repo e2e campaign produced six findings. **Three of them were the check being wrong, not the
+code.** That ratio is the lesson: walking in, I treated every red as a defect report, and on this
+tree that assumption is close to a coin flip.
+
+- `prose yields its numbers` failed **0/12** and read exactly like a broken extraction. It was
+  asserting the opposite of `D-2026-08-26-a-transcription-may-not-infer-a-setpoint`, so it could
+  only ever fail. Its stated premise — "the condition is simply gone" — was false, and one
+  measurement showed the value sitting on step 2 with its sentence verbatim. Had I "fixed" the
+  adapter to satisfy the check, I would have made the system violate a merged ADR.
+- `f-malformed-json` sent a *truncated* argument document and demanded it be reported. LangChain
+  repairs truncation through `parse_partial_json` before anything first-party sees it — a fact the
+  module under test already documents, having once corrected its own docstring for the same
+  confusion. Unsatisfiable by construction, and it left the genuinely reachable case untested.
+- Four of the storm's failures were my own missing `CHEMCLAW_MCP_REPO`, which made its chaos
+  primitive kill a process it then could not restart. The damage surfaced two families later as
+  unrelated red checks, and was invisible from every one of them.
+
+**The rule: before fixing what a red check points at, ask what the check asserts and whether the
+system is documented to do that.** Read the module's own docstring and grep `docs/decisions/` for
+the behaviour before touching code. A check that has never passed is evidence about the check.
+
+**And the corollary, which cost the most here: re-run once with the environment fully set before
+believing any failure.** A lane failure and a real failure look identical in a report — both are a
+red row with a plausible observation. Only the re-run separates them, and on this campaign it
+changed the verdict on three of four storm failures. The re-run is cheap; a fix aimed at the wrong
+target is not.
+
+Related, from the same run: my *own* fix's first version was wrong in a way my own two new tests
+could not see, because I wrote them from the same understanding of the layout that produced the
+off-by-one. `parents[3]` raised a bare `IndexError` on the shipped default. That is the 2026-08-28
+lesson repeating one day later, so the enumeration habit is not yet automatic: **when a change adds
+an index or a predicate, write down the inputs it cannot read before writing the test.**
+
+## 2026-08-29 — a handed-over measurement is a claim, not a fact
+
+The 2026-08-28 campaign handed over F6 with two symptoms and a named next step. One symptom was
+false and the next step pointed at the wrong seam:
+
+- `chemclaw_invalid_tool_calls_total` was reported as carrying **no samples**. It carries two per
+  turn. The same lane, the same behaviour, the same probe — `curl /metrics | grep` says
+  `chemclaw_invalid_tool_calls_total{tool="find_notes"} 2`.
+- The step named was "enter LangChain's streaming tool-call assembly", flagged as this system's
+  most defect-prone seam. That seam is sound at every step, and each step was measurable in
+  minutes: the aggregated chunk carries `invalid_tool_calls`, `message_chunk_to_message` preserves
+  it, and the middleware receives it. Roughly an hour of work sat behind a warning about a seam
+  that turned out to be innocent.
+
+The real cause was one layer away and had nothing to do with streaming: `tool_failed` is raised by
+a `wrap_tool_call` middleware, and a call whose arguments never parsed never enters the tool chain.
+
+**The rule: re-run the handed-over measurement first, before reading the diagnosis attached to
+it.** A previous session's finding has exactly the standing of a docstring — evidence about what
+its author believed. This repository already says prose is never evidence about what the code does;
+a measurement written into prose becomes prose the moment the run ends. Reproducing this one cost
+two commands against a lane that was going up anyway, and it inverted both halves of the handover.
+
+**And the corollary about scary labels:** "this system's most defect-prone seam" is a reason to
+measure that seam *first and cheaply*, not a reason to treat entering it as the cost of the task.
+Four print statements settled it.
+
+## 2026-08-29 — a precedent on disk is not the rule that governs it
+
+Merging `origin/main` into the eight-findings branch put two files on `073`: `main`'s merged
+`073_experiment_protocols.sql` and this branch's unmerged `073_pending_requests.sql`. I checked
+whether that mattered by reading `core/migrate.py` — it keys the ledger on the *full filename* and
+applies in sorted filename order — then noted that `main` already carries `037_*` and `043_*` pairs,
+and told the user it was "not a problem". The full suite disagreed:
+`test_no_two_migrations_claim_one_number` failed.
+
+Both halves of my reasoning were true and the conclusion was still wrong. The runner genuinely does
+not care. The four existing files are **grandfathered by name** in an exemption list whose docstring
+says exactly what it is for: *"the check exists for the next one — caught at review, when a rename is
+still free. Adding a fifth name to it is a visible act in a diff."* Reasoning from the precedent led
+me toward the one move the rule was written to make expensive.
+
+**The rule: when the tree shows a pattern that looks permitted, find the gate that governs it before
+concluding it is.** Two files that look like a merged pair are evidence about history, not about
+policy. Here the policy was one `grep -rn "claim_one_number" tests/` away, and my earlier grep for
+`duplicat|uniq` missed it purely because the test is named in the repository's own prose style rather
+than in the vocabulary I guessed at.
+
+The corollary that would have caught it faster: **grep the test suite for the concept, not for the
+word I would have used.** This repository names its checks as sentences (`test_a_trail_nobody_can_
+read...`, `test_no_two_migrations_claim_one_number`), so a keyword search over identifiers is a
+weaker instrument here than in most trees — search the *subject* (`migration`, `number`) and read the
+handful of hits.
+
+## 2026-08-29 — four of my five worst defects were a check that could not fail
+
+An adversarial review of a tier I had just merged found **fifteen** defects under a green 231-test
+suite. Four of the five worst were the same shape: a **blocker that could not fail**, each sitting
+under a passing test I had written from the same misunderstanding as the code.
+
+- `components_resolve` tested `canonical == smiles and not _parses(smiles)`. I believed
+  `canonical_smiles` returns its input unchanged on a bad input. It does not — RDKit stops at
+  whitespace, so `"CCO junk"` canonicalises *successfully* to `"CCO"`, a smaller molecule. The first
+  clause is false for exactly the class the check exists for, so the second was never reached and the
+  detail read `1 structures parse` about a structure that does not.
+- `forbidden_absent` compared `canonical_smiles("DMF")` — the literal string `"DMF"` — against a set
+  of canonical SMILES. The comment beside it explained at length why looking at the structure
+  matters. It could never match.
+- `charge_is_consistent` put `reference.amount_mmol > 0` inside the comprehension that finds
+  disagreements, so a limiting reagent at `0.0` emptied the list and passed.
+- `layout_fits` never compared `rows`/`columns` to `plate_format`.
+
+**What each has in common is that my test asserted the same wrong model of the world as the code.**
+`test_components_resolve_blocks_a_structure_rdkit_cannot_read` passes `"not-a-smiles"` — which
+RDKit rejects outright, the one case the conjunction handles. I never tried `"CCO junk"`, because
+the code and the test came out of one belief.
+
+The rules I am taking:
+
+1. **For a check, enumerate the input *classes* before writing either the code or the test**, and
+   name the one the check exists for. Here it was "a string RDKit accepts as a different, smaller
+   molecule" — the class `require_molecule`'s own docstring is entirely about, in a function I had
+   read that morning. A both-directions test is not enough when both directions come from one idea.
+2. **A test I write beside my own code is a consistency check, not a search.** The searching has to
+   be done by something that did not write the code. This one cost 15 findings; commissioning it
+   was the highest-value hour of the task and it should not have been the last hour.
+3. **When a comment argues for a behaviour, run the behaviour.** Three of the four announced
+   themselves in their own prose — `forbidden_absent`'s comment describes the DMF/`CN(C)C=O` case as
+   the reason for code that cannot do it. I wrote the comment and the code in one pass and checked
+   neither against the other. The existing rule 14 says the docstring is the best bug detector;
+   the corollary is that it is useless on prose *I* wrote in the same breath as the code.
+
+## 2026-08-29 — I verified `make test` and CI runs `make cov`
+
+I ran `make lint type test` five times across a change, called it green, and CI failed — on a test
+`make test` runs too, but in a job I had never reproduced. The `ci` target is
+`lint type cov kg-validate … deps-audit`, and **`cov` is not `test`**: it is
+`pytest --cov --cov-report=term-missing`, which adds a coverage floor and, more to the point here,
+changes the timing profile of every performance-budget test in the suite. The failure was a
+per-turn graph-compile budget at 408 ms against a 400 ms bound.
+
+Rule 5 already says "run the gate's own command, at the gate's own scope, unpiped", and I read the
+`Makefile`'s `cov` line the day I started. What I did not do was ask **which target CI actually
+invokes** — I inferred it from `CLAUDE.md`'s prose ("the gate: `make lint` · `make type` ·
+`make test`"), which describes the developer loop rather than the CI job. The authority is
+`.github/workflows/`, and it costs one `grep`.
+
+**Before claiming a change is green: `grep -n 'make ' .github/workflows/*.yml` and run exactly
+those.** For this repository that is `make ci`, and the two targets it has that the prose does not
+are `cov` and `deps-audit`.
+
+The finding underneath was worth having, so the cost was not wasted: four new tools raised the
+per-turn compile 30 ms (209 → 239, isolated by deleting their registration import), and profiling
+put **79% of the whole build** in `langchain_core.tools.convert` re-deriving a pydantic model from
+every tool's signature on every build. Build time is proportional to schema size exactly as prompt
+cost is — a second cost of an oversized tool schema that nobody here had measured.
+
+## 2026-08-29 — a fix can be paid for with a record that does not exist
+
+The second adversarial pass over `chemclaw.protocols` found six more defects on top of the first
+pass's fifteen. The one worth a rule is not any of the six; it is the shape the largest one had.
+
+`store.advanced()` demotes an `approved` design back to `draft` when a revision lands on it. That is
+correct, and the docstring arguing for it ends: *"Which revision was approved stays recoverable:
+`set_status` records it."* `set_status` wrote one column on the header row and logged a line that
+did not carry the revision. **I wrote the demotion and the sentence excusing its cost in the same
+commit, one screen apart, and the sentence was an invention.**
+
+Rule 14 and the previous entry's rule 3 both say a docstring is a bug detector and that prose I
+wrote in the same breath as the code is not. This is the sharper case, because the false sentence
+was not describing the code beside it — it was describing *somewhere else*, and describing it as a
+reason to accept a loss. So:
+
+1. **A cost-is-affordable claim names a mechanism; open the mechanism.** "X stays recoverable
+   because Y records it" is a claim about Y, in a comment about X. It reads as reassurance and it
+   is a testable assertion about a different function. Every time I justify removing, demoting or
+   overwriting something by naming what still holds it, the next action is to open that thing.
+2. **A field the API accepts and never reads is a control that lies.** `POST
+   /protocols/{id}/status` validated a `reason` to 2,000 characters and dropped it — while the UI
+   labelled the box "recorded with the move", *disabled every button until it was filled in*, and
+   confirmed "recorded against you with the reason you wrote". That is worse than a dead parameter:
+   it is a promise made to a person, three times, in their own screen. **Trace every request field
+   to a write, and grep the consumer repository for the ones a person types.**
+3. **A fixture that agrees with my type proves nothing about the service.** The UI's
+   `GET /protocols/{id}` type was nested where the service is flat, so `revision.design` was
+   `undefined` and the document page threw on its first field — under 808 green unit tests and 8
+   green browser tests, one of whose docstrings says it exists to prove the page "renders against a
+   real proxied response rather than a stubbed one". Every stub was written from the same belief as
+   the type. **A cross-repository shape is verified by dumping the producer's own schema, not by
+   re-reading the consumer.** One `model_json_schema()` call ended a question three test suites
+   could not.
+4. **Resolve a merge, then grep for the markers.** `docs/decisions/README.md` went to a commit with
+   `<<<<<<< HEAD` in it and eight of `origin/main`'s ADR rows dropped. `make lint` and `make type`
+   were both green, because the file is Markdown. The suite caught it; my own reading did not.
+
+5. **Do not touch the shared database while a full suite is running against it.** I started
+   `make cov`, then ran a mutation that dropped a table and re-migrated it. The suite's own
+   Postgres-backed tests were reading that table at the time, so the run stopped being evidence
+   about anything and had to be thrown away and restarted. The sandbox has one Postgres and
+   `tests/pg.py` points every backend test at it. **While a suite is running, the only safe
+   commands are read-only ones** — a mutation experiment waits, or runs against a database of its
+   own.
+
+6. **The "run exactly what CI runs" rule is per repository, and the UI's gate is seven commands.**
+   I ran `typecheck`, `lint` and `test` in `Chemclaw3_ui`, called it green, and CI failed on
+   `npm run format:check`. The check job is `npm audit --omit=dev --audit-level=high`, `typecheck`,
+   `lint`, `format:check`, `test`, `check:contrast`, `build`; the e2e job adds **both directions**
+   of `check:no-dev-auth` (a default build must not carry the dev provider, an `ALLOW_DEV_AUTH=true`
+   build must) and `test:e2e`. Same `grep -n 'run: ' .github/workflows/*.yml`, different repository.
+
+## 2026-08-29 (second entry) — I shipped, then a review found four defects in what I shipped
+
+PR #282 merged green: `make lint type test`, a live storm family going 7/8 → 8/8, and a live
+measurement of the exact behaviour. Four adversarial reviewers over the merged commit then found
+four real problems: one defect introduced by the change, one pre-existing field it made
+reachable, one process failure, and one false claim in its own ADR. "Three introduced" is what I
+first wrote, and it is not what the four bullets below say.
+
+What the green gate could not see, and why:
+
+- **The new event fired on turns that succeeded.** Every test I wrote asked "is the lost call
+  announced?" and none asked "is anything announced when nothing was lost?" — so `evals/live`
+  scoring a clean turn `failed_loudly=True`, `turn_costs` booking failures against successful
+  calls, and `Chemclaw3_ui` painting two red rows above a good answer were all invisible to a suite
+  that only tested the failure case.
+- **I never enumerated the consumers.** `ToolFailedEvent` had exactly one producer before this;
+  adding a second changed the meaning of every reader of it, and I read none of them. Two of the
+  three broken readers are named in the event's own docstring.
+- **My ADR asserted a mitigation I had not checked.** I wrote that `reason` distinguished a
+  repaired step from a broken tool. `reason` names five gates and both cases carry `None` — one
+  grep would have shown it. That is the same class as the handover measurement I had corrected in
+  this very session, committed by me, in the document recording the correction.
+- **A field documented as bounded was not.** `invalid_tool_calls`' docstring said every field was
+  bounded on the way out; I read the docstring instead of the constructor three lines below it.
+  (An earlier version of this line attributed that claim to `BrokenCall.error`'s own docstring,
+  which says no such thing — a correction about misreading prose, itself misreading prose.)
+
+**The rule: when a change adds a second producer of an existing event, record, or metric, list
+every consumer of it and say what each now sees.** Not "does my new case work" — "what does the
+*old* reader make of my new case". The cheap version is one grep for the type name across `src/`
+and the sibling repos, then one sentence per hit.
+
+**And the corollary: a test suite that only exercises the failure path proves nothing about the
+success path.** For any change that fires on a condition, write the test where the condition is
+absent first. `test_a_repair_that_works_announces_nothing_because_nothing_was_lost` is the test
+that should have existed before the feature did.
+
+
+## 2026-08-29 (third entry) — the third pass, and a self-inflicted wound in the middle of it
+
+A fresh four-way review of the two merged commits found seven more things. The pattern across all
+three passes is one thing, stated three ways:
+
+- **#282**: I tested the failure path and not the success path, so a new event firing on turns that
+  succeeded was invisible.
+- **#284**: I fixed the announcement and shipped `_empty_answer_event` with **no test at all** —
+  `grep "reason to start from" tests/` returned only the source line — and its one behaviour I did
+  think about (failures) folded in the one I did not (refusals), contradicting a merged ADR.
+- Both: prose asserting the rule the same commit had just reverted, 200 lines below the paragraph I
+  corrected.
+
+**The rule, and it is the same rule each time: the thing I did not think about is the thing with no
+test.** Before committing, list every input the new code branches on and name the test for each
+branch. `tool_refusals` was a term in an expression I wrote and never once considered.
+
+**And a mistake made while proving the fix.** My mutation script restored with
+`git checkout -- src/` between runs. `src/` held all of the session's uncommitted work, so the first
+"restore" discarded every source fix I had just made — silently, because the tests live in `tests/`
+and only the *baseline* went red. I noticed because the baseline read `8 failed` when it should have
+read all-pass, and I nearly read that as a real regression.
+
+**The rule: commit before you mutate.** A revert-to-prove loop must restore from a committed
+baseline (`git checkout HEAD -- <one file>`), never from the index of a dirty tree, and never with a
+directory-wide path. Check the baseline is green *first*: a mutation run whose baseline is red is
+measuring nothing.
+
+**One more, from the same loop:** `str.replace(old, new, 1)` hits the first occurrence, and this
+middleware writes its guard twice — once per hook. The mutation landed on the sync path while the
+test drove the async one, so the guard read as unpinned when it was pinned. The parametrized test
+that came out of that now covers both, which is the coverage the accident found.
+
+
+## 2026-08-29 (fourth entry) — three numbers I published that were not properties
+
+A fourth review cycle, this time over my own fixes rather than over the code they fixed,
+**falsified three measurements I had already written into an ADR.** Every one of them was a real
+number when I took it. Every one was then written down as a fact about the system.
+
+- *"A chemist's abandonment was reverted 20 times out of 20."* Re-run five times: 20, 18, 18, 20,
+  17 — 93 of 100. The race is overwhelmingly likely, not certain. I ran it once, saw a clean sweep,
+  and reported the sweep.
+- *"2.61 s at the 4 MB cap payload, down from 46 s."* That payload cannot be constructed any more —
+  the same commit added the `max_length` ceilings that refuse it. The largest design now legal
+  diffs in ~0.3 s (0.060 s when that was written, on one filling of the free-text
+  fields — the byte size at those counts ranges 482 KB to 1382 KB and the diff time does not move
+  with it), and at its ceiling the quadratic scan costs 22.4 ms against `Counter`'s 0.107
+  ms. **Two fixes shipped together and I gave the credit to the wrong one**, which then went into a
+  code comment as the reason that line exists.
+- *"90.6 ms → 15.7 ms."* Reproduces at 384 arms, not at 24 (4x there). And the method it described
+  was reverted in the same cycle, so the claim outlived its subject.
+
+**The rule: a number going into the record is run more than once, and reported as what varied.**
+One run, in one configuration, immediately after the change it is meant to justify, is the most
+flattering measurement available — and it is the one I reach for, because at that moment I am
+looking for confirmation rather than for the distribution. `CLAUDE.md` says "measure it, don't argue
+it" and says nothing about how many times; for a claim that ends up in an ADR or a code comment, the
+answer is more than once.
+
+**The corollary, which is the part that generalises past measurement.** When two changes ship in one
+commit and the outcome improves, I attribute the improvement to the more interesting one. Here the
+interesting change was an algorithm (O(n²) → `Counter`) and the boring one was a refusal
+(`max_length`), and the boring one did all the work. Before writing "X fixed Y", disable X alone and
+check that Y comes back.
+
+**And the same instrument found four more of the same kind in the UI**, all fixture-shaped: a
+transcript index I "corrected" to a value that gave two messages one key, a plate axis where rows
+and columns used different rules, an error path written for a `detail` shape and blind to the one it
+was written for, and an interface promising a field no read returns. Each was found by reading the
+*producer* — `_transcript`'s `enumerate`, `place()`'s label arithmetic, the route's 409 body,
+`DesignOut`'s `extra="forbid"`. **When a fixture and the code agree, that is not evidence; the
+producer is the evidence.** I now read the producer before writing the fixture, in both repositories.
+
+## 2026-08-30 — the fourth pass, and the signal I kept ignoring
+
+The fourth review of one subject ended in a rewrite: 113 lines of retry machinery replaced by 42
+that move a call from one field to another. (I first wrote that as "~180 replaced by ~20" — a 9x
+reduction I never measured, against a real 2.7x. See the fifth entry.) What is worth carrying is not the design —
+it is that **three rounds of "found a defect, fixed the defect" was itself the finding**, and I read
+it three times as three unrelated bugs.
+
+**The rule: when consecutive fixes each introduce the next defect, stop fixing and look at the
+design.** The diagnostic is not the count. It is that every fix *rebuilt something the surrounding
+system already provides* — a loop ceiling because the loop cap could not see the extra model call,
+a reporting ceiling because nothing bounded the corrective message, an announcement rule because no
+`tool_failed` could be raised, a call-id guard because the announcement had no id. Four hand-built
+substitutes for four things a graph iteration gives away. A mechanism that needs its own version of
+what it sits next to is standing outside it.
+
+**A second-order mistake, and the one I am least comfortable with: I propagated two agent-supplied
+specifics into the permanent record without reading either source.** `"0 failures / 3 held"` was
+quoted as `Chemclaw3_ui`'s header; the component renders `` `${held} refusal${...}` `` and omits the
+failure clause entirely at zero, so the string I quoted cannot be produced. `841 kB` was
+unreproducible — 623 kB at the commit it described. Both reached four first-party files, an ADR and
+the ledger, because a subagent reported them and they sounded like measurements.
+
+**The rule: a number or a quoted string from a subagent is a claim, not a measurement, until I have
+opened the file or run the thing.** The cost of checking is one `grep`; the cost of not checking is
+a false fact in a record that outlives the session. Quoting a *file I have not read* is the specific
+act to refuse — a measurement I can at least re-run.
+
+**Third: a merge resolver that reconciles two append-only registers by key must treat a *changed*
+row as a conflict, not a duplicate.** Mine keyed the ADR ledger by id and did `rows[id] = line`
+iterating ours-then-theirs, so `main`'s copy won every collision and silently discarded a correction
+the branch had made to an existing row. It reported a clean merge. Nothing was lost that a test
+could see, which is exactly why it survived to be noticed a week later.
+
+**Fourth, on tests that pass under the defect they were written for.** The parse-error test pinned
+its 79-character fixture, which fit inside both the head window and the tail window — so the
+head-bounded implementation it was written to reject passed it. A bound is only tested by a fixture
+that *exceeds* it, and the honest form is a diff against the alternative implementation rather than
+a property both share. `test_the_parse_error_keeps_its_reason_where_head_bounding_would_lose_it`
+now asserts `"Expecting property name" not in _bounded_text(raw)` beside the positive case, so the
+two cannot silently converge again.
+
+**Fifth: assert the mutation is caught by the test written for it, not merely by the suite.** My
+first mutation run used `-x`, so a mutation was reported "CAUGHT" by whichever test ran first. Two
+of seven were caught by an older test and one — dropping the model's call id — *survived* the test
+whose comment claimed to prove it, because the announcer and the refusal read the same
+`request.tool_call["id"]` and pair with each other whatever it is. That comment was a false claim
+about a control, written by me, one commit after writing the rule against them. It is corrected in
+place and the real proof moved to the producer.
+
+
+## 2026-08-30 — six strangers found 37 defects in code four of my own reviews had passed
+
+A fifth review cycle over the prescriptive tier, run by six subagents with **fresh context windows**
+over disjoint slices. They found 37 defects here and 8 in the frontend, in code that had already
+been through four of my own review-fix cycles and a green 233-test suite.
+
+**The pattern in what they found that I did not.** Almost every one is a place where I read my own
+*intention* instead of the text:
+
+- I wrote `_structures`' docstring arguing that `reaction_smiles` says "what is being asked for"
+  while the set says "what the design *does*" — and left `request.components` in the same set, which
+  is the identical mistake one field over. It made the commonest ask in process chemistry ("get me
+  out of DMF", which names DMF and forbids it in one sentence) permanently unstorable.
+- I wrote `_number`'s docstring naming `1.23457e+06` as the defect it fixed. The fix covered only
+  integral values and the docstring's own literal example still reproduced.
+- I wrote `_cell` to stop free text restructuring a table, and never asked the same question about
+  the text *outside* tables — where a hazard string forged a second `## Waste` section.
+- I fixed who supplies the quote for `basis="stated"` and never revisited what `stated` means, so
+  the value stayed unattested and four limits a chemist never named were stored as their own words.
+
+**The rule: after fixing a defect, search for its shape elsewhere.** Every one of those is the
+fixed bug living one field, one function or one layer along. I fix the instance and write a
+docstring about the class, which reads as if I had fixed the class.
+
+**And the second one, which is new to me: a fix can silently retire a test somewhere else.** The
+audit applied 21 source mutations that left the suite green. The sharpest:
+`test_two_writers_racing_on_one_head_lose_as_a_revision_conflict` exists to prove the primary key
+decides a race and asserts, emphatically, that the loser "cannot pass by inheritance" from
+`UniqueViolation`. A `FOR UPDATE` added *later*, for an unrelated defect, serialises those writers —
+so the branch is now unreachable, replacing the handler with a raised `AssertionError` leaves the
+suite green, and the test goes on passing while its docstring is false. Nothing signals this.
+
+The remedy is cheap and I now use it: **for any test whose value is the branch it reaches, break the
+source and check it goes red.** I did that for the render, authorization, store and diff tests added
+in this cycle, and it caught two of my own tests asserting something other than what I thought.
+
+**The sentence that stood here counted them, and the count was wrong three different ways.** It read
+"11 of 13 render tests, all 4 authorization tests, all 4 store tests, both diff tests" — 21 — while
+the commit and the merge said "all 23 tests added in this cycle" and the ADR said four. A later
+review collected the node ids at both ends of the branch and measured **41 new node ids over 36 new
+test functions**: authorization +7 (not 4), checks +8 and design_tools +3 (which this sentence
+omitted entirely), render +15, store +4. The store figure was the only one right. **A count of my
+own work is a measurement like any other, and I wrote three of them from memory in one cycle.**
+Either collect it — `pytest --collect-only -q` at both ends is one command — or describe the
+practice without a number, which is what the paragraph above now does.
+
+**A measurement note, continuing the previous entry's rule.** The reviewers handed me numbers and I
+re-ran every one before using it. Two did not reproduce as reported: the sign-off race was described
+as a concurrency defect and reproduces 0/100 as a race but 100/100 as plain latency, and the torn
+read needed `REPEATABLE READ` rather than merely one transaction. Had I taken either on trust I
+would have written a fix for the wrong mechanism and a commit message asserting it. **Someone
+else's measurement is evidence about their run, not about mine.** The torn-read figure I published
+for that second one — "2/25" — is the same lesson turned on me: a later reviewer got 1/25, 3/25 and
+1/25 on three runs, because a race rate is a *rate* and I quoted one sample of it as a constant. The
+mechanism was right; the number needed a denominator big enough to be one. Measured properly it is
+**9 of 200**, and that figure is now what sets the test's round count.
+
+## 2026-08-30 (second entry) — what the fifth review round found, and why it kept going
+
+Three fresh-context reviewers over the change I had just merged. They found four things, and none
+of them was a defect in what the code *does* — two false claims and two untested paths.
+
+**The rule that comes out of it: a review round that finds only false claims and untested paths is
+the signal a design has settled, not the signal to stop reviewing.** Those are the cheapest defects
+to introduce and the most expensive to find later, precisely because nothing goes red. Rounds one
+to three found design defects and I kept going because things were obviously wrong; round five is
+the one I would have skipped, and it caught a total loss of a bound.
+
+**A fix for an off-by-one at one end of a range is not evidence about the other end.** My binary
+search fixed a `repr`-escape being cut in half — a large-input bug — and created a worse bug at
+small budgets: `text[-0:]` is the whole string, so when nothing fits the budget the function
+returned the *entire* 100 kB document. The test I wrote with the fix exercised only the budget the
+original defect had been found at. When a change touches a bound, test both ends of it and the
+degenerate middle, not the value that motivated the change.
+
+**A predecessor's tests are a checklist of properties somebody already thought were worth holding.**
+I deleted `test_the_sync_path_announces_what_the_async_path_announces` along with the mechanism it
+covered, and wrote no equivalent — so gutting the replacement's synchronous hook left 137 tests
+green. Deleting a test is a decision that needs the same argument as deleting the code. Before
+removing a test file's worth of coverage, list what each deleted test asserted and say, per item,
+whether the replacement still needs it.
+
+**A claim about ordering must be tested under the configuration that can falsify it.** "Innermost
+of the governance chain" was false whenever the harness is enabled, and both tests pinning that
+chain build it under profiles that attach neither of the two entries that nest inside. The
+falsifying configuration was the one nothing constructed. When pinning a list that is assembled
+conditionally, enumerate the conditions and pin the widest one.
+
+**And the third round running in which I published a number I had not measured.** "~20 lines
+replace ~180" — a 9x reduction against a real 2.7x (113 against 42, AST-counted). The previous
+entry in this file is about exactly this, written by me, one round earlier. Writing the rule down
+did not stop me doing it; what would have is counting before typing the sentence. **Treat any
+ratio, count or size in prose as requiring a command in the same edit.** If there is no command,
+there is no number — write "smaller" instead.
+
+## 2026-09-04 — a gate that cannot run, and a contract with two halves
+
+From the fifteen-review deployment-readiness pass (`D-2026-09-04-fifteen-fresh-contexts-over-one-tree`).
+
+**A skipped gate is invisible in a way a failing one is not, so check what a green run did not
+run.** `helm` is absent from this sandbox; twelve chart assertions skip as "helm is not installed";
+five HIGH chart defects had survived every previous review because nobody had rendered the chart.
+`tests/pg.py` has an epilogue that names its skips for exactly this reason and nothing does the same
+for helm. **Rule for myself: before reporting a suite green, read the skip list and ask what each
+skip means the run is not evidence about — then install the missing thing rather than noting it.**
+
+**A green server suite is not evidence that a client can call the server.** Every one of twenty-seven
+route tests wrote the request body the *server* expected, so an endpoint its only client could not
+call stayed green through `mypy --strict`, ten validators and 6,406 tests. **Rule: where a route's
+only caller is a companion repo, read that repo's call site and test the literal body it sends.**
+
+**A per-package check is not the gate.** Nine fixers each ran `mypy --strict` on their own `src/`
+package and reported clean; eleven errors were in `tests/`, which the real gate covers. Three more
+regressions surfaced only in the full suite. **Rule: run the project's own composite target before
+claiming done — never a scoped approximation of it.**
+
+**Verify a claim against the thing it describes, not against another document.** A `BACKLOG.md` row
+said a fix was blocked on "a matching change in `Chemclaw3_ui`" — that half had already shipped, and
+believing the row is what kept the defect alive. A fixer found it by checking the client instead.
+**Rule: a blocker written down is a claim about a commit; re-check it before accepting it.**
+
+**When a reviewer prescribes a fix, measure the prescription.** Four were wrong in this pass, one of
+them dangerously (`ABANDON` as a parent-close policy is worse than the default it replaces, not
+better). **Rule: a finding's diagnosis and its proposed remedy are two separate claims and the
+second is usually the less tested one.**
+
+## 2026-09-05 — four reviewers over one day's measurement
+
+From `D-2026-09-05-four-reviews-of-one-days-measurement`, reviewing my own #308.
+
+**A comment that disclaims an anti-pattern is not a defence against writing it.** I wrote
+`probes[::len // n][:n]` under a paragraph explaining why `probes[:n]` would be wrong, and for every
+n above half the corpus those are the same expression. The comment made the code *look* considered
+and stopped me checking. **Rule: when a comment says "not X", compute the case where the code most
+resembles X and assert the difference.**
+
+**I shipped an arithmetic bound with no test at all, in a change whose whole subject was
+measurement.** Every other piece of #308 got tests; `--sample` got a paragraph. **Rule: a selection
+or sampling rule is the one thing in a measurement that can be wrong while every arm still runs and
+reports — it gets a test before it gets a comment.**
+
+**Delegating a fix does not delegate the claim.** The false "CI never installed helm" narrative and
+the unmeasured "33" came from a subagent's work I accepted because its evidence for the *mechanism*
+was good. Its evidence for the *story around the mechanism* was a BACKLOG row. **Rule: when a
+subagent reports a fix, re-derive the numbers and the causal claim separately from the diff — they
+are two claims and only one of them was tested.**
+
+**A claim is checkable against `main`, not against the branch point.** The ADR contradicting my helm
+rationale merged while I was working. I never re-read `main` before merging. **Rule: before merging,
+re-read what landed on the base branch since the branch point, specifically for claims my prose
+makes about the same subsystem.** It happened again in the review itself, and cost more: three PRs
+landed while four reviewers ran, and one of them rebuilt the judge on the provider seam — so the TLS
+fix I had written, tested and described in an ADR was obsolete before it merged, and the merge
+conflict was the only thing that told me. **Corollary: re-read the base *before* writing the fix,
+not before pushing it, whenever a review takes long enough for the base to move.**
+
+**Committing the result and not the artifact behind it is how a number becomes unre-derivable.** I
+committed 442 transcripts and left the token counters in `/tmp`, so the one table nobody could check
+was the cost table. **Rule: if a figure comes from a scrape, a counter or a clock rather than from a
+file, commit the scrape in the same commit as the figure.**
+
+**And the correction to a wrong assertion can be wrong.** My first fix for the sampling test
+asserted "the last draw lands in the final tenth", which is false at n=2 where the correct
+stratified draw is the first probe of each half. **Rule: state the property (each band contributes
+one), never a proxy for it (the last one is near the end).**
+
+**A clean auto-merge is not evidence the tree is unchanged.** The remote branch was the pre-squash
+history of an already-merged PR (branch deletion is blocked through this git proxy), so it looked
+content-free — its tree was byte-identical to the squash on `main`. Merging it re-added a
+`BACKLOG.md` row I had deleted in this cycle, with no conflict: from the merge base's view that
+branch *adds* the row and my commit removes it, and git resolved it in the branch's favour. **Rule:
+after merging a stale branch whose PR was squashed, diff the merge result against your own pre-merge
+HEAD, not just against the base.** Zero files differing is the assertion; "it auto-merged cleanly"
+is not.
+
+**A flag named for its conditional half gets skipped on the branch that matters.**
+`private_ca_transport` carried `trust_env=False` — with a docstring naming the exact proxy attack —
+behind `if not ca_bundle: return None`, and no shipped configuration sets a bundle. So the control
+was real, tested, documented, and absent from every deployment, and four separate documents cited it
+as protection. **Rule: when a function does an unconditional thing and a conditional thing, the name
+and the early return both belong to the unconditional one.** The corollary that found it: grep for
+who *takes* the branch, not for who mentions the function.
+
+**Fixing a conflated flag costs whatever else it was conflated with, and that has to be measured
+too.** `trust_env=False` refuses ambient proxies; it also stops httpx reading `SSL_CERT_FILE`, so
+the obvious fix would have silently swapped a deployment's trust store for `certifi` — measured, 1
+CA certificate against 118. The backlog row had warned about exactly this and I had already written
+the ADR without accounting for it. **Rule: when a row states a cost, measure the cost before
+deciding it is acceptable — and prefer taking back the half you did not object to (one explicit
+`verify=`) over accepting a second behavioural change you never put to the owner.**
+
+**Measure the options before putting them to the owner, and put the crux in the question.** The
+choice here looked like "guard-side or client-side"; measuring first showed the client-side option
+as originally scoped was theatre, because the LLM call goes out on a client `langchain-openai`
+builds with `trust_env=True` and centralising *first-party* construction never reaches it. A
+question asked before that measurement would have offered an option that does nothing.
+
+**I wrote a control and then hand-rolled the environment convention it depends on.** The ADR argued,
+correctly, that reading `no_proxy` a second time would be writing a second answer to it — and used
+`urllib.request.proxy_bypass` for that half while reading the proxy variables myself, as
+`name` and `name.upper()` over three names. Every client library lowercases instead, so
+`Https_Proxy` gave httpx a live proxy mount while my check saw nothing and the process booted
+clean. The test's own docstring made the argument that defeats it ("a control an operator disables
+by typing the variable in lower case") and stopped one step short. **Rule: when a rule cites an
+environment convention, get every part of that convention from one stdlib call — and when a
+docstring argues why case matters, enumerate the cases rather than two of them.**
+
+**A guard derived from the widest available set refuses things that set cannot describe.** I ran
+`derive_allowed` — every host by any protocol — through a proxy check. Measured, psycopg connects
+with all three proxy variables pointed at a dead port, so the Postgres host was never proxiable;
+a site whose `NO_PROXY` covered every HTTP destination and not its database would have been refused
+at boot by a message that was false. **Rule: a new check gets its own derivation of exactly what it
+can decide about, even when a wider set is sitting there already typed.**
+
+**Preserving one half of a conflated flag can break the other half in *either* direction.** First
+attempt at keeping `SSL_CERT_FILE` alive under `trust_env=False` used
+`create_default_context(cafile=None)` — which honours it, and on the shipped configuration silently
+swapped certifi's 118 roots for the OS store's 152, dropping 13. The correct fix reproduces the
+library's own precedence explicitly and is verified against it in all four combinations. **Rule:
+when replacing a library's default, measure your replacement against that default in every input
+combination, not just the one that motivated the change.**
+
+**My own fixture hid a finding.** The scheme-mismatch test failed for a reason unrelated to
+schemes: `calc_server_url` ships as loopback `http://`, so `HTTP_PROXY` really did carry it, and
+the fixture was measuring the shipped defaults rather than the property. **Rule: a fixture for a
+property test sets every input the property ranges over — a default left in place is an unstated
+arm.**
+
+**I attributed a difference between two full-suite runs to my own diff without checking the
+instrument.** The commit closing orphaned httpx clients claimed it "moved the suite's
+ResourceWarning count from 129 to 137". Four consecutive green runs read 129, 141, 137, 143 — the
+run *after* the fix was the highest — and driven directly, the two files involved emit 0 either
+way; the warnings belonged to a third file. **Rule: before attributing a metric's movement to a
+change, run the metric twice without the change. A number that moves on its own is not evidence,
+and a suite-wide aggregate of a GC-timing-dependent warning is exactly that kind of number.**
+The correction goes in the live prose, because `git log` keeps the wrong sentence either way.
+
+**A unit test that constructs the component is evidence about the component, never about whether
+anything calls it.** Six defects in one review round shared exactly that shape, and the worst of
+them was mine: `_TurnLedger.note_event` counted an `AnswerEvent` correctly, its tests called it
+directly, and the three columns it fills were `NULL/false/0` on every row a deployment could ever
+have written — because the event is *built* in `run_turn` rather than streamed, and never reached
+"the one place the counts are taken". **Rule: when a change adds a reader — a column, a counter, a
+gate, an index — the first test drives the production entry point and asserts on what the *sink*
+received. A test that calls the reader directly may exist, but never alone, and never first.**
+
+**A derived set is only better than a stated one when the derivation answers the question being
+asked.** I derived `capture_calls` from `side_effecting_tools()` and wrote a comment praising the
+derivation for being self-maintaining. It spans 49 tools, six of which write knowledge, so a turn
+that computed one xTB energy booked a knowledge capture. **Rule: before deriving a set from an
+existing partition, say out loud what question that partition answers and what question mine asks;
+if the sentences differ, the derivation is a coincidence that happens to type-check.**
+
+**A default is an assertion about every row that already exists.** `NOT NULL DEFAULT 0` on
+`retrieval_calls` backfilled the whole history of `turn_costs` with "answered without consulting the
+record" — the most interesting value the column can take — in a migration whose own next paragraph
+argued precisely this about the column beside it. **Rule: for a new column, ask what a query for its
+most interesting value would return on the day it ships. If that answer includes rows nobody
+measured, it is nullable.**
+
+**Writing a corpus for its retrieval shape is not the same as writing chemistry.** Two of the four
+chemistry errors in the 48-note eval corpus were inside gold sets: a Heck "at reflux" in DMF at
+110 °C, a Dean–Stark trap on an ethanol esterification. Every retrieval assertion passed throughout.
+**Rule: a fixture in a domain gets one read pass *as domain content*, separately from the pass that
+checks it exercises the code — and the corpus must not contradict itself, which is the half a
+non-expert reader can still check.**
+
+**A test can be red only under `make cov`, and lesson 38's rule sends you the wrong way.**
+`test_concurrent_batches_do_not_race_on_the_cache` failed the full gate and passed every time I ran
+it alone — which reads exactly like the contended-load case above, and is not it. Coverage tracing
+multiplies a tight 4,800-iteration threaded loop by ~30 (4.8 s bare, 132-216 s traced) and the
+global cap is 180 s, so the run's outcome is decided by which side of that line the machine lands
+on. Five isolated runs under `--cov`: 132 s, 152 s pass; 200 s, 213 s, 216 s fail. Perfect
+correlation with the cap, none with the race the test is named for.
+
+Two things I nearly got wrong. I reached for "order dependence" first, because that is what the last
+two suite-only failures were, and it cost a detour. And the failure *presents* as the concurrency
+bug under test, so "flaky race test" is the reading that offers itself — on a test whose own
+docstring says a race test cannot promise to fail every run.
+
+**Rule: reproduce a suite-only failure under the gate's own flags before theorising.** `pytest <file>`
+is not `make cov`. And when a slow test sits under a shared cap, the number to check is its
+*traced* runtime, not its bare one — this is the third test in this repository whose cap was sized
+against a measurement nobody took under coverage.
+
+**An absolute-sounding qualifier in a one-line design instruction is a question, not a spec.** The
+owner wrote "things that change agent behaviour like skills only after human review". I read "only"
+as covering every turn, wrote a whole ADR section rejecting the local-skills tier on that reading,
+and was wrong: the review applies to the *shared* tree, and the local tier was the point of the
+design. Both readings are grammatical and they differ in exactly one property — whether an
+unreviewed skill may touch its own author's turns. **Rule: when a short instruction turns on a
+quantifier (only, always, never, all) and two readings would produce materially different code, put
+the two readings to the owner before writing either one up. The tell is that I can state the
+distinguishing property in a single sentence — if I can, I can ask.**
+
+**A rejected alternative's argument survives the rejection being overturned.** When the tier came
+back, the objection I had raised against it (per-user skills fragment answers across chemists with
+nothing recording why) was still true. Deleting it with the rejection would have lost the reason
+the design needs an inspectability invariant. **Rule: when a decision reverses, re-file the losing
+argument as a stated cost or as a requirement it generates — never delete it as though it had been
+wrong.**
+
+**`git add -A` in a tree other agents are working in stages their experiments as my commit.** My
+merge commit deleted one line from `connectors/registry.py` — the whole subject of the branch's
+first fix, present in both parents and the merge base — because four review agents were running
+mutation arms against `src/` while I resolved the merge with `git add -A`. The repo's "one writer
+per path when fanning out" rule covers the agents; it does not cover the *commit*. **Rule: when
+subagents may be mutating the tree, stage a merge by naming its files (`git add <paths>`), never
+`-A`; and brief read-only reviewers to mutate under a copy rather than in place.**
+
+**And my own verification could not have caught it.** I checked the merge result against my
+*pre-merge HEAD*, which is blind by construction to any file the merge legitimately touches. The
+check that finds this class is `git diff $(git merge-tree --write-tree <parent1> <parent2>)
+<merge>^{tree}`: it names every file where the committed merge differs from a clean merge of the
+same two parents, so a deliberate conflict resolution and an accidental capture appear side by side
+and have to be told apart one at a time. Mine showed three files; two were my resolutions and one
+was the accident. **Rule: verify a merge against a machine-computed merge of its own parents, not
+against either side of it.**
+
+**The guard caught what the reviewer and I both nearly missed, which is the argument for writing
+it.** `test_every_ambient_name_space_is_refused_to_a_connector` goes red on that deleted line, so
+CI would have refused the merge — a test written this week to stop a *future* refactor silently
+re-opening `write_todos` caught the session that wrote it doing exactly that, three commits later.
+
+**A control aimed at the wrong subject passes every test written for it.** My boot refusal charged
+every http(s) destination the process dials — and every first-party client for those had
+`trust_env=False`, half of them set by the same commit. Measured: zero proxy mounts each against two
+on a default client. So it refused deployments over destinations a proxy could not carry, missed the
+three it could, and on the shipped loopback defaults stopped `import chemclaw.core.config` and
+`pytest` outright for anyone behind a corporate proxy. Every arm I wrote passed, because I had
+tested the mechanism against my own model of it. **Rule: for a control that refuses, name the actor
+it defends against and measure that the actor can actually reach each thing being charged — a
+destination that cannot be attacked is a false refusal waiting for a deployment.**
+
+**Fixing a control can reintroduce the defect a reviewer just removed from it.** The first review
+found the proxy read missed mixed-case spellings; I fixed it with `getproxies_environment`.
+Re-targeting at grpc and urllib then forced a direct read again — that stdlib call drops `http`
+under `REQUEST_METHOD` and neither git nor grpc implements the carve-out — and the
+`name`/`name.upper()` shortcut came back with it. Measured, `Grpc_Proxy` was live again.
+**Rule: when a change re-opens code a review has already corrected, re-run that review's own
+measurement against the new version before running anything else.**
+
+**A test that cannot produce the collision it describes still passes.** My guard against two proxies
+collapsing onto one destination varied two variables on *one* reader — and a reader takes the first
+match and stops, so it could only ever record one. The mutation survived; the collision needs two
+readers on one host. **Rule: before asserting that a mutation is caught, run the mutation. A test
+whose scenario is impossible is green for the same reason the correct code is.**
+
+**An instrument that returns the same number for both arms may be blind rather than agreeing.**
+`SSLContext.get_ca_certs()` does not report a `capath` at all, so my four-row trust-store table read
+`0 | 0` and I recorded agreement — while an ambient `SSL_CERT_DIR` was silently widening a
+configured CA pin. **Rule: when a comparison's two sides agree at zero, prove the instrument can
+produce a non-zero before believing it.** A real handshake was one page of code and found the
+defect the table was written to rule out.
+
+**"Nobody has applied it yet" is not a fact the repository can hold.** I edited migration 082 in
+place because it was unmerged, and `tests/test_migrations_are_additive.py` — skipped on this
+sandbox's truncated clone, run on CI's `fetch-depth: 0` — caught it against the commit that
+introduced the file. The rule is mechanical on purpose: who has applied a migration is unknowable
+from inside the tree, and my own dev database had already applied it. **Rule: a migration is
+immutable from the commit that introduces it, not from the merge that ships it; a correction is a
+new file. And when a guard is skipped locally for an environmental reason, treat its subject as
+unchecked rather than as fine — the skip line says which.**
+
+## 2026-09-05 — six reviewers over one session's front-end and event work
+
+From reviewing the changes of this same session, in `Chemclaw3` (#319) and `Chemclaw3_ui` (#67).
+Three of what they found were regressions I had introduced hours earlier, and each was invisible to
+the gate I ran.
+
+**A CSS `@media print` rule is not covered by a green unit suite, and neither is anything else the
+browser's layout decides.** happy-dom evaluates neither `:has()` nor layout, so the print stylesheet
+I added — which hid every `#root` child on any page without a protocol document, i.e. a blank sheet
+for the conversation — passed 1,000 tests and a build. **Rule: a change whose effect is a computed
+style, a layout, or a selector match is not done until it is measured in a real browser; the fastest
+form is a standalone probe page loaded in the pinned Chromium, and the durable form is a Playwright
+arm asserting *both* the page it was written for and one it was not.**
+
+**"Reuse the shared counter" is a refactor, not a no-op, when the counter also sets a duration.** I
+replaced `backoff(6, …)` with `backoff(attempt, …)` to make a silent branch report — correct — and
+silently cut the concurrent-stream cap's first wait from 15–30 s to 1–2 s, because the literal was
+the *saturation point* and not a magic number. It surfaced as a ~50% test flake, not as a failure.
+**Rule: before replacing a literal with a variable, ask what the literal was *for*; if it is a
+saturation point, a ceiling or a floor, keep it as `max`/`min` around the variable.**
+
+**A flaky test is a message about the code, not about the test.** My first reading was "this test's
+window is too tight". The window was fine the day before; my change had moved the value it measured.
+**Rule: when a test starts flaking in a change that touched its subject, assume the change until the
+diff proves otherwise.**
+
+**Two files that say they do "the same thing for the same reason" will not.** `errorFromStatus` split
+the two 429s on whether `Retry-After` was *present*; `useJobStreams` split them on whether it
+*parsed*, under a docstring pointing at the other file. **Rule: when a docstring cites another
+module as the authority for a decision, open it and diff the predicate — a citation is not an
+implementation.**
+
+**A field written by two producers and read by nobody is dead, and the docstring will describe the
+reader it does not have.** `AwaitingBrief` carried `subject`, `kind` and `due_at` under "the four
+fields anything renders", where the badge reads `.length`. Deleting them also deleted a real defect
+they had grown. **Rule: for a new state field, grep the readers before writing the docstring, and
+let the grep write it.**
+
+**Extracting a function does not carry its fix.** Another branch extracted `sleep` from the module
+whose version had the abort-listener cleanup, and shipped the version without it, under a docstring
+saying it took the one "that got it right". **Rule: an extraction is a diff against the original, not
+a paraphrase of it — and the new home gets the test the old one had, on the function rather than
+through its caller.**
+
+**`git checkout <file>` is not "undo my last edit".** Twice in this session it discarded a whole
+file's uncommitted work while I was probing whether a test bites. **Rule: to probe a revert, copy the
+file to the scratchpad first and restore from the copy; never reach for `git checkout` on a file
+with uncommitted work in it.**
+
+**Running the gate means running all of it.** I pushed a branch where `tsc -b` was red — four
+construction sites of an interface I had given two required fields — because I had been running
+`vitest` and `eslint` on the files I touched. **Rule: after changing a shared type, run the whole
+typecheck, not the tests of the files that changed.**
+
+**A deletion's blast radius is a measurement, not an estimate — take it before planning.** Ungating
+knowledge sounded like editing nine call sites. Measured first: 348 files mentioned the gate, 15
+imported it, 11 of 11 eval probe files graded the agent on its behaviour, and — the finding that
+changed the whole shape — *all nine callers were knowledge*, so the change deleted a subsystem
+rather than rewiring one. **Rule: before planning a removal, grep for importers, for prose mentions,
+and for tests/evals that assert the behaviour, and report the three numbers. The one that reframes
+the task is usually the third.**
+
+**When a removal leaves a subsystem with no caller, that is the user's decision, not a detail to
+resolve while editing.** "Delete it" and "keep it dormant for the decided-but-unbuilt subject" are
+both defensible and cost very different things. I put it to the owner with the line count and both
+costs. **Rule: if finishing a task as specified would delete or orphan a working subsystem the spec
+did not name, stop and ask — the spec's author usually did not know it was in scope.**
+
+**A test that fails after a redesign is sometimes reporting a regression, not staleness.** The
+poisoned-index test failed because the gate's linked worktree had its own index and my writer shares
+one — so a plain `git commit` swept unrelated staged files into the note's commit. The reflex of
+"the design changed, update the assertion" would have shipped that. **Rule: for every test that
+fails after a redesign, name which of the two it is — the assertion is obsolete, or the guarantee
+it encoded is one I just broke — and say so in the commit.**
+
+**Prose that cites a symbol is code that can dangle.** `test_docstring_paths` found 22 files
+pointing at modules I had deleted, and `prose-validate` found seven more including a setting name
+inside my own replacement text explaining that the setting was gone. **Rule: after any rename or
+deletion, run the repository's own prose validators before believing the sweep is done — a
+docstring pointer is not caught by mypy, ruff or the test suite.**
+
+## A deleted producer leaves readers that pass their own tests (2026-09-05)
+
+**What happened.** Five fresh-context reviews of the PR-gate deletion found nine defects. Four were
+the same shape and I had not looked for it: `operations.authorship` and the evidence pack both still
+read `note_proposals`, a table the deletion left standing and emptied of any producer. Neither is
+broken in a way anything reports — they return `0` and `[]`, which is what an idle system returns.
+`kg-validate` and `backfill_corpus` were the prose version: each rested its stated purpose on a
+review step that no longer happens.
+
+**Why I missed it.** I grepped for the removed *thing* — `pr_gate`, `propose_note`,
+`proposal_store` — and fixed every hit. That finds the writers. A reader names a table, a column or
+a concept and survives the grep entirely.
+
+**The rule.** *When deleting a subsystem, enumerate the tables, columns, metrics and config keys it
+was the only writer of, and then find every reader of each one.* For each, ask: **who writes what
+this reads now?** If the answer is "nobody", the reader is a defect even though it is green — and it
+is worse than a crash, because a plausible zero is indistinguishable from a quiet afternoon. This is
+`D-2026-09-05-a-reader-with-no-caller-passes-its-own-tests` one level out: that was about a
+component nothing *calls*, this is about one whose *input* nothing produces.
+
+**The corollary that cost the most.** A deletion also invalidates arguments made by the code that
+stays. The sidecar's `rsync --delete` was safe for exactly as long as the writer committed
+elsewhere; moving the writer into that tree turned it into silent, permanent data loss, and nothing
+in either file mentioned the other. So: when a component moves, re-read what was safe *because* of
+where it used to be.
+
+**And: my own edits are part of the bill.** Rewriting tool docstrings for correctness moved
+`tests/test_context_floor.py`'s measured prefix by 56 tokens. I re-recorded the figures rather than
+raising the ceiling. A docstring is prompt, and prose that costs tokens is a change like any other.
+
+## `vitest` green is not `npm run test:e2e` green (2026-09-05)
+
+**What happened.** In the companion PR I edited three `e2e/*.spec.ts` files, ran `lint`,
+`tsc -b`, `format:check` and `vitest`, reported "110 files, 991 tests green" and pushed. CI failed:
+`e2e/routing.spec.ts` — a fourth e2e file I had not opened — clicked through the sidebar into a
+proposal sheet the same PR deleted.
+
+**Why I missed it.** I read the four `npm run` scripts I happened to know and treated their union as
+"the gate". The gate is the CI workflow, and it has a `Browser tests` step running `npm run test:e2e`
+that none of those four covers. I had *edited files that only that step runs* and still did not run
+it.
+
+**The rule.** *Before claiming a change is verified, read the CI workflow and run the steps that
+cover the files the diff touches* — not the commands habit supplies. If a diff touches `e2e/`, the
+e2e suite is part of the verification, and there is no version of "green" that excludes it.
+
+**Second-order, and worth the two extra minutes it costs.** When the e2e run then failed locally in
+a way that looked catastrophic (92 tests failing in 3 ms), the answer was not "my change broke
+everything": the browser binary was at a different path, and after fixing that, the remaining
+failures were 2-worker contention in this sandbox — the same files pass 6/6 in isolation. Check
+whether a failure is *yours* before either believing it or dismissing it. I confirmed by re-running
+the touched files at `--workers=1`, where all 44 pass.
+
+This is the same shape as the finding this session's ADR is about, applied to me: a green line whose
+basis is narrower than the claim it is used to support.
+
+**Six tests I wrote to prove six fixes were vacuous, and they were vacuous the same way.** A
+fresh-context agent ran 30 mutations against the tests from one day's work: 23 caught, 7 survived.
+Every survivor is a test asserting *the shape of a thing rather than its effect* —
+
+- a **pool count** instead of which server each pool dials (`/readyz` probing the wrong DSN charged
+  33 connections to the wrong server, 4 pools either way, green);
+- a **substring of a PromQL rule** instead of what the rule computes (`or` → `and` between the two
+  per-server branches makes the alert unfireable; all seven assertions still true);
+- a **difference between two renders** instead of the number rendered (a `+5` inside
+  `chemclaw.fleetPools` declared 31 pools for a topology of 26; both sides moved together);
+- **three of a chart's four** fleet inputs fed to `Settings` (the fourth non-zero fails every pod at
+  startup, suite green);
+- **two sweep points on the same side** of the constant they exist to pin (`3 × replicas` → `2 ×`);
+- a **docstring naming a composition root the body never touches** (`serve_worker`) — its sibling
+  drives the real root and caught the identical mutation, which is the contrast that proves it.
+
+The last one is the tell for the whole set: the sibling test was written by the same session in the
+same hour and is not vacuous, because it drives the thing instead of describing it.
+
+**Rule: after writing a test for a fix, mutate the fix and watch the test fail — before writing the
+commit message.** Not the whole suite; just the one line the test is about. I already had this rule
+in the form "a test that substitutes its own copy of the thing under test proves nothing", and it
+did not fire, because none of these substitutes anything: they observe the real object and ask it
+the wrong question. The sharper form is that **a test and the fix it guards, written together, share
+a blind spot** — the only thing that finds it is changing the code and seeing what stays green.
+
+One of the six was a test I had already repaired once that same day, for a *different* vacuity, and
+it went green again on a mutation I had not thought to try.
+
+**"`kubeconform` not installed" is not "kubeconform cannot be installed", and I read it as the
+second for a whole session.** `make helm-validate` was the one gate step I never ran locally, on the
+strength of that message; I deferred it to CI eight times and said so each time as though it were a
+property of the sandbox. It took one `curl` and a `cp`. The target then passed on the first run —
+31 and 35 manifests valid, both PromQL arms clean — which means every chart change this session was
+verified only by a remote job I could have reproduced in a minute.
+
+The Makefile's message points at `docs/guides/runbook.md`, and the runbook named none of the three
+binaries, so the pointer was dangling and the misreading was the natural one. That section exists
+now.
+
+**Rule: before recording a gate step as unavailable, try to make it available once.** `CLAUDE.md`
+already carries exactly this argument about Docker — "that message describes a default, not a
+limit" — and I re-derived the same mistake against a different tool in the same session, having read
+that paragraph at session start.
+
+**A rule I have written down twice is one I still walked into.** Correcting the connection ceiling,
+I put "26 pools steady, 36 at the peak" and "six pools of headroom" into `values.yaml` — the exact
+file whose prose pin exists because it once said "17 pooled processes" over a render of 14, and the
+pin failed my commit. That is the system working, and it is also the third entry in this log about
+transcribing a measurement into prose. **Rule: before writing any number into a non-test file, ask
+which test would fail if it went stale — if the answer is "none", the number belongs in the test and
+the prose gets the name of the test.** The corollary that would have saved the round: a repository
+with a pin for this class of mistake is a repository that has already made it, so read the pin
+before writing the paragraph, not after it rejects you.
+
+**Deleting on the strength of one falsified claim is as unmeasured as keeping on the strength of
+one asserted claim.** The comment justifying `plan_cache_mode=force_custom_plan` said the dense
+vector query cliffs from a generic plan; it does not, and the measured mechanism (an HNSW index that
+*cannot* order on a parameter) is not how pgvector behaves. The setting looked like dead weight kept
+alive by a plausible story — this repository's own deletion pattern. Measuring the *second* claim in
+the same comment found a real 1.81x regression on a different statement by a different mechanism, so
+the deletion would have removed a control that works. **Rule: a falsified justification licenses
+re-measuring the thing, never removing it; check every claim the comment makes before acting on the
+first one that fails.**
+
+**The line above the line I fixed carried the same defect.** `_invoke`'s at-capacity message was
+corrected for promising a retry that only one of its two callers performs — and the `logger.warning`
+immediately above it went on saying "the job will be retried" through that whole commit and its
+review. **Rule: when a claim is wrong in one place, grep the claim rather than fixing the line;
+the same sentence usually exists two or three times within the same function.**
+
+## A survey's exemption is the claim to re-measure (2026-09-12)
+
+**What happened.** Briefing an implementer to put a ratchet over the MCP fleet's resource bounds, I
+handed it a table of twelve env-overridable bounds and a sentence I had taken from a survey without
+checking: *"`calc`'s bounds are not env-readable — constants only — so `calc` is the one server where
+the ceiling cannot be widened by a deployment."* The implementer derived the set from the code
+instead and found **42**, `calc`'s among them. Verified independently:
+
+```
+defaults : 4 500
+with env : 99 99999     # CHEMCLAW_CALC_MAX_CONCURRENT_REQUESTS, CHEMCLAW_XTB_MAX_ATOMS
+```
+
+`calc` is the server whose calls take minutes to hours. Had the implementer worked to my table, the
+ratchet would have shipped blind to the heaviest server in the fleet, and the gap would have read as
+covered.
+
+**Why the survey was wrong, in a form worth reusing.** It read `engine/admission.py` and
+`engine/xtb_cli.py`, saw module-level `int` constants, and concluded "constants only". The values
+flow from a `pydantic-settings` class two files away whose `env_prefix="CHEMCLAW_"` makes every field
+an environment variable. **An `os.environ`/`getenv` grep cannot see a pydantic-settings field** — so
+any inventory of "what a deployment can change" built by grepping for env reads is short by exactly
+the settings-class mechanism, which is the mechanism a well-structured repository uses.
+
+**Rule: a survey sentence of the form "X is the one case where this cannot happen" is the sentence
+to re-measure first.** It is the claim that scopes work *away* from X, so believing it costs exactly
+the case it exempts, and it is never the claim anyone checks — an exemption reads as diligence.
+
+**Rule: brief an implementer with the measurement and the anchors, never with the conclusion.** Three
+further framing claims in the same brief were wrong and the implementer caught each only because it
+had been given room to re-derive: the widening form I preferred (`value > default`) mis-scores
+`CHEMCLAW_CREST_THREADS=4` against a default of `0` meaning "size from `/proc/cpuinfo`", which is a
+*narrowing* reading as a widening; `ctypes` must not go on the forbidden-import list because
+`pyexec`'s sandbox needs it for `prctl(PR_SET_DUMPABLE, 0)`; and the egress ratchet saw the guard in
+5 of 7 Containerfiles, not 7.
+
+## Ask what fanned-out implementers share, not just which files they own (2026-09-12)
+
+**What happened.** I launched three implementers into the same working tree on the same branch,
+having carefully given each a disjoint set of source files. Disjoint files are not the unit of
+sharing. They would have shared **one git index** — the failure already in this log, where a plain
+`git commit` swept unrelated staged files into a note's commit — and each would have run `make type`
+over 840 files while the others were mid-edit, so any of them could have chased, or "fixed", another
+agent's half-written module. I stopped all three before any had written a byte, verified the tree
+clean, and ran them serially instead while work in a *different repository* continued in parallel.
+
+**Rule: before fanning out, enumerate what the agents share — the index, the virtualenv, the
+database, the full-tree gate — not only the files.** Parallelism is free across repositories and
+expensive inside one checkout. If it must be inside one, give each agent its own worktree, and
+remember a worktree needs its own environment before `uv run` means anything in it.
+
+## A mutation that did not apply reads exactly like a mutation that survived (2026-09-12)
+
+**What happened.** Running R3 over `tests/test_llm_gateway_guard.py`, eight of nine mutations turned
+their test red and one came back green — a connector bundle importing `core.embeddings`, which the
+new partition test exists to catch. The obvious reading is "that test is vacuous". The actual cause
+was my harness: the mutation was a `str.replace` anchored on `import asyncio`, and
+`connectors/bo/worker.py` has no such line, so the file was never edited and the test was asked to
+notice a change nobody had made. Re-anchored on a line the file does have, it went red immediately.
+
+Both outcomes print the same thing. A mutation harness that does not verify it mutated is the same
+shape as the guards this review keeps finding — a control whose success and whose no-op are
+indistinguishable from outside.
+
+**Rule: a mutation step asserts that the file changed before it runs the test.** `git diff --quiet
+<file> && echo "MUTATION DID NOT APPLY"` is the whole fix, and it belongs in the harness rather than
+in the reading of its output, because the reading is where the optimistic interpretation lives.
+
+## 2026-09-12 — never `git checkout` a file whose only copy of your work is uncommitted
+
+Mutation testing (R3) means editing a shipped file, running a test, and reverting. I reverted with
+`git checkout <file>` on three files whose changes were **uncommitted**, and destroyed about forty
+minutes of work in `plan_gate.py`, `routes/plan.py` and `cli/chat.py` — silently, because the
+mutation's own test run had already printed its red line and the loss only showed up when an
+unrelated test went red afterwards.
+
+`git checkout` restores from the index. During a mutation the index holds the *pre-change* file, so
+the revert throws away the fix and the mutation together.
+
+**Rule: back the file up before mutating it and restore from the backup, never from git** —
+`cp f $SCRATCH/b.f; <mutate>; pytest ...; cp $SCRATCH/b.f f`. Committing the fix first also works
+and is better when the fix is finished; the backup is what covers mutating work in progress.
+
+The tell that something was wrong was a mutation reddening a test it had no business touching
+(`test_a_refusal_outside_the_scope_names_what_was_approved` failing on a change to the HTTP route).
+**A mutation that reddens the wrong test is a signal about the tree, not about the test.**
+
+## A race test that orchestrates both sides can reproduce neither (2026-09-13)
+
+**What happened.** W24.3 asked for a lock-order deadlock driven to failure on the pre-fix code. I wrote
+one test that raced two real Postgres connections *and* asserted the route's retry. It passed. It also
+passed **six times out of six with the retry removed**, because it released the other transaction
+before the delete under test had taken any lock — so no cycle ever formed and the assertion was about
+nothing. A hand-written probe of the same two orders, with the release gated on the other side being
+*known* to hold its lock, deadlocked 16 times out of 16.
+
+The deeper reason it could not be one test: which transaction Postgres kills is decided by which lock
+request *closes* the cycle, so external orchestration can reliably make the other side the victim and
+cannot reliably make the side under test the victim. One test wanted two incompatible timings.
+
+**Rule: a concurrency test asserts that the interleaving it needed actually happened.** "Exactly one of
+the two transactions was aborted" is one line, and it turns a run where no cycle formed into a failure
+instead of a pass. And when the outcome to be asserted depends on *which* party loses a race nobody
+controls, split it: race the mechanism, inject the response.
+
+## Thirteen red tests can be a broken fixture, not a caught mutation (2026-09-13)
+
+**What happened.** Mutation-testing W24.6 I edited a SQL string to invert its intent, twice, and both
+times produced invalid SQL — an unterminated quote, then an untyped placeholder. Each run reddened
+**thirteen** tests in the file. Thirteen red lines read like a mutation being caught emphatically.
+Neither run tested anything: the fixture was broken, so no test reached its subject. The valid mutation
+(`run_id <> (%s::text || '-never')`) reddened exactly **one** test, on the assertion written for it.
+
+This is the other half of the 2026-09-12 lesson. That one was a mutation that did not apply and looked
+like one that survived; this one applied, broke something upstream of the subject, and looked like one
+that was caught.
+
+**Rule: a mutation is checked against the test it was written to redden, not against the count.** If a
+mutation reddens tests it has no business touching, read it as a signal about the mutation — the same
+way a mutation reddening the *wrong* test is a signal about the tree. And for SQL specifically, run the
+mutated statement once before believing its result: a syntax error is indistinguishable from a finding
+in a pytest summary.
+
+## Two green runs are not a stable failure set (2026-09-13)
+
+**What happened.** W24.8 asked whether `pytest-xdist` is a win. I ran the suite twice under `-n 4`,
+both clean, and wrote an ADR whose headline was *"the failure set is identical in every arm"* — then
+changed `make test`'s default to four workers on the strength of it. The verification run I took
+**because** the default had changed failed two extra tests. Five runs put the rates at 2-in-5 and
+1-in-5, and both tests pass serially every time. One of them was on a list of four the brief had
+predicted and my ADR had dismissed as "a problem that did not occur".
+
+The wrong conclusion is not the interesting part; the sample size is. Two clean runs of an 8,800-test
+suite is an ordinary outcome for a 40 %-per-run flake. What the claim asserted was *stability* — a
+statement about the distribution — and two samples cannot support that in the "always" direction. The
+speed half of the same measurement was fine on two runs, because a wall clock is one number and a
+failure set is a sample.
+
+**Rule: a claim that something is stable carries its repetition count, and the count has to be big
+enough for the rate it is excluding.** "Identical in every arm" over n=2 is "identical in two runs";
+write that instead, and then decide whether two is enough for the decision being taken. When the
+decision is to change a *gate*, it is not.
+
+The corollary that saved it: **after changing a default, re-run the thing the default governs.** The
+only reason this was caught before merge is that changing `make test` meant running `make test`.
+
+## Three of four surviving mutations were the fixture, not the test (2026-09-13)
+
+**What happened.** Wave 26 ran 33 mutations and four survived. One was a genuinely missing assertion.
+The other three shared one shape: **the fixture made the subject's change invisible, so the assertion
+could not have failed whatever the code did.**
+
+- `WatermarkWarehouse` is a fake that mirrors the watermark's *semantics* and is told its columns
+  directly. So the end-to-end drain test passed with `sql.watermark_expression` reverted: the fake
+  was computing the right answer independently of the code under test.
+- `tests/test_rxnfp_server.py` indexed its fingerprint records with no `source`, so the citation was
+  bare whether or not the tool qualified it. The test asserted a string that both versions produce.
+- Nothing asserted that the new `note_id` column reaches SQL, so the dialect could drop it and the
+  producer tests — which assert what the *producer* hands over — stayed green.
+
+Each is a different surface, and none of them is the shape the existing rules name (a constant
+compared to itself, a re-typed expression, a string that also appears in a comment). The common
+element is that the fixture was built to make the test *run*, not to make the subject *observable*.
+
+**Rule: before writing the assertion, ask what value in the fixture the subject is supposed to
+change — and check that the fixture actually carries a value the subject can change.** A record with
+no `source` cannot show a citation being qualified. A fake that computes the answer itself cannot
+show a query being rewritten. Where a fake deliberately duplicates the subject's semantics (which is
+sometimes right), the clause the subject emits has to be pinned somewhere else, in both directions —
+and say in the test's docstring that the pinning is why the duplication is safe.
+
+**And a mutation harness can lie in one direction only.** A mutation that fails to *apply* reports a
+pass, indistinguishable from a survivor; an unquoted bash heredoc mangled one of mine and produced
+exactly that. A mutation that applies can never produce a false red. So every RED is evidence and
+every SURVIVED is a hypothesis — re-apply a survivor by hand before concluding the test is weak.
+
+## I destroyed uncommitted work with `git checkout` one hour after reading the rule against it (2026-09-14)
+
+**What happened.** Mutation-testing W27.4 I mutated `src/chemclaw/ingest/sources/registry.py`,
+confirmed the test went red, and reverted with `git checkout src/chemclaw/ingest/sources/registry.py
+2>/dev/null || true`. The index held the *pre-change* file, so the checkout took the mutation **and**
+the `active_retrieve_corpora` function the whole row rested on. The 2026-09-12 lesson says exactly
+this, in this file, and I had read it at session start.
+
+Two things made it happen that the earlier lesson does not name:
+
+- **The `|| true` made it feel like a no-op.** A guarded revert reads as defensive. It is not the
+  guard that is dangerous, it is the verb.
+- **I had used `cp file file.bak` for the four mutations before it**, and switched to `git checkout`
+  for the fifth because that file's mutation was a one-line `sed` and felt too small to back up.
+  The size of the mutation has nothing to do with the size of what the revert throws away.
+
+What caught it was luck of habit: I ran `git diff --stat` afterwards, saw *no* diff on a file I had
+been editing all row, and recognised the silence. Had the file also carried a committed change the
+stat would have been non-empty and I would have read it as fine.
+
+**Rule: never type `git checkout`, `git restore`, `git stash` or `git reset` on a path at all while
+any part of the working tree is uncommitted — not as a revert, not "just this one line", not with a
+`|| true`.** `cp f $SCRATCH/b.f` before, `cp $SCRATCH/b.f f` after, every time, whatever the size of
+the edit. And the check that a revert restored rather than erased is `grep` for something the file
+should still contain, not `git diff --stat` — an empty diff is the *symptom* of the erasure, not
+evidence against it.
+
+The deeper rule, which is the one that would have removed the hazard entirely: **commit the row's
+work before mutation-testing it.** A commit costs nothing and makes every revert verb safe.
+
+## 2026-09-14 — a mutation that substitutes nothing reports the code is fine
+
+Driving the four regex guards in `cli/live_benchmark._chosen` one at a time, the loop passed each
+guard to a Python snippet as a shell argument in single quotes (`'(?<!\\w)'`). Bash hands that
+through with **both** backslashes, the file holds one, so `str.replace` matched nothing and wrote
+the file back unchanged — four runs, "16 passed" every time, reported as four guards that are
+covered. They are not: re-driven properly, each of the four could be deleted with the whole file
+green.
+
+The failure is not the quoting. It is that **a mutation loop's output is indistinguishable between
+"the test caught nothing because the code is well covered" and "the test caught nothing because
+nothing was mutated"** — and the reassuring reading is the one that needs no follow-up.
+
+**Rule: a mutation loop asserts that the file changed before it runs the test.** Not `git diff`
+afterwards — inside the loop, on the bytes: read the file, apply the substitution, assert the new
+text differs from the original, *then* run pytest. Three lines, and it turns a silent false pass
+into a loud `AssertionError`. Where the substitution is done by `sed`/`bash`, the same check is
+`git diff --numstat` on the path *before* the test runs, read for a non-zero count rather than
+glanced at.
+
+And the second-order one, which is what made me check at all: **a mutation that survives is a
+question, and the first thing to ask is whether the mutation happened.** Four identical "16 passed"
+lines for four different substitutions is the shape of a loop that is not substituting — a real
+coverage gap rarely produces the same number four times.
+
+Beside it, a standing rule I broke and got away with: I ran `git stash` / `git stash pop` to
+measure a scorer against HEAD while the tree carried uncommitted work, and `git checkout <path>` to
+undo several mutations. The 2026-09-12 lesson above forbids every one of those verbs on a path
+while anything is uncommitted, and the reason it forbids them is exactly that they work until they
+do not. `cp` to the scratchpad and back, or commit first — which is the version that costs nothing.
+
+## Four guards I wrote could not fail, and each failure mode was different (2026-09-14)
+
+**What happened.** Working the Wave 2/4/7 branch I wrote a guard for every behaviour I added and
+mutation-tested each one. Four passed the mutation *by accident* on their first form, and only
+driving the mutation found it. The four are worth listing because the causes do not generalise to
+one rule:
+
+1. **The assertion was about an outcome the test harness cannot produce.** A
+   `Content-Disposition` injection test asserted `"x-injected" not in response.headers`. ASGI
+   carries headers as a list of pairs, so a CRLF never splits in-process — the assertion passes
+   whether or not the sanitiser exists. What a real server splits on is the *character*, and that
+   is what the test now asserts.
+2. **The assertion named a word the code does not use.** A digest test asserted the word
+   `"disputed"` was absent from an un-disputed body, while the notice it was guarding against says
+   "disagree with something already in the graph". The mutation that appends the notice
+   unconditionally left it green. A guard against an *extra line* has to be about the line.
+3. **The test iterated a collection that was empty.** A profile-prose guard looped
+   `load_profiles()`, which returns what it newly *registered* — idempotent by skipping names
+   already in the registry, so the second call in a process returns `[]`. It looped over nothing
+   and passed green over a defect I had measured minutes earlier in a plain interpreter.
+4. **The test drove one call where the defect needs two.** A digest test named
+   `..._is_reported_once_rather_than_never` asserted a single `_is_new` call. The branch returned
+   `True` unconditionally, so what it actually pinned was "every time, forever" — its own name said
+   "once" and nothing checked the second call.
+
+**The common shape is not carelessness.** Each assertion was *true*; each was true for a reason
+other than the behaviour it was supposed to hold. Reading them back would not have found any of the
+four — I wrote them, I believed them, and three of them I had just finished arguing for in a
+docstring.
+
+**Rule: a guard is not written until its mutation has been watched failing, and "the suite is green
+after I mutate" is a finding about the guard, never about the code.** I already knew that and did
+it every time, which is why all four were caught. What is new is the follow-on rule:
+
+**When a mutation survives, do not reach for a bigger mutation — ask which of these four the
+assertion is.** Is it about an outcome this harness can produce (1)? Does it name a literal the
+code actually emits (2)? Is the collection it iterates non-empty *in this process* (3)? Does the
+defect need N calls and the test makes N (4)? Each has a different repair, and "assert something
+stronger" fixes only the second.
+
+**And a corollary about docstrings.** Three of the four sat under a paragraph explaining exactly
+what the guard was for. A confident docstring above an assertion is evidence that the author
+understood the defect — it is not evidence the assertion reaches it, and it made me slower to
+suspect the test.
+
+## Nine vacuous guards, seven causes — and the last three were a different kind (2026-09-15)
+
+**What happened.** Six fresh-context reviews of the wave programme's own merge found five more
+guards green against the defect they name, on top of the four already recorded here. More
+importantly, three of the six reviews found their worst defect *inside a fix from the previous
+wave* — written by a session that had just measured the defect it was repairing and did not measure
+the repair.
+
+The clearest: `supported_from` was added to stop the digest re-notifying, and its docstring closed
+"when a member joins, the id changes too, so the identity and the date move together or not at
+all." `stable_id` hashes `min(member_ids)` and its own docstring spends a paragraph explaining why
+it deliberately does not hash the set. One `python -c` would have shown the premise false before the
+sentence asserting it was written. The cost was the same storm the fix was closing, in a new dress,
+plus a silent direction the old code did not have.
+
+**The rule.** *A fix's premise is a claim about code you did not write. Check it against that code
+before you write the docstring that rests on it* — the docstring is where the premise becomes
+invisible, because from then on every reader is reading your sentence instead of the function.
+Concretely: when a fix says "X is safe **because** Y", open Y and drive it. The tell is the word
+"because" pointing at a symbol in another module.
+
+**The second rule, extending the four-way diagnostic.** The four causes already here were: an
+assertion the harness cannot express; a string absent for an unrelated reason; a fixture returning
+an empty set; one call where the defect needs two. Three new ones, and they are not fixed by
+asserting something *stronger about the same object*:
+
+5. **The assertion is about the call's shape, not its argument's value.** An AST scan for
+   `minted_on` in the keywords passes when every call passes `minted_on=None`. Fix: assert
+   `ast.unparse(value)`, the way the sibling guard one file over already did.
+6. **The scan's universe is a strict subset of the surface at risk.** `registered_tools()` is 31
+   tools; the agent binds 114. The excluded set contained the exact bundle the guard was about.
+   Fix: derive the universe from what actually ships, and assert the universe is non-empty so a
+   glob that stops matching is red rather than vacuous.
+
+   **This is the same axis as cause 3 and the entry first listed them as unrelated.** Cause 3 (the
+   fixture returns an empty set) is the degenerate case of 6: same object — the universe — and the
+   same repair. Keep both numbers because the *tell* differs (3 shows up as a loop body that never
+   runs; 6 as one that runs over the wrong things), but diagnose them together.
+7. **Existence stands in for reachability.** A symbol can exist, be referenced, and not be served —
+   `@activity.defn` without `@durable_activity` wedges a replay exactly as deletion would. Fix:
+   assert the registration, not the symbol.
+
+So the diagnostic is seven-way and the branch matters: 1, 2 and 4 want a different payload or a
+second call; 3 and 6 want a different universe (3 is 6's degenerate case); 5 wants a different
+assertion; 7 wants a different property.
+**Do not reach for a bigger mutation** — a bigger mutation that still goes green tells you nothing
+about which of the seven you are in.
+
+**The third rule, on writing the finding down.** Two of the numbers corrected in this pass went
+stale *inside their own merge range*: a probe-coverage figure measured on 2026-09-14 was wrong
+because a sibling commit in the same pull request added 36 probes, in a docstring citing
+`D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` two paragraphs above. Re-measure a figure
+at the end of the branch, not when you first take it — a merge range is a commit too.
+
+## Round two: the repair was worse than the defect twice, and cause (e) shipped inside the entry defining it (2026-09-15)
+
+**What happened.** Five fresh-context reviewers were pointed at the *fixes* from the entry above
+rather than at the original code, and told to attack the premise each fix rests on. Seven of the
+fixes were wrong. Two were worse than what they replaced:
+
+- the backfill's trailing flush, moved into a `finally` with a blanket `except`, turned a loud
+  failure into `wrote 4 note(s)` and exit **0** with nothing in git — on the *common* path;
+- `BatchingNoteWriter.write` returning `written=True` at accept time made
+  `chemclaw_notes_recorded_total` count notes that provably never reached the graph, under a
+  metric declared as "Notes written into the knowledge graph".
+
+And the delegation bound, written to stop a selection effect, both missed the effect (it excluded
+`incomplete`, so an arm that *crashed* on the hard tasks reproduced the headline verbatim) and made
+the instrument unusable — a Monte-Carlo put the per-repeat delegation needed for an even chance of
+any report at ~87.4%, **rising** with the repeat count.
+
+**The rule: a repair has a failure mode of its own, and it is usually the mirror of the defect.**
+Before shipping a fix, ask what the *inverse* error looks like and check you have not just bought
+it. Under-counting notes became over-counting; a silent drop became a silent success; a bound that
+admitted a selection effect became a bound that admits no data. In each case one more mutation —
+"make the thing the fix depends on fail" — would have shown it.
+
+**And cause (e) shipped twice in the commit that added cause (e) to the list above.** The miner
+guard was "fixed" from asserting the keyword to asserting `ast.unparse(value).startswith(
+"supported_from(")` — the callee's *name* — so `supported_from(sorted(ids)[1:], by_id)`, the
+original defect in a new dress, passed. The route guard was written asserting that the keywords
+`failures=` and `precedent=` appear, so `failures=[], precedent=[]` passed at 190 green. Both
+docstrings argued that driving the behaviour would "prove the fixture, not the wiring". That
+argument was wrong both times and is worth naming as its own tell:
+
+**"Driving this would only test the fixture" is the sentence that precedes a vacuous guard.** It is
+occasionally true and it is mostly a reason not to write the harder test. Both were 20 lines, and
+the pattern for one of them was already in the file it belonged in.
+
+## 2026-09-15 — correcting a justification is not evidence about the thing it justifies
+
+`tests/test_subagents.py::test_a_helper_holds_no_connector_tool` rested on "two concurrent readers
+of one MCP tool object deadlock". Two sessions had touched that bound. The first stated it. The
+second (`D-2026-08-29-a-helper-reaches-no-connector-because-of-the-lifecycle-not-the-deadlock`)
+noticed the reason was broader than the evidence, wrote a careful ADR saying so, corrected three
+docstrings — and kept the behaviour, because it re-scoped the deadlock claim to the one shape it
+*did* cover rather than driving it. Driven on 2026-09-15 against two real servers, it is false for
+that shape too: 4 concurrent 1.88 s calls over one open tool object finish in 1.99 s.
+
+That ADR's own words were "the risk is not that the bound is wrong — it is that the next reader
+either removes it, having noticed the gap, or leaves it in place believing a measurement covers
+it." It then did the second thing.
+
+**The rule.** When an ADR corrects *why* a control exists and leaves the control standing, it must
+state which arm it did not run, in the ADR, as a named gap. "The measurement is real and it is
+about X" is a claim about the measurement's scope, not about X — and a scope claim is cheap to
+write and cheap to be wrong about. If the remaining arm is drivable in one script, drive it in the
+same commit.
+
+**A third claim in the same bound was false the day it was written**: "nothing counts how often
+`task` is called", repeated in `CLAUDE.md`, `agent/subagents.py` and that ADR, and used in all
+three as a reason a decision could not be taken. `task` is an ordinary tool in the caller's
+`ToolNode`; `chemclaw_tool_calls_total{tool="task"}` had always moved. **An absence used as a
+reason not to decide is exactly the claim to check first**, because nobody checks the thing that
+lets them stop.
+
+## 2026-09-15 — a scratchpad file named after a stdlib module rewrites the repository
+
+`src/chemclaw/protocols/export.py` was clobbered five times across two sessions, and four
+diagnoses blamed subagents running `git checkout -- <path>` in the shared working tree. Wrong. The
+scratchpad held a leftover script named `csv.py`. Python puts a script's own directory at the head
+of `sys.path`, so running *anything* from there made `import csv` execute it — and that script's
+body wrote a file into `src/`. `importlib.metadata` imports `csv`, so every chemclaw import
+triggered it.
+
+**The rule.** Never name a scratchpad script after a stdlib module. When a tracked file changes
+with no plausible writer, do not reason about who might have run git — put an `sys.addaudithook`
+on `open`-for-write against that path and print the stack. It took one script and found the cause
+immediately, after four sessions of a confident wrong answer.
+
+## 2026-09-15 — a timing bound must separate the two outcomes, not the two speeds
+
+`tests/test_publish_outbox.py::test_two_workers_claiming_at_once_split_the_queue` failed once in a
+full serial run and never again — 5/5 alone, 28/28 in its own file, and green in the next full run.
+The tempting conclusion was "flake", which this repository's own rules forbid.
+
+The cause is in the test. It proves `FOR UPDATE SKIP LOCKED` by racing a second claim against a
+held lock, and the only thing time can observe there is **blocked or not blocked**. Measured: an
+unblocked claim is **0.9 ms**; a blocked one holds until `pg_statement_timeout_seconds` (30 s). Any
+bound between those distinguishes the implementations. The bound was **10 s** — four orders of
+magnitude above the passing case, and still tight enough to fire on connection acquisition under
+load, which is a *third* outcome the assertion cannot tell from the defect.
+
+**The rule.** When a test uses a deadline to observe a behaviour, write down both outcomes it must
+separate and put the bound between them, as far from the passing case as the real backstop allows.
+A bound chosen as "comfortably more than it takes" is chosen against the passing case alone, and
+the failure it then invents is indistinguishable from the one it was written to catch. Widening is
+only safe with the defect arm driven: here, deleting `SKIP LOCKED` still fails at 25 s (28.4 s),
+and that is what makes the new bound a bound rather than a silenced assertion.
+
+`CLAUDE.md` already carries the cost, about a different pair of tests: "a gate that reds for a
+scheduling artefact teaches everybody to re-run."
+
+## 2026-09-15 — a file name written from memory is a claim, and this tree checks it
+
+Third time this session a reference guard caught prose I wrote. The newest: a docstring in
+`kg/note.py` cited `tests/test_graph_analytics.py`, which does not exist — the analytics tests are
+in `tests/test_knowledge_gaps.py`, a fact I had *established by grep ten minutes earlier* and then
+wrote from memory anyway.
+
+The others were the same shape one layer out: a new tool and a new error class joining the tree
+without being declared in `mcp_face.WITHHELD`, the probe corpus, `_BAD_DATA_TYPES` and the registry
+list — four guards, four decisions, none of them rubber stamps.
+
+**It happened again in the next commit, one entry later.** A docstring in `tests/test_eln.py`
+said `warehouse/binding.py`; the file is `src/chemclaw/ingest/eln/warehouse/binding.py`. Same
+guard, same session, having just written the rule down. So the rule as first stated — "paste it
+from the shell" — is not enough, because the failure is not mistyping a name: it is writing the
+*shorthand a human would say out loud*. `warehouse/binding.py` is what you would call it in
+conversation and is not what it is called.
+
+**The rule, restated.** A backticked path is repo-rooted or it is wrong. Before committing prose
+that names one, run
+`make lint && .venv/bin/python -m pytest tests/test_docstring_paths.py -q` — five seconds, and it
+is the guard that has now caught four of my sentences this session. And when a change adds a *kind* of thing — a tool, an error class, a note
+type, a constant other packages read — run the full suite before pushing, not the affected suites:
+every one of these was invisible to the tests of the code I changed, because the guard lives with
+the declaration and not with the behaviour. `make test` is ~18 minutes; a red CI cycle is longer,
+and a red PR spends somebody's trust rather than my time.
+
+## A `git checkout <file>` to undo a probe undid an hour of unrelated work (2026-09-15)
+
+I wanted to prove a line was load-bearing, so I edited `src/chemclaw/api/runner.py` to remove it,
+ran the tests, and then "reverted the probe" with `git checkout src/chemclaw/api/runner.py`. That
+file also held an hour of uncommitted feature work in the same session. `git checkout` restores from
+`HEAD`; it does not know which of my edits was the probe. All of it went.
+
+The recovery was cheap only because the edit had been applied by a script I still had in context. It
+would not have been cheap an hour earlier or later.
+
+**The rule.** A destructive-by-design probe — remove a guard, break an import, delete a line, and
+see what fails — copies the file to the scratchpad **first** and restores from that copy, never from
+git:
+
+    cp src/path/file.py "$SCRATCH/file.py.bak"   # before the probe
+    cp "$SCRATCH/file.py.bak" src/path/file.py   # after it
+
+More generally: **`git checkout -- <path>` is only safe on a path with nothing uncommitted worth
+keeping**, and during a feature that is almost never true of the file I am probing, because the
+reason I am probing it is that I just changed it. Commit first, or copy first. This is the same
+shape as the `rm`-before-`ls` rule the working-tree guidance already states, one tool over.
+
+## An absence test that scanned a sixth of the file it was guarding (2026-09-15)
+
+I wrote a test asserting `durable/check_in.py` contains no model-running call, and implemented it as
+`source.split('"""')[2]` — meaning to skip the module docstring. That slice ends at the *next*
+docstring, so it covered only the 1,636 characters between the module docstring and the first class.
+Anything below the first class was unguarded, which is where the code that would violate it actually
+lives.
+
+(This heading said "18%" and the paragraph "out of 9,001", both measured against the file
+mid-development; the merged file is 9,833 characters, so the fraction was 16.6%. A worked ratio
+against a file that is still being written is a number that goes stale inside its own commit —
+which is the lesson two headings down, arriving early.)
+
+It passed, of course. Both versions pass on a clean file; that is what a guard does, and it is why
+passing says nothing about whether it works.
+
+**The rule.** A test that asserts an **absence** is only as good as the region it reads, and the
+region must be proven, not intended. Two things, both cheap:
+
+1. Parse the tree rather than slicing the text — `ast.walk` covers every statement and skips
+   docstrings for free, because a docstring is a `Constant` carrying no `Name` or `alias`.
+2. **Plant the violation** the test exists to catch, in the place the implementation would really
+   put it (the bottom of the file, not the top), and watch it fail. I did this and the AST version
+   caught what the slice version had been missing all along.
+
+This is `tests/test_state_channels.py`'s lesson in a different costume: a hook returning the right
+dict proves nothing about whether the channel exists, and a scan that finds nothing proves nothing
+about whether it looked.
+## Do not edit the tree while the gate is running
+
+**2026-09-15.** A 24-minute `make test` came back with five failures. Three were real (a new tool
+over the context-floor ceiling, and the two compaction defaults derived from it). Two —
+`test_layering.py::test_module_scope_imports_are_declared` and
+`test_workflow_replay.py::…[TemplateWorkflow-before-the-run-record.json]` — were artefacts of my
+own editing: I wrote `analytical/stability.py` and its imports *while the suite ran*, and several of
+these tests walk the source tree at run time rather than at collection. `test_workflow_replay`
+passed in isolation immediately afterwards.
+
+The cost is not the wasted run, it is the **diagnosis**: a failure list mixing real defects with
+artefacts of the run's own conditions is one you cannot act on without re-running everything, and
+the tempting move is to dismiss the ones that look unrelated. That is how a real failure gets
+written off as a flake.
+
+**Rule: once `make test` starts, the tree is frozen until it finishes.** Queue the next edit; do not
+apply it. If something must be edited, kill the run rather than let it produce evidence about a tree
+that no longer exists.
+
+## A shallow clone makes a citation check skip, not pass
+
+**2026-09-15.** `Chemclaw3-mcp`'s CI was red on a test that had *skipped* in every local run:
+`test_every_commit_the_registers_cite_is_reachable_from_head` cannot decide reachability in a
+shallow clone, so it skips locally and runs in CI, where the checkout is full. Five ADRs on `main`
+cited a branch commit a squash merge had discarded.
+
+Two things follow. First, the failure was **pre-existing on the base branch** and my PR merely
+surfaced it — established by reproducing it on `origin/main` before touching anything, which is the
+step that decides whether a red CI is yours. Second, and more usefully: **`git fetch --unshallow`
+before believing a green local run**, in every repository of this family. A test that skips is not a
+test that passed, and this repository's own `tests/conftest.py` epilogue exists to say so about the
+Postgres set — the same discipline applies to the git-history set, which has no epilogue.
+
+**Rule: when a check's skip reason names a property of the *checkout* rather than of the
+environment, fix the checkout and re-run before pushing.**
+
+
+## Run the gate's command, not your own approximation of it
+
+**2026-09-15.** CI's `static` job went red on `mypy` errors in tests I had just written, after I had
+run `uv run mypy --strict src/chemclaw` and reported it clean. `make type` is
+`uv run mypy src examples tests` — **880 files**. Mine was 472, and the 408 it skipped were exactly
+where the new code was.
+
+The same shape as the two entries above, and the third instance in one session: I ran a *narrower*
+check than the gate and read its green as the gate's. The other two were a narrower *test set*; this
+one was a narrower *file set*, reached by hand-writing an invocation instead of using the target
+that exists.
+
+**Rule: never hand-roll a gate step.** `make lint`, `make type`, `make test` are what CI runs, and
+`CLAUDE.md` says so in as many words — *"Use them rather than raw invocations — CI runs exactly
+these, so a green `make` locally means a green CI."* A hand-written `mypy`/`pytest`/`ruff` line is
+fine for a fast inner loop and is never the evidence that something is ready to push.
+
+The fix was worth more than the silencing, too: four call sites carried `# type: ignore[arg-type]`,
+and mypy actually raises `arg-type` for a list *variable* and `list-item` for a list *literal* — so
+two of the four ignores named the wrong code and the other two were load-bearing. One `_plan()`
+helper that states the conversion once replaced all four. **An ignore that has to be spelled two
+ways for one mismatch is a sign the ignore is the wrong tool.**
+
+
+## `make db-migrate` after merging main, before believing a local gate
+
+**2026-09-15.** The full local gate came back with 9 errors in `tests/test_runtime_ddl_privilege.py`
+— a file the branch never touched — all of them `relation "composed_workflows" does not exist`. That
+table arrived with a PR that merged into `main` while mine was in CI. I had merged `main` into the
+branch and never migrated, so a long-lived local database was one migration behind the code it was
+testing. One `make db-migrate` (7 ms) and all 11 passed.
+
+**The general point is the asymmetry between the two gates, which is worth holding onto.** CI builds
+its database from migrations on every run, so it can *never* hit this. The sandbox database persists
+across a session, so it drifts from `main` the moment a migration lands there. Each gate is
+therefore stricter than the other in a different place: CI caught a `mypy` gap the same afternoon
+that my narrower invocation missed, and the local run caught a migration drift CI structurally
+cannot see — and it has Postgres-backed coverage CI's throwaway container skips entirely.
+
+Neither is "the" gate. **Merging on one alone is merging on half the evidence**, which is why both
+were waited for here.
+
+**Rule: after `git merge origin/main` — or any base update — run `make db-migrate` before starting a
+local gate.** An error in a file the branch did not touch, on a table the branch did not add, is the
+signature: check the migration ledger before reaching for anything cleverer.
+
+
+## A figure recalled from the shape of the code is wrong about a third of the time
+
+**2026-09-15.** Three timing claims were written into prose from a sense of what the code does, and
+all three were wrong when measured:
+
+- `thermalsafety`'s tool docstring named `semenov_critical_ambient` as its slowest tool at "roughly
+  60 µs". The slowest is `tmr_ad` at 63.7 µs, because it runs a fixed 200-step bisection; semenov
+  stops on a tolerance and is 16.3 µs.
+- `suitability`'s tool docstring said the report was 10.6 µs and the primitives 0.3–1.4 µs. Measured:
+  29.8 µs and 1.9–4.9 µs. Most of each figure turned out to be pydantic building the result model,
+  not the chromatography — which is not something the shape of the code suggests at all.
+- The `CEILING_IS_ARGUED_ABSENT` table gave `props` at "11.7 ms of CPU". Measured on the engine it is
+  **1.8 µs**, four orders of magnitude out.
+
+Each conclusion survived its correction — every one of those tools is still far too cheap to need a
+concurrency ceiling — which is exactly why the habit is dangerous. The argument being right is what
+makes the number feel checked.
+
+**Rule: a number that will be written into prose gets measured in the same session it is written,
+even when the conclusion does not depend on it.** The cost is one script. Where the number exists to
+justify a decision, put the measurement in a test so the next reader does not have to trust the
+prose either.
+
+## Two numbers on different bases do not compare, however carefully each was measured
+
+**2026-09-15.** The `props` figure above was not simply wrong — it was measured, correctly, as a
+whole MCP round trip, and then written next to `thermalsafety`'s 63.7 µs, which was the engine
+alone. Both were real measurements of different things. The table then read as though `props` were
+200× the cost of `thermalsafety`, when on one basis it is the cheapest of the three by two orders of
+magnitude, and the exemption that looked least justified was the best justified.
+
+This is the same defect `CLAUDE.md` already records about the helper's tool count ("54 in-process
+against 24 bound, one subtraction that does not work"). It is not a careless-measurement failure; it
+is a units failure wearing measurement's clothes.
+
+**Rule: when several numbers appear in one table, state the basis once, above the table, and derive
+every entry the same way.** If two entries genuinely need different bases, that is two tables.
+
+## A refutation that cannot fire is a guard with no caller
+
+**2026-09-15.** `thermalsafety` serves an adiabatic temperature rise and a jacket heat-removal duty,
+and the agent's system prompt still says "a computed reaction enthalpy is never … an adiabatic rise,
+a jacket duty". The obvious fix was the mechanism already there: cut that clause into its own
+`PromptBlock(absent_unless={"adiabatic_temperature_rise", "heat_removal_capacity"})`, so a deployment
+that binds those tools stops being told the capability does not exist.
+
+`make prose-validate` refused it, and was right. **This tree declares no `thermalsafety` bundle**, so
+`build_langgraph_agent` can never bind those names; only a deployment pointing
+`CHEMCLAW_CONNECTORS_DIR` at the fleet's own `manifests/` directory reaches that server. The block
+would have been dropped from no deployment, ever — a clause keyed on a condition that cannot occur,
+which is `reject_widening` and `map_to_hpc_identity` in a prompt: the appearance of a control.
+
+What shipped instead was the honest half — the denial was narrowed to what is true in every lane
+(that server holds no calorimetry *model*; every input to it is a number a person measured) and the
+refutable consequence was dropped rather than keyed. Under-claiming a limit is the safe direction.
+
+**Rule: before keying anything on a tool name, check that this tree can bind it.** Writing a
+capability in one repository does not make it reachable from another; that takes a manifest, and a
+sibling repository's `manifests/` directory is not this one's surface. The validator knows this and
+is faster to ask than a checkout is to read.
+
+## Correcting half a sentence carries the other half forward unchecked
+
+**2026-09-15.** A probe header read: "`thermalsafety` (8851) and `kinetics` (8852) are `next` in
+`Chemclaw3-mcp/MODULES.md`". `thermalsafety` had just shipped as `built`, so I rewrote the sentence
+— and wrote "`kinetics` (8852) is **still `next`**", preserving the clause I had not looked at.
+
+`kinetics` has been `proposed`, never `next`. The only server at `next` in that catalogue is
+`nomenclature` (8864). So a commit whose entire subject was stale cross-repo claims shipped a stale
+cross-repo claim, in the sentence it was correcting, an hour before a subagent reading the actual
+file caught it.
+
+**Two things made it invisible.** The word "still" reads as a *check* — it asserts continuity, which
+is a claim about having looked — when in fact it was inherited. And half the sentence had just been
+verified, which lends the other half a borrowed credibility: the edit felt like an act of
+verification because part of it was one.
+
+**Rule: an edit that corrects part of a sentence re-verifies the rest of it, or deletes the rest.**
+A clause surviving a correction is not evidence; it is the part nobody looked at. "Still", "remains",
+"unchanged" and "as before" are the words to search for — each one asserts a check, so each one owes
+one.
+
+**Second rule, for this case specifically: do not transcribe another repository's status field at
+all.** That header now records what was observed with the date it was observed, the way
+`Chemclaw3-mcp/CLAUDE.md` records this family's port assignments — because a status in a file no
+test here can read goes stale on somebody else's merge schedule, and the present tense claims
+otherwise.
+
+## A subagent that mutation-tests shares my working tree, and its restore is a `git checkout`
+
+**2026-09-16.** I fanned out three fresh-context reviewers over one branch and kept editing while
+they ran. One of them was doing mutation testing on `durable/template_job.py` — plant a defect, run
+the suite, restore from a `.orig` copy it had taken at spawn time. Its restore ran over the edits I
+had made since, and `git status` showed the file as modified, so nothing looked wrong: the change I
+had just written, ruff-formatted and type-checked had simply stopped existing, and I only noticed
+because a `mypy` error named a field the file no longer declared. When I stopped the agent it had
+been interrupted mid-restore, leaving `if False:  # MUTATION` in the shipped file — a planted defect
+one commit away from being merged.
+
+**A subagent is not isolated from my working tree.** It has the same filesystem and the same git
+index. Its scratch copy, its `git checkout`, its `git stash` are all operations on *my* files.
+
+**Rules.** A reviewer asked to drive or mutate code gets a worktree of its own, or I do not edit the
+files it was given while it runs. If neither is arranged, the files under review are read-only for
+me until every reviewer has handed back. And when a reviewer is stopped mid-flight, `git diff` the
+files it was scoped to before doing anything else — a mutation left behind is indistinguishable from
+my own work in a `git status` listing, and it is the one kind of leftover that is *designed* to make
+the tests pass while the code is wrong.
+
+**And a mutation loop must never run in the background, because the restore is the half that gets
+killed.** Learned twice in one session, from both ends. A reviewer's backgrounded batch was cut off
+mid-iteration and left `"model_route"` -> `"model_routes"` in `turn_graph.py`; its re-run then backed
+up the *already-mutated* file and dutifully restored the mutation, so the backup itself carried the
+defect forward. Separately, a reviewer I told to mutate in the shared tree left a revert of a merged
+authorization fix behind. The shape is the same in both: a mutation harness is a
+patch-run-restore *pair*, and anything that can kill it between the halves leaves the tree looking
+edited by me. So: mutate in the foreground, one at a time; make the harness refuse to start when a
+backup file already exists (a stale backup means the last run died, not that this one may proceed);
+and never use a git verb to restore, since `git checkout --` cannot tell a mutation from a real edit
+and a stale backup is the only evidence of which is which.
+
+## `mypy --strict src` is not `make type`, and the gap is where a moved signature hides
+Broke CI twice in one session, in two repositories, from the same substitution. The gate checks
+`src examples tests` — 919 files against 490 — so when a fix moves a signature, every *test* call site
+it moved under is invisible to the narrower command. Both times the fix was right and the report said
+"mypy --strict green"; both times CI found a test still passing the old shape. **Run the Makefile
+target, not the tool.** The same applies to `ruff`: `make lint` is `check` plus `format --check`, and
+only the pair is the gate. When a report claims a gate, the thing to check is whether it names the
+target or the tool.
+
+## A fixture built past validation is a fixture that supplies the subject
+A guard for two new model fields was green with both fields deleted. Its fixture built the answer with
+`model_copy(update=…)`, which assigns **past** validation — so it was injecting the very fields whose
+survival across the boundary was the property under test. Rewritten through `model_validate` over the
+wire shape, the mutation reds. This is the "a control's fixture is part of its subject" rule arriving
+by a new route: for anything whose subject is a *boundary* (`extra="ignore"`, a decoder, a parser),
+the fixture has to cross that boundary the way production crosses it, or the test is about the
+constructor instead.
+
+## An absent keyword argument is a behaviour, and a test that reads the source can assert its opposite
+
+**2026-09-18.** Asked to look at context and workspace management, I went at the top `BACKLOG.md`
+row: one helper spawn costs 20,712 kB of checkpoint rows and 91% of it was unattributed. The row was
+confident about what the answer was *not* — the helper graph is compiled with no checkpointer, so
+"looking for that object is a dead end" — and it was wrong, along with the ADR sentence and the test
+behind it. `None` is not "no checkpointer" to LangGraph: a subgraph compiled with `None` inherits
+its parent's through the run config. Every helper had been checkpointing its own thread onto its
+caller's saver. One keyword changes 18,944 kB into 424 kB.
+
+**What made the belief durable was a test, and the test was the most convincing thing in the tree.**
+`test_the_helper_graph_is_compiled_without_a_checkpointer` parsed the AST, found no `checkpointer=`
+keyword, and concluded there was no checkpointer — reading the very absence that *causes* the
+inheritance as proof against it. It was green the whole time, it was cited in an ADR, and a
+`BACKLOG.md` row spent one of its two remaining levers on its authority.
+
+**The rule I want.** When a claim is about what a *framework* does with an argument I did not pass,
+the source cannot answer it — only the framework's own resolution can, and the cheapest form of that
+is the artefact it produces. Before believing a "we don't do X" claim, ask what row, file or byte
+would exist if we did, and go look for it. Here it was one `GROUP BY checkpoint_ns` away the whole
+time, and the attribution nobody had run took ten minutes.
+
+**The corollary that caught two more.** Two other modules had measured this exact namespace and
+written it down — `agent/checkpointer.py`'s prune carries a `PARTITION BY checkpoint_ns` whose
+comment describes the helper's `tools:<uuid>` namespace in the present tense, and a test drove a real
+`task` call to exercise it. The tree held both the claim and its refutation for weeks. So when a
+finding surprises me, grep for the *opposite* claim before writing it up: if another module already
+knows, the finding is not "nobody measured this", it is "two parts of this tree disagree", which is a
+sharper thing to say and points at which one to change.
+
+## A number is derived from a measurement, and the measurement's unit can move underneath it
+
+**2026-09-18.** I recommended `agent_max_turn_billed_tokens = 300_000` as a per-turn runaway
+backstop, argued as "above the one runaway this tree has measured" — a turn that billed 250,000
+tokens against a 1,000-token session cap. The argument is sound and the number was wrong by an
+order of magnitude: at this tree's current `PREFIX_BOUND` of 81,600 tokens per model call, 300,000
+funds **three** calls, while `harness_max_loop_iterations` permits 25 and
+`agent_context_token_budget` permits 118,700 on each of them. The backstop sat *below* the two
+guards it was supposed to sit above, so it would have ended ordinary heavy turns and made the
+iteration cap unreachable. One guard killing another, shipped on by default, in the commit whose
+whole subject was turning guards on.
+
+**Why the reasoning felt complete.** I checked the new number against the measured runaway and it
+was larger, which is the comparison the argument names. What I did not check is whether the
+measurement still meant what it meant when it was taken: 250,000 tokens was ~25 calls when a call
+carried ~10,000, and is ~3 calls now that the prefix has grown sevenfold. The figure survived the
+change that invalidated its unit, and comparing against it reproduced the staleness rather than
+catching it. This is
+`D-2026-09-05-a-ratchet-that-re-derives-half-its-basis-bounds-half-a-request` in a new place: a
+basis nobody re-derives agrees with itself forever.
+
+**Rule: a cap that must sit above another guard is *derived from that guard*, never chosen against
+a past measurement.** Here it is `harness_max_loop_iterations × agent_context_token_budget` — what
+a turn can lawfully spend with both existing guards holding. Write the relation, not the number.
+
+**Rule: pin the relation, in both directions, and mutate it.** `tests/test_spend_cap.py` now
+asserts the cap is at or above the lawful ceiling *and* funds at least
+`harness_max_loop_iterations` calls at `PREFIX_BOUND`. Both fail against 300,000, which is how I
+know the tests are about the defect rather than about the fix. A single-direction assertion would
+have passed against a cap set absurdly high, which is the other way to get this wrong.
+
+**Rule: when a setting's justification cites a measurement, name the measurement's unit in the same
+sentence.** "250,000 tokens" is not a fact about runaways; "25 model calls, at the ~10,000-token
+calls of the day" is. Only the second one visibly rots.
+
+## A control's subject must be a behaviour, not a file (2026-09-18)
+
+Four fresh-context reviews of five merged commits found the engineering sound and **nine of its
+controls hollow**. Each had passed review. Each had the same shape: the test's subject was a file
+rather than a behaviour.
+
+- `assert "save_local_skill" not in inspect.getsource(proposal_tools)` — a claim about where
+  somebody chose to put the code. A registered tool doing exactly the forbidden thing, appended to
+  *that same module*, left it green.
+- `{name for name in registered_tool_names() if "accept" in name}` — a claim about vocabulary.
+- An assertion on the in-process ledger, one layer short of the row the guard actually reads. Two
+  one-line mutations of the producer left 467 tests passing.
+- `predicted_helper_surface` compared against a build that calls the same two functions — the
+  "a basis that is re-derived rather than observed will agree with itself forever" defect,
+  happening to a test that *cites that sentence as its reason for existing*.
+- A citation dict (`_A_LIVE_GATE`) whose values nothing read, with a comment saying an entry whose
+  gate stops existing "fails there".
+
+**The rule I am writing for myself:** before claiming a control exists, *apply the defect it is
+named after and watch it fail*. A mutation is one line and a revert; reading the test is not
+evidence. This is the repository's own "measure it, don't argue it" extended from defects to
+controls, and the tell is the same one every time — if I can state what the test asserts without
+saying what would break, it asserts a file.
+
+Second-order, and the part I nearly missed: two of the nine were controls I had *written in this
+same session* while explicitly reasoning about this failure mode. Knowing the pattern does not
+catch it. Driving it does.
+
+**And it happened again, in the fix.** The registry walk above passed alone and failed the first
+full run: it walked a registry `_register_generated_tools()` had never filled, so the control
+written to cover *every* tool-defining module covered the ones a bare import reached. Two more in
+the same commit — a new `ChemclawError` subclass that a derived register walks, and two tests of
+mine asserting an "empty corpus" against a database 243 other tests write to.
+
+**So the rule has a second half: a control's fixture is part of its subject.** Running it in
+isolation is not evidence that it covers what it names, and "it passes" and "it passes on the
+shipped surface" are different claims. Before believing a new control, ask what its fixture builds
+and whether that is the thing the sentence in its docstring is about — then run the whole suite,
+because a green targeted run is exactly the evidence that misses this.
+
+## 2026-09-18 — a mutation watched failing is half a guard
+
+A fresh-context review drove seven mutations against two guards I had written the day before and
+hardened. All ten of the commit's claims reproduced, both merge resolutions were provably lossless,
+and the guards were genuinely better than what they replaced. Six of the seven mutations were
+nonetheless **green over a live, false statement**, and four of them in the very files that had
+carried the original defect:
+
+- the readiness guard's subject population was *backticked* tokens, so a reword that also dropped
+  the backticks removed the row from the owed set as well as from the claimed set;
+- the prose guard's new basis was `assert scanned_in_package` — an *any* basis over a four-file
+  package where one file carries the surface, so moving that one file out left the basis satisfied;
+- the other half of the same scope, in the same function, had no basis at all;
+- the pairing window was one sentence, so a full stop was an exemption;
+- the file-level exemption was argued as a quotation exemption and skipped a thousand lines;
+- one adjective between the cardinal and "tools" evaded the pattern the comment said covered it.
+
+**Why the previous session's work felt finished.** `tasks/lessons.md` already carries the rule that
+a guard is not written until its mutation has been watched failing, and I obeyed it exactly: every
+claim in that commit was driven, and every one reproduced. What I did not do is the complement.
+Watching a guard *fail* tells you the guard is connected to the defect. It tells you nothing about
+the boundary of what it catches, and the boundary is where the next instance of the same defect
+lands — because the next author is not re-introducing your mutation, they are writing a sentence.
+
+**Rule: a guard is finished when *other* mutations of the same property have been watched still
+failing — at least two, and at least one of them a reword rather than a deletion.** The first
+mutation proves connection; the others map the boundary. If the only mutation that reds is the one
+the guard was written for, what shipped is a regression test for a fixed bug, which is a smaller and
+different thing than a guard.
+
+**Rule: derive the scope, do not assert that it is non-empty.** Both prose-guard holes were an
+unanchored string, and the first fix for that was a stronger assertion over the same string. The
+assertion is the weaker move every time: `find_spec` on the module that defines the surface, or the
+`name:` its own manifest declares, makes a rename *carry* the scope instead of emptying it, and
+leaves the assertion to guard only the residue resolution cannot see. Say which residue that is.
+
+**Rule: state a guard's narrowness in the same breath as its rule, and prefer widening when the
+false-positive cost measures zero.** Three of the six holes were narrownesses the docstring had
+honestly described and the `#:` comment had then overstated ("any cardinal immediately before
+'tools' is refused"). A reader believes the comment. Every widening in this round was measured
+first — zero new offenders in each case — which is what made the choice an argument rather than a
+preference.
+
+**Rule: an exemption is exempt from something. Name what.** "This file quotes the sentences it
+refuses" licenses the *quotations*, not the file; the implementation licensed the file, and a
+previous commit had already had to hand-delete two fresh counts from it.

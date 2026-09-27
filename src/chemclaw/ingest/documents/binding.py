@@ -15,9 +15,11 @@ before a single file is opened.
 """
 
 import re
+from functools import cached_property
 from pathlib import PurePosixPath
 from typing import Any, Self
 
+import pathspec
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from chemclaw.core.errors import ChemclawError
@@ -112,6 +114,28 @@ class RootBinding(BaseModel):
 _CHUNK_TEXT_VERSION = "ctv2"
 
 
+#: The largest document `tests/test_deploy_chart.py::PARSE_MIB_PER_PARSE_BUDGET_MIB` was measured
+#: against, and therefore the largest a binding may declare.
+#:
+#: **The parse budget bounds what a parse allocates *beyond* the document it was handed**, because
+#: `ingest/documents/isolate._bound_allocations` reads its baseline after `raw` is unpickled —
+#: driven, `VmData` 230.4 MiB before a 50 MiB document and 280.5 MiB after. So a pod's real
+#: per-parse charge has two terms, and the chart's coefficient multiplies only the budget. That was
+#: sound while nothing could move the other term and unsound the moment anything could: this field
+#: is set per `datasource.yaml`, it had `ge=1024` and no upper bound, and a site binding at 200 MiB
+#: moved the real charge to ~360 MiB while
+#: `test_a_pod_that_starts_a_parse_forkserver_fits_the_memory_it_declares` did not move at all
+#: (`D-2026-09-19-a-coefficient-measured-at-one-cap-is-a-claim-about-that-cap`).
+#:
+#: Refusing at load rather than charging both terms in the chart, because the coefficient is a
+#: *measurement* at a basis — 406.7 MiB of pod for two concurrent 50 MiB plain-text documents — and
+#: a site that wants larger documents needs it re-measured, not re-arithmetic'd. The refusal says
+#: so. The alternative of folding the document into the budget was built and reverted: it refuses a
+#: 40 MiB text file at the shipped 160 MiB budget, because a text parse holds the bytes, the
+#: decoded `str` and the pickle at once.
+PARSE_COEFFICIENT_BASIS_BYTES = 52_428_800
+
+
 class DocumentShareBinding(BaseModel):
     """Everything about one mounted share: where it is, what to read, and who may read it."""
 
@@ -141,16 +165,20 @@ class DocumentShareBinding(BaseModel):
     # it writes one word, and an author who forgot gets an error naming both choices.
     public: bool = False
 
-    # Glob patterns matched against the mount-relative POSIX path. Office lock files (`~$...`),
-    # archive folders and scratch directories are the usual population, and excluding them is
-    # cheaper than parsing them.
+    # Gitignore patterns matched against the mount-relative POSIX path. Office lock files
+    # (`~$...`), archive folders and scratch directories are the usual population, and excluding
+    # them is cheaper than parsing them. Compiled by `exclude_spec`, which is where the choice of
+    # gitignore semantics over `fnmatch`'s is argued.
     exclude: list[str] = Field(default_factory=list)
     # The formats to open, a subset of what this system can actually read. Narrowing it is a
     # legitimate cost control on a large share ("PDFs and decks only, for now").
     extensions: list[str] = Field(default_factory=lambda: sorted(SUPPORTED_EXTENSIONS))
     # A share holds files no document reader should be handed: a 2 GB scanned archive, a database
     # export named `.csv`. 50 MB covers real reports with room to spare.
-    max_file_bytes: int = Field(default=52_428_800, ge=1024)
+    #
+    # **`le` as well as `ge`, because this field is the second term of the pod's memory sizing and
+    # for a while it was the undeclared one** — see `PARSE_COEFFICIENT_BASIS_BYTES` below.
+    max_file_bytes: int = Field(default=52_428_800, ge=1024, le=PARSE_COEFFICIENT_BASIS_BYTES)
 
     # Chunking. Big enough that a chunk carries an argument rather than a sentence, small enough
     # that a citation points somewhere a reader can check.
@@ -179,6 +207,38 @@ class DocumentShareBinding(BaseModel):
         deployment re-read its own share.
         """
         return f"{self.chunk_chars}:{self.chunk_overlap_chars}:{_CHUNK_TEXT_VERSION}"
+
+    @cached_property
+    def exclude_spec(self) -> pathspec.GitIgnoreSpec:
+        """The `exclude:` patterns compiled once, under gitignore semantics rather than `fnmatch`'s.
+
+        Gitignore is the semantics the patterns a deployment writes were already assuming —
+        `**/Archive/**`, `~$*`, `*.tmp` are gitignore lines, and `sharedrive/datasource.yaml` ships
+        exactly those three. `fnmatch` gives `**` no special meaning, which is why
+        `crawl._is_excluded` used to try every pattern three ways; `crawl.py` carries what that
+        bought, what it could not reach, and the compatibility measurement over the shipped set.
+
+        Compiled here because the binding is where the patterns live and the spec is a pure function
+        of them, so one compile serves every bounded crawl chunk instead of one per chunk.
+
+        `GitIgnoreSpec` rather than `PathSpec.from_lines("gitwildmatch", ...)`, which is the form
+        the library's own docs call subtly wrong for negation precedence — and which `pathspec` 1.x
+        deprecates, at two `DeprecationWarning`s per pattern per compile. How loud that is on a run
+        of `tests/test_document_share.py` is therefore a fact about that file's fixtures and about
+        the active warning filter rather than about this line — measured on one commit it was 76
+        under pytest's defaults and 262 under `-W always`, which is why no number is stated here and
+        why the two that were, in this docstring and in `pyproject.toml`, disagreed. `GitIgnoreSpec`
+        warns on neither generation. Measured over the shipped patterns the two spellings agree on
+        every probed path; the declared floor is `pathspec>=1.1` and `pyproject.toml` carries why —
+        a floor is a claim about the generation these assertions were measured against.
+
+        Raises:
+            ValueError: A pattern gitignore cannot parse (`pathspec` raises a subclass of it).
+                Surfaced at load by `_is_coherent` rather than mid-crawl: a degenerate pattern
+                fails identically on every attempt, and `DocumentShareError` is the family the
+                durable layer already knows not to retry.
+        """
+        return pathspec.GitIgnoreSpec.from_lines(self.exclude)
 
     @model_validator(mode="after")
     def _is_coherent(self) -> Self:
@@ -230,6 +290,20 @@ class DocumentShareBinding(BaseModel):
                 "if every authenticated caller may read it. Omitting both used to mean ungated, "
                 "which is a security decision no manifest should make by accident"
             )
+        # Compiled at load, not at first use: an exclusion nobody can parse is a manifest error,
+        # and the alternative is a `GitWildMatchPatternError` out of the middle of a crawl — a
+        # deterministic failure in the one family `chemclaw.durable.publish` would keep retrying,
+        # because it is not a `DocumentShareError`.
+        #
+        # Caught as `ValueError` rather than by name: `pathspec` raises
+        # `GitWildMatchPatternError` on 0.12 and `GitIgnorePatternError` from a module that does
+        # not exist there on 1.x, and both subclass `ValueError`. Naming either one pins this
+        # package to a generation of a dependency for no gain — the message is what an operator
+        # reads, and it is carried through either way.
+        try:
+            _ = self.exclude_spec
+        except ValueError as exc:
+            raise ValueError(f"exclude pattern is not a usable gitignore pattern: {exc}") from exc
         return self
 
     @property

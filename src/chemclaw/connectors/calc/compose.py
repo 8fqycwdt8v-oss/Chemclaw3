@@ -1253,7 +1253,7 @@ async def reaction_energy(
         # describes a calculation this process no longer runs: the physics is `Chemclaw3-mcp`'s
         # since `D-2026-08-16-the-physics-leaves-the-cache-stays`, and a deployment whose env says
         # `GFN2-xTB` while the server runs GFN1 published a `ReactionEnergyResult` — a Temporal wire
-        # type, PR-gated into the knowledge graph — asserting the wrong level of theory. The
+        # type, recorded into the knowledge graph — asserting the wrong level of theory. The
         # neighbouring composites (`scan_profile`, `solvent_comparison`) already read it off the
         # result; this one did not. The fallback is for histories written before `SpeciesEnergy`
         # carried the field, never for a live run.
@@ -2036,7 +2036,7 @@ async def bond_dissociation_survey(
         # `reaction_energy` already carries, and this composite is on the same publication path.
         # `settings.xtb_method` describes a calculation this process no longer runs, so a
         # deployment whose env says `GFN2-xTB` while the server runs GFN1 published a
-        # `BondDissociationSurvey` — a Temporal wire type, PR-gated into the knowledge graph —
+        # `BondDissociationSurvey` — a Temporal wire type, recorded into the knowledge graph —
         # asserting the wrong level of theory. The two sibling composites added alongside this one
         # both read it off the result; this one alone regressed a fix already argued for.
         method=methods[0] or settings.xtb_method,
