@@ -47,13 +47,37 @@ survives the bump. Current-evidence retrieval already drops the retired note by 
 serves one note per substance. `compound_dependencies` returns the current compound for a note that
 links a stale structure-derived id, and logs it.
 
-**B: `_IONISABLE_NEUTRAL_ACIDS` in `core/chem.standardize`.** Perchloric, tetrafluoroboric,
-sulfamic, thiocyanic (both tautomers), carbonic, hypophosphorous and boric acid: a neutral spectator
-on the table is discarded like its anion, so each salt's two spellings get one `compound_id`.
-Matched after `Cleanup`, because `Cleanup` rewrites perchloric acid into a charge-separated form no
-hand-written SMILES matches. Both spellings of all seven are pinned in
-`_STANDARDIZATION_AT_THIS_VERSION`, beside the adducts that cannot ionise (BF3, CO2), which stay.
-`STANDARDIZATION_VERSION` moves to `std12`.
+**B: `_IONISABLE_NEUTRAL_ACIDS` in `core/chem.standardize`, behind a basicity gate.** The seven
+acids are perchloric, tetrafluoroboric, sulfamic, thiocyanic (both tautomers), carbonic,
+hypophosphorous and boric acid. A neutral spectator on this list is discarded like its anion **only
+when the single organic fragment beside it could have taken its proton** (`_can_take_the_proton`).
+That means the fragment carries one of:
+
+- an aliphatic amine that is not an amide, carbamate, urea, sulfonamide, aniline, N–N or N–O nitrogen;
+- an amidine or guanidine;
+- a basic aza-aromatic nitrogen (pyridine-type, imidazole N3, and not pyrrole-type NH);
+- a net positive charge.
+
+The same gate applies to all seven acids, and none is special-cased.
+
+**Why the gate.** An independent chemistry review blocked the first version, and the owner decided
+the gate. Without it, the acid was stripped beside *any* single organic fragment. So a boronic acid
+beside boric acid, or a compound transcribed with its carbonate buffer, took the parent's id and was
+indistinguishable from a salt. That is the false merge
+`D-2026-08-27-a-solvate-is-not-its-solvent` prevents for two organic fragments, and these acids
+have no organic fragment of their own to trip that carve-out. Every test paired the acids with
+ethylamine, so nothing caught it.
+
+Matching is done after `Cleanup`, because `Cleanup` rewrites perchloric acid into a
+charge-separated form that no hand-written SMILES matches. `tests/test_compound_identity.py` checks:
+
+- every acid × six basic partners converges;
+- every acid × ten non-basic partners (boronic acid, phenol, carboxylic acid, amide, carbamate,
+  sulfonamide, aniline, nitroarene, pyrrole, ester) keeps its own id;
+- every acid registered alone is untouched.
+
+Salt spellings and three mixtures are pinned in `_STANDARDIZATION_AT_THIS_VERSION`.
+`STANDARDIZATION_VERSION` moves to `std12`. It has not shipped, so the gate stays in `std12`.
 
 ## Options weighed
 
@@ -67,6 +91,8 @@ hand-written SMILES matches. Both spellings of all seven are pinned in
   different claim, and a by-id lookup of one should keep returning it with its successor as a
   neighbour (KM-7). A compound's id *is* its identity, so its retired note is the same substance
   under a stale id.
+- **Strip the acid beside any single organic fragment.** The first version did this, and review
+  blocked it: it merges a mixture into its parent (see B).
 - **A pKa-shaped predicate for B.** Declined for the reason `core/chem.py` opens by refusing a bespoke
   notion of sameness; the set is measured, closed and seven long, and
   `tests/test_compound_identity.py::test_the_table_is_exactly_the_acids_the_catalogue_omits` reds the

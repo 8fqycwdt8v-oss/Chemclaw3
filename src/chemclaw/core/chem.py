@@ -204,10 +204,12 @@ from chemclaw.core.ids import stable_hash
 # (`D-2026-09-27-a-compound-id-a-bump-moves-is-superseded-not-orphaned`): for a counterion the
 # catalogue omits, `CCN.OCl(=O)(=O)=O` kept its perchloric acid while `CC[NH3+].[O-]Cl(=O)(=O)=O`
 # stripped the perchlorate. `_IONISABLE_NEUTRAL_ACIDS` is the seven acids that do it, and a neutral
-# spectator on it is now discarded like its anion. **This is the first bump that re-keys rather than
-# only retiring**: `chemclaw.cli.rekey_compounds` writes the `supersedes` link from each compound
-# note's new id to its old one and re-fingerprints the shelved rows, so a citation to a pre-bump id
-# still resolves and the graph does not keep a note per spelling.
+# spectator on it is now discarded like its anion — when, and only when, the organic fragment
+# beside it has a basic site that could form the salt (`_can_take_the_proton`). **This is the
+# first bump that re-keys rather than only retiring**: `chemclaw.cli.rekey_compounds` writes the
+# `supersedes` link from each compound note's new id to its old one and re-fingerprints the shelved
+# rows, so a citation to a pre-bump id still resolves and the graph does not keep a note per
+# spelling.
 STANDARDIZATION_VERSION = "std12"
 
 # The d- and f-block by atomic number — Sc→Zn, Y→Cd, La→Hg (lanthanides included) and Ac onward.
@@ -309,6 +311,43 @@ _IONISABLE_NEUTRAL_SPECTATORS = frozenset(
     for spellings in _IONISABLE_NEUTRAL_ACIDS.values()
     for spelling in spellings
 )
+
+#: What a fragment needs before a neutral acid beside it is read as its counterion: **a site that
+#: can take the acid's proton.** Without it the table merged a mixture into its parent — a boronic
+#: acid beside boric acid, or a compound transcribed with its carbonate buffer, took the parent's
+#: id — which is the false merge `D-2026-08-27-a-solvate-is-not-its-solvent` exists to prevent,
+#: reintroduced because these acids have no organic fragment of their own to trip the
+#: two-organic-fragment carve-out. One gate for all seven acids, no acid special-cased:
+#:
+#: - an **aliphatic amine** — primary, secondary or tertiary, but not an amide, carbamate or urea
+#:   nitrogen, not a sulfonamide, not an aniline or other N on an aromatic ring, not N–N or N–O;
+#: - an **amidine or guanidine** — the sp2 nitrogen of a C(=N)N not itself acylated or sulfonylated;
+#: - a **basic aza-aromatic nitrogen** — pyridine-type, imidazole N3 — two-coordinate and neutral,
+#:   which is what leaves out pyrrole-type NH and N-substituted ring nitrogens;
+#: - or a fragment **already carrying a net positive charge** (quaternary, or already protonated).
+#:
+#: SMARTS rather than a pKa, and deliberately coarse: it asks whether a salt *could* form, which
+#: is a structural question, and leaves how strong the salt is to chemistry this module does not do.
+_BASIC_SITES = tuple(
+    Chem.MolFromSmarts(pattern)
+    for pattern in (
+        "[NX3;+0;!$(N~a);!$(N-[#6,#7,#15,#16]=[#7,#8,#16]);!$(N-[#7,#8]);!$(N-C#N);!$(N=*)]",
+        "[NX2;+0;!$(N-[#6,#16]=[#8,#16])]=[CX3;!a]-[#7X3]",
+        "[nX2;+0]",
+    )
+)
+
+
+def _can_take_the_proton(fragment: Chem.Mol) -> bool:
+    """Whether `fragment` has a site an ionisable neutral acid beside it could protonate.
+
+    See `_BASIC_SITES`. Net charge rather than any positive atom, because a nitro group carries a
+    formal `+` on nitrogen and is no base.
+    """
+    if Chem.GetFormalCharge(fragment) > 0:
+        return True
+    return any(fragment.HasSubstructMatch(site) for site in _BASIC_SITES)
+
 
 _TAUTOMERS = rdMolStandardize.TautomerEnumerator()
 _TAUTOMERS.SetRemoveSp3Stereo(False)
@@ -584,9 +623,10 @@ def standardize(mol: Chem.Mol) -> Chem.Mol:
         #   upstream, and it is delegated because a solvent list is exactly the table
         #   `D-2026-08-01-a-reagent-is-not-its-largest-fragment` refuses to keep in step by hand.
         #
-        # - **It is the neutral form of a counterion the list omits** (`_IONISABLE_NEUTRAL_ACIDS`),
-        #   so a perchlorate salt written as the amine beside perchloric acid is the salt written
-        #   ionic, not a co-crystal of two reagents.
+        # - **It is the neutral form of a counterion the list omits** (`_IONISABLE_NEUTRAL_ACIDS`)
+        #   **and the organic fragment could have taken its proton** (`_can_take_the_proton`), so
+        #   a perchlorate salt written as the amine beside perchloric acid is the salt written
+        #   ionic, while a boronic acid beside boric acid is a mixture and keeps both.
         #
         # Anything else neutral and unrecognised — H2O2, a co-crystal former, a second reagent —
         # leaves the string whole, which is what `standardize` already does for two organic
@@ -599,13 +639,16 @@ def standardize(mol: Chem.Mol) -> Chem.Mol:
             Chem.MolToSmiles(f)
             for f in Chem.GetMolFrags(_KNOWN_SPECTATORS.remove(cleaned), asMols=True)
         }
+        # One of the ionisable neutral acids is a counterion only beside a fragment that could
+        # have taken its proton; beside anything else it is a second component, and stays.
+        salt_former = _can_take_the_proton(organic_fragments[0])
         kept = [organic_fragments[0]] + [
             f
             for f in Chem.GetMolFrags(cleaned, asMols=True)
             if not _is_organic(f)
             and Chem.GetFormalCharge(f) == 0
             and Chem.MolToSmiles(f) in survived
-            and Chem.MolToSmiles(f) not in _IONISABLE_NEUTRAL_SPECTATORS
+            and not (salt_former and Chem.MolToSmiles(f) in _IONISABLE_NEUTRAL_SPECTATORS)
         ]
         # Rebuilt rather than edited in place: `Chem.MolFromSmiles` over the kept fragments is one
         # sanitized molecule, and the common case (everything discarded) is the organic fragment
