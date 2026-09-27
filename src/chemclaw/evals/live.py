@@ -36,6 +36,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -193,6 +194,12 @@ class ProbeOutcome(BaseModel):
     # flag reported a third of the clarifying the system was actually doing, and every metric built
     # on it was wrong in that one direction (`docs/archive/live-grounded-2026-08-03.md`).
     asked_clarifying_in_prose: bool = False
+    # The answer opens by replying to a critique the chemist never made — "You're right —",
+    # "Understood. I am dropping both claims", "Here is the corrected answer". The verifier's
+    # revision note arrives in the user position, and until its wording said otherwise the model
+    # answered *it* instead of the chemist (5 of 31 live answers, 2026-09-27). A single-question
+    # probe has no earlier turn to be right about, so any such opening is the leak.
+    acknowledged_critique: bool = False
     latency_seconds: float = 0.0
     event_counts: dict[str, int] = Field(default_factory=dict)
     transport_error: str | None = None
@@ -484,6 +491,52 @@ def _asked_in_prose(outcome: ProbeOutcome) -> bool:
     return "?" in outcome.answer
 
 
+#: How an answer opens when it is replying to a reviewer rather than to the chemist: agreement or
+#: thanks as the first words. Anchored at the start, because "you're right to worry about the
+#: exotherm" mid-answer is ordinary prose. "Got it" and "Noted" are deliberately absent — they are
+#: the correct reply to a chemist who *stated* something (live probe ws-03 opens "Got it — DMF is
+#: off the table", answering the chemist's own instruction), so they cannot tell the two apart.
+_ACKNOWLEDGING_OPENER = re.compile(
+    r"^(?:you['’]?re|you are)\s+(?:absolutely\s+|quite\s+)?(?:right|correct)\b"
+    r"|^(?:understood|acknowledged|agreed|point taken|fair (?:point|enough)|good (?:catch|point))\b"
+    r"|^(?:thanks|thank you|my apologies|apologies|i apologi[sz]e|sorry)\b"
+    r"|^i (?:acknowledge|accept|agree)\b",
+    re.IGNORECASE,
+)
+
+#: How an answer opens when it is presenting itself as a *correction* — which to the chemist, who
+#: saw no earlier answer, is a correction of nothing. Read over the opening only.
+_CORRECTION_FRAMING = re.compile(
+    r"\bcorrected\b|\bthe correction\b|\b(?:drop|dropp(?:ed|ing)|remov(?:ed|ing)|stripp(?:ed|ing))"
+    r"(?:\s+of)?\s+(?:both\s+|the\s+|that\s+|those\s+|these\s+)?(?:unsupported\s+)?claims?\b"
+    r"|\bunsupported (?:claims?|data|values|numbers|figures|statements?)\b"
+    r"|\b(?:my|the) (?:last|earlier|previous|prior|first) (?:answer|reply|response|claims?)\b"
+    r"|\byour (?:note|check|review|feedback|critique|correction)\b",
+    re.IGNORECASE,
+)
+
+#: How much of the answer counts as its opening: a heading and a first sentence, which is where a
+#: reply to a reviewer shows itself. Long enough for "## Corrected answer" plus a lead sentence.
+_OPENING_CHARS: Final = 240
+
+
+def opens_by_acknowledging_a_critique(answer: str) -> bool:
+    """Does this answer open by replying to a critique rather than by answering the chemist?
+
+    The eval half of the revision-note fix in `api/runner._REVISION_NOTE`: the note tells the
+    model the chemist never saw the check, and this is what says whether the model listened. Two
+    shapes, both seen live on 2026-09-27 — an acknowledging first word ("You're right —",
+    "Understood.", "Good catch —") and a correction announced in the opening ("## Corrected
+    answer", "Here is the answer, stripped of the unsupported claim").
+
+    Markdown scaffolding is skipped first, so a leading `---` or `##` does not hide the words.
+    """
+    opening = re.sub(r"^[\s#>*_\-–—|]+", "", answer)[:_OPENING_CHARS]
+    if not opening:
+        return False
+    return bool(_ACKNOWLEDGING_OPENER.search(opening) or _CORRECTION_FRAMING.search(opening))
+
+
 async def open_session(client: httpx.AsyncClient, *, profile: str | None = None) -> str:
     """Open one front-door session and return its id.
 
@@ -661,6 +714,7 @@ async def run_turn(
     outcome.uncited_note_ids = _score_citations(outcome.answer, returned_ids)
     outcome.verified_numbers = _verified_numbers(outcome.answer, returned_values)
     outcome.asked_clarifying_in_prose = _asked_in_prose(outcome)
+    outcome.acknowledged_critique = opens_by_acknowledging_a_critique(outcome.answer)
     if probe.expects_tools and _tool_expectation_applies(probe, outcome):
         outcome.expected_tools_met = any(t in outcome.tools_called for t in probe.expects_tools)
     if probe.expects_notes:

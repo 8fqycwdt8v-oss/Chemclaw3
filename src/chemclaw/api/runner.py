@@ -97,6 +97,7 @@ from chemclaw.core.identity_context import (
 from chemclaw.core.logging import log_event
 from chemclaw.core.metrics import METRICS
 from chemclaw.core.metrics_bridge import degraded
+from chemclaw.core.model_prose import ModelProse
 from chemclaw.core.session_context import (
     reset_current_session_id,
     set_current_session_id,
@@ -1384,13 +1385,27 @@ def _revision_message(claims: Sequence[str]) -> str:
     an empty block.
     """
     named = "\n".join(f"- {claim}" for claim in claims)
-    return (
-        "Your previous answer was checked against the evidence this turn actually retrieved, and "
-        "the claims below are not supported by it. Answer again: drop or correct each one, cite "
-        "the evidence for what you keep, and say plainly what the evidence does not settle rather "
-        "than filling the gap. Do not restate the previous answer.\n"
-        + frame_untrusted(named, note_id="unsupported-claims")
-    )
+    return _REVISION_NOTE + "\n" + frame_untrusted(named, note_id="unsupported-claims")
+
+
+#: The revision round's instruction, addressed so that the answer it produces is addressed to the
+#: chemist. **The note arrives in the `user` position and the chemist never sees it**, and the first
+#: wording read as a person pushing back: driven live against a real model (2026-09-27, 31 probes),
+#: 5 answers opened "You're right —", "Understood. I am dropping both claims…" or "Good catch —",
+#: and more announced themselves as "the corrected answer" — each one replying, in the chemist's
+#: transcript, to a critique the chemist never made. The position stays (`_settle_revision_thread`
+#: withdraws exactly this `human` message, and a provider needs a user turn after an assistant
+#: one); what changes is who the note says is speaking and who the reply is for.
+_REVISION_NOTE = ModelProse(
+    "[System note, not from the chemist — the chemist never sees it, so do not reply to it, thank "
+    "anyone for it or mention it.] An automated check compared your previous answer with the "
+    "evidence this turn actually retrieved, and the claims below are not supported by it. Write "
+    "the answer to the chemist's question again, from the beginning and addressed to the chemist, "
+    "as if it were your first reply: drop or correct each claim, cite the evidence for what you "
+    "keep, and say plainly what the evidence does not settle rather than filling the gap. Do not "
+    "open by agreeing with, acknowledging or apologising for anything, and do not call the answer "
+    "corrected or revised — to the chemist there is no earlier answer to correct."
+)
 
 
 #: The five things that can become of a request to have a person read a flagged answer. A frozen
