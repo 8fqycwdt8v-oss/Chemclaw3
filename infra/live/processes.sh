@@ -36,6 +36,33 @@ readonly API_PORT="${CHEMCLAW_LIVE_API_PORT:-8000}"
 log() { printf '\033[36m[live]\033[0m %s\n' "$*"; }
 die() { printf '\033[31m[live] %s\033[0m\n' "$*" >&2; exit 1; }
 
+# Source a file of `export NAME=value` lines, keeping every NAME the caller already set.
+#
+# The run dir holds two of these, and both exist because a *later* invocation of this script must
+# come up in the environment the running lane was started in rather than in whatever shell ran it:
+#
+#   * `lane-env.sh` — what a wrapping lane composed before calling `up` (the four-repo lane's
+#     connector directories, data sources, sibling tokens and model gateway; `e2e-full-stack/up.sh`
+#     writes it). Without it `restart api` from the storm, or from the line `up.sh` prints, brought
+#     the front door back with none of that: no mock-vendor, no pyexec, no ELN/ORD sources.
+#   * `connector-env.sh` — the credentials `connectors_dev --export-env` *mints* (see `up`). Not
+#     reloaded, a second `up` minted new ones while the connectors process kept the old, and every
+#     tool call from the restarted front door 401'd against a server that was plainly up.
+#
+# Caller wins, so an operator can still override any one of them for one invocation, and a line
+# that is not an export is ignored rather than executed.
+source_unset_only() {
+  local file="$1" line name
+  [ -r "$file" ] || return 0
+  while IFS= read -r line; do
+    case "$line" in export\ [A-Za-z_]*=*) ;; *) continue ;; esac
+    name="${line#export }"
+    name="${name%%=*}"
+    [ -n "${!name+x}" ] || eval "$line"
+  done <"$file"
+}
+source_unset_only "$RUN_DIR/lane-env.sh"
+
 # The lane's environment, in one place. Every key already exists; nothing here is new config.
 #
 # `service_host` is not cosmetic: `api/middleware.py::_refuse_unauthenticated_exposure` (SEC-2)
@@ -91,14 +118,19 @@ if [ "$CHEMCLAW_ENTRA_REQUIRED" = "true" ]; then
   # in this lane", it means every expensive job and every write tool is refused and the probe run
   # measures a permissions error instead of the system.
   export CHEMCLAW_ENTRA_PRIVILEGED_ROLES="${CHEMCLAW_ENTRA_PRIVILEGED_ROLES:-process-chemist}"
-  # `Settings` refuses `entra_required=true` while `harness_autonomy` still says `plan_only` and
-  # `harness_enabled` is off: the approval-first posture would be named in one setting and attached
-  # by neither. This lane is deliberately unsupervised — a probe run has no human to approve a plan
-  # — so it states that, which is what the setting is for. With the harness off the value changes
-  # no behaviour; it is the statement the refusal asks for, and it stays overridable so the lane can
-  # also run the chart's own posture (`CHEMCLAW_HARNESS_ENABLED=true`).
-  export CHEMCLAW_HARNESS_AUTONOMY="${CHEMCLAW_HARNESS_AUTONOMY:-execute}"
 fi
+# **The lane is unsupervised in every posture, so it says so in every posture.** This export used
+# to sit inside the enforced-identity branch above, where it was written to satisfy `Settings`'
+# refusal of `entra_required=true` beside an unattached `plan_only`. Since D-2026-09-13 the code
+# default is the harness *on* and `plan_only`, so the dev posture — the one `make live-up` and the
+# four-repo lane run — inherited the approval-first gate with no human to approve anything: every
+# durable job a turn launched was refused with `PlanNotApprovedError`, and the storm's family D
+# recorded 0 `job_records` rows across 12 turns. A probe or storm run has nobody to approve a plan,
+# so the lane states `execute` here, for both postures.
+#
+# Overridable like every default in this block. `make live-plan-gate` is the one suite that needs
+# the gate: start the lane with `CHEMCLAW_HARNESS_AUTONOMY=plan_only` for it.
+export CHEMCLAW_HARNESS_AUTONOMY="${CHEMCLAW_HARNESS_AUTONOMY:-execute}"
 
 # Mint the identity the probe runner presents, from the issuer the front door is validating
 # against. Called after the mock is known to be up (a token is minted, not fetched at startup), and
@@ -233,8 +265,17 @@ start_worker() {
 #
 # A process that has genuinely died is not made slower to detect by this: the liveness check below
 # fails within a second of the pid going away, so only real waiting waits.
+#
+# **And it is a setting, `CHEMCLAW_LIVE_READY_ATTEMPTS`, because 300 was measured too short too.**
+# On a loaded host `worker-bo` — torch and bofire on the import path, started beside three other
+# workers doing the same — exceeded it and the lane killed a process that was still importing. The
+# slowest legitimate start is a property of the machine, not of this script, so the machine's
+# operator is the one who can move it.
+readonly READY_ATTEMPTS="${CHEMCLAW_LIVE_READY_ATTEMPTS:-300}"
+[[ "$READY_ATTEMPTS" =~ ^[1-9][0-9]*$ ]] \
+  || die "CHEMCLAW_LIVE_READY_ATTEMPTS must be a positive integer, got '$READY_ATTEMPTS'"
 wait_for() {
-  local name="$1" url="$2" attempts="${3:-300}"
+  local name="$1" url="$2" attempts="${3:-$READY_ATTEMPTS}"
   for _ in $(seq 1 "$attempts"); do
     # **Liveness first, and the order is the point.** A URL answering is evidence that *something*
     # serves that address — never that this process does. When a start loses a race for a bound
@@ -320,16 +361,26 @@ not the fix: it is the posture the chart ships and the one this lane exists to e
 # this lane knows its port and its module). `bo`, `calc`, `molfp` and `rxnfp` declare an endpoint
 # too and are absent from the fleet's `manifests/`, which is exactly right — they are served by
 # this repository's own `connectors_dev` process, and the loop below rewrites their URLs.
+#
+# **And the front door has to bind it**, asked of `registry.enabled()` — the function the front
+# door itself asks. Without this third term the lane started `props`, `kinetics`, `suitability`,
+# `thermalsafety` and `unitops`, all `default_enabled: false`, under an empty enable-list that
+# binds none of them: five servers up, healthy and never called, reading as tested. A lane that
+# wants them names them in `CHEMCLAW_CONNECTORS_ENABLED` (the four-repo lane does, for all of
+# them), and then they are started *and* bound.
 fleet_bundle_names() {
   "$1" - "$REPO_ROOT" "$MCP_REPO" <<'PY'
 import pathlib, sys, yaml
 
+from chemclaw.connectors.registry import enabled
+
 repo, fleet = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+bound = {manifest.name for manifest in enabled()}
 for manifest in sorted((repo / "src/chemclaw/connectors").glob("*/connector.yaml")):
     name = manifest.parent.name
     if not (yaml.safe_load(manifest.read_text()) or {}).get("endpoint"):
         continue
-    if (fleet / "manifests" / name / "connector.yaml").exists():
+    if name in bound and (fleet / "manifests" / name / "connector.yaml").exists():
         print(name)
 PY
 }
@@ -452,6 +503,12 @@ up() {
   python="$(python_bin)"
   cd "$REPO_ROOT"
 
+  # The credentials a previous `up` minted, when that lane is still the one running (`down` deletes
+  # the file). `connectors_dev --export-env` keeps a token already in the environment, so this is
+  # what makes a second `up` — `restart <name>` is one — re-use the secrets the running servers
+  # hold instead of minting new ones beside them. See `source_unset_only`.
+  source_unset_only "$RUN_DIR/connector-env.sh"
+
   # Addresses and credentials first, so every process below inherits both (see `connector_env`).
   #
   # Captured before `eval`, not inside it: command substitution inside `eval` discards the exit
@@ -522,11 +579,14 @@ up() {
     case "$connector_exports" in *"export $token_var="*) continue ;; esac
     if [ -n "${!token_var:-}" ]; then held+=("$token_var"); else unheld+=("$token_var"); fi
   done
+  # `umask` inside the subshell and the redirection inside it too: `( umask 077; … ) > file` opens
+  # the file before the body runs, so it was created 0644 — every minted credential world-readable.
   ( umask 077
-    printf '%s\n' "$connector_exports"
-    printf 'export CHEMCLAW_CONNECTOR_URLS=%q\n' "$CHEMCLAW_CONNECTOR_URLS"
-    for token_var in "${held[@]}"; do printf 'export %s=%q\n' "$token_var" "${!token_var}"; done
-  ) > "$RUN_DIR/connector-env.sh"
+    { printf '%s\n' "$connector_exports"
+      printf 'export CHEMCLAW_CONNECTOR_URLS=%q\n' "$CHEMCLAW_CONNECTOR_URLS"
+      for token_var in "${held[@]}"; do printf 'export %s=%q\n' "$token_var" "${!token_var}"; done
+    } > "$RUN_DIR/connector-env.sh"
+  )
   [ ${#unheld[@]} -eq 0 ] \
     || log "no credential held for ${unheld[*]} — a second shell will 401 on those connectors"
   if [ "${CHEMCLAW_LIVE_PROBE_TOKEN:-}" != "" ]; then
@@ -623,8 +683,9 @@ down() {
   done
   # The credentials belong to the processes that just stopped. Left behind, `processes.sh env`
   # would hand a later shell tokens for servers that are gone — a stale secret is a slower version
-  # of the mismatch this file exists to prevent, not a milder one.
-  rm -f "$RUN_DIR/connector-env.sh"
+  # of the mismatch this file exists to prevent, not a milder one. The wrapping lane's environment
+  # goes with them for the same reason: the next `up` is a new lane, not a restart of this one.
+  rm -f "$RUN_DIR/connector-env.sh" "$RUN_DIR/lane-env.sh"
 }
 
 status() {

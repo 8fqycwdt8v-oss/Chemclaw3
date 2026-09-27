@@ -920,11 +920,12 @@ SERVED_ELSEWHERE_ALLOWANCE = 11_000
 #: **But one configuration in this tree does mount the whole directory.**
 #: `infra/live/e2e-full-stack/up.sh` puts `$MCP_REPO/manifests` on `CHEMCLAW_CONNECTORS_DIR` —
 #: *after* this tree's own directory, and discovery is first-directory-wins, so every name this
-#: tree declares resolves to this tree's manifest and its `default_enabled: false` holds there too.
-#: What that lane binds from the fleet is therefore only the bundles this tree declares nothing
-#: for — `pyexec` — and its prefix is over `PREFIX_BOUND` by roughly that bundle's schema, which
-#: leaves the clear trigger's thread allowance short of the
-#: 30,000 `core/config/agent.py` derives it to be. That is stated rather than absorbed: raising
+#: tree declares resolves to this tree's manifest. That lane also names every discovered bundle in
+#: `CHEMCLAW_CONNECTORS_ENABLED` — it is the full-stack test, and with the list empty it started
+#: five opt-in servers the front door never bound — so it binds the fleet-only `pyexec` *and* the
+#: five `default_enabled: false` process-development bundles, and its prefix is over `PREFIX_BOUND`
+#: by roughly their schemas. That leaves the clear trigger's thread allowance well short of the
+#: 30,000 `core/config/agent.py` derives it to be. It is stated rather than absorbed: raising
 #: `SERVED_ELSEWHERE_ALLOWANCE` to cover it would move both defaults for every deployment on
 #: account of a lane that talks to `chemclaw.cli.mock_llm`.
 #:
@@ -944,13 +945,13 @@ SERVED_ELSEWHERE_ALLOWANCE = 11_000
 #:
 #: The cost is stated rather than absorbed, because raising a bound quietly is how one stops being
 #: one: a deployment that mounts this directory and enables the bundle pays 3,764 more tokens on
-#: every model call. (`infra/live/e2e-full-stack/up.sh` mounts it and enables none: this tree's
-#: opt-in copy wins the name there, as the note above says.) At 538 tokens a tool `thermalsafety` is
-#: in the band its siblings occupy (`safety` 544, `props` 489, `chem` 465) rather than an outlier,
-#: and the length is the fleet's own rule about a tool docstring stating what the tool is *not* —
-#: which for a server that answers "what happens if the cooling fails" is the paragraph that keeps a
-#: Semenov estimate from being quoted as an SADT. Trimming to fit would have cost ~330 tokens a
-#: tool, which is that paragraph.
+#: every model call. (`infra/live/e2e-full-stack/up.sh` mounts it and, as the note above says,
+#: enables it — this tree's copy of the manifest is the one bound there.) At 538 tokens a tool
+#: `thermalsafety` is in the band its siblings occupy (`safety` 544, `props` 489, `chem` 465)
+#: rather than an outlier, and the length is the fleet's own rule about a tool docstring stating
+#: what the tool is *not* — which for a server that answers "what happens if the cooling fails" is
+#: the paragraph that keeps a Semenov estimate from being quoted as an SADT. Trimming to fit would
+#: have cost ~330 tokens a tool, which is that paragraph.
 #:
 #: `SERVED_ELSEWHERE_ALLOWANCE` deliberately did **not** move with it: `thermalsafety` is not a
 #: bundle this tree declares, so no chart deployment binds it, and charging `PREFIX_BOUND` for it
@@ -1649,10 +1650,10 @@ def test_the_bundles_both_repositories_declare_are_the_ones_charged_to_the_allow
     default `enabled()` returns any of them, so charging them to `PREFIX_BOUND` would raise both
     compaction defaults for every deployment on account of bundles those deployments do not
     bind. What they cost is bounded by `FLEET_PUBLISHED_ALLOWANCE` below instead, which prices a
-    deployment that mounts the fleet's directory *and enables them*. The e2e lane
-    (`infra/live/e2e-full-stack/up.sh`) mounts it after this tree's own, so this tree's opt-in
-    copies win there too and it binds none of the five; `pyexec` is the one fleet-only bundle
-    that lane binds.
+    deployment that mounts the fleet's directory *and enables them* — which is what the e2e lane
+    (`infra/live/e2e-full-stack/up.sh`) does: it mounts that directory after this tree's own, so
+    this tree's copies of the shared manifests win the names, and names every discovered bundle in
+    `CHEMCLAW_CONNECTORS_ENABLED`, so it binds the five and the fleet-only `pyexec` too.
 
     Needs a checkout and not a built `.venv`: reading the fleet's manifests is a shallow clone's
     worth of work, which is the half of this file that could plausibly run in CI.
@@ -1871,9 +1872,8 @@ def test_the_whole_directory_the_e2e_lane_mounts_is_bounded_too() -> None:
     The test above bounds what `PREFIX_BOUND` is built from and therefore what a chart deployment
     pays. This one bounds the fleet's whole `manifests/` directory — what a deployment that mounts
     it and enables its bundles would pay — because nothing in this repository was watching those
-    schemas grow at all. `infra/live/e2e-full-stack/up.sh` mounts that directory but after this
-    tree's own, so of it the lane binds only what this tree declares nothing for (`pyexec`); the
-    bound is an over-estimate of that lane, not a measurement of it.
+    schemas grow at all. `infra/live/e2e-full-stack/up.sh` mounts that directory after this tree's
+    own and enables every bundle it discovers, so this bound is the price of that lane's fleet half.
 
     It is a bound on somebody else's tree and it can only skip or fail; it can never be the thing
     that *sets* a default here, which is why it is a second constant rather than a larger first

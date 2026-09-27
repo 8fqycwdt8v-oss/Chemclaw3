@@ -113,6 +113,14 @@ class EvalSettings(BaseSettings):
     # conversations and routing keys scored by their own suites, and folding them into the
     # 190-question corpus would change what that run measures without changing what it reports.
     live_m12_probe_dir: str = "data/evals/probes/m12"
+    # How long `make live-jobs` waits for a launched workflow to reach a terminal state before it
+    # judges it. The launcher's own inline wait (`inline_wait_seconds`) is a *turn's* patience and
+    # hands back a bare workflow id when it runs out — correctly — so a smoke that described the
+    # workflow the moment the launch returned read RUNNING on a first launch that took 20.2 s and
+    # failed a job that went on to complete (3/5, then 5/5 on the rerun). This is the smoke's own
+    # bound, separate from the turn's: long enough for a cold worker's first quick-level xTB job,
+    # short enough that a job that is genuinely stuck is reported as stuck rather than waited out.
+    live_jobs_terminal_wait_seconds: float = Field(default=180.0, gt=0)
     # How long the delegation runner waits for a turn's `turn_costs` row before calling it a hole.
     #
     # It exists because that write is deliberately **off** the turn's hot path:

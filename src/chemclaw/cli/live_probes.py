@@ -265,7 +265,7 @@ def _gateway_line() -> str:
     from chemclaw.cli.mock_llm import MOCK_BASE_URL
 
     line = f"**model gateway**: {settings.llm_base_url} · **model**: {settings.llm_model}"
-    if settings.llm_base_url == MOCK_BASE_URL:
+    if _scripted_gateway():
         logger.warning(
             "this run is pointed at the scripted mock (%s). Its answers are a fixed script, so "
             "nothing here can be graded and the run will exit non-zero.",
@@ -279,9 +279,10 @@ def _reachability_status(outcomes: list[ProbeOutcome]) -> int:
     """3 when the run reached the front door for no probe at all; 0 otherwise.
 
     Measured, not assumed: with nothing listening, three probes came back 100% `ConnectError`, were
-    judged `unserved` on their empty answers — a real verdict, so `_grading_status` returned 0 —
-    and the run exited **0**. The two guards are therefore about different failures, and the
-    grading one does not subsume this one.
+    recorded `unserved` on their empty answers — which `_grading_status` then counted as verdicts,
+    and returned 0 — and the run exited **0**. `_grading_status` no longer counts those, but the
+    two guards are still about different failures and the exit codes say which: 3 is "reached
+    nothing", 2 is "reached it and graded nothing".
 
     Exit 3 rather than 2 to match `validate_template_args_live`, whose Makefile comment already
     fixes the convention: *"Exit 3 (not 1) means it could not reach something — reported, never
@@ -301,8 +302,10 @@ def _reachability_status(outcomes: list[ProbeOutcome]) -> int:
     return 0
 
 
-def _grading_status(grades: list[Judgement]) -> int:
-    """2 when judging happened and produced no verdict at all; 0 otherwise.
+def _grading_status(
+    grades: list[Judgement], outcomes: list[ProbeOutcome], *, scripted: bool
+) -> int:
+    """2 when no judge produced a verdict, or when the gateway was the scripted mock; 0 otherwise.
 
     The corpus suite ended `return 0` unconditionally — twenty lines below its own empty-selection
     guard, whose comment already states the rule this function applies: *"Zero probes is not a
@@ -319,16 +322,45 @@ def _grading_status(grades: list[Judgement]) -> int:
     worth reading (a judge that failed on four probes out of 190 is a fact about those four); a
     share of nothing is not a result at all. Any number between the two would be a threshold this
     repository would then have to defend, and there is no measurement to derive one from.
+
+    **An `unserved` on a turn that produced no answer is not a verdict either.** `judge_outcome`
+    records it without calling the judge, so it says the transport failed, not that anybody graded
+    anything — and counting it let a mock run out through the same door: measured 2026-09-27, one
+    probe's stream broke, it came back `unserved`, every other probe `ungraded`, and the run exited
+    0 directly under `_gateway_line`'s warning that it "will exit non-zero". So a verdict counts
+    only when the judge was asked, which is exactly when the outcome carries an answer.
+
+    **And a run against the scripted mock is 2 whatever it produced** (`scripted`), because that is
+    what `_gateway_line` tells the operator and because it is true: the answers are a fixed script
+    and a judge on the same gateway is the same script, so any verdict there is evidence about the
+    mock rather than about the system. The delegation suite takes the same rule for the same reason.
     """
-    if any(g.verdict != "ungraded" for g in grades):
+    answered = {outcome.probe_id for outcome in outcomes if outcome.answered}
+    judged = [g for g in grades if g.verdict != "ungraded" and g.probe_id in answered]
+    if scripted:
+        logger.error(
+            "this run's gateway was the scripted mock, so its %d judgement(s) grade a script. "
+            "Point CHEMCLAW_LLM_BASE_URL at a gateway to measure the system.",
+            len(grades),
+        )
+        return 2
+    if judged:
         return 0
     logger.error(
-        "every one of the %d judgements came back ungraded — this run measured nothing. "
-        "The usual cause is a gateway that cannot grade: `settings.llm_base_url` is %s.",
+        "none of the %d judgements is a verdict a judge returned (ungraded, or unserved on a "
+        "turn that never answered) — this run measured nothing. The usual cause is a gateway "
+        "that cannot grade: `settings.llm_base_url` is %s.",
         len(grades),
         settings.llm_base_url,
     )
     return 2
+
+
+def _scripted_gateway() -> bool:
+    """Whether this process is pointed at `cli.mock_llm` — asked of it, never transcribed."""
+    from chemclaw.cli.mock_llm import MOCK_BASE_URL
+
+    return settings.llm_base_url == MOCK_BASE_URL
 
 
 def _load_transcripts(directory: Path) -> tuple[list[Probe], list[ProbeOutcome]]:
@@ -491,7 +523,23 @@ def _m12_probes(probe_dir: str | None, suite: str) -> list[Probe]:
 
 
 async def _run_plan_gate(args: argparse.Namespace) -> int:
-    """Suite A — plan → approve → execute → re-gate, live. Exits non-zero on any failed check."""
+    """Suite A — plan → approve → execute → re-gate, live. Exits non-zero on any failed check.
+
+    **Exit 3 against the scripted mock, before a probe is asked.** The suite's premise is a model
+    that writes a plan the chemist then approves, and `cli.mock_llm` never plans: no todo list, so
+    no plan to decide on, so every decision POST is a 409 and the report read **0/5 FAIL** — a
+    verdict on the approval gate from a run that never reached it. That is "could not stage the
+    scenario", which this harness spells 3 (see `_reachability_status`), not a failed check.
+    """
+    if _scripted_gateway():
+        logger.error(
+            "the plan-gate suite cannot be staged against the scripted mock (%s): it never writes "
+            "a plan, so there is nothing to approve and no check here can be reached. Point "
+            "CHEMCLAW_LLM_BASE_URL at a gateway and start the lane with "
+            "CHEMCLAW_HARNESS_AUTONOMY=plan_only.",
+            settings.llm_base_url,
+        )
+        return 3
     # Imported here rather than at module load: resolving the gated surface builds the connector
     # registry, and a `--suite corpus` run has no use for it.
     from chemclaw.agent.authz import side_effecting_tools
@@ -1044,7 +1092,7 @@ async def _main(args: argparse.Namespace) -> int:
         )
         print(report)
         _write_outputs(directory, report, regraded)
-        return _grading_status(regraded)
+        return _grading_status(regraded, outcomes, scripted=_scripted_gateway())
 
     probes = load_probes(args.probe_dir)
     loaded = len(probes)
@@ -1101,7 +1149,7 @@ async def _main(args: argparse.Namespace) -> int:
     # reach, silent failures and durable-job launches are all real numbers this report carries. A
     # run that declines to grade is not claiming a grade. The case where it truly measured nothing
     # is the one above, which it does not escape.
-    return 0 if args.no_judge else _grading_status(grades)
+    return 0 if args.no_judge else _grading_status(grades, outcomes, scripted=_scripted_gateway())
 
 
 def _positive(value: str) -> int:

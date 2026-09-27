@@ -235,11 +235,33 @@ start_mock_vendor() {
 
 # ---------------------------------------------------------------------------- Chemclaw3_ui
 
-start_ui() {
-  if [ ! -d "$UI_REPO/node_modules" ]; then
-    log "installing Chemclaw3_ui dependencies"
+# Whether the UI's installed tree is behind what its manifests ask for.
+#
+# `node_modules` existing is not that question: it survives every `git pull` that adds or bumps a
+# dependency, so the lane skipped the install and the BFF died at import on a package the lockfile
+# named and nothing had installed. npm writes `node_modules/.package-lock.json` as the record of
+# what it last installed, so a lockfile (or `package.json`) newer than that record is the signal —
+# and a missing record means no complete install ever finished.
+ui_dependencies_stale() {
+  local installed="$UI_REPO/node_modules/.package-lock.json"
+  [ -f "$installed" ] || return 0
+  [ "$UI_REPO/package-lock.json" -nt "$installed" ] || [ "$UI_REPO/package.json" -nt "$installed" ]
+}
+
+# `npm ci` when there is a lockfile — it installs exactly what the lockfile says and never rewrites
+# it, which is the sibling checkout's file and not this lane's to edit — and `npm install` only
+# when there is none to be exact about.
+install_ui_dependencies() {
+  log "installing Chemclaw3_ui dependencies"
+  if [ -f "$UI_REPO/package-lock.json" ]; then
+    ( cd "$UI_REPO" && npm ci --silent )
+  else
     ( cd "$UI_REPO" && npm install --silent )
   fi
+}
+
+start_ui() {
+  if ui_dependencies_stale; then install_ui_dependencies; fi
   CHEMCLAW_API_URL="http://127.0.0.1:${CHEMCLAW_LIVE_API_PORT:-8000}" \
     AUTH_MODE=dev \
     start ui-bff bash -c "cd '$UI_REPO' && exec npm run dev"
@@ -249,6 +271,42 @@ start_ui() {
   # actually wiring to the front door, so it is the one whose own /healthz has to answer.
   wait_for ui-bff "http://127.0.0.1:${BFF_PORT:-8787}/healthz"
   wait_for ui-spa "http://127.0.0.1:5173"
+}
+
+# ---------------------------------------------------------------------------- lane environment
+
+# Every variable `up` composes for the backend, written where `processes.sh` reads it back.
+#
+# `processes.sh restart <name>` is the primitive the storm's chaos family uses and the command the
+# end of `up` tells an operator to run — and it runs in a fresh shell holding none of the exports
+# above. So a restarted front door came back without the fleet and harness manifest directories
+# (no `pyexec`, no `mock-vendor`), without the ELN/ORD sources, and pointed at the mock model even
+# when this lane had named a gateway. `processes.sh` sources this file at start with the caller's
+# own environment winning (`source_unset_only`), and its `down` deletes it with the lane.
+#
+# The names are the ones `up` exports, in one list; `tests/test_live_lane_scripts.py` fails if
+# `up` exports a `CHEMCLAW_*` variable this list does not carry. An unset one (no gateway named) is
+# skipped rather than written empty, which would override the reader's own. 0600: it can carry
+# `CHEMCLAW_LLM_API_KEY`.
+readonly LANE_ENV_VARS=(
+  CHEMCLAW_LLM_BASE_URL CHEMCLAW_LLM_MODEL CHEMCLAW_LLM_API_KEY
+  CHEMCLAW_CONNECTORS_DIR CHEMCLAW_CONNECTORS_ENABLED
+  CHEMCLAW_DATA_SOURCES CHEMCLAW_ELN_EXPORT_DIR CHEMCLAW_ORD_EXPORT_DIR
+  CHEMCLAW_PROPS_TOKEN CHEMCLAW_RXNPREDICT_TOKEN CHEMCLAW_CHEM_TOKEN CHEMCLAW_SAFETY_TOKEN
+  CHEMCLAW_CALC_TOKEN CHEMCLAW_PYEXEC_TOKEN
+  CHEMCLAW_MCP_REPO
+)
+persist_lane_env() {
+  local file="$LIVE_DIR/run/lane-env.sh" var
+  mkdir -p "$LIVE_DIR/run"
+  # The umask is set *around* the redirection, not inside the command it redirects: in
+  # `( umask 077; … ) >file` the file is opened before the body runs, so it is created 0644.
+  ( umask 077
+    for var in "${LANE_ENV_VARS[@]}"; do
+      if [ -n "${!var:-}" ]; then printf 'export %s=%q\n' "$var" "${!var}"; fi
+    done >"$file"
+  )
+  log "lane environment persisted to $file"
 }
 
 # ---------------------------------------------------------------------------- entrypoint
@@ -316,13 +374,33 @@ up() {
   # further up — the exact asymmetry the paragraph above describes, sitting directly under it.
   export CHEMCLAW_PYEXEC_TOKEN="${CHEMCLAW_PYEXEC_TOKEN:-dev-token}"
 
+  # **Every bundle this lane can reach is bound, the five opt-in ones included.** `props`,
+  # `kinetics`, `suitability`, `thermalsafety` and `unitops` declare `default_enabled: false`, so
+  # with no enable-list the front door binds none of them — while `processes.sh` used to start all
+  # five, so the full-stack lane ran five servers nothing called and read as having tested them.
+  # This is the full-stack test, so it pays for them: the list is every bundle discovered on the
+  # directory above, derived from the registry rather than written here, and an explicit list
+  # overrides `default_enabled` (`registry.enabled`). `processes.sh` starts exactly the fleet
+  # bundles the front door binds, so the two now agree by construction. The prefix this costs is
+  # what `tests/test_context_floor.FLEET_PUBLISHED_ALLOWANCE` prices. Overridable, like the rest.
+  local every_bundle
+  every_bundle="$(cd "$REPO_ROOT" && uv run python -c 'import os
+from chemclaw.connectors.registry import discovered
+print(os.pathsep.join(sorted(discovered())))')" \
+    || die "could not list the bundles discovered on $CHEMCLAW_CONNECTORS_DIR"
+  export CHEMCLAW_CONNECTORS_ENABLED="${CHEMCLAW_CONNECTORS_ENABLED:-$every_bundle}"
+
   log "connectors dir: $CHEMCLAW_CONNECTORS_DIR"
+  log "connectors enabled: $CHEMCLAW_CONNECTORS_ENABLED"
 
   # `chem` and `safety` come up inside processes.sh, which resolves the fleet checkout through the
   # same `sibling_repo` and therefore reaches the same answer. Exported anyway, so the child lane
   # is pinned to the path *this* one resolved rather than resolving a second time — one search, one
   # answer, whatever the two shells were started with.
   export CHEMCLAW_MCP_REPO="$MCP_REPO"
+
+  # Persisted for every later `processes.sh` invocation — see `persist_lane_env`.
+  persist_lane_env
 
   # **Only the fleet servers this repository declares no manifest for** — today `pyexec`.
   # Every other one is `processes.sh::start_fleet_bundles`', whose set is `fleet_bundle_names`
