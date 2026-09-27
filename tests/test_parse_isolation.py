@@ -20,10 +20,13 @@ local IPC. Nothing asserted it in either direction, and the C half of the same c
 """
 
 import asyncio
+import io
 import socket
 import subprocess
 import sys
+import textwrap
 import time
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -32,6 +35,7 @@ from chemclaw.agent import attachments
 from chemclaw.agent.attachments import (
     AttachmentError,
     AttachmentUnavailable,
+    parse_attachment,
     parse_attachment_off_loop,
 )
 from chemclaw.core import netguard
@@ -43,14 +47,36 @@ from chemclaw.ingest.documents.isolate import (
     parse_context,
     parse_document_isolated,
 )
-from chemclaw.ingest.documents.parse import ScannedDocumentError
+from chemclaw.ingest.documents.parse import (
+    DocumentParseError,
+    ScannedDocumentError,
+    UnclassifiedParseError,
+    parse_document,
+)
 from tests.egress_probe import egress_posture
 from tests.test_document_formats import _blank_pdf_bytes  # type: ignore[attr-defined]
 
 # A CSV big enough that parsing it is unmistakably longer than the deadline the wedge test sets,
-# and small enough that building it costs nothing. Measured on this tree: 6 MB parses in 0.694 s,
-# so 20 MB is ~2.3 s against a 0.2 s deadline — a factor of ten, not a race.
-_SLOW_CSV = b"aaaa,bbbb,cccc,dddd\n" * 1_000_000
+# and small enough that building it costs nothing.
+#
+# **Wide rows rather than many narrow ones, and that is a memory shape rather than a preference.**
+# The same 20 MB as `b"aaaa,bbbb,cccc,dddd\n" * 1_000_000`, which is what this was, and which now
+# exceeds `document_parse_memory_bytes` and comes back as a refusal instead of a slow parse: a
+# million rows is a million `str` objects in the rendered lines, and a `str` costs ~50 bytes of
+# header before its characters. 100,000 rows of the same total length cost a tenth of that.
+# Re-measured on this tree after the change: 0.56 s isolated against the 0.2 s deadline below, a
+# factor of 2.8 where this comment used to claim ten. Ten is no longer available and that is the
+# budget working: a CSV slow enough for it is a CSV whose rendered text does not fit one parse.
+_SLOW_CSV = (b",".join([b"a" * 24] * 8) + b"\n") * 100_000
+
+# Above this, a fork round trip is the reason a derived deadline has no room, and no change to
+# `_parse_csv` can be. 2.7x the 0.030 s the CI runner measures and a fifth of the 0.165 s median
+# this remote sandbox does — see `_budgets_the_slow_fixture_overruns`, which is the only reader.
+_FORK_IS_THE_PROBLEM = 0.08
+
+# The marker the three fixture-timed tests skip under when this box cannot express the scenario.
+# Spelled once so a run's epilogue and a reader are looking at the same string.
+_SLOW_FIXTURE_SKIP = "process creation is too expensive on this box"
 
 
 def test_a_parse_child_is_still_inside_the_no_egress_posture() -> None:
@@ -90,6 +116,116 @@ def test_a_parse_child_is_still_inside_the_no_egress_posture() -> None:
         f"a parse child's outbound connect was {outcome!r} rather than refused by the egress "
         "guard, so untrusted bytes are parsed in a process outside the no-egress posture"
     )
+
+
+def _in_process_parse_seconds(raw: bytes) -> float:
+    """What `raw` costs to parse here, so a deadline can be derived instead of transcribed.
+
+    In-process on purpose: the number wanted is the *parse*, and going through
+    `parse_document_isolated` would fold a fork round trip into it and then be compared against a
+    deadline that has to contain one.
+    """
+    started = time.perf_counter()
+    parse_document("slow.csv", raw, None)
+    return time.perf_counter() - started
+
+
+def _fork_round_trip_seconds() -> float:
+    """What one fork-and-answer costs, measured rather than written down.
+
+    **The constant this replaces was wrong twice, in both directions.** It stood for the floor a
+    derived deadline may not go under — the *small* upload has to fit inside the same deadline — and
+    an absolute number cannot do that job when every other term in the comparison scales with the
+    machine. First it was padded to 50 ms and then multiplied by three, refusing a deadline already
+    five times the round trip; corrected to 20 ms it then refused CI, where the parse it is measured
+    against is 0.203 s rather than the 0.36 s this box sees, so the derived deadline fell to 51 ms
+    and the fixed floor did not move with it.
+
+    Measuring both ends is what makes the comparison scale-free: a faster runner shortens the parse
+    and the fork together, and their ratio is the thing the test actually depends on.
+    """
+    _warm_the_forkserver()
+    started = time.perf_counter()
+    parse_document_isolated("small.csv", b"id,yield\nR-1,88\n", None, 30.0)
+    return time.perf_counter() - started
+
+
+def _budgets_the_slow_fixture_overruns() -> tuple[float, float]:
+    """`(cost, deadline)` for `_SLOW_CSV`, measured here rather than written down.
+
+    **Three tests in this file time themselves against this fixture, and every one of them had a
+    constant in it.** `D-2026-09-19-a-ceiling-on-the-archive-is-not-a-ceiling-on-the-parse` rewrote
+    `_parse_csv` to render row by row and cut the parse from ~2.3 s to 0.36 s here and **0.258 s**
+    on the CI runner, which left a hardcoded 0.2 s deadline ahead of it by 1.3x. Two of the three
+    raced, on separate runs, and each was found and fixed on its own — which is how the third was
+    still sitting there with a 2x margin.
+
+    So the budgets are derived from what the parse costs on the box running the test. A quarter is
+    the margin; the floor is one fork round trip, because a deadline under that kills the child
+    before it reads a byte and the test would be about process creation instead.
+
+    **When that floor is not clear, which of the two measurements moved decides whether this is a
+    failure or a skip**, and it used to be a failure either way. The ratio can collapse from below —
+    `_parse_csv` got faster once already and will again — and that must red the gate, because the
+    three tests downstream stop being evidence about a parse outrunning its deadline. It can equally
+    collapse from above, on a box where creating a process is expensive: measured in the Claude Code
+    Remote sandbox, five runs gave a **0.165 s median** fork round trip against the **0.030 s** the
+    CI runner measures, with the parse at 0.205 s — matching CI's 0.258 s, so nothing was wrong with
+    the parse and the ratio was 1.24 against a required 4. That is not a defect this repository can
+    fix and it is not evidence about anything; `_FORK_IS_THE_PROBLEM` is where the two cases part.
+    The bound is 2.7x CI's own figure, so no change to `_parse_csv` can reach it, and well under
+    this sandbox's — which is the property that keeps the failure arm real.
+    """
+    cost = _in_process_parse_seconds(_SLOW_CSV)
+    fork = _fork_round_trip_seconds()
+    deadline = cost / 4
+    if deadline <= fork and fork > _FORK_IS_THE_PROBLEM:
+        pytest.skip(
+            f"{_SLOW_FIXTURE_SKIP}: a fork round trip costs {fork:.3f}s here against the 0.030s a "
+            f"CI runner measures, so a deadline this {cost:.3f}s parse overruns four times over "
+            f"({deadline:.3f}s) is under it. The parse is not the problem — process creation is, "
+            "and this box cannot express a parse outrunning its deadline at all"
+        )
+    assert deadline > fork, (
+        f"_SLOW_CSV parses in {cost:.3f}s here, so a deadline it overruns four times over is "
+        f"{deadline:.3f}s — under the {fork:.3f}s a fork round trip costs, so the child would be "
+        "killed before it read a byte and this would be about process creation rather than about a "
+        "parse outrunning its deadline. A fork that cheap means the *parse* got faster, which is "
+        "what this arm is for. Growing the fixture is not the way out: driven, 40 MB of the same "
+        "CSV is refused by `document_parse_memory_bytes` before the deadline is reached."
+    )
+    return cost, deadline
+
+
+def test_the_fixture_guard_tells_a_slow_box_from_a_fast_parse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both arms of `_budgets_the_slow_fixture_overruns`' floor, driven with the clocks faked.
+
+    The floor used to fail either way, which reddened the gate in the Claude Code Remote sandbox for
+    a property of the sandbox. Splitting it is only safe if the *failure* arm still fires, so both
+    are asserted here rather than left to whichever box happens to run the suite — the whole defect
+    being that a machine-dependent branch is exercised by nobody on purpose.
+
+    Fake seconds, not real ones: this asserts the branch, and measuring it for real would reproduce
+    the sampling problem one level up.
+    """
+    monkeypatch.setattr("tests.test_parse_isolation._in_process_parse_seconds", lambda raw: 0.200)
+
+    # A slow fork with a healthy parse is the box's fault, so the scenario is inexpressible here.
+    monkeypatch.setattr("tests.test_parse_isolation._fork_round_trip_seconds", lambda: 0.165)
+    with pytest.raises(pytest.skip.Exception, match=_SLOW_FIXTURE_SKIP):
+        _budgets_the_slow_fixture_overruns()
+
+    # A *cheap* fork with no room left means the parse got faster, which must still red the gate.
+    monkeypatch.setattr("tests.test_parse_isolation._fork_round_trip_seconds", lambda: 0.060)
+    with pytest.raises(AssertionError, match="the .parse. got faster"):
+        _budgets_the_slow_fixture_overruns()
+
+    # And a healthy ratio returns the budgets untouched.
+    monkeypatch.setattr("tests.test_parse_isolation._fork_round_trip_seconds", lambda: 0.030)
+    cost, deadline = _budgets_the_slow_fixture_overruns()
+    assert (cost, deadline) == (0.200, 0.050)
 
 
 def _warm_the_forkserver() -> None:
@@ -141,10 +277,11 @@ def test_a_parsers_refusal_crosses_the_process_boundary_as_itself() -> None:
 def test_a_parse_past_its_deadline_is_killed_and_counted() -> None:
     """The direct form of the fix: the child is killed, and the kill is visible from a scrape."""
     _warm_the_forkserver()
+    _, deadline = _budgets_the_slow_fixture_overruns()
     before = METRICS.value("chemclaw_document_parse_kills_total")
     started = time.monotonic()
     with pytest.raises(ParseWorkerLost):
-        parse_document_isolated("slow.csv", _SLOW_CSV, None, 0.2)
+        parse_document_isolated("slow.csv", _SLOW_CSV, None, deadline)
     elapsed = time.monotonic() - started
     # The caller is freed on the deadline rather than on the parse: the whole point is that the
     # thread ends. Generous on the upper side because sending 20 MB to the child is real work.
@@ -164,26 +301,84 @@ async def test_a_parse_past_its_deadline_frees_its_slot_for_the_next_upload(
     `AttachmentUnavailable`, which is the shape of the production failure: uploads refused by a pod
     that has capacity on paper.
 
-    Three of the four budgets are set against the ~2.3 s parse rather than against each other, so
-    that the defect cannot hide behind any of them. The queue wait is shorter than the parse: if it
-    were longer the second upload would simply outwait the wedge. The caller's backstop is shorter
-    than the parse too, and the shipped 5 s is not — with that in place an in-process parse finishes
-    *inside* the backstop and comes back as a success, so the mutation would be caught by the wrong
-    assertion and this test would not be evidence about slots at all.
+    Three of the four budgets are set against the fixture's *measured* parse rather than against
+    each other, so that the defect cannot hide behind any of them. The queue wait is shorter than
+    the parse: if it were longer the second upload would simply outwait the wedge. The caller's
+    backstop is shorter than the parse too, and the shipped 5 s is not — with that in place an
+    in-process parse finishes *inside* the backstop and comes back as a success, so the mutation
+    would be caught by the wrong assertion and this test would not be evidence about slots at all.
+
+    **The budgets were transcribed against a ~2.3 s parse, and that parse is no longer 2.3 s.**
+    `D-2026-09-19-a-ceiling-on-the-archive-is-not-a-ceiling-on-the-parse` rewrote `_parse_csv` to
+    render row by row, which cut this fixture to **0.36 s** — leaving the 0.2 s deadline below it by
+    1.8x, so whether the parse outran its deadline came down to how fast the runner was. It passed
+    three local full runs and CI on the commit that caused it, then failed CI with
+    `DID NOT RAISE`. Making the fixture slow again is not available: measured, 15x the cell count
+    buys 0.40 s to 0.73 s, because the cost is in the bytes rather than in the cells, and the size
+    that would buy 2.3 s is now refused by `document_parse_memory_bytes`.
+
+    So the deadline is derived from the fixture instead of written down beside it: a quarter of what
+    the parse actually costs *here*, which holds its ratio on a runner of any speed. The floor is
+    the fork round trip, **measured here too rather than written down**, because the *small* upload
+    has to fit inside the same deadline. A fixed floor does not do that job: the constant that stood
+    there refused CI, where this parse costs 0.203 s against the 0.36 s this box sees, so the
+    derived deadline fell to 51 ms while the floor stayed where it was. Measuring both ends makes
+    the comparison scale-free — a faster runner shortens the parse and the fork together, and their
+    ratio is what this test actually depends on — and if the parser ever does get fast enough to
+    squeeze them together this fails saying so rather than going quietly marginal again.
+
+    Growing the fixture is not the way out, and that is measured rather than assumed: at 40 MB of
+    the same CSV the isolated parse is refused by `document_parse_memory_bytes` before the deadline
+    is reached at all, so the test would pass on a memory refusal while claiming to be about time.
     """
     _warm_the_forkserver()
+    cost, deadline = _budgets_the_slow_fixture_overruns()
+    fork = _fork_round_trip_seconds()
     monkeypatch.setattr(settings, "attachment_max_concurrent_parses", 1)
-    monkeypatch.setattr(settings, "attachment_parse_timeout_seconds", 0.2)
-    monkeypatch.setattr(settings, "attachment_parse_reap_grace_seconds", 0.5)
-    monkeypatch.setattr(settings, "attachment_parse_queue_seconds", 0.5)
+    monkeypatch.setattr(settings, "attachment_parse_timeout_seconds", deadline)
+    monkeypatch.setattr(settings, "attachment_parse_reap_grace_seconds", deadline * 2.5)
+    # Shorter than the parse, for the reason above: a queue wait past it would let the second
+    # upload simply outwait the wedge instead of being shed by it.
+    monkeypatch.setattr(settings, "attachment_parse_queue_seconds", cost / 2)
     monkeypatch.setattr(settings, "attachment_max_bytes", len(_SLOW_CSV) + 1)
 
     with pytest.raises(AttachmentError):
         await parse_attachment_off_loop("slow.csv", _SLOW_CSV)
-    # The release rides `Future.add_done_callback`, which asyncio dispatches with `call_soon`,
-    # so it lands on the next turn of the loop rather than before this coroutine resumes.
-    await asyncio.sleep(0)
-    assert attachments._PARSE_SLOTS.in_flight == 0
+    # **Waited for rather than asserted on the next loop turn, because the slot is not the caller's
+    # to release.** `parse_attachment_off_loop` shields the future precisely so that cancelling the
+    # *caller* cannot fire the release while the thread is still running — its own comment says "the
+    # slot comes back exactly when the thread does" — and when the backstop fires, that thread is
+    # still inside `isolate`, killing the child. Measured from this test's own log: "killed the
+    # reader process for slow.csv after 0.058s". So `await asyncio.sleep(0)` yielded one turn and
+    # then asserted a 58 ms event had already happened; it passed 10 of 10 runs in isolation and
+    # failed inside a full serial suite, which is the signature of a race rather than of a wedge.
+    #
+    # The bound is what keeps this a regression test. The defect it exists for held the slot for the
+    # life of the process — the docstring's own measurement is `in_flight` still at 2 five seconds
+    # after both callers were freed — so five seconds separates "comes back" from "never comes back"
+    # by two orders of magnitude while asserting nothing about scheduling.
+    released = time.monotonic() + 5.0
+    while attachments._PARSE_SLOTS.in_flight and time.monotonic() < released:
+        await asyncio.sleep(0.01)
+    assert attachments._PARSE_SLOTS.in_flight == 0, (
+        "the slot was still held 5 s after the caller was freed, which is the wedge this test "
+        "exists for: a replica with capacity on paper and none in fact"
+    )
+
+    # **The second upload gets its own deadline, and that is the whole reason this test is stable.**
+    # One setting was doing two jobs: the slow parse has to *overrun* it and the small file has to
+    # *fit inside* it, which needs the parse to cost many times a fork round trip. On this box that
+    # ratio is ~25 and on the CI runner it is 8.6 (0.258 s against 0.030 s), so a guard demanding
+    # four times one and three times the other could not be satisfied there at all — driven, twice.
+    # Nothing about the subject needs them shared: what is asserted below is that the slot was
+    # *free*, measured against the queue wait, and a slot that is still held sheds the upload no
+    # matter how long its deadline is.
+    monkeypatch.setattr(settings, "attachment_parse_timeout_seconds", cost)
+    assert settings.attachment_parse_queue_seconds > 2 * fork, (
+        f"the queue wait is {settings.attachment_parse_queue_seconds:.3f}s and a fork round trip "
+        f"is {fork:.3f}s, so the assertion below would be measuring process creation rather than "
+        "whether the slot came back"
+    )
 
     started = time.monotonic()
     parsed = await parse_attachment_off_loop("small.csv", b"id,yield\nR-1,88\n")
@@ -205,7 +400,11 @@ async def test_the_cap_still_sheds_when_the_slots_are_genuinely_busy(
     _warm_the_forkserver()
     monkeypatch.setattr(settings, "attachment_max_concurrent_parses", 1)
     monkeypatch.setattr(settings, "attachment_parse_timeout_seconds", 30.0)
-    monkeypatch.setattr(settings, "attachment_parse_queue_seconds", 0.1)
+    # Derived for the same reason the other two are: the holder has to still be parsing when this
+    # wait elapses, and against a fixture that now costs 0.26-0.36 s the 0.1 s constant that stood
+    # here was a 2x margin nobody had looked at since `_parse_csv` got faster.
+    cost, _ = _budgets_the_slow_fixture_overruns()
+    monkeypatch.setattr(settings, "attachment_parse_queue_seconds", cost / 4)
     monkeypatch.setattr(settings, "attachment_max_bytes", len(_SLOW_CSV) + 1)
 
     holder = asyncio.create_task(parse_attachment_off_loop("slow.csv", _SLOW_CSV))
@@ -298,4 +497,550 @@ def test_a_child_that_stalls_after_its_first_byte_still_frees_the_worker_thread(
     assert reported["linger.txt"][2] == "ParsedDocument", reported["linger.txt"]
     assert reported["orphans"][0] == "0", (
         f"{reported['orphans'][0]} grandchild process(es) outlived the kill that freed the slot"
+    )
+
+
+def _workbook_of_shared_strings(references: int, wide: bool) -> bytes:
+    r"""A legal `.xlsx` whose text is many times its expanded size, optionally one code point wide.
+
+    Written as raw OOXML rather than through `openpyxl` because the point is a property of the
+    format that `openpyxl` will not produce: a *shared string* is stored once in the archive and
+    referenced from as many cells as the sheet likes, so the text `_parse_xlsx` builds is the
+    length of the string times the number of references while the archive grows by ~30 bytes each.
+    Nothing here is crafted or dishonest — every `file_size` in the central directory is true,
+    which is what `_refuse_a_bomb` reads, and the workbook opens in Excel.
+
+    `wide` adds one more shared string holding a single astral code point, referenced from exactly
+    one cell. Every other character is ASCII. CPython stores a `str` at the width of its widest code
+    point, and `_parse_xlsx` ends in one document-wide `"\\n\\n".join(blocks)`, so that one cell
+    quadruples the whole document.
+
+    Args:
+        references: How many cells point at the long shared string.
+        wide: Whether one further cell holds a single astral code point.
+
+    Returns:
+        The workbook's bytes.
+    """
+    run = ("tetrahydrofuran-4-methoxybenzaldehyde-isolated-yield-" * 19)[:1000]
+    strings = [run, "\U0001f9ea"] if wide else [run]
+    per_row = 20
+    rows = []
+    for row in range(1, references // per_row + 1):
+        cells = "".join(
+            f'<c r="{chr(65 + column)}{row}" t="s"><v>0</v></c>' for column in range(per_row)
+        )
+        rows.append(f'<row r="{row}">{cells}</row>')
+    if wide:
+        rows.append(f'<row r="{len(rows) + 1}"><c r="A{len(rows) + 1}" t="s"><v>1</v></c></row>')
+    main = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+    package = "http://schemas.openxmlformats.org/package/2006/relationships"
+    document = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    parts = {
+        "[Content_Types].xml": (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.'
+            'relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>'
+            '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-'
+            'officedocument.spreadsheetml.sheet.main+xml"/>'
+            '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.'
+            'openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+            '<Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.'
+            'openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/></Types>'
+        ),
+        "_rels/.rels": (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            f'<Relationships xmlns="{package}"><Relationship Id="rId1" '
+            f'Type="{document}/officeDocument" Target="xl/workbook.xml"/></Relationships>'
+        ),
+        "xl/workbook.xml": (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            f'<workbook xmlns="{main}" xmlns:r="{document}"><sheets>'
+            '<sheet name="runs" sheetId="1" r:id="rId1"/></sheets></workbook>'
+        ),
+        "xl/_rels/workbook.xml.rels": (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            f'<Relationships xmlns="{package}">'
+            f'<Relationship Id="rId1" Type="{document}/worksheet" Target="worksheets/sheet1.xml"/>'
+            f'<Relationship Id="rId2" Type="{document}/sharedStrings" Target="sharedStrings.xml"/>'
+            "</Relationships>"
+        ),
+        "xl/worksheets/sheet1.xml": (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            f'<worksheet xmlns="{main}"><sheetData>{"".join(rows)}</sheetData></worksheet>'
+        ),
+        "xl/sharedStrings.xml": (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            f'<sst xmlns="{main}" count="{references + int(wide)}" uniqueCount="{len(strings)}">'
+            + "".join(f"<si><t>{one}</t></si>" for one in strings)
+            + "</sst>"
+        ),
+    }
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for path, body in parts.items():
+            archive.writestr(path, body)
+    return buffer.getvalue()
+
+
+def _declared_expansion(raw: bytes) -> int:
+    """What `_refuse_a_bomb` reads out of the archive's central directory."""
+    with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+        return sum(item.file_size for item in archive.infolist())
+
+
+def test_a_legal_upload_cannot_spend_more_than_the_parse_budget_declares() -> None:
+    """Every ceiling on a document is a number in the archive; this is the one on the parse.
+
+    The workbook here is legal by every bound upstream of the parse — well under
+    `attachment_max_bytes` on the wire and under `document_max_expanded_bytes` expanded, with a
+    central directory that tells the truth about both. It still asks for two hundred million
+    characters, because a shared string is stored once and read from as many cells as the sheet
+    has. Driven in a 1Gi memory cgroup holding the front door's measured 523 MiB idle pair, two
+    concurrent parses of a workbook of this shape — 222,485 bytes on the wire, 5.9 MiB expanded,
+    96.3 M characters — took the parent process with `SIGKILL`, exit 137: a pod OOMKill, every
+    connected turn lost, from an upload nothing was entitled to refuse.
+
+    What refuses it now is `document_parse_memory_bytes`, enforced by the kernel on the child that
+    does the allocating, so nothing written in the archive can move it. Asserted as a refusal
+    rather than as a memory reading because a memory reading of a process this one does not
+    `waitpid` on is not available here: the parse child belongs to the forkserver, so
+    `RUSAGE_CHILDREN` never sees it. The pod-level number is in
+    `tests/test_deploy_chart.py::PARSE_MIB_PER_PARSE_BUDGET_MIB`.
+    """
+    raw = _workbook_of_shared_strings(200_000, wide=False)
+    assert len(raw) < settings.attachment_max_bytes, "the fixture stopped being a legal upload"
+    assert _declared_expansion(raw) < settings.document_max_expanded_bytes, (
+        "the fixture stopped being legal by the expansion ceiling, which is the whole point of it"
+    )
+    with pytest.raises(DocumentParseError) as refusal:
+        parse_document_isolated("runs.xlsx", raw, None, 120.0)
+    assert "memory" in str(refusal.value), (
+        "a document refused for its size must say so; the caller cannot act on 'could not be read'"
+    )
+
+
+def test_one_wide_code_point_does_not_multiply_what_a_parse_may_spend() -> None:
+    r"""The same workbook, one astral character apart, and the budget is the same budget.
+
+    `_parse_xlsx` ends in one document-wide `"\\n\\n".join(blocks)`, and CPython stores a `str` at
+    the width of its widest code point — so a single emoji, superscript minus, `Å` or equilibrium
+    arrow in one cell quadruples the whole extracted document. Measured on a real memory cgroup, a
+    legal 1,089,493-byte upload at 63.4 MiB expanded charged the pod 236 MiB pure-ASCII and 500 MiB
+    with one astral character in it, against a chart constant of 3.1 MiB per expanded MiB that
+    predicted 197 for both.
+
+    Both halves are asserted, and the first is why this is not simply "wide documents are refused":
+    the ASCII twin must still parse, or the bound would have been bought by refusing everything.
+    """
+    narrow = _workbook_of_shared_strings(30_000, wide=False)
+    wide = _workbook_of_shared_strings(30_000, wide=True)
+    assert len(wide) - len(narrow) < 200, "the two fixtures must differ by one character, not more"
+
+    parsed = parse_document_isolated("narrow.xlsx", narrow, None, 120.0)
+    assert parsed.text.isascii() and len(parsed.text) > 30_000_000
+
+    with pytest.raises(DocumentParseError) as refusal:
+        parse_document_isolated("wide.xlsx", wide, None, 120.0)
+    assert "memory" in str(refusal.value)
+
+
+def _markup_heavy_docx(paragraphs: int, runs: int) -> bytes:
+    """A legal Word report whose cost is its markup rather than its text.
+
+    Every word its own styled run, which is what Word itself produces after tracked changes, mixed
+    fonts, a spell-check language pass or a round-trip through another tool. `python-docx` builds an
+    lxml DOM out of that markup, so the cost is in the elements and not in the characters — which is
+    why no ceiling read out of the archive predicts it.
+    """
+    body = "".join(
+        "<w:p><w:pPr><w:jc w:val='both'/></w:pPr>"
+        + "".join(
+            '<w:r><w:rPr><w:b/><w:color w:val="1F4E79"/><w:sz w:val="22"/></w:rPr>'
+            f'<w:t xml:space="preserve">word{run} </w:t></w:r>'
+            for run in range(runs)
+        )
+        + "</w:p>"
+        for _ in range(paragraphs)
+    )
+    document = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        f"<w:body>{body}<w:sectPr/></w:body></w:document>"
+    )
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "[Content_Types].xml",
+            '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/'
+            'content-types"><Default Extension="xml" ContentType="application/xml"/>'
+            '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.'
+            'relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/'
+            'vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>',
+        )
+        archive.writestr(
+            "_rels/.rels",
+            '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/'
+            '2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/'
+            'officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>'
+            "</Relationships>",
+        )
+        archive.writestr(
+            "word/_rels/document.xml.rels",
+            '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/'
+            '2006/relationships"/>',
+        )
+        archive.writestr("word/document.xml", document)
+    return buffer.getvalue()
+
+
+def test_a_document_stopped_by_the_budget_says_so_even_when_a_c_parser_reported_it() -> None:
+    """The refusal a markup-heavy `.docx` earns, which used to say the document was malformed.
+
+    **lxml reports its own allocation failure rather than letting CPython raise**, so the
+    `except MemoryError` arm that names this ceiling never fired for the one format that most needs
+    it. Measured on the shipped path before this: a 485,186-byte Word report — 2,000 paragraphs of
+    200 styled runs, 2,979,999 characters of text, legal by every bound upstream — came back as
+    `could not read report.docx: unknown error (<string>, line 0)`. That is not a missing reason, it
+    is a wrong one: it tells a chemist their perfectly good report is broken at line 0, which is
+    worse than the generic wording `too_large_to_read` exists to replace.
+
+    `_at_ceiling` is what renames it, and both arms are asserted because either alone passes on the
+    wrong implementation. A document that is *really* unreadable must keep its own message, or the
+    fix is "call everything a memory problem" — driven, the two populations do not overlap: a
+    parse stopped by the budget fails with 0.1 MiB of its allowance left, and a truncated archive
+    fails with the whole 160 MiB unspent.
+    """
+    raw = _markup_heavy_docx(2_000, 200)
+    assert len(raw) < settings.attachment_max_bytes, "the fixture stopped being a legal upload"
+    assert _declared_expansion(raw) < settings.document_max_expanded_bytes, (
+        "the fixture stopped being legal by the expansion ceiling, which is the point of it"
+    )
+
+    with pytest.raises(DocumentParseError) as refusal:
+        parse_document_isolated("report.docx", raw, None, 120.0)
+    assert "memory" in str(refusal.value), (
+        f"a document the budget stopped was refused as {str(refusal.value)!r}, which reads as "
+        "'your file is malformed' and names neither the ceiling nor the knob that moves it"
+    )
+
+    broken = io.BytesIO()
+    with zipfile.ZipFile(broken, "w") as archive:
+        archive.writestr("word/document.xml", "<w:document><not closed")
+    with pytest.raises(DocumentParseError) as unreadable:
+        parse_document_isolated("broken.docx", broken.getvalue(), None, 120.0)
+    assert "memory" not in str(unreadable.value), (
+        "a genuinely unreadable document was blamed on the memory budget, so the assertion above "
+        "proves nothing — every refusal would pass it"
+    )
+
+
+def test_an_ambient_hard_limit_below_the_budget_is_a_smaller_budget_not_a_dead_parser() -> None:
+    """`setrlimit` cannot raise a maximum, and that used to make every document unreadable.
+
+    A process tree carrying any hard `RLIMIT_DATA` below `VmData + document_parse_memory_bytes` — a
+    systemd `LimitDATA=`, a container security profile, an operator raising the knob above what the
+    platform allows — made `_bound_allocations` raise `ValueError: not allowed to raise maximum
+    limit`. In `_parse_into` that lands in the broad arm, so **every upload and every share document
+    of every format** came back as "could not be read", with the cause only in a log line.
+
+    Driven in a subprocess, because the limit has to be lowered before the call and a test process
+    that lowers its own hard limit cannot put it back.
+    """
+    probe = textwrap.dedent(
+        """
+        import resource, sys
+        from chemclaw.ingest.documents.isolate import _anonymous_bytes, _bound_allocations
+
+        base = _anonymous_bytes()
+        tight = base + 8 * 1024 * 1024
+        resource.setrlimit(resource.RLIMIT_DATA, (tight, tight))
+        ceiling, hard = _bound_allocations(160 * 1024 * 1024)
+        print("CLAMPED" if ceiling == tight and hard == tight else f"UNEXPECTED:{ceiling},{hard}")
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, timeout=120, check=False
+    )
+    assert result.returncode == 0, (
+        "a hard RLIMIT_DATA below the parse budget took the bound out with an exception, so every "
+        f"document of every format is refused as unreadable: {result.stderr[-400:]}"
+    )
+    assert "CLAMPED" in result.stdout, (
+        "the ambient ceiling did not become the budget; a lower platform limit is a smaller "
+        f"budget, which is what this knob is for: {result.stdout!r}"
+    )
+
+
+def _markup_heavy_pptx(slides: int, runs: int) -> bytes:
+    """A legal deck whose cost is its markup, the `.pptx` twin of `_markup_heavy_docx`.
+
+    Every word its own styled run, which is what a deck becomes after a template change or a
+    round-trip through another tool. `python-pptx` builds the same lxml DOM `python-docx` does, so
+    the cost is in the elements rather than in the characters.
+    """
+    from pptx import Presentation
+    from pptx.util import Inches, Pt
+
+    deck = Presentation()
+    blank = deck.slide_layouts[6]
+    for _ in range(slides):
+        slide = deck.slides.add_slide(blank)
+        frame = slide.shapes.add_textbox(Inches(0.2), Inches(0.2), Inches(9), Inches(6)).text_frame
+        paragraph = frame.paragraphs[0]
+        for index in range(runs):
+            run = paragraph.add_run()
+            run.text = f"word{index} "
+            run.font.bold = True
+            run.font.size = Pt(11)
+    buffer = io.BytesIO()
+    deck.save(buffer)
+    return buffer.getvalue()
+
+
+def test_a_deck_stopped_by_the_budget_earns_the_same_named_refusal_a_document_does() -> None:
+    """`.pptx` goes through the same lxml layer, and nothing had driven it.
+
+    `D-2026-09-19-a-refusal-that-blames-the-document-is-worse-than-one-that-says-nothing` fixed the
+    `.docx` case — lxml reports its own allocation failure, so the arms that name this ceiling
+    never fired and a legal report was refused as malformed at line 0 — and left the deck path
+    unverified, with a `BACKLOG.md` row saying so rather than a guess.
+
+    Driven: a 1,552,596-byte deck of 600 slides x 600 styled runs holds 2,821,690 characters,
+    parses unbounded in 4.4 s, and is refused here in 0.5 s **with the memory refusal**, so
+    `_at_ceiling` already covered it. This is what keeps that true rather than incidental.
+
+    Both arms, as for `.docx`: a deck that is really unreadable must keep its own message, or every
+    refusal would pass the first assertion.
+    """
+    raw = _markup_heavy_pptx(600, 600)
+    assert len(raw) < settings.attachment_max_bytes, "the fixture stopped being a legal upload"
+
+    with pytest.raises(DocumentParseError) as refusal:
+        parse_document_isolated("deck.pptx", raw, None, 120.0)
+    assert "memory" in str(refusal.value), (
+        f"a deck the budget stopped was refused as {str(refusal.value)!r}, which names neither the "
+        "ceiling nor the knob that moves it"
+    )
+
+    broken = io.BytesIO()
+    with zipfile.ZipFile(broken, "w") as archive:
+        archive.writestr("ppt/presentation.xml", "<p:presentation><not closed")
+    with pytest.raises(DocumentParseError) as unreadable:
+        parse_document_isolated("broken.pptx", broken.getvalue(), None, 120.0)
+    assert "memory" not in str(unreadable.value), (
+        "a genuinely unreadable deck was blamed on the memory budget, so the assertion above "
+        "proves nothing"
+    )
+
+
+def test_a_refusal_is_not_bounded_by_the_ceiling_that_caused_it() -> None:
+    """The reply is released before it is sent, because a `MemoryError` in a handler reaches no arm.
+
+    Python does not route an exception raised inside one `except` clause to a later one, so a
+    `MemoryError` while pickling the refusal onto the pipe escapes `_parse_into` entirely and the
+    caller gets an EOF it can only report as "stopped without answering" — the one failure in that
+    module whose cause is knowable, arriving nameless. The refusal is ~250 characters, so it is
+    unlikely rather than impossible, and "unlikely" is an argument rather than a measurement.
+
+    `_release_allocations` removes the question instead of estimating it: by the time a handler
+    runs the parse is over, the budget's job is done, and the reply gets the room the parse was
+    denied. Asserted on the mechanism — the ceiling is gone once the arm has run — because
+    provoking a real allocation failure inside a handler is not something a test can stage
+    honestly.
+    """
+    probe = textwrap.dedent(
+        """
+        import resource
+        from chemclaw.ingest.documents.isolate import _bound_allocations, _release_allocations
+
+        before = resource.getrlimit(resource.RLIMIT_DATA)
+        ceiling, hard = _bound_allocations(64 * 1024 * 1024)
+        bounded = resource.getrlimit(resource.RLIMIT_DATA)[0]
+        _release_allocations(hard)
+        after = resource.getrlimit(resource.RLIMIT_DATA)[0]
+        print("BOUNDED" if bounded == ceiling else f"NOT-BOUNDED:{bounded}")
+        print("RELEASED" if after == hard and after != bounded else f"STILL-BOUND:{after}")
+        same = resource.getrlimit(resource.RLIMIT_DATA)[1] == before[1]
+        print("UNCHANGED-HARD" if same else "HARD-MOVED")
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, timeout=120, check=False
+    )
+    assert result.returncode == 0, f"the probe did not run: {result.stderr[-400:]}"
+    assert "BOUNDED" in result.stdout, f"the parse was never bounded: {result.stdout!r}"
+    assert "RELEASED" in result.stdout, (
+        "the ceiling still stood after the failure arm released it, so a refusal is pickled under "
+        f"the budget that stopped the parse: {result.stdout!r}"
+    )
+    assert "UNCHANGED-HARD" in result.stdout, (
+        "releasing moved the hard limit, which is irreversible for the process and is not what "
+        f"this is for: {result.stdout!r}"
+    )
+
+
+def _zip_with_truncated_markup() -> bytes:
+    """A structurally valid `.docx` container whose `word/document.xml` stops mid-element.
+
+    This is the unclassified population in its cheapest honest form: the archive opens, its central
+    directory is sound, `_refuse_a_bomb` has nothing to say about it, and the failure happens inside
+    lxml for a reason no caller can name — what an interrupted network copy leaves on a share.
+    """
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as container:
+        container.writestr("[Content_Types].xml", "<?xml version='1.0'?><Types/>")
+        container.writestr("word/document.xml", "<?xml version='1.0'?><w:document><w:body>")
+    return buffer.getvalue()
+
+
+def _zip_that_declares_too_much() -> bytes:
+    """A `.docx` whose central directory declares more expansion than the ceiling allows.
+
+    Deflated zeroes, so it is ~64 KiB on disk for 64 MiB declared — `_refuse_a_bomb` reads the
+    declared `file_size` and never decompresses, which is the whole point of refusing there.
+    """
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as container:
+        container.writestr("[Content_Types].xml", "<?xml version='1.0'?><Types/>")
+        container.writestr("word/document.xml", b"\0" * (settings.document_max_expanded_bytes + 1))
+    return buffer.getvalue()
+
+
+def test_an_unbounded_parse_does_not_blame_the_document_for_what_it_cannot_know() -> None:
+    """`parse_attachment` sets no ceiling, so it cannot report a verdict a ceiling establishes.
+
+    `D-2026-09-19-a-refusal-that-blames-the-document-is-worse-than-one-that-says-nothing` put
+    `_at_ceiling` in the isolate child, where the ceiling is *known*. The residual is the path that
+    never forks: `cli/backfill_corpus.py` and the format tests call `parse_attachment`, no
+    `RLIMIT_DATA` is set on that process, and a C parser that reports its own allocation failure —
+    lxml does exactly that — arrives as `unknown error (<string>, line 0)`. Indistinguishable from a
+    malformed file, and worded as an accusation against a document that may be perfectly legal.
+
+    The decision is `D-2026-09-22-an-unbounded-parse-may-not-blame-the-document`: this path stays
+    in-process, and its refusal states what it cannot establish rather than guessing. The parser's
+    own words are kept, because an operator debugging a share needs them.
+
+    **The input is a structurally valid zip with truncated markup, and it has to be.** The first
+    version of this test passed `b"not a zip at all"`, which never reaches the broad arm at all:
+    `_refuse_a_bomb` refuses it from the central directory, and that is a *classified* fact. So the
+    test asserted the new behaviour while exercising none of it — and, until a review measured it,
+    hid a defect in which the classified refusal grew the caveat. A truncated `word/document.xml` is
+    the population this is actually about: the file is a legal container, and a parse of it fails
+    somewhere inside a C library for a reason this system cannot name.
+    """
+    with pytest.raises(UnclassifiedParseError) as refused:
+        parse_attachment("report.docx", _zip_with_truncated_markup())
+
+    message = str(refused.value)
+    assert "could not read report.docx" in message, (
+        f"the parser's own words must survive — an operator needs them: {message}"
+    )
+    assert "not established here" in message, (
+        "the refusal reads as a verdict on the document, which is the one thing an unbounded parse "
+        f"cannot establish: {message}"
+    )
+    assert "no memory ceiling" in message, message
+    assert ".." not in message, (
+        f"the caveat was appended to a cause that already ended in a period: {message}"
+    )
+    assert message.count("report.docx") == 1, (
+        f"the document is named twice in one refusal: {message}"
+    )
+
+
+def test_a_classified_refusal_is_not_buried_under_a_caveat_about_memory() -> None:
+    """The caveat belongs to the unclassified population only, and burying the rest is the same bug.
+
+    An unsupported format, a container that is not a zip and a scanned PDF are statements about the
+    document that hold whether or not a ceiling was set. Wrapping them in "we do not know whether
+    this machine had enough memory" would be the same what-do-I-actually-know failure pointed the
+    other way — a refusal that is *less* specific than the thing it knows.
+
+    **Every named population is driven, because naming three and checking one is how the fourth got
+    buried.** The first version of this test listed three and asserted only the unsupported-format
+    arm; the `BadZipFile` arm was meanwhile raising `UnclassifiedParseError`, so "File is not a zip
+    file" arrived followed by a paragraph about memory not being established — about the one thing
+    that was.
+    """
+    populations = {
+        "unsupported format": (("notes.zzz", b"hello"), "not a supported format"),
+        "not a zip container": (("report.docx", b"not a zip at all"), "File is not a zip file"),
+        "over-expanding archive": (("bomb.docx", _zip_that_declares_too_much()), "past the"),
+        "scanned PDF": (("scan.pdf", _blank_pdf_bytes()), "so it is a scan"),
+    }
+    for population, ((name, raw), expected) in populations.items():
+        with pytest.raises(DocumentParseError) as refused:
+            parse_attachment(name, raw)
+        message = str(refused.value)
+        assert expected in message, f"{population}: {message}"
+        assert not isinstance(refused.value, UnclassifiedParseError), (
+            f"{population} is a classified fact and must not carry the unclassified type: {message}"
+        )
+        assert "not established here" not in message, (
+            f"{population} grew the unbounded caveat: {message}"
+        )
+
+
+def test_only_the_unknown_failures_carry_the_type_the_caveat_keys_on() -> None:
+    """`UnclassifiedParseError` marks the population, so no caller reads a message to guess.
+
+    This is the half that keeps the decision from rotting: the distinction is in the *type*, and a
+    caller that sniffed "unknown error" out of a string would break on the next lxml release.
+
+    **The derivation is over `except` handlers, not over `raise` statements, and the difference is
+    the whole guard.** Counting `raise UnclassifiedParseError(...)` nodes and asserting a number is
+    what the first version did, and a review showed it passes unchanged when a *third* broad arm is
+    added that raises the base class — the exact regression the docstring claimed it prevented. So
+    this walks the module for every broad handler anywhere in it (bare `except`, `except Exception`,
+    `except BaseException`) and requires each one to raise this type, and requires that no *narrow*
+    handler does. A third broad arm is then covered or red, and a classified arm that reaches for
+    the unclassified type — which is how `zipfile.BadZipFile` got the memory caveat — is red too.
+    """
+    import ast
+
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "chemclaw"
+        / "ingest"
+        / "documents"
+        / "parse.py"
+    )
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+
+    def raises_unclassified(handler: ast.ExceptHandler) -> bool:
+        return any(
+            isinstance(node, ast.Raise)
+            and isinstance(node.exc, ast.Call)
+            and isinstance(node.exc.func, ast.Name)
+            and node.exc.func.id == "UnclassifiedParseError"
+            for node in ast.walk(handler)
+        )
+
+    def is_broad(handler: ast.ExceptHandler) -> bool:
+        if handler.type is None:
+            return True
+        return isinstance(handler.type, ast.Name) and handler.type.id in {
+            "Exception",
+            "BaseException",
+        }
+
+    handlers = [node for node in ast.walk(tree) if isinstance(node, ast.ExceptHandler)]
+    assert handlers, "parse.py has no `except` handlers at all, so this derivation is measuring air"
+
+    uncovered = [h.lineno for h in handlers if is_broad(h) and not raises_unclassified(h)]
+    assert not uncovered, (
+        f"broad `except` arms at lines {uncovered} do not raise UnclassifiedParseError, so a "
+        "failure this system cannot explain is reported as a verdict on the document"
+    )
+    misplaced = [h.lineno for h in handlers if not is_broad(h) and raises_unclassified(h)]
+    assert not misplaced, (
+        f"narrow `except` arms at lines {misplaced} raise UnclassifiedParseError, so a classified "
+        "refusal is about to be buried under a caveat about memory it does not need"
+    )
+    assert issubclass(UnclassifiedParseError, DocumentParseError), (
+        "it must stay a DocumentParseError or every existing handler — the share sync's "
+        "reject-and-continue net, the upload route, the isolate child — stops catching it"
     )

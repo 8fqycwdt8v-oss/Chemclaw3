@@ -20,6 +20,8 @@ import fnmatch
 import logging
 import os
 import shutil
+import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -41,7 +43,6 @@ from chemclaw.core.identity_context import (
     reset_current_identity,
     set_current_identity,
 )
-from chemclaw.core.metrics import METRICS
 from chemclaw.ingest.documents import retriever as retriever_module
 from chemclaw.ingest.documents import sync as sync_module
 from chemclaw.ingest.documents.binding import DocumentShareError, load_binding
@@ -56,7 +57,6 @@ from chemclaw.ingest.documents.index import (
     InMemoryDocumentIndex,
     PostgresDocumentIndex,
 )
-from chemclaw.ingest.documents.isolate import parse_context
 from chemclaw.ingest.documents.parse import (
     DocumentParseError,
     ParsedDocument,
@@ -2470,7 +2470,11 @@ def test_a_systematic_read_failure_costs_log_lines_by_the_pass_not_by_the_corpus
         "one line per file in the corpus, and the reason is in every one of them"
     )
     summary = warnings[0].getMessage()
-    assert "40" in summary and "DocumentParseError" in summary, (
+    # The reason is the *class name* `sync.py` counts by (`type(exc).__name__`), so it moves when a
+    # refusal is classified more precisely — which is a feature and is why this asserts the suffix
+    # rather than one name. `UnclassifiedParseError` is what a corrupt PDF earns today, and pinning
+    # `DocumentParseError` here is what turned that improvement into a red test.
+    assert "40" in summary and "ParseError x40" in summary, (
         f"the one line an operator reads must carry the count and the distinct reasons: {summary!r}"
     )
     # The individual paths are not lost, they are moved: DEBUG is where a per-file trail belongs.
@@ -2665,9 +2669,7 @@ def test_a_normal_share_is_untouched_by_the_bound(share: dict[str, Any]) -> None
     assert report.indexed == 4 and report.deduplicated == 1  # the fixture share's own numbers
 
 
-def test_a_share_document_is_parsed_in_a_process_the_crawl_can_kill(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_a_share_document_is_parsed_in_a_process_the_crawl_can_kill(tmp_path: Path) -> None:
     """The crawl's worker thread must end, and for a whole release it did not.
 
     **The defect.** `sync.py` wrapped `asyncio.to_thread(_read_and_parse, …)` in `wait_for`, and
@@ -2678,47 +2680,43 @@ def test_a_share_document_is_parsed_in_a_process_the_crawl_can_kill(
     — the same wedge `agent/attachments.py` had, on a pool nothing caps, with the killable
     subprocess already sitting one module over as a drop-in.
 
-    Driven against the real `parse_document_isolated` — no stand-in, because the claim is that the
-    shipped crawl reaches it — with a document whose parse is an order of magnitude past the
-    deadline. The counter it lands on is `skipped_timeout` and not `skipped_unreadable`:
-    `ParseWorkerLost` is a `DocumentParseError` subclass, so without its own `except` arm a killed
-    parse would be filed beside a corrupt PDF and the one number that says a bound fired would
-    read zero.
+    Driven through the shipped `sync_share` and the real `parse_document_isolated` — only what the
+    stalled child *does* is substituted. The counter it lands on is `skipped_timeout` and not
+    `skipped_unreadable`: `ParseWorkerLost` is a `DocumentParseError` subclass, so without its own
+    `except` arm a killed parse would be filed beside a corrupt PDF and the one number that says a
+    bound fired would read zero.
 
-    The sibling tests above drive a stand-in for the *read*, which is the half the crawl's own
-    `wait_for` still covers and a child process cannot.
+    **Why a stalled child rather than a large document, and a subprocess rather than this one.**
+    This test used a 20 MB CSV against a 0.2 s deadline and failed on CI once. Measured, that CSV
+    is not slow to parse: it ends in the child's memory ceiling (`document_parse_memory_bytes`) as a
+    `DocumentParseError`, so the test was a race between two bounds — on a fast runner the ceiling
+    won, the whole pass took a quarter of a second and the file was filed as unreadable. A child
+    that never answers and allocates nothing can only end on the deadline, so the deadline can be
+    generous for the quick document too. The stall has to live in the forkserver's preload, which
+    this process's forkserver was warmed without — `tests/parse_stalls.py` says why at length.
     """
     mount = tmp_path / "mount"
     (mount / "Docs").mkdir(parents=True)
     (mount / "Docs" / "quick.txt").write_text("the palladium catalyst deactivated above 80 degrees")
-    # Measured on this tree: 6 MB of CSV parses in 0.694 s, so 20 MB is ~2.3 s — an order of
-    # magnitude past the 0.2 s deadline below rather than a race with it.
-    (mount / "Docs" / "slow.csv").write_bytes(b"aaaa,bbbb,cccc,dddd\n" * 1_000_000)
-    share = {
-        "mount": str(mount),
-        "roots": [{"path": "Docs"}],
-        "public": True,
-        "extensions": [".txt", ".csv"],
-        "max_file_bytes": 50_000_000,
-    }
-    monkeypatch.setattr(settings, "attachment_parse_timeout_seconds", 0.2)
-    monkeypatch.setattr(settings, "attachment_parse_reap_grace_seconds", 5.0)
-    binding = load_binding(share)
-    index = InMemoryDocumentIndex()
-    # Pay the forkserver's one-off start outside the measurement, the way the upload tests do.
-    parse_context()
-
-    before = METRICS.value("chemclaw_document_parse_kills_total")
-    started = time.perf_counter()
-    report = asyncio.run(sync_share(SOURCE, binding, index, limit=100))
-    elapsed = time.perf_counter() - started
-
-    assert report.skipped_timeout == 1, report
-    assert report.skipped_unreadable == 0, report
-    assert report.indexed == 1, report
-    assert METRICS.value("chemclaw_document_parse_kills_total") - before == 1, (
-        "no parse child was killed, so the crawl parsed that document on its own worker thread"
+    (mount / "Docs" / "stall.csv").write_text("a,b\n1,2\n")
+    probe = subprocess.run(
+        [sys.executable, "-c", f"from tests.parse_stalls import crawl; crawl({str(mount)!r})"],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
     )
-    # `asyncio.run` joins the default executor before returning, so this duration *includes* the
-    # worker thread — which is the whole claim: before the fix it would have been the 2.3 s parse.
-    assert elapsed < 5.0, elapsed
+    assert probe.returncode == 0, probe.stderr
+    lines = [line for line in probe.stdout.splitlines() if line.startswith("crawl|")]
+    assert len(lines) == 1, (probe.stdout, probe.stderr[-2000:])
+    ended, timed_out, unreadable, indexed, kills, children = lines[0].split("|")[1:]
+    # The property, not a duration: the stalled child never answers, so a crawl that nobody kills
+    # never returns, and the probe's patience is far past the deadline that must end it.
+    assert ended == "ended", (lines[0], probe.stderr[-2000:])
+    assert (timed_out, unreadable, indexed) == ("1", "0", "1"), (lines[0], probe.stderr[-2000:])
+    assert kills == "1", (
+        "no parse child was killed, so the crawl parsed that document on its own worker thread: "
+        f"{lines[0]}"
+    )
+    assert children == "0", f"a killed parse child outlived the pass: {lines[0]}"

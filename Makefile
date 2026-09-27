@@ -103,7 +103,7 @@ SHELL := bash
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install lint type test cov check ci chat db-migrate db-grants schedules-apply kg-validate synthesize eval eval-strict eval-baseline eval-baseline-check eln-validate skill-validate connector-validate datasource-validate sink-validate channel-validate sink-schema template-validate connectors prose-validate helm-validate explain user-erase reindex reindex-full up down phoenix-up phoenix-down phoenix-publish deps-audit live-infra live-infra-down live-up live-down live-status live-jobs live-probes live-turn-cost live-benchmark live-template-args live-verifier-margin trajectory-census live-data live-plan-gate live-degradation live-storm live-soak live-soak-report leak-probe mutants mutant-results mutant-stats upstream-check share-estimate share-sync live-ab live-e2e-full-stack live-e2e-full-stack-down live-e2e-full-stack-status
+.PHONY: help install lint type test cov check ci chat db-migrate db-grants schedules-apply kg-validate synthesize eval eval-strict eval-baseline eval-baseline-check eln-validate skill-validate connector-validate datasource-validate sink-validate channel-validate sink-schema template-validate connectors prose-validate helm-validate explain user-erase reindex reindex-full up down phoenix-up phoenix-down phoenix-publish deps-audit live-infra live-infra-down live-up live-down live-status live-jobs live-probes live-turn-cost live-benchmark live-template-args live-verifier-margin trajectory-census distill propose-profile live-data live-plan-gate live-degradation live-storm live-soak live-soak-report leak-probe mutants mutant-results mutant-stats upstream-check share-estimate share-sync live-ab live-delegation hypothesis-recovery live-e2e-full-stack live-e2e-full-stack-down live-e2e-full-stack-status
 
 help:  ## List every target with its one-line description (the default).
 	@# Reads the `## ` comments beside each target, so a new target documents itself the day it is
@@ -287,8 +287,13 @@ helm-validate:  ## Render the Helm chart and validate it against the Kubernetes 
 	@# shipped covering three of six; `secrets.create` and `mcpFace.route.enabled` were rendered by
 	@# nothing in `tests/`, this file or `.github/`. The two `--set`s after `alertmanager.enabled`
 	@# are its prerequisites, not extra coverage: that template refuses to render with no receivers.
+	@# `mcpFace.ingressNamespaces` is the same kind of prerequisite for `mcpFace.route.enabled`, and
+	@# it was added *by* this render failing: publishing the face with an empty peer list renders a
+	@# Route to an address the chart's own `mcp-face-ingress` policy drops, which the template now
+	@# refuses. That refusal landing here first is the union arm working — it is the only thing in
+	@# the tree that had ever set that switch.
 	@set -e; \
-	  for flags in "" "--set mcpFace.enabled=true --set mcpFace.route.enabled=true --set documentShare.enabled=true --set monitoring.temporalSdkMetrics.enabled=true --set secrets.create=true --set monitoring.alertmanager.enabled=true --set-json monitoring.alertmanager.receivers=[{\"name\":\"chemclaw-oncall\"}] --set monitoring.alertmanager.defaultReceiver=chemclaw-oncall"; do \
+	  for flags in "" "--set mcpFace.enabled=true --set mcpFace.route.enabled=true --set-json mcpFace.ingressNamespaces=[{\"network.openshift.io/policy-group\":\"ingress\"}] --set documentShare.enabled=true --set monitoring.temporalSdkMetrics.enabled=true --set secrets.create=true --set monitoring.alertmanager.enabled=true --set-json monitoring.alertmanager.receivers=[{\"name\":\"chemclaw-oncall\"}] --set monitoring.alertmanager.defaultReceiver=chemclaw-oncall"; do \
 	    helm template chemclaw deploy/helm/chemclaw \
 	      --set networkPolicy.allowAnyDestination=true \
 	      --set retention.unboundedGrowthAccepted=true \
@@ -549,6 +554,20 @@ live-verifier-margin:  ## Re-roll the raw judge and measure its margin at the th
 trajectory-census:  ## Count recurring tool-call trajectories over the stored sessions (the distiller's trigger).
 	uv run python -m chemclaw.cli.trajectory_census $(ARGS)
 
+# The consumer that census never had. Mines the same corpus, applies the self-confirmation guard
+# — a trajectory that recurs only where a skill of that name was already acting is not evidence
+# for proposing it — and files what survives into the proposal queue for its owner to decide.
+#
+# **On demand and never on a timer**, the rule `CLAUDE.md` states and the campaign and playbook
+# miners already follow. Dry by default: `ARGS="--propose"` is what writes.
+distill:  ## Distil recurring trajectories into skill proposals (dry; ARGS="--propose" to file).
+	uv run python -m chemclaw.cli.distill $(ARGS)
+
+# The other proposer, and the honest one to read the help for: an accepted profile proposal is a
+# *record* that somebody wants one, because a profile is git-resident and no route can commit.
+propose-profile:  ## Propose an agent profile from observed tool co-occurrence (dry; ARGS="--propose").
+	uv run python -m chemclaw.cli.propose_profile $(ARGS)
+
 # The corpus half of the same question `live-probes` asks of the model: not "did a tool answer"
 # but "is the number in the answer the number in the paper". Checks every published measurement
 # against what actually arrived, value by value. No model, for the reason `live-jobs` gives: a
@@ -583,6 +602,26 @@ live-data:  ## Check the seeded corpus against the published factor tables, valu
 # the open row in `docs/planning/BACKLOG.md`.
 live-ab:  ## Ask the probe corpus against the prompt-swapping control arm and compare (real gateway).
 	uv run python -m chemclaw.cli.live_probes --suite ab $(ARGS)
+
+# The delegation experiment's run half (issue #359). Four arms over `data/evals/probes/delegation.
+# yaml`, `MINIMUM_REPEATS` repeats each, one report per arm against the `no-helper` baseline.
+#
+# **Two of the four arms need the front door started a particular way and no flag here can do it**:
+# `helper-routed` needs `CHEMCLAW_MODEL_ROUTES='{"helper": "<a smaller model>"}'` and `peer` needs
+# `CHEMCLAW_AGENT_PEER_ROSTER` naming another profile, because a helper's model route and a peer
+# roster are read by the process that builds the agent. The suite prints what each arm needs and
+# reports an arm that could not have complied as `undelegated` rather than as a pass.
+#
+# Against `chemclaw.cli.mock_llm --catalogue delegation` this proves the runner and nothing else:
+# the double supplies the decision to delegate, which is the one thing a credential-free lane cannot
+# get from a model. Answering "does delegation pay" needs a gateway.
+live-delegation:  ## The delegation experiment: drive every arm and compare (real gateway).
+	uv run python -m chemclaw.cli.live_probes --suite delegation $(ARGS)
+
+# Needs no gateway and no credential: the judge is simulated, which is what makes the ground truth
+# constructed and the null controllable. It measures the ranking machinery, not a model's judgement.
+hypothesis-recovery:  ## Reproduce the ADR's tournament-recovery table against a null control.
+	uv run python -m chemclaw.cli.hypothesis_recovery $(ARGS)
 
 live-plan-gate:  ## M12: plan -> approve -> execute -> re-gate, live (needs harness_autonomy=plan_only).
 	uv run python -m chemclaw.cli.live_probes --suite plan-gate $(ARGS)

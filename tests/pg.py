@@ -49,7 +49,9 @@ from chemclaw.core.migrate import migrate, migration_dsn
 # surface, and its parity tests (DA-1) require every field to be documented in `.env.example`.
 # A test-only knob does not belong there.
 #
-# Suffixed with a fresh uuid4 so two pytest runs against one database cannot collide: the session
+# Suffixed with a fresh uuid4 so two pytest *processes* against one database cannot collide — and
+# only processes, because this is a module constant: two sessions inside one process share the
+# suffix, which is the hazard `_MIGRATED`'s comment below measures. The session
 # fixture *drops* its schema on the way out, so a fixed name means a second run deletes the first
 # run's tables mid-flight. Found the hard way — running a single test file while the full suite
 # was going did exactly that. A hard kill can leave an orphan schema behind; it is inert and named
@@ -98,16 +100,52 @@ async def create_test_schema(base_dsn: str, schema: str = TEST_SCHEMA) -> None:
 
 
 async def drop_test_schema(base_dsn: str, schema: str = TEST_SCHEMA) -> None:
-    """Drop the isolation schema and everything in it, so a run leaves no residue behind."""
+    """Drop the isolation schema and everything in it, so a run leaves no residue behind.
+
+    **Forgetting the migration memo is part of dropping the schema, not a courtesy the caller
+    pays.** `_MIGRATED` lives for the *process* and records that the DDL landed in a schema; this
+    statement is what makes that record false. They are separated by `pytest.main()` returning, so
+    nothing relates them unless the destroying end says so — which is why the invalidation is here
+    rather than in `conftest.py`'s fixture, where a second dropper would have to remember it.
+    """
     async with await connect(base_dsn) as conn:
         await conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
         await conn.commit()
+    _forget_migrations_in(schema)
 
 
 # Which (migration DSN, migrations directory) pairs this process has already migrated. The
 # session fixture in `conftest.py` fixes both before any test runs, so in a normal run this holds
 # exactly one entry and every test after the first pays only the reachability probe.
+#
+# **A process outlives a pytest session, and this memo used to outlive the schema it described.**
+# `mutmut` runs the suite through `pytest.main()` *in-process* — stats, then clean tests, then once
+# per mutant — so one process holds many sessions. `isolated_postgres_schema` drops `TEST_SCHEMA`
+# when a session ends and recreates it (empty) when the next begins, while `TEST_SCHEMA` is a
+# module constant and therefore the same name throughout: identical memo key, vanished tables. So
+# every session after the first found `migrated_db_or_skip` a no-op, resolved every unqualified
+# name through the search_path's second entry, and ran the suite — truncations included — against
+# **`public`**, the developer's own database. Measured: two sessions in one process, session 1
+# isolated and session 2 appending 24 rows to `public.audit_events`.
 _MIGRATED: set[tuple[str, str]] = set()
+
+
+def _forget_migrations_in(schema: str) -> None:
+    """Discard the memo entries that claimed migrations are applied inside `schema`.
+
+    Matched on the schema's identity where it actually lives — the rendered `search_path` option
+    `schema_dsn` puts on the DSN — and **not** on the schema name appearing anywhere in the string.
+    A bare `schema in dsn` was the first spelling and a review measured two false positives it
+    cannot avoid: `TEST_SCHEMA` is a prefix of the derived `f"{TEST_SCHEMA}_no_checkpointer"` and
+    `_no_ledger` names, so dropping the base schema would forget a derived one's memo; and a schema
+    name occurring in a database name or a password would match too. Both cost only an idempotent
+    re-migration, which is why this is a correctness-of-the-claim fix rather than a bug fix — but
+    the claim is what the next reader relies on.
+    """
+    rendered = quote(f"-c search_path={schema},public")
+    for entry in list(_MIGRATED):
+        if rendered in entry[0]:
+            _MIGRATED.discard(entry)
 
 
 async def migrated_db_or_skip() -> None:

@@ -39,6 +39,8 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 
+from chemclaw.agent.distiller import MIN_INDEPENDENT_SESSIONS
+
 
 @dataclass(frozen=True)
 class Turn:
@@ -195,7 +197,7 @@ def census(turns: list[Turn], failures: list[SessionFailures] | None = None) -> 
     recurring: list[dict[str, Any]] = []
     for tools, occurrences in sorted(by_class.items(), key=lambda kv: -len(kv[1])):
         sessions = {t.session_id for t in occurrences}
-        if len(sessions) < 2:
+        if len(sessions) < MIN_INDEPENDENT_SESSIONS:
             continue
         first_by_session: dict[str, datetime | None] = {}
         for turn in occurrences:

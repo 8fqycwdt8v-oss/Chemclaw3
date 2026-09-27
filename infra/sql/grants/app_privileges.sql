@@ -124,6 +124,13 @@ BEGIN
     -- rather than by a clock, D-011; a job record is the durable evaluation record D-157 exists to
     -- keep). Withholding DELETE makes those refusals enforced rather than merely intended.
     --
+    -- `behaviour_proposals` sits beside `plan_approvals` for the same reason both need UPDATE and
+    -- neither needs DELETE: a proposal's row is written once and its *decision* is the one field
+    -- that changes afterwards, exactly as a plan approval's `consumed_at` is. It is retained rather
+    -- than pruned (`durable/retention.py::_NOT_PRUNED`), so withholding DELETE is what makes that
+    -- refusal enforced rather than intended — the sentence this comment block already makes about
+    -- the three tables above.
+    --
     -- **`note_proposals` was here and is not any more.** The PR-gate that wrote it is gone
     -- (`D-2026-09-05-the-gate-is-deleted-not-dormant`) and the table is retired rather than
     -- dropped, because it holds real sign-offs an erasure request must still find. A retired
@@ -136,7 +143,7 @@ BEGIN
         'bo_campaigns, measurements, predictions, observations, '
         'pending_requests, effects, '
         'reaction_records, experiment_protocols, '
-        'plan_approvals, sync_cursors, turn_costs, '
+        'plan_approvals, behaviour_proposals, sync_cursors, turn_costs, '
         'molecule_fingerprints, reaction_fingerprints, reaction_labels, corpus_molecules, '
         'corpus_reactions, corpus_cursors, '
         'tool_result_links TO %I', app_role);
@@ -180,9 +187,15 @@ BEGIN
     -- holds an answer that was moved aside precisely so a reopen could not blank it, so a credential
     -- able to UPDATE or DELETE one would undo the move. The application writes it once, from
     -- `pending_store.open_request`, and never reads it back to revise it.
+    -- `experiment_arm_results` is the third of the same family and the argument is the clearest of
+    -- them: it holds what a designed arm actually produced, and a re-measured well is a *second*
+    -- observation rather than a correction of the first. A credential that could UPDATE one could
+    -- make two disagreeing assays look like one agreeing measurement, which is precisely the
+    -- evidence the append-only shape exists to keep; one that could DELETE could make a failed
+    -- plate disappear from the record that says which designs were ever run.
     EXECUTE format(
         'GRANT INSERT ON bo_suggestions, structures, experiment_protocol_revisions, '
-        'experiment_protocol_status_events, pending_request_answers TO %I',
+        'experiment_protocol_status_events, pending_request_answers, experiment_arm_results TO %I',
         app_role
     );
 

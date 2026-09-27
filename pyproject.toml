@@ -212,6 +212,19 @@ dependencies = [
     # `TIKTOKEN_CACHE_DIR`); the package must never fetch one at request time, which is what
     # `core/netguard.py` would refuse and what the no-egress posture forbids.
     "tiktoken>=0.13",
+    # Declared for the same reason as its neighbour above and resolved the same way — it is already
+    # in this repository's closure as a requirement of `tiktoken`, so the cost is this line
+    # (`D-2026-09-16-a-library-already-in-the-closure-is-a-declaration-not-a-dependency`), and the
+    # failure mode a transitive edge has is the one that argument names: a bump over there that
+    # drops it takes a *bound* with it rather than a feature.
+    #
+    # `ingest/eln/warehouse/expr.py` is its only importer and runs one thing through it: a
+    # site-supplied pattern from a `datasource.yaml`, against free-text warehouse cells, under
+    # `timeout=`. `re` has no timeout, and a catastrophic pattern there pinned an ingest worker
+    # until the activity's `start_to_close` and then did it again on the retry
+    # (`D-2026-09-21-a-pattern-that-cannot-be-timed-out-is-run-by-an-engine-that-can`). Everywhere
+    # else in this tree the pattern is first-party and `re` stays the engine.
+    "regex>=2026.7.19",
     "temporalio[pydantic]>=1.30.0",
     "uvicorn>=0.51.0",
 ]
@@ -231,6 +244,11 @@ dev = [
     "pytest-timeout>=2.3",
     "pre-commit>=3.8",
     "types-pyyaml>=6.0.12.20260518",
+    # Stubs rather than a `[[tool.mypy.overrides]]` entry, because the one thing this repository
+    # asks of `regex` is a keyword argument — `search(..., timeout=)`, the bound that
+    # `ingest/eln/warehouse/expr.py` exists to hold. Silencing the import would make `mypy --strict`
+    # accept a call to an engine that had dropped it.
+    "types-regex>=2026.7.19",
     "scipy-stubs>=1.17.1.5",
     "hypothesis>=6.100",
     "mutmut>=3.0",
@@ -338,6 +356,12 @@ extend-immutable-calls = ["fastapi.Depends", "fastapi.Security"]
 
 [tool.mypy]
 python_version = "3.11"
+# First-party code resolves from the source tree, never from the installed package. `chemclaw` ships
+# no `py.typed`, so without this a narrower invocation (`mypy tests/test_x.py`) found it in
+# site-packages as an *untyped* package, and the incremental cache it wrote made the next
+# `make type` report errors that are not in the code (`Module "chemclaw.cli" has no attribute
+# "live_probes"`) until `.mypy_cache` was deleted. One resolution for every invocation, one cache.
+mypy_path = "$MYPY_CONFIG_FILE_DIR/src"
 strict = true
 # Fail loudly on a half-configured type environment rather than silently skipping.
 warn_unused_configs = true
@@ -480,25 +504,91 @@ fail_under = 84
 # mutants over an hours-long suite, and most of them land in code where a surviving mutant means
 # nothing (a log message, a docstring-shaped constant). The count here is not written down for the
 # reason the rest of this repository does not write down counts that drift — read the list. What it
-# covers: the authorization gate, the PR-gate and the note schema behind it, the calculation cache's
-# identity, the budget guard, the durable audit sink, `runner_trace.py` (which shipped a real defect
-# on 2026-08-04 and is therefore the best available test of whether its own tests are any good), the
-# offline lexical proxy both hybrid indexes share (`core/fulltext.py` — found 2026-09-04 by the
-# review that asked whether this suite can fail: a mutant reverting `_WORD` to its own comment's
-# named-bad ASCII-only spelling survived 349 green tests), the template resolver's whole-string
-# anchor (`templates/resolve.py`, same review), and the quantity-grounding module the same review's
-# fixture-reach probe found undertested (`core/quantities.py`).
+# covers: the authorization gate, the note schema and the one knowledge write path, the calculation
+# cache's identity, the budget guard, the durable audit sink, `runner_trace.py` (which shipped a real
+# defect on 2026-08-04 and is therefore the best available test of whether its own tests are any
+# good), the offline lexical proxy both hybrid indexes share (`core/fulltext.py` — found 2026-09-04
+# by the review that asked whether this suite can fail: a mutant reverting `_WORD` to its own
+# comment's named-bad ASCII-only spelling survived 349 green tests), the template resolver's
+# whole-string anchor (`templates/resolve.py`, same review), and the quantity-grounding module the
+# same review's fixture-reach probe found undertested (`core/quantities.py`).
+#
+# **`kg/note.py` and `kg/git_writer.py` used to be described here as "the PR-gate and the note
+# schema behind it", and there is no PR-gate** — `D-2026-09-05-the-gate-follows-behaviour-not-
+# knowledge` deleted it and every module behind it, and `git_writer.py` opens by saying so. The two
+# modules stay for what they actually are: the note schema, and the single write path into the
+# knowledge graph whose ordering is load-bearing.
+#
+# **`core/chem.py` and `core/logging.py` were added 2026-09-19**, by the audit of the commit that
+# changed both of them. `chem.py` mints `compound_id`, the calculation cache's key and the
+# definition both fingerprint indices filter on, which makes it at least as invariant-bearing as
+# `science/calc/store.py` beside it; measured on that commit, two mutations of its neutralisation
+# guard and one of `STANDARDIZATION_VERSION` itself passed the whole 343-test chem subset.
+# `core/logging.py` is the secret-redaction filter, where a surviving mutant is a credential on
+# stdout: measured on the same commit, leaving one of the two PEM header tails greedy passed all 120
+# of its own tests at 117 s per call, and making both possessive passed them while leaking a private
+# key body verbatim.
 [tool.mutmut]
 source_paths = [
     "src/chemclaw/agent/authz.py",
     "src/chemclaw/agent/audit_store.py",
+    # Added by the wave-5 backlog pass. Four refusal gates were outside this list —
+    # `agent/plan_gate.py`, `agent/skill_backend.py`, `agent/spend_cap.py` and `agent/loop_cap.py` —
+    # each a control of the same kind as `authz.py` above: a refusal whose surviving mutant is a tool
+    # call that should not have happened. Only **one** lands here, because the row asking for them
+    # says why: "the list is short on purpose — the comment above it records that the run is hours
+    # long — so each addition needs its runtime measured rather than assumed."
+    #
+    # `spend_cap.py` is first because it is the **smallest of the four by source length** (309 lines
+    # against `loop_cap.py`'s 333, `skill_backend.py`'s 367 and `plan_gate.py`'s 671), so it buys the
+    # cheapest available answer to "what does one of these cost". Lines are a proxy for mutant count
+    # and not a measurement of it, and **the cost of this addition is not recorded anywhere yet**:
+    # `make mutants` has not completed a run since `D-2026-09-22-a-mutation-backstop-that-cannot-start`
+    # found it failing before any mutant is tested. An earlier draft of this comment said the cost
+    # was "recorded below" — there is nothing below that records it. `mutants/mutmut-stats.json` is
+    # the file that will, and the `BACKLOG.md` row carries what is left to do.
+    "src/chemclaw/agent/spend_cap.py",
+    # The other three, added 2026-09-23 once the row's premise had been measured away. It asked for
+    # each addition's runtime to be priced first, on the ground that "the run is hours long"; the
+    # first completed run was **87 minutes**, and `spend_cap.py`'s own share of it was **29
+    # mutants, ~18 s**. These are 671, 367 and 333 lines against its 309 — the same order — so the
+    # price was known well enough to stop paying for it one module at a time.
+    #
+    # **And the run that added them priced it exactly**: 3,640 mutants -> **4,057**, and the wall
+    # clock went *down*, 87 minutes to 82m40s. The +417 is smaller than the run-to-run variance,
+    # so at this size an addition is not the term that decides how long the backstop takes — which
+    # is the answer the row was waiting for, and it is the opposite of what "the run is hours long"
+    # implied.
+    #
+    # Every one is a refusal gate of the same kind as `authz.py` at the top of this list: a
+    # surviving mutant is a tool call, a skill write, or a model call that should not have
+    # happened. What makes them worth the minutes is that a *coverage* floor cannot see this —
+    # all three are well above the repository's 84% line already.
+    #
+    # Their own test files go into `pytest_add_cli_args_test_selection` in the same edit, never
+    # after: an unpaired source path leaves every mutant on the lines only its own file covers
+    # reported **`no_tests`** — not `survived`, which is the word an earlier draft of this comment
+    # used and which the gate's own text refuses ("a mutant nothing reaches is not a survivor — it
+    # is a hole in the *selection*"). `total` counts it either way, which is how the score reached
+    # 44.3% against a floor of 72.0: 1,009 `no_tests`, against 988 that genuinely survived. Measured
+    # that way here, selection-alone against selection-plus-file: `plan_gate.py` **66% -> 87%**,
+    # `skill_backend.py` **51% -> 90%**, `loop_cap.py` **88% -> 100%**.
+    "src/chemclaw/agent/plan_gate.py",
+    "src/chemclaw/agent/skill_backend.py",
+    "src/chemclaw/agent/loop_cap.py",
     "src/chemclaw/api/budget.py",
     "src/chemclaw/api/runner_trace.py",
+    "src/chemclaw/core/chem.py",
     "src/chemclaw/core/fulltext.py",
+    "src/chemclaw/core/logging.py",
     "src/chemclaw/core/quantities.py",
     "src/chemclaw/kg/note.py",
     "src/chemclaw/kg/record.py",
     "src/chemclaw/kg/git_writer.py",
+    # Added by the wave-10 audit, which found the `_MARK_DELIVERED` lease fence revertable
+    # green over 222 tests. Every statement here is a lease or state transition whose wrong
+    # answer is a publication booked that never happened.
+    "src/chemclaw/publish/outbox.py",
     "src/chemclaw/science/calc/store.py",
     "src/chemclaw/templates/resolve.py",
 ]
@@ -525,8 +615,31 @@ also_copy = [
     "examples",
     "infra",
     "knowledge",
+    # The result-sink schema, added 2026-09-22 together with `tests/test_publish_end_to_end.py`
+    # below. **`also_copy` and the test selection are coupled, and nothing relates them**: that
+    # test reaches `cli/sink_schema.ddl`, which globs `schema/result-store/*.sql` from the
+    # repository root, so inside `mutants/` it raised `SystemExit: no schema files found` during
+    # the *stats* phase — the run refusing to start, the same class as the three blockers
+    # `D-2026-09-22-a-mutation-backstop-that-cannot-start` records. Widening the selection is
+    # therefore never only a selection edit: it is a question about what the added file reads,
+    # and `schema/` was the one root directory this list did not carry.
+    "schema",
     "skills",
     "tasks",
+    # The rest of the tracked root, added 2026-09-22 when the guard below stopped filtering files
+    # and dotfiles out. **The asymmetry is the whole argument**: copying a file no test reads costs
+    # the bytes, while missing one a selected test reads aborts the run in the stats phase with a
+    # message about that file and nothing about the copy. So the rule the guard enforces is "every
+    # tracked root entry", not "the ones somebody thinks are needed" — a judgement nobody can make
+    # ahead of the next test added to the selection.
+    ".dockerignore",
+    ".git-blame-ignore-revs",
+    ".gitignore",
+    ".pre-commit-config.yaml",
+    ".trivyignore.yaml",
+    "Jenkinsfile",
+    "LICENSE",
+    "SECURITY-REVIEW-2026-08-28.md",
 ]
 # The suite twice over is the honest budget here. A mutant that merely makes a test *slow* is not
 # killed by it, and the default multiplier declares a timeout a kill.
@@ -565,6 +678,14 @@ pytest_add_cli_args_test_selection = [
     "tests/test_budget.py",
     "tests/test_concurrency_claims.py",
     "tests/test_runner.py",
+    # Added with `agent/spend_cap.py` below, and the pairing is the point: a source path whose own
+    # test file is unlisted reports every mutant on the lines that file covers as a survivor, no
+    # matter how well tested the module is. Measured before adding it — the only listed file that
+    # touches the module is `test_runner.py`, at **70%** statement coverage of `spend_cap.py`
+    # (missing 135, 156-159, 191, 215-217, 231, 284-295, 301), against **96%** from
+    # `test_spend_cap.py`'s own 18 tests. So ~18 statements' worth of mutants were unkillable by
+    # construction, which is exactly the failure this list's comment below warns about.
+    "tests/test_spend_cap.py",
     "tests/test_disconnect_teardown.py",
     "tests/test_note.py",
     # Kills 24 of `note.py`'s mutants on its own — every typed-link (`split_link`) and `outgoing_*`
@@ -579,4 +700,30 @@ pytest_add_cli_args_test_selection = [
     "tests/test_note_visibility.py",
     "tests/test_store.py",
     "tests/test_postgres_store.py",
+    # **Six files paired with a `source_paths` entry that nothing in this list reached.** A mutant on
+    # a line no selected test executes is reported `no_tests`, and `total` counts it — which is why
+    # the first completed run scored 1612/3640 = 44.3% against a floor of 72.0 while **1009 mutants
+    # (27.7%) were reached by no test at all**. The list had never been widened as `source_paths`
+    # grew from the seven the floor was recorded against to eighteen.
+    #
+    # Each line is the measured lift on its own module, selection-alone against selection-plus-file:
+    "tests/test_fulltext.py",  # core/fulltext.py      44% -> 100%
+    "tests/test_quantities.py",  # core/quantities.py  69% ->  92%
+    "tests/test_logging.py",  # core/logging.py        62% ->  81%
+    "tests/test_templates.py",  # templates/resolve.py 19% ->  87%
+    "tests/test_publish_end_to_end.py",  # publish/outbox.py 31% -> 62%
+    "tests/test_compound_identity.py",  # core/chem.py  69% ->  84%
+    # Paired with the three refusal gates added to `source_paths` in the same edit, and measured
+    # the same way. `loop_cap.py` is the one already mostly reached — `test_runner.py` drives the
+    # loop — and it is listed anyway, because the 12 points it gains take it to **100%**: the
+    # selection alone misses `220-228, 257->exit, 288, 329->333`, and this file closes all of them.
+    #
+    # **It is 100% and not the 97% an earlier draft of this comment said**, and the way that number
+    # was wrong is worth keeping: 97% is what `tests/test_loop_cap_floor.py` scores *on its own*,
+    # missing `109-110`, which `tests/test_runner.py` already covers through `api/runner`. Two
+    # measurements of different things, reported as the before-and-after of one — the same
+    # instrument error this repository keeps finding, one directory over.
+    "tests/test_plan_gate.py",  # agent/plan_gate.py       66% ->  87%
+    "tests/test_skill_backend.py",  # agent/skill_backend.py   51% ->  90%
+    "tests/test_loop_cap_floor.py",  # agent/loop_cap.py    88% -> 100%
 ]

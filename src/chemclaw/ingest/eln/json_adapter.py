@@ -43,9 +43,11 @@ from chemclaw.core.config import settings
 from chemclaw.ingest.eln.adapter import (
     ElnMappingError,
     RawEntry,
+    entry_id_or_stem,
     entry_window,
     is_late_arrival,
     parse_iso_utc,
+    refuse_colliding_ids,
     warn_late_arrivals,
 )
 from chemclaw.ingest.eln.ord import (
@@ -56,6 +58,7 @@ from chemclaw.ingest.eln.ord import (
     ReactionStep,
     Role,
     StepKind,
+    unresolved_peak_name,
 )
 from chemclaw.ingest.rejections import record_refusals
 
@@ -237,6 +240,10 @@ class JsonExportAdapter:
         # the ledger is keyed the same way. The file stem is the only id there is for a payload
         # that never parsed, so nothing in it can be trusted to name the entry.
         refused: dict[str, str] = {}
+        # Every id this directory claims, and the files claiming it — `refuse_colliding_ids`
+        # decides what to do when one id has two files, and it is collected over the whole
+        # directory rather than over the window for the reason stated there.
+        files_by_id: dict[str, list[str]] = {}
         for path in sorted(self._dir.glob("*.json")):
             try:
                 payload = json.loads(path.read_text(encoding="utf-8"))
@@ -258,16 +265,27 @@ class JsonExportAdapter:
                 # without touching `modified` would otherwise never be fetched again, so the
                 # tombstone would be written at the source and read by nobody.
                 retracted = _optional_timestamp(payload.get("retracted"), path)
-            except (OSError, json.JSONDecodeError, ElnFormatError) as exc:
-                logger.warning(
-                    "%s: skipping unreadable ELN export %s: %s", self._source, path.name, exc
-                )
-                refused[path.stem] = f"unreadable ELN export {path.name}: {exc}"
+                entry_id = entry_id_or_stem(payload.get("id"), path, "id")
+            # `UnicodeDecodeError` is listed explicitly and nothing else here covers it: it derives
+            # from `ValueError`, so it is a *sibling* of `json.JSONDecodeError` rather than a child,
+            # and it is not an `OSError` — the file opens and reads fine, the bytes are simply not
+            # UTF-8. Driven before it was listed: three exports in one directory, the middle one
+            # latin-1, aborted `fetch_new_entries` outright and returned neither of the two
+            # well-formed files, against this method's own skip-and-continue contract, with nothing
+            # in the rejection ledger because this handler never ran. `ord_adapter` had already
+            # been fixed for exactly this; the shipped-default source had not.
+            # `ElnMappingError` rather than `ElnFormatError`: the parent is what a scan-time mapping
+            # refusal is, and `entry_id_or_stem` raises the parent so one rule can serve both
+            # file-drop adapters.
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError, ElnMappingError) as exc:
+                logger.warning("%s: skipping ELN export %s: %s", self._source, path.name, exc)
+                refused[path.stem] = f"refused ELN export {path.name}: {exc}"
                 continue
+            files_by_id.setdefault(entry_id, []).append(path.name)
             if entry_window(created, modified, retracted) >= since:
                 entries.append(
                     RawEntry(
-                        entry_id=str(payload.get("id") or path.stem),
+                        entry_id=entry_id,
                         created_at=created,
                         modified_at=modified,
                         payload=payload,
@@ -281,6 +299,9 @@ class JsonExportAdapter:
                     f"({created.isoformat()}), so no scheduled run will fetch it; re-run the sync "
                     "from an explicit earlier `since` to backfill it"
                 )
+        collisions = refuse_colliding_ids(logger, self._source, files_by_id)
+        entries = [entry for entry in entries if entry.entry_id not in collisions]
+        refused.update(collisions)
         entries.sort(key=lambda e: e.created_at)
         return entries, late, refused
 
@@ -493,20 +514,30 @@ def _impurities(payload: dict[str, Any]) -> list[Impurity]:
         if not isinstance(row, dict):
             raise ElnFormatError(f"impurity is not an object: {row!r}")
         name, smiles = row.get("name"), row.get("smiles")
-        if not name and not smiles:
-            logger.warning("skipped an impurity row with neither name nor smiles: %r", row)
-            continue
         area = row.get("area_percent")
         # RRT reads the same way area% does, and for the reason `Impurity.rrt` gives: it is how a
         # chemist names an unresolved peak, so a row that carries one and loses it here is a row
         # that can no longer say *which* impurity it is about.
-        rrt = row.get("rrt")
+        rrt = float(row["rrt"]) if row.get("rrt") is not None else None
+        # An RRT-only row *is* identified — by where it eluted — so it is named rather than dropped,
+        # which is the remedy `Impurity._identifiable` prescribes and this adapter did not take. The
+        # drop test is read after the RRT rather than before it: it used to sit two lines above the
+        # line that reads `rrt`, so the largest peak in a profile could be the one lost.
+        if not name and not smiles and rrt is not None and rrt > 0.0:
+            name = unresolved_peak_name(rrt)
+        if not name and not smiles:
+            # Still nothing: no name, no structure, and no positive retention time either — a row
+            # that identifies nothing and asserts nothing, which is a blank line in an analytics
+            # table rather than a peak. Dropped rather than rejected, so one such row cannot cost
+            # the reaction its record.
+            logger.warning("skipped an impurity row with neither name nor smiles: %r", row)
+            continue
         profile.append(
             Impurity(
                 name=name,
                 smiles=smiles,
                 area_percent=float(area) if area is not None else None,
-                rrt=float(rrt) if rrt is not None else None,
+                rrt=rrt,
             )
         )
     return profile

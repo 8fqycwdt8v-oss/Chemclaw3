@@ -80,18 +80,22 @@ async def _drain_one(manifest_name: str, sink: ResultSink, batch_size: int) -> S
     # `batch_size - 1` perfectly deliverable rows once they had spent their attempts. A poison row
     # must not take its neighbours with it, and which neighbours it took would depend only on the
     # order `claim` happened to return.
-    ids: list[int] = []
+    # **The lease travels with the row, not the id.** Every list below is a partition of this
+    # claim, and each one is handed to a `mark_*`, so carrying `outbox.Lease` rather than an `int`
+    # is what makes the fence unforgettable at all four of those call sites — see `outbox.Lease`
+    # for the release a stale pass used to perform on a live one's row.
+    leases: list[outbox.Lease] = []
     records: list[ResultRecord] = []
-    unreadable: list[int] = []
-    for row_id, _, document in claimed:
+    unreadable: list[outbox.Lease] = []
+    for row in claimed:
         try:
-            records.append(ResultRecord.model_validate(document))
+            records.append(ResultRecord.model_validate(row.document))
         except Exception as exc:
             # Will not fix itself on a retry, so it spends an attempt rather than looping forever.
-            unreadable.append(row_id)
+            unreadable.append(row.lease)
             outcome.reason = str(exc)[:500]
             continue
-        ids.append(row_id)
+        leases.append(row.lease)
     if unreadable:
         await outbox.mark_failed(
             unreadable, f"stored document is not a readable record: {outcome.reason}"
@@ -111,8 +115,8 @@ async def _drain_one(manifest_name: str, sink: ResultSink, batch_size: int) -> S
         # Temporal's retry loop as well would be two backoffs for one problem, and would make an
         # operator read a workflow failure to learn what `result_publications.last_error` says more
         # precisely.
-        await outbox.mark_failed(ids, str(exc))
-        outcome.failed += len(ids)
+        await outbox.mark_failed(leases, str(exc))
+        outcome.failed += len(leases)
         outcome.reason = str(exc)[:500]
         return outcome
     except Exception as exc:
@@ -132,29 +136,29 @@ async def _drain_one(manifest_name: str, sink: ResultSink, batch_size: int) -> S
         # delivery per record for the one pass in which a refusal occurs, which is bounded by the
         # batch size and is the smaller harm by far.
         outcome.reason = str(exc)[:500]
-        delivered: list[int] = []
-        refused: list[int] = []
-        for row_id, record in zip(ids, records, strict=True):
+        delivered: list[outbox.Lease] = []
+        refused: list[outbox.Lease] = []
+        for lease, record in zip(leases, records, strict=True):
             try:
                 await sink.deliver([record])
             except SinkUnavailableError as outage:
                 # The destination went away mid-replay: everything not yet delivered is the
                 # outage's, not the poison's, and must stay claimable.
-                refused.extend(ids[len(delivered) + len(refused) :])
+                refused.extend(leases[len(delivered) + len(refused) :])
                 outcome.reason = str(outage)[:500]
                 break
             except Exception as refusal:
-                refused.append(row_id)
+                refused.append(lease)
                 outcome.reason = str(refusal)[:500]
             else:
-                delivered.append(row_id)
+                delivered.append(lease)
         if refused:
             await outbox.mark_failed(refused, outcome.reason)
-        ids = delivered
+        leases = delivered
         outcome.failed += len(refused)
 
-    await outbox.mark_delivered(ids)
-    outcome.delivered = len(ids)
+    await outbox.mark_delivered(leases)
+    outcome.delivered = len(leases)
     return outcome
 
 

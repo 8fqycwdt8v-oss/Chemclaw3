@@ -59,19 +59,25 @@ from chemclaw.durable import digest as _digest  # noqa: F401
 from chemclaw.durable import document_sync as _document_sync  # noqa: F401
 from chemclaw.durable import eln_sync as _eln_sync  # noqa: F401
 from chemclaw.durable import eval_drift as _eval_drift  # noqa: F401
+from chemclaw.durable import hypothesis_tournament as _hypothesis_tournament  # noqa: F401
 from chemclaw.durable import label_sync as _label_sync  # noqa: F401
 from chemclaw.durable import memory_jobs as _memory_jobs  # noqa: F401
 from chemclaw.durable import note_index as _note_index  # noqa: F401
 from chemclaw.durable import notify as _notify  # noqa: F401
 from chemclaw.durable import observation_jobs as _observation_jobs  # noqa: F401
 from chemclaw.durable import orchestrator as _orchestrator  # noqa: F401
+from chemclaw.durable import orphaned_waits as _orphaned_waits  # noqa: F401
 from chemclaw.durable import publish_results as _publish_results  # noqa: F401
 from chemclaw.durable import report_workflow as _report_workflow  # noqa: F401
 from chemclaw.durable import retention as _retention  # noqa: F401
 from chemclaw.durable import template_activities as _template_activities  # noqa: F401
 from chemclaw.durable import template_job as _template_job  # noqa: F401
 from chemclaw.durable.registry import describe, registered_activities, registered_workflows
-from chemclaw.durable.serve import serve_worker, worker_interceptors
+from chemclaw.durable.serve import (
+    refuse_unauthenticated_worker,
+    serve_worker,
+    worker_interceptors,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -90,11 +96,13 @@ async def main() -> None:
     `run_agent_step` registered and the mock's loopback address on the settings object; with the
     line, it refuses before `connect()` is reached. After `configure_logging`, so the refusal and
     the opt-in warning both go through this process's own handlers rather than the root logger's
-    default.
+    default. The sign-in posture is checked beside it for the same reason and in the same place
+    (`durable/serve.refuse_unauthenticated_worker`).
     """
     configure_logging()
     configure_telemetry()
     refuse_unconfigured_llm_gateway()
+    refuse_unauthenticated_worker()
     client = await connect()
     worker = Worker(
         client,
@@ -112,6 +120,12 @@ async def main() -> None:
         # magnitude smaller — and this queue's work is almost entirely database work (the retention
         # sweep, the reindex, the chain verification, every job record).
         max_concurrent_activities=settings.worker_max_concurrent_activities,
+        # What the worker holds *between* tasks, which the activity ceiling above does not bound:
+        # a cached workflow is a started one kept resident so its next task replays from memory
+        # instead of from history. Set here because the SDK's own default would otherwise be the
+        # choice, and measured rather than adopted — `core/config/temporal.py` carries the numbers
+        # and `tests/test_workers.py` holds them against the chart's memory request.
+        max_cached_workflows=settings.worker_max_cached_workflows,
         # Every activity this worker serves, bound to the turn that asked for it and recorded on
         # its way in and out (`durable/interceptor.py`). Here rather than in `serve_worker` for
         # the reason `graceful_shutdown_timeout` is: it is a property of what the worker *serves*,

@@ -54,6 +54,7 @@ from temporalio.exceptions import ActivityError, ApplicationError, ChildWorkflow
 from temporalio.workflow import ParentClosePolicy
 
 with workflow.unsafe.imports_passed_through():
+    from chemclaw.agent.refusal_route import sentence_of
     from chemclaw.core.config import settings
     from chemclaw.core.metrics_bridge import degraded
     from chemclaw.durable.awaiting import AwaitAnswerWorkflow, AwaitOutcome, AwaitRequest
@@ -128,11 +129,28 @@ def failure_reason(exc: BaseException) -> str:
     payload, or a driver that folds a query into its message, is kilobytes. The cap is the one
     `publish_results.py` already applies to the analogous field, applied once here so no caller
     has to remember.
+
+    **Stripped of a refusal's routing footer, because this string's readers are people.**
+    `agent/refusal_route.routed` appends `(refusal | code: … | who can act: … | sanctioned path: …)`
+    to a gate's sentence so the *model* can route around a wall instead of retrying it. That footer
+    is written in the second person to an agent, and this is not its channel: the reason reaches
+    `JobFailedEvent.reason` on the chemist's stream and `GET /jobs/{id}`'s summary. Measured on the
+    shipped chart posture — `entra_required` on with `entra_privileged_roles` empty, which refuses
+    every `expensive: true` step for everyone — a template job step produced
+
+        user u-alice lacks a privileged role for compare_solvents
+        (refusal | code: expensive_action_role_not_held | boundary: the entitlement gate on
+         expensive actions | who can act: … | sanctioned path: none from here)
+
+    on a chemist's screen. `tool_authz.failure_detail` already strips it for the `ToolFailedEvent`
+    half of the same problem; this is the durable half, and one stripping point covers every reader
+    downstream of it. The model-facing readers of this same string (`agent/job_results.py`,
+    `connectors/jobs.py`) lose only the footer of a refusal they did not raise.
     """
     cause: BaseException = exc
     while isinstance(cause, (ChildWorkflowError, ActivityError)) and cause.__cause__ is not None:
         cause = cause.__cause__
-    return (str(cause) or type(cause).__name__)[:_REASON_MAX_CHARS]
+    return sentence_of(str(cause) or type(cause).__name__)[:_REASON_MAX_CHARS]
 
 
 class ConnectorJobInput(BaseModel):

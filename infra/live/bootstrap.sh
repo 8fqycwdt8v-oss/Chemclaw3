@@ -54,9 +54,16 @@ readonly PGVECTOR_VERSION="${CHEMCLAW_LIVE_PGVECTOR_VERSION:-v0.8.6}"
 # and leave them off PATH — only the client package is linked into /usr/bin. Asking `pg_config`
 # rather than hard-coding the path also means a machine with two clusters uses the one whose
 # `pg_config` is first, which is the same one `pg_isready` and `psql` will talk to.
-readonly PGBIN="$(pg_config --bindir)"
+#
+# Empty when there is no `pg_config` at all, which is a machine that did not install a server and
+# may still be pointed at one that is running (see the native branch of `up`); the tools are then
+# whatever `PATH` holds.
+readonly PGBIN="$(pg_config --bindir 2>/dev/null || true)"
+pgtool() { if [ -n "$PGBIN" ]; then printf '%s/%s' "$PGBIN" "$1"; else printf '%s' "$1"; fi; }
 # Where the note writer commits. Never the working checkout — see `ensure_note_repo`.
 readonly NOTE_REPO_DIR="${CHEMCLAW_NOTE_REPO_DIR:-$LIVE_DIR/knowledge-repo}"
+# The note repo's `origin`: a bare copy under the lane's own directory. See `ensure_note_repo`.
+readonly NOTE_ORIGIN_DIR="${CHEMCLAW_LIVE_NOTE_ORIGIN_DIR:-$LIVE_DIR/knowledge-origin.git}"
 # The role/password/database the default DSN in `core/config/store.py` already names, written
 # once. Every admin command below connects over TCP with this password rather than through the
 # trusted local socket, so bootstrap fails here if the credential the application will use is
@@ -140,6 +147,7 @@ ensure_temporal_cli() {
 ensure_note_repo() {
   if [ -d "$NOTE_REPO_DIR/.git" ]; then
     log "note repo clone already present ($NOTE_REPO_DIR)"
+    ensure_note_origin
     return
   fi
   # A *dedicated* clone, because `kg/git_writer.py` refuses anything else and is right to:
@@ -152,9 +160,36 @@ ensure_note_repo() {
   # That is not a small subset of the system: `kg/record.py` is the one path job results, reports
   # and distilled playbooks all take, so without this the entire knowledge-contribution half
   # of a live run is unreachable. Found by running the ELN sync against a lane that lacked it.
+  #
+  # **And never cloned straight from the checkout either**, because a clone's `origin` is where it
+  # came from: `git clone "$REPO_ROOT"` made the developer's own checkout the remote, so every note
+  # the writer pushed landed on that checkout's base branch — the same publication of agent-authored
+  # notes into the source repository, one hop removed. The clone comes from a bare copy under
+  # `.live/` instead, and that bare copy is its `origin`, so a push stays inside the lane.
   log "cloning a dedicated knowledge repo for the note writer ($NOTE_REPO_DIR)"
-  mkdir -p "$(dirname "$NOTE_REPO_DIR")"
-  git clone --quiet "$REPO_ROOT" "$NOTE_REPO_DIR"
+  mkdir -p "$(dirname "$NOTE_REPO_DIR")" "$(dirname "$NOTE_ORIGIN_DIR")"
+  [ -d "$NOTE_ORIGIN_DIR" ] || git clone --quiet --bare "$REPO_ROOT" "$NOTE_ORIGIN_DIR"
+  git clone --quiet "$NOTE_ORIGIN_DIR" "$NOTE_REPO_DIR"
+}
+
+# Re-point a clone made before the bare origin existed. Its `origin` is still the developer's
+# checkout, so leaving it would keep pushing notes there on every lane that was bootstrapped once
+# under the old rule. The bare copy is made *from the clone*, so every note it already holds is in
+# its new origin and the next push is a fast-forward rather than a divergence.
+ensure_note_origin() {
+  local origin
+  origin="$(git -C "$NOTE_REPO_DIR" remote get-url origin 2>/dev/null || true)"
+  [ "$origin" = "$NOTE_ORIGIN_DIR" ] && return
+  if [ ! -d "$NOTE_ORIGIN_DIR" ]; then
+    mkdir -p "$(dirname "$NOTE_ORIGIN_DIR")"
+    git clone --quiet --bare "$NOTE_REPO_DIR" "$NOTE_ORIGIN_DIR"
+  fi
+  if [ -n "$origin" ]; then
+    git -C "$NOTE_REPO_DIR" remote set-url origin "$NOTE_ORIGIN_DIR"
+  else
+    git -C "$NOTE_REPO_DIR" remote add origin "$NOTE_ORIGIN_DIR"
+  fi
+  log "note repo origin moved from ${origin:-nothing} to $NOTE_ORIGIN_DIR"
 }
 
 # ---------------------------------------------------------------------------- postgres
@@ -185,7 +220,7 @@ ensure_cluster() {
 # would be shorter and would stop testing the credential the app actually presents.
 run_sql() {
   local database="$1" statement="$2"
-  as_postgres "PGPASSWORD='$PGPASSWORD_VALUE' $PGBIN/psql -h 127.0.0.1 -p $PGPORT \
+  as_postgres "PGPASSWORD='$PGPASSWORD_VALUE' $(pgtool psql) -h 127.0.0.1 -p $PGPORT \
       -U '$PGUSER_NAME' -d '$database' -tAqc \"$statement\""
 }
 
@@ -201,6 +236,16 @@ run_sql() {
 # left in the third verb after the first two were fixed.
 compose_postgres_id() { compose_service_id postgres; }
 
+# Whether anything accepts Postgres connections on the lane's port — `pg_isready` when the client
+# tools are installed, the TCP port otherwise, so the question can be asked on a host with neither.
+postgres_answering() {
+  if command -v "$(pgtool pg_isready)" >/dev/null 2>&1; then
+    "$(pgtool pg_isready)" -h 127.0.0.1 -p "$PGPORT" >/dev/null 2>&1
+  else
+    (exec 3<>"/dev/tcp/127.0.0.1/$PGPORT") 2>/dev/null
+  fi
+}
+
 start_postgres() {
   if compose_postgres_id >/dev/null; then
     log "starting the compose postgres container"
@@ -214,7 +259,7 @@ start_postgres() {
     done
     die "the compose postgres container did not accept connections on $PGPORT within 90s"
   fi
-  if pg_isready -h 127.0.0.1 -p "$PGPORT" >/dev/null 2>&1; then
+  if postgres_answering; then
     log "postgres already accepting connections on $PGPORT"
   else
     mkdir -p "$LIVE_DIR"
@@ -225,12 +270,14 @@ start_postgres() {
         -w start >/dev/null"
   fi
   if [ "$(run_sql postgres "select count(*) from pg_database where datname='$PGDB_NAME'")" = "0" ]; then
-    as_postgres "PGPASSWORD='$PGPASSWORD_VALUE' $PGBIN/createdb -h 127.0.0.1 -p $PGPORT \
+    as_postgres "PGPASSWORD='$PGPASSWORD_VALUE' $(pgtool createdb) -h 127.0.0.1 -p $PGPORT \
         -U '$PGUSER_NAME' '$PGDB_NAME'"
   fi
   # Created here rather than left to migration 002, so a missing pgvector fails while the message
   # can still say what to install — inside `make db-migrate` it would surface as a DDL error.
-  run_sql "$PGDB_NAME" "create extension if not exists vector" >/dev/null
+  run_sql "$PGDB_NAME" "create extension if not exists vector" >/dev/null \
+    || die "the postgres serving $PGPORT has no pgvector extension available. Install pgvector into
+that server (this script builds it only into a cluster it provisions itself)."
   log "postgres up on $PGPORT (pgvector $(run_sql "$PGDB_NAME" \
     "select extversion from pg_extension where extname='vector'"))"
 }
@@ -338,7 +385,7 @@ status() {
   if compose_postgres_id >/dev/null; then pg_kind="compose"; fi
   if compose_temporal_id >/dev/null; then temporal_kind="compose"; fi
 
-  if pg_isready -h 127.0.0.1 -p "$PGPORT" >/dev/null 2>&1; then
+  if postgres_answering; then
     log "postgres: serving $PGPORT ($pg_kind)"
   else
     log "postgres: nothing is serving $PGPORT"
@@ -389,11 +436,25 @@ case "${1:-up}" in
       exec docker compose -f "$COMPOSE_FILE" up -d
     fi
     log "no docker daemon — bringing the stack up natively"
-    ensure_pgvector
-    ensure_temporal_cli
-    ensure_cluster
+    # **Ask the configured addresses first; provision only what does not answer.** This branch used
+    # to build pgvector, build the Temporal CLI and initialise a cluster unconditionally, so a host
+    # already running Postgres and Temporal on these ports — a Homebrew or Postgres.app server, a
+    # broker somebody else started — died on a missing `pg_config`, `go` or server headers it never
+    # needed. What answers is adopted (and `start_postgres` still checks the application's own
+    # credential, database and pgvector against it); what does not is provisioned, as before.
+    if postgres_answering; then
+      log "postgres already answering on $PGPORT — adopting it rather than provisioning a cluster"
+    else
+      ensure_pgvector
+      ensure_cluster
+    fi
     start_postgres
-    start_temporal
+    if temporal_port_open; then
+      log "temporal already answering on $TEMPORAL_PORT — adopting it"
+    else
+      ensure_temporal_cli
+      start_temporal
+    fi
     log "stack ready. Next: make db-migrate && make live-up"
     ;;
   down)

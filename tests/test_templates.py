@@ -534,7 +534,13 @@ def test_a_shipped_template_whose_arguments_cannot_be_checked_says_so() -> None:
         "degradant-triage": ["enumerate_degradants", "screen_hazards"],
         "hazard-briefing": ["screen_hazards"],
         "microspecies-profile": ["enumerate_protonation_states"],
+        "scale-up-thermal-envelope": [
+            "adiabatic_temperature_rise",
+            "mtsr",
+            "stoessel_criticality_class",
+        ],
         "stereoisomer-ranking": ["enumerate_stereoisomers"],
+        "substitution-series": ["enumerate_substitutions"],
         "tautomer-resolution": ["enumerate_tautomers"],
     }
 
@@ -1136,7 +1142,7 @@ def test_both_lanes_derive_the_same_arguments_from_the_same_tool() -> None:
     """
     import inspect
 
-    from chemclaw.cli.validate_template_args_live import _live_arguments
+    from chemclaw.agent.template_surface import normalise_tool_schema
     from chemclaw.cli.validate_templates import ToolArguments
 
     async def screen_hazards(smiles: list[str], top_k: int = 5) -> str:
@@ -1144,7 +1150,7 @@ def test_both_lanes_derive_the_same_arguments_from_the_same_tool() -> None:
         return "hazard: none found"
 
     offline = ToolArguments.of_signature(inspect.signature(screen_hazards))
-    live = _live_arguments(_live_tool("screen_hazards"))
+    live = ToolArguments.of_schema(normalise_tool_schema(_live_tool("screen_hazards")) or {})
     assert (
         offline
         == live
@@ -2076,3 +2082,19 @@ def test_a_composed_run_says_so_on_the_sessions_started_jobs_list() -> None:
         {},
         "alice:fp",
     ).startswith("composed-")
+
+
+@pytest.mark.parametrize("actor", ["", " ", "\t\n"])
+def test_a_step_identity_refuses_a_blank_actor(actor: str) -> None:
+    """A whitespace actor is a principal nobody is, and every step would stamp it ambient."""
+    from chemclaw.durable.template_activities import StepIdentity
+
+    with pytest.raises(ValidationError):
+        StepIdentity(actor=actor, correlation_id="run-1")
+
+
+def test_a_step_identity_strips_the_actor_it_keeps() -> None:
+    """Padding is not part of the principal: the stamped actor is the stripped one."""
+    from chemclaw.durable.template_activities import StepIdentity
+
+    assert StepIdentity(actor="  alice  ", correlation_id="run-1").actor == "alice"

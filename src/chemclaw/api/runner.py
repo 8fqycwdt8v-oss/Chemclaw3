@@ -39,15 +39,11 @@ from chemclaw.agent.authz import (
 )
 from chemclaw.agent.checkpointer import checkpointer
 from chemclaw.agent.chemclaw_agent import connector_specs
-from chemclaw.agent.context_budget import (
-    begin_context_watch,
-    current_context,
-    end_context_watch,
-)
+from chemclaw.agent.context_budget import current_context
 from chemclaw.agent.framing import frame_untrusted
 from chemclaw.agent.job_results import await_job_results
-from chemclaw.agent.langgraph_agent import build_langgraph_agent
-from chemclaw.agent.loop_cap import begin_loop_watch, end_loop_watch, loop_hit_cap
+from chemclaw.agent.local_skills import personal_skills_available
+from chemclaw.agent.loop_cap import loop_hit_cap
 from chemclaw.agent.plan_gate import (
     PLAN_APPROVAL_PROMPT,
     approval_stands,
@@ -58,25 +54,22 @@ from chemclaw.agent.plan_gate import (
 )
 from chemclaw.agent.plan_state import session_plan
 from chemclaw.agent.profiles import get_profile
-from chemclaw.agent.repeat_guard import begin_call_watch, end_call_watch
 from chemclaw.agent.scratchpad import memory_store
 from chemclaw.agent.session import TurnSession
 from chemclaw.agent.session_events import claim_unconsumed
-from chemclaw.agent.spend_cap import (
-    begin_spend_watch,
-    end_spend_watch,
-    spend_hit_cap,
-    turn_billed_tokens,
-)
+from chemclaw.agent.skill_fingerprint import skill_fingerprint
+from chemclaw.agent.spend_cap import spend_hit_cap, turn_billed_tokens
 from chemclaw.agent.state import turn_config
-from chemclaw.agent.tool_result_size import bounded_content
-from chemclaw.agent.turn_cost import TurnCost, record_turn_cost
-from chemclaw.agent.turn_usage import (
-    InFlightPrompts,
-    TurnUsage,
-    reset_turn_usage,
-    set_turn_usage,
+from chemclaw.agent.stored_skill_tools import stored_skill_declarations
+from chemclaw.agent.tool_result_size import (
+    bounded_content,
+    reset_full_result_sink,
+    set_full_result_sink,
 )
+from chemclaw.agent.turn_ambient import reset_tolerantly, turn_caps
+from chemclaw.agent.turn_cost import TurnCost, record_turn_cost
+from chemclaw.agent.turn_graph import build_turn_agent
+from chemclaw.agent.turn_usage import InFlightPrompts, TurnUsage
 from chemclaw.api.budget import BudgetTracker
 from chemclaw.api.events import (
     AnswerEvent,
@@ -93,7 +86,7 @@ from chemclaw.api.events import (
 from chemclaw.api.graph_stream import graph_events
 from chemclaw.api.runner_answer import build_answer_event
 from chemclaw.api.runner_trace import ToolCallTrace
-from chemclaw.api.tool_results import session_sink
+from chemclaw.api.tool_results import full_result_sink, session_sink
 from chemclaw.connectors.registry import open_connector_specs
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
@@ -114,7 +107,7 @@ from chemclaw.core.session_context import (
 from chemclaw.core.temporal_client import connect
 from chemclaw.core.tracing import start_span
 from chemclaw.core.turn_flags import reset_dry_run, set_dry_run
-from chemclaw.core.turn_signals import JobSignal
+from chemclaw.core.turn_signals import JobSignal, SkillLoadedSignal
 from chemclaw.core.turn_text import reset_current_user_texts, set_current_user_texts
 from chemclaw.durable.awaiting import AwaitRequest, open_wait
 from chemclaw.kg.note import cited_ids
@@ -190,7 +183,7 @@ async def run_turn(
     connectors: Sequence[Any] | None = None,
     history: Any | None = None,
     profile: str | None = None,
-    graph_factory: Callable[..., Any] = build_langgraph_agent,
+    graph_factory: Callable[..., Any] = build_turn_agent,
     deadline: float | None = None,
 ) -> AsyncIterator[Event]:
     """Run one turn and yield its events (tokens, tool calls, jobs, then the answer).
@@ -356,10 +349,22 @@ async def run_turn(
                 # single run showed the build 38% slower and that was noise; the residual 16.6 ms
                 # is the switch interval and is not removable here.
                 #
-                # The two awaits are hoisted rather than moved into the thread, because acquiring a
+                # The awaits are hoisted rather than moved into the thread, because acquiring a
                 # pooled connection is the loop's to do.
+                #
+                # The third one reads what the two stored skills tiers declare about tools, so
+                # `ToolScopedSkills` narrows them as it narrows a filed tree — it is `await` for the
+                # same reason the other two are, and it is here because the builder that needs it is
+                # synchronous. It is one paged search per mounted tier over a capped namespace, on
+                # the same store `turn_store()` just returned.
+                #
+                # It takes no actor: it reads the same `get_current_actor()` the mount resolves
+                # its namespace from, which is why this call sits inside `_turn_ambient`. Passing
+                # the request's raw value made the two spell one actor two ways for a padded oid —
+                # see `stored_skill_declarations`, which carries the measurement.
                 checkpointer = await _turn_checkpointer()
-                store = await _turn_store()
+                store = await turn_store()
+                stored_skills = await stored_skill_declarations(store)
                 graph = await asyncio.to_thread(
                     graph_factory,
                     profile=profile,
@@ -369,6 +374,7 @@ async def run_turn(
                     connectors=turn_tools,
                     checkpointer=checkpointer,
                     store=store,
+                    stored_skills=stored_skills,
                 )
                 # `turn_config`, not a bare `configurable`: it also carries the graph's step
                 # ceiling, which nothing here had ever chosen — the framework bakes 9999, and
@@ -453,16 +459,27 @@ async def run_turn(
                 silent = _empty_answer_event(session, tool_trace, ledger)
                 if silent is not None:
                     yield silent
-                    # **`return`, not fall through**, which is what this did. `events.py` names
-                    # the two cap errors as the ones that share their turn with an answer, and
-                    # falling through broke that for `empty_answer` in three ways at once: the
-                    # client got an `AnswerEvent` whose text is `""` (the reference page renders it
-                    # as an empty assistant bubble), `build_answer_event` spent a judge call under
-                    # `verifier_enabled` grading an empty string, and `answered = True` reached
-                    # `record_turn_cost(completed=answered)` — so the cost ledger booked "the user
-                    # got an answer for the money" for precisely the silent-death turn that branch
-                    # exists to name. The teardown below still books the spend and the duration,
-                    # which is right: the turn cost what it cost.
+                # **The stop is a different question from the naming, and writing them as one
+                # condition made one of them dead code.** "Does this silence need an error event of
+                # its own?" is `_empty_answer_event`'s, and it answers *no* for a turn a cap has
+                # already named — see its own comment for the drive. "Is there anything to ship?" is
+                # this one, and it is true of a capped silent turn exactly as much as of an
+                # unexplained one, because the three consequences below do not care why the text is
+                # empty. The first version of this fix asked the cap test here as well, which made
+                # the test inside `_empty_answer_event` unreachable: driven, three mutations of it
+                # stayed green.
+                #
+                # **`return`, not fall through**, which is what this did. `events.py` names
+                # the two cap errors as the ones that share their turn with an answer, and
+                # falling through broke that for `empty_answer` in three ways at once: the
+                # client got an `AnswerEvent` whose text is `""` (the reference page renders it
+                # as an empty assistant bubble), `build_answer_event` spent a judge call under
+                # `verifier_enabled` grading an empty string, and `answered = True` reached
+                # `record_turn_cost(completed=answered)` — so the cost ledger booked "the user
+                # got an answer for the money" for precisely the silent-death turn that branch
+                # exists to name. The teardown below still books the spend and the duration,
+                # which is right: the turn cost what it cost.
+                if not ledger.answer_text.strip():
                     return
                 # Before the answer, because the answer is the turn's final event: a chemist reading
                 # "review the plan and approve it" in the answer text used to have nothing to act on
@@ -502,6 +519,23 @@ async def run_turn(
                     and review.unsupported
                     and rounds < settings.answer_review_max_rounds
                 ):
+                    # The message the thread ends on right now: the answer this round is out to
+                    # replace, and the mark everything the round adds sits after. Read before the
+                    # round is counted, and a checkpointer that cannot answer ends the loop rather
+                    # than the turn: the graded answer is already in hand, and revising without
+                    # the mark would leave the round's fabricated `human` prompt on the thread with
+                    # nothing to withdraw it by.
+                    try:
+                        retracted = await _thread_tip(graph, graph_config)
+                    except Exception:
+                        degraded(
+                            logger,
+                            "review_revision_thread",
+                            "could not read session %s's thread before a review revision; the "
+                            "flagged answer ships unrevised",
+                            session.session_id,
+                        )
+                        break
                     rounds += 1
                     # **What the turn already has in hand, held across the round.** A revision
                     # *replaces* an answer, so `_revise_answer` clears `answer_parts` before it
@@ -512,9 +546,6 @@ async def run_turn(
                     # `chemclaw_turn_empty_answers_total` flat because the emptiness guard had
                     # already run against the *flagged* text one screen above.
                     kept = list(ledger.answer_parts)
-                    # The message the thread ends on right now: the answer this round is out to
-                    # replace, and the mark everything the round adds sits after.
-                    retracted = await _thread_tip(graph, graph_config)
                     try:
                         async for event in _revise_answer(
                             graph,
@@ -559,9 +590,23 @@ async def run_turn(
                             ledger.answer_parts[:] = kept
                     # After the outcome is known, because what the thread must end on is the answer
                     # that ships — which is this round's only when the round produced one.
-                    await _settle_revision_thread(
-                        graph, graph_config, retracted=retracted, replaced=replaced
-                    )
+                    try:
+                        await _settle_revision_thread(
+                            graph, graph_config, retracted=retracted, replaced=replaced
+                        )
+                    except Exception:
+                        # The thread is left untidied, not the answer lost: the chemist still gets
+                        # the answer in the ledger, and the next turn opens on a thread carrying
+                        # the round's messages — counted, because that is the divergence
+                        # `_settle_revision_thread` exists to prevent.
+                        degraded(
+                            logger,
+                            "review_revision_thread",
+                            "could not withdraw revision %d's messages from session %s's thread; "
+                            "the answer ships, and the thread keeps what the round added",
+                            rounds,
+                            session.session_id,
+                        )
                     if not replaced:
                         break
                     answer, review = await build_answer_event(
@@ -768,6 +813,12 @@ class _TurnLedger:
     answer_confidence: float | None = None
     review_required: bool = False
     notes_cited: int = 0
+    # **Which skills actually shaped this turn**, for the guard `agent/distiller.py` reads. A set
+    # rather than a list: a turn that re-read one skill's body loaded it once as far as any
+    # consumer is concerned, and a duplicate would make "how many turns loaded this" wrong in the
+    # direction that admits self-confirming evidence. Ordered on the way out so two turns that
+    # loaded the same skills produce the same row.
+    skills_loaded: set[str] = field(default_factory=set)
 
     @property
     def answer_text(self) -> str:
@@ -848,14 +899,35 @@ class _TurnLedger:
             self.notes_cited = len(cited_ids(event.text))
 
     def note_signal(self, signal: Any) -> None:
-        """Record a durable job launch, so the resume below knows what to wait for.
+        """Record what a graph run announced about itself, for the readers below.
 
-        A method rather than the lambda this was, because the resume passes a *different* callback
-        deliberately (a no-op) and a named pair reads as the decision it is rather than as one
-        lambda that lost its body.
+        A method rather than the lambda this was, because the second and third runs of a turn pass
+        `note_signal_without_job_chaining` and a named pair reads as the decision it is rather than
+        as one lambda that lost its body.
         """
         if isinstance(signal, JobSignal):
             self.started_jobs.append(signal.job_id)
+        else:
+            self.note_signal_without_job_chaining(signal)
+
+    def note_signal_without_job_chaining(self, signal: Any) -> None:
+        """The same, for a run that must not add to what this turn will wait for.
+
+        **Exactly one signal type is suppressed, and the blanket that stood here suppressed the
+        union.** The rule this callback exists for is `JobSignal`'s alone: a resume that fed its own
+        job ids back into `started_jobs` would let one chemist turn chain durable jobs indefinitely
+        inside a single request. Nothing about a revision round or a resumed half makes the *other*
+        signals untrue, and dropping them was measurably unsafe in one direction that matters —
+        `answer_review_max_rounds` ships at 2, so a skill read only during a revision round left
+        `turn_costs.skills_loaded` empty, and `agent/distiller.py::independent_sessions` counted
+        that session as *independent* evidence for proposing the very skill that was acting in it.
+        The self-confirmation guard failed **open**, which is the direction it exists to close.
+        """
+        if isinstance(signal, SkillLoadedSignal):
+            # Both tiers into one set. A personal skill shapes a turn exactly as a reviewed one
+            # does, and the guard that reads this would otherwise be blind to the tier most likely
+            # to be self-confirming — the one the agent can propose into.
+            self.skills_loaded.add(signal.skill)
 
 
 async def _earlier_user_texts(history: Any | None, session: TurnSession) -> list[str]:
@@ -929,7 +1001,7 @@ def _turn_ambient(
     usage: TurnUsage,
     user_texts: Sequence[str],
 ) -> Iterator[None]:
-    """Stamp the six ambients a turn runs under, and unstamp every one on the way out.
+    """Stamp the ambients only a request can supply, and unstamp every one on the way out.
 
     **Synchronous on purpose, and that is the point of extracting it.** These resets used to sit at
     the bottom of `run_turn`'s `finally`, under a comment warning that nothing in that block may
@@ -939,7 +1011,12 @@ def _turn_ambient(
     acquire an `await` between the last statement and the reset, so the rule is now structural
     rather than a comment somebody has to keep obeying.
 
-    Each of the five, and why it is ambient rather than an argument:
+    **The four cap watches and the token ledger are not here any more** — they are
+    `agent.turn_ambient.turn_caps`', entered below, because two other drivers of a turn need the
+    same five and were opening two and none of them. What stays is what only a *request* has an
+    argument for.
+
+    Each of the ones that stay, and why it is ambient rather than an argument:
 
     - the session, so a job-launching tool records push-back to the right session (F3-T3) — never a
       model-supplied argument;
@@ -948,17 +1025,11 @@ def _turn_ambient(
       `build_langgraph_agent`: agents are cached per profile for the process's lifetime, so a
       build-time id was shared by every turn from every user on the pod, and the audit trail could
       not tell two conversations apart;
-    - the tool-call counter, so the identical question asked a third time is refused rather than
-      re-executed (`chemclaw.agent.repeat_guard`);
-    - the loop watch, so a turn stopped by the runaway cap can say so instead of looking exactly
-      like one that finished (`chemclaw.agent.loop_cap`). A no-op without the harness, which is what
-      attaches the cap;
-    - the token ledger, so a model call that rides no stream can still be booked against this turn.
-      Every call the graph makes is metered off its `messages` stream — including the ones a tool
-      body makes, which inherit the graph's callbacks — but the verifier's judge runs *after* that
-      stream is exhausted, so its tokens reached neither the budget guard nor the `turn_costs` row.
-      Ambient rather than threaded, because that call sits three frames below `build_answer_event`
-      inside a provider's own chain (`chemclaw.agent.turn_usage.off_stream_metering`).
+
+    - where a cut tool result keeps its full text (`full_result_sink`), because the cut runs in a
+      middleware cached per profile for the process, so it cannot be handed this turn's session at
+      build time — and the session plus this turn's correlation id are exactly what a stored result
+      is filed under (`D-2026-09-27-a-cut-result-is-kept-for-the-chemist-not-the-model`);
 
     `dry_run` rides here too for the reason it is ambient at all: the model can neither set it nor
     clear it (IDEA-4). `user_texts` — the chemist's own words in this thread, this turn's message
@@ -970,32 +1041,32 @@ def _turn_ambient(
     how far back it reaches is `core.turn_text`'s, and the read that fills it is the caller's,
     because nothing in this function may `await`.
 
-    Reset order is the reverse-ish order the original spelled out and is preserved exactly: the two
-    watches, the dry-run flag, then the three identity vars. `set_current_identity` is skipped
-    entirely when there is no actor, so the unauthenticated path stamps nothing to reset.
+    Reset order is unchanged by the extraction and was checked rather than assumed: the nested
+    `with` exits while the exception propagates out of the `yield`, so the five cap ambients still
+    tear down first and in their old order, then the full-result sink (set last, reset first), then
+    the dry-run flag, then the three identity vars.
+    `set_current_identity` is skipped entirely when there is no actor, so the unauthenticated path
+    stamps nothing to reset.
     """
     session_token = set_current_session_id(session_id)
     user_texts_token = set_current_user_texts(user_texts)
     identity_token = set_current_identity(actor, roles) if actor is not None else None
     correlation_token = set_current_correlation_id(correlation_id)
-    calls_token = begin_call_watch()
-    # The turn's context record, started beside the tool-call counter because it is the same kind
-    # of thing: per-turn state the middleware writes and the teardown reads. Without it compaction
-    # reports every model call's standing reduction as a fresh one, and `turn_costs` cannot say
-    # whether the policy touched the turn at all (`agent/context_budget.py`).
-    context_token = begin_context_watch()
-    loop_token = begin_loop_watch()
-    spend_token = begin_spend_watch()
-    usage_token = set_turn_usage(usage)
     dry_run_token = set_dry_run(dry_run)
+    full_results_token = set_full_result_sink(full_result_sink(session_id, correlation_id))
     try:
-        yield
+        # **The four cap ambients are `agent.turn_ambient.turn_caps`', not this function's, and
+        # that is the whole of the change.** This front door opened all four; the Temporal
+        # template step opened two of them and the CLI opened none, so on those two paths a
+        # fan-out was
+        # bounded by the per-branch channel snapshot rather than by the turn and an off-stream
+        # model call was counted by nothing. Four zero-argument watches opened by hand in three
+        # drivers is a thing three callers get wrong differently; a context manager is a thing a
+        # driver either enters or does not. What stays here is what only a *request* can supply.
+        with turn_caps(usage, closing=f"session {session_id}"):
+            yield
     finally:
-        _unstamp(session_id, end_call_watch, calls_token)
-        _unstamp(session_id, end_context_watch, context_token)
-        _unstamp(session_id, end_loop_watch, loop_token)
-        _unstamp(session_id, end_spend_watch, spend_token)
-        _unstamp(session_id, reset_turn_usage, usage_token)
+        _unstamp(session_id, reset_full_result_sink, full_results_token)
         _unstamp(session_id, reset_dry_run, dry_run_token)
         _unstamp(session_id, reset_current_user_texts, user_texts_token)
         _unstamp(session_id, reset_current_session_id, session_token)
@@ -1005,29 +1076,14 @@ def _turn_ambient(
 
 
 def _unstamp(session_id: str, reset: Callable[[Any], None], token: Any) -> None:
-    """Undo one ambient, tolerating a token whose `Context` is not the one closing the turn.
+    """Undo one of this front door's ambients, naming the session in the log line.
 
-    A contextvar `Token` remembers the `Context` it was created in, and one teardown path closes
-    the turn from somewhere else: when a client stops reading, the turn's generator is abandoned
-    at a `yield` and asyncio's async-generator finalizer runs `aclose()` in a *new task with a new
-    context*. Every reset then raises `ValueError` — and the first one aborted the five after it,
-    including `reset_current_identity`, while surfacing as an unretrieved-task traceback naming a
-    `ContextVar` and no session.
-
-    Tolerating it loses nothing: the context those tokens belong to is being discarded either way,
-    so the values are gone whether or not the reset lands. What is gained is that the *rest* of the
-    teardown runs, and that the log line names the session. Only `ValueError` — anything else from
-    a reset is a real defect and must not be swallowed.
+    The tolerance and the argument for it live in `agent.turn_ambient.reset_tolerantly`, which the
+    cap ambients need for the same reason and which `tests/test_layering.py`'s `agent -> api` ban
+    puts on that side. This is the front-door spelling of `closing=`: every caller here has a
+    session id, and a teardown line that cannot name one was the original defect's worst part.
     """
-    try:
-        reset(token)
-    except ValueError:
-        logger.warning(
-            "the turn for session %s was torn down in a foreign context; "
-            "its ambient %s could not be reset",
-            session_id,
-            reset.__name__,
-        )
+    reset_tolerantly(reset, token, closing=f"session {session_id}")
 
 
 async def _open_turn_surface(
@@ -1129,9 +1185,11 @@ async def _resume_on_job_results(
     A second `graph_events` over the *same* graph and the same `thread_id`, because the continuation
     has to see the conversation the first half produced.
 
-    **`on_signal` is a no-op here rather than the ledger's appender, deliberately.** A resume that
-    fed its own job ids back into `started_jobs` would be the recursion this feature is without, so
-    that one chemist turn cannot chain durable jobs indefinitely inside a single request.
+    **`on_signal` drops this run's job launches and keeps everything else.** A resume that fed its
+    own job ids back into `started_jobs` would be the recursion this feature is without, so that one
+    chemist turn cannot chain durable jobs indefinitely inside a single request — and that argument
+    reaches `JobSignal` and nothing beside it, which is why the callback is named rather than a
+    blanket `lambda _signal: None`. See `_TurnLedger.note_signal_without_job_chaining`.
 
     `run_complete` is cleared for the duration and set again after: the resume drives a *second*
     model run, which can half-write exactly like the first — so the exchange is incomplete again
@@ -1162,7 +1220,7 @@ async def _resume_on_job_results(
             _job_results_message(results),
             config=config,
             trace=trace,
-            on_signal=lambda _signal: None,
+            on_signal=ledger.note_signal_without_job_chaining,
             usage=ledger.usage,
             exchanges=ledger.exchanges,
             carry=carry,
@@ -1231,7 +1289,7 @@ async def _revise_answer(
             trace=trace,
             # A no-op for the reason the resume gives: a revision that fed its own job ids back into
             # `started_jobs` would let one chemist turn chain durable work indefinitely.
-            on_signal=lambda _signal: None,
+            on_signal=ledger.note_signal_without_job_chaining,
             usage=ledger.usage,
             exchanges=ledger.exchanges,
             carry=carry,
@@ -1336,6 +1394,32 @@ def _revision_message(claims: Sequence[str]) -> str:
     )
 
 
+#: The five things that can become of a request to have a person read a flagged answer. A frozen
+#: set rather than a comment, so `tests/test_answer_revision.py` can assert every one is reachable
+#: and `_escalation_outcome` cannot book a sixth by typo — the failure mode of a label typo is a
+#: silent second series, which is why `core/metrics.py` declares label *names* the same way.
+ESCALATION_OUTCOMES = frozenset({"opened", "joined", "no_claims", "no_actor", "unavailable"})
+
+
+def _escalation_outcome(outcome: str) -> None:
+    """Book what became of one escalation attempt.
+
+    Beside each of the five returns rather than once at the top, because the interesting outcomes
+    are the four that are *not* `opened`: each was a log line and nothing else, and
+    `chemclaw_answer_review_exhausted_total` counts turns that went out flagged, which is the same
+    number whether a person was asked, an existing wait absorbed the ask, or the broker was down.
+
+    **Raises rather than asserts**, per
+    `D-2026-09-16-an-assert-is-a-control-with-an-off-switch-in-this-repository-too`: `python -O`
+    deletes an assert, and what this checks is a *label value*, which the registry cannot check for
+    itself — it validates label **names** and would take a typo'd outcome as a silent sixth series
+    that no panel queries.
+    """
+    if outcome not in ESCALATION_OUTCOMES:
+        raise ValueError(f"undeclared escalation outcome {outcome!r}")
+    METRICS.increment("chemclaw_answer_review_escalations_total", labels={"outcome": outcome})
+
+
 def _record_review_rounds(session: TurnSession, answer: AnswerEvent, rounds: int) -> None:
     """Book what the revision loop did, including the case where it ran out of rounds.
 
@@ -1413,10 +1497,16 @@ async def _escalate_exhausted_review(
     the evidence) and would be the wrong one for an approval, where each act needs its own
     decision — which is why `durable/connector_job.py` keys its approval on the job id instead.
 
-    **Unrouted (`asked_of=""`), which means "whoever is entitled".** `connector_job.py` fails
-    closed on an unrouted *approval* because the requester could then approve their own
-    irreversible change; a review is not an authorization, and the chemist who received the
-    flagged answer is among the people best placed to read it. Nothing is released by answering.
+    **Routed to the requester, and this paragraph said the opposite until the routing changed.**
+    It read "unrouted (`asked_of=""`), which means whoever is entitled" — an argument about
+    *authorization* (a review is not an authorization, so the requester answering it is fine) that
+    never touched *visibility*. Unrouted does not mean "whoever is entitled" to a reader:
+    `_may_answer` returns `True` for any authenticated caller and `pending_store`'s list predicate
+    carries `OR asked_of = ''`, so the request was listed to the whole tenant carrying
+    model-authored claim text lifted out of a thread those readers cannot open. The argument the
+    old wording made is still sound and is now the reason the *requester* is a legitimate
+    answerer rather than the reason nobody is named. `connector_job.py` still fails closed on an
+    unrouted approval, for its own separate reason. Nothing is released by answering.
 
     **Best-effort, on the `deliver_best_effort`/`notify_session_best_effort` precedent.** The
     answer has already been built and is about to be yielded; a chemist must not lose it because
@@ -1430,7 +1520,14 @@ async def _escalate_exhausted_review(
             function emitting an event of its own.
         answer: The answer as it will ship. Only `review_required` is read: a loop that broke out
             after *fixing* the answer has nothing to escalate.
-        actor: The turn's authenticated principal, or `None` off the authenticated path.
+        actor: The turn's authenticated principal. **Checked against `entra_required` as well as
+            for emptiness**, because off the authenticated path it is not empty: `api/auth.py`
+            manufactures a stand-in principal whose `oid` is the literal `dev-user`, and
+            `Principal.oid` is `min_length=1`, so `not actor` is false in exactly the posture this
+            guard was written for. Raising a durable request as `dev-user` — and addressing its
+            notices to `dev-user` — is the attribution-nothing-can-write shape
+            `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution` deletes on sight,
+            arriving through the branch meant to prevent it.
         claims: What the last verdict found unsupported, named in the rationale so the reviewer
             starts where the checks stopped.
         correlation_id: The turn's id, in the rationale because it is the join key to
@@ -1438,7 +1535,24 @@ async def _escalate_exhausted_review(
     """
     if not answer.review_required or not settings.answer_review_escalation_enabled:
         return
-    if not actor:
+    if not claims:
+        # **The loop refuses to revise on a contentless verdict and this must refuse to escalate on
+        # one, for the same reason.** The re-grade at the loop's bottom is a *fresh* verdict, so a
+        # turn can exit with rounds spent and `unsupported` empty — a judge outage
+        # (`verifier.py` sets `review_notes` and leaves the claims empty) or a low-confidence
+        # verdict whose every claim is supported. Both produced a rationale ending "What the checks
+        # could not ground: " with nothing after it. A judge outage is fleet-wide, so without this
+        # it files one contentless review request per active conversation — a verdict nobody can
+        # act on, which is the failure this whole escalation exists to end.
+        _escalation_outcome("no_claims")
+        logger.info(
+            "the answer for session %s stays marked for review and no person was asked: the "
+            "verdict named no unsupported claim for a reviewer to start from",
+            session.session_id,
+        )
+        return
+    if not actor or not settings.entra_required:
+        _escalation_outcome("no_actor")
         logger.info(
             "the answer for session %s stays marked for review and no person was asked: the turn "
             "has no authenticated actor to raise the request as",
@@ -1462,6 +1576,22 @@ async def _escalate_exhausted_review(
             f"flag, so a person is being asked to read it. Turn {correlation_id}. What the checks "
             "could not ground: " + "; ".join(claims)
         ),
+        # **Routed to the requester, and that is a visibility decision rather than a routing one.**
+        # An empty `asked_of` does not mean "whoever is entitled" to a reader — `_may_answer`
+        # returns `True` for any authenticated caller and `pending_store`'s list predicate carries
+        # `OR asked_of = ''`, so an unrouted request is listed to the whole tenant. This one's
+        # `rationale` is model-authored claim text lifted out of the answer, and its `subject`
+        # names the conversation — while that conversation is owner-scoped and 404s a non-owner
+        # with no existence leak. Unrouted, it published a fragment of a private thread fleet-wide
+        # to people who cannot open the thread to check it.
+        #
+        # So it goes to the one principal who can actually read what it points at. That makes the
+        # ask an honest self-review rather than a leaky appeal to nobody: a real reviewer
+        # population is a configured entitlement this deployment does not have, and inventing one
+        # here would be a control nobody asked for. `connectors/bo/workflows.py` leaves `asked_of`
+        # empty for a wait a *person* launched about work they chose to share; this one fires
+        # automatically, per conversation, carrying conversation content.
+        asked_of=actor,
         requested_by=actor,
         session_id=session.session_id,
         correlation_id=correlation_id,
@@ -1478,6 +1608,7 @@ async def _escalate_exhausted_review(
             open_wait(request), settings.connector_health_timeout_seconds
         )
     except Exception:
+        _escalation_outcome("unavailable")
         degraded(
             logger,
             "answer_review_escalation",
@@ -1486,6 +1617,7 @@ async def _escalate_exhausted_review(
             session.session_id,
         )
         return
+    _escalation_outcome("opened" if opened else "joined")
     if opened:
         logger.warning(
             "a person has been asked to review the answer for session %s, which stayed flagged "
@@ -1520,6 +1652,23 @@ def _cap_events(session: TurnSession, ledger: _TurnLedger) -> Iterator[ErrorEven
             yield event
 
 
+def _partial_answer_clause(ledger: _TurnLedger) -> str:
+    """How a cap event ends, which depends on whether the turn wrote anything before it fired.
+
+    Both cap events ended `"so the answer below is partial"` unconditionally, and a capped turn does
+    not always have an answer below: driven 2026-09-19 at `agent_max_turn_billed_tokens=1`, the cap
+    fired after 1,020 billed tokens with no prose at all, so the chemist read "the answer below is
+    partial" with nothing following it — and then, one event later, `empty_answer` saying "Nothing
+    was written, so there is nothing below to read" with the opposite `retryable` flag.
+
+    One function because the two caps are one sentence with one number swapped, and a clause fixed
+    in one of them is the shape `tasks/lessons.md` calls a rule written twice.
+    """
+    if ledger.answer_text.strip():
+        return "so the answer below is partial"
+    return "and nothing had been written, so there is nothing below to read"
+
+
 def _loop_cap_event(session: TurnSession, ledger: _TurnLedger) -> ErrorEvent | None:
     """Say out loud that the runaway guard fired, or `None` if it did not.
 
@@ -1549,7 +1698,7 @@ def _loop_cap_event(session: TurnSession, ledger: _TurnLedger) -> ErrorEvent | N
     return ErrorEvent(
         message=(
             f"The turn reached its {settings.harness_max_loop_iterations}-iteration limit "
-            "and stopped with work still open, so the answer below is partial "
+            f"and stopped with work still open, {_partial_answer_clause(ledger)} "
             f"(session {session.session_id})."
         ),
         code="loop_cap_reached",
@@ -1595,8 +1744,8 @@ def _spend_cap_event(session: TurnSession, ledger: _TurnLedger) -> ErrorEvent | 
     return ErrorEvent(
         message=(
             f"The turn reached its {settings.agent_max_turn_billed_tokens:,}-token budget "
-            f"after billing {billed:,} and stopped with work still open, so the answer below "
-            f"is partial (session {session.session_id})."
+            f"after billing {billed:,} and stopped with work still open, "
+            f"{_partial_answer_clause(ledger)} (session {session.session_id})."
         ),
         code="spend_cap_reached",
         retryable=False,
@@ -1656,6 +1805,21 @@ def _empty_answer_event(
     comparison the code does not make.)
     """
     if ledger.answer_text.strip():
+        return None
+    if ledger.loop_capped or ledger.spend_capped:
+        # **A capped turn is not a silent one, and saying so twice contradicted itself.** Driven
+        # 2026-09-19 at `agent_max_turn_billed_tokens=1`: the chemist got `spend_cap_reached`
+        # (`retryable=False`) immediately followed by `empty_answer` (`retryable=True`) about the
+        # same silence, which a surface cannot reconcile — and `chemclaw_turn_empty_answers_total`
+        # moved too, firing `ChemclawTurnsAnsweringEmpty`, whose own description and runbook entry
+        # both said "No error counter moves" and sent the operator after "a model that emitted only
+        # tool calls" while naming neither the cap nor the counter that identifies it. The cap has
+        # its own event, its own counter and its own turn outcome; this series is for the case
+        # nothing explains, which is what makes it worth alerting on at `for: 0m`.
+        #
+        # `_cap_events` runs before this, so the flags are set by the time it is asked. The caller
+        # still stops here — see its own comment — because a capped turn with no prose must not
+        # reach `build_answer_event`.
         return None
     METRICS.increment("chemclaw_turn_empty_answers_total")
     attempted = len(trace.called_tools)
@@ -2137,6 +2301,15 @@ def _book_turn_spend(
             answer_confidence=ledger.answer_confidence,
             review_required=ledger.review_required,
             notes_cited=ledger.notes_cited,
+            # **Digested, because this row outlives the person.** The column's only consumer is
+            # the distiller's self-confirmation guard, which asks whether *this* skill was acting —
+            # an equality question a digest answers exactly as well as the name. The name itself is
+            # a chemist's own words, and `turn_costs` is in `leaver._RETAINED` and refused by
+            # `durable/retention.py`: measured, a skill called `project-nightingale-workup` was
+            # still in the table after `erase_actor(apply=True)` reported success. The code claimed
+            # the opposite ("erased with that person by `agent/leaver.py`"), which is the kind of
+            # false statement about a control this repository exists to stop making.
+            skills_loaded=sorted(skill_fingerprint(name) for name in ledger.skills_loaded),
         )
     )
     # **The same record as a log line, because a deployment may have no ledger to read.** The cost
@@ -2233,24 +2406,28 @@ async def _turn_checkpointer() -> Any:
     return await checkpointer()
 
 
-async def _turn_store() -> Any:
+async def turn_store() -> Any:
     """This turn's durable memory store, or `None` where the deployment keeps none.
 
-    Two gates, both necessary and neither redundant. `agent_memory_enabled` is the deployment's
-    decision that agent-authored files may outlive a session at all; `session_store` is the same
-    condition `_turn_checkpointer` reads, because the store shares the checkpointer's pool and a
-    process on the in-memory store has no Postgres to put one in. Building it here rather than in
-    `build_langgraph_agent` is what keeps that builder synchronous — the same seam the checkpointer
-    already uses.
+    The two gates are `local_skills.personal_skills_available`'s, asked rather than restated:
+    a third surface (`propose_skill`) read them by not reading them at all, which is the argument
+    that function now carries. Building the store here rather than in `build_langgraph_agent` is
+    what keeps that builder synchronous — the same seam the checkpointer already uses.
 
     The *third* gate is not here and that is deliberate: whether the turn has an actor is decided by
     `scratchpad_backend`, because that is where the namespace is computed and an actorless memory is
     one nobody could erase.
 
+    **Public since `api/routes/skills.py` became the second caller**, and public rather than
+    copied: the chemist's own skills ride this same store
+    (`D-2026-09-18-a-skill-a-chemist-keeps-is-behaviour-they-approved`), so the two surfaces answer
+    "is this available" from one function. A second spelling of these two conditions is how one of
+    them gets a third condition later and the other does not.
+
     Returns:
         A ready `AsyncPostgresStore`, or `None` for a turn with a scratchpad but no memory.
     """
-    if not settings.agent_memory_enabled or settings.session_store != "postgres":
+    if not personal_skills_available():
         return None
     return await memory_store()
 

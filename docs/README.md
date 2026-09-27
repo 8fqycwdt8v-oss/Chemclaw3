@@ -35,8 +35,10 @@ of a past state is `archive/`, and is never updated again.
 **The long-form findings live in `docs/archive/findings-2026-08.md`.** `BACKLOG.md` had grown to 4,717
 lines and 237 open rows across ~40 dated `Open — Left by the <review>` sections, gaining roughly
 three lines for every line removed — at which size nobody read it, so nothing was closed out of it,
-so it grew. The queue is now forty rows grouped by what they ask for; every finding's full
-measurement, and the review that produced it, is in the archive.
+so it grew. The queue is now grouped by what its rows ask for rather than by the review that found
+them, and how many there are is `grep -c '^- \[ \]' docs/planning/BACKLOG.md` — this sentence said
+"forty" through two different true answers. Every finding's full measurement, and the review that
+produced it, is in the archive.
 
 For what the *code* directories are, see `ARCHITECTURE.md` at the repository root.
 

@@ -514,14 +514,6 @@ def test_a_compiled_agent_still_reaches_its_tool_node_at_nodes_tools_dot_bound()
     middleware chain into an upstream-surface assertion and make a first-party regression look
     like a dependency bump. `tests/test_langgraph_agent.py`, `test_middleware_order.py`,
     `test_subagents.py` and `test_tool_schema.py` read the same path and break with it.
-
-    **And since `D-2026-09-16-a-roster-varies-the-two-dimensions-that-carry-no-authority`, so does
-    `src/`** — `agent/langgraph_agent._bound_helper_names` is the first production reader of this
-    path, and it is the one whose failure is *quiet*. Every other reader is a measurement that dies
-    loudly; that one answers "what does this helper bind", and an empty answer is indistinguishable
-    from a helper a deployment has legitimately emptied, so a rename upstream would drop every
-    rostered helper with an INFO line and remove the feature with nothing red. It is named here
-    because this file's rule is that each pin names the module that breaks.
     """
     from langchain.agents import create_agent
     from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
@@ -1958,6 +1950,53 @@ def test_the_task_tool_still_closes_over_its_roster_as_subagent_graphs() -> None
     )
 
 
+def test_an_oversized_skill_description_is_still_truncated_rather_than_refused() -> None:
+    """Why `SkillManifest` declares length bounds upstream already has constants for.
+
+    `agent/skill_manifest.py` imports `MAX_SKILL_NAME_LENGTH` and `MAX_SKILL_DESCRIPTION_LENGTH` and
+    turns them into pydantic bounds, which looks like a duplicate control and is not: upstream's
+    loader **truncates** past either limit and carries on, logging a warning. So without this
+    repository's bounds a chemist posting a 2,000-character description gets a 200, and a model is
+    served half of it with nothing on either surface saying so — and a skill can be stored under one
+    name and listed under another.
+
+    This is an assumption test in the direction that matters. If a bump made upstream *refuse*
+    instead of truncating, the same skill would vanish from the listing with no error anywhere, and
+    this repository's bounds would be the only thing between a person and a silent no-op. Either
+    behaviour is workable; not knowing which one is live is not.
+    """
+    from deepagents.middleware.skills import (
+        MAX_SKILL_DESCRIPTION_LENGTH,
+        MAX_SKILL_NAME_LENGTH,
+        _parse_skill_metadata,
+    )
+
+    from chemclaw.agent.skill_manifest import (
+        MAX_SKILL_DESCRIPTION_CHARS,
+        MAX_SKILL_NAME_CHARS,
+    )
+
+    assert (MAX_SKILL_NAME_CHARS, MAX_SKILL_DESCRIPTION_CHARS) == (
+        MAX_SKILL_NAME_LENGTH,
+        MAX_SKILL_DESCRIPTION_LENGTH,
+    ), "this repository's bounds are imported from upstream's, so they cannot disagree"
+
+    over = "d" * (MAX_SKILL_DESCRIPTION_LENGTH + 500)
+    parsed = _parse_skill_metadata(
+        f"---\nname: over-long\ndescription: {over}\n---\n\nbody\n", "/x/SKILL.md", "over-long"
+    )
+
+    assert parsed is not None, (
+        "upstream now refuses an over-long description rather than truncating it. A skill over the "
+        "limit would vanish from the listing with no error, so `SkillManifest`'s bounds are the "
+        "only refusal a person ever sees — keep them, and say so here"
+    )
+    assert len(parsed["description"]) == MAX_SKILL_DESCRIPTION_LENGTH, (
+        "upstream no longer truncates to the spec limit, so the number `SkillManifest` bounds at "
+        "is no longer the number the model is served"
+    )
+
+
 def test_pyjwt_still_fetches_its_key_set_through_fetch_data() -> None:
     """`api/auth.py` overrides `PyJWKClient.fetch_data`, which upstream never published as a seam.
 
@@ -2058,3 +2097,217 @@ def test_a_pyjwt_client_still_fills_its_key_set_cache_from_fetch_data() -> None:
         "api/auth.py::_HttpxJwkClient.fetch_data is no longer what makes the second one free, so "
         "every token validation is an outbound request to the tenant"
     )
+
+
+def test_a_subgraph_compiled_without_a_checkpointer_inherits_its_parents() -> None:
+    """The semantics one line of this tree turns on, asserted against the installed distribution.
+
+    `None` is not "no checkpointer" to LangGraph — it is *inherit*. Every `task` helper this
+    repository ever spawned checkpointed its own thread onto its caller's saver because the call
+    site passed nothing, and `retrieval/fanout.py` did the same with 195 kB of retrieved corpus
+    (`D-2026-09-18-a-checkpointer-of-none-is-the-callers-checkpointer`, and the fan-out instance
+    that proved its "the class is closed" bullet wrong).
+
+    Asserted here because it is a *promise upstream makes in a docstring*, which is the weakest
+    kind: if a future version made `None` mean "none", every `checkpointer=False` in this tree
+    would become a no-op that reads as deliberate.
+    """
+    import inspect
+
+    from langgraph import types as lg_types
+    from langgraph.pregel import Pregel
+
+    # Read the source rather than `__doc__`: `Checkpointer` is a type alias, so the string under it
+    # is a module-level literal that never becomes an attribute. Asserting `__doc__` here passed
+    # vacuously on the union's own docstring until this comment was written.
+    doc = inspect.getsource(lg_types)
+    assert "inherits checkpointer from the parent graph" in doc, (
+        "upstream no longer documents `None` as inheriting the parent's checkpointer, so the "
+        "`checkpointer=False` call sites in this tree may now be saying something else"
+    )
+    assert "disables checkpointing, even if the parent graph has a checkpointer" in doc, (
+        "upstream no longer documents `False` as the opt-out; `agent/langgraph_agent.py` and "
+        "`retrieval/fanout.py` both rely on it"
+    )
+    assert "if self.checkpointer is False" in inspect.getsource(Pregel._defaults), (
+        "`Pregel._defaults` no longer short-circuits on `checkpointer is False` before reading "
+        "the parent's saver out of the run config, which is where the opt-out is resolved"
+    )
+
+
+def test_every_compiled_graph_in_this_tree_names_its_checkpointer() -> None:
+    """A bare `.compile()` is a graph that silently adopts whatever saver its caller holds.
+
+    **The class, not the instance.**
+    `D-2026-09-18-a-checkpointer-of-none-is-the-callers-checkpointer`
+    fixed the helper and its Consequences bullet claimed no shipped path wrote a second namespace
+    any more. `retrieval/fanout.py:299` was `graph.compile()` the whole time, reached from
+    `gather_evidence` on both the caller's and the helper's surface, and measured at 195 kB of the
+    `ranked` channel in its own `n:<uuid>` namespace on the chemist's thread. One instance was
+    fixed and the class declared closed, which is the shape this assertion exists to stop.
+
+    Syntactic on purpose, and that is defensible *here* where an AST reading of a keyword's absence
+    was not: the hazard **is** the default. What this asks is that every compile site states what it
+    wants, so a reviewer sees the choice rather than inheriting one.
+    """
+    import ast
+    from pathlib import Path
+
+    # The regular-expression engines, whose `.compile` has nothing to do with graphs. Named as a
+    # class rather than accumulated one skip at a time: `regex` joined `re` when
+    # `D-2026-09-21-a-pattern-that-cannot-be-timed-out-is-run-by-an-engine-that-can` put a
+    # site-supplied pattern under a deadline, and a third entry here should be a third *engine*,
+    # not an exception somebody added to make this green.
+    _PATTERN_ENGINES = {"re", "regex"}
+
+    root = Path(__file__).resolve().parent.parent / "src"
+    bare: list[str] = []
+    for path in root.rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                continue
+            if node.func.attr != "compile":
+                continue
+            if isinstance(node.func.value, ast.Name) and node.func.value.id in _PATTERN_ENGINES:
+                continue
+            if any(keyword.arg == "checkpointer" for keyword in node.keywords):
+                continue
+            bare.append(f"{path.relative_to(root)}:{node.lineno}")
+
+    assert not bare, (
+        f"{len(bare)} graph compile site(s) name no checkpointer: {bare}. `None` means *inherit*, "
+        "so a graph invoked inside a turn adopts the chemist's Postgres saver and checkpoints "
+        "whatever it carries under its own namespace. Pass `checkpointer=False` for a graph "
+        "nothing resumes, or name the saver."
+    )
+
+
+def test_only_the_subagent_middleware_returns_a_command_carrying_the_files_channel() -> None:
+    """`batch_siblings`'s divisor is sound only while `task` is the single such producer.
+
+    `agent/tool_result_size.py` divides the helper file budget by the batch's calls **naming this
+    tool**, and the argument for not dividing by the whole batch is that nothing else in the
+    installed `deepagents` hands a caller a `Command` whose `update` carries `files`. Two
+    different tools doing it would each divide by their own count and together exceed the budget.
+
+    That claim lived in an ADR and in a walk somebody did once, which is the shape this file
+    exists to end: a dependency bump adding a second producer would red nothing.
+    `deepagents.middleware.subagents._return_command_with_state_update` copies every key not in
+    `_EXCLUDED_STATE_KEYS`, so it is the producer; the assertion is that it stays the only one.
+
+    **Three sites, and only one of them originates anything.** The assertion names all three
+    rather than collapsing them to the one that matters, so a new site is read rather than assumed.
+
+    **It does filter, and this docstring used to say it did not** — `update` must be an `ast.Dict`
+    carrying a `**spread` or a literal `"files"` key, which is what reduces the installed
+    distribution's 19 `Command(...)` constructions to these three. Two `summarization` sites build
+    their update in a local and pass it by name, so they can never be reported here however they
+    change. Both are `wrap_model_call` commands in a middleware this deployment replaces with
+    `disabled_summarizer`, so nothing is unchecked today — but "a filter is where a fourth would
+    hide" was exactly the wrong sentence to write above a filter.
+    `filesystem`'s pair rebuild a wrapped tool's result as `{**update, "messages": …}`, so the
+    `files` they can carry is the wrapped tool's, already counted wherever it came from; they relay
+    a producer and cannot invent one. A **new** entry in this list is the thing to look at.
+
+    **Scoped to `Command`s on purpose.** `FilesystemMiddleware`'s write verbs reach the same
+    channel through `StateBackend`'s `send(...)` and return a plain `ToolMessage`, so they never
+    pass `rewritten_command_files` and this bound never sees them. That is a separate gap with its
+    own `BACKLOG.md` row; what this pins is the population the divisor reasons about.
+    """
+    import ast
+    import importlib
+    import inspect
+    import pkgutil
+
+    import deepagents
+
+    producers: list[str] = []
+    for found in pkgutil.walk_packages(deepagents.__path__, deepagents.__name__ + "."):
+        try:
+            module = importlib.import_module(found.name)
+            source = inspect.getsource(module)
+        except Exception:
+            # A module that will not import, or has no readable source, cannot be a producer.
+            continue
+        for node in ast.walk(ast.parse(source)):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+            if name != "Command":
+                continue
+            for keyword in node.keywords:
+                if keyword.arg != "update" or not isinstance(keyword.value, ast.Dict):
+                    continue
+                # A literal `"files"` key, or a `**spread` of state this module did not filter —
+                # the second is how the real producer does it and the first is how a new one would.
+                spreads = any(key is None for key in keyword.value.keys)
+                literal = any(
+                    isinstance(key, ast.Constant) and key.value == "files"
+                    for key in keyword.value.keys
+                )
+                if spreads or literal:
+                    producers.append(f"{found.name}:{node.lineno}")
+
+    assert producers == [
+        # The two relays: a wrapped tool's own update, rebuilt with new messages.
+        "deepagents.middleware.filesystem:3422",
+        "deepagents.middleware.filesystem:3463",
+        # The producer: `**state_update`, every key the subagent held that is not excluded.
+        "deepagents.middleware.subagents:507",
+    ], (
+        f"the sites handing a caller a `Command` that can carry `files` are {producers}, and "
+        "`agent/tool_result_size.py::batch_siblings` divides the helper file budget by the "
+        "batch's calls naming ONE tool on the grounds that exactly one of them originates such a "
+        "command. A second originator divides by its own count and the two together exceed the "
+        "budget. So: read the new or moved site. If it relays a wrapped tool's update, add it "
+        "here with that noted; if it builds one of its own, the divisor's argument no longer "
+        "holds and `batch_siblings` has to count the union of the producing tools."
+    )
+
+
+def test_rdkits_fragment_catalogue_still_carries_what_this_module_assumes() -> None:
+    """`core/chem.standardize` discards a neutral spectator only if RDKit's catalogue knows it.
+
+    **This is the one upstream shape here that is a *list* rather than a name.** After
+    `D-2026-09-22-the-parent-is-the-fragment-this-module-calls-organic`, whether a hydrate or a
+    solvate collapses is decided by `rdMolStandardize.FragmentRemover`'s catalogue — so upstream
+    dropping water from it would silently stop every hydrate collapsing, and adding
+    tetrafluoroborate would silently change how TBTU is keyed. Neither would red anything, because
+    the identity tests assert what this system answers and that answer would move with the list.
+
+    Two directions, and the absent half is as load-bearing as the present one: the charge clause in
+    `standardize` leads *because* the catalogue omits tetrafluoroborate, which was measured after a
+    list-only spelling regressed TBTU. The day it is added, that argument is worth re-reading.
+    """
+    from rdkit import Chem
+    from rdkit.Chem.MolStandardize import rdMolStandardize
+
+    remover = rdMolStandardize.FragmentRemover()
+
+    def stripped_from(organic: str, spectator: str) -> bool:
+        """Whether the catalogue removes `spectator` when it sits beside an organic fragment."""
+        pair = Chem.MolFromSmiles(f"{organic}.{spectator}")
+        assert pair is not None, spectator
+        remaining = {
+            Chem.MolToSmiles(f) for f in Chem.GetMolFrags(remover.remove(pair), asMols=True)
+        }
+        return Chem.MolToSmiles(Chem.MolFromSmiles(spectator)) not in remaining
+
+    carried = {"O": "water", "Cl": "hydrogen chloride", "[Na+]": "sodium"}
+    for spectator, name in carried.items():
+        assert stripped_from("CCN", spectator), (
+            f"RDKit's fragment catalogue no longer carries {name}. `core/chem.standardize` "
+            "discards a neutral spectator only if this catalogue knows it, so every hydrate and "
+            "solvate "
+            "silently stops collapsing — re-read that branch before touching anything else"
+        )
+    omitted = {"F[B-](F)(F)F": "tetrafluoroborate"}
+    for spectator, name in omitted.items():
+        assert not stripped_from("CC[NH3+]", spectator), (
+            f"RDKit's fragment catalogue now carries {name}. That is the omission the charge "
+            "clause in `core/chem.standardize` was measured against — it leads because the list "
+            "alone "
+            "regressed TBTU — so the argument for its order is worth re-reading, not the code"
+        )

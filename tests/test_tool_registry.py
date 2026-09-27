@@ -8,7 +8,7 @@ same audit+authz middleware. See `docs/archive/audit/10-config-extensibility.md`
 
 import pytest
 
-from chemclaw.agent.chemclaw_agent import _capability_tools
+from chemclaw.agent.chemclaw_agent import _capability_tools, _withheld_launcher_names
 from chemclaw.connectors.registry import enabled
 from chemclaw.core.tool_registry import (
     _REGISTRY,
@@ -50,9 +50,21 @@ _EXPECTED_INPROCESS_TOOLS = {
     "structure_experiment_request",
     "compose_workflow",
     "run_composed_workflow",
+    # In-process for the same reason `compose_workflow` is: the store is core's, and proposing is
+    # the turn's own composition rather than durable work. It writes a proposal and never a skill —
+    # a person's route is what turns one into behaviour.
+    "propose_skill",
     "draft_experiment_protocol",
     "read_experiment_protocol",
     "find_experiment_protocols",
+    # Scaling a stored design to a new basis. In-process for the same reason as the three above:
+    # it reads the design store, which is core's, and writes nothing — keeping a rescale goes back
+    # through `draft_experiment_protocol` under the ordinary `parent_revision` check.
+    "rescale_experiment_protocol",
+    # The two halves of the plate-results loop, in-process for the three above's reason: both
+    # read the design store, which is core's.
+    "attach_plate_results",
+    "read_plate_results",
     # The join between the two halves of "propose an experiment": a campaign's suggested points
     # are `{parameter: value}` and a design needs labelled factors and arms citing those labels.
     # In-process for the same reason as the pair above — the campaign store is core's and the
@@ -79,6 +91,7 @@ _EXPECTED_INPROCESS_TOOLS = {
     # workflows with no caller at all — this is the trigger that replaced the clock, and a person
     # asking is now the only thing that starts one.
     "request_development_report",
+    "rank_competing_hypotheses",
     "synthesize_memory",
     "get_durable_job_status",
     # The retrospective half of that pair (D-157): the durable record of every finished run, which
@@ -118,17 +131,24 @@ def test_registry_holds_the_inprocess_tools_and_only_generated_launchers_besides
     surface(None)
     extra = set(registered_tool_names()) - _EXPECTED_INPROCESS_TOOLS
     jobs = {job.name for manifest in enabled() for job in manifest.jobs}
-    assert extra == jobs | set(template_tool_names())
+    # Bounded on both sides rather than equal: the registry only grows, so a launcher an earlier
+    # build in this process registered under another configuration can still be held while this
+    # deployment withholds it (`chemclaw_agent._withheld_launcher_names` subtracts it on read).
+    assert (
+        jobs | set(template_tool_names()) <= extra <= jobs | set(template_tool_names(declared=True))
+    )
 
 
 def test_capability_tools_are_exactly_the_registry() -> None:
     """`_capability_tools()` is the registry, whole and in order — connectors are not in it.
 
     A connector's MCP tools are per-turn (`connector_tools`), not per-process, so the agent's own
-    tool list is the registry and nothing more.
+    tool list is the registry and nothing more — less any template launcher this deployment
+    withholds, which an earlier build in the same process may have registered.
     """
     tools = _capability_tools()
-    assert tools == registered_tools()
+    withheld = _withheld_launcher_names()
+    assert tools == [tool for tool in registered_tools() if tool.__name__ not in withheld]
 
 
 def test_agent_advertises_the_registered_inprocess_tools() -> None:

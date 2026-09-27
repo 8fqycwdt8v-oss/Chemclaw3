@@ -338,6 +338,10 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
     ("chemclaw.cli", "chemclaw.evals"),
     ("chemclaw.cli", "chemclaw.ingest"),
     ("chemclaw.cli", "chemclaw.kg"),
+    # `cli/propose_profile.py` mines `audit_events.tool`, the same model-written column
+    # `operations.activity.safe_tool_name` bounds for its own readers — and a bound applied to one
+    # reader of a column is not a bound, which that function's docstring argues.
+    ("chemclaw.cli", "chemclaw.operations"),
     # `cli/verifier_margin.py` measures the judge's roll-to-roll margin
     # (D-2026-08-27-a-verdict-at-the-margin-is-a-coin-toss), and the judge's input type is
     # `retrieval.evidence.EvidenceChunk` — building the pairs from anything else would measure a
@@ -359,6 +363,7 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
     ("chemclaw.durable", "chemclaw.connectors"),
     ("chemclaw.durable", "chemclaw.core"),
     ("chemclaw.durable", "chemclaw.evals"),
+    ("chemclaw.durable", "chemclaw.hypotheses"),
     ("chemclaw.durable", "chemclaw.ingest"),
     ("chemclaw.durable", "chemclaw.kg"),
     ("chemclaw.durable", "chemclaw.memory"),
@@ -368,9 +373,11 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
     ("chemclaw.evals", "chemclaw.agent"),
     ("chemclaw.evals", "chemclaw.api"),
     ("chemclaw.evals", "chemclaw.core"),
+    ("chemclaw.evals", "chemclaw.hypotheses"),
     ("chemclaw.evals", "chemclaw.kg"),
     ("chemclaw.evals", "chemclaw.retrieval"),
     ("chemclaw.evals", "chemclaw.science"),
+    ("chemclaw.hypotheses", "chemclaw.kg"),
     ("chemclaw.ingest", "chemclaw.core"),
     ("chemclaw.ingest", "chemclaw.kg"),
     ("chemclaw.ingest", "chemclaw.retrieval"),
@@ -453,6 +460,15 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
 # exception_and_the_dict_says_which` is the same claim in a form that fails when it stops being
 # true.
 _ALLOWED_LAZY_EDGES: dict[Edge, str] = {
+    ("chemclaw.hypotheses", "chemclaw.core"): (
+        "`dispatch.structure_of` validates a subject's SMILES with `core.chem`, which imports "
+        "RDKit. Lazy rather than module-scope because `hypotheses` is imported inside Temporal's "
+        "workflow sandbox: that is exactly where `hypotheses.rating`'s module-scope numpy reached "
+        "`os.putenv` and was refused "
+        "(`D-2026-09-20-a-ranking-is-evidence-a-critic-is-not-a-gate`), and a second heavy C "
+        "extension at import time is the same bet twice. The call sites are "
+        "all in activities, where the import is free"
+    ),
     ("chemclaw.science", "chemclaw.publish"): (
         "cached_compute offers a freshly computed primitive to the external results store. Lazy "
         "for two reasons that both matter: `science` is the pure-computation layer and must not "

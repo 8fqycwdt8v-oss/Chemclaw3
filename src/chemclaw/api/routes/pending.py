@@ -177,9 +177,19 @@ async def answer_pending(
     # checkout this replica has not caught up with, and refusing a chemist on that is both the
     # wrong failure direction and unappealable — there is no override on this route. See the
     # method's own docstring for the measurement.
-    broken = [
-        item for item in await premise_breaks(stored.premise_note_ids) if item.blocks_an_answer()
-    ]
+    #
+    # **A `review` is exempt, because for it the check runs backwards.** Every other kind asks
+    # somebody to *apply* knowledge, so a retired premise means the answer would be applied to
+    # something that no longer holds. A review asks somebody to judge an answer the checks could
+    # not ground — so its premise is the thing under review, and the most natural act after
+    # reading it is to supersede or refute the note it rested on. That act would then lock the
+    # reviewer out of recording the review, on a route with no override and no cancel, leaving the
+    # wait only able to expire. The escalation also opens these automatically from claim text that
+    # routinely carries citations, so it can open one whose premise was *already* broken — and the
+    # 409 would then say the knowledge "has changed since it was asked" when nothing changed,
+    # which is the one thing `request_external_input`'s ask-time refusal exists to make true.
+    breaks = await premise_breaks(stored.premise_note_ids) if stored.kind != "review" else []
+    broken = [item for item in breaks if item.blocks_an_answer()]
     if broken:
         count_refusals("answer", broken)
         raise HTTPException(

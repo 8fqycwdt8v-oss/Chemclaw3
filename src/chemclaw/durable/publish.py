@@ -66,6 +66,20 @@ _BAD_DATA_TYPES = [
     # transient: the parent has taken no turn, so there is no thread to copy, and retrying finds
     # exactly the same absence — nothing about waiting makes a checkpoint appear.
     "SessionForkError",
+    # The proposal store finding neither an inserted row nor an existing one after its own
+    # insert-or-conflict (`agent/behaviour_proposals.py`). Unreachable by construction and listed
+    # anyway, because the walk in `tests/test_publish.py` asks about every subclass rather than
+    # about the ones that happen to cross an activity boundary today — and the answer here is the
+    # same one it would be if something durable ever did write a proposal: the statements are
+    # deterministic against the same rows, so a retry finds the identical impossibility.
+    "ProposalStoreError",
+    # A document the personal skills tier will not keep (`agent/local_skills.py`) — a name already
+    # taken, a body over the cap, something that is not a `SKILL.md` at all. Bad data by the same
+    # argument as its neighbours: the admission rules are deterministic against the same bytes, so
+    # a retry finds the identical refusal. Listed although no activity writes a skill today,
+    # because `tests/test_publish.py` walks every subclass rather than the ones that cross an
+    # activity boundary at this commit.
+    "SkillRefused",
     # A `reaction_records.conditions` payload that is not a JSON object at all
     # (`ingest/eln/records.py`). Bad data rather than transient — no build of this ingest writes
     # one, and retrying re-reads the same row. Distinct from the *extra field* a newer build
@@ -75,6 +89,13 @@ _BAD_DATA_TYPES = [
     "ElnFormatError",
     "OrdFormatError",
     "IngestError",
+    # An activity result over `activity_result_max_bytes` — the ceiling
+    # `durable/interceptor.py` refuses at so the broker does not refuse it invisibly. Bad data
+    # rather than transient, and this is the one entry in this list whose retryability was
+    # *measured*: unrefused, the worker retried a 6 MB result for ever against a gRPC
+    # `ResourceExhausted` while every attempt logged `completed`. The result is a deterministic
+    # function of the arguments, so the next attempt is the same number of bytes.
+    "ActivityResultTooLarge",
     "MetricError",
     "PlaybookError",
     # A campaign's recorded points and its decision space disagreeing, or a design space whose
@@ -186,6 +207,13 @@ _BAD_DATA_TYPES = [
     "StatusConflict",
     "UnstorableDocument",
     "UnknownDesign",
+    # An outcome naming an arm the stored revision does not have. Bad data in this list's exact
+    # sense: the arm id is wrong, so every attempt fails identically and a retry only delays the
+    # message that names the arms which do exist.
+    "UnknownArm",
+    # The latest values for one outcome in more than one unit. The stored rows decide it, so a
+    # retry reads the same rows and refuses identically.
+    "MixedUnits",
     "TemplateError",
     # A composed workflow that names a write, a job, or a step that does not resolve. Bad data in
     # exactly this list's sense: the document is what is wrong, so every attempt fails identically.
@@ -196,14 +224,18 @@ _BAD_DATA_TYPES = [
     # (Science-4, `chemclaw.science.bo.engine`). Deterministic in the data: the same duplicate
     # or degenerate points collapse the same kernel on a retry, so this is bad-data, not transient.
     "SurrogateFitError",
-    # The four ways a declaratively-bound warehouse source fails (`chemclaw.ingest.eln.warehouse`),
+    # The five ways a declaratively-bound warehouse source fails (`chemclaw.ingest.eln.warehouse`),
     # all of them deterministic in something a retry cannot change. `BindingError`/`PathSyntaxError`
     # are a malformed binding — the manifest is the same file on the next attempt. `TransformError`
     # is a row carrying a value the binding's vocabulary does not cover; `WarehouseQueryError` is a
-    # relation or column the site does not have. An unreachable warehouse is deliberately *not*
-    # here: the driver raises `ConnectionError` for that, precisely so it stays retryable.
+    # relation or column the site does not have. `PatternBudgetError` is a `regex` transform that
+    # spent its whole wall clock on one cell: the pattern and the page are both the same on the
+    # next attempt, so retrying it is the stall again — which is what it cost before the engine had
+    # a deadline to exceed. An unreachable warehouse is deliberately *not* here: the driver raises
+    # `ConnectionError` for that, precisely so it stays retryable.
     "BindingError",
     "PathSyntaxError",
+    "PatternBudgetError",
     "TransformError",
     "WarehouseQueryError",
     # A vendored dataset that is absent, malformed, or does not match its manifest checksum

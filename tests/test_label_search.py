@@ -11,6 +11,7 @@ executed half of this file.
 """
 
 import asyncio
+import re
 import time
 from collections.abc import Awaitable, Callable
 
@@ -29,6 +30,7 @@ from chemclaw.science.fingerprints.store import (
 from chemclaw.science.labels.molecules import (
     CORPUS_MOLECULES_TABLE,
     CorpusMolecules,
+    VerifyDeadlineExceeded,
     _verify_within,
 )
 from chemclaw.science.labels.pattern import compile_query
@@ -370,6 +372,38 @@ async def test_q4_reactions_whose_product_matches_a_smarts() -> None:
     }
 
 
+def test_the_partial_verdict_can_never_print_a_share_of_100_or_0() -> None:
+    """The branch whose whole job is to say "not complete" printed "(100%)".
+
+    `{share:.0f}` rounds, so 4,999 of 5,000 read **"PARTIAL: … (100%)"** and 1 of 100,000 read
+    **"(0%)"** — a reader takes the first as complete and the second as nothing, inside the sentence
+    that exists to tell them it is neither. Floored to a tenth and clamped, so the printed share
+    cannot reach either edge while the branch it is in is true.
+
+    Asserted as a property over the edges rather than on one string, because the defect is the
+    *rounding*, and a single example fixed by hand would pass with `:.0f` and a special case.
+    """
+    from chemclaw.science.labels.records import CorpusCoverage
+
+    for labelled, total in ((4999, 5000), (99999, 100000), (1, 100000), (1, 5000), (1, 3)):
+        verdict = CorpusCoverage(labelled=labelled, total=total).verdict
+        assert verdict.startswith("PARTIAL")
+        match = re.search(r"\((\d+\.\d)%\)", verdict)
+        assert match is not None, verdict
+        printed = match.group(1)
+        assert printed not in {"100.0", "0.0"}, (
+            f"{labelled} of {total} printed ({printed}%) in the branch that says it is not complete"
+        )
+        assert 0.0 < float(printed) < 100.0
+
+
+def test_a_fully_labelled_scope_still_says_complete() -> None:
+    """The other side of the clamp: 100% belongs to the COMPLETE branch and only to it."""
+    from chemclaw.science.labels.records import CorpusCoverage
+
+    assert CorpusCoverage(labelled=5000, total=5000).verdict.startswith("COMPLETE")
+
+
 async def test_a_corpus_sitting_exactly_on_the_cap_is_not_reported_as_truncated() -> None:
     """Truncation is observed by reading one row past the cap, never inferred from `len == cap`.
 
@@ -511,13 +545,21 @@ async def test_a_substructure_verify_that_runs_too_long_is_cut_off_rather_than_a
 def test_a_verify_past_its_deadline_stops_instead_of_matching_the_rest_of_the_candidates() -> None:
     """The bound above releases the caller; this is what makes it true of the worker thread.
 
-    `asyncio.wait_for` cannot stop a thread, so a verify that outran the bound went on matching
-    every remaining candidate — up to `substructure_scan_max_records` of them — while holding a
-    slot in the loop's *default* executor, which is also where `chemclaw.api.auth` validates every
-    bearer token. `_verify_within` reads the deadline between candidates instead.
+    `asyncio.wait_for` cannot stop a thread, so before this the verify went on matching every
+    remaining candidate — up to `substructure_scan_max_records` of them — against a pattern already
+    known to be pathological.
 
-    No Postgres and no clock constant: one match is measured here and the deadline is expressed in
-    matches, so a faster machine changes the numbers and not the property.
+    **A candidate count, not a ratio of two wall clocks.** This asserted
+    `bounded < unbounded / 4`, and its own docstring claimed machine independence on the grounds
+    that "the deadline is expressed in matches, so a faster machine changes the numbers and not the
+    property" — the same claim its sibling in `tests/test_molfp.py` had to retract after a quarter
+    failed `main` twice in one morning at 0.270 and 0.271. The count was already in hand here:
+    `_verify_within` reads the deadline between candidates, so `examined` is exactly the quantity,
+    and it was going into an exception message and nowhere else. `VerifyDeadlineExceeded` carries
+    it out.
+
+    Two integers that do not move with the machine: a bounded verify reaches a handful of the 300
+    candidates, and a deadline that does not reach the thread reaches all 300 while raising.
     """
     query = compile_query(_UNMATCHABLE)
     molecule = Chem.MolFromSmiles(_CHAIN_CORPUS[0])
@@ -525,17 +567,19 @@ def test_a_verify_past_its_deadline_stops_instead_of_matching_the_rest_of_the_ca
     molecule.HasSubstructMatch(query)
     per_candidate = time.perf_counter() - started
 
-    started = time.perf_counter()
-    with pytest.raises(TimeoutError):
+    with pytest.raises(VerifyDeadlineExceeded) as stopped:
         _verify_within(_CHAIN_CORPUS, query, time.monotonic() + per_candidate * 5)
-    bounded = time.perf_counter() - started
 
-    started = time.perf_counter()
-    assert _verify_within(_CHAIN_CORPUS, query, time.monotonic() + 3600) == []
-    unbounded = time.perf_counter() - started
-
-    assert bounded < unbounded / 4, (
-        f"the verify ran {bounded:.3f}s of an unbounded {unbounded:.3f}s past its deadline"
+    assert _verify_within(_CHAIN_CORPUS, query, time.monotonic() + 3600) == [], (
+        "unmatchable, so the unbounded verify really did examine every candidate"
+    )
+    assert stopped.value.total == len(_CHAIN_CORPUS), (
+        f"the refusal counts against {stopped.value.total} candidates where the corpus has "
+        f"{len(_CHAIN_CORPUS)}, so it is not describing this verify"
+    )
+    assert stopped.value.reached < len(_CHAIN_CORPUS) // 4, (
+        f"the verify reached {stopped.value.reached} of {len(_CHAIN_CORPUS)} candidates past its "
+        "deadline, which is the bound failing to reach the worker thread"
     )
 
 

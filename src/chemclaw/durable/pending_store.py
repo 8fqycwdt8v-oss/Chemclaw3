@@ -17,32 +17,15 @@ import json
 from collections.abc import Sequence
 from contextlib import AbstractAsyncContextManager
 from datetime import datetime
-from typing import Annotated, Any
+from typing import Any
 
 import psycopg
 from psycopg.rows import TupleRow, class_row
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from chemclaw.core import db
 from chemclaw.core.config import settings
-
-
-def _stamp(value: Any) -> Any:
-    """A timestamp column as this model's ISO string, leaving anything else to be validated.
-
-    **A validator rather than a SQL-side cast, because the string is on the wire.** These three
-    fields reach `GET /pending` and the agent's own inbox tool as `datetime.isoformat()` spells
-    them; `::text` in the SELECT would have converted them in the server and spelled them
-    differently, which is a change to an API response rather than to a row factory.
-    """
-    if isinstance(value, datetime):
-        return value.isoformat()
-    return "" if value is None else value
-
-
-#: A `TIMESTAMPTZ` column carried as the ISO string this seam has always exposed. `answered_at` is
-#: nullable, and NULL reads as the empty string — which is what "still waiting" looks like here.
-Stamp = Annotated[str, BeforeValidator(_stamp)]
+from chemclaw.core.db import IsoStamp
 
 
 class PendingRequest(BaseModel):
@@ -66,12 +49,12 @@ class PendingRequest(BaseModel):
     requested_by: str = ""
     session_id: str = ""
     state: str = "waiting"
-    due_at: Stamp = ""
+    due_at: IsoStamp = ""
     reminders: int = 0
-    answered_at: Stamp = ""
+    answered_at: IsoStamp = ""
     answered_by: str = ""
     answer: dict[str, Any] = Field(default_factory=dict)
-    created_at: Stamp = ""
+    created_at: IsoStamp = ""
     #: The knowledge notes the question rests on, so the answer route can ask whether they still
     #: hold (`kg/premise.py`). Read out of the row rather than recomputed from `subject`, because a
     #: re-ask may reword the question and the premise that was *validated* at ask time is the one an
@@ -332,6 +315,64 @@ async def settle_request(
     async with _connect() as conn:
         cursor = await conn.execute(
             _SETTLE, (state, state, answered_by, json.dumps(answer), request_id)
+        )
+        return cursor.rowcount == 1
+
+
+# **Guarded on the run, not only on the state.** `_OPEN` reopens a request id under a new run and
+# rewrites `run_id`, so a sweep that read an old run's row and then found that run dead must not
+# settle the *new* run's question. The run it examined is the only one it may speak for.
+_SETTLE_ORPHAN = """
+    UPDATE pending_requests
+    SET state = 'cancelled', answered_at = NULL, answered_by = '', answer = %s
+    WHERE request_id = %s AND run_id = %s AND state = 'waiting'
+"""
+
+#: One keyset page of waiting rows past the grace window, oldest first.
+#:
+#: **A cursor, not only a limit.** Without one every pass selected the same oldest rows, and a
+#: healthy wait is left `waiting` — so a batch's worth of live questions older than an orphan held
+#: the front of the queue for up to `awaiting_max_days` and the orphan was never examined.
+#: `request_id` breaks `created_at` ties so the order is total and no row is skipped or repeated.
+_ORPHAN_CANDIDATES = """
+    SELECT request_id, run_id, created_at FROM pending_requests
+    WHERE state = 'waiting' AND created_at < now() - make_interval(secs => %s)
+      AND (%s::timestamptz IS NULL OR (created_at, request_id) > (%s::timestamptz, %s))
+    ORDER BY created_at, request_id
+    LIMIT %s
+"""
+
+
+class WaitingRow(BaseModel):
+    """One candidate for the orphan sweep, and the keyset position after it."""
+
+    request_id: str
+    run_id: str = ""
+    created_at: datetime
+
+
+async def waiting_rows(
+    *, older_than_seconds: float, limit: int, after: WaitingRow | None = None
+) -> list[WaitingRow]:
+    """One page of waiting rows past the grace window, continuing after `after`.
+
+    See `_ORPHAN_CANDIDATES` for why the sweep pages rather than re-reading one fixed batch.
+    """
+    at = after.created_at if after else None
+    key = after.request_id if after else ""
+    async with _connect() as conn:
+        cursor = await conn.execute(_ORPHAN_CANDIDATES, (older_than_seconds, at, at, key, limit))
+        return [
+            WaitingRow(request_id=str(row[0]), run_id=str(row[1] or ""), created_at=row[2])
+            for row in await cursor.fetchall()
+        ]
+
+
+async def settle_orphan(request_id: str, run_id: str, reason: str) -> bool:
+    """Cancel a waiting row whose run is gone, if that run still owns it (`_SETTLE_ORPHAN`)."""
+    async with _connect() as conn:
+        cursor = await conn.execute(
+            _SETTLE_ORPHAN, (json.dumps({"reason": reason}), request_id, run_id)
         )
         return cursor.rowcount == 1
 

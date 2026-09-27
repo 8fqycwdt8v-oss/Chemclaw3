@@ -179,6 +179,12 @@ function applyEvent(evt, answerEl) {
       // transcript showed a silent gap wherever a tool raised.
       add("trace", `${agentTag(evt)}✗ ${evt.tool} failed — ${evt.message}`);
       return answerEl;
+    case "handoff":
+      // The boundary rather than the speaker: what a reader needs is that the prose after this
+      // line comes from an agent with a different surface and a different brief. `reason` is the
+      // handing model's own account, which is the only record of the decision that exists.
+      add("trace", `\u21c4 ${evt.from_agent} \u2192 ${evt.to_agent}: ${evt.reason}`);
+      return answerEl;
     case "evidence_source":
       // Zero is the point of this line, not noise to filter: a source that found nothing is the
       // failure D-2026-08-01 went looking for, and it is invisible in the merged evidence list.

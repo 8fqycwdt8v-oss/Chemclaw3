@@ -62,6 +62,27 @@ def strip_links(text: str) -> str:
     return WIKILINK.sub(lambda match: split_link(match.group(1))[1], text)
 
 
+def as_cell(text: str) -> str:
+    """`text` as one line that can fill a slot in a note body but cannot add structure to it.
+
+    The two rules `retrieval/harness._as_evidence` argues at length, in one place because there are
+    now three callers: `strip_links` so interpolated text cannot mint a graph edge on the note being
+    written, and whitespace collapse so it cannot mint Markdown. A newline ends a line and a leading
+    `- ` starts a list item, so multi-line text placed in a bullet does not render badly — it
+    renders
+    as *more bullets*, which read as independent, uncited content. Measured on the committed corpus,
+    eight retrieved chunks became twenty-three bullets that way.
+
+    **Model-authored text needs this exactly as much as retrieved text does**, which is what brought
+    it here from `harness`. A hypothesis statement is a sentence this system asked a model to write,
+    and a model that emits `[[playbook-degassing]]` inside it would put a real outgoing edge on a
+    proposal note, citing a note nothing retrieved.
+
+    The text is preserved rather than truncated: a reader still sees what it said, on one line.
+    """
+    return " ".join(strip_links(text).split())
+
+
 def cited_links(text: str) -> list[tuple[str, str]]:
     """Every `(relation, note id)` a body cites, deduplicated by pair in first-seen order.
 
@@ -446,6 +467,13 @@ KNOWN_NOTE_TYPES: frozenset[str] = frozenset(
         # rather than from a surrogate model (D-162) — the non-BO sibling of `bo-candidate`.
         "experiment-proposal",
         "failure-mode",  # a negative result worth not repeating (gap KNW-3)
+        # A field of competing explanations, ranked against each other by judged pairwise
+        # comparison (`durable/hypothesis_tournament.py`). Distinct from `experiment-proposal`,
+        # which is the single next run argued from the record: this one holds the *alternatives*
+        # that were considered and how they placed, so a later session can see what was ruled
+        # against rather than only what was chosen. The tournament writes `experiment-proposal`
+        # notes for the checks a human must run; this type is the field they came out of.
+        "hypothesis-field",
         # How a measurement was made: the assay or purity method a chemist actually ran, as they
         # recorded it. **This exists because `relations.py` declares `measured-by` — "this claim
         # rests on that experimental method or instrument" — and until now no note type could be

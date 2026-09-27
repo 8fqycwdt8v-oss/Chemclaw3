@@ -237,6 +237,16 @@ class RetrievalSettings(BaseSettings):
         Tanimoto threshold: a weight has no upper bound to clamp toward, and substituting the
         uniform default would answer a question the deployment did not ask in a way it could not
         tell from one it did.
+
+        **Where the upper bound went instead**
+        (`D-2026-09-23-the-bound-belongs-on-the-mix-not-on-the-weight`). A large weight is
+        dangerous only through the *cut* — measured, `{"graph": 10}` over five legs starves four
+        of them at a window of 8 and starves nothing at 30 — so the damage is a function of
+        `weight x legs x cut` and a ceiling on the first term would refuse deployments that are
+        fine and admit ones that are not. `retrieval/hybrid.py::with_no_leg_cut_out` bounds the
+        surviving mix at the cut instead, which is where
+        `D-2026-08-01-a-cap-that-starves-a-source` already put the same guarantee for the
+        round-robin path.
         """
         unordered = sorted(name for name, weight in value.items() if not math.isfinite(weight))
         if unordered:

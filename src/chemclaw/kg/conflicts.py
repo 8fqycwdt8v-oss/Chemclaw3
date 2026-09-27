@@ -387,8 +387,11 @@ def conflicts_by_note(conflicts: list[Conflict]) -> dict[str, list[Conflict]]:
 
 # The derived conflict map, one entry per directory, validated against the notes' stat fingerprint
 # *and* the date it was computed for — `find_conflicts(as_of=…)` scans only the notes current on
-# that day, so yesterday's map is a different answer, not a stale one. One entry per directory,
-# overwritten on a miss, so it cannot grow.
+# that day, so yesterday's map is a different answer, not a stale one. `None` is the whole-corpus
+# scan a date-windowed sweep needs, and it keys as its own entry for exactly the same reason: it is
+# a different answer. One entry per directory, overwritten on a miss, so it cannot grow — which does
+# mean a deployment alternating windowed and unwindowed sweeps over one tree recomputes each time,
+# and that is the same trade the single entry already made for two dates.
 #
 # The lock is held across the *computation*, not merely around the dict access, which is the one
 # place this differs from `chemclaw.kg.graph`'s caches. Retrieval reaches this from three worker
@@ -407,7 +410,7 @@ def conflicts_by_note(conflicts: list[Conflict]) -> dict[str, list[Conflict]]:
 # on. Lock objects are never removed, for the reason `graph._COMPUTE_LOCKS` states.
 _LOCKS_GUARD = threading.Lock()
 _INDEX_LOCKS: dict[str, threading.Lock] = {}
-_INDEX_CACHE: dict[str, tuple[NotesFingerprint, date, dict[str, NoteConflicts]]] = {}
+_INDEX_CACHE: dict[str, tuple[NotesFingerprint, date | None, dict[str, NoteConflicts]]] = {}
 
 # Warned once per process: with `graph_cache_enabled=false` there is no fingerprint to key the
 # index on, so every retrieval pays the full scan — a knob that quietly turns a cached 1.5 s into
@@ -415,8 +418,15 @@ _INDEX_CACHE: dict[str, tuple[NotesFingerprint, date, dict[str, NoteConflicts]]]
 _WARNED_UNCACHED = False
 
 
-def conflict_index(notes_dir: Path, as_of: date) -> dict[str, NoteConflicts]:
-    """Map each current note id to what it disagrees with — cached behind the notes fingerprint.
+def conflict_index(notes_dir: Path, as_of: date | None) -> dict[str, NoteConflicts]:
+    """Map each note id to what it disagrees with — cached behind the notes fingerprint and `as_of`.
+
+    `as_of` is `find_conflicts`' rule verbatim: a date scans only the notes current on it, and
+    `None` scans the whole corpus. **A caller that serves retired notes must pass `None`**, which
+    is the half `retrieval.retrievers._conflict_index` got wrong — a date-windowed sweep served
+    notes retired today while this was called with `date.today()`, so `find_conflicts` never scanned
+    them and every chunk carried `conflicts_with=[]`, indistinguishable from a note nothing
+    disagrees with.
 
     The shape retrieval wants: bare ids and a count, so a chunk can carry `conflicts_with` without
     dragging the `Conflict` models (and their prose `detail`) into the model's context. The ids are

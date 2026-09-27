@@ -167,7 +167,13 @@ def estimate_trend(timepoints: list[Timepoint], criterion: AcceptanceCriterion) 
 
     slope, intercept, r_squared, standard_error = _fit(months, values)
     observed = max(months)
-    rising = _side_the_attribute_approaches(slope, intercept, criterion, reference)
+    rising = _side_the_attribute_approaches(
+        slope,
+        intercept,
+        criterion,
+        reference,
+        drifting=_is_a_drift(months, slope, standard_error),
+    )
     bound = _bound_for(rising, criterion, reference)
     crossing, note = _crossing(
         months=months,
@@ -189,8 +195,38 @@ def estimate_trend(timepoints: list[Timepoint], criterion: AcceptanceCriterion) 
     )
 
 
+def _is_a_drift(months: list[float], slope: float, standard_error: float) -> bool:
+    """Whether the fitted slope is distinguishable from zero at the band's own confidence level.
+
+    `se(slope) = s / sqrt(Sxx)`, compared against `t_{0.95,n-2} · se(slope)`. The level is
+    `CONFIDENCE` rather than a second number of its own: this module draws its bound at Q1E's
+    one-sided 95%, and asking whether the drift it is extrapolating is real at any *other* level
+    would be two standards in one calculation.
+
+    A perfect fit (`s == 0`) has no uncertainty for a slope to hide in, so any non-zero slope is a
+    drift and a zero one is not. `Sxx > 0` is guaranteed: `_fit` refuses a single distinct time.
+    """
+    n = len(months)
+    if standard_error == 0.0:
+        return slope != 0.0
+    mean_x = sum(months) / n
+    sxx = sum((x - mean_x) ** 2 for x in months)
+    quantile = float(stats.t.ppf(CONFIDENCE, n - 2))
+    return abs(slope) > quantile * standard_error / math.sqrt(sxx)
+
+
+def _states_a_bound(criterion: AcceptanceCriterion, *, rising: bool) -> bool:
+    """Whether the criterion limits the side an attribute with this sign of slope is heading."""
+    return (criterion.maximum if rising else criterion.minimum) is not None
+
+
 def _side_the_attribute_approaches(
-    slope: float, intercept: float, criterion: AcceptanceCriterion, unit: str
+    slope: float,
+    intercept: float,
+    criterion: AcceptanceCriterion,
+    unit: str,
+    *,
+    drifting: bool,
 ) -> bool:
     """True when the upper bound is the relevant one — from the slope, or from the criterion.
 
@@ -201,15 +237,34 @@ def _side_the_attribute_approaches(
     drift to take a sign from, and `slope > 0` silently classified it as falling and then refused a
     specification that states only a maximum.
 
-    With no drift the confidence band still widens with extrapolation, so a bound does still move
-    and the question is only *which one*. Answered from the criterion: the side it states, or, when
-    it states both, the one the fitted value sits nearer to — which is the one the widening band
-    reaches first.
+    **The gate on that was bit-exact equality, and real data is never bit-exactly flat.** An
+    in-control impurity profile of 0.10, 0.11, 0.10, 0.11 area% fits a *negative* slope, so it was
+    "falling" and `_bound_for` refused it outright against a specification that states only a
+    maximum — which is every impurity specification. Driven over 2,000 simulated truly-flat series
+    at the reporting threshold, 749 of them (37%) were refused, and the two halves of that split
+    differ only in the sign of the noise: two datasets a chemist would call identical, one answering
+    and one erroring.
+
+    So the sign is used where it is usable and only there. `drifting` (`_is_a_drift`) says whether
+    the slope is distinguishable from zero at the same confidence the band is drawn at, and the
+    three cases are:
+
+    * the criterion bounds the side the slope points at — that side, whatever `drifting` says.
+      This is every ordinary case and its behaviour is unchanged, which is what keeps a genuine
+      trend safe from a significance test that is weak at three or four timepoints.
+    * it does not, and the slope is a real drift — that side still, so `_bound_for` raises: an
+      impurity genuinely rising against a minimum-only specification has nothing to reach, and
+      answering about the other bound would answer a question nobody asked.
+    * it does not, and the slope is noise — the criterion decides, exactly as for a flat fit.
+
+    With no usable drift the confidence band still widens with extrapolation, so a bound does still
+    move and the question is only *which one*. Answered from the criterion: the side it states, or,
+    when it states both, the one the fitted value sits nearer to — which is the one the widening
+    band reaches first.
     """
-    if slope > 0:
-        return True
-    if slope < 0:
-        return False
+    rising = slope > 0
+    if slope != 0.0 and (drifting or _states_a_bound(criterion, rising=rising)):
+        return rising
     if criterion.maximum is None:
         return False
     if criterion.minimum is None:
@@ -272,10 +327,21 @@ def _crossing(
 
     # Q1E §2.4: at most twice the observed period, and never more than 12 months beyond it.
     ceiling = min(2.0 * observed, observed + 12.0)
-    if _past_limit(bound_at(0.0), limit, rising):
+    # **The search starts at the first measurement, not at time zero, and that is the fix rather
+    # than a refinement.** The band's half-width grows with `(t - x̄)²`, so on a programme whose
+    # first pull is at 24 months it is at its *widest* before any data exists — and this asked
+    # `bound_at(0.0)`, a point the study never observed and Q1E never extrapolates backwards to.
+    # Driven on a compliant 24/30/36-month assay (98.5, 98.3, 97.4 % w/w against a 95.0 % minimum):
+    # the lower bound is **96.97% at the first pull** and crosses 95.0% at **39.2 months**, inside
+    # the 48-month ceiling — and the shipped function answered `months_to_limit=0.0` with "this data
+    # does not support any period". Zero is the number a chemist reads off a batch that is in
+    # specification at every timepoint it has.
+    start = min(months)
+    if _past_limit(bound_at(start), limit, rising):
         return 0.0, (
-            "the confidence bound is already past the limit at time zero, so this data does not "
-            "support any period — check the fit and the limit before reading anything else here"
+            f"the confidence bound is already past the limit at the first timepoint ({start:g} "
+            "months), so this data does not support any period — check the fit and the limit "
+            "before reading anything else here"
         )
     if not _past_limit(bound_at(ceiling), limit, rising):
         return None, (
@@ -284,7 +350,10 @@ def _crossing(
             "period, and no more than 12 months beyond it). That is a statement about this data's "
             "reach, not a finding that the attribute never reaches the limit"
         )
-    low, high = 0.0, ceiling
+    # Bracketed by the two points just tested: the bound is inside the limit at `start` and past it
+    # at `ceiling`, which is the sign change bisection needs. Starting from 0.0 bracketed on a value
+    # the check above no longer evaluates.
+    low, high = start, ceiling
     for _ in range(200):
         middle = (low + high) / 2.0
         if _past_limit(bound_at(middle), limit, rising):

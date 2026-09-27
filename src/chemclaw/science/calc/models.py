@@ -618,7 +618,12 @@ class VibrationalMode(BaseModel):
     """
 
     wavenumber_cm: float
-    ir_intensity_km_per_mol: float
+    # `None` when the intensities could not be paired with the modes — see
+    # `ThermochemistryResult.spectrum_unavailable`. It is the absence of a number, not a zero: a
+    # band reported at 0.00 km/mol is a claim that it does not absorb, and a whole spectrum of those
+    # is the silent failure `thermo.thermochemistry_from_hessian` already refuses to produce for a
+    # Hessian carrying no intensity data at all.
+    ir_intensity_km_per_mol: float | None
 
 
 class ThermochemistryResult(BaseModel):
@@ -684,6 +689,18 @@ class ThermochemistryResult(BaseModel):
     # the bands that matter (`strongest_bands`); `mode_count` is then the honest statement of how
     # many there were — the same truncation contract `SiteReactivityResult` uses for atoms.
     modes: list[VibrationalMode]
+    # Why this result carries wavenumbers but no intensities, or `None` when it carries both.
+    #
+    # **A spectrum can fail on its own, and it used to take the free energy with it.** Pairing the
+    # server's intensities to this projection's modes needs both sides to agree on how many modes
+    # are external, and they judge that by different criteria — so inside a ~2.3-degree window
+    # around linearity the pairing is unsafe, and `thermo._align_intensities` raised out of the
+    # whole calculation. Driven on a CO2 Hessian bent to 179 degrees: no G, H, S or `is_minimum`,
+    # where every one of those numbers was correct — not one term of the partition function reads an
+    # intensity. So the refusal moved to the field it is about. When this is set, every
+    # `VibrationalMode.ir_intensity_km_per_mol` is `None` and `strongest_bands` has nothing to rank
+    # by.
+    spectrum_unavailable: str | None = None
     mode_count: int
     # The five lowest modes, always from the *full* set. RRHO is weakest here, so this is where
     # doubt about the free energy belongs, and it must survive truncation.
@@ -713,9 +730,14 @@ class ThermochemistryResult(BaseModel):
         absorb, and the weak modes between them carry no information for that comparison. Imaginary
         modes are never dropped — they are the reason to distrust the whole result, and they have
         no intensity to rank by.
+
+        With `spectrum_unavailable` set there is no intensity to rank by *anywhere*, so an unknown
+        intensity sorts below every real one and what survives is the first `limit` real modes by
+        wavenumber. That is an arbitrary slice and it is not pretending otherwise: the field says
+        why, and a caller comparing against a measured spectrum has to read it.
         """
         real = [index for index, mode in enumerate(self.modes) if mode.wavenumber_cm > 0]
-        real.sort(key=lambda index: self.modes[index].ir_intensity_km_per_mol, reverse=True)
+        real.sort(key=lambda index: self.modes[index].ir_intensity_km_per_mol or -1.0, reverse=True)
         kept = set(real[:limit])
         return [
             mode

@@ -49,6 +49,7 @@ from chemclaw.protocols.export import run_sheet_path
 from chemclaw.protocols.from_bo import factors_and_arms
 from chemclaw.protocols.layout import LayoutError, place, smallest_plate_for
 from chemclaw.protocols.models import (
+    DesignRevision,
     DesignStatus,
     DesignSummary,
     EvidenceRef,
@@ -66,6 +67,17 @@ from chemclaw.protocols.render import (
     ProtocolReadout,
     receipt,
     render_markdown,
+)
+from chemclaw.protocols.rescale import RescaleError, rescale
+from chemclaw.protocols.result_store import default_arm_result_store
+from chemclaw.protocols.results import (
+    ArmResult,
+    MixedUnits,
+    PlateOutcomes,
+    UnknownArm,
+    observations_for,
+    require_arms_exist,
+    summarise,
 )
 from chemclaw.protocols.store import DesignStore, RevisionConflict, default_design_store
 from chemclaw.science.bo.campaign_record import read_campaign_thread
@@ -319,6 +331,26 @@ async def _require_writable(store: DesignStore, design_id: str) -> DesignSummary
             "`structure_experiment_request` rather than writing to theirs."
         )
     return header
+
+
+async def _read_design_or_refuse(
+    store: DesignStore, design_id: str, revision: int = 0
+) -> DesignRevision:
+    """One revision of a design — the head for `revision=0` — or a refusal the model can act on.
+
+    One refusal for the four tools that read a design, because the copies had drifted: one of them
+    read a specific revision and answered its absence as "no design", so a chemist asking for
+    revision 5 of a design that has four was told the design did not exist. The message names the
+    revision whenever one was asked for, and always the tool that lists what does exist.
+    """
+    stored = await store.read(design_id, revision or None)
+    if stored is None:
+        raise ChemclawError(
+            f"no design {design_id!r}"
+            + (f" at revision {revision}" if revision else "")
+            + ". Use find_experiment_protocols to list what exists."
+        )
+    return stored
 
 
 async def _stored_status(store: DesignStore, design_id: str) -> DesignStatus:
@@ -750,13 +782,7 @@ async def read_experiment_protocol(design_id: str, revision: int = 0) -> str:
         ChemclawError: no design or no such revision.
     """
     store = _store()
-    stored = await store.read(design_id, revision or None)
-    if stored is None:
-        raise ChemclawError(
-            f"no design {design_id!r}"
-            + (f" at revision {revision}" if revision else "")
-            + ". Use find_experiment_protocols to list what exists."
-        )
+    stored = await _read_design_or_refuse(store, design_id, revision)
     body = ProtocolReadout(
         receipt=receipt(
             stored.design,
@@ -770,6 +796,211 @@ async def read_experiment_protocol(design_id: str, revision: int = 0) -> str:
         run_sheet=run_sheet_path(design_id, stored.revision),
     )
     return _readable(body)
+
+
+class RescaleReadout(BaseModel):
+    """A rescaled protocol, the factor, and what the rescale refused to touch.
+
+    `caveats` is not a footnote and is deliberately a first-class field beside `design`: a reader
+    that reports the scaled charges without them has produced exactly the document that makes a
+    scaled batch fail. `protocols/rescale.py` says why each entry is on the list.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    design_id: str = ""
+    from_revision: int = 0
+    factor: float = 0.0
+    basis: str = ""
+    design: ExperimentDesign
+    caveats: list[dict[str, str]] = Field(default_factory=list)
+    stored: bool = False
+
+
+# **Why this tool's docstring is short, when the thing it is about is a long argument.**
+# A tool description is serialised ahead of the system message on every model call, and the first
+# draft of the one below cost 1,169 tokens against the 728 of headroom
+# `tests/test_context_floor.py` had — it was the widest single contributor in the prefix. The
+# reasoning it carried (which durations are not linear in the charge, and why a scaled batch gains
+# an impurity the bench never saw) is judgment, so it belongs where judgment belongs: in
+# `protocols/rescale.py`'s module docstring for a reader, and in `skills/protocol-scale-translation`
+# for the model, loaded on the turns that need it rather than on all of them. What stays here is
+# what the model needs to *call* it correctly and the one instruction it must not get wrong, which
+# is that the caveats are reported rather than summarised.
+@tool
+async def rescale_experiment_protocol(design_id: str, target_scale: str) -> str:
+    """Scale a stored protocol's charges to a new basis, and list what does not scale.
+
+    Charges move by one factor off the limiting line; equivalents do not. Stores nothing — to keep
+    it, call `draft_experiment_protocol` with the head's `parent_revision`.
+
+    Args:
+        design_id: The `design-…` id to scale.
+        target_scale: The new basis as a quantity — "2 kg", "500 mL". Must be in the dimension the
+            limiting charge line already states.
+
+    Returns:
+        JSON with `factor`, `basis`, the scaled `design`, and `caveats` — the quantities that did
+        not scale. **Report every caveat beside the charges**; scaled charges without them are the
+        document that makes a batch fail.
+
+    Raises:
+        ChemclawError: unknown design, not exactly one limiting line, a limiting line with no
+            amount, or a target needing a molar mass or density.
+    """
+    store = _store()
+    stored = await _read_design_or_refuse(store, design_id)
+    try:
+        result = rescale(stored.design, target=target_scale)
+    except RescaleError as exc:
+        raise ChemclawError(str(exc)) from exc
+    return _readable(
+        RescaleReadout(
+            design_id=design_id,
+            from_revision=stored.revision,
+            factor=result.factor,
+            basis=result.basis,
+            design=result.design,
+            caveats=[
+                {"where": c.where, "quantity": c.quantity, "reason": c.reason}
+                for c in result.caveats
+            ],
+        )
+    )
+
+
+class PlateReadout(BaseModel):
+    """A design's outcomes, plus the observations they make for a campaign when one is named."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    outcomes: PlateOutcomes
+    # Each measured arm's factor levels beside its value — the shape a campaign fits. Empty unless
+    # an outcome was named, because "every outcome at once" is not a table a surrogate can take.
+    observations: list[dict[str, float | str]] = Field(default_factory=list)
+    # Why `observations` is empty although an outcome was named: its latest values are in more
+    # than one unit. Beside the readout rather than instead of it, because the results, the
+    # disagreements and the unmeasured arms are exactly what a chemist needs to fix that.
+    observations_refused: str = ""
+
+
+class AttachedResults(BaseModel):
+    """What landed, and what the plate now looks like as a whole."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    design_id: str = ""
+    revision: int = 0
+    attached: int = 0
+    arms_without_results: list[str] = Field(default_factory=list)
+    disagreements: list[str] = Field(default_factory=list)
+
+
+# **Why the judgment is short here and long in the skill.** This tool's cost is charged to every
+# model call (`tests/test_context_floor.py`), and what a chemist should be told about a half-run
+# plate, a re-measured well or an outcome name that matches no objective is judgment —
+# `skills/hte-campaign-design` carries it. What stays is what the model needs to call this
+# correctly and the two things it must not do with the answer.
+@tool
+async def attach_plate_results(
+    design_id: str,
+    results: list[ArmResult],
+    revision: int = 0,
+) -> str:
+    """Attach measured outcomes to the arms of a stored design.
+
+    Closes the loop a designed plate otherwise leaves open: the arms this records become the
+    observations `suggest_next_experiment` can fit. Append-only — a re-measured well is a second
+    observation, not a correction, and both stay visible.
+
+    Args:
+        design_id: The `design-…` the plate was laid out as.
+        results: One entry per measured well: `arm_id`, `outcome` (use the design's own
+            `analytics.measures` wording), `value`, and optionally `unit`, `reaction_id`,
+            `measured_at`, `note`.
+        revision: The revision the plate was **run from**, or 0 for the head. Pass the printed
+            revision when it is not the head; a later edit must not re-point these numbers.
+
+    Returns:
+        JSON with `attached`, `arms_without_results` (named, not counted) and `disagreements`.
+        **Report the unmeasured arms**: a summary of only what landed makes a half-run plate look
+        finished.
+
+    Raises:
+        ChemclawError: No such design or revision, an `arm_id` that revision does not have, or a
+            design belonging to another chemist.
+    """
+    store = _store()
+    # The results table is append-only and this tool is its only writer, so an unowned write here
+    # could never be taken back: the same `owner_permits` rule its two sibling writers apply.
+    await _require_writable(store, design_id)
+    stored = await _read_design_or_refuse(store, design_id, revision)
+    parsed = [ArmResult.model_validate(result) for result in results]
+    try:
+        require_arms_exist(stored.design, parsed)
+    except UnknownArm as exc:
+        raise ChemclawError(str(exc)) from exc
+    results_store = default_arm_result_store()
+    attached = await results_store.append(
+        design_id,
+        stored.revision,
+        parsed,
+        author_kind="agent",
+        author=require_actor(),
+    )
+    outcomes = summarise(
+        stored.design,
+        design_id,
+        stored.revision,
+        await results_store.read(design_id, stored.revision),
+    )
+    return _readable(
+        AttachedResults(
+            design_id=design_id,
+            revision=stored.revision,
+            attached=attached,
+            arms_without_results=outcomes.arms_without_results,
+            disagreements=outcomes.disagreements,
+        )
+    )
+
+
+@tool
+async def read_plate_results(design_id: str, outcome: str = "", revision: int = 0) -> str:
+    """Read a design's measured outcomes, and the observations they make for a campaign.
+
+    Args:
+        design_id: The `design-…` to read.
+        outcome: Name one to also get `observations` — each measured arm's factor levels beside its
+            value, which is the shape `suggest_next_experiment` fits a surrogate to.
+        revision: A specific revision, or 0 for the head.
+
+    Returns:
+        JSON with `results`, `arms_without_results`, `disagreements`, and `observations` when an
+        outcome was named. An arm with no measurement is **omitted** from observations rather than
+        defaulted: a missing well is not a zero. Values in mixed units give no observations and
+        an `observations_refused` naming the arms under each unit.
+
+    Raises:
+        ChemclawError: No such design or revision.
+    """
+    store = _store()
+    stored = await _read_design_or_refuse(store, design_id, revision)
+    rows = await default_arm_result_store().read(design_id, stored.revision)
+    observations: list[dict[str, float | str]] = []
+    refused = ""
+    if outcome:
+        try:
+            observations = observations_for(stored.design, outcome, rows)
+        except MixedUnits as exc:
+            refused = str(exc)
+    return _readable(
+        PlateReadout(
+            outcomes=summarise(stored.design, design_id, stored.revision, rows),
+            observations=observations,
+            observations_refused=refused,
+        )
+    )
 
 
 class ProtocolListing(BaseModel):

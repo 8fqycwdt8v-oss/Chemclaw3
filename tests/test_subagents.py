@@ -51,10 +51,12 @@ from chemclaw.agent.subagents import (
     GENERAL_PURPOSE,
     HELPER_BRIEF,
     SPEAKS_TO_THE_CHEMIST,
+    bounded_tool_list,
     describe_helper,
     general_purpose_helper,
     helper_profile,
     refuse_an_unknown_roster,
+    roster_names,
     specialist_override,
 )
 from chemclaw.core.config import settings
@@ -1014,7 +1016,23 @@ def test_a_helpers_file_outlives_the_turn_that_spawned_it() -> None:
     assert f"&lt;/{ENVELOPE_TAG}>" in read_back
 
 
-def test_a_helpers_scratch_file_is_bounded_on_its_way_into_its_callers_state() -> None:
+def test_a_helpers_oversized_write_is_refused_at_its_own_backend_and_crosses_nothing() -> None:
+    """At the shipped settings the cut below is not reached, because the write never happens.
+
+    `D-2026-09-26-a-helpers-unbounded-write-verbs-take-the-scratch-cap`: `write_file` is refused
+    past `agent_scratch_file_max_chars` in the backend a helper's call reaches, and the default is
+    the channel budget itself — so a helper writing four budgets' worth stores nothing and hands its
+    caller nothing, rather than storing it and being cut on the way.
+    """
+    written = "z" * (settings.agent_subagent_files_max_chars * 4)
+    assert len(written) > settings.agent_scratch_file_max_chars
+    files = _spawn_state(read=True, written=written).get("files") or {}
+    assert not files, f"a write past the per-write cap reached the caller: {sorted(files)}"
+
+
+def test_a_helpers_scratch_file_is_bounded_on_its_way_into_its_callers_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The isolation above is real and it is about the *thread*; this is the other channel.
 
     `D-2026-08-29-a-helpers-report-is-model-prose-in-its-callers-thread` measured the caller's whole
@@ -1027,8 +1045,14 @@ def test_a_helpers_scratch_file_is_bounded_on_its_way_into_its_callers_state() -
     Driven with the thread asserted alongside, because the two numbers are the finding: a test that
     only checked `files` could pass while a regression quietly put the helper's reading into the
     caller's messages as well.
+
+    **The per-write cap is raised past the write**, because at the shipped value it refuses this
+    write inside the helper (the test above) and nothing would cross to be cut. The cut still
+    matters for a deployment whose per-write cap sits above the channel budget, and for many files
+    under it that together exceed the budget.
     """
     written = "z" * (settings.agent_subagent_files_max_chars * 4)
+    monkeypatch.setattr(settings, "agent_scratch_file_max_chars", len(written))
     state = _spawn_state(read=True, written=written)
 
     files = state.get("files") or {}
@@ -1046,7 +1070,7 @@ def test_a_helpers_scratch_file_is_bounded_on_its_way_into_its_callers_state() -
     )
 
 
-def test_a_cut_file_says_it_was_cut() -> None:
+def test_a_cut_file_says_it_was_cut(monkeypatch: pytest.MonkeyPatch) -> None:
     """A silent truncation hands a chemist a document that simply stops.
 
     The caller can read a helper's file back — that crossing is what `parent_reads` exercises — so
@@ -1057,6 +1081,8 @@ def test_a_cut_file_says_it_was_cut() -> None:
     from chemclaw.agent.framing import SYSTEM_SPEECH_MARK
 
     written = "z" * (settings.agent_subagent_files_max_chars * 4)
+    # Past the per-write cap, for the reason the test above gives.
+    monkeypatch.setattr(settings, "agent_scratch_file_max_chars", len(written))
     files = _spawn_state(read=True, written=written).get("files") or {}
     content = "".join(str(data.get("content", "")) for data in files.values())
 
@@ -1086,12 +1112,123 @@ def test_several_files_share_one_budget() -> None:
 
     budget = settings.agent_subagent_files_max_chars
     files = {f"/scratch/n{index}.md": create_file_data("z" * budget) for index in range(4)}
-    bounded = rewritten_command_files(Command(update={"files": files}), _bounded_file)
+    bounded = rewritten_command_files(Command(update={"files": files}), _bounded_file, None, budget)
 
-    stored = sum(len(str(d.get("content", ""))) for d in bounded.update["files"].values())
+    landed = bounded.update["files"]
+    stored = sum(len(path) + len(str(d.get("content", ""))) for path, d in landed.items())
     assert stored <= budget, (
         f"four files of {budget} characters each stored {stored} against a {budget} budget, so the "
         "cap is per file and four helpers' worth of files is four times the bound"
+    )
+
+
+def test_an_exhausted_budget_still_cuts_when_more_than_one_file_crosses() -> None:
+    """The most-exhausted case was the *unbounded* case, which is the one shape a cap may not have.
+
+    `_bounded_file` floored the budget at 1 and then divided it by the number of files sharing the
+    command, so `1 // 2` was 0 — and 0 is how `agent_subagent_files_max_chars` is switched off
+    entirely (`bounded_content` returns uncut at `limit <= 0`). A caller whose `files` channel was
+    already at the budget, receiving two files from one helper, therefore stored both of them
+    whole, with nothing logged and `chemclaw_subagent_file_truncations_total` unmoved.
+
+    Measured before the fix: two 500,000-character files against an exhausted budget stored
+    1,000,000 characters. The sibling `bounded_for_batch` floors *after* dividing and its comment
+    says why — "0 is the deployment's own 'no cap' and a share that rounded to it would restore the
+    unbounded behaviour exactly where the batch is widest".
+
+    Driven through `bound_tool_results` rather than on the arithmetic, because the arithmetic moved:
+    `D-2026-09-19-a-cap-on-the-contents-is-not-a-cap-on-the-channel` put the division in
+    `rewritten_command_files`, which spends a remainder, and left `_bounded_file` with the cut. A
+    test that still called the cutter with a `held` would be asserting a parameter rather than the
+    behaviour, which is what the whole review wave this belongs to keeps finding.
+    """
+    import asyncio
+    from types import SimpleNamespace
+
+    from deepagents.backends.utils import create_file_data
+    from langgraph.types import Command
+
+    from chemclaw.agent.tool_result_size import bound_tool_results
+    from chemclaw.core.metrics import METRICS
+
+    budget = settings.agent_subagent_files_max_chars
+    content = "z" * (budget * 4)
+    before = METRICS.value("chemclaw_subagent_file_truncations_total")
+
+    async def _handler(request: Any) -> Any:
+        return Command(
+            update={"files": {f"/scratch/new{i}.md": create_file_data(content) for i in range(2)}}
+        )
+
+    # The channel is already at the budget, which is the case the old arithmetic failed open on.
+    exhausted = {"/scratch/held.md": create_file_data("h" * budget)}
+    request = SimpleNamespace(
+        tool_call={"id": "w0", "name": "task"},
+        state={
+            "messages": [
+                AIMessage(
+                    content="",
+                    tool_calls=[{"name": "task", "args": {}, "id": "w0", "type": "tool_call"}],
+                )
+            ],
+            "files": exhausted,
+        },
+    )
+    bounded = cast("Any", asyncio.run(bound_tool_results.awrap_tool_call(request, _handler)))  # type: ignore[arg-type]
+    stored = sum(
+        len(path) + len(str(data.get("content", "")))
+        for path, data in bounded.update["files"].items()
+        if path not in exhausted
+    )
+
+    assert stored <= budget, (
+        f"two files crossing into a channel already holding {budget} characters stored {stored} "
+        f"characters against a {budget} budget, so the cap switched itself off at the point the "
+        "channel was fullest"
+    )
+    # The docstring's other half: the old failure was *silent*. A cap that cut but recorded nothing
+    # would satisfy the assertion above while leaving an operator with no way to see it happen.
+    assert METRICS.value("chemclaw_subagent_file_truncations_total") > before, (
+        "the files were cut and `chemclaw_subagent_file_truncations_total` did not move, so the "
+        "truncation is invisible to an operator"
+    )
+
+
+def test_the_file_cap_set_to_zero_is_off_rather_than_absolute(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """0 is this setting's documented off switch, and the branch that spells it had no test.
+
+    Before `D-2026-09-18-a-checkpointer-of-none-is-the-callers-checkpointer` the behaviour fell out
+    of the arithmetic for free — `0 // sharing` is 0 and `bounded_content` treats a non-positive
+    limit as no cap. That commit made it an explicit `else: share = 0`, which is clearer and is
+    exactly the kind of branch that rots: mutated to `share = 1` it survives the whole suite, and
+    every deployment that switched the cap off would silently get a 44-character brief form in
+    place of every file a helper hands back.
+
+    Asserted at both ends, because either alone is passable: off stores the text whole, and on
+    cuts it.
+    """
+    from types import SimpleNamespace
+
+    from chemclaw.agent.tool_result_size import _bounded_file, _files_budget
+
+    content = "z" * 500_000
+    request = SimpleNamespace(tool_call={"id": "w0", "name": "task"}, state={"files": {}})
+
+    monkeypatch.setattr(settings, "agent_subagent_files_max_chars", 0)
+    assert _files_budget(request) is None, (
+        "`agent_subagent_files_max_chars = 0` is documented as switching the cap off, and it "
+        "produced a budget — a budget of zero characters stores nothing at all"
+    )
+    assert len(_bounded_file(content, 0)) == len(content), (
+        "a share of 0 is how the off switch reaches the cutter, and the file came back cut"
+    )
+
+    monkeypatch.setattr(settings, "agent_subagent_files_max_chars", 200_000)
+    assert _files_budget(request) == 200_000, "the cap is configured and produced no budget"
+    assert len(_bounded_file(content, 200_000)) < len(content), (
+        "the cap is configured and cut nothing, so the assertions above prove nothing"
     )
 
 
@@ -1102,9 +1239,12 @@ def test_a_second_delegation_shares_the_budget_the_first_one_spent() -> None:
     `DeltaChannel` — it merges rather than replaces. So a caller that delegates N times stored up
     to N x `agent_subagent_files_max_chars`, which is the same shape `_bounded_file`'s own
     docstring rejects one level down ("a per-file cap times an unbounded number of files is not a
-    bound"), one level up. It is a *storage* bound, so the cost is checkpoint rows: measured at
-    10.4x amplification, ten delegations at the shipped setting is ~20 MB of checkpoint rows per
-    superstep instead of ~2.
+    bound"), one level up. It is a *storage* bound, so the cost is checkpoint rows, amplified by
+    LangGraph rewriting the whole channel per superstep and again per version. The 10.4x this
+    docstring used to quote is not that amplification: it was a whole helper spawn, most of which
+    was the helper checkpointing its own thread onto the caller's saver
+    (`D-2026-09-18-a-checkpointer-of-none-is-the-callers-checkpointer`), a cost this bound never
+    touched and which is now closed.
 
     Driven through `bound_tool_results` — the shipped middleware — rather than on `_bounded_file`,
     because what changed is that the bound now reads the caller's state, and a test that called
@@ -1139,6 +1279,88 @@ def test_a_second_delegation_shares_the_budget_the_first_one_spent() -> None:
     )
 
 
+def test_a_chemists_own_file_survives_a_delegation_it_had_nothing_to_do_with() -> None:
+    """The bound is on what a helper *adds*, and it was cutting what its caller already had.
+
+    **The shape is the finding.** deepagents hands a subagent every non-excluded key of its
+    caller's state and copies them all back — `_EXCLUDED_STATE_KEYS` is `messages`, `todos` and
+    `structured_response`, so `files` travels both ways whole. The `Command` that comes back
+    therefore carries the caller's **own** documents beside the helper's, and
+    `rewritten_command_files` cut all of them. The test above builds a `Command` holding only the
+    new file, which is not what the shipped path produces, and that unfaithful fixture is exactly
+    what hid this.
+
+    Measured before the fix, at a channel already at its budget: a chemist's 200,000-character
+    `/scratch/` file came back as **45 characters** — the brief form — because a helper had
+    returned, and the WARNING beside it read "cut 200000 character(s) from a file a helper wrote".
+    The helper had never touched it.
+
+    Cutting it could never have saved a byte, which is what makes this a plain defect rather than
+    a trade: upstream's reducer is `result[key] = value`, so re-delivering an unchanged file is a
+    no-op on the channel. Skipping those files also makes the bound *exact* — the helper's own
+    file gets the whole remaining budget instead of a share diluted by every document its caller
+    was carrying.
+    """
+    import asyncio
+    from types import SimpleNamespace
+
+    from deepagents.backends.utils import create_file_data
+    from langgraph.types import Command
+
+    from chemclaw.agent.tool_result_shape import _DROPPED_PATH
+    from chemclaw.agent.tool_result_size import bound_tool_results
+
+    budget = settings.agent_subagent_files_max_chars
+    mine = "p" * budget
+    already = {"/scratch/mine.md": create_file_data(mine)}
+    request = SimpleNamespace(
+        tool_call={"id": "call-3", "name": "task"},
+        state={"messages": [], "files": already},
+    )
+
+    async def _handler(_request: Any) -> Any:
+        # What upstream actually returns: the caller's whole channel plus the helper's own file.
+        return Command(
+            update={
+                "files": {
+                    "/scratch/mine.md": create_file_data(mine),
+                    "/scratch/evidence.md": create_file_data("z" * budget * 4),
+                }
+            }
+        )
+
+    bounded = cast("Any", asyncio.run(bound_tool_results.awrap_tool_call(request, _handler)))  # type: ignore[arg-type]
+    files = bounded.update["files"]
+
+    assert str(files["/scratch/mine.md"]["content"]) == mine, (
+        f"a chemist's own {budget}-character scratch file came back as "
+        f"{len(str(files['/scratch/mine.md']['content']))} characters because a helper returned; "
+        "the budget bounds what a helper adds to the channel, not what its caller already wrote"
+    )
+    # This channel is already *at* the budget, so what is left to spend is nothing and the helper's
+    # own file is dropped rather than stored as a marker — the decision
+    # `D-2026-09-19-a-cap-on-the-contents-is-not-a-cap-on-the-channel` takes, since a marker per
+    # file is the linear growth the cap exists to stop. What may never happen is a silent loss.
+    assert "/scratch/evidence.md" not in files, (
+        "the channel was already at its budget and the helper's file was stored anyway"
+    )
+    # What the notice guarantees at *this* channel is the count and that reading will fail; the
+    # sample of paths is the part that shrinks, and here there is nothing left for it to fit in.
+    # `test_a_dropped_set_is_named_while_there_is_room_to_name_it` drives the other end.
+    assert "1 file(s)" in str(files[_DROPPED_PATH]["content"]), (
+        "the helper's file was dropped and nothing in the channel says it happened, so a caller "
+        "reading it back gets `no such file` with no way to tell that from never having asked"
+    )
+    added = sum(
+        len(path) + len(str(data.get("content", "")))
+        for path, data in files.items()
+        if path != "/scratch/mine.md"
+    )
+    assert added <= budget, (
+        f"the helper added {added} characters against a {budget}-character budget"
+    )
+
+
 def test_a_helper_has_no_durable_memory_route_and_no_store_is_passed_to_one() -> None:
     """What actually makes `helper_profile`'s `harness_enabled=False` safe, pinned in both halves.
 
@@ -1168,6 +1390,7 @@ def test_a_helper_has_no_durable_memory_route_and_no_store_is_passed_to_one() ->
 
     from chemclaw.agent.langgraph_agent import _subagents
     from chemclaw.agent.scratchpad import MEMORY_ROOT, scratchpad_backend
+    from chemclaw.agent.skill_access import SkillNarrowing
 
     class _Skills:
         """The one attribute `scratchpad_backend` reads off a skills backend."""
@@ -1176,7 +1399,11 @@ def test_a_helper_has_no_durable_memory_route_and_no_store_is_passed_to_one() ->
 
     # The mechanism: with no store there is no durable route, so `/memories/…` falls to the
     # `StateBackend` default and dies with the helper's own graph state.
-    backend = scratchpad_backend(_Skills(), None)  # type: ignore[arg-type]
+    backend = scratchpad_backend(
+        _Skills(),  # type: ignore[arg-type]
+        None,
+        permits=SkillNarrowing.permissive(),
+    )
     assert MEMORY_ROOT not in backend.routes, (
         f"a store-less backend routes {MEMORY_ROOT}, so a helper's write would outlive it and the "
         "plan gate is the only thing that would have refused it — which `helper_profile` removed"
@@ -1210,39 +1437,71 @@ def test_a_helper_has_no_durable_memory_route_and_no_store_is_passed_to_one() ->
     )
 
 
-def test_the_helper_graph_is_compiled_without_a_checkpointer() -> None:
-    """Upstream's contract is one prompt in, one report out — a thread to resume is not that.
+def test_a_helper_writes_no_checkpoint_of_its_own() -> None:
+    """Observed against a real saver, because the source says nothing about this.
 
-    Asserted because the fact is load-bearing outside this file and was already misread once: a
-    `BACKLOG.md` row costing a helper spawn at 20,712 kB attributed it to "the helper's own subgraph
-    checkpoints" and offered "compiling a helper with no checkpointer at all" as one of two levers
-    to choose between. There is no such checkpointer to remove — this is already the shipped
-    configuration, so that lever was spent before the row was written, and whoever picked it up
-    would have gone looking for an object that does not exist.
+    **This test used to read the AST and assert the wrong thing.** It checked that the helper's
+    `build_langgraph_agent(...)` call passes no `checkpointer=` keyword and concluded from that
+    absence that a helper holds no checkpointer — reasoning a `BACKLOG.md` row then used to
+    declare one of its two remaining levers already spent. The absence is what *causes* the
+    behaviour it was read as excluding: `None` is how a LangGraph subgraph asks to inherit its
+    parent's saver (`CONFIG_KEY_CHECKPOINTER: checkpointer or configurable.get(...)`), so every
+    helper was checkpointing its own thread under a `tools:<uuid>` namespace on the caller's
+    `thread_id`. Measured before the fix: 18,944 kB of checkpoint rows for one 2 MB helper write,
+    17,760 kB of it in that namespace; after, 424 kB.
 
-    Read off the source rather than the compiled object, because a `CompiledStateGraph` exposes no
-    "was I given a saver" that is public API, and pinning a private attribute would be a second
-    upstream coupling for a fact the call site states outright.
+    That is the defect `tests/test_context_floor.py`'s own docstring names — "a basis that is
+    re-derived rather than observed will agree with itself forever" — so this reads the rows the
+    turn actually wrote. `checkpointer=False` is the fix and it is *also* not assertable from the
+    source: what matters is that no subgraph namespace lands on the thread, whatever spelling
+    produces it.
     """
-    import ast
-    from pathlib import Path
+    import chemclaw.agent.checkpointer as ckpt
+    from chemclaw.agent.audit import NullAuditSink
+    from chemclaw.core import db
+    from chemclaw.core.config import settings as live
+    from tests.pg import create_checkpoint_tables, migrated_db_or_skip
 
-    import chemclaw.agent.langgraph_agent as la
+    thread = "helper-checkpoint-probe"
 
-    tree = ast.parse(Path(la.__file__).read_text(encoding="utf-8"))
-    builds = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "build_langgraph_agent"
-    ]
+    async def _run() -> tuple[dict[str, int], int]:
+        await migrated_db_or_skip()
+        await create_checkpoint_tables()
+        await ckpt.close_checkpointer()
+        saver = await ckpt.checkpointer()
+        try:
+            model = _HelperScript(messages=iter([]), read=True, written="a scratch note")
+            graph = build_langgraph_agent(
+                model=model,
+                audit_sink=NullAuditSink(),
+                profile=AgentProfile(name="default"),
+                checkpointer=saver,
+            )
+            await graph.ainvoke(turn_input("sweep the sources"), turn_config(thread))
+            async with db.connection(live.postgres_dsn) as conn, conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT checkpoint_ns, count(*) FROM checkpoints "
+                    "WHERE thread_id = %s GROUP BY 1",
+                    (thread,),
+                )
+                rows = {str(ns): int(count) for ns, count in await cur.fetchall()}
+            return rows, model.helper_calls
+        finally:
+            await ckpt.close_checkpointer()
 
-    assert len(builds) == 1, "this module builds the helper graph once; this test reads that one"
-    passed = {keyword.arg for keyword in builds[0].keywords}
-    assert "helper" in passed, "the one build here should be the helper's; this test is stale"
-    assert "checkpointer" not in passed, (
-        "the helper graph was given a checkpointer: it would then hold a thread nobody addresses, "
-        "and its state would be persisted twice — once under its own thread and again through the "
-        "keys upstream copies into the caller's"
+    namespaces, helper_calls = asyncio.run(_run())
+
+    assert helper_calls > 0, (
+        "no helper ran, so this turn had no subgraph to checkpoint and the assertion below would "
+        "pass on an empty thread"
+    )
+    assert namespaces.get("", 0) > 0, (
+        f"the caller wrote no checkpoints either, so nothing here measures a saver: {namespaces}"
+    )
+    assert not [name for name in namespaces if name], (
+        f"a helper checkpointed its own thread onto the caller's saver: {namespaces}. A helper is "
+        "one prompt in and one report out — a thread to resume is a second conversation nobody "
+        "addresses, and it cost the caller's session 45x the checkpoint rows a turn writes"
     )
 
 
@@ -1690,21 +1949,10 @@ def test_a_named_helper_is_told_what_it_actually_holds(monkeypatch: pytest.Monke
     its prompt names 10 it lacks. The override is appended last, because a contradiction resolved
     in favour of whichever came first would resolve the wrong way.
     """
-    captured: list[str] = []
-
-    class _Capture(GenericFakeChatModel):
-        def bind_tools(self, tools: Any, **kwargs: Any) -> Any:
-            return self
-
+    # No graph built here on purpose: this asserts the *text*, and the next test asserts that the
+    # model is sent it off the wire. A `_Capture` model and a compiled graph stood here and were
+    # `del`'d unread two lines later, which reads as a wire assertion and is not one.
     specialist = get_profile("computation")
-    graph = build_langgraph_agent(
-        model=_Capture(messages=iter([AIMessage(content="")])),
-        profile=AgentProfile(name="default"),
-        helper=True,
-        specialist=specialist,
-    )
-    del captured, graph
-
     override = specialist_override(specialist, ["describe_topology", "find_calculations"])
 
     assert "narrower than" in override
@@ -1775,3 +2023,495 @@ def test_a_named_helpers_two_texts_name_the_same_surface() -> None:
     for tool in surface:
         assert tool in described, f"the description omits {tool}"
         assert tool in override, f"the helper's own override omits {tool}"
+
+
+def test_a_parallel_fan_out_shares_the_budget_rather_than_multiplying_it() -> None:
+    """N concurrent `task` calls each read the same pre-batch `files`, so each took it all.
+
+    **The gap, and it is the concurrent half of the test above.**
+    `test_a_second_delegation_shares_the_budget_the_first_one_spent` closed the *sequential* case:
+    a second `task` call sees the first one's files in `held` and is charged for them. It cannot
+    close the concurrent one, because `_files_already_held` reads `request.state["files"]` and
+    `_batch_calls`'s own docstring says why that is the wrong number here — `ToolNode` builds every
+    call in a superstep from **one pre-batch snapshot**, so N concurrent `task` calls see an
+    identical `held` and each take the whole of what is left. The channel then receives up to
+    N x `agent_subagent_files_max_chars`, and `general_purpose_helper`'s own description invites
+    exactly that shape ("Spawn one — or several at once") against an
+    `agent_max_parallel_tool_calls` that ships at 8.
+
+    The divisor is same-name calls rather than `batch_width`, and that is the one decision here.
+    `batch_width` is the whole batch, and dividing by it would charge a helper for seven `props`
+    calls that write no file — measured on the installed distributions, the only site that copies
+    a non-excluded state key (and so `files`) into a caller's `Command` is
+    `deepagents.middleware.subagents`'s `**state_update`, which is `task`. Concurrent producers of
+    this channel are therefore the batch's calls that name *this* tool, and nothing else.
+
+    Driven through `bound_tool_results` with a real originating `AIMessage`, because the whole
+    defect is what the middleware reads off the batch: a fixture that passed the width in would
+    assert the arithmetic and not the wiring.
+    """
+    import asyncio
+    from types import SimpleNamespace
+
+    from deepagents.backends.utils import create_file_data
+    from langgraph.types import Command
+
+    from chemclaw.agent.tool_result_size import bound_tool_results
+
+    budget = settings.agent_subagent_files_max_chars
+    width = 4
+    asked = AIMessage(
+        content="",
+        tool_calls=[
+            {"name": "task", "args": {}, "id": f"fan-{i}", "type": "tool_call"}
+            for i in range(width)
+        ],
+    )
+
+    async def _handler(request: Any) -> Any:
+        which = request.tool_call["id"]
+        return Command(
+            update={"files": {f"/scratch/{which}.md": create_file_data("z" * budget * 2)}}
+        )
+
+    landed = 0
+    for i in range(width):
+        request = SimpleNamespace(
+            # The snapshot every call in the superstep is built from: empty, for all of them.
+            tool_call={"id": f"fan-{i}", "name": "task"},
+            state={"messages": [asked], "files": {}},
+        )
+        bounded = cast("Any", asyncio.run(bound_tool_results.awrap_tool_call(request, _handler)))  # type: ignore[arg-type]
+        landed += sum(len(str(d.get("content", ""))) for d in bounded.update["files"].values())
+
+    assert landed <= budget, (
+        f"{width} concurrent `task` calls put {landed} characters into one `files` channel "
+        f"against a {budget}-character budget, so the bound is per call rather than per channel"
+    )
+
+
+def test_the_fan_out_divisor_counts_the_tools_that_write_files_not_the_whole_batch() -> None:
+    """One `task` beside seven tools that write no file still gets the whole remaining budget.
+
+    The other direction of the test above, and the reason its divisor is same-name calls. A bound
+    that divided by `batch_width` would fail closed — safe, and wrong in a way nobody would see as
+    a defect: a helper's research note cut to an eighth because the model happened to ask `props`
+    seven questions in the same breath. Only `task` reaches this code path at all, so a batch with
+    one of them has one producer of this channel.
+    """
+    import asyncio
+    from types import SimpleNamespace
+
+    from deepagents.backends.utils import create_file_data
+    from langgraph.types import Command
+
+    from chemclaw.agent.tool_result_size import bound_tool_results
+
+    budget = settings.agent_subagent_files_max_chars
+    asked = AIMessage(
+        content="",
+        tool_calls=[{"name": "task", "args": {}, "id": "solo", "type": "tool_call"}]
+        + [
+            {"name": "lookup_property", "args": {}, "id": f"p-{i}", "type": "tool_call"}
+            for i in range(7)
+        ],
+    )
+    # Comfortably under the budget rather than one character short of it: the point is the
+    # *divisor*, and an eighth of the budget is 25,000 — so a note of half survives whole only if
+    # the seven `lookup_property` calls were not counted. One short of the budget would fail for
+    # an unrelated reason, since the key and the room reserved for a dropped-set notice are
+    # charged against the same channel.
+    note = "z" * (budget // 2)
+
+    async def _handler(_request: Any) -> Any:
+        return Command(update={"files": {"/scratch/note.md": create_file_data(note)}})
+
+    request = SimpleNamespace(
+        tool_call={"id": "solo", "name": "task"},
+        state={"messages": [asked], "files": {}},
+    )
+    bounded = cast("Any", asyncio.run(bound_tool_results.awrap_tool_call(request, _handler)))  # type: ignore[arg-type]
+    landed = sum(len(str(d.get("content", ""))) for d in bounded.update["files"].values())
+    assert landed == len(note), (
+        f"a lone `task` beside seven tools that write no file stored {landed} of "
+        f"{len(note)} characters, so the divisor is counting the batch rather than the producers"
+    )
+
+
+def test_the_file_share_bounds_the_superstep_at_every_width_this_deployment_allows() -> None:
+    """The superstep total, which is the thing this is named for and did not assert.
+
+    **This test shipped degenerate and a fresh-context review caught it.** It passed `held=budget`,
+    so the numerator was 0 in every cell, `max(0 // anything, 1)` floored the share to 1, and
+    neither `sharing` nor `concurrent` influenced a single assertion — it passed with the whole
+    `concurrent` divisor reverted. Its docstring claimed to sweep "past the crossover"; at an
+    exhausted budget every cell is already past it, so it visited neither side.
+
+    Worse, the bound in its own name did not hold. Driven through the shipped `bound_tool_results`
+    before `capacity` existed, budget 200,000:
+
+        width= 8  files/call=  600  ->   206,400   OVER
+        width= 8  files/call= 5000  -> 1,720,000   OVER
+        width= 1  files/call= 5000  ->   215,000   OVER
+
+    and `(5000, 8)` was literally a cell in this test's own grid. `bounded_content` floors at the
+    notice saying it cut, so N files each at that floor is 44N: dividing the share further cannot
+    help once it has floored, which is why the fix bounds the *count* and not only each file's size.
+
+    **And the fix for that shipped with this test still measuring half its subject**
+    (`D-2026-09-19-a-cap-on-the-contents-is-not-a-cap-on-the-channel`). It summed `content` and
+    never read a key, exactly as `_files_already_held` did, so a superstep the channel charged
+    274,887 characters for read 191,517 here and passed — 37% over, on ordinary
+    `/scratch/w0-4443.md` paths and with no adversary. A path is a string the *model* wrote, so
+    the padding dimension below is not a pathological case but the cheapest way to make the two
+    halves visibly different: at 1,000 characters of padding the same command landed 4,728,887.
+
+    So: a fresh channel, so the share actually varies; the **total** asserted over keys *and* text,
+    which is what `test_the_batch_share_bounds_the_batch_at_every_width` asserts for the sibling
+    resource and what this one measured half of; and widths past `agent_max_parallel_tool_calls`,
+    because that setting is LangGraph's `max_concurrency` and this module's own docstring says
+    twenty calls still return twenty results — nothing clamps a batch.
+    """
+    import asyncio
+    from types import SimpleNamespace
+
+    from deepagents.backends.utils import create_file_data
+    from langgraph.types import Command
+
+    from chemclaw.agent.tool_result_size import bound_tool_results
+
+    budget = settings.agent_subagent_files_max_chars
+    for width in (1, 2, settings.agent_max_parallel_tool_calls, 20):
+        for per_call in (1, 8, 600, 5_000):
+            # **Both dimensions are swept; their product is not.** A cell costs `width x per_call`
+            # files to build and bound, so the corner alone is 100,000 of them — and this test
+            # timed out at pytest's 180 s on a loaded CI runner while measuring 10.3 s on a quiet
+            # box, which is a 17x margin that was never real. What the bound needs exercised is
+            # each dimension past its crossover, and 1 x 5,000 and 20 x 600 do that: driven, the
+            # pre-fix accounting reds at 1 x 600 alone. The product buys a slower gate and no
+            # coverage, so it is capped.
+            if width * per_call > 20_000:
+                continue
+            # The padded arm only has to make keys dominate, which 600 files does as plainly as
+            # 5,000 — and 20 x 5,000 keys of 1,000 characters is 100 M characters of fixture for
+            # one assertion.
+            for padding in (0, 1_000) if per_call <= 600 else (0,):
+                asked = AIMessage(
+                    content="",
+                    tool_calls=[
+                        {"name": "task", "args": {}, "id": f"w{i}", "type": "tool_call"}
+                        for i in range(width)
+                    ],
+                )
+
+                async def _handler(request: Any, *, n: int = per_call, pad: int = padding) -> Any:
+                    which = request.tool_call["id"]
+                    return Command(
+                        update={
+                            "files": {
+                                f"/scratch/{'p' * pad}{which}-{j}.md": create_file_data("z" * 2_000)
+                                for j in range(n)
+                            }
+                        }
+                    )
+
+                landed = 0
+                for i in range(width):
+                    request = SimpleNamespace(
+                        tool_call={"id": f"w{i}", "name": "task"},
+                        state={"messages": [asked], "files": {}},
+                    )
+                    call = bound_tool_results.awrap_tool_call(request, _handler)  # type: ignore[arg-type]
+                    bounded = cast("Any", asyncio.run(call))
+                    # Keys as well as text: the channel is a mapping and LangGraph checkpoints the
+                    # mapping, so a path is charged for what it is long. Measuring only `content`
+                    # is what let this same assertion read 191,517 while the channel held 274,887.
+                    landed += sum(
+                        len(path) + len(str(data.get("content", "")))
+                        for path, data in bounded.update["files"].items()
+                    )
+
+                assert landed <= budget, (
+                    f"{width} concurrent call(s) of {per_call} file(s) each, at {padding} "
+                    f"character(s) of path padding, landed {landed:,} characters in one superstep "
+                    f"against a {budget:,}-character budget"
+                )
+
+
+def test_a_dropped_set_is_named_while_there_is_room_to_name_it() -> None:
+    """A dropped file is a louder failure than a truncated one only if something says which.
+
+    The count and "reading one back will fail" are the two facts `_dropped_notice` never drops,
+    because a caller cannot act correctly without them. The sample of paths is the part that
+    shrinks to fit, and it has to actually be there when there is room — a notice that only ever
+    said "3 file(s)" would leave a chemist with three `no such file` errors and no way to match
+    them to anything they asked for.
+
+    Both ends, because either alone passes on the wrong implementation: the sample appears, **and**
+    it is cut rather than allowed to be the unbounded thing. A path of 20,000 characters is not a
+    pathological input in the sense that matters here — it is a string the model passed to
+    `write_file`, which is the same place every other path in this channel comes from.
+    """
+    from deepagents.backends.utils import create_file_data
+    from langgraph.types import Command
+
+    from chemclaw.agent.tool_result_shape import _DROPPED_PATH, rewritten_command_files
+    from chemclaw.agent.tool_result_size import _bounded_file
+
+    budget = settings.agent_subagent_files_max_chars
+    # More files than the budget can represent even as truncation notices, which is what makes
+    # this the dropping path rather than the truncating one.
+    short = {f"/scratch/e{i}.md": create_file_data("z" * 2_000) for i in range(5_000)}
+    bounded = rewritten_command_files(Command(update={"files": short}), _bounded_file, None, budget)
+    notice = str(bounded.update["files"][_DROPPED_PATH]["content"])
+    assert "/scratch/e" in notice, (
+        "files were dropped and the notice named none of them, so a caller reading one back gets "
+        f"`no such file` with nothing to match it against: {notice!r}"
+    )
+
+    long_paths = {
+        f"/scratch/{'q' * 20_000}-{i}.md": create_file_data("z" * 2_000) for i in range(5_000)
+    }
+    bounded = rewritten_command_files(
+        Command(update={"files": long_paths}), _bounded_file, None, budget
+    )
+    landed = sum(
+        len(path) + len(str(data.get("content", "")))
+        for path, data in bounded.update["files"].items()
+    )
+    assert landed <= budget, (
+        f"twenty dropped files with 20,000-character paths landed {landed:,} characters against a "
+        f"{budget:,}-character budget, so the notice naming them is the unbounded thing"
+    )
+
+
+def test_a_roster_entry_s_menu_is_bounded_by_what_it_lists_not_by_what_it_binds() -> None:
+    """`task`'s own schema must not grow with a surface this repository cannot measure.
+
+    `describe_helper` enumerates the tools the helper's *compiled* graph bound, which is the right
+    derivation and made `task`'s description a function of how many tools the sibling fleet serves.
+    `tests/test_context_floor.py`'s per-tool bound binds no fleet connector, so it read `task` at
+    897
+    against a 900-token ceiling while a deployment serving the `safety` bundle would send ~1,009 —
+    the `D-2026-09-05-a-ratchet-that-binds-no-connectors-measures-a-smaller-system` shape, one level
+    down. A ratchet blind to its input cannot hold this, so the bound is in the description.
+    """
+    from chemclaw.agent.profiles import AgentProfile
+    from chemclaw.agent.subagents import describe_helper
+    from chemclaw.core.config import settings
+
+    profile = AgentProfile(name="wide", description="Reads things.")
+    cap = settings.agent_helper_menu_tools
+    few = describe_helper(profile, [f"tool_{i:03d}" for i in range(cap)])
+    many = describe_helper(profile, [f"tool_{i:03d}" for i in range(400)])
+
+    assert "and " not in few.split("holds exactly:")[1], "an unbounded roster counted nothing"
+    assert many.count("tool_") == settings.agent_helper_menu_tools
+    assert f"and {400 - settings.agent_helper_menu_tools} more" in many, (
+        "the entry must say how many names it did not list"
+    )
+    assert len(many) < len(few) + 20, "400 tools grew the menu entry by more than the count suffix"
+
+
+def test_a_rostered_helpers_connectors_are_the_specialists_and_not_its_callers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The connector half of the roster intersection, asserted without re-deriving it.
+
+    Mutation: `helper_connectors` returning `kept` instead of the specialist intersection — so every
+    rostered helper holds *all* of its caller's reading connector tools regardless of the name the
+    model picked — left `tests/test_subagents.py` at 59 passed, and no other file imports it.
+
+    `test_the_predicted_surface_is_what_a_compiled_helper_binds` cannot catch it, because
+    `predicted_helper_surface` calls the same two functions the build calls, so both sides of that
+    equality move together: the "a basis that re-derives rather than observes will agree with itself
+    forever" defect that test's own docstring cites as its reason for existing, happening to it. The
+    `helper ⊆ caller` arms stay true because these tools *are* the caller's. So this asserts the
+    intersection against a literal.
+    """
+    from chemclaw.agent.authz import side_effecting_tools
+    from chemclaw.agent.profiles import AgentProfile
+    from chemclaw.agent.subagents import helper_connectors
+
+    class _Tool:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+    acting = next(iter(side_effecting_tools()))
+    callers = [_Tool("reads_a"), _Tool("reads_b"), _Tool(acting)]
+    specialist = AgentProfile(name="narrow", tool_names=frozenset({"reads_a"}))
+
+    unnamed = helper_connectors(callers, None)
+    rostered = helper_connectors(callers, specialist)
+
+    assert unnamed is not None and sorted(t.name for t in unnamed) == ["reads_a", "reads_b"], (
+        "the unnamed helper's connector half is the caller's minus what acts"
+    )
+    assert rostered is not None and [t.name for t in rostered] == ["reads_a"], (
+        "a rostered helper held a connector tool its specialist does not name"
+    )
+
+
+def test_a_roster_description_names_the_bound_surface_and_nothing_beside_it() -> None:
+    """Both directions, because only one of them was asserted.
+
+    `test_every_roster_description_names_the_surface_its_graph_bound` asserts `bound ⊆ described`,
+    so `describe_helper` listing `bound | profile.tool_names` stayed green over the whole file — and
+    that is precisely the failure `D-2026-09-16` names: "a description written about the profile
+    would advertise a helper that computes, and the model would delegate a calculation and get back
+    a report saying it could not run one." The menu bound means the containment is now `described ⊆
+    bound` rather than equality, which is the safe direction: under-promising costs a delegation,
+    over-promising costs a wasted turn and a wrong report.
+    """
+    from chemclaw.agent.profiles import AgentProfile
+    from chemclaw.agent.subagents import describe_helper
+
+    profile = AgentProfile(name="p", description="Reads.", tool_names=frozenset({"a", "b", "c"}))
+    described = describe_helper(profile, ["a", "b"])
+    listed = {
+        word.strip(" .,") for word in described.split("holds exactly:")[1].replace(",", " ").split()
+    }
+
+    assert {"a", "b"} <= listed
+    assert "c" not in listed, "the description advertised a tool the helper does not bind"
+
+
+def test_a_file_the_helper_edited_is_served_before_a_file_it_invented() -> None:
+    """A dropped path is not always a missing file, and the notice used to say it was.
+
+    deepagents' channel reducer is `result[key] = value`
+    (`deepagents.middleware.filesystem._file_data_delta_reducer`), so omitting a key leaves
+    whatever the caller already had at it. For a document the helper **edited**, that means
+    `read_file` succeeds and returns the **pre-edit** text — the silent stale read this module
+    exists to prevent — while the notice said "Reading one back will fail", which is worse than
+    saying nothing: a model that retries the read gets confirmation of the stale content.
+
+    Driven at an exhausted channel before this: a chemist's `/notes/mine.md` came back as
+    `'STALE VERSION'` after a helper wrote `'FRESH VERSION THE HELPER WROTE'` to it.
+
+    Two arms, because the fix is two things and either alone is passable. Given room, a path the
+    caller already holds is served **first**, since reverting an edit is strictly worse than a new
+    file not appearing. Given none, the notice says which of the two happened.
+    """
+    import asyncio
+    from types import SimpleNamespace
+
+    from deepagents.backends.utils import create_file_data
+    from langgraph.types import Command
+
+    from chemclaw.agent.tool_result_shape import _DROPPED_PATH
+    from chemclaw.agent.tool_result_size import bound_tool_results
+
+    budget = settings.agent_subagent_files_max_chars
+    edited = "/notes/mine.md"
+    fresh = "FRESH VERSION THE HELPER WROTE"
+    # The edited path arrives **last**, so what saves it is the priority order and not the order
+    # the helper happened to hand its files back in — without that, this arm passes on an
+    # implementation that has no priority at all.
+    returned = {f"/scratch/new{i}.md": create_file_data("z" * 2_000) for i in range(5_000)}
+    returned[edited] = create_file_data(fresh)
+
+    def _land(filler: int) -> dict[str, Any]:
+        held = {
+            edited: create_file_data("STALE VERSION"),
+            "/scratch/filler.md": create_file_data("f" * filler),
+        }
+        asked = AIMessage(
+            content="",
+            tool_calls=[{"name": "task", "args": {}, "id": "w0", "type": "tool_call"}],
+        )
+        request = SimpleNamespace(
+            tool_call={"id": "w0", "name": "task"},
+            state={"messages": [asked], "files": held},
+        )
+
+        async def _handler(_request: Any) -> Any:
+            return Command(update={"files": returned})
+
+        call = bound_tool_results.awrap_tool_call(request, _handler)  # type: ignore[arg-type]
+        landed = cast("Any", asyncio.run(call))
+        return cast("dict[str, Any]", landed.update["files"])
+
+    with_room = _land(budget // 2)
+    assert str(with_room[edited]["content"]) == fresh, (
+        "a file the helper edited was dropped while fifty files it invented were stored, so the "
+        "caller reads back the version from before the helper ran and nothing failed to tell it so"
+    )
+
+    exhausted = _land(budget)
+    assert edited not in exhausted, "the fixture stopped exhausting the channel"
+    notice = str(exhausted[_DROPPED_PATH]["content"])
+    assert "left as this caller already had them" in notice, (
+        f"the notice does not distinguish a file that is now missing from one that silently "
+        f"reverted, and a caller acts on those two differently: {notice!r}"
+    )
+    assert "Reading one back will fail" not in notice, (
+        "the notice still claims a read will fail, which is false for exactly the path where "
+        "being wrong is worst — the read succeeds and returns the pre-edit text"
+    )
+
+
+def test_the_dropped_set_notice_does_not_overwrite_a_file_that_is_already_there() -> None:
+    """A module about never cutting silently may not destroy a document to say it cut.
+
+    `_DROPPED_PATH` was a fixed literal written straight into the rewritten mapping, so a caller
+    holding a real file at `/scratch/_files_the_budget_could_not_hold.md` had its content replaced
+    by the `[system]` text, silently. Contrived — nothing here picks that name — and unguarded,
+    which is the half that matters.
+
+    Both arms: the path stays the predictable literal when nothing holds it, because a notice
+    nobody can find is its own defect, and it steps aside when something does.
+    """
+    from deepagents.backends.utils import create_file_data
+    from langgraph.types import Command
+
+    from chemclaw.agent.tool_result_shape import _DROPPED_PATH, rewritten_command_files
+    from chemclaw.agent.tool_result_size import _bounded_file
+
+    budget = settings.agent_subagent_files_max_chars
+    mine = "a chemist's own notes, at the one path this module reserves"
+    files = {f"/scratch/e{i}.md": create_file_data("z" * 2_000) for i in range(5_000)}
+
+    without = rewritten_command_files(
+        Command(update={"files": dict(files)}), _bounded_file, None, budget
+    )
+    assert _DROPPED_PATH in without.update["files"], (
+        "the notice did not land at its documented path, so nothing a caller reads tells it what "
+        "happened to the files that are missing"
+    )
+
+    # The faithful shape: deepagents hands the caller's whole channel back, so a document the
+    # caller already holds arrives in the command *unchanged* and passes through the loop. That is
+    # the file the notice used to land on top of.
+    held = {_DROPPED_PATH: create_file_data(mine)}
+    files[_DROPPED_PATH] = held[_DROPPED_PATH]
+    with_collision = rewritten_command_files(
+        Command(update={"files": files}), _bounded_file, held, budget
+    )
+    landed = with_collision.update["files"]
+    assert str(landed[_DROPPED_PATH]["content"]) == mine, (
+        "a file already at the notice's path was overwritten by the notice, which is this module "
+        "destroying a document in order to report that it truncated one"
+    )
+    elsewhere = [path for path in landed if path.startswith("/scratch/_files_the_budget")]
+    assert len(elsewhere) == 2, (
+        f"the notice had nowhere to go and was dropped instead, so the files it stands for are "
+        f"gone with nothing naming them: {elsewhere}"
+    )
+
+
+def test_a_rostered_profile_naming_nothing_narrows_to_nothing() -> None:
+    """On a roster, `tool_names=None` is the empty set — never "does not narrow".
+
+    The rule is security-relevant and was written three times (two helper sites, one peer site);
+    `roster_names` is now the one definition all three intersect through.
+    """
+    assert roster_names(AgentProfile(name="unnamed")) == frozenset()
+    assert roster_names(AgentProfile(name="named", tool_names=frozenset({"a"}))) == {"a"}
+
+
+def test_the_menu_list_enumerates_up_to_its_limit_and_counts_the_rest() -> None:
+    """The capability half both roster menus share: sorted, bounded, the remainder counted."""
+    assert bounded_tool_list(["c", "a", "b"], 3) == "a, b, c"
+    assert bounded_tool_list(["c", "a", "b"], 2) == "a, b, and 1 more"
+    assert bounded_tool_list([], 2) == ""

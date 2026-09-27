@@ -1,0 +1,78 @@
+# **Declared here, served by `Chemclaw3-mcp`, and OFF unless a deployment names it.**
+#
+# This file is a copy of the fleet's own `manifests/unitops/connector.yaml`, which stays
+# authoritative because it is what actually answers. What this copy buys is the thing a manifest
+# does even when no turn binds it: `chemclaw_agent.declared_tool_names` reads manifests out of
+# `connectors_dirs`, so `skill-validate`, `prose-validate` and `template-validate` can resolve
+# these tool names — and without it the judgment beside this file could not name the tools it is
+# judgment *about* (the D-117 defect, the same argument `connectors/safety/connector.yaml` makes).
+#
+# **`default_enabled: false` is the other half, and it is what makes declaring this affordable.**
+# Every bound tool's schema is serialised ahead of the system message on every model call. These
+# five process-development bundles are ~22,000 tokens together, against a `PREFIX_BOUND` that
+# `core/config/agent.py` derives both compaction thresholds from — so binding them everywhere would
+# take that much thread allowance from every deployment on earth, including the ones that never ask
+# a scale-up question. So silence means off: a release that wants this capability names it in
+# `CHEMCLAW_CONNECTORS_ENABLED` (the chart's `connectors.unitops.enabled`) and pays for it, and one
+# that does not is byte-for-byte unchanged.
+#
+name: unitops
+description: >-
+  Scale-up and unit-operation sizing, from the equipment and material data the chemist already
+  has: carry an agitation duty between vessels on matched power-per-volume and matched tip speed,
+  get Zwietering's just-suspended speed for a slurry, get a jacketed vessel's heat-transfer time
+  constant and the duty at a stated driving force, size a distillation by Fenske-Underwood-
+  Gilliland, get the crystallisation yield two measured solubilities permit, and get a
+  constant-pressure cake filtration time or a two-period batch drying time. **It holds no data at
+  all** — no vessel register, no VLE table, no solubility curve, no cake resistance, no drying
+  curve, no impeller catalogue — so every tool refuses to default the measured number its answer
+  is made of, and a question that has only a vessel name and no measurement is one this server
+  cannot answer. Nothing here is a simulation: a shortcut column is not a stage-by-stage
+  calculation, a Zwietering speed is a fitted correlation, a crystallisation yield is an
+  equilibrium maximum a real batch comes in under, and a cake filtration assumes an incompressible
+  cake. It returns no TMR, no MTSR and no criticality class — a cooling-failure or heat-load
+  question is `thermalsafety`'s, and the jacket duty here is a *capacity* rather than a load. It
+  computes no wash volume and no displacement efficiency. Pure and synchronous — no store, no
+  durable state, no corpus, and no network call at any point.
+
+endpoint:
+  transport: http
+  # A loopback dev default; the deployment moves it.
+  url: http://127.0.0.1:8853/mcp
+  health_url: http://127.0.0.1:8853/healthz
+  # Every tool is closed-form algebra, the widest being a fixed 200-step bisection for Underwood's
+  # root. The timeout exists to stop a mute connector hanging a turn, not to bound a calculation.
+  request_timeout: 15
+  # Bearer even though the shipped URL is loopback, for the reason `servers/props/connector.yaml`
+  # states: a manifest whose auth mode changes with its address is one whose serving side gets it
+  # wrong. The token env var is the same name on both sides.
+  auth:
+    mode: bearer
+    token_env: CHEMCLAW_UNITOPS_TOKEN
+  tools:
+    - agitation_scale_up
+    - just_suspended_speed
+    - heat_transfer_time_constant
+    - shortcut_distillation
+    - crystallisation_yield
+    - filtration_time
+    - drying_time
+
+  # Every tool is read-only: each takes numbers, computes, and returns. Nothing here writes, stores
+  # or reserves anything, so there is no state a plan gate would need to approve. Classifying by
+  # omission fails *open* (D-167), which is why all seven are listed rather than left to a default.
+  read_only:
+    - agitation_scale_up
+    - just_suspended_speed
+    - heat_transfer_time_constant
+    - shortcut_distillation
+    - crystallisation_yield
+    - filtration_time
+    - drying_time
+
+skills:
+  - unit-operation-sizing
+
+# Silence means off for this bundle; an explicit `connectors_enabled` naming it wins over
+# this flag, which is how it is ever reachable (`connectors/registry.py::enabled`).
+default_enabled: false

@@ -25,7 +25,12 @@ from fastapi.testclient import TestClient
 
 from chemclaw.agent.session import TurnSession
 from chemclaw.api.app import create_app
-from chemclaw.api.state import _claim_turn_slot, _release_turn_slot, _start_turn_lease
+from chemclaw.api.state import (
+    _actor_turns_in_flight,
+    _claim_turn_slot,
+    _release_turn_slot,
+    _start_turn_lease,
+)
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import get_current_actor
 from chemclaw.core.metrics import METRICS
@@ -336,7 +341,7 @@ def test_a_lapsed_turns_teardown_cannot_revoke_its_successors_claim(
     monkeypatch.setattr(settings, "service_turn_admission_timeout_seconds", 0.0)
     active: dict[str, Any] = {}
 
-    first = _claim_turn_slot(active, "s1")
+    first = _claim_turn_slot(active, "s1", actor="alice")
     assert first is not None
     _start_turn_lease(active, "s1", first)
     # The lease lapses (the never-advanced-generator window this expiry exists for), and a
@@ -345,7 +350,7 @@ def test_a_lapsed_turns_teardown_cannot_revoke_its_successors_claim(
 
     while any(lease.deadline > time.monotonic() for lease in active.values()):
         time.sleep(0.005)
-    second = _claim_turn_slot(active, "s1")
+    second = _claim_turn_slot(active, "s1", actor="alice")
     assert second is not None
 
     _release_turn_slot(active, "s1", first)
@@ -631,3 +636,49 @@ def test_a_shed_turn_and_a_spent_budget_do_not_share_one_error_code(
         "budget uses — with the opposite remedy"
     )
     assert errors[-1]["retryable"] is True
+
+
+def test_an_expired_lease_does_not_hold_an_actors_slot() -> None:
+    """The anti-brick guard, and the whole reason the count is derived rather than kept.
+
+    A `dict[str, int]` keyed by principal is the obvious shape for a per-actor cap and is what
+    `src/chemclaw/api/routes/streams.py` uses for streams. It is wrong here because a turn has a
+    window neither teardown covers — a client gone after the streaming response was handed off but
+    before its generator was first advanced runs no `finally` at all — so an integer would stay
+    incremented for the pod's lifetime and refuse that human forever. Reading the lease map instead
+    means the same expiry that stops a stale entry answering 409 also stops it answering 429: the
+    cost of a skipped teardown is one lease width, not a restart.
+    """
+    active: dict[str, Any] = {}
+    token = _claim_turn_slot(active, "s1", actor="alice")
+    assert token is not None
+    assert _actor_turns_in_flight(active, "alice", besides="other") == 1
+
+    # Lapse it the way `_start_turn_lease` would, with a deadline already in the past.
+    active["s1"] = type(active["s1"])(
+        token=token, deadline=0.0, actor="alice", claimed_at=active["s1"].claimed_at
+    )
+    assert _actor_turns_in_flight(active, "alice", besides="other") == 0
+
+
+def test_a_turns_own_session_is_not_counted_against_its_actor() -> None:
+    """`besides=` is what keeps a double-submit answering 409 rather than 429.
+
+    Without it the status code for one unchanged user action — posting twice to a session that is
+    already running — would depend on how many *other* sessions that chemist had open.
+    """
+    active: dict[str, Any] = {}
+    assert _claim_turn_slot(active, "s1", actor="alice") is not None
+    assert _actor_turns_in_flight(active, "alice", besides="s1") == 0
+    assert _actor_turns_in_flight(active, "alice", besides="s2") == 1
+
+
+def test_a_maintenance_hold_is_not_a_turn() -> None:
+    """Fork and delete take the same slot to *exclude* a turn; neither is one.
+
+    They pass `actor=None`, so a chemist deleting a session does not spend a concurrency slot they
+    never asked for — and `None` can never collide with a principal id.
+    """
+    active: dict[str, Any] = {}
+    assert _claim_turn_slot(active, "s1", actor=None) is not None
+    assert _actor_turns_in_flight(active, "alice", besides="other") == 0

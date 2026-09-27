@@ -142,6 +142,24 @@ _COUNTERS: dict[str, str] = {
         "event on an open stream, previously an HTTP 503)."
     ),
     "chemclaw_turns_refused_budget_total": "Turns refused with 429 by the turn/token budget.",
+    # Its own counter rather than the budget's, because the budget's drives an alert whose remedy
+    # is the token window: a conversation at `session_max_thread_bytes` is cleared by a new session
+    # (`D-2026-09-24-a-turn-costs-the-thread-it-loads`).
+    "chemclaw_turns_refused_thread_size_total": (
+        "Turns refused because their session's stored conversation reached "
+        "session_max_thread_bytes."
+    ),
+    # Deliberately unlabelled, and `actor` is the label that must never be added: `/metrics` is
+    # unauthenticated, and an `oid` is an unbounded *caller-chosen* key — minting oids is the way
+    # around a per-principal limit, so the series cap would silence this counter exactly when it
+    # matters. The identity is in the WARNING beside the increment. Not folded into
+    # `chemclaw_turns_conflict_total{scope=…}` either: that counter's population is 409 conflicts
+    # on one session, whose remedy is to wait for your own turn, and this one's is a 429 across
+    # sessions — two populations under one denominator nobody can interpret.
+    "chemclaw_turns_refused_actor_cap_total": (
+        "Turns refused with 429 because the actor already held "
+        "`service_max_concurrent_turns_per_actor` concurrent turns on this process."
+    ),
     # The revision loop over a flagged answer. Two series rather than one, because "how often
     # does the verifier reject an answer" and "how often does rejecting it fail to help" are
     # different questions and only the second is a defect: a deployment whose revisions always
@@ -156,6 +174,19 @@ _COUNTERS: dict[str, str] = {
     "chemclaw_answer_review_exhausted_total": (
         "Turns whose answer was still unsupported after every allowed revision, and went out "
         "marked for review."
+    ),
+    # **What happened to the person the escalation was supposed to reach**, which the counter above
+    # cannot say: it counts turns that went out flagged, and every one of the escalation's five
+    # outcomes looks identical from it. Four of them reached an operator as a log line only — and
+    # one, `joined`, is the outcome a busy deployment spends most of its time in, because the dedup
+    # subject is the *conversation*: every later exhausted turn of a thread already under review
+    # joins the open wait and asks nobody anything new. A deployment where `joined` dominates
+    # `opened` is one where reviews are piling into a handful of threads; one where `no_actor`
+    # dominates is running unauthenticated and escalating to nothing at all; `unavailable` is the
+    # broker, and is the only one that is also a `degraded` call.
+    "chemclaw_answer_review_escalations_total": (
+        "Attempts to ask a person to read an answer the revision rounds could not clear, by what "
+        "became of the request."
     ),
     # Questions refused because the knowledge they rest on moved. Two ends and three reasons, both
     # labelled, because they are acted on differently and were previously indistinguishable: an
@@ -212,8 +243,13 @@ _COUNTERS: dict[str, str] = {
     # wide over large results reaches this one inside a handful of iterations, and a turn that
     # plans in circles reaches that one having billed almost nothing. A rising rate here is a
     # deployment whose turns are too expensive rather than too long, which is a retrieval or
-    # tool-result-size problem; flat at zero while `turn_costs` shows large turns means the cap is
-    # unset (`agent_max_turn_billed_tokens` ships at 0) rather than never reached.
+    # tool-result-size problem; flat at zero while `turn_costs` shows large turns means turns are
+    # staying under the cap — or that a deployment set `agent_max_turn_billed_tokens` to 0, which
+    # is how it is switched off. It is **not** 0 by default, and this comment said the opposite
+    # long enough to invert an operator's reading of a flat series. A series that moves at all
+    # wants the cap checked against this deployment's `turn_costs` rows: the shipped value is a
+    # runaway backstop derived from what the loop cap and the context budget already authorise, so
+    # a backstop that bites is one somebody set too low.
     "chemclaw_turn_spend_caps_total": "Turns stopped by the per-turn billed-token cap.",
     # The detach/stop split (D-2026-08-27-a-disconnect-is-a-detach-not-a-stop). A disconnect no
     # longer cancels a turn, so these two are what tell an operator how often clients drop away
@@ -401,6 +437,27 @@ _COUNTERS: dict[str, str] = {
     # *job* and the wrong shape for the *knowledge* — with only a success counter, a total git
     # outage reads as "zero proposals", which is exactly what an idle system reads as. Two counters
     # make the difference visible and give the alert a ratio to fire on.
+    # **The hypothesis tournament degrades silently at every stage, by design.** Angle drafting,
+    # generation, critique, judging and check derivation all catch, log a warning and continue, so
+    # a run where every judge call failed still returns a ranked table — from the prior, honestly
+    # labelled "unrated (never compared)" — and nothing fleet-wide could tell it from a healthy
+    # run. That is the shape `chemclaw_notes_publish_failures_total` below exists for: a dead
+    # dependency producing output byte-for-byte indistinguishable from an idle deployment.
+    "chemclaw_hypothesis_tournaments_total": (
+        "Hypothesis tournaments that finished, by what they were able to produce."
+    ),
+    # A generator that stops producing usable refutation conditions after a model change is
+    # invisible without this: the screen is the only stage that deletes, and it deletes quietly.
+    "chemclaw_hypothesis_screen_rejections_total": (
+        "Hypotheses removed before the tournament, by which mechanical rule removed them."
+    ),
+    # A deployment whose checks never run looks identical from outside to one whose questions all
+    # need a laboratory. The code says which: a corpus whose compounds carry no structures, an
+    # actor with no role for an expensive trigger and a model naming a field the job does not
+    # declare are three different repairs.
+    "chemclaw_hypothesis_check_refusals_total": (
+        "Discriminating checks that were not run, by the grounding rule that refused them."
+    ),
     "chemclaw_notes_publish_failures_total": (
         "Knowledge notes that could not be written into the graph; the knowledge was lost."
     ),
@@ -427,8 +484,8 @@ _COUNTERS: dict[str, str] = {
     # all discarded it (REV-6). Counted per unreachable connector rather than per degraded turn, so
     # "one connector is dark" and "the fleet is dark" are different rates.
     "chemclaw_connectors_unreachable_total": (
-        "Connectors that failed to come up when a turn or template step opened them; their tools "
-        "were absent from that turn."
+        "Connectors that failed to come up when a turn or template step opened them, by connector; "
+        "their tools were absent from that turn."
     ),
     "chemclaw_event_streams_rejected_total": (
         "Push-back event streams rejected with 429 at the per-user or per-process cap."
@@ -808,6 +865,35 @@ _COUNTERS: dict[str, str] = {
         "visibility predicate only ever narrows, so an unconfigured deployment permits every "
         "string a model can invent, and `skills/README.md` resolves."
     ),
+    "chemclaw_behaviour_proposals_total": (
+        "Proposed changes to what the agent does, by kind and by what became of them. The only "
+        "answer to the question this queue exists to make answerable — is the agent proposing "
+        "anything, and is anybody deciding? A deployment where `proposed` climbs and `accepted` "
+        "and `rejected` stay flat has a queue nobody reads, which is worse than no queue: the "
+        "agent is told its proposal is waiting and it is not. `superseded` is the system's own "
+        "outcome rather than a person's, and the same text proposed again must not read as a fresh "
+        "proposal either — `already_open` is the model repeating itself and `already_decided` "
+        "is the "
+        "idempotent path. The outcomes are `proposed`, `revived`, `already_open`, "
+        "`already_decided`, `superseded`, `accepted` and `rejected` — not counted here, because a "
+        "count in prose is a claim about its author's afternoon and this one was already wrong "
+        "once. `revived` is a re-proposal of a *superseded* body, which is a genuine state change "
+        "and booked `already_open` until it had its own label: the queue read as being repeated "
+        "at while it was in fact being refilled."
+    ),
+    "chemclaw_local_skill_loads_total": (
+        "Skill bodies a chemist's *own* tier delivered — the same question as the counter above, "
+        "asked of the tier that counter cannot see. `chemclaw_skill_loads_total` lives on "
+        "`NarrowedSkillsBackend`, and the personal tier is a `StoreBackend`, so a local skill load "
+        "moved nothing at all: measured, a shipped skill and a personal one read through the same "
+        "mount in one process left one series at 1 and the other absent. **Bare, and that is the "
+        "whole reason it is a second series rather than a label.** A local skill's name is written "
+        "by a person, clamped by nothing, and would be a per-chemist identifier minting a series "
+        "per private project name in a shared exposition — the rule `Chemclaw3-mcp` states for its "
+        "own fleet, which this repository had no occasion to state until a caller-named skill "
+        "existed. What an operator needs from this is whether the tier is used at all, and a bare "
+        "count answers it; who used which is a question for that person's own listing route."
+    ),
     # --- the turn ------------------------------------------------------------------------------
     "chemclaw_turns_finished_total": (
         "Turns that ended, by outcome — the one series that separates `answered` from "
@@ -1001,6 +1087,16 @@ _CALL_BUCKETS: tuple[float, ...] = (
 )
 
 _HISTOGRAMS: dict[str, str] = {
+    # **The only in-run proxy for judge quality this feature has.** It is measured on every run and
+    # was, until this series existed, written into a note body and nowhere else. It matters because
+    # the ranking is only as good as the judge: the simulation in `evals/hypothesis_tournament.py`
+    # puts top-1 recovery under 40% at a 75%-accurate judge, so a gateway model swap that made the
+    # judge prefer whichever side it saw first would quietly turn the whole feature into noise
+    # while every other signal stayed green. 0.0 is no order effect; 1.0 is the order deciding
+    # every pair.
+    "chemclaw_hypothesis_position_bias": (
+        "How far a tournament's judge preferred whichever hypothesis it was shown first."
+    ),
     "chemclaw_turn_duration_seconds": "Wall-clock duration of one streamed agent turn.",
     "chemclaw_tool_duration_seconds": "Wall-clock duration of one tool invocation.",
     "chemclaw_http_request_duration_seconds": (
@@ -1040,7 +1136,13 @@ _HISTOGRAMS: dict[str, str] = {
 # Per-histogram bucket boundaries. A histogram's buckets are part of its Prometheus identity, so
 # this is a property of the declaration exactly as the HELP text is — see `_TURN_BUCKETS` above for
 # why one shared set was wrong.
+#: Position bias is a fraction on [0, 1], not a duration, so it gets its own linear buckets. The
+#: interesting region is the top: 0.0 is a judge that ignores order and 1.0 is one that is decided
+#: by it, and an operator wants to see the distribution creep upward rather than a mean move.
+_FRACTION_BUCKETS: tuple[float, ...] = (0.1, 0.25, 0.5, 0.75, 0.9, 1.0)
+
 _HISTOGRAM_BUCKETS: dict[str, tuple[float, ...]] = {
+    "chemclaw_hypothesis_position_bias": _FRACTION_BUCKETS,
     "chemclaw_turn_duration_seconds": _TURN_BUCKETS,
     "chemclaw_tool_duration_seconds": _TOOL_BUCKETS,
     "chemclaw_job_duration_seconds": _JOB_BUCKETS,
@@ -1101,6 +1203,14 @@ _HISTOGRAM_LABELS: dict[str, tuple[str, ...]] = {
 # systems to reconcile that this comment always warned about. What a *profile* costs is the gap this
 # registry fills, because nothing else has ever heard of one.
 _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
+    # `completed` (a ranked, separated field), `unseparated` (ranked but inside its own
+    # uncertainty — a real answer, and the common one), `unrated` (no comparison survived, so the
+    # ranking is the prior) and `empty` (nothing survived the screen). Four states rather than
+    # success/failure, because three of them are legitimate outcomes a chemist should see and only
+    # one of them means the judge never answered.
+    "chemclaw_hypothesis_tournaments_total": ("outcome",),
+    "chemclaw_hypothesis_screen_rejections_total": ("rule",),
+    "chemclaw_hypothesis_check_refusals_total": ("code",),
     "chemclaw_tokens_total": ("profile",),
     "chemclaw_input_tokens_total": ("profile",),
     "chemclaw_output_tokens_total": ("profile",),
@@ -1121,6 +1231,11 @@ _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
     # the two call sites, and `reason` is one of `BrokenPremise`'s three, fixed in `kg/premise.py`.
     # Neither can carry a note id, which would be a caller's string and unbounded.
     "chemclaw_premise_refusals_total": ("end", "reason"),
+    # Five series, and every value is a source literal in `api/runner._escalate_for_review`:
+    # `opened`, `joined`, `no_claims`, `no_actor`, `unavailable`. Nothing a caller supplies reaches
+    # it — a session id or an actor would be unbounded cardinality, and both are already in the log
+    # line beside each increment.
+    "chemclaw_answer_review_escalations_total": ("outcome",),
     # Three values, fixed in `agent/condense.py`'s own `DigestSource` literal rather than by a
     # caller: `extracted`, `degraded`, `oversized`. Bounded by the code that emits it, which is the
     # same guarantee `state` above gets from a CHECK constraint.
@@ -1188,12 +1303,20 @@ _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
     "chemclaw_tool_calls_total": ("tool", "outcome"),
     # A directory name under a configured skills tree, clamped by the read having succeeded rather
     # than by the visibility predicate, which is inert in a deployment that configures no gate.
+    "chemclaw_behaviour_proposals_total": ("kind", "outcome"),
     "chemclaw_skill_loads_total": ("skill",),
     "chemclaw_tool_refusals_total": ("reason",),
     "chemclaw_invalid_tool_calls_total": ("tool",),
     "chemclaw_turns_finished_total": ("outcome",),
     "chemclaw_jobs_finished_total": ("connector", "outcome"),
     "chemclaw_activity_failures_total": ("activity",),
+    # A bundle name off the connector registry — a deployment's own `CHEMCLAW_ENABLED_CONNECTORS`
+    # entry, never a caller's string, which is the same rule every label in this table follows. It
+    # is the label the sibling gauge `chemclaw_connector_unhealthy` already carries, and the reason
+    # it is here is that the counter without it could not say *which* connector went dark: the
+    # `ChemclawConnectorsDegradingTurns` rule groups by it, and a dashboard reading the unlabelled
+    # form could only report that something had.
+    "chemclaw_connectors_unreachable_total": ("connector",),
     "chemclaw_calc_cache_total": ("outcome",),
     "chemclaw_calc_backend_at_capacity_total": ("tool",),
     "chemclaw_ingest_records_total": ("source", "outcome"),
@@ -1249,6 +1372,12 @@ _GAUGES: dict[str, str] = {
         "Name lookups the LD_PRELOAD egress interposer refused in this process."
     ),
     "chemclaw_turn_capacity": "Configured maximum concurrent turns (the admission cap).",
+    # Published so a deployment that never set the key reads as an explicit 0 on a dashboard
+    # rather than as an absence of refusals, which is what an unset fairness cap and a working
+    # one look like from a scrape.
+    "chemclaw_turn_actor_capacity": (
+        "Configured maximum concurrent turns one actor may hold on this process (0 = disabled)."
+    ),
     # The right-hand side of the only question the per-process cap cannot answer. `sum()` of the
     # gauge above across pods is what the fleet is *admitting* right now; this is what it was
     # declared to be allowed to admit. Config validation catches the product at deploy time, but it

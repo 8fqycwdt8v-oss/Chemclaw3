@@ -57,10 +57,21 @@ the model reports on a corpus it was never shown all of. The notice names the to
 removed and what to do about it, and it ends in `SYSTEM_SPEECH_MARK`, which is the part a connector
 cannot forge. It did not until 2026-09-10, while this file said in two places that it was named as
 system text: `_notice` records what a claim of provenance is worth without the anchor behind it.
+
+**The cut is for the model; the chemist keeps the whole result**
+(`D-2026-09-27-a-cut-result-is-kept-for-the-chemist-not-the-model`). What the model reads is cut
+and stays cut — that is the context the cut exists to save. But the removed middle used to reach no
+store at all, because the tool-result store is fed from the stream, which only ever sees the
+message the model got. So a cut here also hands the *full* text to the turn's `FullResultSink`
+before the message leaves this module, and stamps the ref that sink answered on the message's
+`response_metadata` (`FULL_RESULT_REF_KEY`), which travels with the message and is not part of what
+the model reads. The stream then names that ref on `ToolResultEvent.result_ref`. There is no tool
+that lets the model fetch it back: that would re-inflate exactly what the cut reclaimed.
 """
 
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
+from contextvars import ContextVar, Token
 from typing import Any
 
 from langchain.agents.middleware import wrap_tool_call
@@ -72,6 +83,7 @@ from chemclaw.agent.tool_result_shape import rewritten_command_files, rewritten_
 from chemclaw.core.config import settings
 from chemclaw.core.logging import log_event
 from chemclaw.core.metrics_bridge import record_metric
+from chemclaw.core.model_prose import ModelProse
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +94,7 @@ _HEAD_SHARE = 3 / 5
 
 #: What a model can do about a cut *it caused by asking*, which is every tool result and a `task`
 #: report: it chose the call, so it can choose a narrower one.
-TOOL_REMEDY = (
+TOOL_REMEDY = ModelProse(
     "narrow the question (a filter, a smaller limit, one identifier) to see the part you need"
 )
 
@@ -91,7 +103,7 @@ TOOL_REMEDY = (
 #: and did not write, so there is no question to narrow — telling it to narrow one would send it
 #: to re-fetch data the step was handed. The only correct act is to say so in the answer, which is
 #: also what the chemist reading that answer needs to know.
-STEP_REMEDY = (
+STEP_REMEDY = ModelProse(
     "this step's template interpolated it, so there is no question to narrow — answer from what "
     "is here and say in your answer that part of the input was not shown"
 )
@@ -320,6 +332,8 @@ def bounded_content(
     *,
     mark: str = SYSTEM_SPEECH_MARK,
     remedy: str = TOOL_REMEDY,
+    charged_total: int | None = None,
+    expanded_from: int | None = None,
 ) -> tuple[Any, int]:
     """`content` cut to `limit` characters of text, and how many characters that removed.
 
@@ -342,14 +356,71 @@ def bounded_content(
     a cut is never silent, and a bound never grows what it bounds. Below that length cutting cannot
     reclaim anything, so there is no cut and no notice is owed.
 
+    **`charged_total` is what the notice's arithmetic is about, and it exists because this function
+    runs twice on one result.** `frame_connector_results` nests `bound_tool_results` inside itself
+    and re-bounds afterwards, because escaping is what makes the text longer — so the second pass
+    receives text the first already cut, and computing `total` from it describes the intermediate
+    rather than the tool. Both passes also place the notice at `_HEAD_SHARE`, so the second cut
+    deletes the first's notice and writes its own in the same position. Measured on a connector
+    success at the shipped ceiling: a tool returning 500,000 characters delivered
+    "451 of 60,102 characters removed" — understating the loss by a factor of ~975, in the direction
+    that hides it, in a sentence whose whole stated purpose is "so the model can say how much it did
+    not see". That is `FingerprintSearch.verdict`'s defect, which this module's docstring cites as
+    its reason to exist.
+
+    So the layer that knows the tool's real output size passes it, and the notice is written about
+    that number while the *cut* is still made against the text actually in hand. `None` means "this
+    content is the whole of it", which is true of every single-pass caller.
+
+    **`charged_total` alone was not enough, and the shape that used it overstated for every result
+    between the ceiling and about four times it.** `charged = max(charged_total, total)` stood here
+    — a clamp against an arithmetic that would otherwise go negative — and it picks the *escaped*
+    total whenever escaping expands past the stamped original, which is exactly the case the second
+    pass exists for. Driven on the shipped ceiling with a payload the escape expands (`"<" * n` plus
+    one soft-hyphen-disguised tag), on the connector-success path **and** on the non-connector one:
+
+    | the tool returned | the delivered notice said |
+    | --- | --- |
+    | 59,900 (*under* the ceiling) | `179,900 of 239,554 characters removed` |
+    | 100,000 | `179,281 of 238,935` |
+    | 150,000 | `179,281 of 238,935` |
+
+    The total is the same number at 100,000 and at 150,000 because it had become a function of
+    `4 x limit` rather than of the tool's output, and `returned - removed` is negative in all three
+    rows. Removing the clamp alone turns that into the mirror-image falsehood: the kept span is
+    counted in *escaped* characters against a total in the tool's own, so the same three rows read
+    "200 of 59,900" — a 75% loss reported as 0.3%, which is the understatement
+    `FingerprintSearch.verdict` is cited here for.
+
+    `expanded_from` is what closes both: the size of the content in hand **before** the caller
+    expanded it. The kept span is then converted back into the tool's own units in proportion
+    (`kept * expanded_from // total`) and the notice's two numbers are both about the tool. `None`
+    means "nothing expanded this", which is true of every single-pass caller and makes the
+    conversion the identity.
+
+    **It is a proportional attribution and not an exact count**, which is worth saying because a
+    number that can only be wrong in one direction is worse than no number: the escape expands some
+    characters and not others, so if the expanding ones cluster in the middle the removal is
+    over-reported and if they cluster at the ends it is under-reported. It is unbiased rather than
+    conservative, it is bounded by the tool's own total in both directions, and an exact count would
+    need the escape to carry an offset map through two middlewares.
+
     Returns:
-        The bounded content and the number of characters removed (0 when nothing was).
+        The bounded content and the number of characters removed from `content` (0 when nothing
+        was) — the real removal from what was passed, which is what a caller counting its own work
+        needs; the sentence the model reads is about `charged_total` when one is given.
     """
     spans = _spans(content)
     total = sum(len(span) for span in spans)
     if limit <= 0 or total <= limit:
         return content, 0
-    widest = len(_notice(tool, total, total, mark, remedy))
+    # The notice speaks about the tool's output; the cut is made against the text in hand. They are
+    # the same number for every caller that bounds a result once.
+    charged = total if charged_total is None else charged_total
+    # How much of the text in hand corresponds to one character of the tool's output. `total` when
+    # nothing expanded it, which makes every conversion below the identity.
+    source = total if expanded_from is None else expanded_from
+    widest = len(_notice(tool, charged, charged, mark, remedy))
     carrier = _carrier(content, spans)
     if limit < widest:
         # The share is smaller than the sentence explaining the cut, so the sentence is the thing
@@ -367,7 +438,9 @@ def bounded_content(
         # The figure is not written here: it used to say 19 characters and 3,158 calls, and the
         # mark `_notice` gained made both stale in the same commit
         # (`tests/test_tool_result_size.py` measures the crossover instead).
-        brief = _brief_notice(total, mark)
+        # Nothing survives on this branch, so the whole of the tool's output is gone and the
+        # conversion above has nothing to convert.
+        brief = _brief_notice(charged, mark)
         if total <= len(brief):
             return content, 0
         return _rebuilt(content, _kept(spans, 0, brief, carrier)), total
@@ -379,13 +452,149 @@ def bounded_content(
     # `total`.
     kept = max(limit - widest, 0)
     removed = total - kept
-    return (
-        _rebuilt(content, _kept(spans, kept, _notice(tool, removed, total, mark, remedy), carrier)),
-        removed,
-    )
+    # What the model can still see, in the tool's own units rather than in the expanded ones. Never
+    # above `charged`, because `kept <= total` and `source <= charged` — which is what keeps
+    # `returned - removed` non-negative without a clamp that discards the tool's own figure.
+    visible = kept * source // total if total else 0
+    notice = _notice(tool, charged - min(visible, charged), charged, mark, remedy)
+    return _rebuilt(content, _kept(spans, kept, notice, carrier)), removed
 
 
-def bounded_for_batch(request: Any, content: Any, *, mark: str = SYSTEM_SPEECH_MARK) -> Any:
+#: Where the inner bound records the tool's real output size, for the outer bound to charge.
+#:
+#: On `ToolMessage.response_metadata`, because that is the one field on a result that travels with
+#: it through `model_copy` and is not part of what the model reads. A key rather than a second
+#: middleware-to-middleware channel: the two passes are in one chain on one message, and a
+#: contextvar would be wrong the moment two tool calls in a batch are bounded concurrently.
+ORIGINAL_CHARS_KEY = "chemclaw_original_chars"
+
+
+def text_chars(content: Any) -> int:
+    """How many characters of text a `ToolMessage.content` holds, across every span of it.
+
+    Public because the callers that *expand* a result have to say what they expanded — the second
+    bounding pass writes a notice about the tool's own units and cannot derive the conversion from
+    text it has already rewritten. `_spans` is the same walk and stays private: this is the one
+    question a caller outside this module has.
+    """
+    return sum(len(span) for span in _spans(content))
+
+
+def original_chars(message: Any) -> int | None:
+    """The tool's real output size, if an earlier bound in this chain recorded one.
+
+    Returns:
+        The character count the first pass saw, or `None` when nothing has bounded this result yet.
+    """
+    stamped = (getattr(message, "response_metadata", None) or {}).get(ORIGINAL_CHARS_KEY)
+    return stamped if isinstance(stamped, int) else None
+
+
+#: Where a cut result names the full text it was cut from — present **iff** the model was shown a
+#: cut, and its value is the ref the turn's `FullResultSink` stored the full text under, or `""`
+#: when nothing stored it (no sink on this driver, the full text over the store's cap, a failed
+#: write). Presence and value are two facts on purpose: "the model saw less than the tool returned"
+#: is true whether or not the full text could be kept, and a surface needs it either way.
+#:
+#: On `response_metadata` for the reason `ORIGINAL_CHARS_KEY` is: it travels with the message
+#: through `model_copy`, through the checkpoint and through `session_messages`, and it is not what
+#: the model reads. A ref is 64 characters, so the thread carries a pointer, never the text.
+FULL_RESULT_REF_KEY = "chemclaw_full_result_ref"
+
+#: `(tool, full_text) -> ref`, answering `""` when it stored nothing and never raising. The same
+#: shape as `api/tool_results.ResultSink`, restated rather than imported because
+#: `tests/test_layering.py` forbids `agent -> api`: the store is the front door's, and this module
+#: only knows that somebody may be listening.
+FullResultSink = Callable[[str, str], Awaitable[str]]
+
+# **Ambient, because the cut runs inside a middleware that is built once per profile and cached for
+# the process** — a sink captured at build time would file one turn's results under another turn's
+# session. Set by the one driver that has a session to file under (`api/runner._turn_ambient`);
+# every other driver (the CLI, a template step) leaves it unset, and a cut there stamps `""` and
+# stores nothing, which is what those drivers did before and all they can do: nothing serves their
+# results back to a surface.
+_full_results: ContextVar[FullResultSink | None] = ContextVar(
+    "chemclaw_full_result_sink", default=None
+)
+
+
+def set_full_result_sink(sink: FullResultSink) -> Token[FullResultSink | None]:
+    """Make `sink` where this turn's cut results keep their full text; returns the reset token."""
+    return _full_results.set(sink)
+
+
+def reset_full_result_sink(token: Token[FullResultSink | None]) -> None:
+    """Undo `set_full_result_sink`, so the next turn on this worker starts with no sink."""
+    _full_results.reset(token)
+
+
+def was_cut(message: Any) -> bool:
+    """Whether the model was shown a cut of this result rather than all of it."""
+    return FULL_RESULT_REF_KEY in (getattr(message, "response_metadata", None) or {})
+
+
+def full_result_ref(message: Any) -> str:
+    """The ref of the full text this result was cut from, or `""` when there is none to fetch."""
+    ref = (getattr(message, "response_metadata", None) or {}).get(FULL_RESULT_REF_KEY)
+    return ref if isinstance(ref, str) else ""
+
+
+def full_text(content: Any) -> str:
+    """The text a `ToolMessage.content` holds, every span joined — what the full-result store keeps.
+
+    The same walk the cut measures with (`_spans`), so what is kept is exactly what was cut from:
+    an image block contributes nothing here for the reason it contributes no span there.
+    """
+    return "".join(_spans(content))
+
+
+async def kept_in_full(result: Any, originals: dict[str, str], tool: str) -> Any:
+    """Store each cut result's full text and stamp its ref on the message the model is handed.
+
+    `originals` maps a `tool_call_id` to the text that call returned *before* it was cut; a
+    middleware's synchronous rewrite fills it and this, the one `await` in the pair, drains it.
+    Written before the message leaves the middleware, so the bytes are durable before the stream
+    can announce the ref naming them — the ordering `api/runner_trace.py` states for its own write.
+
+    **A caller records only a message not already carrying `FULL_RESULT_REF_KEY`.** The chain cuts
+    in two places (`bound_tool_results`, then `frame_connector_results`' re-bound after escaping),
+    and the first one to cut saw more of the tool's output than the second, so its stamp stands and
+    the outer pass records nothing for that message (`tool_framing`'s `_kept` checks `was_cut`).
+
+    Returns `result` itself when nothing was cut, so identity still means "unchanged".
+    """
+    if not originals:
+        return result
+    sink = _full_results.get()
+    refs = {
+        call_id: (await sink(tool, text) if sink is not None else "")
+        for call_id, text in originals.items()
+    }
+
+    def _stamped(message: ToolMessage) -> ToolMessage:
+        if message.tool_call_id not in refs:
+            return message
+        return message.model_copy(
+            update={
+                "response_metadata": {
+                    **(message.response_metadata or {}),
+                    FULL_RESULT_REF_KEY: refs[message.tool_call_id],
+                }
+            }
+        )
+
+    return rewritten_tool_messages(result, _stamped)
+
+
+def bounded_for_batch(
+    request: Any,
+    content: Any,
+    *,
+    mark: str = SYSTEM_SPEECH_MARK,
+    charged_total: int | None = None,
+    expanded_from: int | None = None,
+    count: bool = True,
+) -> Any:
     """`content` cut to this call's share of the ceiling, counted, logged, and said so in the text.
 
     The share arithmetic and both of its side effects in one function, because there are now two
@@ -399,15 +608,36 @@ def bounded_for_batch(request: Any, content: Any, *, mark: str = SYSTEM_SPEECH_M
 
     Returns `content` itself when nothing was removed, so a caller can tell "unchanged" by
     identity rather than by re-measuring — the same contract `rewritten_tool_messages` relies on.
+
+    **`charged_total` and `count` both exist because this runs twice on one result**, and both were
+    missing. `frame_connector_results` re-bounds after escaping (escaping is what makes the text
+    longer), so a framed connector success or a defanged helper report passes through here a second
+    time. `charged_total` keeps the notice's arithmetic about the tool rather than about the
+    intermediate — see `bounded_content`. `count` keeps the *metric* about the result rather than
+    about the pass: the counter and the `tool_result.truncated` row fired twice for one cut, the
+    second time with the understated figure, so an operator counting cuts saw 2N for N results.
+    The first pass's numbers are the true ones, so the second pass is the one that stays quiet.
+
+    `expanded_from` is the third of the same family and arrived last: `charged_total` kept the
+    notice's *total* about the tool, and this keeps its *removal* about the tool, because the second
+    pass cuts text it has expanded. See `bounded_content` for the two measured falsehoods either one
+    alone leaves behind.
     """
     tool = str(request.tool_call["name"])
     ceiling = settings.agent_max_tool_result_chars
     # The batch's share, never below 1: 0 is the deployment's own "no cap" and a share that rounded
     # to it would restore the unbounded behaviour exactly where the batch is widest.
     limit = max(ceiling // batch_width(request), 1) if ceiling else 0
-    bounded, removed = bounded_content(content, tool, limit, mark=mark)
-    if not removed:
-        return content
+    bounded, removed = bounded_content(
+        content,
+        tool,
+        limit,
+        mark=mark,
+        charged_total=charged_total,
+        expanded_from=expanded_from,
+    )
+    if not removed or not count:
+        return bounded if removed else content
     # **The metric label is the served name, never the model's string**, and `core/metrics.py`
     # already claimed it was ("a tool name here is one the registry served, never a string a caller
     # invented"). It was not: `ToolNode` dispatches an unregistered name through this chain, its
@@ -434,18 +664,41 @@ def bounded_for_batch(request: Any, content: Any, *, mark: str = SYSTEM_SPEECH_M
     return bounded
 
 
+def _batch_calls(request: Any) -> list[Any]:
+    """The tool calls the assistant message that asked for *this* one made, this one included.
+
+    The shared walk under both counters below. It is read off the message rather than counted from
+    the state's tool results, for the reason `plan_gate.rewrite_todos_in_batch` gives for the same
+    walk: `ToolNode` hands each call a runtime built from one pre-batch snapshot, so the
+    originating `AIMessage` is the only place the *other* calls running right now are visible —
+    the results do not exist yet.
+
+    Empty when the message cannot be found, which both readers turn into 1 rather than 0 or a
+    guess: off the request path (a middleware driven directly, `agent/tool_invocation.py`'s
+    no-graph fold) there is no batch, and one call getting the whole budget is exactly today's
+    behaviour.
+
+    Args:
+        request: The tool-call request the middleware chain is running.
+
+    Returns:
+        The batch's calls, or an empty list when the originating message is not in state.
+    """
+    messages = (getattr(request, "state", None) or {}).get("messages") or []
+    this_call = request.tool_call.get("id")
+    for message in reversed(messages):
+        calls = getattr(message, "tool_calls", None) or []
+        if any(call.get("id") == this_call for call in calls):
+            return list(calls)
+    return []
+
+
 def batch_width(request: Any) -> int:
     """How many tool calls the assistant message that asked for *this* one made.
 
-    The denominator of the share below, and the number nothing was dividing by. It is read off the
-    message rather than counted from the state's tool results, for the reason
-    `plan_gate.rewrite_todos_in_batch` gives for the same walk: `ToolNode` hands each call a
-    runtime built from one pre-batch snapshot, so the originating `AIMessage` is the only place the
-    *other* calls running right now are visible — the results do not exist yet.
-
-    1 when the message cannot be found rather than 0 or a guess: off the request path (a middleware
-    driven directly, `agent/tool_invocation.py`'s no-graph fold) there is no batch, and one call
-    getting the whole ceiling is exactly today's behaviour.
+    The denominator of `bounded_for_batch`'s share, and the number nothing was dividing by. Every
+    call in a batch sends its result to the same model in the same request, so the whole batch is
+    the right divisor there — unlike `batch_siblings` below, whose resource has fewer producers.
 
     Args:
         request: The tool-call request the middleware chain is running.
@@ -453,13 +706,45 @@ def batch_width(request: Any) -> int:
     Returns:
         The number of calls in this call's batch, never below 1.
     """
-    messages = (getattr(request, "state", None) or {}).get("messages") or []
-    this_call = request.tool_call.get("id")
-    for message in reversed(messages):
-        calls = getattr(message, "tool_calls", None) or []
-        if any(call.get("id") == this_call for call in calls):
-            return max(len(calls), 1)
-    return 1
+    return max(len(_batch_calls(request)), 1)
+
+
+def batch_siblings(request: Any) -> int:
+    """How many calls in this batch invoke the same tool as this one.
+
+    **The divisor for a resource whose producers are one tool rather than the whole batch**, which
+    is the caller's `files` channel. `_files_already_held` reads a pre-batch snapshot, so N
+    concurrent `task` calls each see an identical `held` and each take the whole of what is left —
+    the concurrent half of the defect `_bounded_file`'s `held` closed for the sequential case.
+
+    Same-name rather than `batch_width`, and that is the decision: measured against the installed
+    distributions, the only site that copies a non-excluded state key — and so `files` — into a
+    caller's `Command` is `deepagents.middleware.subagents`'s `**state_update`, which is `task`.
+    A `props` call in the same batch writes no file, so charging a helper for it would cut a
+    research note to a fraction on a batch that shares none of its budget.
+
+    **It counts siblings by name, not writers, and that gap is a real cost rather than a rounding
+    one.** Most `task` calls read and write nothing, so a batch of eight helpers of which one files
+    a note charges that note an eighth — which is the same outcome the paragraph above rejects
+    `batch_width` for, arrived at by a narrower route. Driven at the shipped budget, one writer
+    beside silent siblings: 199,999 characters land whole at width 1, 100,000 at width 2, 50,000 at
+    4 and 25,000 at 8. The bound still holds — an unused sibling's share is wasted allowance, never
+    spent — so this fails closed, and what it costs is a note cut for company it did not keep.
+    Counting writers instead needs their results, which do not exist when this runs;
+    `docs/planning/BACKLOG.md` carries the exact-accounting design and why it is not a free win.
+
+    Args:
+        request: The tool-call request the middleware chain is running.
+
+    Returns:
+        The number of calls in this batch naming this call's tool, never below 1.
+    """
+    # Subscript rather than `.get`, because `bounded_for_batch` one function up already requires
+    # the key and the two reads of one dict must not disagree about whether it is optional — a
+    # missing name here would match no sibling, floor to 1 and hand out the whole budget, which is
+    # a fail-open reached by a shape the other reader would have raised on.
+    name = request.tool_call["name"]
+    return max(sum(1 for call in _batch_calls(request) if call.get("name") == name), 1)
 
 
 @wrap_tool_call
@@ -486,19 +771,70 @@ async def bound_tool_results(request: Any, handler: Callable[[Any], Any]) -> Any
     60,000, so a report measured at **70,048 characters** reached the caller's thread whole.
     """
     result = await handler(request)
+    # The full text of every result this pass cuts, for `kept_in_full` to store once the
+    # synchronous rewrite below has decided which ones those are.
+    originals: dict[str, str] = {}
 
     def _bounded(message: ToolMessage) -> ToolMessage:
+        # Measured before the cut, because after it the number is gone: `frame_connector_results`
+        # wraps this middleware and re-bounds what comes out, and without this stamp its notice
+        # describes the 60,000-character intermediate instead of what the tool returned.
+        was = sum(len(span) for span in _spans(message.content))
         content = bounded_for_batch(request, message.content)
         if content is message.content:
             return message
-        return message.model_copy(update={"content": content})
-
-    def _bounded_for_this_command(content: str, sharing: int) -> str:
-        return _bounded_file(content, sharing, _files_already_held(request))
+        originals[message.tool_call_id] = full_text(message.content)
+        return message.model_copy(
+            update={
+                "content": content,
+                "response_metadata": {
+                    **(message.response_metadata or {}),
+                    ORIGINAL_CHARS_KEY: was,
+                },
+            }
+        )
 
     return rewritten_command_files(
-        rewritten_tool_messages(result, _bounded), _bounded_for_this_command
+        await kept_in_full(
+            rewritten_tool_messages(result, _bounded), originals, str(request.tool_call["name"])
+        ),
+        _bounded_file,
+        (getattr(request, "state", None) or {}).get("files"),
+        _files_budget(request),
     )
+
+
+def _files_budget(request: Any) -> int | None:
+    """How many characters this command may add to the caller's `files` channel.
+
+    **One number, computed once, spent by the loop that has the keys.** The share arithmetic used
+    to live in `_bounded_file` and divide by a count of files, which is the right divisor for text
+    and no divisor at all for a path — so `agent/tool_result_shape.rewritten_command_files` now
+    receives what may be spent and allocates it, because it is the only place that can see what a
+    file costs. That also retires the count cap this replaced: a cap on how many files may be
+    stored was a *model* of when the budget runs out, and the budget running out is available
+    directly.
+
+    Three terms, and each is a defect this module already measured:
+
+    - the setting is the channel's, so what the channel already holds is subtracted
+      (`_files_already_held`) — otherwise N delegations each store the whole budget;
+    - the batch's siblings divide it, because `files` is a `DeltaChannel` and every `task` call in
+      this superstep read the same pre-batch snapshot (`batch_siblings` says why that is the only
+      arithmetic available before their results exist);
+    - `None` when the setting is 0, which is its documented off switch and must not become a
+      budget of zero characters.
+
+    Args:
+        request: The tool-call request, whose state carries the caller's channels.
+
+    Returns:
+        The characters this command may add, or `None` when the cap is switched off.
+    """
+    budget = settings.agent_subagent_files_max_chars
+    if budget <= 0:
+        return None
+    return max(budget - _files_already_held(request), 0) // batch_siblings(request)
 
 
 def _files_already_held(request: Any) -> int:
@@ -511,6 +847,13 @@ def _files_already_held(request: Any) -> int:
     is already there against the same budget is what makes the setting a bound on the channel,
     which is the resource its comment in `core/config/agent.py` names.
 
+    **A key is charged beside its text, and this function summed only text.** The channel is a
+    mapping and LangGraph checkpoints the mapping, so a path costs what it is long — and a path is
+    a string the *model* wrote in its `write_file` call rather than anything this system composed.
+    Measured through the shipped middleware at the 200,000-character budget, 5,000 ordinary
+    `/scratch/…` keys were 83,370 uncounted characters, and 5,000 thousand-character keys were
+    4,527,370. See `agent/tool_result_shape.rewritten_command_files` for the half that spends it.
+
     Args:
         request: The tool-call request, whose `state` carries the caller's channels.
 
@@ -521,57 +864,51 @@ def _files_already_held(request: Any) -> int:
     if not isinstance(files, dict):
         return 0
     return sum(
-        len(data["content"])
-        for data in files.values()
+        len(path) + len(data["content"])
+        for path, data in files.items()
         if isinstance(data, dict) and isinstance(data.get("content"), str)
     )
 
 
-def _bounded_file(content: str, sharing: int, held: int = 0) -> str:
+def _bounded_file(content: str, share: int) -> str:
     """One file's share of `agent_subagent_files_max_chars`, cut with a notice that says so.
 
-    **The resource is the caller's `files` channel, so the budget is the channel's and the share is
-    per file** — the same division `bounded_for_batch` applies across a batch of tool calls, and
-    for the same reason: a per-file cap times an unbounded number of files is not a bound. A helper
-    that writes one note gets the whole budget; one that writes ten gets a tenth each.
+    **The cut, the log and the counter — and no longer the arithmetic.** The share used to be
+    divided here, out of the setting, by a count of files and a count of concurrent calls; it is
+    now handed in by `agent/tool_result_shape.rewritten_command_files`, which spends a remainder
+    and is the only place that can see what a file costs, because the key is half the cost and
+    never reached this function. `_files_budget` above holds the two terms that are about the
+    *request* rather than about one file.
 
     `bounded_content` is reused rather than reimplemented, so a truncated file keeps both ends and
     carries the same system-marked notice a truncated tool result does — which matters, because the
     caller *can* read one back (`read_file` reaches the file this crossed with) and a silent cut
     would hand a chemist a document that simply stops.
 
-    **`held` is what makes it a bound on the channel rather than on one `task` call.** `files` is a
-    `DeltaChannel` and accumulates, so without it a caller that delegates ten times stores ten
-    times the setting. What is left of the budget is divided, and an exhausted budget cuts to
-    `bounded_content`'s brief form rather than to nothing — a floor of 1 rather than 0, because 0
-    is how this setting is switched off entirely.
-
-    The tool name passed to the notice is `task`, because that is the call the caller sees in its
-    own thread and the one an operator would go looking at.
+    **A share of 0 is no cap rather than no content**, which is how `agent_subagent_files_max_chars
+    = 0` switches the whole bound off: `bounded_content` returns a non-positive limit uncut, so the
+    off switch has one spelling in this module instead of a branch per caller. Every share the loop
+    computes for a live budget is floored at 1 for the reason the sibling `bounded_for_batch` gives
+    — a share that rounded to 0 would restore the unbounded behaviour exactly where the channel is
+    fullest, and that was measured: two 500,000-character files against an exhausted channel stored
+    1,000,000 characters uncut, with nothing logged and the counter unmoved.
 
     Args:
         content: The file's text as the helper left it.
-        sharing: How many files cross in this command.
-        held: Characters of `files` the caller's state already carries.
+        share: How many characters this file may occupy, or 0 for no cap.
 
     Returns:
         The text to store, or `content` itself when nothing was cut.
     """
-    budget = settings.agent_subagent_files_max_chars
-    if budget > 0:
-        budget = max(budget - held, 1)
-    share = budget // max(sharing, 1)
     bounded, removed = bounded_content(content, "task", share)
     if not removed:
         return content
     record_metric(lambda m: m.increment("chemclaw_subagent_file_truncations_total"))
     logger.warning(
-        "cut %d character(s) from a file a helper wrote into its caller's state; the share of "
-        "`agent_subagent_files_max_chars` across %d file(s) is %d, with %d character(s) of the "
-        "budget already held",
+        "cut %d character(s) from a file a helper wrote into its caller's state; its share of "
+        "`agent_subagent_files_max_chars` — what is left of the channel's budget, divided over the "
+        "files still to cross, less this file's own path — is %d character(s)",
         removed,
-        sharing,
         share,
-        held,
     )
     return str(bounded)

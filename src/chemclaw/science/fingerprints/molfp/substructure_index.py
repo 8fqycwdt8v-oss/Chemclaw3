@@ -113,6 +113,40 @@ from chemclaw.science.fingerprints.store import FingerprintRecord
 
 log = logging.getLogger(__name__)
 
+
+class ScanDeadlineExceeded(TimeoutError):
+    """A substructure scan stopped on its deadline, carrying how far it actually got.
+
+    **A `TimeoutError` subclass, so every `except TimeoutError` on the way out keeps working** —
+    `search.py` turns it into the same `FingerprintError` `asyncio.wait_for` produces, and nothing
+    upstream has to learn a new type.
+
+    What it adds is `reached`, and the reason is that the property this deadline exists for is a
+    claim about *records*: "it stopped instead of going on matching every remaining record". That
+    was asserted as a ratio of two wall clocks (`bounded < unbounded / 2`), a proxy that failed
+    `main` twice in one morning at 0.270 and 0.271 against a bar of a quarter while measuring
+    0.186-0.206 on an idle machine. The count was already computed — `start`, formatted into the
+    message and then discarded — so the honest assertion was one attribute away and the message was
+    the only thing holding it.
+    """
+
+    def __init__(self, reached: int, total: int, because: str = "") -> None:
+        """Carry the cut-off point beside the message that used to be the only place it appeared.
+
+        `because` keeps the two scan paths distinguishable, which they were on purpose and which
+        unifying the type nearly lost: `test_a_caller_with_no_time_left_builds_nothing_and_is_told_
+        what_ran_out` asserts the record-by-record path says so, because a corpus too large to index
+        and a corpus too slow to match have different remedies. The *count* is shared; the sentence
+        naming which scan ran out is not.
+        """
+        detail = f", {because}" if because else ""
+        super().__init__(
+            f"substructure scan gave up after {reached} of {total} molecule(s){detail}"
+        )
+        self.reached = reached
+        self.total = total
+
+
 # The first chunk of a scan is one record, so the first deadline check happens after exactly the
 # work the per-record loop this replaces did between its own checks. Everything after it is sized
 # from what that one cost — see `CorpusIndex.labels_matching`.
@@ -227,8 +261,10 @@ class CorpusIndex:
             The matching labels in stored order, at most `limit` of them.
 
         Raises:
-            TimeoutError: The deadline passed before the whole slice was scanned. The caller turns
-                it into the same `FingerprintError` `asyncio.wait_for` produces.
+            ScanDeadlineExceeded: The deadline passed before the whole slice was scanned. A
+                `TimeoutError`, so the caller turns it into the same `FingerprintError`
+                `asyncio.wait_for` produces; it carries `reached` for the same reason this returns
+                it.
         """
         found: list[str] = []
         total = len(self.labels)
@@ -237,9 +273,7 @@ class CorpusIndex:
         slice_seconds = settings.substructure_scan_deadline_slice_seconds
         while start < total and len(found) < limit:
             if time.monotonic() >= deadline:
-                raise TimeoutError(
-                    f"substructure scan gave up after {start} of {total} molecule(s)"
-                )
+                raise ScanDeadlineExceeded(start, total)
             end = min(start + chunk, total)
             began = time.monotonic()
             hits = self.library.GetMatches(

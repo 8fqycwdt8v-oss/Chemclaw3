@@ -31,36 +31,14 @@ serves it rewrite the sentence in the same change.
 """
 
 from contextlib import AbstractAsyncContextManager
-from datetime import datetime
-from typing import Annotated, Any
 
 import psycopg
 from psycopg.rows import TupleRow, class_row
-from pydantic import BaseModel, BeforeValidator, ConfigDict
+from pydantic import BaseModel, ConfigDict
 
 from chemclaw.core import db
 from chemclaw.core.config import settings
-
-
-def _stamp(value: Any) -> Any:
-    """A timestamp column as this model's ISO string, leaving anything else to be validated.
-
-    **A validator rather than a SQL-side cast, because the string is on the wire.** `::text` would
-    have done the conversion in the server and spelled it `2026-09-16 10:00:00+00`, where every
-    reader of this model has always been handed `datetime.isoformat()`'s
-    `2026-09-16T10:00:00+00:00`. A row factory binds columns by name and does not convert them, so
-    the conversion has to move somewhere — and the only place it can move without changing what a
-    caller reads is here.
-    """
-    if isinstance(value, datetime):
-        return value.isoformat()
-    return "" if value is None else value
-
-
-#: A `TIMESTAMPTZ` column carried as the ISO string this seam has always exposed. `settled_at` is
-#: nullable — an effect that was begun and never settled is the state the ledger exists for — and
-#: NULL reads as the empty string rather than as `None`, which is what `unsettled` means by it.
-Stamp = Annotated[str, BeforeValidator(_stamp)]
+from chemclaw.core.db import IsoStamp
 
 
 class EffectRecord(BaseModel):
@@ -88,8 +66,8 @@ class EffectRecord(BaseModel):
     state: str = "attempting"
     external_ref: str = ""
     detail: str = ""
-    attempted_at: Stamp = ""
-    settled_at: Stamp = ""
+    attempted_at: IsoStamp = ""
+    settled_at: IsoStamp = ""
 
 
 def _connect() -> AbstractAsyncContextManager[psycopg.AsyncConnection[TupleRow]]:

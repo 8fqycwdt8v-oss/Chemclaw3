@@ -71,6 +71,7 @@ from chemclaw.ingest.eln.json_adapter import JsonExportAdapter
 from chemclaw.ingest.eln.ord import OrdReaction
 from chemclaw.ingest.eln.ord_adapter import OrdJsonAdapter
 from chemclaw.ingest.eln.record import record_from_ord_reaction
+from chemclaw.ingest.eln.warehouse.expr import PatternBudgetError, pattern_budget
 
 logger = logging.getLogger(__name__)
 
@@ -583,44 +584,58 @@ async def check_prose_yields_its_numbers(eln_export_dir: Path) -> Check:
     raws = await adapter.fetch_new_entries(_EPOCH)
     checked = 0
     wrong: list[str] = []
-    for raw in raws:
-        prose = str(raw.payload.get("procedure") or "")
-        temperature = _PROSE_TEMPERATURE.search(prose)
-        time_h = _PROSE_TIME.search(prose)
-        if temperature is None or time_h is None:
-            continue
-        try:
-            reaction = adapter.map_to_ord(raw)
-        except Exception:
-            continue
-        checked += 1
-        # `is not None` on the step values, and not a truthiness test: one fixture reads "cooled to
-        # 0 °C", and `0.0 or None` would report the extraction as a failure that it is not.
-        steps_carry = any(step.temperature_c is not None for step in reaction.steps) and any(
-            step.duration_h is not None for step in reaction.steps
-        )
-        # The setpoint may be present only if the entry stated it in its own field. Read from the
-        # payload rather than assumed absent, so an entry that legitimately carries both is not
-        # counted as a regression.
-        stated = (
-            raw.payload.get("temperature_c") is not None,
-            raw.payload.get("time_h") is not None,
-        )
-        setpoint_invented = (
-            reaction.temperature_c is not None and not stated[0],
-            reaction.time_h is not None and not stated[1],
-        )
-        if not steps_carry:
-            wrong.append(
-                f"{raw.entry_id}: prose states "
-                f"{(float(temperature.group(1)), float(time_h.group(1)))} and no step carries both"
+    # One budget for the whole check, matching how a real sync runs it: a per-entry budget would
+    # satisfy the derived guard below and bound nothing, since the cost this exists to bound is
+    # the page's total rather than any one entry's.
+    with pattern_budget():
+        for raw in raws:
+            prose = str(raw.payload.get("procedure") or "")
+            temperature = _PROSE_TEMPERATURE.search(prose)
+            time_h = _PROSE_TIME.search(prose)
+            if temperature is None or time_h is None:
+                continue
+            try:
+                reaction = adapter.map_to_ord(raw)
+            except PatternBudgetError:
+                # **Not swallowed, which the broad arm below would do.** `PatternBudgetError` is a
+                # bare `Exception`, so exhausting the page budget used to skip every remaining entry
+                # and let this check *pass* with a quietly smaller denominator — the exact "silent
+                # denominator" failure this function's own docstring names two paragraphs up. A
+                # binding too expensive to map a page is a finding, not a skippable entry.
+                raise
+            except Exception:
+                continue
+            checked += 1
+            # `is not None` on the step values, and not a truthiness test: one fixture reads
+            # "cooled to 0 °C", and `0.0 or None` would report the extraction as a failure that it
+            # is not.
+            steps_carry = any(step.temperature_c is not None for step in reaction.steps) and any(
+                step.duration_h is not None for step in reaction.steps
             )
-        elif any(setpoint_invented):
-            wrong.append(
-                f"{raw.entry_id}: headline setpoint "
-                f"{(reaction.temperature_c, reaction.time_h)} was derived from prose, which "
-                f"D-2026-08-26 forbids"
+            # The setpoint may be present only if the entry stated it in its own field. Read from
+            # the
+            # payload rather than assumed absent, so an entry that legitimately carries both is not
+            # counted as a regression.
+            stated = (
+                raw.payload.get("temperature_c") is not None,
+                raw.payload.get("time_h") is not None,
             )
+            setpoint_invented = (
+                reaction.temperature_c is not None and not stated[0],
+                reaction.time_h is not None and not stated[1],
+            )
+            if not steps_carry:
+                wrong.append(
+                    f"{raw.entry_id}: prose states "
+                    f"{(float(temperature.group(1)), float(time_h.group(1)))} and no step "
+                    "carries both"
+                )
+            elif any(setpoint_invented):
+                wrong.append(
+                    f"{raw.entry_id}: headline setpoint "
+                    f"{(reaction.temperature_c, reaction.time_h)} was derived from prose, which "
+                    f"D-2026-08-26 forbids"
+                )
     return Check(
         name="prose reaches the steps, and never the setpoint",
         passed=checked > 0 and not wrong,
@@ -794,13 +809,16 @@ async def _map_corpus(
     }
     mapped: dict[str, list[OrdReaction]] = {}
     refused: dict[str, int] = {}
-    for raw in raws:
-        dataset_id = dataset_of.get(raw.entry_id, "")
-        try:
-            mapped.setdefault(dataset_id, []).append(adapter.map_to_ord(raw))
-        except Exception as exc:
-            refused[dataset_id] = refused.get(dataset_id, 0) + 1
-            logger.debug("refused %s: %s", raw.entry_id, exc)
+    # The same page-wide regex budget a real sync runs under, so this probe measures the shipped
+    # bound rather than an unbounded variant of it — which is the whole point of a live check.
+    with pattern_budget():
+        for raw in raws:
+            dataset_id = dataset_of.get(raw.entry_id, "")
+            try:
+                mapped.setdefault(dataset_id, []).append(adapter.map_to_ord(raw))
+            except Exception as exc:
+                refused[dataset_id] = refused.get(dataset_id, 0) + 1
+                logger.debug("refused %s: %s", raw.entry_id, exc)
     return mapped, refused
 
 

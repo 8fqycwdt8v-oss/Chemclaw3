@@ -25,28 +25,23 @@ worker is a different process, so this meters honestly rather than pretending to
 import asyncio
 import logging
 import time
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Iterator, Sequence
 from contextlib import AsyncExitStack, contextmanager
-from typing import Any
+from typing import Annotated, Any
 
 from langchain_core.callbacks import AsyncCallbackHandler
 from langchain_core.outputs import LLMResult
-from langchain_core.tools import tool as tool_decorator
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from temporalio import activity
 
-from chemclaw.agent.context_budget import (
-    begin_context_watch,
-    current_context,
-    end_context_watch,
-)
+from chemclaw.agent.context_budget import current_context
 from chemclaw.agent.loop_cap import loop_capped
 from chemclaw.agent.profiles import AgentProfile, get_profile
-from chemclaw.agent.repeat_guard import begin_call_watch, end_call_watch
 from chemclaw.agent.spend_cap import spend_capped
 from chemclaw.agent.state import answer_text, turn_config, turn_input
 from chemclaw.agent.tool_invocation import invoke_governed
 from chemclaw.agent.tool_result_size import STEP_REMEDY, bounded_content
+from chemclaw.agent.turn_ambient import turn_caps
 from chemclaw.agent.turn_cost import TurnCost, record_turn_cost
 from chemclaw.agent.turn_usage import TurnUsage, llm_result_usage
 from chemclaw.connectors.jobs import prepare_job_launch
@@ -62,6 +57,7 @@ from chemclaw.core.identity_context import (
 from chemclaw.core.logging import log_event
 from chemclaw.core.metrics import METRICS
 from chemclaw.core.session_context import reset_current_session_id, set_current_session_id
+from chemclaw.durable.governed_launch import audited_launch
 from chemclaw.durable.heartbeat import beating
 from chemclaw.durable.registry import durable_activity
 
@@ -91,7 +87,10 @@ class StepIdentity(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    actor: str = Field(min_length=1)
+    # Stripped, then refused blank: `Field(min_length=1)` accepted `" "`, and a whitespace actor is
+    # stamped ambient by every step as a principal nobody is — the same rule `api/auth.py` holds on
+    # the token's `oid`.
+    actor: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
     roles: list[str] = Field(default_factory=list)
     # Ties this run's audit events together, exactly as a conversation's correlation id does, so a
     # template's steps are one traceable unit in the trail rather than N unrelated tool calls.
@@ -387,11 +386,12 @@ async def authorize_job_step(step: JobStepInput) -> ResolvedJob:
     """
     connector, job = find_job(step.job)
     with _acting_as(step.identity):
-        payload = await _audited(
-            step.identity,
+        payload = await audited_launch(
             job.name,
             step.arguments,
             lambda: prepare_job_launch(connector, job, step.arguments),
+            actor=step.identity.actor,
+            correlation_id=step.identity.correlation_id,
         )
     return ResolvedJob(
         connector=connector,
@@ -403,43 +403,6 @@ async def authorize_job_step(step: JobStepInput) -> ResolvedJob:
         awaits_answer=job.awaits_answer,
         payload=payload,
     )
-
-
-async def _audited(
-    identity: StepIdentity,
-    tool: str,
-    arguments: dict[str, Any],
-    action: Callable[[], dict[str, Any]],
-) -> dict[str, Any]:
-    """Run a job step's pre-flight through the governed chain, so the launch leaves an audit row.
-
-    Through the chain over a real tool rather than by emitting an `AuditEvent` directly: there is
-    exactly one place that decides what an audit record looks like, and a second emitter would
-    drift from it the first time that shape changed. The tool is named for the job, so the row
-    reads the same as the one a chat turn's launch of the same job writes — which is the point,
-    since the whole finding was that these two paths were governed differently.
-
-    The pre-flight is wrapped in a tool built on the spot rather than found on the surface, because
-    what is being audited is not a tool the model can call: it is the resolution and validation a
-    `job` step does before Temporal starts the workflow. Naming it after the job is what makes it
-    legible in the trail.
-
-    A refusal propagates after being recorded as an `error` outcome, exactly as a denied chat tool
-    call is.
-    """
-
-    @tool_decorator(name_or_callable=tool, description=f"launch the {tool!r} job")
-    async def _launch(**_kwargs: Any) -> dict[str, Any]:
-        return action()
-
-    payload: dict[str, Any] = await invoke_governed(
-        _launch,
-        arguments,
-        correlation_id=identity.correlation_id,
-        actor=identity.actor,
-        profile=get_profile(None),
-    )
-    return payload
 
 
 # **On the background queue, because until now it was on no queue at all.** `resolve_job_step` (as
@@ -842,11 +805,14 @@ async def run_agent_step(step: AgentStepInput) -> AgentStepResult | str:
     meters (the counters, and the durable row that outlives the process) and does not pretend to
     cap. A run-level cap on template spend needs a durable counter, which is a decision, not a call.
 
-    **The repeat guard is watched here too**, because it is per-turn ambient state that the middle-
-    ware reads and its caller owns the lifetime of (`agent/repeat_guard.py`). Without
-    `begin_call_watch` the guard is inert — its contextvar is `None`, so the counter it increments
-    is discarded — and a step's model could ask one tool the identical question indefinitely, which
-    is precisely the shape the guard was measured against (`find_past_jobs` ×8 in one turn).
+    **Every per-turn cap ambient is opened here**, through `agent.turn_ambient.turn_caps` rather
+    than by hand — this step used to open two of the four, so a `task` fan-out inside it was bounded
+    by the per-branch channel and a tool body's model call was booked by nothing. The repeat guard
+    is one of them, because it is per-turn ambient state the middleware reads and the caller owns
+    the lifetime of (`agent/repeat_guard.py`): without its watch the guard is inert — its contextvar
+    is `None`, so the counter it increments is discarded — and a step's model could ask one tool the
+    identical question indefinitely, the shape it was measured against (`find_past_jobs` ×8 in one
+    turn).
     """
     from chemclaw.agent.langgraph_agent import build_langgraph_agent
 
@@ -860,13 +826,16 @@ async def run_agent_step(step: AgentStepInput) -> AgentStepResult | str:
     # own end and produced nothing is the silent death, and every other ending overwrites this
     # before the `finally` books it.
     outcome = "empty_answer"
-    calls_token = begin_call_watch()
-    # Started for the same reason as the call watch above it: a step runs a real model turn, so the
-    # context policy's per-turn state has to exist here too or compaction reports one standing
-    # reduction once per model call and the step's cost row cannot say the policy fired
-    # (`agent/context_budget.py`).
-    context_token = begin_context_watch()
-    with _acting_as(step.identity):
+    # **Every cap ambient a turn runs under, not the two this step used to open.** A step runs a
+    # real model turn, so it needs the context record (or compaction reports one standing reduction
+    # once per model call and the cost row cannot say the policy fired) — and it needs the loop and
+    # spend watches for the reason `agent/turn_ambient.py` states: without them a `task` fan-out
+    # inside a step is bounded by the per-branch channel snapshot and each branch spends the whole
+    # allowance, and a model call a tool body makes is counted by nothing. `meter.usage` is passed
+    # rather than letting the manager build a ledger, so the caps are enforced against the same
+    # object `_book_step_spend` reads.
+    step_label = f"template {step.template or '?'} step {step.step_id or '?'}"
+    with turn_caps(meter.usage, closing=step_label), _acting_as(step.identity):
         try:
             async with AsyncExitStack() as stack:
                 # `unreachable` is kept, and discarding it was the defect `AgentStepResult`
@@ -971,11 +940,11 @@ async def run_agent_step(step: AgentStepInput) -> AgentStepResult | str:
             # that one in-flight call — the provider reported no usage for it, and there is nothing
             # to read. Every call that completed is booked. So the ledger can under-report by at
             # most one call, never by a whole turn.
-            end_call_watch(calls_token)
-            # Booked *before* the context watch is torn down, because the row reads it. The call
-            # watch above has no such reader, which is why the two ends are not adjacent.
+            # Booked inside `turn_caps`, because the row reads the context watch and the manager
+            # tears every watch down on the way out. That ordering used to be spelled as two
+            # `end_*` calls with the booking between them; it is now a property of where this line
+            # sits, which is one fewer thing to get right by hand.
             _book_step_spend(step, meter.usage, time.perf_counter() - started, answered, outcome)
-            end_context_watch(context_token)
 
 
 def _book_step_spend(

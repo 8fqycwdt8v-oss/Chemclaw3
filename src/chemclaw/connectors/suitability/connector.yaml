@@ -1,0 +1,72 @@
+# **Declared here, served by `Chemclaw3-mcp`, and OFF unless a deployment names it.**
+#
+# This file is a copy of the fleet's own `manifests/suitability/connector.yaml`, which stays
+# authoritative because it is what actually answers. What this copy buys is the thing a manifest
+# does even when no turn binds it: `chemclaw_agent.declared_tool_names` reads manifests out of
+# `connectors_dirs`, so `skill-validate`, `prose-validate` and `template-validate` can resolve
+# these tool names — and without it the judgment beside this file could not name the tools it is
+# judgment *about* (the D-117 defect, the same argument `connectors/safety/connector.yaml` makes).
+#
+# **`default_enabled: false` is the other half, and it is what makes declaring this affordable.**
+# Every bound tool's schema is serialised ahead of the system message on every model call. These
+# five process-development bundles are ~22,000 tokens together, against a `PREFIX_BOUND` that
+# `core/config/agent.py` derives both compaction thresholds from — so binding them everywhere would
+# take that much thread allowance from every deployment on earth, including the ones that never ask
+# a scale-up question. So silence means off: a release that wants this capability names it in
+# `CHEMCLAW_CONNECTORS_ENABLED` (the chart's `connectors.suitability.enabled`) and pays for it, and one
+# that does not is byte-for-byte unchanged.
+#
+name: suitability
+description: >-
+  USP <621> chromatographic system-suitability arithmetic, from numbers a chromatogram already
+  reported: replicate-injection RSD with the compendial rule for how many injections that limit
+  needs, theoretical plate count and resolution under both width conventions USP defines, the
+  tailing factor at 5% height, retention and separation factors, and whether a proposed change to
+  an isocratic method stays inside what the general chapter permits without revalidation. Nothing
+  here integrates a chromatogram, finds a peak, assigns a baseline or opens an instrument file —
+  every input is a retention time, a width or an area a person or a data system already reported.
+  Passing suitability says the system performed at the moment of the run; it is not method
+  validation and not evidence the result is accurate. Pure and synchronous — no store, no durable
+  state, no corpus, and no network call at any point.
+
+endpoint:
+  transport: http
+  # A loopback dev default; the deployment moves it.
+  url: http://127.0.0.1:8892/mcp
+  health_url: http://127.0.0.1:8892/healthz
+  # Every tool here is microseconds of closed-form arithmetic. The bound exists to stop a mute
+  # connector hanging a turn, not to police a fast one.
+  request_timeout: 15
+  # Bearer even though the shipped URL is loopback, for the reason `servers/props/connector.yaml`
+  # states: a manifest whose auth mode changes with its address is one whose serving side gets it
+  # wrong. The token env var is the same name on both sides.
+  auth:
+    mode: bearer
+    token_env: CHEMCLAW_SUITABILITY_TOKEN
+  tools:
+    - replicate_precision
+    - plate_count
+    - peak_symmetry
+    - peak_resolution
+    - retention_factor
+    - permitted_method_adjustment
+    - system_suitability_report
+
+  # Every tool is read-only: each takes numbers, computes, and returns. Nothing here writes, stores
+  # or reserves anything, so there is no state a plan gate would need to approve. Classifying by
+  # omission fails *open* (D-167), which is why all seven are listed rather than left to a default.
+  read_only:
+    - replicate_precision
+    - plate_count
+    - peak_symmetry
+    - peak_resolution
+    - retention_factor
+    - permitted_method_adjustment
+    - system_suitability_report
+
+skills:
+  - system-suitability
+
+# Silence means off for this bundle; an explicit `connectors_enabled` naming it wins over
+# this flag, which is how it is ever reachable (`connectors/registry.py::enabled`).
+default_enabled: false

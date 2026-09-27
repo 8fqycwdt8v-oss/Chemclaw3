@@ -206,3 +206,164 @@ def test_every_template_tool_a_skill_names_is_a_real_template_tool() -> None:
         f"The real names are {sorted(real)} — `run_` plus the file stem with dashes replaced by "
         "underscores, never the stem as written."
     )
+
+
+def test_a_frontmatter_defect_cannot_widen_what_a_skill_is_scoped_to(tmp_path: Path) -> None:
+    """A read error must cost a skill its visibility, never buy it back.
+
+    `declared_tools` fed `ToolScopedSkills`, which reads a missing entry as "declares nothing" and
+    therefore leaves the skill **visible to every caller**. So while this walked the whole
+    `SkillManifest`, any frontmatter defect — a description one character over
+    `MAX_SKILL_DESCRIPTION_CHARS`, a misspelled `tags:` key — silently unscoped the skill. Neither
+    is evidence about which tools the skill teaches, and the filter's whole contract is one-way.
+    """
+    from chemclaw.agent.skill_manifest import MAX_SKILL_DESCRIPTION_CHARS, _declared_tools
+
+    for name, extra in (
+        ("over-long", f"description: {'x' * (MAX_SKILL_DESCRIPTION_CHARS + 1)}"),
+        ("typo-key", "description: fine\ndescriptions: a misspelled key extra=forbid refuses"),
+    ):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "SKILL.md").write_text(
+            f"---\nname: {name}\n{extra}\ntools: [predict_pka]\n---\n\nbody\n"
+        )
+
+    _declared_tools.cache_clear()
+    declared = declared_tools([str(tmp_path)])
+
+    assert declared == {
+        "over-long": frozenset({"predict_pka"}),
+        "typo-key": frozenset({"predict_pka"}),
+    }, "a frontmatter defect erased the tools declaration, leaving the skill unscoped"
+
+    _declared_tools.cache_clear()
+
+
+def test_a_skill_with_no_readable_name_is_scoped_to_nothing(tmp_path: Path) -> None:
+    """The residue of the rule above, and it used to be asserted the other way round.
+
+    **This test asserted `declared_tools(...) == {}` and called staying out of the map "the
+    conservative answer". It is the fail-open answer**, and the test directly above says why: the
+    consumer is `ToolScopedSkills._permits`, which reads a *missing* entry as "declares nothing" and
+    therefore leaves the skill **visible to every caller**. So the pair contradicted each other on
+    one rule — "a read error must cost a skill its visibility, never buy it back" — with this half
+    buying it back for every defect the sibling's two cases do not cover. Measured against a profile
+    holding **zero** callable tools: a scalar `tools:`, a mapping `tools:` and an unparseable
+    frontmatter were all visible, where the over-long `description` the sibling covers was not.
+
+    So the unreadable case is keyed too, with a declaration nothing can satisfy. The key is the
+    *directory* name, because the frontmatter is the thing that could not be read — and
+    `make skill-validate` requires the directory and the frontmatter `name` to agree
+    (`cli/validate_skills.py`), so in any tree CI has walked this is the same string the readable
+    path would have produced. In a tree it has not walked, a skill scoped to nothing is the safe
+    answer rather than a guess, which is the direction the sibling's contract asks for.
+    """
+    from chemclaw.agent.skill_access import ToolScopedSkills
+    from chemclaw.agent.skill_manifest import UNREADABLE_DECLARATION, _declared_tools
+
+    for name, body in (
+        ("nameless", "---\ndescription: no name\n---\n\nbody\n"),
+        ("tools-scalar", "---\nname: tools-scalar\ndescription: d\ntools: predict_pka\n---\n"),
+        ("bad-yaml", "---\nname: bad-yaml\ndescription: [unclosed\n---\n\nbody\n"),
+    ):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "SKILL.md").write_text(body)
+
+    _declared_tools.cache_clear()
+    declared = declared_tools([str(tmp_path)])
+
+    assert declared == {
+        "nameless": UNREADABLE_DECLARATION,
+        "tools-scalar": UNREADABLE_DECLARATION,
+        "bad-yaml": UNREADABLE_DECLARATION,
+    }, "an unreadable manifest stayed out of the map, which leaves the skill visible to everyone"
+
+    # **The half that makes the assertion above mean something.** A key in the map is only
+    # conservative if the value cannot be satisfied, so this asks the consumer rather than trusting
+    # the sentinel's name.
+    #
+    # **`available=frozenset()` alone is the one value that cannot tell the two apart**, and it was
+    # the only one asserted. An empty surface satisfies no declaration whatever it names, so setting
+    # the sentinel to a real tool name (`frozenset({"predict_pka"})`) left 91 tests green — while a
+    # profile holding `predict_pka`, which `data/profiles/` ships, saw every skill with an
+    # unreadable manifest. So the surfaces below include realistic non-empty ones, and the widest
+    # of them is every name this deployment can actually serve.
+    from tests.surface import surface
+
+    served = surface().tool_names
+    assert served, (
+        "the shipped profile advertises no tools, so the widest arm below asserts nothing"
+    )
+    for available in (frozenset(), frozenset({"predict_pka"}), frozenset({"find_notes"}), served):
+        narrowing = ToolScopedSkills(declared=declared, available=available)
+        visible = [name for name in declared if narrowing._permits(name)]
+        assert visible == [], (
+            f"{visible} has an unreadable manifest and is visible to a profile holding "
+            f"{sorted(available)[:4]}{'…' if len(available) > 4 else ''}"
+        )
+
+    # **And the sentinel's unsatisfiability is derived, not asserted about its wording.** The reason
+    # `required & available` is always empty is that the name carries a NUL, which no tool name in
+    # this deployment can — so that is what is checked, against the served surface rather than
+    # against a sentence. A sentinel changed to any name a real profile could hold fails here as
+    # well as in the loop above, which is what makes the two independent.
+    assert any("\x00" in name for name in UNREADABLE_DECLARATION), (
+        f"the unreadable-manifest sentinel {sorted(UNREADABLE_DECLARATION)} holds no character a "
+        "tool name cannot, so nothing stops a real profile satisfying it"
+    )
+    assert not [name for name in served if "\x00" in name], (
+        "a served tool name carries a NUL, so the sentinel is no longer unsatisfiable by "
+        "construction and needs a different basis"
+    )
+
+    _declared_tools.cache_clear()
+
+
+def test_a_skill_manifest_read_is_always_a_whole_triple(tmp_path: Path) -> None:
+    """`_declared_pair` is total, over every way a manifest can fail to be read.
+
+    **The dead code this replaces was invisible to `mypy --strict`.** The function was annotated
+    `-> tuple[str, frozenset[str]] | None`, its summary line said "or None (logged) if the file
+    cannot be read at all", and `_declared_tools` guarded on `if pair is not None:` — all three long
+    after the `except` arm was changed to return `(directory name, UNREADABLE_DECLARATION)`. Nothing
+    can return `None` any more, so the guard was a branch no test could cover and the annotation was
+    a licence: a future `return None` would type-check, pass the guard, drop the entry, and leave
+    the skill **visible**, which is the fail-open answer that arm exists to refuse.
+
+    So the annotation is narrowed and this is what holds it. Driven over six shapes, which is the
+    set that reaches the `except` for six different reasons — a file that is not there at all, a
+    name that is empty, a name that is only whitespace, bytes no decoder accepts, a `tools:` key of
+    the wrong type, and a `requires:` key of the wrong type.
+
+    **Both halves of the answer are asserted, which is why the last case is here.** The read returns
+    `(name, tools, requires)`, and `ToolScopedSkills` consults the two sets with opposite
+    quantifiers: a skill survives on *any* declared tool and is hidden unless *every* required one
+    is present. A failure arm that sentinelled `tools` and left `requires` empty would therefore be
+    fail-closed on one rule and fail-*open* on the other, from the same unreadable file — so the
+    triple is compared whole rather than by its first two elements.
+    """
+    from chemclaw.agent.skill_manifest import UNREADABLE_DECLARATION, _declared_pair
+
+    cases = {
+        "gone": None,
+        "empty-name": "---\nname: ''\n---\nbody\n",
+        "ws-name": "---\nname: '   '\n---\nbody\n",
+        "scalar-tools": "---\nname: scalar-tools\ntools: nope\n---\nbody\n",
+        "scalar-requires": "---\nname: scalar-requires\nrequires: nope\n---\nbody\n",
+    }
+    for directory, body in cases.items():
+        (tmp_path / directory).mkdir()
+        if body is not None:
+            (tmp_path / directory / "SKILL.md").write_text(body)
+    (tmp_path / "bad-bytes").mkdir()
+    (tmp_path / "bad-bytes" / "SKILL.md").write_bytes(b"---\nname: \xff\xfe\n---\nbody\n")
+
+    for directory in (*cases, "bad-bytes"):
+        read = _declared_pair(tmp_path / directory / "SKILL.md")
+        assert read == (directory, UNREADABLE_DECLARATION, UNREADABLE_DECLARATION), (
+            f"{directory} answered {read!r}; an unreadable manifest must be a whole triple keyed "
+            "by its directory and scoped to nothing — `None` drops the entry, a missing entry "
+            "reads "
+            "as 'declares nothing', which leaves the skill visible to every profile, and an empty "
+            "`requires` is the same fail-open answer for the all-of rule"
+        )

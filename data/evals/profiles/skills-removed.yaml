@@ -35,6 +35,15 @@
 # are worth, not an unbiased estimate. Reporting a negative result from this arm therefore needs
 # the refusal counter read alongside it.
 #
+# **It reaches neither tier, and for two commits it reached one.** A chemist's own skills
+# (`POST /skills/mine`) are mounted by the backend rather than selected by `skill_names`, and
+# `local_skills.py` argues at length that the shared narrowings must not select among them — right
+# for a named subset, wrong for `[]`. Measured before it was fixed: this arm listed a personal skill
+# while listing none of the shared ones, so every A/B it reported still carried personal judgment
+# for any actor with a populated `/mine`. `langgraph_agent._skills_middleware` now drops that source
+# on an empty narrowing, which is the one case that means "no skills at all" rather than "these
+# skills".
+#
 # Both are why this measures "the skills' content", not "the existence of a skills mechanism".
 #
 # **`skill_names: []` is empty, not absent**, and the distinction is the whole arm. `None` means

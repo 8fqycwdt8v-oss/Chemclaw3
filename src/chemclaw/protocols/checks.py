@@ -30,6 +30,7 @@ from typing import Any
 
 from chemclaw.core.chem import InvalidSmilesError, element_counts
 from chemclaw.core.reagents import resolve_compound_name
+from chemclaw.core.units import UnitError, parse_quantity
 from chemclaw.protocols.layout import PLATE_SHAPES, capacity, plate_shape, well_label
 from chemclaw.protocols.models import (
     ChargeLine,
@@ -64,6 +65,64 @@ _PH_BAND = (-2.0, 16.0)
 _MAX_EQUIVALENTS = 200.0
 _MAX_MASS_MG = 1_000_000.0
 _MAX_VOLUME_ML = 20_000.0
+
+#: How far above the *declared* scale a charge may go before it reads as a unit mistake.
+#:
+#: **The two constants above are a bench bound wearing a unit-mistake badge, and at kilo scale the
+#: badge is wrong.** They say 1 kg and 20 L, which is a fine description of what a discovery
+#: chemist charges and a false one for a 20 kg campaign in a 250 L reactor — the opening probe of
+#: `data/evals/probes/process-chemistry.yaml`. A protocol at that scale still *stored*, because
+#: this check is a warning rather than a blocker; what it did was report every real charge on it as
+#: a suspected unit error. A warning that fires on correct input is worse than no warning, because
+#: it is the one that teaches a chemist to stop reading warnings — and this check sits beside
+#: `charge_is_consistent` and `limiting_is_limiting`, which they then stop reading too.
+#:
+#: So the bound moves with `request.scale` when the chemist stated one, and the defaults above are
+#: what "no scale stated" means. The multiplier is deliberately loose because the thing being
+#: caught is an *order-of-magnitude slip*, not an unusual recipe: a charge 1,000x the batch scale
+#: is a thousandfold unit error, while 30x is a solvent charged by mass and 5x is an antisolvent.
+#: Anything tighter starts arguing with process chemistry, which is not this function's business.
+_SCALE_MASS_MULTIPLE = 1_000.0
+
+#: Litres of any one charge per kilogram of declared scale, for the same purpose.
+#:
+#: Process volumes run 5-20 L/kg and a wash or a crystallisation liquor can double that, so 100 is
+#: several times the widest real number and still three orders below a mL/L slip.
+_SCALE_VOLUMES_PER_KG = 100.0
+
+#: The density assumed to read a *volume* scale as a mass one, and the only physical assumption in
+#: this module. Water, because the alternative is refusing to widen the mass band for a protocol
+#: whose scale the chemist stated in litres — which is most of them, above a few kilos.
+_ASSUMED_DENSITY_KG_PER_L = 1.0
+
+
+def _plausibility_bands(design: ExperimentDesign) -> tuple[float, float, str]:
+    """The mass (mg) and volume (mL) ceilings for this design, and how they were arrived at.
+
+    Returns the defaults unchanged when the request states no scale, states one this module cannot
+    read ("a 96-well plate", "pilot"), or states one in a dimension that fixes neither bound (mol,
+    with no molar mass to spend it against). **Never tightens**: both are `max`ed against the bench
+    defaults, so declaring a 5 g scale cannot start failing a charge that passes today. The band is
+    here to catch a slip, and a check that grew teeth on a quiet Tuesday is how a warning becomes
+    noise in the other direction.
+    """
+    quantity = parse_quantity(design.request.scale.value)
+    if quantity is None:
+        return _MAX_MASS_MG, _MAX_VOLUME_ML, ""
+    try:
+        if quantity.unit.dimension == "mass":
+            kilograms = quantity.to("kg").value
+        elif quantity.unit.dimension == "volume":
+            kilograms = quantity.to("L").value * _ASSUMED_DENSITY_KG_PER_L
+        else:
+            return _MAX_MASS_MG, _MAX_VOLUME_ML, ""
+    except UnitError:  # pragma: no cover - `to` cannot fail on a dimension just matched
+        return _MAX_MASS_MG, _MAX_VOLUME_ML, ""
+    if kilograms <= 0.0:
+        return _MAX_MASS_MG, _MAX_VOLUME_ML, ""
+    mass = max(_MAX_MASS_MG, kilograms * 1_000_000.0 * _SCALE_MASS_MULTIPLE)
+    volume = max(_MAX_VOLUME_ML, kilograms * _SCALE_VOLUMES_PER_KG * 1_000.0)
+    return mass, volume, f" for the declared scale of {design.request.scale.value}"
 
 
 def _ok(check_id: str, severity: CheckSeverity, detail: str = "") -> ProtocolCheck:
@@ -749,6 +808,7 @@ def quantities_are_plausible(design: ExperimentDesign) -> ProtocolCheck:
             problems.append(
                 f"step {index}: {step.duration_h} h is over {_MAX_PLAUSIBLE_HOURS:.0f} h"
             )
+    max_mass_mg, max_volume_ml, basis = _plausibility_bands(design)
     for line in _all_charge_lines(design):
         if line.equivalents == 0.0 and not line.limiting:
             problems.append(f"charge line {line.component!r} is 0 equivalents")
@@ -757,10 +817,16 @@ def quantities_are_plausible(design: ExperimentDesign) -> ProtocolCheck:
                 f"charge line {line.component!r} at {line.equivalents} equivalents is over "
                 f"{_MAX_EQUIVALENTS:.0f} — a solvent is charged by volume, not by equivalents"
             )
-        if line.mass_mg is not None and line.mass_mg > _MAX_MASS_MG:
-            problems.append(f"charge line {line.component!r}: {line.mass_mg} mg is over 1 kg")
-        if line.volume_ml is not None and line.volume_ml > _MAX_VOLUME_ML:
-            problems.append(f"charge line {line.component!r}: {line.volume_ml} mL is over 20 L")
+        if line.mass_mg is not None and line.mass_mg > max_mass_mg:
+            problems.append(
+                f"charge line {line.component!r}: {line.mass_mg} mg is over "
+                f"{max_mass_mg / 1_000_000.0:g} kg{basis}"
+            )
+        if line.volume_ml is not None and line.volume_ml > max_volume_ml:
+            problems.append(
+                f"charge line {line.component!r}: {line.volume_ml} mL is over "
+                f"{max_volume_ml / 1_000.0:g} L{basis}"
+            )
     if problems:
         return _fail("quantities_are_plausible", "warning", "; ".join(problems))
     return _ok("quantities_are_plausible", "warning", "setpoints and amounts are in range")

@@ -36,6 +36,7 @@ from typing import Any
 import pytest
 
 from tests.calc_server_fake import _KEYED, _UNKEYED, embed
+from tests.siblings import SIBLING_SKIP
 from tests.test_context_floor import _sibling_python
 
 #: The program run inside the sibling checkout's interpreter. It derives one identity per compute
@@ -206,7 +207,10 @@ def test_the_fake_keys_calculations_the_way_the_server_keys_them() -> None:
     answers, reason = _sibling_identities()
     if not answers:
         pytest.skip(
-            "the calc server's own key derivation was NOT measured: "
+            # The marker, so `tests/conftest.py`'s epilogue counts this one. It did not: the reason
+            # was worded from scratch, and the epilogue that exists to say what a run is *not*
+            # evidence about was silent about the most load-bearing skip in the set.
+            f"{SIBLING_SKIP} the calc server's own key derivation was NOT measured: "
             f"{reason}. `tests/calc_server_fake._KEYED` is a hand-written mirror of it, so every "
             "D-011 'a persisted result is never recomputed' assertion in this suite is unchecked "
             "against the server in this run."

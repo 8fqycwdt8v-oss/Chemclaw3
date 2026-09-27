@@ -17,8 +17,10 @@ silently rather than loudly, which is why they earn a test of their own.
 
 import os
 import re
+import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 from functools import cache
 from pathlib import Path
@@ -784,29 +786,23 @@ def test_a_comment_never_swallows_the_line_after_it() -> None:
 # along. The exemption had never been checked against what kubeconform actually did.
 _CATALOG_VALIDATED_KINDS = frozenset({"ServiceMonitor", "PodMonitor", "PrometheusRule"})
 
-# The one kind kubeconform genuinely has no schema for, so `make helm-validate` runs with
-# `-ignore-missing-schemas` and *skips* it rather than failing. Keeping the set explicit is what
+# The kinds kubeconform genuinely has no schema for, so `make helm-validate` runs with
+# `-ignore-missing-schemas` and *skips* them rather than failing. Keeping the set explicit is what
 # stops that flag from being a hole: a skipped kind is a deliberate entry here, not a silent pass.
-_UNVALIDATED_KINDS = frozenset({"Route"})
-
-# Kinds the chart *can* render but does not on the shipped values, so they never reach kubeconform
-# in the validation render and cannot appear in its `Skipped` count.
 #
-# `AlertmanagerConfig` is gated on `monitoring.alertmanager.enabled`, which is off because the chart
-# cannot invent a receiver — a Slack webhook or a PagerDuty key is a deployment fact. It would be
-# skipped rather than validated if it did render (the datreeio catalog carries a `v1alpha1` schema
-# for it and no `v1beta1`), which is why it is recorded here rather than quietly left out: the point
-# of these three sets is that every kind in the template text is accounted for by *someone*.
-_UNRENDERED_BY_DEFAULT_KINDS = frozenset({"AlertmanagerConfig"})
-
-# What the CI gate reports for the chart as it stands: every rendered resource validated except the
-# OpenShift `Route`. Pinned as a number because the two sets above are claims about kubeconform's
-# behaviour, and a claim about someone else's tool is worth stating in a form that can be compared
-# against its actual output rather than believed.
-_EXPECTED_SKIPPED_RESOURCES = 1
+# `Route` is the OpenShift one, absent from both kubeconform's defaults and the datreeio catalog.
+# `AlertmanagerConfig` is the second and it was **not listed here until the gate was first run**: it
+# sat in a set called `_UNRENDERED_BY_DEFAULT_KINDS`, whose stated reason was that it "never reaches
+# kubeconform in the validation render and cannot appear in its `Skipped` count". That is false —
+# `make helm-validate`'s union arm sets `monitoring.alertmanager.enabled=true`, so it renders, it
+# reaches kubeconform, and it is skipped (the catalog carries a `v1alpha1` schema for it and no
+# `v1beta1`). A kind is exempt because of what kubeconform can do with it, which is a property of
+# the kind; whether a given arm renders it is a property of the arm, and conflating the two put the
+# second skipped kind in the set defined as the one that cannot be skipped.
+_UNVALIDATED_KINDS = frozenset({"Route", "AlertmanagerConfig"})
 
 
-def test_only_the_known_crd_is_unvalidated_by_kubeconform() -> None:
+def test_only_the_known_crds_are_unvalidated_by_kubeconform() -> None:
     """Pin which kinds the chart renders, so `-ignore-missing-schemas` cannot hide a new one.
 
     `make helm-validate` must pass `-ignore-missing-schemas` because the chart renders an OpenShift
@@ -817,7 +813,10 @@ def test_only_the_known_crd_is_unvalidated_by_kubeconform() -> None:
 
     The cost of the flag is that an unknown kind is skipped instead of rejected. This test buys that
     back offline: every kind the chart renders is a core Kubernetes kind, a CRD the catalog covers,
-    or the one genuinely unvalidated kind named above.
+    or one of the genuinely unvalidated kinds named above. It is a claim about the *kinds*; how many
+    **resources** of them each render arm emits is
+    `test_every_resource_kubeconform_skips_is_one_this_file_declared`, which is a different question
+    and used to be answered by comparing the two.
     """
     core_kinds = {
         "ConfigMap",
@@ -831,27 +830,118 @@ def test_only_the_known_crd_is_unvalidated_by_kubeconform() -> None:
         "ServiceAccount",
     }
     rendered = set(re.findall(r"^kind:\s*([A-Za-z]+)", _all_templates(), flags=re.MULTILINE))
-    unexpected = (
-        rendered
-        - core_kinds
-        - _CATALOG_VALIDATED_KINDS
-        - _UNVALIDATED_KINDS
-        - _UNRENDERED_BY_DEFAULT_KINDS
-    )
+    unexpected = rendered - core_kinds - _CATALOG_VALIDATED_KINDS - _UNVALIDATED_KINDS
     assert not unexpected, (
         f"the chart renders kind(s) {sorted(unexpected)} that kubeconform may silently skip — "
         "add a schema location, or add them to _UNVALIDATED_KINDS with the reason"
     )
     # Both exemptions must stay earned: a kind the chart stopped rendering is stale bookkeeping,
     # and — the failure this test itself had — an exemption nobody ever checked against the tool.
-    stale = (
-        _UNVALIDATED_KINDS | _CATALOG_VALIDATED_KINDS | _UNRENDERED_BY_DEFAULT_KINDS
-    ) - rendered
+    stale = (_UNVALIDATED_KINDS | _CATALOG_VALIDATED_KINDS) - rendered
     assert not stale, f"exempted kind(s) the chart no longer renders: {sorted(stale)}"
-    assert len(_UNVALIDATED_KINDS) == _EXPECTED_SKIPPED_RESOURCES, (
-        "the count CI reports as `Skipped` must match what this file claims is unvalidated; "
-        "if they diverge, one of them is wrong about kubeconform rather than about the chart"
+
+
+def _kubeconform_arms() -> list[list[str]]:
+    """The flag sets `make helm-validate` actually pipes through kubeconform.
+
+    Read out of the `Makefile`'s own `for flags in …` loop rather than restated here, for the reason
+    `test_the_union_render_covers_every_switch_this_chart_ships_off` gives about that same literal:
+    a copy of the list is a second answer to the question, and it stays green while the gate's
+    render narrows underneath it. Split on whitespace rather than with a second `shlex` pass,
+    because the `--set-json` values carry the quotes helm needs and a posix split strips them.
+    """
+    makefile = (DEPLOY.parent / "Makefile").read_text()
+    loop = next(line for line in makefile.splitlines() if line.lstrip().startswith("for flags in"))
+    body = loop.split("for flags in", 1)[1].rsplit("; do", 1)[0]
+    return [arm.split() for arm in shlex.split(body)]
+
+
+@pytest.mark.skipif(
+    shutil.which("helm") is None or shutil.which("kubeconform") is None,
+    # "helm is not installed" verbatim, because that literal is what `tests/conftest.py`'s epilogue
+    # counts; worded freshly, this skip was invisible to the count.
+    reason="helm is not installed (or kubeconform is): both render and validate the chart",
+)
+def test_every_resource_kubeconform_skips_is_one_this_file_declared() -> None:
+    """Take the skipped count off the tool, for every arm the gate validates.
+
+    `_UNVALIDATED_KINDS` is a claim about what kubeconform does, and this file used to check it by
+    comparing `len(_UNVALIDATED_KINDS)` against a literal `_EXPECTED_SKIPPED_RESOURCES = 1` sitting
+    six lines below it. Both halves were wrong in a way only running the tool could show, and it had
+    never been run here — `kubeconform` and `promtool` are absent from the sandbox, so `make
+    helm-validate` exits before its first render and the whole target had been taken on trust.
+
+    Run: the default arm reports `Skipped: 1` and the **union arm reports `Skipped: 3`** — two
+    `Route`s (the release's own and `chemclaw-mcp-face`'s) plus the `AlertmanagerConfig` that a set
+    named `_UNRENDERED_BY_DEFAULT_KINDS` claimed could never appear in this count. So the comparison
+    was between a number of *kinds* and a number of *resources*, which are different quantities
+    (`tasks/lessons.md`: two numbers on different bases do not compare, however carefully each was
+    measured); it held at `1 == 1` only because the default arm happens to render exactly one Route.
+
+    The deeper defect is what the comment claimed for itself: the literal was pinned, in its own
+    words, "in a form that can be compared against its actual output rather than believed" — and
+    nothing compared it. Its only reader was an assertion against the `len()` of a set in the same
+    file. So the count is now *derived* from the render per arm and *measured* against kubeconform's
+    own summary line, which is the only thing that can settle a claim about somebody else's tool.
+    """
+    arms = _kubeconform_arms()
+    assert len(arms) >= 2, (
+        "`make helm-validate` no longer renders more than one arm through kubeconform, so the "
+        "off-by-default templates reach it for the first time in an operator's cluster"
     )
+    for arm in arms:
+        render = _render(*arm).stdout
+        declared = [
+            f"{document.get('metadata', {}).get('name')} {document['kind']}"
+            for document in yaml.safe_load_all(render)
+            if document and document.get("kind") in _UNVALIDATED_KINDS
+        ]
+        result = subprocess.run(
+            [
+                "kubeconform",
+                "-strict",
+                "-summary",
+                "-ignore-missing-schemas",
+                "-kubernetes-version",
+                _kube_version(),
+                "-schema-location",
+                "default",
+                "-schema-location",
+                "https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/"
+                "{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json",
+            ],
+            input=render,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, (
+            f"kubeconform rejects the render for arm {arm or '(shipped defaults)'}:\n"
+            f"{result.stdout}{result.stderr}"
+        )
+        reported = re.search(r"Skipped:\s*(\d+)", result.stdout)
+        assert reported is not None, (
+            f"kubeconform printed no `Skipped` count for arm {arm or '(shipped defaults)'}, so "
+            f"this test cannot see what the flag hid:\n{result.stdout}"
+        )
+        assert int(reported.group(1)) == len(declared), (
+            f"kubeconform skipped {reported.group(1)} resource(s) on arm "
+            f"{arm or '(shipped defaults)'} and this file accounts for {len(declared)} "
+            f"({sorted(declared)}). `-ignore-missing-schemas` is hiding a kind — name it in "
+            "_UNVALIDATED_KINDS with the reason, or give kubeconform a schema location for it"
+        )
+
+
+def _kube_version() -> str:
+    """The Kubernetes version the gate validates against, off the `Makefile`'s own default.
+
+    Restating `1.29.0` here would be the defect this whole test exists to correct, one variable
+    over: a second declaration of a number, checked by nothing against the first.
+    """
+    makefile = (DEPLOY.parent / "Makefile").read_text()
+    match = re.search(r"^KUBE_VERSION \?= (\S+)$", makefile, flags=re.MULTILINE)
+    assert match is not None, "the Makefile no longer declares KUBE_VERSION"
+    return match.group(1)
 
 
 def test_something_actually_scrapes_the_metrics_endpoint() -> None:
@@ -1791,7 +1881,9 @@ _DISARMED_ALERTS = ("ChemclawEgressGuardDisarmed", "ChemclawEgressPreloadDisarme
 
 @pytest.mark.skipif(
     shutil.which("helm") is None or shutil.which("promtool") is None,
-    reason="helm and promtool are what render and evaluate the rule",
+    # "helm is not installed" verbatim, because that literal is what `tests/conftest.py`'s
+    # epilogue counts; worded freshly, this skip was invisible to the count.
+    reason="helm is not installed (or promtool is): both render and evaluate the rule",
 )
 def test_a_single_disarmed_pod_is_what_these_alerts_are_for() -> None:
     """`max(...) < 1` over a per-pod gauge cannot fire while any one pod is armed.
@@ -2208,6 +2300,119 @@ def test_the_dependency_audit_gates_every_branch_push_and_the_local_gate() -> No
     assert "deps-audit" in ci_target, f"`make ci` does not depend on deps-audit: {ci_target}"
 
 
+#: Binaries a `shutil.which(...)` skip guard may rely on with no CI install step, because the
+#: runner image guarantees them. `bash`, `git` and `make` are what a GitHub Actions job *is* — a
+#: workflow that had to install `bash` would be describing a different problem — and `flock` is
+#: util-linux, present on every Ubuntu image. The point of the allowlist is that it is short and
+#: each entry is a claim about the image rather than about this repository.
+_RUNNER_IMAGE_BINARIES = frozenset({"bash", "flock", "git", "make"})
+
+
+def test_every_binary_the_suite_skips_on_is_installed_where_the_suite_runs() -> None:
+    """A `skipif(shutil.which(...))` is a promise that CI has the binary. Three of them did not.
+
+    Forty-eight places in this suite gate on seven binaries, and a missing one is a **skip**, which
+    reports green: driven with none of the three chart binaries on `PATH`, 75 tests skip across
+    `test_deploy_chart.py` and `test_retention.py` alone. (48 is the number of `shutil.which` calls,
+    not of tests — one decorator can cover a parametrised family, which is the whole gap between the
+    two figures and the reason both are stated as what they are.) So a skip guard is worth exactly
+    what the CI job running the suite installs, and nothing checked that. Measured when the
+    `kubeconform` test above was written and the obvious question was put to it: where does it
+    run?
+
+    Nowhere. `check` runs `make cov` and installed only `helm`; `chart` has `kubeconform` and
+    `promtool` and runs `make helm-validate` and no pytest. So the three tests gated on those two
+    binaries could not execute in either job —
+    `test_every_resource_kubeconform_skips_is_one_this_file_declared`,
+    `test_a_single_disarmed_pod_is_what_these_alerts_are_for`, and the `promtool` arm of
+    `tests/test_retention.py`. The latter two are the PromQL checks, and their whole subject is a
+    failure the cluster reports as `Valid` while the alerts silently never evaluate: written to
+    close that hole, and never once run by CI.
+
+    `check` installs all three binaries now. This test is the mechanism rather than the instance,
+    which is the distinction `test_every_gate_make_ci_runs_is_a_step_ci_yml_runs` below draws about
+    its own subject: the next binary-gated test added to this suite fails here on the day it is
+    written instead of skipping quietly for a month.
+
+    Both directions, because an allowlist nobody prunes is the other half of the same defect.
+    """
+    sources = "\n".join(
+        path.read_text() for path in sorted((DEPLOY.parent / "tests").rglob("*.py"))
+    )
+    gated = set(re.findall(r'shutil\.which\(\s*"([a-z0-9_-]+)"', sources))
+    assert "helm" in gated, f"the skip-guard scan did not parse: {sorted(gated)}"
+
+    jobs: dict[str, Any] = yaml.safe_load(
+        (DEPLOY.parent / ".github" / "workflows" / "ci.yml").read_text()
+    )["jobs"]
+    suite_jobs = [
+        name
+        for name, job in jobs.items()
+        if any(
+            target in {"cov", "test"}
+            for step in job.get("steps", [])
+            for command in re.findall(r"^make (.+)", str(step.get("run", "")), re.MULTILINE)
+            for target in command.split()
+        )
+    ]
+    assert len(suite_jobs) == 1, (
+        f"{suite_jobs} run the suite; this test assumes one job does, and two would mean a binary "
+        "installed in one of them still leaves the other's run skipping"
+    )
+    installed = "\n".join(
+        str(step)
+        for step in jobs[suite_jobs[0]]["steps"]
+        if str(step.get("name", "")).startswith("Install")
+    )
+
+    unprovided = sorted(
+        binary for binary in gated - _RUNNER_IMAGE_BINARIES if binary not in installed
+    )
+    assert not unprovided, (
+        f"tests skip on {unprovided} and the `{suite_jobs[0]}` job installs none of them, so those "
+        "tests report green in CI without ever running. Add an install step, or add the binary to "
+        "_RUNNER_IMAGE_BINARIES with the reason the runner image guarantees it"
+    )
+    stale = sorted(_RUNNER_IMAGE_BINARIES - gated)
+    assert not stale, (
+        f"_RUNNER_IMAGE_BINARIES exempts {stale}, which no test in this suite gates on any more"
+    )
+
+    # And the exemption has to be **earned**, or it is the hole rather than the guard. Driven: with
+    # only the two assertions above, moving `kubeconform` into the allowlist and deleting its
+    # install step passed — the escape hatch silenced exactly the defect this test was written for.
+    #
+    # An entry here claims the runner image guarantees the binary, which is a fact about somebody
+    # else's image and unverifiable from this tree. What *is* verifiable is the contrapositive: a
+    # binary this repository installs somewhere, or tells a human to install, is one it already
+    # knows is not guaranteed. So the two lists must be disjoint, and `kubeconform` cannot be
+    # exempted while `chart` installs it and the runbook names it under "install these".
+    install_steps = "\n".join(
+        str(step)
+        for job in jobs.values()
+        for step in job.get("steps", [])
+        if str(step.get("name", "")).startswith("Install")
+    )
+    # The binary each step *installs*, not every word it mentions: matched on the `install -m` that
+    # puts it on `PATH` and on the `setup-<tool>` action. A substring scan over the step text read
+    # `git` out of the `github.com` in a download URL — a guard that fires on its own plumbing.
+    installed_anywhere = set(re.findall(r"install -m \d+ \S*?/([a-z0-9_-]+)\b", install_steps))
+    installed_anywhere |= set(re.findall(r"uses: \S+/setup-([a-z0-9-]+)@", install_steps))
+    runbook = (DEPLOY.parent / "docs" / "guides" / "runbook.md").read_text()
+    runbook_block = runbook.split('says a binary is "not installed', 1)[1].split("```")[1]
+    told_to_install = {line.split()[0] for line in runbook_block.splitlines() if line.strip()}
+    assert {"helm", "kubeconform", "promtool"} <= installed_anywhere | told_to_install, (
+        "neither the workflow's install steps nor the runbook's install block parsed; this check "
+        f"saw {sorted(installed_anywhere)} and {sorted(told_to_install)}"
+    )
+    contradicted = sorted(_RUNNER_IMAGE_BINARIES & (installed_anywhere | told_to_install))
+    assert not contradicted, (
+        f"_RUNNER_IMAGE_BINARIES claims the runner image guarantees {contradicted}, and this "
+        "repository installs them or tells a human to — so it does not believe its own exemption. "
+        "Install the binary in the suite's job instead of exempting it"
+    )
+
+
 def test_every_gate_make_ci_runs_is_a_step_ci_yml_runs() -> None:
     """Two hand-maintained lists whose whole contract is that they agree, and nothing checked it.
 
@@ -2217,10 +2422,17 @@ def test_every_gate_make_ci_runs_is_a_step_ci_yml_runs() -> None:
     pinned; the *mechanism* was not, so the next gate to be added to one list and forgotten in the
     other fails nothing. This closes the class instead of the instance.
 
-    `helm-validate` is the one gate deliberately in a job of its own: it needs `helm` and
-    `kubeconform` and no Python, so it runs in `chart` in parallel rather than lengthening `check`.
-    The split is asserted rather than tolerated — a gate quietly moving between jobs is a change to
-    what blocks a merge.
+    `helm-validate` is the one gate deliberately in a job of its own, so it runs in `chart` in
+    parallel rather than lengthening `check`. The split is asserted rather than tolerated — a gate
+    quietly moving between jobs is a change to what blocks a merge.
+
+    The reason used to be stated as "it needs `helm` and `kubeconform` and no Python", and both
+    halves have since stopped being true. It needs `promtool` as well, and it needs Python: the
+    target unwraps its own render to feed the rule files to `promtool`, which is why `chart` grew a
+    `uv sync` step. And `check` now installs all three binaries too — not to run this gate, which
+    stays here, but because three tests in this suite gate on `kubeconform`/`promtool` and could
+    therefore run in neither job: they skipped in `check` for want of the binary, and `chart` runs
+    no pytest. The split is about which *gate* lives where, not about which binaries a job may have.
 
     **Both directions, and the second one is why this test was rewritten.** It used to slice the
     file in two on a literal newline-plus-`  chart:` and call the halves `check_job` and
@@ -2945,6 +3157,15 @@ def test_every_ratio_alert_has_a_traffic_floor() -> None:
     RevisionsNotHelping` divides `increase()` by `increase()`. Both functions produce a range
     vector and both have the same idle-window problem, so both are matched now, and the floor may
     be expressed with either.
+
+    **And a second time, one level in: `sum by (…)`.** The floor pattern required a bare
+    `and sum(rate(`, which is every ratio this chart happened to hold — all three are
+    fleet-wide. `ChemclawToolCallsFailing` is per `tool`, so both its halves are
+    `sum by (tool) (rate(…))` and its floor, which is *stronger* than a fleet-wide one because it is
+    charged per series, did not match the pattern at all. The grouping clause is optional in the
+    pattern now. The lesson both instances carry is the one in `tasks/lessons.md`: a derived scope
+    that is derived by a *string shape* is only as general as the shapes its author happened to have
+    in front of them, and the detector, not the rules, is what goes stale.
     """
     rules = re.split(r"\n\s*- alert: ", (CHART / "templates" / "prometheusrule.yaml").read_text())
     ratios = []
@@ -2964,7 +3185,7 @@ def test_every_ratio_alert_has_a_traffic_floor() -> None:
             f"{name} still guards its denominator with clamp_min, which converts an idle window "
             "into a large finite ratio instead of no sample"
         )
-        assert re.search(r"\band\s+sum\((?:rate|increase)\(", expr), (
+        assert re.search(r"\band\s+sum(?:\s+by\s*\([^)]*\))?\s*\((?:rate|increase)\(", expr), (
             f"{name} divides two range vectors with no absolute floor on the denominator, so one "
             "event in an idle window is a 100% failure rate"
         )
@@ -3053,9 +3274,35 @@ def test_the_metrics_that_were_designed_to_alert_actually_alert() -> None:
 
     Pinned by metric name rather than by rule count so renaming a metric without moving its alert
     fails here, which is the drift that makes an alerting stack quietly stop covering anything.
+
+    **The last three were added on 2026-09-19 and each was a control that read as present.**
+    `test_every_declared_metric_has_a_consumer` is satisfied by a *dashboard panel*, so each had a
+    reader and no rule, and the operability audit measured what that bought:
+
+    - `chemclaw_connectors_unreachable_total` was the **only** series that moved for a connector
+      answering 500 on `/mcp` while its `/healthz` answered 200 — the readiness gauge held 0, so
+      `ChemclawConnectorsUnhealthy` could not fire and nothing else read this one;
+    - `chemclaw_tool_calls_total{outcome="error"}` is the same fact for a connector that *does* come
+      up and then fails its calls, and had panels only;
+    - `chemclaw_turns_finished_total` carries `outcome="spend_capped"`, which `values.yaml` tells an
+      operator in as many words "is what says whether the number you chose is biting" — a chart
+      pointing at a control that did not exist.
+
+    The runbook half is guarded separately and derivably by
+    `test_every_alert_carries_a_runbook_url_that_resolves`, so an alert added here without an entry
+    there fails without needing a fourth name in this list.
+
+    **Read off the rules' PromQL, not off the file, and this test was doing the very thing
+    `_alert_expressions` exists to prevent.** It asserted `metric in rule` over the whole template,
+    so a Go-template comment or an annotation *mentioning* a series made it "alerted". Driven: the
+    `ChemclawToolCallsFailing` expression was repointed at another counter entirely and this test
+    stayed green, satisfied by the comment above that rule naming `chemclaw_tool_calls_total`. That
+    is the same false coverage `_alert_expressions`' own docstring describes, in the test one screen
+    away from it.
     """
     rule = (CHART / "templates" / "prometheusrule.yaml").read_text()
     assert "kind: PrometheusRule" in rule
+    alerted = _series_referenced(_alert_expressions())
     for metric in [
         "chemclaw_audit_sink_failures_total",
         "chemclaw_notes_publish_failures_total",
@@ -3065,8 +3312,14 @@ def test_the_metrics_that_were_designed_to_alert_actually_alert() -> None:
         "chemclaw_connectors_unhealthy",
         "chemclaw_db_unavailable_total",
         "chemclaw_tokens_total",
+        "chemclaw_connectors_unreachable_total",
+        "chemclaw_tool_calls_total",
+        "chemclaw_turns_finished_total",
     ]:
-        assert metric in rule, f"{metric} has no alert"
+        assert metric in alerted, (
+            f"{metric} is in no alert *expression* — a mention in a comment or in an "
+            "annotation is not an alert"
+        )
 
 
 @pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
@@ -3890,7 +4143,17 @@ _SWITCH_PREREQUISITES: dict[str, tuple[str, ...]] = {
         "--set",
         "monitoring.alertmanager.defaultReceiver=chemclaw-oncall",
     ),
-    "mcpFace.route.enabled": ("--set", "mcpFace.enabled=true"),
+    # Two, and the second is a posture rather than a prerequisite object: the chart refuses to
+    # publish the face until a deployment names who may reach it, because the `mcp-face-ingress`
+    # policy would otherwise drop every request the Route admits. Stated here as the router's own
+    # selector — the value the front door's list already ships — so this render is the posture a
+    # real publishing release takes.
+    "mcpFace.route.enabled": (
+        "--set",
+        "mcpFace.enabled=true",
+        "--set-json",
+        'mcpFace.ingressNamespaces=[{"network.openshift.io/policy-group":"ingress"}]',
+    ),
 }
 
 
@@ -5685,3 +5948,807 @@ def test_no_alert_reads_a_series_this_prometheus_cannot_see() -> None:
             "*platform* Prometheus in `openshift-monitoring`. A user-workload PrometheusRule "
             "cannot see those series, so this rule is green forever."
         )
+
+
+#: What the front door holds before it parses anything, in MiB.
+#:
+#: Measured on the real serving object — `uvicorn chemclaw.api.app:create_app --factory` against the
+#: dev Postgres, lifespan run, `/healthz` served — at 445,204 kB resident and 442,270 kB of `Pss`,
+#: which is 431.9 MiB.
+#:
+#: **`Pss` is not "unique pages", and the sentence here that said so was wrong**
+#: (`D-2026-09-19-a-ceiling-on-the-archive-is-not-a-ceiling-on-the-parse`). A memory cgroup charges
+#: a page in full to whichever cgroup first touched it, once; `Pss` divides a shared page by the
+#: number of processes mapping it *system-wide*, which is a different quantity and one that moves
+#: with what else is running on the node. So `Pss` understates this pod's charge whenever a page it
+#: brought in is also mapped outside it. **Driven here rather than argued**: one unchanged process
+#: with the parsers imported reads 53,118 kB of `Pss` alone, 47,653 kB while six unrelated siblings
+#: map the same shared objects, and 53,130 kB again when they exit — 10.3% of the reading belonged
+#: to what else was running, where `Rss` moved 12 kB (0.016%) across the same three samples. It is
+#: kept as the number this constant was derived
+#: from because re-deriving the front door's resident set is not what that ADR set out to do, and
+#: because every use of it here is a *floor* argument ("the pod already holds at least this"); the
+#: quantity a later derivation should use is the cgroup's own `memory.max_usage_in_bytes`, which is
+#: what the parse measurements below now use.
+#:
+#: A floor rather than a ceiling, and deliberately so: that process had compiled no agent graph,
+#: opened no connector session and served no turn. What it does not include is the subject of a
+#: `docs/planning/BACKLOG.md` row of its own.
+FRONT_DOOR_RESIDENT_MIB = 432
+
+#: The same for the background worker (`python -m chemclaw.durable.background_worker`), which starts
+#: a forkserver too — `ingest/documents/sync.py` parses every crawled document in one. Measured at
+#: 284,880 kB of `Pss` with every activity module imported, which is 278.2 MiB.
+WORKER_RESIDENT_MIB = 279
+
+#: What warming the parse forkserver costs the pod, in MiB.
+#:
+#: The forkserver's own `Pss`. Measured, the pod-level delta is 76.1 MiB under pytest, 79.1 MiB
+#: under the worker and 83.5 MiB under the front door, against a forkserver `Pss` of
+#: 90.0–91.0 MiB across five parents and two virtualenvs — so this number is above every delta
+#: measured for it, which is the property the budget uses. The reason given for that ordering used
+#: to be an argument about `Pss` being unique pages; see `FRONT_DOOR_RESIDENT_MIB` for why that
+#: argument does not hold and why the ordering is carried as a measurement instead.
+#:
+#: **It is not the 109 MiB `docs/planning/BACKLOG.md` carried**, which was `VmRSS`. The process
+#: really is a second full resident copy of pypdf, python-docx, openpyxl and python-pptx —
+#: `forkserver` starts its server by fork *and exec*, so nothing is copy-on-write — but 18.6 MiB of
+#: what `VmRSS` attributes to it is a shared object the front door already has mapped, and the pod's
+#: measured delta is 23–30% below it.
+#:
+#: `test_a_warm_parse_forkserver_still_costs_what_this_budget_was_derived_against` is the live guard
+#: on it, and it measures `VmRSS` rather than this number — see that test for why.
+#:
+#: **Re-measured 2026-09-19 and unchanged, on the run that moved the ceiling below.** Five readings
+#: of the same forkserver: `Pss` 82.5–84.9 (peer-dependent, as ever, which is why it is not the
+#: ratchet), and the pages that belong to it alone — `Private_Dirty` + `Private_Clean`, which is
+#: what a cgroup is charged once for and therefore the closest thing to the pod-level delta —
+#: **76.0–76.1 MiB**, flat to 0.1. Both are
+#: *under* this constant, so it remains the over-estimate it was derived as, and neither
+#: `resources.service` nor `resources.worker` needs re-deriving: the assertion below has 117 MiB of
+#: headroom at the front door (432 + 91 against a 640Mi request) and 654 at the worker, so even
+#: charging the pod the forkserver's whole `VmRSS` would fit. What moved is the `VmRSS` ratchet, and
+#: it moved for a reason that is not this quantity.
+FORKSERVER_POD_COST_MIB = 91
+
+#: What a warm forkserver's `VmRSS` may be, in MiB — the live guard on the constant above.
+#:
+#: `VmRSS` and not `Pss` because this is the quantity that belongs to the process alone, and that
+#: half is now driven rather than asserted: **109 readings across twelve arms** — a bare parent, a
+#: 417 MiB one, pytest's own 459 MiB one, `--cov`, eight CPU hogs, the compose stack plus four peers
+#: holding 2.4 GB and mapping these same libraries, a dropped page cache, a deleted `__pycache__`,
+#: 1/25/100 parses through the singleton, one CPU — read **108.56–109.05 MiB**, a 0.5% spread. The
+#: same forkserver's `Pss` read 93.4 MiB quiet and **81.1 MiB** with those four peers up: 12.3 MiB
+#: apart with nothing whatever touching the closure, which is the reason the test below gives for
+#: rejecting `Pss`, measured instead of argued.
+#:
+#: **What the closure is not is the only thing that moves `VmRSS`, and this comment used to say it
+#: was.** `forkserver` starts its server by fork *and exec*, so the server inherits the process's
+#: *environment* — and `site` then runs this virtualenv's `a1_coverage.pth` inside it, which imports
+#: `coverage` whenever `COVERAGE_PROCESS_START` is set. Driven: **113.81–113.90 MiB** against 108.9,
+#: `_PRELOAD` untouched, which is not a dent in the 3 MiB margin below but straight through this
+#: ceiling — the shape this test had until today reds outright on a gate run with subprocess
+#: coverage on, and names the preload list as the thing that grew. That is why the measurement now
+#: happens in a child started with those injectors dropped, rather than against the forkserver this
+#: pytest process happens to be holding.
+#:
+#: The closure is what it is *meant* to move with, and does: driven by editing `_PRELOAD` itself,
+#: adding `chemclaw.agent.langgraph_agent` measures 407.1 MiB, `chemclaw.core.chem` 148.4 and
+#: `jinja2` 110.5 — the last of those passing, correctly, because 1.6 MiB is inside the margin
+#: below.
+#:
+#: **One reading in roughly 150 is not explained by any of this**, and it is recorded rather than
+#: smoothed over: a single sample of that `jinja2` arm read 114.7, 4.1 MiB high in `RssAnon` alone
+#: with everything else flat, and 13 repeats of the identical arm then read 110.45–110.56. Nothing
+#: reproduced it — not 60 consecutive repeats of the shipped closure, not any arm above. It is
+#: larger than the margin below, so a second one reds this gate for a reason nothing here has named,
+#: and the thing to do with it is to read `RssAnon` rather than raise the ceiling.
+#:
+#: The 3.7 MiB of margin is what keeps a pypdf patch release out of the gate. It is not a bound on
+#: `FORKSERVER_POD_COST_MIB` — `Pss` is only ever below `VmRSS`, never pinned to it — it is a bound
+#: on the closure both of them are measured from.
+#:
+#: **112 → 120 on 2026-09-19, and the closure did not grow — the reading is environment-dependent,
+#: which every paragraph above denies.** Measured here: 116.19, 116.24, 116.2, 116.2, 116.2, 116.2,
+#: 116.3 MiB, a 0.11 spread, against the 108.56–109.05 recorded above. The decisive experiment is
+#: the one the paragraphs above could not do, because they were written before there was a second
+#: environment to do it in: `git archive 06dfd1bd src` — **the very commit that derived 108.9** —
+#: unpacked beside this checkout and imported over `PYTHONPATH` measures **115.6–115.8 MiB**
+#: in-process over three runs, and this tree measures 115.6–115.8 over three. The two revisions are
+#: the same closure to 0.1 MiB, so whatever moved the reading is not in either. No import
+#: entered the closure in between (`git diff 06dfd1bd..HEAD` over `core/`, `ingest/documents/`,
+#: `uv.lock` and `pyproject.toml` adds `resource`, `pathlib` and two first-party lines and nothing
+#: else), `uv.lock` has not changed since #388, and the closure is the same 1,448 modules with the
+#: same top-level set at both revisions.
+#:
+#: **The arms reproduce and only the base does not, which is what makes it an offset rather than a
+#: growth.** Measured at load average 1.1, five readings each: the shipped closure is 116.2 MiB flat
+#: (`RssAnon` 76.0 + `RssFile` 40.2, 0.0 spread), and adding `jinja2` reads 117.7–117.9 — **+1.6
+#: MiB, the same increment recorded above**, where a closure that had genuinely grown would move
+#: every arm. `chemclaw.core.chem` costs +43.8 here against +39.5 there and
+#: `agent.langgraph_agent` +321.6 against +298.2. So what differs between the two environments is a
+#: ~7.3 MiB constant in the base — anonymous, since `RssFile` is flat across every arm — and not
+#: anything `_PRELOAD` drags in.
+#:
+#: Two host properties were checked and are not it: THP is `madvise` with `AnonHugePages: 0`, and
+#: there is one interpreter (`/usr/local/bin/python3` is a symlink to `/usr/bin/python3.11`). What
+#: it most likely is — a differently-built wheel's data segment among the large dependencies — is
+#: not claimed, because nothing here can measure the other environment.
+#:
+#: **Load was ruled out, after one reading suggested it.** A single `jinja2` arm read 121.9 MiB at
+#: load average ~10; four repeats at load 1.1 read 117.7–117.9, while the shipped arm read 116.2 at
+#: both. One reading is not a measurement, which is the rule this nearly broke.
+#:
+#: What that costs is stated rather than hidden: on a host reading 108.9 this ceiling now tolerates
+#: ~11 MiB of real closure growth instead of ~3. The documented sensitivity is unchanged in both
+#: environments, and every arm was re-driven here against 120: `jinja2` **passes** at 117.8 as it
+#: passed at 110.5 there (the margin's whole purpose — a patch release must not red the gate),
+#: while `pandas` reds at 147.6, `chemclaw.core.chem` at 160.0 and `agent.langgraph_agent` at
+#: 437.8. The assertion now prints the decomposition and the command that tells a closure growth
+#: from another environment, so the next reader does not spend a second afternoon attributing this
+#: to `_PRELOAD`.
+FORKSERVER_RSS_CEILING_MIB = 120
+
+#: What one parse in flight costs the pod, per MiB of the budget the *parse* declares.
+#:
+#: **The quantity this is a coefficient of used to be the document's expanded size, and the parse
+#: is not a function of that** — see
+#: `D-2026-09-19-a-ceiling-on-the-archive-is-not-a-ceiling-on-the-parse`.
+#: Re-measured over a real memory cgroup — `memory.max_usage_in_bytes`, reset immediately
+#: before each parse, over a process tree holding the parent, the forkserver and every parse child,
+#: which is what a container is — one legal document at 99% of `document_max_expanded_bytes`
+#: charged the pod:
+#:
+#: | shape | ASCII | one `°` (Latin-1) | one `—` (BMP) | one U+1F9EA (astral) |
+#: | --- | --- | --- | --- | --- |
+#: | 63.4 MiB-expanded workbook, 52.2 M chars | 236 MiB | 287 | 337 | 500 |
+#: | 61.0 MiB-expanded `.docx`, 57.8 M chars | 369 MiB | 424 | 480 | 589 |
+#:
+#: — 1.8 to 9.7 MiB per expanded MiB against a constant of 3.1, because CPython stores a `str` at
+#: the width of its widest code point and `_parse_xlsx` builds one document-wide join. Two further
+#: measurements say the expanded size is not merely a noisy predictor but the wrong one: a workbook
+#: whose 5.9 MiB of expanded XML references one shared string 200,000 times yields 96.3 M
+#: characters and charged 321 MiB, and a markup-heavy `.docx` at 79% of the ceiling, holding
+#: 470,000 characters, charged 840 MiB of lxml DOM.
+#:
+#: So the bound moved to the one quantity a coefficient can honestly be taken against: what the
+#: parse is *allowed to allocate*, which `ingest/documents/isolate.py` sets as an `RLIMIT_DATA` on
+#: the child before it reads a byte. Measured against `document_parse_memory_bytes` over fourteen
+#: documents spanning both formats, all four width classes, the shared-string shape and the
+#: markup-heavy shape, at three different budgets, the pod's peak charge per parse ran 0.45–1.33×
+#: the declared budget at concurrency 1 and 0.65–1.32× at concurrency 2. The larger, rounded up. At
+#: the shipped budget and the shipped cap the worst case measured is two 50 MiB plain-text
+#: documents together: 406.7 MiB of pod, against the 448 MiB this constant allows them.
+#:
+#: Above 1.0 because the parent unpickles a second copy of the text the child sent; below 2.0
+#: because the child's own transient intermediates are inside its ceiling rather than beside it.
+#:
+#: **It is a measurement at a basis, and the basis has two terms rather than one**
+#: (`D-2026-09-19-a-coefficient-measured-at-one-cap-is-a-claim-about-that-cap`). The budget bounds
+#: what a parse allocates *beyond* the document it was handed — `_bound_allocations` reads its
+#: baseline after `raw` is unpickled, driven at `VmData` 230.4 MiB before a 50 MiB document and
+#: 280.5 MiB after — so the pod's real charge is a function of the cap too, and the sentence above
+#: that names "the shipped cap" was the only place that said so. `binding.max_file_bytes` now
+#: carries an `le` tied to `PARSE_COEFFICIENT_BASIS_BYTES`, and the test below asserts the two
+#: agree, so a site cannot raise the cap past what this number was measured against without the
+#: gate saying the coefficient needs re-measuring.
+PARSE_MIB_PER_PARSE_BUDGET_MIB = 1.4
+
+#: What the front door keeps after its first turns, in MiB, over the no-turn floor
+#: `FRONT_DOOR_RESIDENT_MIB` was measured at — the compiled graph's modules, the lazy imports and
+#: the caches a turn fills once.
+#:
+#: Measured as the memory cgroup's anonymous charge (`memory.stat total_rss`, sampled at 10 ms,
+#: because cgroup v1's `max_usage_in_bytes` folds in page cache) on the real uvicorn front door
+#: against the mock LLM (`D-2026-09-24-a-turn-costs-the-thread-it-loads`): +65 to +67 MiB over the
+#: first 50-100 turns at one at a time, in five runs, and flat to within 1 MiB for the next 250.
+#: Rounded up.
+TURN_WARM_MIB = 70
+
+#: What each admitted turn permit adds to the front door, in MiB, on a short thread.
+#:
+#: Stepping concurrency 1 -> 4 -> 8 -> 12 on a warm process added 5.1-6.1 MiB per permit, retained
+#: afterwards as allocator high-water, and 16 or 24 offered turns added nothing more — the
+#: admission cap is what bounds it, which is why it is multiplied by that cap below. Six parallel
+#: tool calls and a forty-call flood per turn added nothing over it once warm. Rounded up.
+TURN_MIB_PER_PERMIT = 6
+
+#: What a turn costs the front door per byte of the thread it continues, in bytes of pod per byte
+#: of the stored `messages` blob (`agent/checkpointer.stored_thread_bytes`).
+#:
+#: **Every turn loads its whole thread** — compaction trims what is sent, not what is held — so
+#: this is a per-permit term in the size of the conversation, and before
+#: `session_max_thread_bytes` nothing bounded that size: twelve threads of 95,000-character
+#: messages drove the front door alone past 1Gi and it was OOM-killed at turn 76. The coefficient
+#: is width-dependent the way the parse one is — CPython holds a `str` at its widest code point
+#: while the blob stays UTF-8 — so it was measured at the widest, one U+1F9EA per 95,000-character
+#: message, and it is noisy: the ratio read 13.4-17.6 across one run's rounds and 11.7 at the end
+#: of another, which reached the same 847 MiB a thread later — allocator high-water moves by
+#: ~50 MiB between runs. One em dash per message read 7.2; a thread of short messages about 1.
+#: This is the largest ratio measured at or under the ceiling, rounded up.
+POD_BYTES_PER_THREAD_BYTE = 18
+
+
+def test_the_parse_coefficient_still_describes_the_largest_document_a_binding_may_declare() -> None:
+    """The coefficient's second term, which nothing used to declare.
+
+    `PARSE_MIB_PER_PARSE_BUDGET_MIB` multiplies `document_parse_memory_bytes`, and that budget is
+    what a parse may allocate **beyond** its document. So the pod's real per-parse charge depends
+    on the largest document a binding will hand it, and that field is set per `datasource.yaml`.
+    It had `ge=1024` and no upper bound: a site binding at 200 MiB moved the real charge to
+    ~360 MiB and moved `test_a_pod_that_starts_a_parse_forkserver_fits_the_memory_it_declares` not
+    at all.
+
+    Asserted as the *agreement* between the two constants rather than as either figure, because
+    what must not drift is that the coefficient was measured at the cap the bindings can reach —
+    406.7 MiB of pod for two concurrent 50 MiB plain-text documents. Raising the cap is legitimate
+    and costs a re-measurement; this is what makes that cost visible instead of silent.
+    """
+    from chemclaw.ingest.documents.binding import (
+        PARSE_COEFFICIENT_BASIS_BYTES,
+        DocumentShareBinding,
+    )
+
+    field = DocumentShareBinding.model_fields["max_file_bytes"]
+    ceiling = next(
+        (getattr(item, "le", None) for item in field.metadata if getattr(item, "le", None)),
+        None,
+    )
+    assert ceiling == PARSE_COEFFICIENT_BASIS_BYTES, (
+        f"`max_file_bytes` is bounded at {ceiling} and the parse coefficient was measured against "
+        f"{PARSE_COEFFICIENT_BASIS_BYTES}; a binding may hand the pod a document larger than "
+        "anything `PARSE_MIB_PER_PARSE_BUDGET_MIB` has ever seen, and no inequality here moves"
+    )
+    assert field.default <= PARSE_COEFFICIENT_BASIS_BYTES, (
+        "the shipped default is already above the basis the coefficient was measured at"
+    )
+
+
+def _declared_mib(resources: dict[str, Any], kind: str) -> int:
+    """The `requests`/`limits` memory a `resources` block declares, in MiB."""
+    declared = str(resources[kind]["memory"])
+    units = {"Mi": 1, "Gi": 1024}
+    suffix = declared[-2:]
+    assert suffix in units, f"unhandled memory unit in {declared!r}"
+    return int(declared[:-2]) * units[suffix]
+
+
+#: The env name both halves of the parse budget are spelled with.
+_PARSE_BUDGET_KEY = "CHEMCLAW_DOCUMENT_PARSE_MEMORY_BYTES"
+
+
+def _parse_budget_mib(override: Any) -> float:
+    """What one parse may allocate on a pod, in MiB, resolved the way the kubelet resolves it.
+
+    **Per component, because one number was serving two pods with twice the room between them.**
+    `document_parse_memory_bytes` is derived downwards from the *front door* — a 1Gi limit and two
+    parse slots — and the background worker reads it with four times the limit and four times the
+    slots, so the same inequality allows 332.7 MiB there against 178.9 here.
+
+    Three sources, in the order a container actually sees them: an explicit `env` entry on the
+    Deployment, then the shared ConfigMap the release reaches through `envFrom`, then the code
+    default. **The middle one was missing and that repeated the defect this helper was written for,
+    one layer up**: the front-door arm resolved the budget from `settings` and never looked at
+    `.Values.config`, so a fleet-wide raise — the natural way to raise it — would move every pod's
+    real budget and move no inequality here. Driven: `config` at 512 MiB gives the front door
+    523 + 2 x 1.4 x 512 = 1957 MiB against a 1Gi limit, and this file stayed green.
+    """
+    from chemclaw.core.config import settings
+
+    if override in (None, ""):
+        return float(settings.document_parse_memory_bytes) / 1024**2
+    return float(override) / 1024**2
+
+
+def _parse_peak_mib(concurrent: int, budget_mib: float) -> float:
+    """What `concurrent` parses at `budget_mib` each peak at, in MiB."""
+    return concurrent * PARSE_MIB_PER_PARSE_BUDGET_MIB * budget_mib
+
+
+def _front_door_turn_mib(config: dict[str, Any]) -> tuple[float, float]:
+    """What the front door's turns hold, in MiB: warm at the admission cap, and at its peak.
+
+    The first is what a front door that has served a busy minute keeps with nothing in flight —
+    the warm-up plus every permit's high-water — and belongs under the *request*. The second adds
+    each permit loading a thread at `session_max_thread_bytes`, and belongs under the *limit*.
+
+    Both inputs resolved the way a container sees them, the lesson `_parse_budget_mib` records:
+    the release's shared `config` first, the code default second. A deployment raising the permit
+    count or the thread ceiling for the whole release has to move an inequality here.
+    """
+    from chemclaw.core.config import settings
+
+    def resolved(key: str, default: int) -> int:
+        """The release's value where it states one — a YAML `0` included — else the code's."""
+        stated = config.get(key)
+        return default if stated in (None, "") else int(stated)
+
+    permits = resolved(
+        "CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS", settings.service_max_concurrent_turns
+    )
+    thread_bytes = resolved("CHEMCLAW_SESSION_MAX_THREAD_BYTES", settings.session_max_thread_bytes)
+    assert thread_bytes, (
+        "session_max_thread_bytes is 0, so a turn may load a thread of any size and the front "
+        "door's peak has no bound this file can state"
+    )
+    warm = TURN_WARM_MIB + permits * TURN_MIB_PER_PERMIT
+    return warm, warm + permits * POD_BYTES_PER_THREAD_BYTE * thread_bytes / 1024**2
+
+
+def test_a_pod_that_starts_a_parse_forkserver_fits_the_memory_it_declares() -> None:
+    """Both components that parse documents are sized against the second process they start.
+
+    Written as an inequality over measured constants and the settings that bound the work, rather
+    than as a number somebody typed, because the failure it replaces is precisely a number typed
+    before `ingest/documents/isolate.py` existed: `resources.service` was sized when a parse ran on
+    a worker thread inside the front door, and a `forkserver` started by fork *and exec* shares no
+    page with it.
+
+    Measured, the request did not satisfy this: 432 MiB resident plus 91 MiB of warm forkserver is
+    523 MiB against a 512Mi request, exceeded while the pod is idle — which is a node oversubscribed
+    by the difference and a pod first in line for eviction, with nothing anywhere saying so.
+
+    **The limit half of this was green on a case that OOM-killed the pod, and what was wrong was
+    the quantity rather than the number**, and
+    `D-2026-09-19-a-ceiling-on-the-archive-is-not-a-ceiling-on-the-parse` has the measurements. It
+    read `document_max_expanded_bytes` and multiplied it by a coefficient
+    measured on three ASCII samples; a parse is not a function of a document's expanded size, for
+    the three independent reasons `PARSE_MIB_PER_PARSE_BUDGET_MIB` sets out. Driven in a 1Gi memory
+    cgroup carrying the 523 MiB idle pair: two legal uploads — 1,089,493 bytes on the wire against
+    `attachment_max_bytes` of 2,000,000, 63.4 MiB expanded against a 64 MiB ceiling — with one
+    astral character each took the *parent* with `SIGKILL`, exit 137, while this assertion
+    read 920 against 1024 and passed.
+
+    So what is multiplied here is `document_parse_memory_bytes`, the ceiling the kernel enforces on
+    the process that does the allocating. That is a coefficient of the quantity it is declared
+    against: raising the budget, `attachment_max_concurrent_parses` or
+    `worker_max_concurrent_activities`, or lowering either declaration, fails here instead of in an
+    OOMKill that takes every other connected turn with it.
+    """
+    from chemclaw.core.config import settings
+
+    values = _values()
+    resources = values["resources"]
+    front_door = FRONT_DOOR_RESIDENT_MIB + FORKSERVER_POD_COST_MIB
+    worker = WORKER_RESIDENT_MIB + FORKSERVER_POD_COST_MIB
+    # The worker declares its own parse allowance, because the fleet-wide one is derived from the
+    # *front door* and this pod has four times the limit and four times the parse slots. Read out of
+    # the values file rather than restated, so the inequality below is asserted against the number
+    # the Deployment actually renders (`deployment-workers.yaml`).
+    worker_override = values["workers"]["background"].get("documentParseMemoryBytes")
+    # The fleet-wide entry every component reads through `envFrom`, which is what a deployment
+    # raising this for the whole release would set. Absent from the shipped `config`, so today this
+    # resolves to the code default — but reading it is what stops that raise from moving a real
+    # budget while moving no inequality here.
+    fleet_wide = (values.get("config") or {}).get(_PARSE_BUDGET_KEY)
+
+    # **The turns are the third term, and the one that scales with load**
+    # (`D-2026-09-24-a-turn-costs-the-thread-it-loads`). The two above were measured with no turn
+    # in flight; a front door that has served turns keeps their warm-up and high-water, and one
+    # at its admission cap holds a thread per permit on top. The worker takes no front-door turns.
+    turns_warm, turns_peak = _front_door_turn_mib(values.get("config") or {})
+
+    for label, key, idle, concurrent, budget_mib, turns_idle, turns in (
+        (
+            "front door",
+            "service",
+            front_door + turns_warm,
+            settings.attachment_max_concurrent_parses,
+            _parse_budget_mib(fleet_wide),
+            turns_warm,
+            turns_peak,
+        ),
+        # **The worker's count is its activity cap, and it used to be 1** — justified by
+        # `ingest/documents/sync.py` awaiting each `_read_and_parse` in turn, which bounds one
+        # *activity* while this pod runs `worker_max_concurrent_activities` of them. That the
+        # document-sync schedule is `ScheduleOverlapPolicy.SKIP` over a workflow whose activities
+        # are sequential does make 1 the number today, but it is a three-hop argument across two
+        # modules that a second share schedule or one manual run breaks, and the pod fits its cap
+        # outright — so the cap is what is asserted and the argument is not needed.
+        (
+            "background worker",
+            "worker",
+            worker,
+            settings.worker_max_concurrent_activities,
+            _parse_budget_mib(worker_override if worker_override is not None else fleet_wide),
+            0.0,
+            0.0,
+        ),
+    ):
+        request = _declared_mib(resources[key], "requests")
+        limit = _declared_mib(resources[key], "limits")
+        assert idle <= request, (
+            f"the {label} holds {idle:.0f} MiB with its parse forkserver warm and nothing in "
+            f"flight ({turns_idle:.0f} of it kept from turns already served), "
+            f"against a memory request of {request} MiB. A pod over its request while idle is "
+            "scheduled onto a node that does not have the memory it uses, and is the first thing "
+            "evicted when that node comes under pressure"
+        )
+        needed = idle - turns_idle + turns + _parse_peak_mib(concurrent, budget_mib)
+        assert needed <= limit, (
+            f"{concurrent} concurrent parse(s) at the {budget_mib:.0f} MiB allocation ceiling this "
+            f"component declares need {needed:.0f} MiB in the {label} — the resident set, the "
+            f"warm forkserver and {turns:.0f} MiB of turns at the admission cap included — against "
+            f"the {limit} MiB its container declares. That is an OOMKill of the whole pod, not a "
+            "refused upload"
+        )
+
+
+#: The program the measurement runs, in a child of this process rather than in it.
+#:
+#: `_PRELOAD` is never named here: the child imports the shipped module and parses through it, so
+#: this stays a ratchet on the real list rather than on a transcription of it. A child that reaches
+#: the end without a forkserver prints nothing, which is the failure the caller names.
+_FORKSERVER_RSS_PROGRAM = """
+from multiprocessing import forkserver
+
+from chemclaw.ingest.documents.isolate import parse_document_isolated
+
+parse_document_isolated("budget.csv", b"id,yield\\nR-1,88\\n", None, 60.0)
+# Read through `getattr` because the pid is not on typeshed's `ForkServer`: upstream keeps no
+# public handle on the process it starts, and the alternative -- matching a `/proc` child by its
+# command line -- would be a second private shape with more code around it.
+pid = getattr(forkserver._forkserver, "_forkserver_pid", None)
+if pid is not None:
+    with open("/proc/%d/status" % pid, encoding="utf-8") as status:
+        for line in status:
+            # `RssAnon`/`RssFile` are the decomposition, printed before the total because the
+            # caller reads the *last* field as the reading. They are what tells a closure that grew
+            # from an environment whose allocator holds more anonymous pages for the same objects;
+            # see `FORKSERVER_RSS_CEILING_MIB` for the run where that distinction was the answer.
+            if line.startswith(("RssAnon:", "RssFile:")):
+                print(line.split()[0], line.split()[1])
+    with open("/proc/%d/status" % pid, encoding="utf-8") as status:
+        for line in status:
+            if line.startswith("VmRSS:"):
+                print(line.split()[1])
+                break
+"""
+
+#: Environment variables that put a module into *every* interpreter this virtualenv starts, through
+#: a `.pth` in `site-packages`, and so into the process being measured rather than into the closure
+#: being measured. Dropped for the measurement: driven, `COVERAGE_PROCESS_START` alone moves the
+#: reading +5.0 MiB with `isolate._PRELOAD` untouched.
+_PTH_INJECTORS = ("COVERAGE_PROCESS_START", "COVERAGE_PROCESS_CONFIG")
+
+
+@pytest.mark.skipif(not Path("/proc/self/status").exists(), reason="needs a Linux /proc")
+def test_a_warm_parse_forkserver_still_costs_what_this_budget_was_derived_against() -> None:
+    """The constant the chart rests on is re-measured here, against the shipped preload list.
+
+    `FORKSERVER_POD_COST_MIB` is the one input to the budget above that is a property of this tree
+    rather than of a declaration: it is whatever `isolate._PRELOAD` drags in, and adding a module to
+    that list — or an import to `ingest/documents/parse.py` — moves it with nothing else changing. A
+    constant transcribed from a measurement five days old is exactly what `docs/planning/BACKLOG.md`
+    carried, and it was 30% out.
+
+    So the closure is measured off a running forkserver rather than restated — **in a child of this
+    process, and no longer the forkserver this one is holding.** That is the correction this test
+    carries, and it is not the one the reading's first flake suggested.
+
+    **What is measured is `VmRSS`, and the first draft of this test measured `Pss` and flaked.**
+    `Pss` is the right unit for the *budget*, because a cgroup is charged once for a unique page; it
+    is the wrong unit for a *ratchet*, because a page's share depends on how many other processes
+    happen to map it. Observed: the first run of that draft inside a freshly created virtualenv read
+    above its 95 MiB ceiling and failed, and five later runs of the identical assertion read
+    90.0–91.0 MiB and passed. That reason is now driven rather than reasoned: four peers mapping
+    these same libraries pulled the forkserver's `Pss` from 93.4 MiB to 81.1 while its `VmRSS`
+    stayed inside 0.1 MiB. `VmRSS` does belong to the process alone, across every arm it was put
+    under — a 417 MiB parent, pytest's own, eight CPU hogs, 2.4 GB of peers, a dropped page cache,
+    a deleted `__pycache__`, a hundred parses through one singleton.
+
+    **What it does not belong to alone is `isolate._PRELOAD`, which is why the measurement moved
+    into a child.** `forkserver` starts its server by fork *and exec*, so the server inherits this
+    process's environment, and `site` runs this virtualenv's `a1_coverage.pth` inside it: with
+    `COVERAGE_PROCESS_START` set, the same untouched preload list measures 113.81–113.90 MiB against
+    108.9 — through the ceiling, not into the margin, so reading the singleton makes *how the gate
+    was invoked* red this assertion and blame `_PRELOAD` for it. A child started with those
+    injectors dropped measures the list and nothing else, and it costs ~2.0 s, of which 0.86 s is
+    the forkserver start this test was paying anyway whenever it ran first in a session.
+    """
+    environment = {k: v for k, v in os.environ.items() if k not in _PTH_INJECTORS}
+    child = subprocess.run(
+        [sys.executable, "-c", _FORKSERVER_RSS_PROGRAM],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=environment,
+        timeout=180,
+    )
+    reading = child.stdout.split()
+    # An empty answer is a parse that ran without a forkserver, or an upstream rename of the handle
+    # the child reads — a named failure rather than a silent skip, which is what this used to be.
+    assert child.returncode == 0 and reading and reading[-1].isdigit(), (
+        "the measurement child reported no forkserver `VmRSS`: a parse ran without a forkserver, "
+        "or upstream renamed the private handle it reads, and this budget then describes another "
+        f"shape. stdout={child.stdout!r} stderr={child.stderr[-2000:]!r}"
+    )
+    measured = int(reading[-1]) / 1024
+    split = " ".join(reading[:-1]) or "no decomposition reported"
+    assert measured <= FORKSERVER_RSS_CEILING_MIB, (
+        f"a warm parse forkserver is resident at {measured:.1f} MiB where the budget above was "
+        f"derived against a closure measured at {FORKSERVER_RSS_CEILING_MIB}. Whatever grew "
+        "`isolate._PRELOAD`'s closure has moved what every front door and every background worker "
+        "costs its node, and `FORKSERVER_POD_COST_MIB` — with `resources.service` and "
+        f"`resources.worker` under it — needs re-deriving before it ships. Decomposition: {split} "
+        "(kB). **Before attributing this to `_PRELOAD`, run the same measurement against a "
+        "revision whose closure is known**, which is the one thing that separates a closure that "
+        "grew from a machine that holds more anonymous pages for the same objects: `git archive "
+        "<rev> src | tar -x -C /tmp/base && PYTHONPATH=/tmp/base/src python -c "
+        "'import chemclaw.ingest.documents.parse'` and read `/proc/self/status`. A reading that is "
+        "high at the older revision too is the environment, and this ceiling is what moves"
+    )
+
+
+def test_the_chart_caps_turns_per_actor_strictly_below_the_process_cap() -> None:
+    """A fairness cap at or above the pod's own cap enforces nothing while reading as protection.
+
+    The code default is 0 (off) because `chemclaw.cli.live_storm`'s family A sweeps the *admission*
+    cap end to end from one credential, so the production posture lives here — and a posture
+    nothing checks is one that drifts. `>=` is the whole failure mode: at 12
+    against a 12-permit pod the guard is consulted on every request, refuses nothing ever, and a
+    reviewer reading `values.yaml` sees a per-actor limit that does not exist.
+    """
+    config = _values()["config"]
+    per_actor = int(config["CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS_PER_ACTOR"])
+    per_process = int(config["CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS"])
+
+    assert per_actor > 0, "the chart carries the production posture; 0 is the code default"
+    assert per_actor < per_process, (
+        f"a per-actor cap of {per_actor} against {per_process} permits refuses nothing; one "
+        f"principal can still hold every permit on the replica"
+    )
+
+
+#: The router's own namespace selector, as `networkPolicy.ingressNamespaces` already ships it for
+#: the chat front door. Written once here because the two tests below need the same value on
+#: opposite sides of one assertion — one renders with it, the other without.
+_ROUTER_PEER = 'mcpFace.ingressNamespaces=[{"network.openshift.io/policy-group":"ingress"}]'
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+def test_publishing_the_face_without_a_router_peer_refuses_to_render() -> None:
+    """`route.enabled` and an empty peer list published an address this chart's own policy drops.
+
+    The pair the chart shipped: `mcpFace.route.enabled=true` renders a `Route`, and
+    `templates/networkpolicy.yaml`'s `mcp-face-ingress` permits `podSelector` — which NetworkPolicy
+    scopes to the policy's own namespace — plus whatever `mcpFace.ingressNamespaces` names, which
+    defaults to `[]`. The router is in neither, so every request the Route admitted was dropped
+    before it reached the pod. The front door does not have this shape: `networkPolicy.ingress
+    Namespaces` ships the router's selector, in the same file, which is what makes the omission a
+    defect rather than a posture.
+
+    **Asserted through a real render in three directions**, because a `fail` is as easy to write too
+    wide as too narrow, and the too-wide version — refusing whenever `ingressNamespaces` is empty —
+    would break the coherent posture of a face reachable only from inside the cluster:
+
+    1. route on, list empty: refused, and the message names the key an operator has to set;
+    2. route on, list named: renders, and both the `Route` and the policy are there with the peer;
+    3. face on, route off: renders, with an empty peer list, because that is a stated posture.
+
+    Not defaulted from `networkPolicy.ingressNamespaces`, and the chart says why in the same words
+    the guard does: that list answers who may reach a surface behind Entra, this one answers who may
+    reach a surface whose whole authorization is one bearer token, and inheriting the first to grant
+    the second is the widening the two-list split exists to prevent.
+    """
+    unstated = _render("--set", "mcpFace.enabled=true", "--set", "mcpFace.route.enabled=true")
+    assert unstated.returncode != 0, (
+        "the chart published a Route whose traffic its own `mcp-face-ingress` policy drops:\n"
+        f"{unstated.stdout[:2000]}"
+    )
+    assert "mcpFace.ingressNamespaces" in unstated.stderr, (
+        f"the refusal does not name the key that fixes it: {unstated.stderr}"
+    )
+
+    stated = _render(
+        "--set",
+        "mcpFace.enabled=true",
+        "--set",
+        "mcpFace.route.enabled=true",
+        "--set-json",
+        _ROUTER_PEER,
+    )
+    assert stated.returncode == 0, stated.stderr
+    published = [
+        document
+        for document in yaml.safe_load_all(stated.stdout)
+        if document and document.get("metadata", {}).get("name", "").endswith("-mcp-face")
+    ]
+    assert {document["kind"] for document in published} >= {"Route", "Service"}, (
+        f"naming the peer did not publish the face: {[d['kind'] for d in published]}"
+    )
+    policy = next(
+        document
+        for document in yaml.safe_load_all(stated.stdout)
+        if document and document.get("metadata", {}).get("name", "").endswith("-mcp-face-ingress")
+    )
+    peers = policy["spec"]["ingress"][0]["from"]
+    assert any("namespaceSelector" in peer for peer in peers), (
+        "the policy still admits only this namespace's pods, so the Route the chart just agreed to "
+        f"publish is still dropped: {peers}"
+    )
+
+    # The narrow direction: an unpublished face with no peers is a posture, not an omission.
+    internal = _render("--set", "mcpFace.enabled=true")
+    assert internal.returncode == 0, internal.stderr
+    names = {
+        (document.get("kind"), document.get("metadata", {}).get("name"))
+        for document in yaml.safe_load_all(internal.stdout)
+        if document
+    }
+    assert ("NetworkPolicy", "chemclaw-mcp-face-ingress") in names, sorted(names)
+    # By parsed name, not by a substring of the whole render: the *chat* front door renders its own
+    # `Route` in the same output, so a text search finds one and says nothing about the face.
+    assert ("Route", "chemclaw-mcp-face") not in names, (
+        f"an unpublished face rendered a Route anyway: {sorted(names)}"
+    )
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+@pytest.mark.parametrize("overrides", _OFF_BY_DEFAULT_RENDERS.values(), ids=_OFF_BY_DEFAULT_RENDERS)
+def test_no_rendered_setting_reaches_a_pod_in_scientific_notation(
+    overrides: tuple[str, ...],
+) -> None:
+    """Helm renders a large or fractional values entry as a float, and `Settings` cannot read one.
+
+    **Driven, on the change that added the first one.** `workers.background.
+    documentParseMemoryBytes: 335544320` reached the container as `"3.3554432e+08"`, because Helm
+    parses the values entry as a float and `| quote` renders a float the way Go prints one.
+    `CHEMCLAW_DOCUMENT_PARSE_MEMORY_BYTES=3.3554432e+08` is a pydantic `int_parsing` error, so every
+    background worker would have crash-looped on start — a whole Deployment down, from a values file
+    that reads correctly and a chart that renders without complaint.
+
+    **The blind spot is why this is a general guard rather than a `%.0f` and a comment.** Every
+    other assertion in this file about that budget reads `values.yaml` through `yaml.safe_load`,
+    where the same entry is an ordinary `int` — so the arithmetic was checked against a number no
+    pod ever sees, and the render was the only place the defect existed. Any future numeric
+    override on any Deployment has the identical trap.
+
+    **And the ConfigMap is the bigger half, which the first version of this guard did not read.**
+    `config.yaml` renders `.Values.config`, `retention.windows` and `retention.artifactStore` with
+    `| quote` too, and those reach *every* pod through `envFrom: configMapRef` — so one float there
+    crash-loops the whole release rather than one Deployment. Driven through a values file (which is
+    where the trap lives; `--set` goes through Helm's strvals parser and keeps an int64):
+    `CHEMCLAW_ARTIFACT_STORE_MAX_BYTES: 10737418240` renders as `"1.073741824e+10"`. So this reads
+    container `env`, `envFrom` sources, and the `data` of every ConfigMap and Secret the chart
+    renders.
+
+    Parametrised over `_OFF_BY_DEFAULT_RENDERS` for the reason its two siblings are: a template
+    behind a switch is validated by nobody otherwise, and `CHEMCLAW_TEMPORAL_METRICS_PORT` exists
+    only under `monitoring.temporalSdkMetrics.enabled` and takes its value straight from the values
+    file through `| quote`.
+
+    Scoped to `CHEMCLAW_*`, because those are the names `Settings` parses; a float in someone
+    else's variable is that consumer's business.
+    """
+    rendered = _render(*overrides)
+    assert rendered.returncode == 0, rendered.stderr
+    offenders: list[str] = []
+
+    def _suspect(where: str, name: str, value: object) -> None:
+        text = str(value)
+        if name.startswith("CHEMCLAW_") and ("e+" in text or "E+" in text):
+            offenders.append(f"{where} {name}={text}")
+
+    for doc in yaml.safe_load_all(rendered.stdout):
+        if not doc:
+            continue
+        kind, name = doc.get("kind"), doc["metadata"]["name"]
+        if kind in {"ConfigMap", "Secret"}:
+            # Where a float does the most damage: one `envFrom: configMapRef` per pod, so the
+            # whole release crash-loops rather than one Deployment.
+            for key, value in (doc.get("data") or {}).items():
+                _suspect(f"{kind} {name}", key, value)
+            continue
+        for owner, spec in _pod_specs(yaml.safe_dump(doc)):
+            for container in [*spec.get("containers", []), *spec.get("initContainers", [])]:
+                for entry in container.get("env") or []:
+                    _suspect(f"{owner}/{container['name']}", entry["name"], entry.get("value", ""))
+
+    assert not offenders, (
+        "these rendered settings reach a pod in scientific notation, which pydantic refuses with "
+        f"`int_parsing`, so the container crash-loops on start: {offenders}. Render it with "
+        "`int64` rather than `| quote`, which prints a Helm float the way Go does"
+    )
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+@pytest.mark.parametrize(
+    ("overrides", "named"),
+    [
+        pytest.param(
+            ("--set", "service.autoscaling.maxReplicas=0"), "maxReplicas", id="hpa-ceiling"
+        ),
+        pytest.param(
+            (
+                "--set",
+                "service.autoscaling.enabled=false",
+                "--set",
+                "service.replicas=0",
+            ),
+            "service.replicas",
+            id="fixed-count",
+        ),
+    ],
+)
+def test_a_release_with_no_front_door_refuses_to_render(
+    overrides: tuple[str, ...], named: str
+) -> None:
+    """A zero front door renders a release in which every pod refuses to start.
+
+    `service_fleet_replicas` is `Field(default=1, gt=0)` and `config.yaml` renders this number into
+    the ConfigMap **every** pod reads through `envFrom`, so a zero does not scale the front door
+    down. It fails `Settings()` at `core/config/__init__.py`'s module-level singleton — which is why
+    this is not a question of which component reads the setting. Driven over nine entrypoints, all
+    nine exit 1, and `deploy/entrypoint.sh` runs `python -m chemclaw.cli.egress_preload` under
+    `set -euo pipefail` *before* its `case`, so every container dies in the shell prologue: the
+    seven connector Deployments, the background worker, and the migrate/schedules/convert hook Jobs
+    — so `helm upgrade` never converges either.
+
+    **Both arms, because the backlog row's own reproducer is not one of them.** It named
+    `--set service.replicas=0`, which on the shipped defaults changes not one byte: the HPA ships
+    enabled and `chemclaw.frontDoorProcesses` reads `maxReplicas` in that branch. The two that do
+    reach it are parametrised here.
+
+    Neither `helm template` nor `kubeconform` could catch this — the value is a valid string in a
+    valid ConfigMap — and `make helm-validate` renders only the defaults plus the flag union, so it
+    never sets a replica count. A render-time `fail` naming the key is the only thing between an
+    operator's `--set` and eleven crash-looping pods.
+    """
+    refused = _render(*overrides)
+
+    assert refused.returncode != 0, (
+        "the chart still renders a release whose every pod refuses to start on "
+        f"{overrides}:\n{refused.stdout[:2000]}"
+    )
+    assert named in refused.stderr, refused.stderr
+    assert "CHEMCLAW_SERVICE_FLEET_REPLICAS" in refused.stderr, (
+        "the refusal must name the setting that actually refuses the value, since that is what an "
+        f"operator has to look up: {refused.stderr}"
+    )
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+def test_the_front_door_count_the_chart_refuses_is_the_one_settings_refuses() -> None:
+    """The chart's bound and `Settings`' bound are one decision, asserted against each other.
+
+    Two places state "at least one front door" and a chart guard that drifted from the field would
+    be the worst of both: a render that succeeds into a crash-loop, or one that refuses a value the
+    code would have taken. Read off `model_fields` rather than transcribed, so moving the field
+    moves this.
+    """
+    from chemclaw.core.config import Settings
+
+    constraints = Settings.model_fields["service_fleet_replicas"].metadata
+    floors = [getattr(item, "gt", None) for item in constraints]
+    assert 0 in floors, (
+        "service_fleet_replicas no longer carries `gt=0`, so the chart guard refusing zero is now "
+        f"stricter than the code it protects: {constraints}"
+    )
+
+    # And the value one above the floor still renders, so the guard is a floor rather than a ban.
+    assert _render("--set", "service.autoscaling.maxReplicas=1").returncode == 0
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+def test_the_fixed_replica_count_renders_nowhere_while_the_hpa_is_on() -> None:
+    """`service.replicas` is dead config on the shipped defaults, and that is now written down.
+
+    The backlog row behind this change was built on `--set service.replicas=0` reaching the
+    ConfigMap. It does not: `service.autoscaling.enabled` ships true, `chemclaw.frontDoorProcesses`
+    reads `maxReplicas` in that branch, and `deployment-service.yaml` omits `replicas` entirely
+    because the HPA owns it. So a `--set` an operator would reasonably expect to scale the front
+    door silently does nothing.
+
+    Pinned as a test rather than left to the comment in `values.yaml`, because the comment is only
+    true while this remains true — and if a later change makes `service.replicas` live under the
+    HPA, this reds and that comment gets corrected with it.
+    """
+    baseline = _render()
+    overridden = _render("--set", "service.replicas=1")
+
+    assert baseline.returncode == 0 and overridden.returncode == 0
+    assert baseline.stdout == overridden.stdout, (
+        "service.replicas now changes the shipped render, so the values.yaml comment saying it is "
+        "read only when the HPA is off is stale"
+    )

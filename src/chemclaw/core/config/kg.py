@@ -56,6 +56,17 @@ class KgSettings(BaseSettings):
     # tree went with the PR gate — there is no second tree any more.) Point it at a dedicated clone
     # of the knowledge repo in production; the "." default only suits a dev checkout.
     note_repo_dir: str = "."
+    # Who the writer's commits are by. Stated rather than left to git, because git's fallback is
+    # `user.*` config nobody provisions (not the chart, not `deploy/knowledge-sync.sh`) and then a
+    # guess from the hostname and uid — `root@<id>.(none)` in a container, which git refuses, so
+    # every note commit failed `Author identity unknown` as a non-retryable `GitWriteError` and the
+    # note was dropped. `GitNoteWriter` hands both to every git child as `GIT_AUTHOR_*` and
+    # `GIT_COMMITTER_*`, so they win over any config the clone happens to carry. A service identity
+    # rather than a person's, because nobody in particular wrote an agent note. `.invalid`
+    # (RFC 2606) is never deliverable, so the default claims no mailbox; set a real address if the
+    # notes remote's forge requires one.
+    note_committer_name: str = Field(default="ChemClaw", min_length=1)
+    note_committer_email: str = Field(default="chemclaw-notes@chemclaw.invalid", min_length=1)
     # Publishing a QM result as a graph note is best-effort: bounded attempts + its own timeout
     # so a persistent failure gives up instead of retrying forever.
     note_write_timeout_seconds: float = Field(default=120.0, gt=0)

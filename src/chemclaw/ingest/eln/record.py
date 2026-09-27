@@ -283,9 +283,9 @@ def _scale(reaction: OrdReaction) -> str | None:
     excluded for the same reason in reverse — three equivalents of an inorganic base can outweigh
     the substrate and would inflate the figure well past what anyone would call the scale.
 
-    Mass preferred, `amount_mmol` as the fallback, and both unit-labelled so the two forms are
-    never confused. `None` when the record charges neither — the note stays silent rather than
-    asserting a scale it does not know.
+    Mass preferred, `amount_mmol` next, a stated volume last, and every form unit-labelled so they
+    are never confused. `None` when the record charges none of them — the note stays silent rather
+    than asserting a scale it does not know.
 
     **The two forms are chosen per record, not per reactant, and a record carrying both reports
     both.** `Component` allows `mass_mg` and `amount_mmol` independently, so "an ELN records one or
@@ -306,9 +306,20 @@ def _scale(reaction: OrdReaction) -> str | None:
     masses = [c.mass_mg for c in reactants if c.mass_mg is not None]
     # Only those with no mass, so a reactant carrying both is counted once, on the preferred form.
     amounts = [c.amount_mmol for c in reactants if c.mass_mg is None and c.amount_mmol is not None]
+    # And only those the source stated neither of the other two for. A volume is not convertible to
+    # either without a density this record does not carry, so it is a *third* labelled term rather
+    # than a conversion: a 49.3 g charge made of 40 g plus 10 mL now reads "40 g + 10 mL of
+    # reactants charged", where it read "40 g" — the under-report this docstring argues is the
+    # direction that matters, arriving by the kind `ord_adapter._amount` could not read.
+    volumes = [
+        c.volume_ml
+        for c in reactants
+        if c.mass_mg is None and c.amount_mmol is None and c.volume_ml is not None
+    ]
     grams = f"{_measured(sum(masses) / 1000)} g" if masses else ""
     mmol = f"{_measured(sum(amounts))} mmol" if amounts else ""
-    charged = " + ".join(part for part in (grams, mmol) if part)
+    millilitres = f"{_measured(sum(volumes))} mL" if volumes else ""
+    charged = " + ".join(part for part in (grams, mmol, millilitres) if part)
     if not charged:
         return None
     return f"{charged} of reactants charged"
@@ -337,7 +348,18 @@ def _charge_block(reaction: OrdReaction) -> str:
     Every input is listed once the section exists, including those with no recorded amount: that a
     species was charged is itself information, and omitting its row would read as "not charged".
     """
-    if not any(c.mass_mg is not None or c.amount_mmol is not None for c in reaction.inputs):
+    # **Or an attribute**, because the gate decided whether a per-species fact reaches the note at
+    # all and read only the three quantities: a record whose ELN charged by `unmeasured` (an ORD
+    # statement, carried as `amount_unmeasured`) or logged a lot number without a mass lost every
+    # one of those rows here, silently. The "table of blanks" this gate avoids is a record that
+    # carries *nothing* per species, which is still what it refuses.
+    if not any(
+        c.mass_mg is not None
+        or c.amount_mmol is not None
+        or c.volume_ml is not None
+        or c.attributes
+        for c in reaction.inputs
+    ):
         return ""
     lines = "".join(f"- {_charge_line(c)}\n" for c in reaction.inputs)
     return f"\n## Charge\n\n{lines}"
@@ -350,6 +372,11 @@ def _charge_line(component: Component) -> str:
         amounts.append(f"{_measured(component.mass_mg)} mg")
     if component.amount_mmol is not None:
         amounts.append(f"{_measured(component.amount_mmol)} mmol")
+    # Volume is a recorded amount like the other two, and saying "amount not recorded" for a
+    # species the source charged by volume is the false half of the same defect: it tells a reader
+    # the ELN was silent where the ELN was not (`Component.volume_ml`).
+    if component.volume_ml is not None:
+        amounts.append(f"{_measured(component.volume_ml)} mL")
     detail = ", ".join(amounts) if amounts else "amount not recorded"
     line = f"`{component.smiles}` ({component.role.value}): {detail}"
     # Whatever else the source recorded about this species, on the row it belongs to rather than in

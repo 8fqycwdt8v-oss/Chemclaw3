@@ -76,6 +76,7 @@ unit names rather than the chemist's spelling — on the path every caller's `ex
 guards.
 """
 
+import re
 from dataclasses import dataclass, replace
 from typing import Literal, get_args
 
@@ -632,3 +633,60 @@ def reconcile(value: float, reported: str, expected: str) -> float:
             f"{expected!r} are the same unit measured against different things"
         )
     return measured.to(expected).value
+
+
+#: A leading number and a trailing unit, with optional space and an optional sign/exponent.
+#: Deliberately anchored at both ends: this reads a field a *person* wrote as the whole answer
+#: ("20 kg"), not a number mentioned inside a sentence. `quantities.labelled_values` is the tool for
+#: the other job, and conflating them would make "run it at 20 °C in 500 mL" parse as a scale.
+_QUANTITY = re.compile(r"^\s*([+-]?\d+(?:[.,]\d+)?(?:[eE][+-]?\d+)?)\s*([^\s\d].*?)\s*$")
+
+#: A comma that could be a thousands separator: one to three digits not starting with 0, then a
+#: comma and exactly three digits. "1,500" is 1500 to one reader and 1.5 to another. Refused rather
+#: than guessed, because either guess is a factor of 1000 in a rescaled protocol and the recorded
+#: basis string would still read "1,500" — the error would be invisible where it lands. "0,500"
+#: is not ambiguous (no thousands group starts with 0), so it reads as a decimal. Matched against
+#: the mantissa only, so "1,500e3" is refused too.
+_AMBIGUOUS_COMMA = re.compile(r"[+-]?[1-9]\d{0,2},\d{3}")
+
+
+def has_ambiguous_comma(text: str) -> bool:
+    """Whether a typed quantity's number uses a comma that may be a thousands separator.
+
+    `parse_quantity` refuses such a number, and a caller turning that refusal into a message
+    should name the comma rather than say "not a quantity" about something that plainly is one.
+    """
+    match = _QUANTITY.match(text)
+    return match is not None and _number_has_ambiguous_comma(match.group(1))
+
+
+def _number_has_ambiguous_comma(number: str) -> bool:
+    """`_AMBIGUOUS_COMMA` over the mantissa, so an exponent cannot hide a thousands group."""
+    mantissa = re.split(r"[eE]", number, maxsplit=1)[0]
+    return _AMBIGUOUS_COMMA.fullmatch(mantissa) is not None
+
+
+def parse_quantity(text: str) -> Measurement | None:
+    """A free-text quantity a person typed, or `None` when it is not one.
+
+    **Returns `None` rather than raising, because most of what reaches it is legitimately not a
+    quantity.** `ExperimentRequest.scale` is a `RequestField` whose value is whatever the chemist
+    said, and "a 96-well plate", "pilot scale" and "" are all ordinary answers. A parser that
+    raised on those would make every caller write the same `try`, and the second caller would write
+    it differently.
+
+    Two callers, which is why this is here rather than inlined: `protocols/checks.py` derives the
+    plausibility bands from the declared scale, and `protocols/rescale.py` reads the basis a
+    protocol is being scaled to. Both want the same three answers — a number, its dimension, or
+    "that was not a quantity" — and both must not explode on prose.
+    """
+    match = _QUANTITY.match(text)
+    if match is None:
+        return None
+    number, unit = match.groups()
+    if _number_has_ambiguous_comma(number):
+        return None
+    try:
+        return Measurement.of(float(number.replace(",", ".")), unit)
+    except (UnitError, ValueError):
+        return None

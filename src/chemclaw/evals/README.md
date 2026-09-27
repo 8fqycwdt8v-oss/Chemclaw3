@@ -8,6 +8,14 @@ so callers resolve by name), `harness.py` runs a case-set, `retrieval.py` scores
 noise floor, billed tokens and wall clock reported beside it rather than folded in, because
 "cheaper but worse" and "better but slower" are different answers that one number hides.
 
+`hypothesis_tournament.py` is the odd one out and says so: it measures an **instrument** rather
+than the system's answers. Given a judge of a stated accuracy, does Swiss pairing plus the
+Bradley-Terry fit recover a known ordering, and by how much does it beat not ranking at all? The
+ground truth is constructed, so it needs no model and no credential and runs in CI
+(`make hypothesis-recovery`) — and so it cannot say whether a *language model* judging real
+chemistry is an accurate judge. `backtest_shape()` states the corpus backtest that would settle
+that and records that it has never run, for `delegation.py`'s reason.
+
 ## Code here, cases in `data/evals/`
 
 This package holds no test case. The versioned case-set, the retrieval corpus and the committed

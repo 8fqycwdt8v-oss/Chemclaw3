@@ -1,0 +1,24 @@
+-- Drop `turn_costs_skills_loaded_idx`: it indexes a containment test no query in this tree makes.
+--
+-- `105_turn_skills_loaded.sql` created it one commit earlier, and its comment stated the read it
+-- was for: *"every turn of this actor that loaded this skill, which is a containment test over a
+-- per-actor slice"*. That query was never written. The only reader of the column is
+-- `chemclaw.cli.distill::_skills_by_session`, and what it actually runs is
+--
+--     SELECT session_id, skills_loaded FROM turn_costs
+--      WHERE session_id <> '' AND cardinality(skills_loaded) > 0
+--
+-- — the whole corpus in one pass, because the guard's input is *every* session's skill set and the
+-- union is taken in Python. `EXPLAIN` on both: a sequential scan for the query that exists, and a
+-- sequential scan for the containment form too. The index is write amplification on every
+-- `turn_costs` insert in exchange for nothing.
+--
+-- **The header was not wrong about the arithmetic; it was wrong about which program it described.**
+-- Indexing the query you intend to write is the same defect as `map_to_hpc_identity` and the empty
+-- `audit_events.agent` column, one layer down — a structure whose justification is a caller that
+-- does not exist. If the distiller ever does ask per-skill, this comes back with the query beside
+-- it in the same commit, and the `EXPLAIN` that shows the planner choosing it.
+--
+-- `IF EXISTS` because a deployment provisioned before `105` never had it, and because this file
+-- must be re-runnable like every other in this directory.
+DROP INDEX IF EXISTS turn_costs_skills_loaded_idx;

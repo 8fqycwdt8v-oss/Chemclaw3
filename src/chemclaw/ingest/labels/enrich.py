@@ -35,7 +35,12 @@ from pydantic import BaseModel, Field
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.logging import log_event
 from chemclaw.core.metrics_bridge import record_metric
-from chemclaw.ingest.labels.labeller import Labeller, ReactionNaming, ReactionRepresentation
+from chemclaw.ingest.labels.labeller import (
+    Labeller,
+    ReactionNaming,
+    ReactionRepresentation,
+    stamped,
+)
 from chemclaw.ingest.labels.merge import merge
 from chemclaw.science.labels.policy import LabelPolicy
 from chemclaw.science.labels.records import ReactionLabel
@@ -145,6 +150,11 @@ async def label_stale(
     representations, namings = await _label(labeller, stale)
     labelled = 0
     unlabelled = 0
+    # Which of the server's components ran and failed, over the whole batch rather than per row.
+    # A failed mapper is a property of the *pod*, so every answer in the batch carries it — one
+    # line per row would be `label_batch_size` identical warnings, which is how a real fault gets
+    # scrolled past. See `_degradations`.
+    degraded: set[str] = set()
     for row in stale:
         policy = policies.get(row.source, _DERIVE_EVERYTHING)
         representation = representations.get(_key(row))
@@ -157,17 +167,28 @@ async def label_stale(
         # reports and the currency the index will claim for that row cannot disagree.
         derived = representation is not None or naming is not None
         await index.store_labels(
-            merge(row, policy, representation, naming), version, derived=derived
+            merge(row, policy, representation, naming),
+            _stamp(representation, naming, version),
+            derived=derived,
         )
         labelled += 1
         if not derived:
             unlabelled += 1
+        degraded.update(_degradations(representation, naming))
     if unlabelled:
         logger.warning(
             "%d of %d reaction(s) were stamped with nothing derived; they leave the stale set so "
             "the drain can advance, and the coverage report counts them as unlabelled",
             unlabelled,
             labelled,
+        )
+    if degraded:
+        logger.warning(
+            "the labelling server answered with %s installed but failing, so those rows are "
+            "stamped with the version that names the failure and will be re-labelled against a "
+            "healthy pod. Nothing here retries them — fix that component and the next pass picks "
+            "them up",
+            ", ".join(sorted(degraded)),
         )
     report = LabelReport(labelled=labelled, unlabelled=unlabelled, has_more=len(stale) == limit)
     _record_pass(
@@ -177,6 +198,72 @@ async def label_stale(
         duration_s=time.perf_counter() - started,
     )
     return report
+
+
+def _degradations(
+    representation: ReactionRepresentation | None, naming: ReactionNaming | None
+) -> set[str]:
+    """Which of the labeller's components ran on this row and failed.
+
+    Read off the answers rather than inferred from what is missing, because the two are different
+    facts and only the server can tell them apart: a `mapped_smiles` of `None` is a pod with no
+    mapper *installed* (normal, and not an error) exactly as often as it is a mapper that ran and
+    threw, and a naming with every field null is the common case where a SMIRKS simply did not
+    match. `degraded` is the server's own statement that something broke.
+    """
+    reported = set()
+    if representation is not None:
+        reported |= set(representation.degraded)
+    if naming is not None:
+        reported |= set(naming.degraded)
+    return reported
+
+
+def _stamp(
+    representation: ReactionRepresentation | None,
+    naming: ReactionNaming | None,
+    version: str,
+) -> str:
+    """The labeller version *this row* is stamped with — the answer's own, or the pass's.
+
+    The pass-level `version` comes from `plan_label_sync`, which asks the server what it is once and
+    carries the answer for the whole run (D-093: re-reading it mid-drain would shift the stale set
+    under the loop). That string reports the components the server *probed*, which is the right
+    basis for choosing the stale set and the wrong one for stamping a row: a component that was
+    installed, ran on this reaction and failed reaches the answer as `degraded`, and the server
+    re-derives its own version accordingly (`mapper@failed` rather than `mapper@absent`) precisely
+    so the row is stale against a pod where it works. Stamping the pass version instead marked that
+    row current, it left `stale()`, and nothing revisited it until the deployment's component
+    versions moved.
+
+    **An answer's version is preferred only when it names a degradation.** A healthy answer's stamp
+    and the pass's are the same string already, and taking the answer's unconditionally would make
+    the stamp move with whatever the pod reported mid-run — which is the drift D-093 fixed by
+    reading the version once.
+
+    **When both halves degrade, the representation's stamp is taken, and the choice does not matter
+    for what the stamp is *for*.** Each answer's version names only the component that call could
+    degrade — `represent` can fail the mapper, `name` can fail the namer — so neither string is the
+    union when both fail. Both differ from a healthy pass's, which is the whole job of the stamp:
+    the row is re-read next pass. What *is* a structured record of which components failed is
+    `degraded`, which `_degradations` reads and `label_stale` reports.
+
+    The remote string is folded through `labeller.stamped`, the same function `Labeller.version`
+    uses, because a stamp missing `STANDARDIZATION_VERSION` and `VOCABULARY_VERSION` could never
+    match a healthy pass's and the row would be re-labelled forever.
+
+    **A degradation reported with no version falls back to the pass's, and that is the only honest
+    answer available.** Both conditions are required because this module derives no labeller
+    version — `labeller.py`'s header is explicit that a locally-derived one "would be
+    *well-formed* and would match nothing", so re-labelling the whole corpus forever. Such a row is
+    stamped current and will not be revisited, which is a real loss; what stops it being a *silent*
+    one is that `_degradations` reads `degraded` on its own, so `label_stale` still warns that the
+    component failed. A server that reports a failure without naming a version is the thing to fix.
+    """
+    for answer in (representation, naming):
+        if answer is not None and answer.degraded and answer.version:
+            return stamped(answer.version)
+    return version
 
 
 def _record_pass(*, labelled: int, unlabelled: int, has_more: bool, duration_s: float) -> None:

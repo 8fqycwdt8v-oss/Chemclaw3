@@ -134,7 +134,12 @@ class RevisionIn(BaseModel):
 
 
 class RevisionOut(BaseModel):
-    """What a stored edit hands back."""
+    """What a stored edit hands back.
+
+    `design_id` echoes the path parameter the caller sent, deliberately: this body is what a client
+    stores or logs against a saved revision, and a response that names only `revision: 4` cannot say
+    which document it is the fourth of once it is separated from its request URL.
+    """
 
     design_id: str
     revision: int

@@ -25,7 +25,7 @@ The hazards this file exists for, all three still live:
 None of those turns a test red on its own. This file is what makes them reviewable: the order is
 asserted at construction, and the *effect* of the order is asserted by running a tool through the
 compiled graph. Both halves are needed. Order alone is the shape-without-effect failure
-`tasks/lessons.md` rule 27 names; effect alone would not notice a second skills middleware.
+`tasks/lessons.md` rule 10 names; effect alone would not notice a second skills middleware.
 """
 
 import asyncio
@@ -90,6 +90,10 @@ _EXPECTED_ORDER = (
     "enforce_loop_cap",
     "enforce_spend_cap",
     "MeterTurnSpend",
+    # A `before_agent` hook, so its position carries no nesting argument: it runs once, before the
+    # first model call, and removes the `files` entries past `agent_scratch_retention_days`
+    # (`D-2026-09-26-a-chemists-scratch-write-is-bounded-and-expires`).
+    "expire_stale_scratch",
     "ReloadingSkillsMiddleware",
     "surface_authorization_denials",
     "surface_domain_errors",

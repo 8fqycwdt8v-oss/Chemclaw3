@@ -9,6 +9,7 @@ description: >-
   report a numeric outcome, that is a fitted decision space: use experiment-design and call the
   optimizer rather than reasoning the next point by hand.
 tools:
+  - rank_competing_hypotheses
   - gather_evidence
   - expand_note
   - similar_reactions
@@ -35,6 +36,12 @@ space and asks BoFire for the next point. Choose between them explicitly:
   in a numeric space.
 - **`experiment-design`** when the objective is one scalar over a few well-bounded continuous or
   categorical variables and enough runs exist to fit a surrogate — a real optimization.
+- **`competing-hypotheses`** when the series has *several* live explanations and the question is
+  which to chase first — an impurity that could be water, base or thermal, with no way to tell
+  from the record. `rank_competing_hypotheses` generates the candidates from independent framings,
+  has them critiqued, ranks them by judged comparison and files the experiments that separate them.
+  This skill still owns the answer that follows: the ranked field is the argument, and §5 below is
+  what turns it into one experiment to run tomorrow.
 
 Say which one you used and why. Never present a reasoned proposal as if a model produced it, or
 a model's point as if it were reasoned from the record.

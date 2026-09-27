@@ -230,17 +230,46 @@ class TurnLease:
     `deadline` is `math.inf` for as long as `post_message`'s own `try/finally` owns the cleanup,
     and a real wall clock from the moment it stops (see `_start_turn_lease`). A record rather than
     a bare float because those two fields are one fact and had to be read together.
+
+    `actor` is the principal whose turn holds this slot, and it is here rather than in a counter of
+    its own so the per-actor cap (`_actor_turns_in_flight`) inherits this record's expiry. A plain
+    `dict[str, int]` keyed by principal is the obvious shape and is wrong for this route: it has no
+    deadline, so the one window neither teardown covers — the never-advanced generator named above —
+    would leave that actor's count inflated for the pod's lifetime, refusing the human the cap
+    exists to protect. `None` marks a maintenance hold (fork, delete) that excludes a turn without
+    being one.
+
+    `claimed_at` exists because that inheritance was **half true when it was written**, and an
+    adversarial review proved the other half. `deadline` is `math.inf` for the whole reservation
+    phase, and that phase is not instantaneous: three store round trips run inside it (the title
+    write, the budget check, the durable claim), none of which carries a statement timeout. A
+    handler *parked* on one of those is covered by no `finally` — the session's own 409 accepts that
+    and says so, because a wedged store is already an outage — but the per-actor cap inherited it
+    silently and turned it into a permanent lockout of one chemist across *every* session, which is
+    precisely the brick the paragraph above claims the design avoids. So the actor count reads
+    `claimed_at` while a reservation is un-started, and an un-started reservation ages out at the
+    same width `_start_turn_lease` would have stamped. The session guard is untouched: its
+    `deadline` semantics, and the argument that only `post_message`'s `finally` may end the
+    reservation, are exactly as they were.
     """
 
     token: str
     deadline: float
+    actor: str | None
+    claimed_at: float
 
 
-def _claim_turn_slot(active_turns: dict[str, TurnLease], session_id: str) -> str | None:
+def _claim_turn_slot(
+    active_turns: dict[str, TurnLease], session_id: str, *, actor: str | None
+) -> str | None:
     """Reserve the in-process one-turn-per-session slot, or report that a live turn holds it.
 
     Returns this turn's token (its identity for `_start_turn_lease` and `_release_turn_slot`), or
     `None` when another turn holds the session.
+
+    `actor` is keyword-only and has **no default** on purpose: it is what the per-actor cap counts,
+    and a default would let a new call site join the map without saying whether its hold is a turn.
+    The two maintenance holds (fork, delete) pass `None`.
 
     The slot is a *lease*, not a latch — the same semantics D-121 gave its durable counterpart
     (`session_turns`), for the same reason: every release site can be skipped. Both of this
@@ -273,8 +302,61 @@ def _claim_turn_slot(active_turns: dict[str, TurnLease], session_id: str) -> str
     if session_id in active_turns:
         return None
     token = uuid.uuid4().hex
-    active_turns[session_id] = TurnLease(token=token, deadline=math.inf)
+    active_turns[session_id] = TurnLease(
+        token=token, deadline=math.inf, actor=actor, claimed_at=now
+    )
     return token
+
+
+def _widest_turn_width() -> float:
+    """The widest wall clock a live turn can hold a slot: its timeout plus its admission wait."""
+    return settings.service_turn_timeout_seconds + settings.service_turn_admission_timeout_seconds
+
+
+def _still_holding(lease: TurnLease, now: float) -> bool:
+    """Whether `lease` may still belong to a running turn, for the per-actor count only.
+
+    A started lease answers from its own `deadline`, which is what the session guard reads. An
+    **un-started** one — `deadline=math.inf`, the reservation `post_message`'s `finally` owns — is
+    aged from `claimed_at` instead, because `inf` is not an expiry and a handler parked on one of
+    the reservation phase's three store round trips is covered by no `finally`. Left inheriting
+    `inf`, one wedged store call refused that chemist on every session until the pod restarted.
+
+    The width is the one `_start_turn_lease` would have stamped, so this can only ever expire a
+    reservation *later* than the lease it is about to become, never sooner — the count stays
+    conservative in the direction that protects other chemists rather than the one that bricks this
+    one. The session's own 409 is deliberately not changed: a wedged store is an outage either way,
+    and that guard's correctness rests on only the `finally` ending the reservation.
+    """
+    if lease.deadline != math.inf:
+        return lease.deadline > now
+    return lease.claimed_at + _widest_turn_width() > now
+
+
+def _actor_turns_in_flight(active_turns: dict[str, TurnLease], actor: str, *, besides: str) -> int:
+    """How many live turns `actor` is running on sessions other than `besides`.
+
+    Read off the lease map rather than kept as its own counter, for the reason `TurnLease.actor`
+    gives: an unexpired lease is the same fact `chemclaw_turns_in_flight` counts, and it sweeps
+    itself. So a *detached* turn counts here too, deliberately — its admission permit came back as
+    fairness to a waiting client (`chemclaw.api.detach`), not because it stopped spending this
+    pod's CPU, tokens and store connection. A per-actor cap that released on detach would hand
+    itself straight back to the POST-and-hang-up case that module measured.
+
+    `besides` is this request's own session, excluded so a double-submit to a session that is
+    already running is still answered by the per-session 409 that names what happened, rather than
+    by a 429 whose code depends on how many other sessions the caller has open. It cannot be used
+    to exceed the cap: the 409 creates no lease.
+
+    Expired entries are filtered rather than deleted — `_claim_turn_slot`'s sweep owns the
+    deleting, and this is the same read the in-flight gauge already does.
+    """
+    now = time.monotonic()
+    return sum(
+        1
+        for held_id, lease in active_turns.items()
+        if held_id != besides and lease.actor == actor and _still_holding(lease, now)
+    )
 
 
 def _start_turn_lease(active_turns: dict[str, TurnLease], session_id: str, token: str) -> None:
@@ -289,17 +371,20 @@ def _start_turn_lease(active_turns: dict[str, TurnLease], session_id: str, token
 
     Identity-checked like the release, so this can only ever restamp the entry it was given a
     token for.
+
+    **Carries `actor` across the restamp**, which is the whole of the per-actor cap's correctness
+    here: this runs at the hand-off, so dropping the field would leave every lease anonymous from
+    the moment a turn actually starts streaming and the cap would count nothing while reading, in
+    review, exactly as it does now.
     """
     lease = active_turns.get(session_id)
     if lease is None or lease.token != token:
         return
     active_turns[session_id] = TurnLease(
         token=token,
-        deadline=(
-            time.monotonic()
-            + settings.service_turn_timeout_seconds
-            + settings.service_turn_admission_timeout_seconds
-        ),
+        deadline=time.monotonic() + _widest_turn_width(),
+        actor=lease.actor,
+        claimed_at=lease.claimed_at,
     )
 
 

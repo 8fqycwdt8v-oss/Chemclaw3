@@ -22,7 +22,7 @@ import logging
 from collections.abc import Iterable
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from pydantic import ValidationError
 from rdkit import Chem
@@ -32,9 +32,11 @@ from chemclaw.core.reagents import resolve_compound_name
 from chemclaw.ingest.eln.adapter import (
     ElnMappingError,
     RawEntry,
+    entry_id_or_stem,
     entry_window,
     is_late_arrival,
     parse_iso_utc,
+    refuse_colliding_ids,
     warn_late_arrivals,
 )
 from chemclaw.ingest.eln.ord import Component, OrdReaction, ReactionStep, Role, StepKind
@@ -82,6 +84,12 @@ _TO_CELSIUS: dict[str, Any] = {
 _TO_HOURS: dict[str, float] = {"HOUR": 1.0, "MINUTE": 1 / 60, "SECOND": 1 / 3600, "DAY": 24.0}
 _TO_MG: dict[str, float] = {"KILOGRAM": 1e6, "GRAM": 1e3, "MILLIGRAM": 1.0, "MICROGRAM": 1e-3}
 _TO_MMOL: dict[str, float] = {"MOLE": 1e3, "MILLIMOLE": 1.0, "MICROMOLE": 1e-3, "NANOMOLE": 1e-6}
+_TO_ML: dict[str, float] = {"LITER": 1e3, "MILLILITER": 1.0, "MICROLITER": 1e-3, "NANOLITER": 1e-6}
+
+# The keys ORD's `Amount` may carry. It is a `oneof` over `mass | moles | volume | unmeasured`,
+# plus the flag that qualifies a volume, and every one of them is read — an amount this adapter can
+# *see* and cannot read is refused by name below rather than becoming no amount at all.
+_AMOUNT_KINDS = frozenset({"mass", "moles", "volume", "unmeasured", "volume_includes_solutes"})
 
 
 class OrdFormatError(ElnMappingError):
@@ -181,6 +189,8 @@ class OrdJsonAdapter:
         # entry id -> why it was refused. A dict, because one file is refused once per fetch and
         # the ledger is keyed the same way.
         refused: dict[str, str] = {}
+        # Every id this directory claims, and the files claiming it — see `refuse_colliding_ids`.
+        files_by_id: dict[str, list[str]] = {}
         for path in sorted(self._dir.glob("*.json")):
             try:
                 payload = json.loads(path.read_text(encoding="utf-8"))
@@ -193,21 +203,28 @@ class OrdJsonAdapter:
                 # amended in place and `record_created` does not move, so creation time alone can
                 # never bring a correction back into the fetch window.
                 modified = _modified_at(payload)
+                entry_id = entry_id_or_stem(
+                    _get(payload, "reaction_id", "reactionId"), path, "reaction_id"
+                )
             # `UnicodeDecodeError` is listed explicitly and is not covered by anything else here.
             # It derives from `ValueError`, not from `OSError`, and `json.JSONDecodeError` is a
             # *sibling* subclass rather than a parent — so one export written by a tool that emitted
             # latin-1 aborted the whole batch, contradicting this method's own skip-and-continue
             # contract and losing every later file in the directory along with it.
-            except (OSError, UnicodeDecodeError, json.JSONDecodeError, OrdFormatError) as exc:
-                logger.warning("skipping unreadable ORD export %s: %s", path.name, exc)
+            # `ElnMappingError` rather than `OrdFormatError`: the parent is what a scan-time
+            # mapping refusal is, and `entry_id_or_stem` raises the parent so one rule can serve
+            # both file-drop adapters.
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError, ElnMappingError) as exc:
+                logger.warning("skipping ORD export %s: %s", path.name, exc)
                 # The file stem is the only id there is: the payload never parsed, so nothing in
                 # it can be trusted to name the record.
-                refused[path.stem] = f"unreadable ORD export {path.name}: {exc}"
+                refused[path.stem] = f"refused ORD export {path.name}: {exc}"
                 continue
+            files_by_id.setdefault(entry_id, []).append(path.name)
             if entry_window(created, modified) >= since:
                 entries.append(
                     RawEntry(
-                        entry_id=str(_get(payload, "reaction_id", "reactionId") or path.stem),
+                        entry_id=entry_id,
                         created_at=created,
                         modified_at=modified,
                         payload=payload,
@@ -220,6 +237,9 @@ class OrdJsonAdapter:
                     f"({created.isoformat()}), so no scheduled run will fetch it; re-run the sync "
                     "from an explicit earlier `since` to backfill it"
                 )
+        collisions = refuse_colliding_ids(logger, self._source, files_by_id)
+        entries = [entry for entry in entries if entry.entry_id not in collisions]
+        refused.update(collisions)
         entries.sort(key=lambda e: e.created_at)
         return entries, late, refused
 
@@ -344,13 +364,20 @@ def _components(
     for compound in _as_list(reaction_input.get("components")):
         if not isinstance(compound, dict):
             raise OrdFormatError(f"component is not an object: {compound!r}")
-        mass_mg, amount_mmol = _amount(_get(compound, "amount") or {})
+        charged = _amount(_get(compound, "amount") or {})
         components.append(
             Component(
                 smiles=_smiles(compound),
                 role=_role(compound, default_role),
-                mass_mg=mass_mg,
-                amount_mmol=amount_mmol,
+                mass_mg=charged.mass_mg,
+                amount_mmol=charged.amount_mmol,
+                volume_ml=charged.volume_ml,
+                # Not under the key `amount`: no amount was recorded, and the charge row already
+                # says so. What this adds is the source's reason — "the amount was deliberately not
+                # measured, and here is how it was charged instead".
+                attributes=(
+                    {"amount_unmeasured": charged.unmeasured} if charged.unmeasured else {}
+                ),
             )
         )
     return components
@@ -520,11 +547,57 @@ def _percentage(product: dict[str, Any], measurement_type: str) -> float | None:
     return None
 
 
-def _amount(amount: dict[str, Any]) -> tuple[float | None, float | None]:
-    """Convert an ORD `Amount` to (mass_mg, amount_mmol); either or both may be absent."""
+class _Charged(NamedTuple):
+    """What one ORD `Amount` says was charged, in this record's canonical units."""
+
+    mass_mg: float | None
+    amount_mmol: float | None
+    volume_ml: float | None
+    #: The source's own statement that the amount was deliberately *not* measured, as the
+    #: `UnmeasuredAmount.type` it gave — carried into `Component.attributes`, since "saturated" or
+    #: "catalytic" is a fact about this charge and not a quantity.
+    unmeasured: str | None
+
+
+def _amount(amount: dict[str, Any]) -> _Charged:
+    """Convert an ORD `Amount` to what this record keeps of it, in mg, mmol and mL.
+
+    **It must not answer "no amount" to an `Amount` it can see.** This read `mass` and `moles` only,
+    and ORD's `Amount` is a `oneof` over `mass | moles | volume | unmeasured` — a neat liquid
+    reactant charged by volume is the ordinary case, and a solvent is almost always one. Driven on a
+    two-reactant charge of 9.3 g (as 10 mL) plus 40 g: the record carried `(None, None)` for the
+    volumetric one, `record._scale` reported **"40 g of reactants charged"** for a 49.3 g charge,
+    and `_charge_line` said "amount not recorded" for a species whose amount the source *had*
+    recorded. Under-reporting scale is the direction `record._scale` argues matters — it makes a
+    pilot batch read as a bench run — and this reproduced it by a kind that reader does not see.
+
+    `unmeasured` is read rather than raised on, because a catalytic or saturated charge is a real
+    ORD statement and refusing the reaction over one would lose a good record; it is carried as an
+    attribute so the charge sheet can say the source declared it unmeasured instead of implying
+    nobody wrote it down. An `Amount` carrying **none** of the four kinds is refused by name: after
+    this, an unread kind can only be one ORD added since, and silently dropping it is the defect
+    above with a different key.
+    """
     if not isinstance(amount, dict):
-        return None, None
-    return _measure(amount.get("mass"), _TO_MG), _measure(amount.get("moles"), _TO_MMOL)
+        return _Charged(None, None, None, None)
+    unmeasured = amount.get("unmeasured")
+    stated = _Charged(
+        mass_mg=_measure(amount.get("mass"), _TO_MG),
+        amount_mmol=_measure(amount.get("moles"), _TO_MMOL),
+        volume_ml=_measure(amount.get("volume"), _TO_ML),
+        unmeasured=(
+            str(unmeasured.get("type") or "unspecified").lower()
+            if isinstance(unmeasured, dict)
+            else None
+        ),
+    )
+    if amount and not any(stated) and not (set(amount) & _AMOUNT_KINDS):
+        raise OrdFormatError(
+            f"amount {sorted(amount)} states none of {sorted(_AMOUNT_KINDS)}, so what was charged "
+            "cannot be read. A recorded amount this ingest drops is a run that reads as smaller "
+            "than it was"
+        )
+    return stated
 
 
 def _measure(value: Any, factors: dict[str, float]) -> float | None:

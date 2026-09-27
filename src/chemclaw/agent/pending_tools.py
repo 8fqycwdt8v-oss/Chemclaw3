@@ -17,7 +17,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, computed_field
 
 from chemclaw.agent.authz import authorize_trigger, require_actor
-from chemclaw.agent.framing import defang
+from chemclaw.agent.tool_framing import defanged_payload
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.session_context import get_current_session_id
 from chemclaw.core.tool_registry import tool
@@ -190,14 +190,25 @@ async def check_pending_requests(asked_of: str = "", limit: int = 20) -> Pending
     page = await pending_store.open_requests(asked_of=asked_of, limit=limit)
     return PendingOverview(
         requests=[
-            {
-                **request.model_dump(exclude={"subject", "rationale", "answer"}),
-                # `subject` and `rationale` are free text a caller supplied — the request is
-                # readable by anyone entitled, so these arrive here exactly as a retrieved chunk
-                # does.
-                "subject": defang(request.subject),
-                "rationale": defang(request.rationale),
-            }
+            # **The whole row, not two fields of it, and the carve-out here was weaker than the one
+            # `commitment_tools` had.** This escaped `subject` and `rationale` on the ground that
+            # they are "free text a caller supplied" and the rest is not. Measured against
+            # `durable/pending_store.PendingRequest`: there is **not one `Literal`** on that model —
+            # `kind`, `state`, `asked_of`, `requested_by`, `session_id`, `answered_by` and
+            # `premise_note_ids` are all unvalidated `str`/`list[str]`, and `request_id` is minted
+            # from them. A request is raised by a *turn* and read by anyone entitled, so every one
+            # of those is text this system did not constrain. Driven with a live closing delimiter
+            # in each: **eight** of them reached the model unescaped.
+            #
+            # `defanged_payload` rather than eight more `defang(...)` entries, for the reason
+            # `commitment_tools` and `protocol_design_tools._readable` use it: a field added to that
+            # model next year is covered without this line being remembered, and a datetime or an
+            # int has no delimiter to spell so escaping it costs nothing.
+            #
+            # `answer` stays excluded rather than escaped, which is unchanged: these are the *open*
+            # requests, so it is empty by construction, and this overview is about what is still
+            # waiting rather than about what was said.
+            defanged_payload(request.model_dump(exclude={"answer"}))
             for request in page.requests
         ],
         total_waiting=page.total_waiting,

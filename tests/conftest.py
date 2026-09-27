@@ -275,17 +275,21 @@ def _fresh_attached_connections() -> Iterator[None]:
 def loopback_dev_posture(monkeypatch: pytest.MonkeyPatch) -> None:
     """Run tests in the loopback dev posture, so the fail-closed boot guards admit them.
 
-    Two guards, two postures, and both are *stated* here rather than inferred from the suite's
+    Three guards, three postures, and each is *stated* here rather than inferred from the suite's
     circumstances. The front door refuses to boot unauthenticated on a non-loopback bind (SEC-2);
     tests drive the app entirely in-process (TestClient — no socket is ever bound), so they use the
     loopback bind. And every process that makes model calls refuses a loopback `llm_base_url`
     unless the posture is declared (`core/llm_gateway`) — the suite's gateway is
     `chemclaw.cli.mock_llm`'s shipped default address, which is exactly that case, so it declares
-    it. Each guard's own refuse/opt-in/boot behaviour is proven explicitly — `test_auth.py` for the
-    first, `tests/test_llm_gateway_guard.py` for the second — by overriding these per test.
+    it. And a Temporal worker refuses to boot with sign-in off unless that is declared
+    (`durable/serve.refuse_unauthenticated_worker`) — the suite runs with `entra_required` off, so
+    it declares that too. Each guard's own refuse/opt-in/boot behaviour is proven explicitly —
+    `test_auth.py` for the first, `tests/test_llm_gateway_guard.py` for the second,
+    `tests/test_worker_posture.py` for the third — by overriding these per test.
     """
     monkeypatch.setattr(settings, "service_host", "127.0.0.1")
     monkeypatch.setattr(settings, "llm_allow_loopback_gateway", True)
+    monkeypatch.setattr(settings, "worker_allow_unauthenticated", True)
 
 
 def timeout_scale() -> float:
@@ -536,6 +540,40 @@ def _report_helm_skips(terminalreporter: TerminalReporter) -> None:
     )
 
 
+def _report_slow_fork_skips(terminalreporter: TerminalReporter) -> None:
+    """Say when a box's own process-creation cost took the parse-deadline tests away.
+
+    The fourth thing a green line can be silent about, and the only one that is a property of the
+    *machine* rather than of a missing dependency. `tests/test_parse_isolation.py` derives its
+    budgets from what the fixture costs to parse here, with a floor of one fork round trip — below
+    that the child is killed before it reads a byte and the test is about process creation. In this
+    remote sandbox a fork round trip measured a **0.165 s median against the CI runner's 0.030 s**,
+    so the floor has no room and three tests cannot express the scenario at all.
+
+    Reported rather than left to `-ra`, because the thing that made this worth a section is that it
+    used to be a *failure*: a red gate for a machine property is what teaches everybody to re-run,
+    and a silent skip of the wedge regression is what the wedge got shipped behind the first time.
+    Matched on the marker the test module spells, imported rather than restated, the way
+    `_report_sibling_skips` matches `tests/siblings.SIBLING_SKIP`.
+    """
+    from tests.test_parse_isolation import _SLOW_FIXTURE_SKIP
+
+    skipped = [
+        report
+        for report in terminalreporter.stats.get("skipped", [])
+        if _SLOW_FIXTURE_SKIP in str(report.longrepr)
+    ]
+    if not skipped:
+        return
+    terminalreporter.write_sep("=", "Parse-deadline tests did not run", yellow=True)
+    terminalreporter.write_line(
+        f"{len(skipped)} tests were skipped because creating a process costs more here than the "
+        "deadline they derive, so this run is not evidence that a parse past its deadline frees "
+        "its upload slot — the wedge those tests regress against. CI's runner forks ~5x faster "
+        "and runs them."
+    )
+
+
 # The marker `tests/temporal_env.py::start_env_or_skip` puts in its skip reason. Matched the same
 # way, for the same reason: the number a reader needs is how many tests did not run.
 _TEMPORAL_SKIP = "Temporal test server unavailable"
@@ -603,11 +641,14 @@ def _report_sibling_skips(terminalreporter: TerminalReporter) -> None:
         return
     terminalreporter.write_sep("=", "Cross-repository checks did not run", yellow=True)
     terminalreporter.write_line(
-        f"{len(skipped)} tests were skipped because there is no Chemclaw3-mcp checkout to read, so "
-        "this run is not evidence about the half of the request prefix that fleet serves — the "
-        "allowance PREFIX_BOUND is built from and both compaction defaults are derived from — nor "
-        "about whether the two repositories still declare the same connector surface and the same "
-        "`calc` tool names. Clone it beside this one, or set CHEMCLAW_MCP_REPO."
+        f"{len(skipped)} tests were skipped because Chemclaw3-mcp could not be read, so this run "
+        "is not evidence about the half of the request prefix that fleet serves — the allowance "
+        "PREFIX_BOUND is built from and both compaction defaults are derived from — nor about "
+        "whether the two repositories still declare the same connector surface, or still agree "
+        "about the tool names and argument keys on the `calc` and `rxnlabel` backend seams. "
+        "Clone it beside this one, or set CHEMCLAW_MCP_REPO; where there is a checkout already, "
+        "each skip above names the bundle it could not measure and why — a missing dependency in "
+        "that tree's own `.venv` now costs that bundle's measurement and no other."
     )
 
 
@@ -617,8 +658,8 @@ def pytest_terminal_summary(terminalreporter: TerminalReporter) -> None:
     Every section is about the same misreading: a run's headline number is believed without the
     things that qualify it. A timed-out test proves nothing about the assertions it never
     reached, and a skipped Postgres, Temporal or helm test proves nothing at all — see
-    `_report_postgres_skips`, `_report_temporal_skips`, `_report_helm_skips` and
-    `_report_sibling_skips`.
+    `_report_postgres_skips`, `_report_temporal_skips`, `_report_helm_skips`,
+    `_report_sibling_skips` and `_report_slow_fork_skips`.
 
     `FAILED tests/test_pka.py::test_… - Failed: Timeout (>180.0s) from pytest-timeout` in the
     short summary was read as a numerical failure by two separate reviewers of this repository, and
@@ -633,6 +674,7 @@ def pytest_terminal_summary(terminalreporter: TerminalReporter) -> None:
     _report_helm_skips(terminalreporter)
     _report_public_schema_shadowing(terminalreporter)
     _report_sibling_skips(terminalreporter)
+    _report_slow_fork_skips(terminalreporter)
     timed_out = sorted(
         report.nodeid
         for report in terminalreporter.stats.get("failed", [])

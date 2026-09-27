@@ -85,7 +85,10 @@ moved into the chart and its test: a number written in prose is a number that go
   **refuses to start** when that mode is bound to a non-loopback interface (the `0.0.0.0` default) —
   it exits with `SECURITY: entra_required is False but the service binds a non-loopback interface …`
   instead of silently serving an open deployment. `CHEMCLAW_SERVICE_ALLOW_INSECURE=true` is the deliberate opt-out (boots with a
-  loud warning) and belongs in local dev only. Under `entra_required`, `CHEMCLAW_ENTRA_TENANT_ID`
+  loud warning) and belongs in local dev only. The **workers** bind no request surface, so that
+  refusal cannot reach them; each refuses to start with sign-in off on its own (`SECURITY: this
+  Temporal worker would run with CHEMCLAW_ENTRA_REQUIRED=false …`), and
+  `CHEMCLAW_WORKER_ALLOW_UNAUTHENTICATED=true` is its opt-out, local dev only. Under `entra_required`, `CHEMCLAW_ENTRA_TENANT_ID`
   and `CHEMCLAW_ENTRA_AUDIENCE` must also be set — a half-configured identity setup fails fast at
   startup rather than at the first request.
 - **`CHEMCLAW_ENTRA_CLIENT_ID` no longer exists. Drop it before upgrading, because nothing will

@@ -25,13 +25,15 @@ import logging
 import socket
 import time
 from collections.abc import Iterator
+from datetime import timedelta
 from typing import Any
 from unittest import mock
 
 import pytest
-from temporalio import activity
-from temporalio.client import Client
+from temporalio import activity, workflow
+from temporalio.client import Client, WorkflowExecutionStatus, WorkflowFailureError
 from temporalio.contrib.opentelemetry import TracingInterceptor
+from temporalio.exceptions import ApplicationError
 from temporalio.runtime import PrometheusConfig
 from temporalio.service import RPCError, RPCStatusCode
 from temporalio.testing import ActivityEnvironment
@@ -68,6 +70,7 @@ from chemclaw.durable.job_metrics import (
 )
 from chemclaw.durable.job_record import JobRecord, record_job
 from chemclaw.durable.job_record_store import PostgresJobRecordSink, read_job_record
+from chemclaw.durable.publish import BAD_DATA_RETRY
 from chemclaw.durable.publish_results import publish_job_result
 from chemclaw.durable.serve import worker_interceptors
 from chemclaw.durable.template_activities import (
@@ -1171,3 +1174,149 @@ def test_the_job_duration_histogram_brackets_the_job_ceiling() -> None:
     metrics.observe("chemclaw_job_duration_seconds", 15000.0, {"connector": "calc"})
     rendered = metrics.render()
     assert 'chemclaw_job_duration_seconds_bucket{connector="calc",le="21600"} 1' in rendered
+
+
+@activity.defn(name="w8b_result_size")
+async def _sized_result(payload_bytes: int) -> str:
+    """An activity whose result size the caller chooses — the subject of the two tests below."""
+    return "x" * payload_bytes
+
+
+@workflow.defn(name="W8bResultSize", sandboxed=False)
+class _ResultSizeWorkflow:
+    """Run `_sized_result` once and hand back its length: what the broker actually kept."""
+
+    @workflow.run
+    async def run(self, payload_bytes: int) -> int:
+        return len(
+            await workflow.execute_activity(
+                "w8b_result_size",
+                payload_bytes,
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=BAD_DATA_RETRY,
+            )
+        )
+
+
+@pytest.mark.timeout(300)
+def test_a_result_the_broker_would_refuse_is_a_counted_failing_activity(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A result over the broker's blob limit fails the activity, on the record, in every consumer.
+
+    **Driven against a real broker, because the defect is what happens *after* the interceptor
+    returns and no fake has that half.** `self.next.execute_activity` hands the result to the
+    worker's task handler, which converts it and calls `RespondActivityTaskCompleted` outside this
+    module's `try` — so every first-party report ran on the wrong side of the refusal. Measured on
+    2026-09-19 against the live broker, with the pre-check removed:
+
+    - a 3,000,000-byte result (over the server's 2 MiB `limit.blobSize.error`, under the 4 MiB gRPC
+      frame) failed the workflow while `activity.finished … completed` had already been logged and
+      `chemclaw_activity_failures_total` held **no sample at all**;
+    - a 6,000,000-byte result (over the gRPC frame) retried for ever against a
+      `ResourceExhausted` the SDK reports as a *network* error, and the workflow was still
+      `RUNNING` two minutes later.
+
+    So the three things asserted here are the three that did not move: the counter the
+    `ChemclawActivityRetryStorm` alert reads (**by `activity` label**, which is how that alert
+    groups), the `outcome` on the line an operator greps, and the workflow reaching a terminal
+    failure rather than hanging — which is what lets the job record write its own outcome.
+
+    The under-ceiling arm is not decoration: a check that refused every result would satisfy the
+    three assertions above on its own, and the counter staying absent for a result the broker keeps
+    is what says this is a ceiling rather than a ban.
+    """
+    ceiling = settings.activity_result_max_bytes
+    # Over the *server's* limit as well as ours, so "the broker would refuse it" is a fact about
+    # this payload rather than a claim about the setting. The ceiling ships at 2 MiB, which is
+    # `limit.blobSize.error`'s own default.
+    refused_bytes = ceiling + 1_000_000
+    metrics = Metrics()
+
+    async def _drive() -> tuple[int, BaseException | None, object]:
+        async with await start_local_env_or_skip() as env:
+            client: Client = pydantic_client(env)
+            async with Worker(
+                client,
+                task_queue="w8b-result-size",
+                workflows=[_ResultSizeWorkflow],
+                workflow_runner=UnsandboxedWorkflowRunner(),
+                activities=[_sized_result],
+                interceptors=worker_interceptors(),
+            ):
+                kept = await client.execute_workflow(
+                    _ResultSizeWorkflow.run,
+                    ceiling // 2,
+                    id="w8b-under-the-ceiling",
+                    task_queue="w8b-result-size",
+                )
+                handle = await client.start_workflow(
+                    _ResultSizeWorkflow.run,
+                    refused_bytes,
+                    id="w8b-over-the-ceiling",
+                    task_queue="w8b-result-size",
+                )
+                with pytest.raises(WorkflowFailureError) as refused:
+                    await handle.result()
+                # The `ActivityError` wrapper says only "Activity task failed"; the name Temporal
+                # matched against `non_retryable_error_types` is on the `ApplicationError` under it.
+                activity_error = refused.value.cause
+                # `BaseException.cause` is not a typed attribute; the chain here is
+                # `WorkflowFailureError -> ActivityError -> ApplicationError`, and only the last
+                # carries the `type` Temporal matched against `non_retryable_error_types`.
+                under = getattr(activity_error, "cause", None)
+                return (
+                    kept,
+                    under,
+                    (await handle.describe()).status,
+                )
+
+    with _using(metrics), caplog.at_level(logging.INFO, logger="chemclaw.durable.interceptor"):
+        kept, application_error, status = asyncio.run(_drive())
+
+    assert kept == ceiling // 2, (
+        "the under-ceiling result did not survive the round trip, so this test is not measuring a "
+        "ceiling"
+    )
+    assert status == WorkflowExecutionStatus.FAILED, (
+        f"the refused result left the workflow {status}; a 6 MB result used to leave it RUNNING "
+        "until the caller gave up, which is the half no metric and no log line reported"
+    )
+    assert isinstance(application_error, ApplicationError), (
+        f"the activity failed as {application_error!r} rather than as an application error, so "
+        "nothing carries the type Temporal classifies on"
+    )
+    assert application_error.type == "ActivityResultTooLarge", (
+        f"the workflow failed for some other reason ({application_error.type}), so the refusal is "
+        "not what it reports and an operator still cannot name the fault"
+    )
+
+    rendered = metrics.render()
+    assert 'chemclaw_activity_failures_total{activity="w8b_result_size"} 1' in rendered, (
+        "`ChemclawActivityRetryStorm` reads `sum by (activity) "
+        "(rate(chemclaw_activity_failures_total[15m]))`; an unlabelled or absent sample is the "
+        f"flat series the alert cannot fire on. Got:\n{rendered}"
+    )
+
+    finished = [
+        record
+        for record in caplog.records
+        if record.__dict__.get("event") == "activity.finished"
+        and record.__dict__.get("activity") == "w8b_result_size"
+    ]
+    outcomes = [record.__dict__["outcome"] for record in finished]
+    assert outcomes.count("failed") == 1, (
+        f"the refused attempt's own line says {outcomes}; it said `completed` for every attempt "
+        "before the pre-check, which is the sentence that sent an operator looking for a network "
+        "fault"
+    )
+    # **Exactly one, which is the non-retryable half.** `BAD_DATA_RETRY` allows
+    # `activity_max_attempts` (5 as shipped), and the result is a deterministic function of the
+    # arguments — so a second `failed` line here would mean `ActivityResultTooLarge` is missing
+    # from `durable/publish._BAD_DATA_TYPES` and the refusal burns the whole retry budget
+    # re-serializing the identical bytes. The `ApplicationError.non_retryable` flag cannot say
+    # this: it reports what the *raiser* asked for, and the classification is the policy's,
+    # applied by the server. The attempt count is where the policy is observable.
+    assert outcomes.count("completed") == 1, (
+        f"the kept result's line should still say completed, got {outcomes}"
+    )

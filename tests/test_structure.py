@@ -44,9 +44,28 @@ def test_identity_ignores_provenance() -> None:
 
     This is what lets a downstream task hit the cache whether its input was embedded
     from a SMILES or produced by an optimizer.
+
+    **Built through the constructor, and the provenance is read back before the two ids are
+    compared.** The first version set both fields with `model_copy(update=…)`, which writes into
+    `__dict__` past validation and therefore supplies a key whether or not the model declares one.
+    Driven: with `smiles` and `origin` *deleted from `Structure`* this test still passed — it was
+    asserting that two structures carrying no provenance at all share an id, which is true and is
+    not the property. `Structure` takes `extra` at pydantic's default of `"ignore"`, so a
+    constructor handed a field the model does not declare drops it silently; the read-back below is
+    what turns that into a failure rather than a vacuous pass.
     """
-    labelled = _water().model_copy(update={"smiles": "O", "origin": "xtb.opt@v1:abc:def"})
-    assert labelled.structure_id == _water().structure_id
+    water = _water()
+    labelled = Structure(
+        elements=water.elements,
+        positions=water.positions,
+        smiles="O",
+        origin="xtb.opt@v1:abc:def",
+    )
+    assert (labelled.smiles, labelled.origin) == ("O", "xtb.opt@v1:abc:def"), (
+        f"the provenance did not survive construction ({labelled!r}), so the comparison below "
+        "would be between two structures that carry none — which is what this test used to assert"
+    )
+    assert labelled.structure_id == water.structure_id
 
 
 def test_coordinates_are_normalized_below_chemical_significance() -> None:

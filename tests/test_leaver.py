@@ -1275,3 +1275,30 @@ async def test_the_claim_sweep_does_not_pay_a_round_trip_per_session() -> None:
         "sweep still claims one session per round trip, so its first claims lapse before its last "
         "one is taken"
     )
+
+
+def test_an_erasure_does_not_take_the_organisations_judgment() -> None:
+    """The org skills tier is nobody's data, so the sweep must not reach it.
+
+    **An absence is not a decision until something asserts it.**
+    `D-2026-09-20-a-behaviour-change-is-gated-by-its-blast-radius` states that a departing person's
+    words inside an organisation skill are a *content* question for an administrator — a revert or a
+    retire — rather than a prefix sweep, because the document is the organisation's judgment and
+    other people's turns depend on it. Without this test that rule is indistinguishable from
+    somebody having forgotten to add a third prefix beside the two in `store_prefixes`.
+
+    Asserted through `store_prefixes`, the function `erase_actor` really calls, and against the
+    namespace the tier really writes under — so a later change that starts keying org rows by actor
+    turns this red rather than quietly making the tier erasable by whoever leaves next.
+    """
+    from chemclaw.agent.leaver import store_prefixes
+    from chemclaw.agent.org_skills import org_skills_namespace, org_versions_namespace
+
+    prefixes = store_prefixes(["alice-oid", "unverified:alice"])
+    org = ".".join(org_skills_namespace())
+
+    assert org not in prefixes, "an organisation skill is not one person's data to erase"
+    assert not any(prefix.startswith(f"{org}.") for prefix in prefixes), prefixes
+    assert not any(
+        prefix.startswith(org_versions_namespace("house-workup")[0]) for prefix in prefixes
+    ), "the version history went with a departing chemist"

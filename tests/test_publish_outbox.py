@@ -147,11 +147,17 @@ async def test_a_failed_delivery_leaves_the_row_pending_until_it_runs_out_of_att
 
     claimed = await outbox.claim("alpha", 10)
     assert len(claimed) == 1
-    await outbox.mark_failed([claimed[0][0]], "destination unreachable")
+    await outbox.mark_failed([claimed[0].lease], "destination unreachable")
     # Still claimable: one attempt spent of two.
-    assert len(await outbox.claim("alpha", 10)) == 1
+    reclaimed = await outbox.claim("alpha", 10)
+    assert len(reclaimed) == 1
 
-    await outbox.mark_failed([claimed[0][0]], "destination unreachable")
+    # **The second mark carries the second claim's lease, not the first's.** A mark is fenced on the
+    # attempt the claim handing it out spent, so re-using `claimed[0].lease` here would be a
+    # superseded pass releasing a live one's row — which is the defect
+    # `test_a_superseded_pass_cannot_release_the_lease_the_live_pass_holds` drives, and which this
+    # test reproduced before the fence existed.
+    await outbox.mark_failed([reclaimed[0].lease], "destination unreachable")
     assert await outbox.claim("alpha", 10) == [], "out of attempts, no longer claimed"
 
     async with outbox._connect("test_fixture") as conn:
@@ -260,7 +266,7 @@ async def test_claiming_a_row_spends_its_attempt(monkeypatch: pytest.MonkeyPatch
     # exclusion above is exactly what a full-length lease is for.
     _with_a_short_lease(monkeypatch)
     claimed = await _claim_after_the_previous_pass_died("alpha")
-    await outbox.mark_failed([claimed[0][0]], "the destination said no")
+    await outbox.mark_failed([claimed[0].lease], "the destination said no")
     async with outbox._connect("test_fixture") as conn:
         cursor = await conn.execute(
             "SELECT attempts FROM result_publications WHERE calc_ref = 'counted'"
@@ -681,7 +687,7 @@ async def test_a_document_this_system_already_queued_stays_readable(
 
     claimed = await outbox.claim("alpha", 10)
     assert len(claimed) == 1
-    stored = claimed[0][2]
+    stored = claimed[0].document
     record = ResultRecord.model_validate(stored)
     assert [fact.property for fact in record.properties] == ["relative_energy"]
 
@@ -771,7 +777,7 @@ async def test_the_real_failure_reason_outranks_the_reaper_s_generic_one(
         await _reset(conn)
     await outbox.enqueue([_record("has-a-reason")])
     claimed = await outbox.claim("alpha", 10)
-    await outbox.mark_failed([claimed[0][0]], "connection refused by the results warehouse")
+    await outbox.mark_failed([claimed[0].lease], "connection refused by the results warehouse")
     # A reported failure releases the lease as it records the reason, so the retry is the next
     # pass rather than the next lease period — claimed straight away, with no wait.
     assert len(await outbox.claim("alpha", 10)) == 1
@@ -814,7 +820,7 @@ async def test_an_emptied_queue_reads_as_zero_seconds_behind_not_as_fifty_six_ye
     assert outbox._oldest_pending_seconds()["alpha"] < 60.0
 
     claimed = await outbox.claim("alpha", 10)
-    await outbox.mark_delivered([claimed[0][0]])
+    await outbox.mark_delivered([claimed[0].lease])
     await outbox.refresh_backlog()
 
     assert outbox._PENDING_GAUGE["alpha"] == 0.0, "the series must stay, reading zero"

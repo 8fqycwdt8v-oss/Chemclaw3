@@ -38,10 +38,20 @@ needs no partition — `task` tells the model to launch several agents concurren
 are independent, so a parallel evidence sweep is N invocations of one name, named or not. What a
 roster adds is a *view*: three prompts over three surfaces, each an intersection of the caller's.
 
-**What a helper does not inherit, and where each bound is enforced.** No checkpointer, because
-upstream's contract is that a helper sees only the prompt it was given and returns one report. No
+**What a helper does not inherit, and where each bound is enforced.** No checkpointer —
+`checkpointer=False`, which is not the same as passing nothing, and for a while this line described
+a bound that was not in force. Upstream's contract is that a helper sees only the prompt it was
+given and returns one report, but `None` is how a LangGraph subgraph asks to *inherit* its parent's
+saver, so every helper checkpointed its own thread onto its caller's under a `tools:<uuid>`
+namespace (`D-2026-09-18-a-checkpointer-of-none-is-the-callers-checkpointer`, which measured it at
+98% of what a spawn cost). No
 helpers of its own, which is the recursion guard `build_langgraph_agent(helper=…)` carries. No
-store, so there is no `/memories/` route and nothing it writes outlives the turn.
+store, so there is no `/memories/` route and nothing it writes reaches the knowledge graph or the
+memory tiers — which is **not** the same as "nothing it writes outlives the turn", the claim this
+sentence used to make. A helper's `/scratch/` file crosses into its caller's `files` channel and is
+checkpointed under the caller's thread, so a later turn can read it back
+(`D-2026-09-04-a-helpers-file-crosses-back-and-stays`); what bounds it is
+`agent_subagent_files_max_chars`, not its lifetime.
 
 **It does reach a connector, since
 `D-2026-09-15-a-helper-shares-the-session-its-caller-already-opened`, and for two rounds it did
@@ -116,6 +126,7 @@ from chemclaw.agent.authz import side_effecting_tools
 from chemclaw.agent.profiles import AgentProfile
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
+from chemclaw.core.model_prose import ModelProse
 
 #: Tools that change nothing and still reach the person on the other side of the conversation.
 #:
@@ -142,7 +153,7 @@ GENERAL_PURPOSE = "general-purpose"
 #: supervisor prompt and the `task` description describing two different mechanisms, and recorded
 #: that the disagreement was the real defect. `tests/test_subagents.py` asserts they still agree —
 #: on the bounds each states, not on wording, because wording that must match cannot be improved.
-HELPER_BRIEF = """
+HELPER_BRIEF = ModelProse("""
 
 You are a helper spawned by another Chemclaw agent to work one task in your own context window.
 You see nothing of the conversation that spawned you beyond the brief you were given, and nothing
@@ -164,7 +175,7 @@ You do hold file tools that write, and a file you write is **not** private to yo
 it crosses back to the agent that spawned you along with your report, and it stays there — the
 conversation you were spawned from can read it again on a later turn, long after you are gone. So
 treat anything you put in one as something you are handing over for keeps. Do not describe work as
-started, scheduled or arriving later: nothing you can reach starts anything."""
+started, scheduled or arriving later: nothing you can reach starts anything.""")
 
 
 def governed_roster(specs: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -344,6 +355,32 @@ def specialist_override(specialist: AgentProfile, bound: Iterable[str]) -> str:
     )
 
 
+def roster_names(profile: AgentProfile) -> frozenset[str]:
+    """The tool names a **rostered** profile (helper or peer) contributes to an intersection.
+
+    `tool_names is None` means "this profile does not narrow", which is the right reading for a
+    session profile and the wrong one for a roster entry: there it would hand a named helper or
+    peer the whole surface it is intersected with, under a name promising less. So on a roster,
+    naming nothing narrows to nothing. One definition because the rule is security-relevant and
+    was written three times — a copy that drifted to the session reading would widen silently.
+    """
+    return profile.tool_names if profile.tool_names is not None else frozenset()
+
+
+def bounded_tool_list(bound: Iterable[str], limit: int) -> str:
+    """`bound` sorted and joined, the first `limit` names enumerated and the rest counted.
+
+    The capability half of both roster menus — a helper's (`describe_helper`) and a peer's
+    (`handoff.describe_peer`) — derived from what the compiled graph bound. Bounded because the
+    list grows with whatever the sibling fleet serves, which no ratchet here can see; the
+    sentence around it stays each caller's own, because the two describe different acts.
+    """
+    ordered = sorted(bound)
+    shown = ", ".join(ordered[:limit])
+    rest = len(ordered) - limit
+    return f"{shown}, and {rest} more" if rest > 0 else shown
+
+
 def describe_helper(profile: AgentProfile, bound: Iterable[str]) -> str:
     """One roster entry's description: a written purpose, then the surface the graph really bound.
 
@@ -374,8 +411,14 @@ def describe_helper(profile: AgentProfile, bound: Iterable[str]) -> str:
         The `description` for this entry's `CompiledSubAgent` spec.
     """
     purpose = (profile.description or "").strip()
-    names = ", ".join(sorted(bound))
-    return f"{purpose} Reads only, and holds exactly: {names}."
+    # **Bounded, because what this enumerates is not a surface this repository can measure.** The
+    # list comes off the compiled graph, so it grows with whatever the sibling fleet serves — and
+    # `tests/test_context_floor.py`'s per-tool bound binds no fleet connector, so `task` measured
+    # 897 against a 900-token ceiling while a deployment that serves `safety` would send ~1,009.
+    # A ratchet that cannot see its input is not the place for this bound; see
+    # `agent_helper_menu_tools`.
+    held = bounded_tool_list(bound, settings.agent_helper_menu_tools)
+    return f"{purpose} Reads only, and holds exactly: {held}."
 
 
 def helper_profile(
@@ -483,11 +526,8 @@ def helper_profile(
                 "harness_enabled": False,
             }
         )
-    # `&` and not `|`, and a specialist naming nothing narrows to nothing rather than to everything:
-    # `tool_names is None` on a rostered profile means "this profile does not narrow", which is the
-    # right reading for a session profile and the wrong one for a roster entry, where it would hand
-    # a named helper the caller's whole reading surface under a name promising less.
-    named = specialist.tool_names if specialist.tool_names is not None else frozenset()
+    # `&` and not `|`, and a specialist naming nothing narrows to nothing — see `roster_names`.
+    named = roster_names(specialist)
     return caller.model_copy(
         update={
             "name": f"{caller.name}-{specialist.name}",
@@ -556,5 +596,5 @@ def helper_connectors(
     kept = [tool for tool in connectors if tool.name not in acting]
     if specialist is None:
         return kept
-    named = specialist.tool_names if specialist.tool_names is not None else frozenset()
+    named = roster_names(specialist)
     return [tool for tool in kept if tool.name in named]

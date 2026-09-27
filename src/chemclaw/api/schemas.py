@@ -21,6 +21,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field, computed_field, field_validator
 
+from chemclaw.agent.session_store import stored_correlation_id
+from chemclaw.agent.tool_result_size import full_result_ref, was_cut
 from chemclaw.api.tool_results import content_address
 from chemclaw.core.config import settings
 
@@ -124,12 +126,18 @@ class TranscriptToolCall(BaseModel):
     only consumer that acts on this — there is nothing to fetch — and telling them apart would
     mean keeping a tombstone per expired blob, which is a durable record of a rendering, on the one
     table in the schema that grows per tool call.
+
+    `result_cut` is `ToolResultEvent.result_cut` recovered from the stored message, with the same
+    meaning: the model was shown a cut of this result, and `result_ref` (when set) opens the full
+    text the tool returned rather than the cut — `result` stays the model's text, like the stream's
+    `preview` does.
     """
 
     tool: str
     arguments: str = ""
     result: str | None = None
     result_ref: str = ""
+    result_cut: bool = False
 
 
 class TranscriptMessage(BaseModel):
@@ -153,6 +161,11 @@ class TranscriptMessage(BaseModel):
     role: str
     text: str
     tool_calls: list[TranscriptToolCall] = []
+    # The turn that stored this message (`session_messages.correlation_id`), so a client whose
+    # stream detached recovers that turn's answer by identity rather than by matching its text.
+    # `None` for a row stored off the request path or before the column existed. Optional and
+    # additive: a client that does not read it sees the contract it always did.
+    correlation_id: str | None = None
 
 
 class PlanDecisionIn(BaseModel):
@@ -258,7 +271,21 @@ class WorkflowApprovalOut(BaseModel):
 
 
 class PendingRequestOut(BaseModel):
-    """One held-open question, as an inbox renders it."""
+    """One held-open question, as an inbox renders it.
+
+    **Narrower than the stored record, and that is the shape rather than an omission.** It is built
+    from `durable.pending_store.PendingRequest` by `**model_dump()`, and it used to restate that
+    record's `answered_at`, `answered_by` and `answer` too — three fields the only route that builds
+    this model cannot ever fill: `pending_store.open_requests` is `WHERE state = 'waiting'` in SQL,
+    so an answered row never reaches here. A response field that is structurally always empty is not
+    a quiet feature a client might one day read, it is boilerplate, and a surface that does serve
+    answered rows will need to say what an answer *is* — whose payload it carries, who may see it —
+    which is a decision to take then rather than a default to inherit now.
+
+    `reminders` stays, and it is the one field here that earns its place by saying something the
+    rest cannot: on a waiting row it separates "asked an hour ago" from "asked on Tuesday and
+    chased three times", which is the difference between an inbox and a list.
+    """
 
     request_id: str
     kind: str
@@ -270,9 +297,6 @@ class PendingRequestOut(BaseModel):
     state: str = "waiting"
     due_at: str = ""
     reminders: int = 0
-    answered_at: str = ""
-    answered_by: str = ""
-    answer: dict[str, Any] = Field(default_factory=dict)
     created_at: str = ""
 
 
@@ -463,7 +487,7 @@ def _transcript(
     rather than queried here so this stays a pure projection the tests can drive without an app,
     and so the one database read happens once per transcript rather than once per tool call.
     """
-    results: dict[str, tuple[str, str]] = {}
+    results: dict[str, tuple[str, str, bool]] = {}
     for message in stored:
         call_id = getattr(message, "tool_call_id", None)
         if not call_id:
@@ -472,24 +496,32 @@ def _transcript(
         # when the turn ran, which is the whole reason the computed ref matches a stored blob. A
         # result that came back empty gets no ref here: there is nothing for a surface to fetch,
         # and `fetchable` is what decides in every other case.
+        #
+        # **A cut result names its full text by the stamp, not by hashing** — the text in this
+        # row is the model's cut, and the stream named the full text the cut kept
+        # (`tool_result_size.FULL_RESULT_REF_KEY`, which the row's JSON round trip preserves).
+        # Falling back to the hash when the stamp is empty is the stream's own fallback: the full
+        # text was not kept, so the stream stored the cut, and this names that.
         text = message_text(message)
-        ref = content_address(text) if text else ""
+        ref = full_result_ref(message) or (content_address(text) if text else "")
         results[str(call_id)] = (
             _truncate_for_transcript(text),
             ref if ref in fetchable else "",
+            was_cut(message),
         )
     transcript: list[TranscriptMessage] = []
     for index, message in enumerate(stored):
         calls: list[TranscriptToolCall] = []
         for call in getattr(message, "tool_calls", None) or []:
             paired = results.get(str(call.get("id", "")))
-            result, ref = paired if paired is not None else (None, "")
+            result, ref, cut = paired if paired is not None else (None, "", False)
             calls.append(
                 TranscriptToolCall(
                     tool=str(call.get("name", "")),
                     arguments=_truncate_for_transcript(call.get("args", "")),
                     result=result,
                     result_ref=ref,
+                    result_cut=cut,
                 )
             )
         # A tool message is the carrier for a result that has already been attached to its call,
@@ -498,7 +530,13 @@ def _transcript(
         if role == "tool" and not calls:
             continue
         transcript.append(
-            TranscriptMessage(index=index, role=role, text=message_text(message), tool_calls=calls)
+            TranscriptMessage(
+                index=index,
+                role=role,
+                text=message_text(message),
+                tool_calls=calls,
+                correlation_id=stored_correlation_id(message),
+            )
         )
     return transcript
 

@@ -18,6 +18,22 @@ states that this file did not is that a closed item is *deleted* in the commit t
 queue now states that rule too. This file is the other half of making it affordable — the place a
 finding's full text goes when it leaves the queue, so deleting a row costs nothing.
 
+**A finding here is a plain bullet, not a checkbox, and that is the point.** It held 221 unchecked
+boxes for as long as this header said "nothing here is scheduled, and nothing here is a
+commitment" — two claims about the same rows, and the queue pointed at them saying they were "open,
+not abandoned". An unchecked box is a commitment somebody is waiting on; these rows are what a
+review measured on a date. Every word of every finding is unchanged; only the marker is. A share of
+them name a subsystem this tree no longer has — the Microsoft Agent Framework, the HPC/Nextflow/
+Seqera tier and its DFT escalation, the PR-gate over agent-written knowledge, the GxP audit hash
+chain, the specialist team and the challenge panel — and they stay exactly as written, because an
+archive that is edited when the tree moves stops being evidence about the pass that wrote it. Read
+a finding for what was measured and with what; then check it against `HEAD` before promoting it,
+and write the queue row from the tree as it stands.
+
+**`- [x]` rows are left alone**, because they carry a different fact: the review that wrote them
+recorded, in that pass, that the thing was resolved. Turning them into plain bullets would erase
+that, and most of them do not say so in their titles.
+
 **Dated sections are kept as they were written.** An archive is ordered by when something was found,
 because "which pass saw this, and what did it have in front of it?" is the question an archive
 answers. The *queue* is ordered by topic, because "what does this ask for?" is the question a queue
@@ -126,7 +142,7 @@ need a coordinated pull request in `Chemclaw3_ui`, so none of them should ship h
 is recorded here is what was *verified* about each against the installed distributions, so the work
 does not start by re-checking.
 
-- [ ] **The front door on `stream_events(version="v3")` — built, measured, and reverted; do not
+- **The front door on `stream_events(version="v3")` — built, measured, and reverted; do not
       restart it until upstream reports usage incrementally** — [L]. The migration was written and
       the whole suite run against it. Most of it worked, and one thing did not.
       **What worked, and is worth having when this becomes possible:** v3 owns `stream_mode` and
@@ -164,7 +180,7 @@ does not start by re-checking.
       `LangChainBetaWarning` lives in `langchain_core._api`, which `tests/test_third_party_layering.py`
       forbids importing — suppress by message, not by category.
 
-- [ ] **The audit trail as OpenTelemetry spans, and the transcript from the checkpointer** — [L].
+- **The audit trail as OpenTelemetry spans, and the transcript from the checkpointer** — [L].
       Unblocked by GxP no longer being a constraint (ADR §5), and **partly overtaken**: `#176`/`#177`
       (`D-2026-08-14-the-record-is-kept-because-it-is-useful-not-because-a-regulator-asks`) landed
       independently and removed the GxP framing and the audit *hash chain*, keeping the trail, the
@@ -196,7 +212,7 @@ does not start by re-checking.
       becomes a tool-call reconstruction that points at the transcript route. **That is a product
       call about a shipped CLI command, not an engineering one** — take it before starting, because
       it decides whether this row is a large deletion or a small one.
-- [ ] **Checkpoint deletion via `BaseCheckpointSaver.adelete_thread`** — [S]. `durable/retention.py`
+- **Checkpoint deletion via `BaseCheckpointSaver.adelete_thread`** — [S]. `durable/retention.py`
       and `agent/leaver.py` both hand-roll `DELETE FROM {table} WHERE thread_id = …` over
       `agent/checkpointer.CHECKPOINT_TABLES`, a hand-maintained tuple invisible to
       `tests/test_schema_inventory.py` (its own open row). `adelete_thread` exists on the base class
@@ -257,23 +273,23 @@ What remains from the review, beyond the rows it touched:
       leaks**. `_positive` refuses all three at parse time. `tests/test_leak_probe.py`,
       `tests/test_sync_share_cli.py`. A test that finds a bug in the thing it was written to cover
       is the argument for writing it.
-- [ ] **MCP's OAuth 2.1 / ID-JAG token exchange as the target design for connector authentication**
+- **MCP's OAuth 2.1 / ID-JAG token exchange as the target design for connector authentication**
       — [L]. A design direction for the open *every shipped connector is unauthenticated* row below,
       not a second item. Recorded so the eventual design starts from the protocol's own answer
       rather than inventing a bearer scheme.
-- [ ] **Sub-note, section-aware chunking with note-id + section metadata** — [M]. The review's
+- **Sub-note, section-aware chunking with note-id + section metadata** — [M]. The review's
       specific remediation for the existing *a note is one vector over its whole body* row.
-- [ ] **AIMNet2 as a mid-tier ML interatomic potential** — [M]. A candidate D-092 never evaluated
+- **AIMNet2 as a mid-tier ML interatomic potential** — [M]. A candidate D-092 never evaluated
       (it assessed ANI-2x/TorchANI and MACE-OFF/MACE-MP only), MIT-licensed, and it clears the
       build-time vendoring bar D-135 already set — checksummed fetch, `HF_HUB_OFFLINE=1`, never a
       quiet runtime fetch. *Trigger:* the same one as every vendored artifact — a decision to pay
       the image-size cost, taken deliberately.
-- [ ] **Langfuse vs Phoenix for the AG-13 eval surface** — [S]. The review recommends self-hosted
+- **Langfuse vs Phoenix for the AG-13 eval surface** — [S]. The review recommends self-hosted
       Langfuse; [`D-2026-08-12-the-experiment-surface-is-the-record-somebody-can-open`](../decisions/D-2026-08-12-the-experiment-surface-is-the-record-somebody-can-open.md)
       already chose Phoenix, on evidence the review did not have. Re-open only with a property
       Phoenix lacks — the choice is not re-litigated by a later recommendation naming a different
       tool.
-- [ ] **Forward-pointers on D-042, D-064 and D-016** — [XS]. Three numbered ADRs the review
+- **Forward-pointers on D-042, D-064 and D-016** — [XS]. Three numbered ADRs the review
       identifies as superseded in substance without saying so (unverified here — check each against
       what supersedes it before editing). The numbered series predates the supersedes header,
       so this is three individual edits, not a format migration. **Constraint:** a merged ADR is
@@ -341,13 +357,13 @@ Ordered by impact × safety: the first six are additive and cannot regress a wor
       identity, approval does not carry, **5/5**. The lesson generalises to the routing row above: a
       probe that depends on the model volunteering a behaviour is not a probe.
 
-- [ ] **Connector domain refusals set the retry flag the repo argues against** — [S].
+- **Connector domain refusals set the retry flag the repo argues against** — [S].
       `tool_authz.py:112-117` states it: `status="error"` reaches Anthropic as `is_error`, "which
       invites exactly the retry a deliberately-worded refusal is trying to prevent". The MCP path
       carries most domain refusals ("that SMILES has an unclosed ring") and sets exactly that flag.
       The policy holds on the two in-process kinds and is inverted on the third.
 
-- [ ] **`LANGSMITH_TRACING` is pinned false in the Helm chart and nowhere else** — [S]. `langsmith`
+- **`LANGSMITH_TRACING` is pinned false in the Helm chart and nowhere else** — [S]. `langsmith`
       is in the runtime closure (a hard requirement of `langchain-core`, pulled again by
       `deepagents`) and enables itself from ambient environment: measured,
       `LANGSMITH_TRACING=true` makes `langsmith.utils.tracing_is_enabled()` return `True` with no
@@ -359,7 +375,7 @@ Ordered by impact × safety: the first six are additive and cannot regress a wor
       should not rest on a library default. Fix at `entrypoint.sh` and/or the composition root so it
       holds regardless of launcher.
 
-- [ ] **A template agent step's token spend is unmetered** — [M]. `record_turn_cost`,
+- **A template agent step's token spend is unmetered** — [M]. `record_turn_cost`,
       `chemclaw_tokens_total`, `budget.record`, `begin_call_watch` and `begin_loop_watch` have
       exactly one caller each (`api/runner.py:527,554,509,197,201`);
       `durable/template_activities.py` calls none, and `graph.ainvoke` at `:384` never reads
@@ -407,13 +423,13 @@ Ordered by impact × safety: the first six are additive and cannot regress a wor
       *Residual, unchanged and still true:* `loop_capped` is a boolean, so a turn capped in pass 1
       that then answers cleanly still marks a complete answer partial.
 
-- [ ] **A template workflow's failure is invisible to the chemist** — [S]. `TemplateWorkflow.run`
+- **A template workflow's failure is invisible to the chemist** — [S]. `TemplateWorkflow.run`
       has no `try/except` and reaches `notify_session_best_effort(…, "job_completed", …)`
       (`durable/template_job.py:119-129`) only on success, unlike
       `ConnectorJobWorkflow._notify_failure` (`durable/connector_job.py:282,333-342`). A step that
       fails after 5 attempts pushes nothing back, and the surface shows the run as "running" forever.
 
-- [ ] **The repeat guard and the loop cap are inert inside a template agent step** — [M].
+- **The repeat guard and the loop cap are inert inside a template agent step** — [M].
       `refuse_repeated_calls` and `loop_hit_cap` are attached but do nothing there, because their
       context managers are entered only by `api/runner.py` — so the only bound on an `agent` step's
       loop is `turn_config()`'s recursion limit. The *plan-gate* half of this row is closed by
@@ -439,7 +455,7 @@ Ordered by impact × safety: the first six are additive and cannot regress a wor
       reconcile. **Row was stale, not open.** *Still not to be touched:* `ingest/documents/sync.py`
       fan-out-on-failure is not a retry layer, and its comment records the outage it fixed.
 
-- [ ] **`run_agent_step` could have task-level idempotency for free, and does not** — [L]. Measured:
+- **`run_agent_step` could have task-level idempotency for free, and does not** — [L]. Measured:
       on resume from the same `thread_id` after a mid-turn crash, a completed task's result replays
       from `checkpoint_writes` and its tool is **not** re-run. That needs a checkpointer, a stable
       thread id and `durability != "exit"`; `run_agent_step` has none, by an explicit decision
@@ -448,7 +464,7 @@ Ordered by impact × safety: the first six are additive and cannot regress a wor
       id is deterministic under replay and the rows are prunable by the existing sweep. ADR-sized:
       it re-draws D-002's line, which must be done deliberately rather than crossed quietly.
 
-- [ ] **No heartbeat and no aggregate timeout on template steps** — [M]. `template_job.py:139-158`
+- **No heartbeat and no aggregate timeout on template steps** — [M]. `template_job.py:139-158`
       sets `start_to_close_timeout` only; `template_activities.py` never calls `activity.heartbeat`,
       though `durable/heartbeat.py` exists and the calc/qm/bo activities use it. No
       `schedule_to_close_timeout` and no `execution_timeout` on `start_workflow`, so one agent step's
@@ -479,7 +495,7 @@ Ordered by impact × safety: the first six are additive and cannot regress a wor
       **still an open row in its own right** — the cap bounds which `mcp` resolves, it does not pass
       a `read_timeout_seconds`.
 
-- [ ] **Two shipped settings govern nothing** — [S]. `calibration_conformal_coverage` and
+- **Two shipped settings govern nothing** — [S]. `calibration_conformal_coverage` and
       `calibration_conformal_min_samples` (`core/config/calculators.py:193-194`) have zero readers in
       `src/`, `tests/` or the chart, yet ship in `.env.example:234-235`.
       `science/calc/uncertainty.py:195` takes exactly these two parameters and is never wired to
@@ -487,7 +503,7 @@ Ordered by impact × safety: the first six are additive and cannot regress a wor
       `service_uvicorn_workers` has no reader, and `entrypoint.sh` maps four other settings to
       uvicorn flags but not this one.
 
-- [ ] **The checkpoint tables are reached only by a hand-maintained tuple** — [S].
+- **The checkpoint tables are reached only by a hand-maintained tuple** — [S].
       `CHECKPOINT_TABLES` (`agent/checkpointer.py:52`) is the sole route for both erasure
       (`agent/leaver.py`) and retention (`durable/retention.py`). The tables are created by
       `AsyncPostgresSaver.setup()` rather than by a migration, so `tests/test_schema_inventory.py`
@@ -495,7 +511,7 @@ Ordered by impact × safety: the first six are additive and cannot regress a wor
       gate in the repo. Add a check that reconciles the tuple against what the saver actually
       creates.
 
-- [ ] **A claim whose mechanism does not exist: the deterministic call id** — [S].
+- **A claim whose mechanism does not exist: the deterministic call id** — [S].
       `agent/tool_invocation.py:53-60` says the id is derived so "a retried activity produces the
       same id", against an audit trail in which one logical call would otherwise read as three. But
       `audit_events` has **no call-id column** — migrations `006/010/011/026/044` add none, and
@@ -506,11 +522,11 @@ Ordered by impact × safety: the first six are additive and cannot regress a wor
       calling twice; `activity.info().attempt` is available and read nowhere. Either add the column
       or correct the docstring.
 
-- [ ] **`session_id` is empty on every template-path audit row** — [S]. `run_agent_step` stamps
+- **`session_id` is empty on every template-path audit row** — [S]. `run_agent_step` stamps
       identity but never calls `set_current_session_id`, so the D-2026-07-31 join from a tool call
       back to the question it answered is empty for the whole template path.
 
-- [ ] **`interrupt()` is declined for a reason that is measurably false** — [S]. The decision is
+- **`interrupt()` is declined for a reason that is measurably false** — [S]. The decision is
       right; the recorded reason is not.
       `D-2026-08-11-a-policy-nobody-can-see-is-a-policy-nobody-has:25-26` says an SSE stream cannot be
       held open across a days-long review — but `interrupt()` does not hold a stream open:
@@ -524,7 +540,7 @@ Ordered by impact × safety: the first six are additive and cannot regress a wor
       activities and the CLI. Supersede the reason, not the decision: as written it invites a future
       reader to re-open the question the moment they discover `invoke()` returns.
 
-- [ ] **No mechanism for a short, in-turn clarification** — [M]. The one thing `interrupt()` is
+- **No mechanism for a short, in-turn clarification** — [M]. The one thing `interrupt()` is
       genuinely good at and the repo has no equivalent for: "you said 'the usual solvent' — which?",
       seconds, same turn, no compliance record. The three existing gates are all durable, owner-scoped
       and days-long. Additive, not a replacement. **Trigger:** the first chemist complaint that the
@@ -532,7 +548,7 @@ Ordered by impact × safety: the first six are additive and cannot regress a wor
 
 ## Open — Left by the post-migration review (2026-08-12)
 
-- [ ] **A plan no longer shows which step is waiting on a durable job** — [M]. The previous engine
+- **A plan no longer shows which step is waiting on a durable job** — [M]. The previous engine
       marked it by prefixing a todo's description (`awaiting-job:<id>`), and the rebuild replaced
       that with a `ChemclawState.awaiting_jobs` field — which nothing ever wrote or read, so the
       capability was lost rather than moved. The field is deleted (a declared field nothing consults
@@ -604,7 +620,7 @@ Ordered by impact × safety: the first six are additive and cannot regress a wor
       token counts — but there are *two* answers, not three, and the ledger is not one of them.
       That is the row below.
 
-- [ ] **`turn_costs` cannot say which model a turn spent its tokens on** — [S]. The table books one
+- **`turn_costs` cannot say which model a turn spent its tokens on** — [S]. The table books one
       row per turn with `profile` but no `model`, so cost per model is answerable from traces (see
       above) and not from the ledger — which matters because the ledger is what survives a trace
       retention window, and D-2026-08-01-spend-is-a-ledger-not-a-label put spend there deliberately.
@@ -646,7 +662,7 @@ Ordered by impact × safety: the first six are additive and cannot regress a wor
 
 ## Open — Left by the tool-result surface (2026-08-09, D-2026-08-09-a-preview-is-not-a-result)
 
-- [ ] **`tool_result_blobs` has no bound on a deployment that has not stated one** — [S].
+- **`tool_result_blobs` has no bound on a deployment that has not stated one** — [S].
       Its retention window defaults to 0 like every other, for a reason that is written down (see
       the ADR and `tasks/lessons.md`), and it is the highest-volume table in the schema at up to a
       row per tool call. Nothing measures it. The honest small piece is a row-count/byte gauge on
@@ -654,7 +670,7 @@ Ordered by impact × safety: the first six are additive and cannot regress a wor
       default that `retention_enabled=false` makes inert anyway.
       **Trigger**: the first deployment that turns the store on in anger, or any disk alert.
 
-- [ ] **A similarity search still narrows a query RDKit only half-parses** — [S].
+- **A similarity search still narrows a query RDKit only half-parses** — [S].
       The safety screens now refuse a SMILES they cannot read in full
       (`core/chem.py::require_molecule`, `D-2026-08-09-a-valid-prefix-is-not-a-molecule`), because
       RDKit's parser accepts a valid prefix and drops whatever follows a space.
@@ -692,7 +708,7 @@ production deployment.
 Five correctness defects found in the hardening campaign's own output; four were fixed in place and
 one was refuted in its remedy. This is the piece deliberately not done.
 
-- [ ] **`logging.handleError` prints a malformed record's raw `msg`/`args` to stderr, unredacted**
+- **`logging.handleError` prints a malformed record's raw `msg`/`args` to stderr, unredacted**
       — [S]. Surfaced by the fix that stopped `SecretRedactingFilter.filter` raising into the
       caller: a record the filter cannot process now continues to the handler, which fails the same
       way and routes to `Handler.handleError`, and CPython's `handleError` writes
@@ -708,7 +724,7 @@ one was refuted in its remedy. This is the piece deliberately not done.
       a structured/JSON stderr handler (which is the point where owning `handleError` becomes
       natural).
 
-- [ ] **Carry structured tool results into `turn_evidence`, instead of their serialization** — [M].
+- **Carry structured tool results into `turn_evidence`, instead of their serialization** — [M].
       `api/runner_trace.py` stringifies each tool result and `verifier.turn_evidence` takes
       `Sequence[str]`, so the judge prompt is handed a JSON blob — envelopes escaped inside string
       literals, plus `source_note_id`/`retriever`/`score` scaffolding it has no use for. Measured
@@ -729,7 +745,7 @@ one was refuted in its remedy. This is the piece deliberately not done.
 Six findings on the gates themselves, four of them a validator that could pass vacuously. These are
 what those fixes deliberately did not close.
 
-- [ ] **Rule 9's corpus is now a list, so a selector outside it is unseen** — [S]. `_selector_sources`
+- **Rule 9's corpus is now a list, so a selector outside it is unseen** — [S]. `_selector_sources`
       walked the working directory, which let `make mutants`' gitignored copy of the tree fail
       `make prose-validate`; it is now the operator documents plus `docs/`. That trades a widening
       hazard for a narrowing one: a PromQL selector written into a package `README.md`, a `SKILL.md`
@@ -740,7 +756,7 @@ what those fixes deliberately did not close.
       the root into a `tmp_path`). *Trigger:* the first selector that belongs in a document outside
       `docs/`, or any second reason to want "the files the repository tracks" as a corpus.
 
-- [ ] **`make template-validate` reports a broken bundle as a traceback** — [S]. A transitive import
+- **`make template-validate` reports a broken bundle as a traceback** — [S]. A transitive import
       failure now propagates out of `_resolvable_signatures` instead of being swallowed, which is
       the point (it used to check less and print "template validation passed"). It exits non-zero
       and prints a real `ModuleNotFoundError`, where `make connector-validate` — which runs first in
@@ -753,7 +769,7 @@ what those fixes deliberately did not close.
 Record: `docs/decisions/D-2026-08-08-a-vector-store-is-not-a-catalogue.md`. The seam ships with a
 Qdrant adapter proven offline against a fake client; these are the edges it could not close.
 
-- [ ] **Nothing has run against a real Qdrant** — [M]. The adapter is exercised against a fake
+- **Nothing has run against a real Qdrant** — [M]. The adapter is exercised against a fake
       client *and* a fake `qdrant_client.models`, which is a claim about the calls it makes and not
       about a server accepting them. Unverified against a live instance: that `query_points` returns
       `.points` on the pinned client version, that a `MatchAny` filter over a large `any:` list
@@ -762,7 +778,7 @@ Qdrant adapter proven offline against a fake client; these are the edges it coul
       *Trigger:* a cluster with Qdrant reachable — the same shape as the warehouse ELN connector's
       own "only the tenant is missing" row.
 
-- [ ] **Every search builds an eligibility scope in memory, and that is now the scaling ceiling** —
+- **Every search builds an eligibility scope in memory, and that is now the scaling ceiling** —
       [M], raised from [S] after the source-scoping fix. `_eligible_documents` selects every matching
       `doc_id` from `document_files` and sends the set to the store — and it runs for *every* search,
       not only filtered ones, because the `source` is always a restriction and skipping it took the
@@ -778,14 +794,14 @@ Qdrant adapter proven offline against a fake client; these are the edges it coul
       latency budget — which for a single-share deployment may be never, since the whole share is
       the scope.
 
-- [ ] **`note_index` is still pgvector-only** — [M]. The seam was built for the document corpus and
+- **`note_index` is still pgvector-only** — [M]. The seam was built for the document corpus and
       the note index was deliberately not moved: it has an open item of its own (no embedding-model
       identity, no chunking — see below), any migration is a full re-embed anyway, and generalizing
       to a second consumer before the first has run against a live server would be designing against
       a guess. *Trigger:* the document corpus is running on an external store, and the note index's
       own item is being closed anyway.
 
-- [ ] **The external index's SQL is unexercised** — [S]. `ExternalVectorDocumentIndex` overrides four
+- **The external index's SQL is unexercised** — [S]. `ExternalVectorDocumentIndex` overrides four
       methods, and the three that touch Postgres (`store_embeddings`, `prune_stale` with its
       `RETURNING`, `_resolve`'s `unnest` join) run only where a database does. The offline suite
       covers the seam, the adapter and the point-id contract; these statements are covered by the
@@ -796,7 +812,7 @@ Qdrant adapter proven offline against a fake client; these are the edges it coul
 Record: `docs/decisions/D-2026-08-08-a-category-has-no-outside.md`. Two defects fixed and eight
 hypotheses refuted by measurement; these are the three the audit deliberately left.
 
-- [ ] **`generate_screening_design` forwards a BoFire message that names no fix** — [S]. A factor
+- **`generate_screening_design` forwards a BoFire message that names no fix** — [S]. A factor
       count with no available generator (measured: 4 factors at `n_generators=2`, which would give
       4 runs for 4 main effects) reaches the caller as BoFire's own `ValueError: No generator
       available for the requested combination.` It *is* a `ValueError`, so `connectors.server`
@@ -806,7 +822,7 @@ hypotheses refuted by measurement; these are the three the audit deliberately le
       is observed retrying `generate_screening_design` after this message, or the next change that
       touches `_fractional_design`'s guards.
 
-- [ ] **A durable campaign's declared direction is not checked against its registered objective** —
+- **A durable campaign's declared direction is not checked against its registered objective** —
       [M]. `CampaignSpec` carries both `problem.objectives[0].direction` (which drives
       `MinimizeObjective`/`MaximizeObjective` and `best_of`) and `objective_name` (which selects the
       evaluator from `science.bo.objectives`'s registry). Nothing binds them, so a spec naming
@@ -820,7 +836,7 @@ hypotheses refuted by measurement; these are the three the audit deliberately le
       finishing with a direction the requester did not intend. The fix is one declared `direction`
       per registry entry plus a check in `require_campaign_startable`.
 
-- [ ] **A campaign's stored history is only as long as the last ask** — [M]. `read_campaign_thread`
+- **A campaign's stored history is only as long as the last ask** — [M]. `read_campaign_thread`
       returns the *latest* suggestion's observations, which is complete only under the documented
       assumption that each turn passes the campaign's whole run history. Measured: an ask made with
       a shorter list shrinks what a later `resume_campaign` reports (3 runs → 2), on both the
@@ -834,7 +850,7 @@ hypotheses refuted by measurement; these are the three the audit deliberately le
 Record: `docs/decisions/D-2026-08-08-a-borrowed-connection-is-bounded-by-default.md`. The default
 landed; this is what the change surfaced and did not close.
 
-- [ ] **The front door holds two pools against one database, and the fleet budget counts one** —
+- **The front door holds two pools against one database, and the fleet budget counts one** —
       [S]. Pools are keyed by `(dsn, libpq options)` and the statement timeout rides on the options
       (D-107), so `/readyz` bounding its probe at `service_readiness_db_timeout_seconds` (2 s, and
       correctly so) gives it a pool of its own beside the stores' 30 s pool. Measured in one
@@ -853,7 +869,7 @@ landed; this is what the change surfaced and did not close.
 
 ## Open — Left by the review-and-hardening campaign (2026-08-08)
 
-- [ ] **The additive gate does not see data-dependent narrowings, and four merged migrations are
+- **The additive gate does not see data-dependent narrowings, and four merged migrations are
       one** — [S]. `tests/test_migrations_are_additive.py` now asks two questions — does this
       destroy data, and does it stop the previous image writing
       (`D-2026-08-08-a-rollback-that-is-not-a-schema-step`) — and the second deliberately flags only
@@ -870,7 +886,7 @@ landed; this is what the change surfaced and did not close.
       previous-image writes are not already known to satisfy it — or the first real rollback
       rehearsal against a populated cluster, which can measure these instead of reasoning about them.
 
-- [ ] **`WarehouseQueryError` embeds the driver's text in a message the model reads** — [S].
+- **`WarehouseQueryError` embeds the driver's text in a message the model reads** — [S].
       `ingest/eln/warehouse/snowflake.py:88` raises `f"warehouse rejected the query: {exc}"` around
       the driver's exception, and `agent/tool_authz.surface_domain_errors` hands a `ChemclawError`'s
       message to the model verbatim. The sibling defect in `DocumentIndexError` was fixed with this
@@ -882,7 +898,7 @@ landed; this is what the change surfaced and did not close.
       *Trigger:* the first live Snowflake tenant (the same one `docs/planning/DEFERRED.md` waits on
       for the ELN binding), or any decision to state a message contract on `ChemclawError` itself.
 
-- [ ] **A decided approval hold can be reopened, and the obvious fix is worse** — [M].
+- **A decided approval hold can be reopened, and the obvious fix is worse** — [M].
       `agent/interaction_tools.py::start_approval` passes no `id_reuse_policy`, so temporalio's
       ALLOW_DUPLICATE default lets a *closed* run's id be reused: re-surfacing a candidate whose
       hold was already approved or rejected starts a fresh run under the same id and resets it to
@@ -898,7 +914,7 @@ landed; this is what the change surfaced and did not close.
       *Trigger:* a reachable Temporal test server, so the closed-hold and expired-hold paths can be
       exercised rather than reasoned about — they skip offline today.
 
-- [ ] **Inserting a command into an existing workflow path has no versioning convention** — [S].
+- **Inserting a command into an existing workflow path has no versioning convention** — [S].
       `grep -rn 'workflow.patched|get_version' src/` returns nothing. D-2026-08-08-an-outage-is-not-a-missing-job
       added a `resolve_notes_per_run` local activity between the build activity and `fan_out` in the
       three synthesis workflows — the correct fix for a determinism bug, and itself an unguarded
@@ -910,7 +926,7 @@ landed; this is what the change surfaced and did not close.
 The three rows below are the API-robustness lane's residuals; what it fixed is in
 `docs/decisions/D-2026-08-08-a-slot-lives-as-long-as-its-response.md`.
 
-- [ ] **A timed-out attachment parse still runs to completion** — [M]. `parse_attachment_off_loop`
+- **A timed-out attachment parse still runs to completion** — [M]. `parse_attachment_off_loop`
       bounds how long a *caller* waits and how many parses run at once, and it cannot bound the
       thread: Python has no way to stop one. So a document past
       `attachment_parse_timeout_seconds` keeps burning a CPU and holding one of
@@ -922,7 +938,7 @@ The three rows below are the API-robustness lane's residuals; what it fixed is i
       *Trigger:* a measured parse that exceeds the timeout in production, or a second CVE in a
       parser library whose fix is not a version bump.
 
-- [ ] **The share sync's parse has no timeout** — [S]. `ingest/documents/sync.py:200` already runs
+- **The share sync's parse has no timeout** — [S]. `ingest/documents/sync.py:200` already runs
       `_read_and_parse` under `asyncio.to_thread`, so a hostile document cannot wedge the crawler's
       event loop (the front-door defect does not exist there — measured, not assumed). What it
       lacks is a wall clock: one pathological file can hold the sync activity for as long as it
@@ -937,7 +953,7 @@ Record: `docs/decisions/D-2026-08-08-a-rule-with-no-test-is-a-claim.md`. Each ro
 the new tests now *record* as debt rather than something they fixed; each is a live row in
 `_KNOWN_LEAKS` / an unconverted site, so none of them is silent any more.
 
-- [ ] **One `durable/launch.py` `start_job()`, and the reuse policy it cannot flatten** — [M].
+- **One `durable/launch.py` `start_job()`, and the reuse policy it cannot flatten** — [M].
       Five copies of the durable-launch idiom exist (`agent/durable_tools.py`,
       `agent/interaction_tools.py`, `templates/registry.py`, and two in `connectors/`), and they are
       what makes `chemclaw.agent → temporalio` and `chemclaw.templates → temporalio` real edges in
@@ -952,7 +968,7 @@ the new tests now *record* as debt rather than something they fixed; each is a l
       *Trigger:* a sixth launch site, or the `interaction_tools` reuse-policy fix landing — whichever
       comes first; both touch the same three lines in five places.
 
-- [ ] **Twenty-nine warn-and-degrade sites still uncounted, in three groups** — [S].
+- **Twenty-nine warn-and-degrade sites still uncounted, in three groups** — [S].
       Measured on `391b6ec^`, counting one `ast.ExceptHandler` whose subtree calls
       `.warning()`/`.warn()` and contains no `raise`: 41 such handlers across 34 modules, of which
       exactly 4 counted anything (`api/routes/turns.py:173`, `api/state.py:237`,
@@ -970,7 +986,7 @@ the new tests now *record* as debt rather than something they fixed; each is a l
       *Trigger:* group (a) once someone decides whether the replay guard belongs at each site or in a
       `durable`-side wrapper; group (c) once the campaign's lanes have merged.
 
-- [ ] **`template-validate` cannot check arguments for a template launcher or a skill tool** — [S].
+- **`template-validate` cannot check arguments for a template launcher or a skill tool** — [S].
       The argument check resolves parameters from the in-process `@tool` registry and each bundle's
       own server tools module: **50 of the 61 advertised tools**. "Covers every tool the shipped
       templates call" is true and worth little — one template ships, with two steps. A `run_<name>`
@@ -980,7 +996,7 @@ the new tests now *record* as debt rather than something they fixed; each is a l
       arguments are not knowable from a static registry either. The eleven unresolvable ones
       include every job-launcher — the most expensive things to fail at run time.
 
-- [ ] **`prose-validate` resolves a *bare* metric name only in the operator corpus, not in
+- **`prose-validate` resolves a *bare* metric name only in the operator corpus, not in
       `docs/decisions/`** — [S].
       Rule 9 (a PromQL selector, `chemclaw_<name>{…}`) does run over the ADRs and is what would have
       caught `chemclaw_degradations_total`; rule 8 (a bare backticked metric name) does not, and
@@ -996,7 +1012,7 @@ the new tests now *record* as debt rather than something they fixed; each is a l
       stale and someone has to decide whether a "historical" marker in the ADR body (rather than a
       corpus exclusion) is the right shape.
 
-- [ ] **The two layering policies do not compose hops, so a stack can be reached in two legal
+- **The two layering policies do not compose hops, so a stack can be reached in two legal
       steps** — [M].
       `from chemclaw.core.temporal_client import Client` inside `science/` passes everything:
       `tests/test_third_party_layering.py` records only third-party targets so it never sees the
@@ -1012,7 +1028,7 @@ the new tests now *record* as debt rather than something they fixed; each is a l
       `core` that is a third-party object rather than a first-party one — that is the case the
       policy would have to name, and until it exists there is nothing to write the rule against.
 
-- [ ] **`_ALLOWED_MODULE_STACKS` rows are package-keyed while `_KNOWN_LEAKS` rows are
+- **`_ALLOWED_MODULE_STACKS` rows are package-keyed while `_KNOWN_LEAKS` rows are
       file-keyed** — [S].
       Measured: a new `connectors/safety/server/_zz.py` importing the conversation framework,
       `temporalio` *and* `fastapi` at module scope passes all 8 stack tests, because
@@ -1032,7 +1048,7 @@ the new tests now *record* as debt rather than something they fixed; each is a l
 Record: `docs/decisions/D-2026-08-08-a-partial-answer-must-say-so.md`. Seven defects fixed; these
 are what that change deliberately did not do.
 
-- [ ] **`peroxide-with-ketone` still misses an inorganic peroxide salt** — [M]. `rules.yaml`'s
+- **`peroxide-with-ketone` still misses an inorganic peroxide salt** — [M]. `rules.yaml`'s
       `left` arm is `[OX2H][OX2H]`, so `Na2O2 + acetone` raises only `peroxide` where
       `H2O2 + acetone` raises both (measured). It is the same coordination gap the
       `oxidizer-with-reductant` fix closed, but the rule's explanation and citation name *hydrogen
@@ -1040,7 +1056,7 @@ are what that change deliberately did not do.
       stated reason false for the molecules newly matched. **Trigger**: a process chemist confirms
       that an inorganic peroxide plus a ketone carries the same TATP-formation hazard, and supplies
       the citation; then widen the pattern *and* the prose together.
-- [ ] **The reagent identity table holds no hydrazine, so it cannot check a hydrazine widening** —
+- **The reagent identity table holds no hydrazine, so it cannot check a hydrazine widening** —
       [M]. `chemclaw.core.reagents._TABLE` is 87 names over **61** distinct structures, and its only
       N–N structures are two azides and the triazole of TBTU/HATU. Three places cited it as "83
       distinct structures" showing a hydrazine widening "matches hydrazinium salts and nothing
@@ -1052,7 +1068,7 @@ are what that change deliberately did not do.
       anyway, since the table's job is resolving what a source calls a reagent. **Trigger**: the next
       change to `core/reagents`, or the next safety rule whose scope is a class the table should
       already name; add the hydrazines with their CAS/aliases and re-run the panel.
-- [ ] **`complex-hydride-with-chlorinated-solvent` misses sodium hydride** — [M]. Its `left` arm is
+- **`complex-hydride-with-chlorinated-solvent` misses sodium hydride** — [M]. Its `left` arm is
       `[$([AlH4-]),$([BH4-])]`, so `['[H-].[Na+]', 'ClCCl']` raises **nothing** (measured through
       `screen_reaction`), while `oxidizer-with-reductant` already lists `[H-]` among its reductants
       and NaH with halocarbons is a Bretherick's entry. Left on the same rule as
@@ -1062,7 +1078,7 @@ are what that change deliberately did not do.
       chemist supplies the citation for the saline-hydride/halocarbon hazard; then either widen this
       rule's pattern *and* its prose and id together, or add a `saline-hydride-with-chlorinated-
       solvent` rule beside it with its own explanation.
-- [ ] **`azide-with-dichloromethane` misses chloroform** — [M]. The `right` arm is `[CH2](Cl)Cl`, so
+- **`azide-with-dichloromethane` misses chloroform** — [M]. The `right` arm is `[CH2](Cl)Cl`, so
       `['[Na+].[N-]=[N+]=[N-]', 'ClC(Cl)Cl']` raises only the structural `non-carbon-azide` flag and
       not the pair rule (measured). Triazidomethane from chloroform is the documented sibling of the
       diazidomethane hazard the rule is written about — the rule's own explanation even names
@@ -1070,20 +1086,20 @@ are what that change deliberately did not do.
       widening the pattern alone leaves the explanation false for chloroform. **Trigger**: a citation
       for the chloroform case (the rule cites Peet & Weber 1988, which is about DCM); then widen the
       pattern, the prose and the id together — `azide-with-polychloromethane` or similar.
-- [ ] **Three campaign ids moved once; a deployment with `bo_campaigns` rows needs a note** — [L].
+- **Three campaign ids moved once; a deployment with `bo_campaigns` rows needs a note** — [L].
       `campaign_id_for` now canonicalizes the parameter and category order, so a campaign declared
       in unsorted order answers to the id its sorted spelling already carried. Both ids are pinned
       in `tests/test_bo_campaign_record.py`. **Trigger**: before the first production deploy that
       carries an existing `bo_campaigns` table — either re-map the rows by recomputing
       `campaign_id_for` over the stored `problem` JSONB, or accept the orphans and say so in the
       release note. No live tenant exists today, which is why this is not a migration.
-- [ ] **`expect_pass` is per case, not per metric** — [L]. `inert_demonstrations()` asserts that at
+- **`expect_pass` is per case, not per metric** — [L]. `inert_demonstrations()` asserts that at
       least *one* gated metric of a demonstration fails, which is as strong as the case-level flag
       allows: a case with two gated metrics whose second one goes inert is still invisible. No
       shipped case needs the finer grain (`retrieval-cross-coupling-literal-miss` is the only
       multi-metric demonstration and its passing metric is the point). **Trigger**: the first case
       that declares two metrics both meant to fail.
-- [ ] **The `pka` calibration ledger resets whenever the pKa key widens** — [M]. `predictions` is
+- **The `pka` calibration ledger resets whenever the pKa key widens** — [M]. `predictions` is
       keyed `(calc_type, calc_version, input_hash)` and `reconciled_for` reads with an exact
       `calc_version` predicate (D-139), so this campaign's key widening orphaned every reconciled
       pKa residual: `calculator_trust("pka")` reports `UNCALIBRATED`, n=0, until each molecule is
@@ -1092,7 +1108,7 @@ are what that change deliberately did not do.
       and in the ADR's Consequences; what is *not* decided is whether an operator should be given a
       re-prediction sweep over the measured set. **Trigger**: the first deployment with a populated
       `predictions` table, or the next widening of a calibrated calculator's version string.
-- [ ] **A partial corpus read is detected only where the miner can see it** — [S]. `read_corpus()`
+- **A partial corpus read is detected only where the miner can see it** — [S]. `read_corpus()`
       reports `complete=False` when an entry `map_to_ord` rejects, which is what gates the
       observation upsert's replace branch. A source that silently returns *fewer entries than it
       holds* — a truncated warehouse query, a share that failed to mount — is invisible: nothing
@@ -1107,7 +1123,7 @@ Record: `docs/decisions/D-2026-08-08-a-test-that-survives-the-mutation-it-names.
 survived a mutation of the code they name are closed there, each with the mutation quoted. These
 three are what that lane could not close.
 
-- [ ] **The Helm chart tests assert on template *source*, never on rendered YAML** — [M].
+- **The Helm chart tests assert on template *source*, never on rendered YAML** — [M].
       Every check in `tests/test_helm_chart.py` reads `values.yaml` as YAML and `templates/*` as
       text, so "the document share is mounted read-only" means "`readOnly: true` appears inside that
       helper's body" — which stays true if the helper is wrapped in a `{{- if }}` no deployment
@@ -1121,7 +1137,7 @@ three are what that lane could not close.
       *Trigger:* a `helm` binary available in the job that runs pytest (today it is installed only
       in the separate `chart` job, which has no `uv`).
 
-- [ ] **The in-memory and Postgres `find` backends are compared on fixed fixtures, not generated
+- **The in-memory and Postgres `find` backends are compared on fixed fixtures, not generated
       ones** — [S]. `test_find_matches_the_in_memory_backend` runs five hand-written queries and
       compares result *sets*; `_matches` (Python) and `_FIND` (SQL) express the same predicate twice
       and nothing makes them stay equal beyond those five. The generated version belongs with the
@@ -1141,7 +1157,7 @@ three are what that lane could not close.
       `conftest.py`: pytest loads `conftest` before every session for fixtures and hooks, and these
       are helpers a test imports by name.
 
-- [ ] **Six test files define a byte-identical fake agent** — [S]. `create_session(self, *,
+- **Six test files define a byte-identical fake agent** — [S]. `create_session(self, *,
       session_id)` plus a `run(stream=True)` generator, in `test_approvals`, `test_auth`,
       `test_metrics`, `test_profile_discovery`, `test_runner`, `test_service`,
       `test_service_events`, `test_disconnect_teardown` and `test_session_context` — nine
@@ -1154,7 +1170,7 @@ three are what that lane could not close.
       *Trigger:* the next time the runner learns to call a new method on the agent — at which point
       all nine go stale together, which is exactly what happened to the update fakes.
 
-- [ ] **488 function-local imports in `tests/`** — [S]. Measured across `tests/*.py`: 530 before
+- **488 function-local imports in `tests/`** — [S]. Measured across `tests/*.py`: 530 before
       the two clusters below were hoisted, 488 after. The largest remaining groups are `settings`
       ×46, `asyncio` ×12, `Principal/require_principal` ×11, `discovered` ×10, `METRICS` ×9,
       `TestClient` ×8, `connector_app` ×7. Most defer nothing: `settings` is a
@@ -1170,7 +1186,7 @@ three are what that lane could not close.
       *Trigger:* do it as one mechanical pass with its own review, or when a local import is found
       shadowing a differently-bound module-scope name (the `stdlib_logging` shape).
 
-- [ ] **`.github/workflows/ci.yml` checks out with `fetch-depth: 1`, which makes the migration
+- **`.github/workflows/ci.yml` checks out with `fetch-depth: 1`, which makes the migration
       immutability check unrunnable in CI** — [S], and it is a one-line fix outside `tests/`.
       `actions/checkout@v4` defaults to a depth-1 clone, where every file looks introduced by the
       graft commit and `git show <graft>:file` is the working tree's own content. Measured on a
@@ -1189,7 +1205,7 @@ run covered the three modules `[tool.mutmut]` named and nothing had ever mutated
 `kg/pr_gate.py`, `kg/note.py`, `agent/audit_store.py` — and ended at 206 of 223 killed with every
 survivor triaged. These two are what it did not close.
 
-- [ ] **Four of the seven `[tool.mutmut]` modules have still never been run under a corrected test
+- **Four of the seven `[tool.mutmut]` modules have still never been run under a corrected test
       selection** — [S]. `agent/authz.py`, `api/budget.py`, `api/runner_trace.py` and
       `science/calc/store.py` have a stored report showing **103 survivors**, produced under the
       same `pytest_add_cli_args_test_selection` that this lane measured as understating the suite by
@@ -1202,7 +1218,7 @@ survivor triaged. These two are what it did not close.
       *Trigger:* the next hardening pass that wants a number for those four modules, or any change
       to one of them — whichever comes first.
 
-- [ ] **The mutmut test selection is maintained by hand and nothing checks it** — [S]. It is a
+- **The mutmut test selection is maintained by hand and nothing checks it** — [S]. It is a
       list of eighteen (now twenty) filenames whose stated job is "the tests that can actually kill
       these mutants", and it was wrong for two of the seven modules because the killing tests do not
       mention the module they cover — `tests/test_relations.py` builds a graph, and the graph is
@@ -1219,7 +1235,7 @@ survivor triaged. These two are what it did not close.
 Record: `docs/decisions/D-2026-08-06-a-share-is-mounted-not-called.md`. The share is crawled,
 indexed, entitlement-gated and tested offline; these are the edges that build could not close.
 
-- [ ] **A gated share contributes nothing to a scheduled report, and does so silently** — [M].
+- **A gated share contributes nothing to a scheduled report, and does so silently** — [M].
       `durable/report_workflow.py` calls `active_retrieve_sources()` inside a Temporal workflow,
       where no identity contextvar is set, so `ShareDocumentRetriever` correctly declines: it cannot
       check an entitlement against an actor that is not there. That is right by construction and
@@ -1230,13 +1246,13 @@ indexed, entitlement-gated and tested offline; these are the edges that build co
       requester's roles onto a background run widens what that run can read.
       *Trigger:* the first deployment that enables a gated share and also runs scheduled reports.
 
-- [ ] **Nothing has been run against a real SMB mount** — [S]. Every test builds a POSIX directory
+- **Nothing has been run against a real SMB mount** — [S]. Every test builds a POSIX directory
       tree, which is what the code sees, but a CIFS mount differs where it matters most for this
       job: `st_mtime_ns` granularity (the whole fingerprint diff rests on it), how a dropped mount
       presents to `scandir` (the prune guard rests on that), and `scandir` latency at 500k entries.
       *Trigger:* a cluster with the PVC attached. Verify with `make share-estimate` first.
 
-- [ ] **A refused file is re-read on every crawl** — [S]. A scanned PDF or an unreadable document
+- **A refused file is re-read on every crawl** — [S]. A scanned PDF or an unreadable document
       gets no `document_files` row, so its fingerprint is not stored and the next crawl opens it
       again. Deliberate: recording it would make it look unchanged forever and `skipped_scan` would
       read zero on every run after the first, losing the number that says how much of the share is
@@ -1246,13 +1262,13 @@ indexed, entitlement-gated and tested offline; these are the edges that build co
       *Trigger:* a real share whose refused population makes the crawl's read volume material —
       `make share-estimate` gives the count before it ever runs.
 
-- [ ] **HNSW recall under a filtered document search is unmeasured** — [S]. `search_dense` orders by
+- **HNSW recall under a filtered document search is unmeasured** — [S]. `search_dense` orders by
       `<=>` with a `LIMIT` and an `EXISTS` predicate on `document_files`; pgvector applies the HNSW
       index first and filters after, so a narrow `tag` over a large corpus can under-return. Harmless
       at fixture scale and unmeasured at a million chunks. *Trigger:* a real corpus is indexed —
       then compare a filtered top-k against the same query with the index disabled.
 
-- [ ] **Share exclusion globs are case-sensitive, and CIFS is not** — [S]. `_is_excluded` matches
+- **Share exclusion globs are case-sensitive, and CIFS is not** — [S]. `_is_excluded` matches
       with gitignore semantics (`pathspec`), which is case-sensitive exactly as the `fnmatch` it
       replaced was, so `Archive`, `ARCHIVE` and `archive` are three strings here and one folder to
       the file server. An operator who excluded a restricted folder by name gets it indexed if anyone
@@ -1262,7 +1278,7 @@ indexed, entitlement-gated and tested offline; these are the edges that build co
       deliberately, with the manifests in front of you. *Trigger:* a real share, where `share-estimate`
       shows a folder an exclusion was meant to cover.
 
-- [ ] **The two lexical legs disagree on AND vs OR — half closed; the document index is what is
+- **The two lexical legs disagree on AND vs OR — half closed; the document index is what is
       left** — [M]. The rule is now decided and stated:
       [`D-2026-08-13-both-lexical-backends-state-one-boolean-rule`](../decisions/D-2026-08-13-both-lexical-backends-state-one-boolean-rule.md)
       — *match any term, rank the notes matching every term first* — which is also the rule
@@ -1324,7 +1340,7 @@ indexed, entitlement-gated and tested offline; these are the edges that build co
       document a chemist knows exists does not come back, or the first recall regression an eval
       catches — and run `ANALYZE` before touching either knob.
 
-- [ ] **An unfiltered external-store search ranks across every share and can return nothing** —
+- **An unfiltered external-store search ranks across every share and can return nothing** —
       [S]. `ExternalVectorDocumentIndex._eligible_documents` returns `None` when a query carries no
       tag or date filter, so `VectorStore.search` ranks over the whole collection — which holds
       every enabled share's points — and `_resolve` then drops the hits belonging to another
@@ -1339,7 +1355,7 @@ indexed, entitlement-gated and tested offline; these are the edges that build co
       `vector_store_provider` is `pgvector`. *Trigger:* the first deployment that sets a non-pgvector
       provider, or the first that enables a second document share.
 
-- [ ] **`chunking_key` names the chunk *settings*, not the chunker** — [S]. `041` made
+- **`chunking_key` names the chunk *settings*, not the chunker** — [S]. `041` made
       `(doc_id, chunking_key, ordinal)` a chunk row's identity, and `chunking_key` is
       `chunk_chars:chunk_overlap_chars`. A change to `chunk_document`'s algorithm — a new page-break
       rule, a different hard-split — moves neither key, so no gate can see it and the corpus keeps
@@ -1348,7 +1364,7 @@ indexed, entitlement-gated and tested offline; these are the edges that build co
       hand in the same commit that changes the algorithm. *Trigger:* the first change to
       `ingest/documents/chunk.py` that moves a boundary.
 
-- [ ] **A superseded cutting survives until the next write to its document** — [S]. `upsert` sweeps
+- **A superseded cutting survives until the next write to its document** — [S]. `upsert` sweeps
       the cuttings that no file row claims for the documents it just wrote, and `prune_stale` sweeps
       them table-wide — but a share that is *disabled* rather than re-chunked leaves its file rows
       in place, so its cutting stays claimed and stays stored. It is invisible to search (the
@@ -1357,7 +1373,7 @@ indexed, entitlement-gated and tested offline; these are the edges that build co
       and nothing else. *Trigger:* a deployment that disables a share permanently, where the storage
       matters enough to want a `sync_share --forget <name>`.
 
-- [ ] **`038`'s btree cannot serve the query it was added for** — [S].
+- **`038`'s btree cannot serve the query it was added for** — [S].
       `WHERE embedding_key IS DISTINCT FROM %(key)s` is a `DistinctExpr`, not an indexable
       `OpExpr`, so the planner can only full-scan. The index costs write amplification on every
       upsert and buys nothing. An indexable form is `embedding_key IS NULL OR embedding_key <> %(key)s`
@@ -1374,7 +1390,7 @@ indexed, entitlement-gated and tested offline; these are the edges that build co
       close is a vendor rolling a model's weights under an unchanged name at an unchanged URL — no
       key can see that, and only a re-embed fixes it.
 
-- [ ] **`known_documents` answers "any chunk", not "all chunks"** — [S]. Both backends check
+- **`known_documents` answers "any chunk", not "all chunks"** — [S]. Both backends check
       whether *some* chunk of a document carries the current key. The docstrings said the stronger
       thing and now say this one, with the measurement (one of five chunks moved to a new key ->
       the document reports as known, `stale_chunks` finds the other four). Transient in the shipped
@@ -1382,7 +1398,7 @@ indexed, entitlement-gated and tested offline; these are the edges that build co
       reorders the two phases inherits a real bug.
       *Trigger:* reordering those phases, or making the drain partial.
 
-- [ ] **The citation tie-break is collation-dependent** — [S]. In-memory picks the smallest path
+- **The citation tie-break is collation-dependent** — [S]. In-memory picks the smallest path
       with Python's code-point `sorted()`; SQL uses `min(f.path)` under the database's collation.
       For a document at `Projects/Report.pdf` and `Projects/acme report.pdf` the two disagree, so
       the "deterministic citation" is a property of the deployment's collation rather than of the
@@ -1392,7 +1408,7 @@ indexed, entitlement-gated and tested offline; these are the edges that build co
 
 Record: `D-2026-08-08-the-inventory-that-vouched-for-itself`.
 
-- [ ] **Migration 041 drops a constraint, and the additive guard refuses it** — [M].
+- **Migration 041 drops a constraint, and the additive guard refuses it** — [M].
       `tests/test_migrations_are_additive.py::test_a_migration_destroys_nothing[041_document_chunk_identity.sql]`
       fails: `041` runs `ALTER TABLE document_chunks DROP CONSTRAINT IF EXISTS document_chunks_pkey`
       to replace the primary key with `(doc_id, chunking_key, ordinal)`. Inherited red, not caused
@@ -1403,7 +1419,7 @@ Record: `D-2026-08-08-the-inventory-that-vouched-for-itself`.
       operation outside the migration set. It is a decision for the lane that wrote 041.
       *Trigger:* immediately — this is a failing test on the campaign branch's gate.
 
-- [ ] **`_report_id` canonicalisation is a policy about free text only** — [S]. Title, headings and
+- **`_report_id` canonicalisation is a policy about free text only** — [S]. Title, headings and
       queries are casefolded and whitespace-collapsed and the section list is sorted;
       `requested_by`, `requested_roles` and `memory_layer` are deliberately byte-exact, because
       those three are the access-control half (D-2026-08-08-identity-must-travel-with-the-work) and
@@ -1449,14 +1465,14 @@ mechanical fix. Ranked by how attacker-reachable the content is.
       mechanism (`D-2026-08-06-an-envelope-that-only-survives-its-own-process`) to one more tool —
       what was open was which fields, and that answer belongs beside the fields.
       `tests/test_framing.py` (forged close defanged, evidence intact, summary covered).
-- [ ] **[M] No connector/MCP tool result is ever framed** (`connectors/*/server/tools.py`).
+- **[M] No connector/MCP tool result is ever framed** (`connectors/*/server/tools.py`).
       `fetch_artifact` returns arbitrary externally-produced text straight to the model. The widest
       surface of the four, and the one whose fix most needs a shape decision — framing every tool
       result would wrap structured payloads the model is meant to read as data.
-- [ ] **[L] `recall_observations` returns corpus-mined free text unframed**
+- **[L] `recall_observations` returns corpus-mined free text unframed**
       (`agent/memory_tools.py:80`). `Observation.statement` is the one knowledge path with no
       human gate at all (D-161's ungated tier).
-- [ ] **[L] `gather_evidence` frames `chunk.content` but not the same note's `source`**
+- **[L] `gather_evidence` frames `chunk.content` but not the same note's `source`**
       (`agent/research_tools.py:181`). The provenance string is caller-influenced and travels
       beside content that *is* framed, which is the tell that the split was accidental.
 ## Open — Quality findings left by the whole-codebase security sweep (2026-08-06)
@@ -1469,54 +1485,54 @@ and was reproduced; none is a reading.
 
 **Data plane and knowledge integrity**
 
-- [ ] **[M] ELN free text becomes real knowledge-graph edges** (`ingest/eln/note.py:27`). A chemist
+- **[M] ELN free text becomes real knowledge-graph edges** (`ingest/eln/note.py:27`). A chemist
       can forge `contradicts`/`supersedes` relations into a PR-gated reaction note by writing them
       into an ELN field — the gate reviews the note, not the edges it asserts.
-- [ ] **[M] A report note wikilinks non-note evidence ids** (`retrieval/harness.py:160`), producing
+- **[M] A report note wikilinks non-note evidence ids** (`retrieval/harness.py:160`), producing
       an unmergeable report and a fabricated relation type.
-- [ ] **[M] Two enabled ELN sources with the same entry id silently collapse** onto one note and
+- **[M] Two enabled ELN sources with the same entry id silently collapse** onto one note and
       one fingerprint row (`ingest/eln/ingest.py:51`), contradicting the manifest's stated
       per-source guarantee.
-- [ ] **[L] `vector.server_embed_function` reaches the SQL text unchecked**
+- **[L] `vector.server_embed_function` reaches the SQL text unchecked**
       (`ingest/eln/warehouse/binding.py:462`), so the module's "only checked identifiers are
       written" invariant is false. Distinct from the documented `where:` trust boundary.
-- [ ] **[L] A warehouse row key is interpolated into a filesystem path** with no slug validation
+- **[L] A warehouse row key is interpolated into a filesystem path** with no slug validation
       (`ingest/eln/warehouse/retriever.py:184`).
 
 **The store seam** — measured by the Q-A lane rather than assumed. The ten `Protocol + InMemory +
 Postgres` triads are *not* one abstraction waiting to be extracted; what is genuinely shared is the
 connect/execute plumbing, and the divergences below are the real prize.
 
-- [ ] **[M] Two of the ten stores read/write a database the migrator never touches**
+- **[M] Two of the ten stores read/write a database the migrator never touches**
       (`agent/turn_cost_store.py:60`, the `session_store_dsn` split).
-- [ ] **[L] Only one of the three jsonb writers rejects non-finite floats**
+- **[L] Only one of the three jsonb writers rejects non-finite floats**
       (`science/calc/postgres_store.py:116`).
-- [ ] **[L] The Postgres connect helper is hand-rolled 14 times**
+- **[L] The Postgres connect helper is hand-rolled 14 times**
       (`science/calc/postgres_store.py:74`), including five byte-identical docstrings and four that
       say "one place, DRY".
 
 **Complexity hotspots** — the defects the complexity was hiding, which is what the lane was asked
 for rather than a decomposition proposal.
 
-- [ ] **[M] One non-UTF-8 ORD export aborts the entire ELN sync batch**
+- **[M] One non-UTF-8 ORD export aborts the entire ELN sync batch**
       (`ingest/eln/ord_adapter.py:110`), contradicting the adapter's skip-and-continue contract.
-- [ ] **[M] `evals.live`'s per-turn Temporal probe makes `failed_loudly` unconditionally true**
+- **[M] `evals.live`'s per-turn Temporal probe makes `failed_loudly` unconditionally true**
       (`evals/live.py:317`), so the harness's headline "failed silently" signal can never fire.
-- [ ] **[L] `run_turn` abandons the agent's `ResponseStream` on every non-exhausting exit**
+- **[L] `run_turn` abandons the agent's `ResponseStream` on every non-exhausting exit**
       (`api/runner.py:318`); it has no `aclose()` and no GC finalizer, so its cleanup hooks never
       run at all.
-- [ ] **[L] The mid-turn resume drops `user_input_requests`** (`api/runner.py:780`), so an approval
+- **[L] The mid-turn resume drops `user_input_requests`** (`api/runner.py:780`), so an approval
       prompt raised during a resume never reaches the stream.
-- [ ] **[L] A failed durable job is dropped from the mid-turn resume**
+- **[L] A failed durable job is dropped from the mid-turn resume**
       (`agent/job_results.py:83`), and the function's own docstring says it is not.
 
 **Error handling and suppression**
 
-- [ ] **[L] 22 of 56 `# noqa` directives suppress rules ruff never runs** (`pyproject.toml:8`) —
+- **[L] 22 of 56 `# noqa` directives suppress rules ruff never runs** (`pyproject.toml:8`) —
       including 15 `BLE001` markers that read as "this broad except was linted and accepted" when
       nothing linted it. Either enable the rules or delete the comments; today they are a claim no
       gate checks.
-- [ ] **[L] `beating()` abandons the work it wraps when the activity is cancelled**
+- **[L] `beating()` abandons the work it wraps when the activity is cancelled**
       (`durable/heartbeat.py:48`) — calc's CREST runs and bo's surrogate fits keep burning CPU
       after `cancel_job`.
 
@@ -1524,22 +1540,22 @@ for rather than a decomposition proposal.
 (`tasks/lessons.md`), so each of these was proven by neutering the control and watching the test
 still pass.
 
-- [ ] **[M] `SnowflakeWarehouse._connect` classifies every client error as retryable
+- **[M] `SnowflakeWarehouse._connect` classifies every client error as retryable
       `ConnectionError`** (`ingest/eln/warehouse/snowflake.py:162`), and no test executes any
       function body in the module.
-- [ ] **[L] `tests/test_connector_isolation.py`'s first-party half is vacuous**
+- **[L] `tests/test_connector_isolation.py`'s first-party half is vacuous**
       (`tests/test_connector_isolation.py:85`): `name.split(".")[0] in ("calc",)` can never match a
       `chemclaw.science.calc.*` module, so the check has always passed on an empty set.
-- [ ] **[L] `test_harness_agent_still_audits_every_tool_call` asserts only that the middleware list
+- **[L] `test_harness_agent_still_audits_every_tool_call` asserts only that the middleware list
       is non-empty** (`tests/test_agent.py:279`) — it passes with the audit middleware removed.
-- [ ] **[L] Eight of the eleven binding transforms in `warehouse/expr.py` are never executed**
+- **[L] Eight of the eleven binding transforms in `warehouse/expr.py` are never executed**
       by the suite, including the two the shipped `eln-snowflake` binding uses.
 
 **Documentation that asserts what the code does not do**
 
-- [ ] **[L] `NoAuth`'s docstring asserts a manifest validator that does not exist**
+- **[L] `NoAuth`'s docstring asserts a manifest validator that does not exist**
       (`connectors/manifest.py:60`).
-- [ ] **[L] `connectors/calc/activities.py`'s module docstring denies the registration mechanism
+- **[L] `connectors/calc/activities.py`'s module docstring denies the registration mechanism
       the file uses two lines later** and cites a queue count D-118 removed
       (`connectors/calc/activities.py:23`).
 
@@ -1556,7 +1572,7 @@ Record: `docs/decisions/D-2026-08-06-a-gate-that-names-nothing.md`, which closed
 trigger gate and added the guard that would have caught it. These are what the same lane found and
 did not fix.
 
-- [ ] **[M] The unauthenticated `X-Chemclaw-Actor` header becomes durable attribution — half
+- **[M] The unauthenticated `X-Chemclaw-Actor` header becomes durable attribution — half
       closed; the record now says which half it is** (`connectors/server.py`). `CallerLogMiddleware`
       documents the identity headers as advisory, but a bundle stamped them into
       `bo_campaigns`/`bo_suggestions`, so anything that could reach the pod could forge who ran an
@@ -1575,13 +1591,13 @@ did not fix.
       name is unverified, it does not make it verifiable. Rows written before this change are not
       migrated and cannot be: a bare id from that era is indistinguishable from a validated one
       after the fact.
-- [ ] **[L] The built-in write gate never consults the connector-declared `state_changing` set**
+- **[L] The built-in write gate never consults the connector-declared `state_changing` set**
       (`agent/authz.py`). `DEFAULT_WRITE_TOOL_GATES` is a hand-maintained list while every manifest
       already partitions its tools into `state_changing`/`read_only`; deriving the gate from the
       declaration is the same move `expensive_actions()` and `side_effecting_tools()` already make.
       `report_measurement` is the live example — any authenticated user may write the shared
       calibration ledger.
-- [ ] **[L] `map_to_hpc_identity` has no caller** (`agent/identity/hpc_bridge.py:18`). The §7.2
+- **[L] `map_to_hpc_identity` has no caller** (`agent/identity/hpc_bridge.py:18`). The §7.2
       oid → HPC-identity mapping log never fires on the real Nextflow path, so the audit link
       between a chemist and a cluster job is declared and never written. Either wire it or delete
       it — a declared-but-unwired control is exactly the shape
@@ -1671,7 +1687,7 @@ rather than a diff.
 
 ## Open — Found by the deeper testing pass (2026-08-04)
 
-- [ ] **A SIGKILLed connector worker costs 600 s before its job resumes, and one setting decides
+- **A SIGKILLed connector worker costs 600 s before its job resumes, and one setting decides
       that for every calc job** — [M]. Measured by the storm's chaos family: the workflow is
       interrupted at `species 1/5`, the activity stays `Started` against a worker identity that no
       longer exists, and Temporal reschedules it only when `xtb_job_heartbeat_timeout_seconds`
@@ -1686,7 +1702,7 @@ rather than a diff.
       pass. On OpenShift, where pod eviction is routine rather than exotic, this is ten minutes of
       dead time per eviction.
 
-- [ ] **The remaining mutant survivors are string mutations** — [S], and the row is kept only so
+- **The remaining mutant survivors are string mutations** — [S], and the row is kept only so
       the number is not re-derived from scratch. `make mutants`, 686 mutants: the two leading files
       have been walked and their eight *behavioural* survivors killed
       (`tests/test_review_2026_08_05.py`). What is left in `api/runner_trace.py` and `kg/pr_gate.py`
@@ -1720,7 +1736,7 @@ found and fixed (D-2026-08-04-a-failure-that-says-nothing-is-read-as-proceed). W
       also retired `xtb_engine.COMMON_SOLVENTS`, which had drifted to omit dmf, dioxane, benzene
       and nitromethane while claiming to name what process chemistry asks about.
 
-- [ ] **du-03: 29 tool calls, no answer, and the capability never reached** — [M]. The turn now
+- **du-03: 29 tool calls, no answer, and the capability never reached** — [M]. The turn now
       says so (`empty_answer`), which is the reporting half. The behavioural half is untouched: it
       looped `find_past_jobs` ×8, `load_skill` ×6, `find_notes` ×5 and never called
       `start_optimization_campaign`, which is what the question needed. Whether that is a
@@ -1734,12 +1750,12 @@ found and fixed (D-2026-08-04-a-failure-that-says-nothing-is-read-as-proceed). W
       purpose — `get_durable_job_status` legitimately changes within a turn, so a cached answer
       would pin a job at "running" for a model that was correctly re-checking.
 
-- [ ] **The full 230-probe corpus has still not been run against a live model** — [M]. This pass
+- **The full 230-probe corpus has still not been run against a live model** — [M]. This pass
       ran the four `du-*` probes and a two-probe harness slice. The wide sweep needs a corpus worth
       sweeping: against the 38-note seed graph it would measure the corpus, not the system, and
       produce numbers that read as comparable to `live-grounded-2026-08-03.md` and are not.
 
-- [ ] **Entra-enforced pass** — [M]. Everything ran `entra_required=false`. The documented approach
+- **Entra-enforced pass** — [M]. Everything ran `entra_required=false`. The documented approach
       is a local RSA keypair + self-served JWKS + minted tokens (`docs/archive/live-gates-2026-07.md`).
 
 ## Open — Left by the live lane (2026-08-04, D-2026-08-04-a-lane-that-only-runs-where-docker-runs)
@@ -1748,7 +1764,7 @@ The lane itself is done: `make live-infra` / `live-up` / `live-jobs` / `live-pro
 checks green against a real Temporal + Postgres in a container with no Docker daemon. What it did
 not close:
 
-- [ ] **The Temporal-backed tests still skip wherever `temporal.download` is blocked** — [M]. All
+- **The Temporal-backed tests still skip wherever `temporal.download` is blocked** — [M]. All
       13 modules fetch the *time-skipping* test server, so a live broker on 7233 cannot substitute:
       a workflow that sleeps would really sleep. But not every one of them skips time — the ones
       that only need a real server (`test_connector_job_workflow`, `test_workers`) could take
@@ -1762,7 +1778,7 @@ not close:
       a false positive that flagged a working durable path), which is the argument for having run it
       rather than reasoned about it. Record: `docs/archive/live-full-stack-2026-08-04.md`.
 
-- [ ] **`make live-jobs` exercises one connector** — [S]. `compute_reaction_energy` on `connector-calc`
+- **`make live-jobs` exercises one connector** — [S]. `compute_reaction_energy` on `connector-calc`
       is deliberate (in-process `tblite`, no HPC, writes to the cache so D-011 is observable), but
       `connector-bo`'s campaign and `connector-qm`'s Nextflow job take different shapes — a campaign
       outlives its turn, and QM needs a cluster. The BO one is reachable now and is the obvious
@@ -1770,7 +1786,7 @@ not close:
 
 ## Open — Found while fixing the grounded live run (2026-08-03)
 
-- [ ] **There is no documented way to populate the fingerprint index** — [S]. Chasing F5 turned up
+- **There is no documented way to populate the fingerprint index** — [S]. Chasing F5 turned up
       that the "separate documented backfill" the operator was assumed to have skipped does not
       exist. `make reindex` is note-index-only; the fingerprint tables are filled as a side effect
       of the ELN sync (`ElnSyncWorkflow`), which calls `FingerprintStore.add()` in process — the only
@@ -1780,7 +1796,7 @@ not close:
       is a documentation gap rather than a silent one — but a runbook section (or a `make` target)
       is what actually closes it.
 
-- [ ] **A BO observation naming an undeclared parameter is silently dropped** — [S], and it is a
+- **A BO observation naming an undeclared parameter is silently dropped** — [S], and it is a
       *fabrication* vector rather than an error-handling one, so it is worth a second look beyond
       the input validation that now rejects it. Measured while fixing F3: BoFire ignores the stray
       column and returns candidates, so `ligand: PPh3` against a problem that never declared
@@ -2011,7 +2027,7 @@ ADR; three of the seven measurements changed a row below, and one reversed a ref
       which is the number to report — a mean of per-fold R² weights a two-point fold like a
       ten-point one. `op-13`'s posterior half closes with it.
 
-- [ ] **The `method` note type is what analytical method development is actually waiting on** —
+- **The `method` note type is what analytical method development is actually waiting on** —
       [M], and it is a schema row rather than a BO one. 24 stories sit in §7/§8 and a
       method-development BO campaign today has neither factors nor responses to sit on: nothing can
       record "we ran this gradient on this column and it resolved these peaks", and the story
@@ -2027,7 +2043,7 @@ ADR; three of the seven measurements changed a row below, and one reversed a ref
       nothing, and each bundle logs its index size at startup — the connector owns the table, so
       core never reaches into it. Extended to `substructure_matches`, which fails the same way.**
 
-- [ ] **The two slowest pKa tests fail when the suite runs on a loaded box** — [S]. On a quiet
+- **The two slowest pKa tests fail when the suite runs on a loaded box** — [S]. On a quiet
       machine the suite is green in ~312 s (2852 passed, 127 skipped, measured twice on
       2026-08-03). With concurrent heavy processes on the same box the same suite took 1330 s
       (4.25×) and failed exactly two tests:
@@ -2079,12 +2095,12 @@ the shipped tree in R5.3.
 Each reproduced against a running deployment; evidence in `docs/archive/live-user-stories-2026-08.md`
 and `tasks/live-test/`. The fixed ones are not listed — see the ADR and the commits on that run.
 
-- [ ] **`ask_clarifying_question` does not end the turn** — [M]. `agent/dialogue_tools.py` used to
+- **`ask_clarifying_question` does not end the turn** — [M]. `agent/dialogue_tools.py` used to
       promise it did; `core/turn_signals.py:129-133` records the signal and returns, and the agent
       loop continues. The docstring now states what is true, but the guarantee is still unenforced.
       Enforcing it fights the deliberate "Partial data is still an answer" instruction, so the two
       rules need reconciling before either is mechanised.
-- [ ] **The fingerprint index and the citable note set are disjoint, and nothing says which was
+- **The fingerprint index and the citable note set are disjoint, and nothing says which was
       read** — [M]. `ingest/eln/ingest.py:44-50` indexes every reaction unconditionally and PR-gates
       the note, by design. In the run that was 4,251 indexed against 987 notes, and there is no
       fingerprint *data source*, so `gather_evidence` structurally cannot see the larger set while
@@ -2100,19 +2116,19 @@ and `tasks/live-test/`. The fixed ones are not listed — see the ADR and the co
       the corpus". The one thing the row got wrong is the direction: it says the harness
       *understates* citation coverage, which is true of the coverage number and backwards for the
       one anybody reads, because an id scored uncited is reported as a fabricated citation.
-- [ ] **The ICH Q3C revision label is unverified** — [XS, but it is on every Q3C citation].
+- **The ICH Q3C revision label is unverified** — [XS, but it is on every Q3C citation].
       `science/safety/ich_q3c.yaml` cites "ICH Q3C(R9) … ICH Step 4 (2024)". An adversarial review
       verified all 62 transcribed values and the Q3D(R2)/2022 label, and could **not** verify this
       one offline. If it is wrong, every Q3C answer carries a correct number under the wrong
       document — the one failure shape the table exists to end. Check it against the ICH site and
       correct the single `guideline:` line; no figure changes.
-- [ ] **The answer shape gate has not been measured live** — [S]. The deterministic scan
+- **The answer shape gate has not been measured live** — [S]. The deterministic scan
       (`ungrounded_parameter_shapes`, `answer_shape_gate_enabled`, off by default) is argued from
       the run that motivated it, not from a run that includes it. Re-run the analytical and
       bucket-C probes with the gate on — roughly six to thirty probes on Haiku, small credit — and
       publish the before/after on the 46% fabrication rate. Until then the claim to make is "the
       mechanism exists and its default is off".
-- [ ] **No document-level provenance share** — [S, recommend refusing rather than building].
+- **No document-level provenance share** — [S, recommend refusing rather than building].
       `kg/note.py` `created_by` is whole-note and binary, there is no document entity, and §12's
       "how much of this was AI-drafted" is unanswerable. The honest refusal is one paragraph; the
       capability is a subsystem.
@@ -2122,17 +2138,17 @@ and `tasks/live-test/`. The fixed ones are not listed — see the ADR and the co
 An adversarially-verified review across every layer and phase; 22 distinct defects were fixed (see
 the `D-2026-08-01-*` ADRs). These are what the fixes uncovered and deliberately did not close.
 
-- [ ] **REV-2 [Medium] — a solvate collapses onto whichever fragment is larger.**
+- **REV-2 [Medium] — a solvate collapses onto whichever fragment is larger.**
   `standard_smiles("CCN.C1CCOC1")` returns THF: `FragmentParent` keeps the largest fragment and
   both are organic, so the ethylamine is discarded. Different mechanism from the counterion rule
   and not addressed by it. Needs a rule for what a solvate's identity is — probably the solute,
   which is the opposite of "largest".
-- [ ] **REV-3 [Low] — connector *server* pods receive `CHEMCLAW_TEMPORAL_TLS_*` but mount no TLS
+- **REV-3 [Low] — connector *server* pods receive `CHEMCLAW_TEMPORAL_TLS_*` but mount no TLS
   volume.** `chemclaw.env` is shared and `chemclaw.tlsMount` is not included there. Harmless only
   because the sole `connect()` caller on that path runs in the front door, not the MCP server — a
   trap for the first connector server that needs Temporal. Not fixed because no `helm` binary and
   no cluster exist here to render the change against.
-- [ ] **REV-5 [Low] — local development needs pgvector >= 0.7.** The migrations use
+- **REV-5 [Low] — local development needs pgvector >= 0.7.** The migrations use
   `bit_jaccard_ops`; the common distribution package is 0.6.0, so a database stood up from `apt`
   fails to migrate. Pre-existing. CI is unaffected (it provides a pgvector-enabled Postgres), so
   this is a `deploy/README.md` note, not a code change.
@@ -2153,7 +2169,7 @@ type sat next to two that were never registered, plus three cleanups in the new 
 - [x] **PROSE-3** `gather_evidence`'s docstring states that a date window scopes the note sources
       only: fingerprint hits from a `reaction_smiles` anchor carry no date and come back
       unwindowed.
-- [ ] **PROSE-4** `propose_knowledge_note`'s docstring lists the note types with an ellipsis — a
+- **PROSE-4** `propose_knowledge_note`'s docstring lists the note types with an ellipsis — a
       third copy of `KNOWN_NOTE_TYPES` kept in sync by nothing. The model-facing description
       should be derived from the frozenset rather than restated. Left open because it means
       building the tool description at registration time, which is a change to how every tool's
@@ -2164,7 +2180,7 @@ type sat next to two that were never registered, plus three cleanups in the new 
 The record closed "a finished run's data, and the reason for it, survive nowhere". Three things it
 deliberately did not close, each because it is a design rather than a line of code.
 
-- [ ] **A failed run leaves no record.** The child failure propagates out of `ConnectorJobWorkflow`
+- **A failed run leaves no record.** The child failure propagates out of `ConnectorJobWorkflow`
       before the write, so `job_records` holds successes only — and "what have we already tried that
       did not work" is exactly the retrospective question the table exists to answer. Needs three
       decisions before code: which status a row carries (a run that failed *after* several rounds is
@@ -2173,13 +2189,13 @@ deliberately did not close, each because it is a design rather than a line of co
       workflow-level handler), and whether a later successful re-run under the same id supersedes the
       failed row or joins it. The attempt is already in `audit_events`, so nothing is lost today
       beyond the campaign's partial history — [M].
-- [ ] **`request_development_report` writes no record.** It does not run through
+- **`request_development_report` writes no record.** It does not run through
       `ConnectorJobWorkflow` (D-115 kept it in core), so it would need its own write site — either by
       lifting the record write into a helper both call, or by moving the report onto the wrapper. Its
       gap is the smaller one: a report's artifact is a PR-gated note whose headings state its
       subject, where a campaign's artifact was a single best point. Same for anything else that ever
       starts a durable workflow outside the seam — [S].
-- [ ] **Temporal namespace retention is still unset.** Nothing in the repo configures it, so a
+- **Temporal namespace retention is still unset.** Nothing in the repo configures it, so a
       deployment inherits the server's default. D-157 removed the *dependence* on that number (the
       result no longer lives only in history) but not the ambiguity: an operator reading the runbook
       still cannot say how long a running deployment keeps workflow history. It is one Helm value
@@ -2215,14 +2231,14 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       calls a shared key. The chain is versioned in the same commit, because `chain_hash` covers the
       whole `AuditEvent` and widening it would otherwise have reported every historical row as
       tampered with — indistinguishable from the tampering the chain exists to detect.
-- [ ] **The reasoning a `correlation_id` now reaches is still erodible** — [M], and it is what makes the
+- **The reasoning a `correlation_id` now reaches is still erodible** — [M], and it is what makes the
       audit-chain join necessary-but-not-sufficient. The join lands on `session_messages`, whose rows
       `durable/retention.py` prunes by age — and which a
       failed or abandoned turn never reaches at all, since the projection is written once, after
       the answer. So a trail can point at a conversation that has since been compacted out of
       recognisability, or at one whose words were never written down. Wants a decision about what a deployment must retain,
       not more plumbing.
-- [ ] **No field holds an intent for a *non-job* tool call** — [M]. D-157 gave
+- **No field holds an intent for a *non-job* tool call** — [M]. D-157 gave
       `ConnectorJobInput` a required `rationale`; D-2026-07-31-the-audit-chain-is-versioned added an `AuditEvent.purpose` column and
       deliberately left it empty, because the honest way to fill it is undecided. Authoring a reason
       per call means changing every tool signature; deriving one from the harness's active todo step
@@ -2230,26 +2246,26 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       one — a reader cannot tell which rows are which. D-157's `rationale` works because a job launch
       is a discrete, deliberate act with an obvious author; an inline tool call is not. Needs a
       decision, not code.
-- [ ] **The reasoning that does exist is pruned, or never written at all** — [M]. The only durable
+- **The reasoning that does exist is pruned, or never written at all** — [M]. The only durable
       trace of intent is the raw message blob in `session_messages`, and two things erode it:
       `durable/retention.py` prunes rows by age, and a turn that ran its tools and then failed or
       was abandoned writes no row at all.
-- [ ] **The approved plan's text is still not durable** — [M]. D-157 made the authorization bind to
+- **The approved plan's text is still not durable** — [M]. D-157 made the authorization bind to
       the plan, but the plan itself lives in an in-process `TodoSessionStore`, so a `plan_approvals`
       row still points at a `plan_hash` whose subject exists nowhere durable — a signature on a
       document nobody kept — and an eviction forces re-approval for reasons unrelated to the plan.
       Wants a `session_plans` table read back on rehydration. Also the durable half of `SCALE-1b`.
-- [ ] **Agent-authored notes cannot carry the provenance fields built for them** — [S].
+- **Agent-authored notes cannot carry the provenance fields built for them** — [S].
       `propose_knowledge_note` accepts only `id/type/body/compound_smiles/tags/source`, so the model
       cannot attach `calc_refs`, `artifact_refs`, typed `relations`, `confidence` or a validity
       window — every field D-133/D-134 added for exactly this.
-- [ ] **`calc_refs` is written on two paths of three** — [S]. D-158 wired the QM note;
+- **`calc_refs` is written on two paths of three** — [S]. D-158 wired the QM note;
       D-2026-07-31-a-campaign-is-an-entity now carries the featurization's calculation keys out to
       the BO suggestion and onto any `experiment-proposal` note drafted from it. What remains is
       `connectors/bo/knowledge.py` — the *durable* campaign's note, which never featurizes, so it
       has no calculation to cite until the durable path is reconciled with the inline one. ELN
       reaction notes rest on no calculation at all and correctly cite none.
-- [ ] **`Note.confidence` is never set by any machine path — and the obvious fix would make
+- **`Note.confidence` is never set by any machine path — and the obvious fix would make
       things worse** — [M], re-diagnosed while implementing it. One consequence stands
       (`kg/conflicts.py` needs a confidence on both sides); the truncation half is now stale twice
       over — the cross-source score ordering is gone, and `EvidenceChunk.score` orders only a
@@ -2275,7 +2291,7 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       `POST /proposals/{id}/decision` make the queue operable, and the merge webhook — now
       HMAC-signed, because its body carries an authorization-shaped claim — closes rows so the
       queue drains. `rejected` is a state the system has for the first time.
-- [ ] **The gate is findable, not pushed, and still opens no PR object** — [M], what the row above
+- **The gate is findable, not pushed, and still opens no PR object** — [M], what the row above
       deliberately left. (a) **No notification**: a new proposal reaches nobody until someone opens
       the queue; routing it through the existing `notify` seam is a decision about who gets told
       what. (b) **No platform adapter**: opening the actual PR needs a real token and base URL to
@@ -2295,11 +2311,11 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       three refinements of one optimization accumulate against one campaign with nobody having to
       open one first. A chemist does not know at the first question that they are beginning a
       campaign, which is why "start one" was the wrong shape.
-- [ ] **The retrospective `optimization-campaign` note still has no link to a BO campaign** — [M].
+- **The retrospective `optimization-campaign` note still has no link to a BO campaign** — [M].
       DRFP clustering mints one from ingested reactions and `bo_campaigns` now exists beside it,
       with nothing joining them. The join wants the same matching rule as the row below, so the two
       belong together.
-- [ ] **The BO loop is open at one end now, not two** — [L]. The proposing half is recorded: a
+- **The BO loop is open at one end now, not two** — [L]. The proposing half is recorded: a
       suggestion, its evidence and its campaign survive the turn. What is still missing is the
       return path — nothing decides that an ingested `reaction` note *is* the execution of a given
       candidate. That needs a matching rule over conditions with tolerances, on parameters an ELN
@@ -2309,7 +2325,7 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       `connectors/bo/activities.py` still stamps every observation `provenance="predicted"`.
 - [x] **The BO note is a graph island** — closed by D-157: `note_with_run_provenance` stamps the run
       and its reason onto any connector's note, and the BO note now carries its decision space.
-- [ ] **Two of ~12 calculators log predictions, and nothing reconciles ELN data** — [M]. Only
+- **Two of ~12 calculators log predictions, and nothing reconciles ELN data** — [M]. Only
       `predict_solubility`/`predict_pka` write to the `predictions` ledger, and its only reconciler
       is `report_measurement`, a chat tool a human must type. The ELN sync ingests measured yields
       and never touches it, so `calculator_trust` will report "not yet calibrated" indefinitely.
@@ -2327,7 +2343,7 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       `authz.side_effecting_tools()` (the set D-167 had already assembled), and the three ad-hoc
       checks deleted. The set moved out of `plan_gate` on the way, because dry-run applies whether
       or not the harness is on.
-- [ ] **Every shipped connector that serves an endpoint is unauthenticated** — [M]. Re-counted
+- **Every shipped connector that serves an endpoint is unauthenticated** — [M]. Re-counted
       2026-08-13: **six** of the seven bundles ship `auth: mode: none` (`bo`, `calc`, `chem`,
       `molfp`, `rxnfp`, `safety`); `qm` declares no `endpoint:` block at all, so it has no endpoint
       auth to declare — it is a durable-jobs-only bundle. The row's "all seven" was wrong in the
@@ -2345,7 +2361,7 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       they mean: `egressDestinations`, or an explicit `allowAnyDestination: true`. Neither, or both,
       and `helm install` fails naming both ways out — the choice moved from a comment nobody re-reads
       into the operator's own values file.
-- [ ] **Workload identity federation is dead code the docs lean on** — [M]. `identity/workload.py`
+- **Workload identity federation is dead code the docs lean on** — [M]. `identity/workload.py`
       has no production caller (only its test and the dormant `obo.py`), while `values.yaml` enables
       it and `deploy/README.md` presents it as *the reason* only three plain secrets are needed.
       Either wire it or correct the documents; also `deployment-connectors.yaml` is the one pod spec
@@ -2385,7 +2401,7 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       repository does not ship; inventing bounds and calling them "the training ranges" would put a
       fabricated threshold into a GxP record, which is worse than no check because a check that
       exists gets trusted.
-- [ ] **F8-T1b — the statistical applicability domain still needs training data** — [S], blocked on
+- **F8-T1b — the statistical applicability domain still needs training data** — [S], blocked on
       a labelled solubility corpus (ESOL's own set, or any other) to derive descriptor bounds or a
       leverage cutoff from. Structural checks catch a salt and an organometallic; they do not catch
       a perfectly ordinary neutral organic that is simply far from anything the model was fitted on.
@@ -2404,12 +2420,12 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       **A structured front-matter field was deliberately not added**: `_excerpt` reads the body, so
       the prose line is what retrieval quotes, and a field would need threading through `NoteRef`
       and `EvidenceChunk` for zero readers. Additive later if a machine consumer appears.
-- [ ] **`Estimate` is a three-writer contract, and four calculators are still outside it** — [S].
+- **`Estimate` is a three-writer contract, and four calculators are still outside it** — [S].
       `pka`, `logd`, `reaction` and `xtb_thermo` each carry an uncertainty under their own field
       name (`uncertainty`, `uncertainty_kcal`) with no `method` and no domain answer. None of them
       writes a note today, which is why the row above did not force the conversion — but a skill
       consulting "how far do I trust this" still gets four shapes and one.
-- [ ] **`conformal_uncertainty` has no caller** — [S]. It needs a database read of the calibration
+- **`conformal_uncertainty` has no caller** — [S]. It needs a database read of the calibration
       ledger's reconciled residuals, so it belongs on the cached path rather than the inline one;
       until that is wired, `calibration_conformal_coverage` and `calibration_conformal_min_samples`
       are configured and unread, and every `method` in the system is `reported` or `none`.
@@ -2439,14 +2455,14 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       capped turn is cut off, which is what `turn_timeout` and `budget_exhausted` already say.
       *Left open:* `Chemclaw3_ui` renders the new code through its generic error path and does not
       yet label it.
-- [ ] **The plan-vs-single-shot A/B has no real task set** — [M]. **No longer blocked on AG-13**,
+- **The plan-vs-single-shot A/B has no real task set** — [M]. **No longer blocked on AG-13**,
       which closed on 2026-08-12: there is now a surface to compare two runs in
       (`D-2026-08-12-the-experiment-surface-is-the-record-somebody-can-open`), and what this row
       still lacks is the task set itself. `plan_execute_utility` scores the pairs a case hands it,
       and the shipped case is illustrative. Genuine baseline-vs-augmented numbers mean running the
       same tasks twice against a live model — publishing each arm with `make phoenix-publish` is
       then the comparison, not a thing to build.
-- [ ] **The retrieval eval still scores only `GraphRetriever`** — [M], but it no longer *pretends*
+- **The retrieval eval still scores only `GraphRetriever`** — [M], but it no longer *pretends*
       otherwise: under `hybrid`, or with `vector`/`lexical` active, the metric raises rather than
       report a graph-only recall under a name that promises the shipped path. Scoring the fused and
       derived paths for real needs the note index built over the eval fixture corpus, which needs
@@ -2469,7 +2485,7 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       `compound_id`, both fingerprint indices, chain matching and progression grouping.
       `STANDARDIZATION_VERSION` in the fingerprint definitions retires stale rows rather than
       ranking two notions of sameness against each other.
-- [ ] **Stereochemistry is left exactly as RDKit reports it** — [M], and deliberately out of the
+- **Stereochemistry is left exactly as RDKit reports it** — [M], and deliberately out of the
       row above. Collapsing a racemate onto a single enantiomer is a chemistry decision with real
       consequences for a chiral route, and it is not one to make as a side effect of stripping
       counterions. Wants its own argument, and probably a per-deployment answer.
@@ -2479,7 +2495,7 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       could not before, which is why the sync never even saw one — and the sync compares the note's
       *body* rather than its id. An amendment is a re-proposal of the same note, so the PR-gate
       shows a reviewer the diff; no second versioning scheme, because git already expresses this.
-- [ ] **A retracted ELN entry stays current evidence** — [M], the half the row above deliberately
+- **A retracted ELN entry stays current evidence** — [M], the half the row above deliberately
       did not close. A withdrawn entry that simply disappears from the export is invisible to a
       sync that only reads what is present, and treating a missing file as a retraction would make
       an export glitch indistinguishable from a withdrawal. Noticing absence needs a full
@@ -2490,11 +2506,11 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       so two systems' colliding entry ids are at least distinguishable in the note. A file adapter
       is handed a directory, not a tenant, so it cannot name an instance; a connector talking to a
       real ELN knows its own and should say so there.
-- [ ] **Mass balance is element-set subsumption only** — [M]. `ingest/eln/validate.py` checks that
+- **Mass balance is element-set subsumption only** — [M]. `ingest/eln/validate.py` checks that
       no product element is absent from the inputs, so `benzene + methanol >> paracetamol` passes.
       No charge balance, no yield-vs-limiting-reagent check despite `amount_mmol` being parsed. The
       stronger check already exists and is not reused (`science/calc/reaction.py:178`).
-- [ ] **A note is one vector over its whole body** — [M]. The identity half of this row is closed
+- **A note is one vector over its whole body** — [M]. The identity half of this row is closed
       (`D-2026-08-08-a-derived-index-must-record-what-derived-it`: `note_index.embedding_key`,
       migration 039, and the ordinary incremental `make reindex` now heals a model change). What
       remains is chunking: a note is embedded as a single vector and the returned excerpt is
@@ -2504,7 +2520,7 @@ QM path. The rows below are what survives that merge, narrowed to say so.
 - [x] **Hazard screening misses the notes that propose conditions** — the note-type half is
       closed: the gate covers `experiment-proposal` and `bo-candidate` by type, not only by a
       `## Procedure` heading a parameter table does not have.
-- [ ] **Pair rules have no notion of sequence** — [M], the other half of that row. They fire across
+- **Pair rules have no notion of sequence** — [M], the other half of that row. They fire across
       components of one mixture SMILES, so a quench reagent added at step 8 is screened against one
       consumed at step 1. Needs a `same_step` scope on the rule table, which is a change to
       `rules.yaml`'s schema rather than to the matcher.
@@ -2528,7 +2544,7 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       the database, because a PITR rolls the database copy back into agreement with the truncated
       trail it exists to catch. `runbook.md` §(xiii) is the restore procedure and states what the
       system requires of each of the four stores.
-- [ ] **Eight tables retention neither prunes nor refuses** — [M]. `durable/retention.py` names
+- **Eight tables retention neither prunes nor refuses** — [M]. `durable/retention.py` names
       two prunable tables and *refuses* three with stated reasons (`audit_events`, `job_records`,
       `calculation_results`), which is the right shape. The rest are simply unlisted:
       `session_owners`, `session_turns`, `turn_costs`, `predictions`, `measurements`,
@@ -2537,13 +2553,13 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       Wants: a disposal decision per table — pruned, or refused with its reason — not a sweep that
       picks them up by default. `infra/sql/README.md` is the current inventory. (2026-08-05
       database review.)
-- [ ] **A pruned session keeps its listable identity** — [L]. Retention prunes `session_messages`
+- **A pruned session keeps its listable identity** — [L]. Retention prunes `session_messages`
       and leaves the `session_owners` row, so `SessionOwnerStore.list_for_owner` still returns the
       session and opening it shows an empty conversation. Not a correctness bug — the id is
       genuinely still owned — but the listing means "what was I working on", and an entry with
       nothing behind it does not answer that. Wants: either the owner row goes with the last
       message, or the listing filters on remaining history. (2026-08-05 database review.)
-- [ ] **No backup *tooling*, and three stores whose recovery is someone else's** — [M]. The anchor
+- **No backup *tooling*, and three stores whose recovery is someone else's** — [M]. The anchor
       made a restore safe to perform; nothing here performs one. Deliberately: this chart deploys
       neither Postgres nor Temporal (the row below), so a `pg_dump` CronJob would claim ownership of
       stores it does not own and be wrong for the expected case of a managed instance with its own
@@ -2551,7 +2567,7 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       RPO/RTO an operator can hold their provider to. Only the audit trail needs a point-in-time
       story — the calculation cache is regenerable by definition (D-011), the note index is rebuilt
       by `make reindex`, and the knowledge repo is git, so every clone is already a backup.
-- [ ] **Postgres and Temporal are neither deployed nor owned** — [L]. The chart dials
+- **Postgres and Temporal are neither deployed nor owned** — [L]. The chart dials
       `chemclaw-temporal-frontend.temporal.svc:7233` and namespace `chemclaw`; there is no subchart,
       no operator manifest, no `register_namespace` call, no retention/archival config, no HA or
       sizing guidance. `helm install` does not produce a working system.
@@ -2574,7 +2590,7 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       **No PDB on the workers, deliberately**: over a `replicas: 1` singleton, `minAvailable: 1`
       blocks every node drain in the cluster forever and `maxUnavailable: 1` permits what no PDB
       permits. The ADR argues it; the fix is the row below, not a policy object.
-- [ ] **The background worker is a hard singleton** — [M]. `workers.background.replicas: 1` owns ELN
+- **The background worker is a hard singleton** — [M]. `workers.background.replicas: 1` owns ELN
       sync, memory synthesis, retention, eval drift and audit-chain verification, and cannot be
       scaled because the PR-gate checkout lock is host-local (D-069). Split from the row above,
       which closed everything *except* this: it is the actual availability gap, it needs the
@@ -2608,7 +2624,7 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       is deliberately *not* digest-pinned in the file: a pinned digest goes stale in weeks and every
       developer build then pulls a base months behind on CVE fixes, so the dev default floats, a
       release pins, and the SBOM records what a build actually contained.
-- [ ] **The image vulnerability scan is written but not merged as a gate** — [M]. `trivy image
+- **The image vulnerability scan is written but not merged as a gate** — [M]. `trivy image
       --exit-code 1 --ignore-unfixed --severity HIGH,CRITICAL` was built in
       D-2026-08-01-a-tag-is-a-pointer-not-a-build, run eight times against real builds, and pulled
       back out. It **earned its keep**: three classes of real problem, all now fixed in
@@ -2627,11 +2643,11 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       **What it needs:** an environment with a container runtime, where the built image can be
       inspected interactively. Every hypothesis here cost a full CI round trip. Start by finding
       what trivy is actually reading — `trivy image --list-all-pkgs` names the file per package.
-- [ ] **No image signing or admission policy** — [M]. Pinning by digest is the property a signature
+- **No image signing or admission policy** — [M]. Pinning by digest is the property a signature
       would enforce; adding one nothing verifies would be a fourth control reporting to nobody.
       Needs a key, a policy admission controller, and a registry to push to — all three belong to
       the cluster-ownership row below.
-- [ ] **Shipping crest (GPL-3.0) is an unmade decision, and now a takeable one** — [S], and not an
+- **Shipping crest (GPL-3.0) is an unmade decision, and now a takeable one** — [S], and not an
       engineering task: whether to redistribute a GPL-3.0 binary inside a product image is the
       product owner's call. What was wrong was that taking it required editing a `RUN` block, so it
       looked like writing a patch and was therefore never taken. `--build-arg INCLUDE_CREST=false`
@@ -2660,7 +2676,7 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       they answer different questions — the correlation id is what `audit_events` is keyed on and
       works with no collector; `traceparent` is what makes a trace a tree. `deploy/README.md`'s
       claims about job spans and dashboards are deleted rather than softened.
-- [ ] **No span around a durable job, and no auto-instrumentation** — [M]. The two boundaries above
+- **No span around a durable job, and no auto-instrumentation** — [M]. The two boundaries above
       are in one process; a job spans two and a Temporal boundary, so the workflow has to carry the
       trace context in its payload — a real design question (payloads are replayed, and a stale
       `traceparent` would attach a replay to the original trace) rather than another `start_span`.
@@ -2711,7 +2727,7 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       **Still open, and named rather than implied:** node-hours. Parallelism belongs to the
       launcher and none reports it back yet — see the row below. Pricing is deliberately absent: the
       ledger records quantities, and a rate card is a deployment's own fact.
-- [ ] **Node-hours are still unmeasured** — [S], the half of cost attribution that needs a live
+- **Node-hours are still unmeasured** — [S], the half of cost attribution that needs a live
       cluster. `runtime_seconds` is wall clock across the child workflow; what an HPC run actually
       costs is that times its allocation, which only the launcher knows. Seqera/Tower reports task
       resource usage on a completed run; plumbing it back through `NextflowLauncher` into
@@ -2727,11 +2743,11 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       (D-011), so a running job has several requesters and cancelling it cancels it for all of
       them. It is an operator action, and the ADR says so rather than shipping a scope check that
       would read as ownership and not be it.
-- [ ] **A chemist cannot stop their own runaway run** — [M], the cost the row above accepted. The
+- **A chemist cannot stop their own runaway run** — [M], the cost the row above accepted. The
       fix is not a scope check on the cancel route; it is a *per-requester* job id, which trades a
       recompute of every shared expensive job for it — a change to D-011's idempotency contract
       with a measurable cost, so it wants its own decision.
-- [ ] **No session delete, export, or pagination** — [M]. Only `POST`/`GET /sessions`; no per-user
+- **No session delete, export, or pagination** — [M]. Only `POST`/`GET /sessions`; no per-user
       erasure across the seven tables that hold a conversation (a data-subject request is currently
       unimplementable, and `audit_events` is deliberately unprunable); `SessionSummary` is
       `session_id + created_at` with a `LIMIT` and no cursor, so past 100 sessions the older ones
@@ -2743,7 +2759,7 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       folded into the call it answers rather than rendered twice, an unanswered call reports
       `result=None` (a real state: "it ran and we do not know how it ended"), and arguments are
       bounded like the audit trail's.
-- [ ] **A plan snapshot, an attachment reference and an answer's confidence are not persisted at
+- **A plan snapshot, an attachment reference and an answer's confidence are not persisted at
       all** — [M], the other half, and it is a different problem from the row above. Those are
       turn-time events computed and streamed; nothing writes them to `session_messages`. Recovering
       them is a change to what a turn *stores*, not to how it is read, so it wants its own decision
@@ -2755,7 +2771,7 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       trail is keyed on (the old message named the *session*, which the user already has). An
       unrecognised failure stays `internal` rather than guessing: a wrong `retryable=True` sends
       someone to burn another turn on a failure that cannot succeed.
-- [ ] **No project as a first-class concept** — [M]. `project` is free text on a reaction and a note
+- **No project as a first-class concept** — [M]. `project` is free text on a reaction and a note
       *tag*; no registry, no project-scoped retrieval, no project-scoped access. Broad internal read
       is a conscious call (`DEFERRED`, KM-9), but "which programme is this work part of" is how
       pharma R&D is organized and the graph cannot answer it reliably.
@@ -2769,7 +2785,7 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       designates as the memory read at session start — a ticket tracked only in
       `implementation-tickets.md` is invisible to the session that would pick it up, which is how
       these three stayed unstarted through seven phases.
-- [ ] **F9-T1 — `architektur.md` §6 still describes a stack this repo does not build** — [S], and
+- **F9-T1 — `architektur.md` §6 still describes a stack this repo does not build** — [S], and
       `CLAUDE.md` already warns readers off it in prose ("historical, not current"). The ticket asks
       for §6 to name OpenShift, Nextflow-on-HPC and the internal LLM adapter instead of Azure AI
       Foundry / Container Apps / raw SLURM, keeping §7/§8. The warning is a workaround for the
@@ -2782,7 +2798,7 @@ QM path. The rows below are what survives that merge, narrowed to say so.
       `deploy.yml` which never existed, and three unresolvable ADR citations.
       **The validator was itself an instance of the defect** — it labelled its own prose source
       `agents/chemclaw_agent.py`, a path gone since D-148.
-- [ ] **`docs/planning/` fails the widened prose rules 175 times** — [M], and deliberately left out
+- **`docs/planning/` fails the widened prose rules 175 times** — [M], and deliberately left out
       of the gate rather than swept. It is a different defect: a ticket that says "create
       `agents/qm_tools.py`" names a file D-118 later deleted, so there is no path to correct it *to*
       — the sentence needs rewording, one judgement at a time, and rewriting each to the nearest
@@ -2842,7 +2858,7 @@ deliberately not fixed there, each because it needs a decision rather than a pat
   `run_agent_step` were registered on no worker, a tool step's `list[Content]` result could not
   cross the activity boundary, and an agent step could not run under `harness_enabled` at all.
 - [x] ~~**DARK-3 — mid-turn resume claims other jobs' completions and drops them.**~~ — **fixed on main by D-153** while this pass was running. `await_job_results` no longer consumes the push-back mailbox at all: each job is awaited on its own Temporal handle, so there is no destructive claim to steal another job's completion with. Recorded rather than deleted because the review found it independently against the pre-D-153 tree.
-- [ ] **DARK-4 [Med] — the durable job idempotency key omits every versioned input.**
+- **DARK-4 [Med] — the durable job idempotency key omits every versioned input.**
   `job_workflow_id` hashes `[connector, job, payload]` only. Change `xtb_method` or a calibration
   constant and the calculation store correctly misses and recomputes, while `start_workflow` raises
   `WorkflowAlreadyStartedError`, rejoins the *completed* prior run, and returns numbers produced by
@@ -2887,7 +2903,7 @@ deliberately not fixed there, each because it needs a decision rather than a pat
   `report_measurement` answered "Recorded". Migration 030 keeps the measurement on its own, and a
   later prediction of the same thing reconciles against it on write, so measure-then-predict works
   as well as the reverse.
-- [ ] **DARK-10 [Low] — the PR-gate's checkout window exposes unreviewed notes to readers.**
+- **DARK-10 [Low] — the PR-gate's checkout window exposes unreviewed notes to readers.**
   `knowledge_path` is the same tree the submitter runs `checkout -B note/<id>` against, so a
   concurrent turn can retrieve an agent-proposed, unreviewed note as authoritative evidence. The
   remaining window is transient and spans a commit, a fetch and a push.
@@ -2926,7 +2942,7 @@ profiles across runs beyond what the notes say in prose.
 Rewriting `docs/planning/DEFERRED.md` into a register meant checking each row against the tree. Two
 things fell out that are work rather than bookkeeping, and neither belonged in a docs cleanup.
 
-- [ ] **Two compound-id conventions in one graph.** The seeded corpus (D-135) names its nine compound
+- **Two compound-id conventions in one graph.** The seeded corpus (D-135) names its nine compound
       notes by slug — `knowledge/compound/compound-thf.md` — while the machine path mints
       `compound-<hash>` from the canonical structure (`core.chem.compound_id`, applied at the gate by
       `eln.compound.compound_dependencies`). **Not a dangling citation today:** a molecule hit exists
@@ -2939,7 +2955,7 @@ things fell out that are work rather than bookkeeping, and neither belonged in a
       means editing the eight notes that cite them plus three test files, and it is a corpus-convention
       change that wants its own argument. A `kg-validate` rule (a compound note's id equals
       `compound_id(compound_smiles)`) is what would keep it from recurring — [M].
-- [ ] **Per-step species linking from free-text prose** — moved here from `DEFERRED.md`, where it was
+- **Per-step species linking from free-text prose** — moved here from `DEFERRED.md`, where it was
       listed as blocked on a name→SMILES tool. That tool exists (`core/reagents.py`, whose docstring
       names this as the thing it unblocks), so this is unscheduled work, not a deferral: wire the
       `eln-reaction-extraction` skill's per-field LLM to resolve named reagents per step, still
@@ -2955,7 +2971,7 @@ fixed; two left open below with the reason. Method note worth keeping: four of t
 invisible to 1450 passing tests because in each case *the test supplied the thing the system was
 supposed to supply*.
 
-- [ ] **VIBE-1 — a durable job's domain error does not reach the model.** With the launcher fixed,
+- **VIBE-1 — a durable job's domain error does not reach the model.** With the launcher fixed,
       `compute_reaction_energy` launched and `CalcJobWorkflow` correctly rejected an unbalanced
       equation, but the tool raised `WorkflowFailureError: Workflow execution failed` and the
       actionable message — "reaction is not atom-balanced (reactants minus products): C +2, H +4,
@@ -2966,7 +2982,7 @@ supposed to supply*.
       Temporal retries; (b) relaying a workflow's failure text in general is a policy decision
       about what is safe to surface — the question `surface_domain_errors` answers by naming
       known-safe types — and wants deciding, not patching. Do (a) first; it may be enough.
-- [ ] **VIBE-2 — `resolve_compound` knows solvents and bases, not substrates.**
+- **VIBE-2 — `resolve_compound` knows solvents and bases, not substrates.**
       `chemclaw/reagents.py` holds 87 spellings, almost all reagents. Every substrate in the
       corpus misses (`4-bromoanisole`, `phenylboronic acid`, `salicylic acid`,
       `4-methoxybiphenyl`), and the model then supplies the structure from memory — right each
@@ -2977,7 +2993,7 @@ supposed to supply*.
       the `chem` bundle, which must not import the knowledge graph (D-115), so the fix is about
       *how* project vocabulary reaches a connector — a generated overlay, a config-pointed
       synonyms file, or a core-side resolution step — not about adding names to a dict.
-- [ ] **VIBE-3 — the answer event carries the model's inter-tool narration.** `AnswerEvent.text`
+- **VIBE-3 — the answer event carries the model's inter-tool narration.** `AnswerEvent.text`
       concatenates every assistant text block in the turn, so an answer reads "I'll resolve the
       compound…Let me correct that…Perfect. Here's what you have:" before it starts. Harmless when
       the turn succeeds; it is what made the failed Q11 read as a broken thought stream. Decide
@@ -3072,7 +3088,7 @@ claim about the world is to run it.
       additionally yields a `CapabilityDegradedEvent` before the first token; the CLI prints to
       stderr, which its docstring had promised and never done. Still degrades rather than raising:
       one dark connector must not become a dead front door.
-- [ ] **REV-7 [Med] A push-back event lost between claim and delivery is lost permanently — and
+- **REV-7 [Med] A push-back event lost between claim and delivery is lost permanently — and
       the fix is *not* the one this item first proposed.** The original recommendation (yield before
       marking rows consumed) is **refuted**: `agents/session_events.py` documents at-most-once as a
       deliberate trade made by COR-4, which *replaced* an at-least-once claim that double-delivered.
@@ -3098,7 +3114,7 @@ claim about the world is to run it.
       shielded against cancellation (D-130's trap — the confirm is reached from a cancelled
       generator). It is an operator-facing contract change too.
 
-- [ ] **The `eval_drift` push-back channel has no consumer.** `chemclaw.durable.eval_drift` writes
+- **The `eval_drift` push-back channel has no consumer.** `chemclaw.durable.eval_drift` writes
       `eval_drift` events to the `system-eval-drift` channel must-deliver, and nothing in the repo
       claims them, so they sit unconsumed until retention (off by default) prunes them by age. Not a
       bug: the channel constant's comment says it is "a `session_events` 'session' an operator
@@ -3114,7 +3130,7 @@ claim about the world is to run it.
       **Done by main (D-130)** — turn teardown is shielded so its cleanup runs in a cancelled task.
       That is the root cause this review identified: the release was an await in a closing generator
       and the `RuntimeError` was swallowed.
-- [ ] **REV-9 [Med] Prompt caching: a large fixed prefix is re-paid every model call** — but
+- **REV-9 [Med] Prompt caching: a large fixed prefix is re-paid every model call** — but
       **measure before building** (D-152), and this entry as first written overstated how reachable
       the saving is. Two corrections from verifying it:
       **(a) the ~14.6 k prefix was measured on the wrong provider.** That figure came from the
@@ -3252,7 +3268,7 @@ claim about the world is to run it.
       `docs/guides/harness-konzept.md`, and the cap applies in both modes, not only execute.
       `workflows/template_job.py` calls its own lookup "I/O-free". `agents/chemclaw_agent.py`
       calls `plan_only` "the pre-execution GxP gate" (REV-1).
-- [ ] **Heal sessions already bricked by a stranded `tool_result`.** `get_messages`'s repair
+- **Heal sessions already bricked by a stranded `tool_result`.** `get_messages`'s repair
       strips orphaned *calls* and cannot see an orphaned *result* (D-145), so any session the old
       age-based retention split is unusable forever with no automatic recovery. Adding the mirror
       strip to the read repair would fix them — deliberately **not** shipped with D-145, because
@@ -3288,7 +3304,7 @@ section, and STO-5/11/13 stay deliberately open.
       a subject-keyed pointer as an ordinary cached calculation. `run_cached_optimization` writes
       it and deliberately does not read it — the reuse is an explicit `starting_geometry` lookup,
       so a cache key always names what actually ran.
-- [ ] **STO-5 [Med] No converged electronic structure kept** — [L]. Deferred with DFT (D-010).
+- **STO-5 [Med] No converged electronic structure kept** — [L]. Deferred with DFT (D-010).
       D-124/D-132 define the media types (`density.restart`, `orbitals.molden`) and the link role;
       nothing writes them. Published measurement: reusing a converged density cuts mean SCF
       iterations from ~33 to ~2.
@@ -3323,7 +3339,7 @@ section, and STO-5/11/13 stay deliberately open.
 
 **Follow-ups this work leaves open (not blockers):**
 
-- [ ] **Vendor a real third-party reference corpus** — [M]. The mechanism is in place and
+- **Vendor a real third-party reference corpus** — [M]. The mechanism is in place and
       documented (`data/vendored/README.md`); what remains is choosing a licence-clean source and
       adding the build step that installs it.
 - [x] **Reconcile the ADR-number convention with its own test.** `CLAUDE.md` said "reserve it in
@@ -3459,7 +3475,7 @@ The load test's fixes landed (see D-119). What it surfaced and did **not** close
 
       Two real things survive it, both smaller than the retracted claim:
 
-- [ ] **AUDIT-2 A tool call rejected for bad arguments is neither audited nor authorization-checked.**
+- **AUDIT-2 A tool call rejected for bad arguments is neither audited nor authorization-checked.**
       Measured against the *previous* engine: argument validation returned the parse error before
       the call reached the middleware pipeline, so "the model asked for `find_notes` with arguments
       it could not satisfy" left no trace in `audit_events`. Authorization not running is harmless
@@ -3487,18 +3503,18 @@ The load test's fixes landed (see D-119). What it surfaced and did **not** close
       is now declared, checked at startup and exported as a gauge
       (D-2026-08-01-a-per-process-cap-multiplied-by-a-number-nobody-wrote-down) — the trade above is
       unchanged, but the number it produces is no longer written down nowhere.
-- [ ] **SCALE-1b Attachments and harness todos are still per-process, and always were.**
+- **SCALE-1b Attachments and harness todos are still per-process, and always were.**
       `agents.attachments.STORE` and the harness `TodoProvider` state live on the live
       `AgentSession` in one process's memory, so a chemist who uploads a CSV and then asks about it
       must reach the same pod. The Route now asserts session affinity (D-121), which pins to a
       *pod* — nothing can pin below one, which is why `service_uvicorn_workers` still defaults to 1
       for any deployment that uses uploads or the harness. Making attachments durable is the fix if
       intra-pod workers are ever wanted.
-- [ ] **SCALE-2 The HPA still scales on CPU.** `values.yaml` documents this as the wrong signal for
+- **SCALE-2 The HPA still scales on CPU.** `values.yaml` documents this as the wrong signal for
       a stream-bound service and now has better ones to use: `chemclaw_turns_in_flight` against
       `chemclaw_turn_capacity`, and the new `chemclaw_turn_duration_seconds` histogram. Needs a
       Prometheus adapter in the cluster.
-- [ ] **SCALE-3 `service_max_concurrent_turns` is still a guess (8).** At 50 users it shed 75% of
+- **SCALE-3 `service_max_concurrent_turns` is still a guess (8).** At 50 users it shed 75% of
       turns; at 64 it shed none but p50 went to 37 s. The measured value depends on the fixes in
       D-119, so it should be re-derived from the next load test, not from this one.
 - [x] **SCALE-4 Make the rollback watermark unnecessary rather than merely loud** — closed by
@@ -3509,7 +3525,7 @@ The load test's fixes landed (see D-119). What it surfaced and did **not** close
       graph reads its own checkpointer and the transcript is projected in one call after the
       answer, so there is no half-written state to bound — watermark, rollback, counter and alert
       all deleted rather than made cheaper.
-- [ ] **SCALE-5 A turn still opens and tears down one MCP session per connector.**
+- **SCALE-5 A turn still opens and tears down one MCP session per connector.**
       `connectors.registry.open_reachable` enters every connector tool for the turn and closes it
       after, because a connector's connection must belong to exactly one turn
       (`agents.chemclaw_agent.connector_tools`). At six connectors that is ~900 MCP handshakes for
@@ -3585,7 +3601,7 @@ kept because the wrong root cause is the more instructive record.
       calculation cache, and the whole turn in the audit trail under one correlation id.
       **Same shape as LIVE-1's lesson:** a configuration that only production sets is a
       configuration nothing tests.
-- [ ] **LIVE-6 [Low] Test-to-table locality.** LIVE-2 isolates the schema but the tests still share
+- **LIVE-6 [Low] Test-to-table locality.** LIVE-2 isolates the schema but the tests still share
       one within a run, so ordering can still couple them (`test_postgres_store` asserts on a global
       migration result). A per-test schema or transactional rollback would close it — [S].
 
@@ -3614,7 +3630,7 @@ risk). Four findings fixed in `a96932d`; the rest need a decision or are follow-
       process can lag by up to the window. `kg.graph.invalidate_cache()` is the bust hook and the
       PR-gate submitter calls it, so the authoring loop never waits; `0` restores scan-every-query
       for deployments where no staleness is acceptable.
-- [ ] **DA-7 [Low] Test-to-module locality is weak** — 3 of 5 mutations survived their "obvious" test
+- **DA-7 [Low] Test-to-module locality is weak** — 3 of 5 mutations survived their "obvious" test
       file and died only under the full suite — [S]. Not a correctness gap (CI runs everything); a
       developer feedback-loop one.
 - [x] **DA-10 [Med] Buy down live-edge risk offline** — [M]. **Decided (D-2) and done** (D-082,
@@ -3711,21 +3727,21 @@ for each recorded here rather than left implicit.
       written down where the next author will read it (`connectors/manifest.py`, runbook §(iv)), so
       "why isn't `find_notes` behind a connector?" has an answer in place rather than being
       re-litigated.
-- [ ] **Stage C, remainder — the `report` job** — [S]. The last bespoke durable adapter that can
+- **Stage C, remainder — the `report` job** — [S]. The last bespoke durable adapter that can
       move; it follows `bo`'s shape once its workflow returns the `ConnectorJobResult` envelope
       directly instead of being wrapped a third time. *Trigger: now; mechanical after D-111/D-113.*
 - [~] **`submit_qm_job` stays in core** — not a Stage C remainder. It needs the HPC identity bridge
       (a federated credential exchanged per submission), which is core's, not a capability's. The
       in-process rule covers it: it is plumbing, not chemistry.
-- [ ] **`mcp_servers/molfp|rxnfp` bodies could move into their bundles** — [S]. Cosmetic: both are
+- **`mcp_servers/molfp|rxnfp` bodies could move into their bundles** — [S]. Cosmetic: both are
       already *reached* only through their connectors, so this is about there being one obvious
       place to look, not about behaviour. `mcp_servers/README.md` says so explicitly meanwhile.
       *Trigger: the next substantive edit to either capability.*
-- [ ] **A second step template** — [S]. `hazard-briefing` is Stage E's only caller. The engine was
+- **A second step template** — [S]. `hazard-briefing` is Stage E's only caller. The engine was
       built ahead of its recorded trigger at the user's request (D-112), so the "does this earn its
       keep" question is still open rather than answered. *Trigger: the next procedure whose order
       must not vary — or, if none appears, a decision to fold it back.*
-- [ ] **Entra auth modes for connectors** — [M]. The manifest's auth union ships `none` and `bearer`.
+- **Entra auth modes for connectors** — [M]. The manifest's auth union ships `none` and `bearer`.
       `entra_workload` (client credentials over the federated SA assertion) and `entra_obo` are the
       documented extension point, each one variant plus one branch in `connectors.identity.auth_for`.
       OBO additionally needs the user's *raw* access token, which `service.auth.Principal` deliberately
@@ -3743,7 +3759,7 @@ for each recorded here rather than left implicit.
       asserts). A job declaring `background-jobs` would start and then wait forever. The field
       could therefore hold exactly one correct value, so it is gone and the queue is derived at
       dispatch.
-- [ ] **Concurrent-turn MCP lifecycle, the general case** — [S]. Per-turn connector instances fixed
+- **Concurrent-turn MCP lifecycle, the general case** — [S]. Per-turn connector instances fixed
       this for connectors (D-109), and the *shape* that caused it — a process-lived tool whose context
       is entered per turn — should not reappear. A guard test asserting no MCP tool is attached to the
       process-lived agent would make that structural rather than remembered. *Trigger: next time
@@ -3763,7 +3779,7 @@ design (D-004/D-005) and queued rather than adopted wholesale — see D-074 for 
       it read as live work here *and* as a live row in `DEFERRED.md` — one item counted twice. The
       deferral row is the correct home (it has the trigger); this box is closed, not deleted,
       because BACKLOG is a log and DEFERRED is a register.
-- [ ] **External ontology anchoring on notes.** Frontmatter `type`/tags are free strings today —
+- **External ontology anchoring on notes.** Frontmatter `type`/tags are free strings today —
       no class hierarchy, so an agent can't query by subsumption (e.g. "all electrophilic aromatic
       substitutions" matching a `reaction_class: acetylation` note). Add optional frontmatter
       fields carrying **existing** external ontology IDs — ChEBI for compounds, RXNO for reaction
@@ -3788,7 +3804,7 @@ durable job execution (Temporal) already covered; three residual gaps closed, ea
 - [x] **Turn/token budgets (#3).** `service/budget.py::BudgetTracker` meters token usage + counts
       turns per session/user; front door refuses over-budget turns with 429 (`budget_*` config, off by
       default). `service/runner.py` (`_usage_tokens` + `record`). Tests: `test_budget.py`, `test_service.py`.
-- [ ] **Deferred (docs/planning/DEFERRED.md):** durable/rolling-window budget quota (survives restart/multi-pod);
+- **Deferred (docs/planning/DEFERRED.md):** durable/rolling-window budget quota (survives restart/multi-pod);
       substructure pattern-fingerprint prefilter (sound screening past ~10⁴ molecules). The deeper
       *mid-flight same-turn* resume stays open (see the harness follow-ups below) — distinct from the
       front-door restart-reattach closed here.
@@ -4004,7 +4020,7 @@ tickets + disposition table: `docs/archive/plans/parity-plan.md`.
       draft (not silently dropped, GxP); `fan_out` re-raises `CancelledError` and carries no
       redundant child-level retry. Conversational multi-agent mesh stays gated (single agent + skills
       is KISS).
-- [ ] Gate-until-trigger (documented, not built): OCR/vision ingestion, vendor connectors
+- Gate-until-trigger (documented, not built): OCR/vision ingestion, vendor connectors
       (Veeva/SAP/LIMS), formal validation artifacts, conversational multi-agent mesh — each with its
       trigger recorded in `docs/archive/plans/parity-plan.md`.
 
@@ -4026,7 +4042,7 @@ an internal data pipeline, no vendor**). Full ticket breakdown: `docs/archive/pl
       `test_llm_provider.py`, `test_agent.py`.
 - [x] **F0-T3** Streaming + generation params: `Agent(default_options=ChatOptions(temperature,
       max_tokens))` from config. Test: `test_agent.py::test_agent_applies_default_generation_options`.
-- [ ] **F0-T4** Tool-calling capability spike (the H0 risk) — `scripts/spike_toolcalling.py` +
+- **F0-T4** Tool-calling capability spike (the H0 risk) — `scripts/spike_toolcalling.py` +
       `docs/spikes/f0-toolcalling.md` verdict. **Needs the live internal endpoint**; run before
       building on the harness. (The "stand-in OpenAI-compatible server" variant is **dropped** —
       it would test the stand-in; the client-wiring half is already proven live by
@@ -4066,7 +4082,7 @@ the record of the original wiring.
       renders plan/tool-trace/tokens/approval/answer). Served at `/`. Test: `test_service.py`.
 - [x] **F2-T3** Typed event contract `service/events.py` (discriminated union on `type`:
       plan/tool_call/token/job_started/approval_request/answer/error). Test: `test_service_events.py`.
-- [ ] Deferred within F2: emit `PlanEvent` from harness todo state, and real `JobStartedEvent` when a
+- Deferred within F2: emit `PlanEvent` from harness todo state, and real `JobStartedEvent` when a
       tool starts a Temporal job (wired in F3 with job→session push-back). ADR **D-A2** (front door).
 
 ### Phase F3 — Durable session + job→session push-back
@@ -4128,7 +4144,7 @@ the record of the original wiring.
 - [x] **F4-T6** Non-Entra bridges: `chemclaw/temporal_client.py::connect_options` (mTLS/api-key) +
       `agents/identity/hpc_bridge.py::map_to_hpc_identity` (logs every mapping). ADR D-047.
       `test_hpc_bridge.py`.
-- [ ] **F4 live edges** (need a real tenant/broker/cluster; code + fake-endpoint tests already green):
+- **F4 live edges** (need a real tenant/broker/cluster; code + fake-endpoint tests already green):
       real Entra token validation against a live JWKS, real federation/OBO exchanges, live Temporal
       mTLS handshake. (Per-request role→skills scoping is **not** open — done in D-052, see F4-T5.)
 - [x] **F5** Real HPC path behind the QM activities: `workflows/hpc/nextflow.py` (Tower REST adapter
@@ -4138,7 +4154,7 @@ the record of the original wiring.
 - [x] **F5 dropped**: ~~`QMJobWorkflow→CalculationWorkflow` rename~~ — **DROPPED** (assessment
       2026-07-25): the workflow type name is durable-history state, so the rename is exactly the
       un-versioned change the workflow-versioning policy below exists to forbid.
-- [ ] **F5 still deferred** (split out of the row above 2026-08-13, which mixed one dropped item
+- **F5 still deferred** (split out of the row above 2026-08-13, which mixed one dropped item
       with two live ones under a single unticked box): real `cclib` parsing once a live QM output
       format is fixed; live-cluster durability spike (needs a cluster).
 - [x] **F6** OpenShift delivery: one rootless multi-target image (`deploy/Containerfile` +
@@ -4146,7 +4162,7 @@ the record of the original wiring.
       service/route/HPA, both workers, MCP, NetworkPolicy, pre-deploy migrate hook), `deploy.yml` CI
       (build + `helm template | kubeconform`), `deploy/README.md`. Config `otel_endpoint`. ADR D-049
       (D-A6/D-A6a: Temporal self-hosted). Offline-verified: YAML parse + brace-balance + Settings map.
-- [ ] **F6 live edges** (CI/cluster-gated): actual image build+push, `helm template`/`kubeconform`,
+- **F6 live edges** (CI/cluster-gated): actual image build+push, `helm template`/`kubeconform`,
       dry-run rollout to a dev namespace, OTel collector wiring, ExternalSecret wiring.
 - [x] **F7** Generic data-source seam: `sources/base.py` (`DataSource` composes the existing
       `ElnAdapter`+`SourceRetriever` halves, `SourceSpec` rejects neither-half), `sources/registry.py`
@@ -4161,7 +4177,7 @@ the record of the original wiring.
       both halves ship (ingest through the PR-gate, plus similarity search run inside the warehouse
       over its own embedding column), proven against a fake driver with no tenant. Remaining work is
       infrastructure only — see `docs/planning/DEFERRED.md`.
-- [ ] **The other F7 adapters**: LIMS/MES/analytical/literature. Each is now a question of whether
+- **The other F7 adapters**: LIMS/MES/analytical/literature. Each is now a question of whether
       it is reaction-shaped: one that is becomes a binding over the same engine, one that is not is
       the trigger for the "universal ingest abstraction" row in `docs/planning/DEFERRED.md`.
 
@@ -4262,7 +4278,7 @@ the record of the original wiring.
       provider wiring and the per-model `gen_ai.client.token.usage` metric came from the framework
       that was removed, and the LangChain stack ships no equivalent — measured; see
       `docs/guides/runbook.md` §(viii) for what attribution is left.*
-- [ ] **Structured outputs** — bind a validated pydantic payload for agent proposals instead of
+- **Structured outputs** — bind a validated pydantic payload for agent proposals instead of
       parsing prose. Deferred to the first call site that needs one (changes call sites, not
       startup wiring); the framework binding to use is the current engine's, not the analysed one's.
 - Do-not-adopt / defer: Redis/mem0 history (durability belongs to Temporal, and neither extra is
@@ -4287,7 +4303,7 @@ the record of the original wiring.
 - [x] Test-helper dedup pass: one `FakeSubmitter` in conftest (replaced ~10 local fakes),
       QM tests use `tests/temporal_env.py` (inline copies + cross-test private imports gone),
       shared `tests/pg.py` Postgres bootstrap, redundant `fast_mock` fixtures deleted.
-- [ ] Multi-process note-submit serialization (lock is per-process; per-submission worktrees or
+- Multi-process note-submit serialization (lock is per-process; per-submission worktrees or
       a distributed lock) — revisit when >1 background worker replica exists.
 
 ## Done — Phase 5b: report / deep-research harness (no new store — D-020)
@@ -4329,7 +4345,7 @@ the record of the original wiring.
       (D-020 was taken by the report harness on main).
 - [x] The awaiting-todo half of the resume follow-up: flipping the todo on job completion, closed —
       see F3-T3 above and `agents/harness_todo.py` (D-058).
-- [ ] **Follow-ups (still open):** resuming the *same* streamed turn mid-flight (vs. picked up on the
+- **Follow-ups (still open):** resuming the *same* streamed turn mid-flight (vs. picked up on the
       session's next turn) via the durable-approval seam (D-032/D-035) · plan/loop metrics for Phase
       2b · plan-mode approval + finer autonomy behind RBAC (Phase 6, authz in the MCP server) ·
       agent-harness ↔ report-pipeline interplay (open research per section vs. fixed synthesis flow).
@@ -4455,7 +4471,7 @@ the record of the original wiring.
       reconstruct typed model) — each `run_cached_*` now only derives its key and delegates (DRY,
       Rule of Three across xTB/solubility/pKa). Name→calculator **registry deferred** (no dispatch
       consumer yet; would be a one-caller abstraction — D-015).
-- [ ] 1c.3 GNN solubility model (inference only; value + uncertainty) — **needs model choice** (see open Qs).
+- 1c.3 GNN solubility model (inference only; value + uncertainty) — **needs model choice** (see open Qs).
       **Blocked on user input** (which GNN + weights/license); the calculator contract makes the
       swap cheap.
 - [x] 1c.4 **pKa via xTB** (`calc/pka.py`): GFN2-xTB ALPB-solvated deprotonation energy of the most
@@ -4500,7 +4516,7 @@ the record of the original wiring.
       eigenbasis of a Lindh model Hessian gives a measured **~2x** on both. The remaining headroom
       is an angle/torsion model with a Wilson B matrix — recorded, not built, because 37% of the
       pairwise model's directions have no curvature and a floor stands in for them.
-- [ ] **X10 transition states** — the largest remaining gap at the *model* level, unchanged by
+- **X10 transition states** — the largest remaining gap at the *model* level, unchanged by
       X5-X7. There is no saddle-point search, so every "how fast" question is unanswerable and a
       relaxed-scan maximum is a sketch of a barrier rather than one. `xtb --path` (the reaction-path
       finder) and CREST's transition-state tooling are the obvious routes.
@@ -4517,12 +4533,12 @@ the record of the original wiring.
 
 ### Ranked out of the xTB use-case review (`docs/guides/xtb-use-cases.md`) — above X3 in value
 
-- [ ] **U1 xTB descriptors as BO featurization** — BoFire campaigns treat ligand/base/solvent as
+- **U1 xTB descriptors as BO featurization** — BoFire campaigns treat ligand/base/solvent as
       *categorical*, so the surrogate cannot generalize to an option never tried. Replacing the
       category with computed electronic descriptors lets it interpolate across the space. Needs **no
       new xTB capability** — only wiring `calc.xtb_props` into `bo/`. Highest value per unit of work
       in the review.
-- [ ] **X9 internal-coordinate optimizer** — measured on the stated workload (200-800 Da): the
+- **X9 internal-coordinate optimizer** — measured on the stated workload (200-800 Da): the
       atorvastatin core (76 atoms) needs **177 Cartesian L-BFGS steps** and 97 s to optimize, and
       the step count grows with size. A redundant-internal-coordinate optimizer typically cuts that
       3-5x, which is the single largest speedup available for this workload and compounds through
@@ -4533,21 +4549,21 @@ the record of the original wiring.
       actor and session. `scripts/validate_skills` now resolves a declared tool against MCP
       `allowed_tools` too, so a skill names a capability and the transport is a deployment
       decision — no skill changed in the move.
-- [ ] **U2 pKa domain extension to bases / N-H acids** — v1 covers neutral O-H/S-H acids only, so
+- **U2 pKa domain extension to bases / N-H acids** — v1 covers neutral O-H/S-H acids only, so
       the most common pharma pKa question (a basic amine API) is unanswerable; the tool errors out,
       which is correct but not useful. A calibration + domain problem, not a new capability.
       **Priority raised** on measured evidence: see U3.
-- [ ] **U3 pKa accuracy characterized** — benchmarked against 12 experimental values spanning
+- **U3 pKa accuracy characterized** — benchmarked against 12 experimental values spanning
       pKa 0.2–15.9 (`tests/test_pka.py`): Spearman ρ **0.965**, RMSE 1.25 (so the reported ±1.6 is
       honest), **worst individual error +2.08**. Conclusion, now enforced by tests and carried by the
       `ionization-and-partitioning` skill: **rank with it, never set a process pH with it** — a
       2-unit error inverts a "pKa ± 2" extraction or salt rule. No further action required unless the
       calibration is revisited; recorded so it is not re-derived.
-- [ ] **U4 descriptor enrichment of ELN-ingested structures** — compute descriptors once per ingested
+- **U4 descriptor enrichment of ELN-ingested structures** — compute descriptors once per ingested
       substrate so the graph becomes searchable by electronic character, not just substructure.
       Cheap (cached forever) and it makes retrieval smarter. Available now; not built.
 - [x] 1c.5b calculator contract landed (see 1c.1); name-registry consciously deferred (D-015).
-- [ ] 1c.7 optional graph note via PR-gate for a *fast* calc result — deferred: the QM path already
+- 1c.7 optional graph note via PR-gate for a *fast* calc result — deferred: the QM path already
       publishes (2.8) and BO recommendations now publish (1d.5); a fast-calc publish waits for a real
       need (avoids a third near-identical mapper before it is asked for). CHECKMATE 1c: G1–G7 met.
 - Note: fast calcs run **without** a Temporal workflow (sub-second) — the store gives "never twice";
@@ -4616,7 +4632,7 @@ the record of the original wiring.
       tree. Promoted to **wave C2** with a proposed advisory-only, deterministic slice (committed
       SMARTS rule table + `@tool` + skill + `kg-validate` hazard-section rule + a recall metric);
       three scope questions await the user — `docs/archive/plans/backlog-plan.md` §3/§5.
-- [ ] Retrosynthesis + reaction prediction · lab automation/SiLA2 closed-loop · process flowsheet
+- Retrosynthesis + reaction prediction · lab automation/SiLA2 closed-loop · process flowsheet
       synthesis · multimodal analytical data (now two rows: generic OCR, and hand-drawn
       structures/spectra) · domain foundation models — all in `docs/planning/DEFERRED.md` with
       triggers; confirm or pull forward. **Corrected 2026-08-13: DoE/Bayesian optimization was in
@@ -4629,24 +4645,24 @@ the record of the original wiring.
 - [x] Design caution "apply Skills/tools **selectively + measured per task**" — **satisfied**:
       `evals/ab.py` (2b.4) measures per-task tool utility including where tooling hurts, and
       `AgentProfile` (D-075) narrows the toolset per use case. Nothing left to build.
-- [ ] Design caution: evaluate the CoALA memory layer against DMR/LongMemEval, not by assumption —
+- Design caution: evaluate the CoALA memory layer against DMR/LongMemEval, not by assumption —
       this was deferred alongside AG-13, and **only half of that blocker survived its closure**.
       AG-13's half was the surface to compare runs in, which now exists; what this row still needs
       is the thing AG-13 turned out not to need — an external benchmark, and a live model to score
       it against.
 
 ## Open questions / awaiting input (see `docs/archive/research-review.md`)
-- [ ] **"pKs models"** — interpreted as **pKa** prediction; confirm (could mean PK/ADMET). The
+- **"pKs models"** — interpreted as **pKa** prediction; confirm (could mean PK/ADMET). The
       pluggable calculator registry (1c.1) makes a rename/swap cheap.
-- [ ] **Which models** for solubility (GNN weights + license?) and pKa (tool/model)? xTB binary
+- **Which models** for solubility (GNN weights + license?) and pKa (tool/model)? xTB binary
       availability + license in the target runtime.
-- [ ] BoFire scope for v1: which problem (reaction-condition? formulation?) is the first real BO case?
-- [ ] Temporal vs. Restate/DBOS/Prefect/Dapr — no head-to-head source found; our choice stands
+- BoFire scope for v1: which problem (reaction-condition? formulation?) is the first real BO case?
+- Temporal vs. Restate/DBOS/Prefect/Dapr — no head-to-head source found; our choice stands
       on maturity/fit. Revisit if operability/cost becomes a concern.
-- [ ] When does Markdown+NetworkX tip to Neo4j/Memgraph + GraphRAG? (deterministic traversal
+- When does Markdown+NetworkX tip to Neo4j/Memgraph + GraphRAG? (deterministic traversal
       sidesteps the NL-query risk for now.)
-- [ ] Concrete lab-automation/SiLA2 + DoE + retrosynthesis integration wiring.
-- [ ] Domain safety/compliance layer design beyond RBAC.
+- Concrete lab-automation/SiLA2 + DoE + retrosynthesis integration wiring.
+- Domain safety/compliance layer design beyond RBAC.
 
 ## Later — all of it shipped; kept as the record of what "later" meant
 - [x] Phase 2 knowledge-graph core + PR-gate · Phase 3 fingerprint search · Phase 4 ELN

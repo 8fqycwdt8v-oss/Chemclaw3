@@ -592,7 +592,12 @@ async def test_a_json_export_the_fetch_drops_leaves_a_ledger_row(tmp_path: Path)
 
     rows = {row[0]: row[1] for row in await _rows("eln-site-a")}
     assert sorted(rows) == ["late", "truncated"], "a dropped export left no question to answer"
-    assert "unreadable" in rows["truncated"]
+    # "refused", not "unreadable": the same handler now also files an export whose *stated* `id` is
+    # blank, which reads fine and names nothing, so the one word that covers both is the verdict
+    # rather than a guess at the cause. The cause is in the reason text after it, which is what the
+    # second half of this assertion reads.
+    assert rows["truncated"].startswith("refused ELN export truncated.json")
+    assert "Unterminated string" in rows["truncated"]
     assert "arrived after the sync cursor" in rows["late"]
     await _clear("eln-site-a")
 
@@ -991,15 +996,20 @@ async def test_the_reader_says_how_many_refusals_it_did_not_show() -> None:
     source = "test-many-matches"
     await _clear(source)
     await _clear(LEDGER_SOURCE)
-    # A nonce in the reason, so this assertion counts *these* rows: matching deliberately
-    # spans sources, and a shared schema carries other tests' refusals.
+    # A nonce in the reason *and in the query*, so this assertion counts only these rows. The
+    # nonce alone was not enough: matching deliberately spans sources and the whole suite shares
+    # one schema, so the ordinary words of a natural-language question ("record", "run") matched a
+    # thirteenth row another module had refused, and this assertion read `13 == 12` on CI while
+    # passing on every subset run locally. The query is the nonce for that reason — what this test
+    # is about is that `total_matching` reports the true count rather than the truncated list's
+    # length, and nothing about that needs the question to be a sentence.
     nonce = "plateaux77713"
     await record_refusals(
         source,
         {f"plate-{index:02d}-well": f"{nonce}: yield_percent exceeds 100" for index in range(12)},
     )
 
-    found = await refusals_matching(f"why is there no record of the {nonce} run")
+    found = await refusals_matching(nonce)
     assert len(found.rejections) == rejections._MAX_MATCHES
     assert found.total_matching == 12
     assert found.truncated

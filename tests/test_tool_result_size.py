@@ -256,7 +256,18 @@ def test_an_oversized_result_is_bounded_on_its_way_to_the_model(
 
     assert isinstance(result, ToolMessage)
     assert len(result.content) < 200_000
-    assert METRICS.value("chemclaw_tool_results_truncated_total") > before
+    # **Exactly one, not "more than before", and the difference is the whole `count` argument.**
+    # `frame_connector_results` nests this middleware inside itself and re-bounds after escaping, so
+    # one cut passes through `bounded_for_batch` twice; `count=False` on the second pass is what
+    # keeps the counter and the `tool_result.truncated` row about the *result*. A `> before`
+    # assertion is satisfied by both passes counting, which is what shipped — measured, one
+    # oversized connector result advanced this counter by **2.0** — so an operator counting cuts saw
+    # 2N for N results, the second row carrying the understated figure. This is a single pass, so
+    # exactly one.
+    assert METRICS.value("chemclaw_tool_results_truncated_total") == before + 1.0, (
+        "one cut must count once: the counter moved by "
+        f"{METRICS.value('chemclaw_tool_results_truncated_total') - before}"
+    )
 
 
 class _Request:

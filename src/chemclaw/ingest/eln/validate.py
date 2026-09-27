@@ -38,6 +38,7 @@ from rdkit import Chem
 
 from chemclaw.ingest.eln.adapter import ElnAdapter, ElnMappingError
 from chemclaw.ingest.eln.ord import OrdReaction
+from chemclaw.ingest.eln.warehouse.expr import pattern_budget
 
 
 def _elements(smiles_list: list[str]) -> tuple[set[str], list[str]]:
@@ -106,16 +107,22 @@ def _validate_source(adapter: ElnAdapter, label: str) -> int:
         )
         return 1
     problems = 0
-    for raw in entries:
-        try:
-            issues = validate_ord(adapter.map_to_ord(raw))
-        except ElnMappingError as exc:
-            print(f"{label}/{raw.entry_id}: unmappable — {exc}")
-            problems += 1
-            continue
-        for issue in issues:
-            print(f"{label}/{raw.entry_id}: {issue}")
-        problems += len(issues)
+    # The same page-wide regex budget an ingest runs under, so `make eln-validate` fails on a
+    # binding whose patterns cost more than a page may spend rather than passing a manifest that
+    # then wedges the sync activity. Found by `tests/test_warehouse_binding.py`'s derived guard over
+    # every module that maps entries in a loop — which is the whole reason that guard is derived
+    # rather than a list of the callers somebody remembered.
+    with pattern_budget():
+        for raw in entries:
+            try:
+                issues = validate_ord(adapter.map_to_ord(raw))
+            except ElnMappingError as exc:
+                print(f"{label}/{raw.entry_id}: unmappable — {exc}")
+                problems += 1
+                continue
+            for issue in issues:
+                print(f"{label}/{raw.entry_id}: {issue}")
+            problems += len(issues)
     if not problems:
         print(f"OK: {len(entries)} entr(ies) from {label} are valid")
     return problems

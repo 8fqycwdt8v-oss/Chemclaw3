@@ -19,6 +19,8 @@ from chemclaw.core.units import (
     JOULE_PER_CALORIE,
     Measurement,
     UnitError,
+    has_ambiguous_comma,
+    parse_quantity,
     parse_unit,
     reconcile,
 )
@@ -455,3 +457,81 @@ def test_the_three_physical_constants_are_pinned_against_the_codata_release_scip
     assert JOULE_PER_CALORIE == 4.184
     assert HARTREE_TO_KCAL == 627.5094740628974
     assert ELECTRONVOLT_TO_KJ == 96.48533212331002
+
+
+# --- parse_quantity -----------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "value", "symbol"),
+    [
+        ("20 kg", 20.0, "kg"),
+        ("20kg", 20.0, "kg"),
+        ("  500 mg  ", 500.0, "mg"),
+        ("1.5 L", 1.5, "L"),
+        ("2,5 kg", 2.5, "kg"),
+        ("2,5 mmol", 2.5, "mmol"),
+        ("1,25 L", 1.25, "L"),
+        ("1e3 g", 1000.0, "g"),
+        ("0.5 mol", 0.5, "mol"),
+    ],
+)
+def test_parse_quantity_reads_what_a_person_types_in_a_scale_field(
+    text: str, value: float, symbol: str
+) -> None:
+    """Including the comma decimal and the missing space, because both are what people write."""
+    quantity = parse_quantity(text)
+    assert quantity is not None
+    assert quantity.value == pytest.approx(value)
+    assert quantity.unit.symbol == symbol
+
+
+@pytest.mark.parametrize(
+    "text", ["", "   ", "a 96-well plate", "pilot scale", "20 furlongs", "kg", "lots", "20"]
+)
+def test_parse_quantity_returns_none_for_what_is_not_a_quantity(text: str) -> None:
+    """`None` rather than an exception, because most of what reaches it is legitimately prose.
+
+    `ExperimentRequest.scale` holds whatever the chemist said. A parser that raised on "a 96-well
+    plate" would put the same `try` in every caller, and the second caller would write it
+    differently — which is the whole reason this returns an answer instead of a failure.
+    """
+    assert parse_quantity(text) is None
+
+
+def test_parse_quantity_refuses_a_number_inside_a_sentence() -> None:
+    """Anchored at both ends: this reads a field, not prose that mentions a number.
+
+    "run it at 20 °C in 500 mL" parsing as a 20 °C *scale* is the failure the anchors prevent, and
+    `quantities.labelled_values` is the tool for the other job.
+    """
+    assert parse_quantity("run it at 20 C in 500 mL") is None
+
+
+@pytest.mark.parametrize(
+    "text", ["1,000 g", "1,500 mL", "12,345 mg", "-1,000 g", "1,500e3 g", "+1,500E-3 mol"]
+)
+def test_parse_quantity_refuses_a_comma_that_may_be_a_thousands_separator(text: str) -> None:
+    """A comma and exactly three digits is refused, not read as a decimal.
+
+    "1,500 g" read as 1.5 g scales a protocol a thousand times too small while its recorded basis
+    still says "1,500 g", so the caller's "write it as a number and a unit" refusal is the answer.
+    An exponent does not hide the group: "1,500e3" is 1.5e3 or 1.5e6.
+    """
+    assert parse_quantity(text) is None
+    assert has_ambiguous_comma(text)
+
+
+@pytest.mark.parametrize(
+    ("text", "value", "unit"),
+    [("0,500 g", 0.5, "g"), ("-0,250 mol", -0.25, "mol"), ("1,5 g", 1.5, "g")],
+)
+def test_parse_quantity_reads_a_comma_that_cannot_be_a_thousands_separator(
+    text: str, value: float, unit: str
+) -> None:
+    """No thousands group starts with 0 or has fewer than three digits: those are decimals."""
+    parsed = parse_quantity(text)
+    assert parsed is not None
+    assert parsed.value == pytest.approx(value)
+    assert parsed.unit.symbol == unit
+    assert not has_ambiguous_comma(text)

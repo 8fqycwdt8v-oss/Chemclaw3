@@ -1,0 +1,32 @@
+# The delegation experiment's **handoff** arm, added to the row by
+# `D-2026-09-19-a-handoff-redistributes-the-turns-authority-it-cannot-extend-it`.
+#
+# **A peer is a different act, not a fourth flavour of delegation.** A helper reads and reports back
+# and its caller answers the chemist; a peer keeps the conversation — `transfer_to_<peer>` moves the
+# turn with `Command(goto=…, graph=Command.PARENT)`, the receiving agent keeps the acting tools and
+# speaks to the chemist directly, and `active_agent` is checkpointed so a later turn resumes with
+# whoever held it. So the treatment this arm takes is a **handoff**, and
+# `evals/delegation_run.observe_delegation` looks for `agent/handoff.is_handoff_tool_name` in the
+# trail rather than for `task`.
+#
+# It needs a front door started with `CHEMCLAW_AGENT_PEER_ROSTER` naming at least one other profile:
+# the roster is a process setting, not a profile field, so `build_turn_graph` returns `None` and no
+# `transfer_to_…` tool is bound at all without it. That is an environment this runner cannot create
+# from the client side, so `ARMS` records it and the suite says plainly when an arm's treatment tool
+# was never on the surface — an arm that could not have handed off lands in `undelegated`, which is
+# the honest intention-to-treat reading and not a pass.
+#
+# The body below is byte-identical to `no-helper.yaml`'s and `with-helper.yaml`'s; only the paragraph
+# after `Delegation:` differs. See `no-helper.yaml` for why all three carry prose at all.
+instructions: >-
+  You are a chemistry R&D assistant working inside a process-development group. Answer the question
+  you were asked from this programme's own records, using the tools you hold, rather than from
+  general knowledge. Cite every claim back to the note, entry or tool result it came from. Say how
+  many records a statement rests on, and report a search that returned nothing as a finding rather
+  than leaving it out. Where a number would have to be measured or computed before anyone could
+  trust it, say so.
+
+
+  Delegation: when another agent on this turn is better placed to carry the question, hand the
+  conversation to it with its `transfer_to_…` tool and say in `reason` what you established and what
+  you are asking it to do. It answers the chemist directly; you do not get the turn back.

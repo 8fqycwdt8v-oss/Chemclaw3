@@ -51,17 +51,36 @@ from tests.fakes_langgraph import ScriptedChatModel
 # The channels this repository adds on top of upstream's. Derived rather than listed, so a new field
 # is covered the day it is declared — the failure above was a field nobody remembered.
 _UPSTREAM = set(get_type_hints(PlanningState, include_extras=True))
-_PROBE_VALUE: dict[str, Any] = {"bool": True, "int": 7}
+_PROBE_VALUE: dict[str, Any] = {"bool": True, "int": 7, "str": "a-peer"}
 
 
 def _declared_channels() -> list[tuple[str, Any]]:
-    """`(name, probe value)` for every channel `ChemclawState` declares beyond upstream's."""
+    """`(name, probe value)` for every channel `ChemclawState` declares beyond upstream's.
+
+    **The probe has to match the field's type, and for a while the derivation could not say so.**
+    The `kind` test was `"bool" if "bool" in text else "int"`, so every non-bool field — of which
+    there was exactly one kind, `int` — probed with `7`. When `active_agent: str` arrived, it
+    probed with `7` too and *passed*: a channel's `update` does no type checking, so an int went
+    in and an int came back out and the equality held. The field was covered in the sense that the
+    loop visited it and in no other sense.
+
+    So the derivation reads the annotation's own type rather than falling through to a default,
+    and an unrecognised one raises here instead of being probed with something arbitrary — which
+    is what makes this file's promise ("a new field is covered the day it is declared") true of
+    the value as well as of the name.
+    """
     channels = []
     for name, annotation in get_type_hints(ChemclawState, include_extras=True).items():
         if name in _UPSTREAM:
             continue
         text = repr(annotation)
-        kind = "bool" if "bool" in text else "int"
+        kind = next((k for k in ("bool", "str", "int") if f"{k}," in text or f"[{k}]" in text), "")
+        if kind not in _PROBE_VALUE:
+            raise AssertionError(
+                f"{name!r} is annotated {text!r}, whose type this derivation does not recognise. "
+                "Add its probe value to `_PROBE_VALUE` and its name to the `kind` tuple — a field "
+                "probed with a value of the wrong type is visited rather than covered."
+            )
         channels.append((name, _PROBE_VALUE[kind]))
     return channels
 

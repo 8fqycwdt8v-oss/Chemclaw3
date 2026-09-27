@@ -14,7 +14,8 @@ naming convention — and it matters more, not less, now that neither tier has a
 
 from pydantic import BaseModel, Field, computed_field
 
-from chemclaw.agent.framing import defang, frame_untrusted
+from chemclaw.agent.framing import frame_untrusted
+from chemclaw.agent.tool_framing import defanged_payload
 from chemclaw.core.config import settings
 from chemclaw.core.tool_registry import tool
 from chemclaw.core.turn_signals import record_note_written
@@ -130,6 +131,43 @@ class ObservationRecall(BaseModel):
         return f"COMPLETE: every open observation is shown, best-supported first. {standing}"
 
 
+def _readable(observation: Observation) -> Observation:
+    """One observation with its statement framed and every other string in it neutralised.
+
+    **The whole row, not the two fields somebody classified, and the classification was wrong.**
+    This treated `statement` (framed) and `projects_seen` (defanged) and argued the rest away:
+    "`scope` and `evidence_note_ids` need no such treatment — both are built from validated note
+    ids". Measured against `memory/observations.Observation`, neither is: `scope` is a `str` the
+    miner composes from note *bodies*, `evidence_note_ids` is a `list[str]`, and `id` is minted from
+    them. Driven with a live closing delimiter in each, **three** reached the model unescaped — and
+    they ride *outside* the envelope, where a forged delimiter reads as the envelope closing and the
+    mined text that follows reads as this system speaking.
+
+    So the escape is the payload's rather than a field list's, for `agent/tool_framing.
+    defanged_payload`'s stated reason: a field added to that model next year is covered without this
+    line being remembered, and `origin`/`status` are `Literal`s with no delimiter to spell.
+
+    `statement` is the one field that gets an **envelope** instead, because it is the only one a
+    citation is made against — and it is framed from the *unescaped* original, since
+    `frame_untrusted` defangs its own content and would otherwise escape an already-escaped string.
+    Framed here rather than at the store, so what is persisted stays the plain statement.
+
+    Args:
+        observation: One open observation, as the store holds it.
+
+    Returns:
+        The same observation, safe to put in front of a model.
+    """
+    safe = defanged_payload(observation)
+    return safe.model_copy(
+        update={
+            "statement": frame_untrusted(
+                observation.statement, note_id=observation.id or "observation"
+            )
+        }
+    )
+
+
 @tool
 async def recall_observations(limit: int = 0) -> ObservationRecall:
     """Recall cross-project patterns the system has noticed but that no human has validated.
@@ -175,20 +213,5 @@ async def recall_observations(limit: int = 0) -> ObservationRecall:
         limit_applied=min(
             limit or settings.observation_max_results, settings.observation_max_results
         ),
-        observations=[
-            observation.model_copy(
-                update={
-                    "statement": frame_untrusted(
-                        observation.statement, note_id=observation.id or "observation"
-                    ),
-                    # `projects_seen` is the same corpus text one field over: it comes from
-                    # `OrdReaction.project`, an unconstrained ELN string, and rides outside the
-                    # envelope where a forged delimiter reads as the envelope closing. `scope` and
-                    # `evidence_note_ids` need no such treatment — both are built from validated
-                    # note ids — and `origin`/`status` are Literals.
-                    "projects_seen": [defang(project) for project in observation.projects_seen],
-                }
-            )
-            for observation in found
-        ],
+        observations=[_readable(observation) for observation in found],
     )

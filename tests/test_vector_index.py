@@ -144,6 +144,39 @@ def test_reindex_only_embeds_the_note_that_changed(
     assert hits and hits[0].note_id == "note-b"
 
 
+def test_a_note_rewritten_while_the_pass_reads_it_heals_on_the_next_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The race between parsing a note and hashing it has to resolve toward re-embedding.
+
+    The pass reads the tree twice — once to parse, once to hash — and a write can land between the
+    two. Parsed first, that stored the *old* body under the *new* digest, which every later pass
+    reads as unchanged: the dense and lexical legs served the pre-amendment text indefinitely.
+    Driven by landing the write immediately after the parse, which is the harmful interleaving.
+    """
+    _write_note(tmp_path, "note-a", "first note body")
+    index = InMemoryNoteIndex()
+    asyncio.run(reindex_notes(index, notes_dir=str(tmp_path)))
+
+    from chemclaw.kg.graph import load_notes as real_load
+
+    def _load_then_a_write_lands(directory: Path) -> object:
+        notes = real_load(directory)
+        _write_note(tmp_path, "note-a", "first note body, amended while the pass read it")
+        return notes
+
+    time.sleep(0.01)  # a distinct mtime on coarse filesystems
+    _write_note(tmp_path, "note-a", "first note body, edited")
+    monkeypatch.setattr(vector_index_module, "load_notes", _load_then_a_write_lands)
+    asyncio.run(reindex_notes(index, notes_dir=str(tmp_path)))
+    monkeypatch.setattr(vector_index_module, "load_notes", real_load)
+
+    assert asyncio.run(reindex_notes(index, notes_dir=str(tmp_path))) == 1, (
+        "the amendment that landed mid-pass was stored under a digest that already matches it, so "
+        "no later pass will ever re-embed the note"
+    )
+
+
 def test_reindex_full_re_embeds_every_note_regardless_of_fingerprint(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -34,8 +34,22 @@ def set_current_session_id(session_id: str | None) -> object:
 
 
 def get_current_session_id() -> str | None:
-    """The session id of the turn in flight, or None when there is no session (non-service)."""
-    return _current_session_id.get()
+    """The session id of the turn in flight, or None when there is no session (non-service).
+
+    Blank is absent, for the reason `core/identity_context.get_current_actor` states once and this
+    module shares: a reader that accepts `""` and not `"   "` fails closed on one spelling of
+    nothing and open on the other. Measured, the open one reaches further here than anywhere else —
+    `agent/plan_gate.enforce_plan_approval` asks `if not session_id`, so a whitespace id proceeds
+    *past* the early return and is then used as the `plan_approvals` lookup key, which is a session
+    whose plan can never be the one a chemist approved. Stripped rather than merely rejected for
+    that function's second reason: two spellings of one session must not be two rows.
+
+    Kept as an expression rather than a shared helper on purpose. This module's docstring promises
+    it "imports nothing but `contextvars`" — it is read from `core.logging`'s own filter, on the
+    logging hot path — and importing a predicate from a sibling to save six characters would spend
+    that guarantee.
+    """
+    return (_current_session_id.get() or "").strip() or None
 
 
 def reset_current_session_id(token: object) -> None:

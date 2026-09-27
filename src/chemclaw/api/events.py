@@ -50,6 +50,23 @@ class PlanEvent(BaseModel):
     Always a non-empty string here, and that is a property of the emitter rather than of this model
     — `plan_identity` returns `None` for an empty plan (hashing "nothing" yields a constant every
     session in every deployment also proposes), and `graph_stream` does not emit an empty plan.
+
+    **`scope` is here for the same reason, one decision later.** A plan approval authorizes the
+    tools its steps declared and nothing else
+    (`D-2026-09-12-an-approval-that-names-no-tool-authorizes-every-tool`), so the scope is the half
+    of what a person is deciding about that the steps do not say — that ADR puts it in as many
+    words: *"a surface that rendered the steps alone would be collecting a yes to something it had
+    not displayed"*. It was added to `GET /sessions/{id}/plan` only, and D-167 had already put
+    `plan_hash` on the stream precisely so that a client would not need that fetch — so the route
+    carrying the scope is the one a card rendered from the stream never calls, and the chemist was
+    shown the steps of a plan whose authorization they could not see. Not a gate bypass: the scope
+    is part of the plan identity, so a widening rewrite changes `plan_hash` and the decision 409s.
+    It is non-disclosure, which is the failure the ADR names.
+
+    Both fields are the *same* read of the *same* steps as the fetch route's — `plan_identity` and
+    `plan_scope.declared_scope` over `_plan_steps(update)`, the two functions
+    `routes/plan._read_plan` calls — because a stream and a route disagreeing about what a plan
+    authorizes is a surface that cannot be believed either way.
     """
 
     type: Literal["plan"] = "plan"
@@ -58,6 +75,11 @@ class PlanEvent(BaseModel):
     # string means "this event predates the hash", which a client must treat as "fetch it" rather
     # than as a hash — never as one that will match.
     plan_hash: str = ""
+    # Defaulted for the same reason, and an empty list is *ambiguous* in a way the empty hash is
+    # not: a plan whose every step declares nothing genuinely authorizes nothing, and an event from
+    # before this field carries the same `[]`. A surface that must tell those apart reads
+    # `plan_hash` — an event carrying a hash and no scope is a plan that declared nothing.
+    scope: list[str] = []
 
 
 # Which agent raised an event, when it was not the one the chemist is talking to (M9).
@@ -306,7 +328,8 @@ class AnswerEvent(BaseModel):
     confidence did not run, so the turn is routed to review with an explicit reason appended to
     `unsupported_claims` rather than a bare flag beside a high `confidence`.
 
-    With every knob off — the default — the scored fields stay `None`/`False`/empty and
+    With every knob off — which is no longer the default, since `answer_shape_gate_enabled` ships
+    on — the scored fields stay `None`/`False`/empty and
     `verified_by` stays `None`. **What says the checks did not run is `checks_run`, and nothing
     said it before**: those defaults are what a check *finds*, so an answer the shape gate scanned
     and cleared serialized identically to one nothing looked at (measured: the same bytes,
@@ -316,7 +339,11 @@ class AnswerEvent(BaseModel):
 
     type: Literal["answer"] = "answer"
     text: str
-    # Which honesty checks ran on this answer — `[]` means none did, which is the shipped default.
+    # Which honesty checks ran on this answer — `[]` means none did. **Not the shipped default any
+    # more**: `answer_shape_gate_enabled` ships on, and `score_answer` appends `answer-shape`
+    # whenever it does, so a shipped deployment carries one entry on every answer and `[]` marks
+    # the deployment that turned the gate off. A surface built on the old reading has the common
+    # case and the exception the wrong way round.
     # Additive and defaulted, like `ToolFailedEvent.reason` and for the same reason: this shape is
     # a contract two other repositories read (`Chemclaw3_ui`, `Chemclaw3_mock`), so a surface that
     # ignores it is unchanged and one that switches on it can be exhaustive.
@@ -469,6 +496,16 @@ class ToolResultEvent(BaseModel):
     has exactly one thing to check, and none of the three ever costs the turn its answer: storing a
     trace blob is a rendering, and no rendering is worth failing a turn over
     (`chemclaw.api.tool_results`).
+
+    **`result_cut` says the model was shown less than the tool returned**, and when it is set
+    `result_ref` addresses the *full* text rather than the model's cut
+    (`D-2026-09-27-a-cut-result-is-kept-for-the-chemist-not-the-model`). A result over the model's
+    share of `agent_max_tool_result_chars` is cut head-and-tail before the model reads it; the full
+    text is kept for the chemist, never offered back to the model. `preview`, `note_ids`, `numbers`
+    and `values` stay on what the model read, because they are what a grounding check asks about.
+    One case keeps `result_ref` on the cut: the full text was over `stream_max_result_bytes` (or
+    its write failed), and then the fetched text is the model's own, carrying the cut's notice
+    in-band — so it never reads as whole.
     """
 
     type: Literal["tool_result"] = "tool_result"
@@ -479,6 +516,7 @@ class ToolResultEvent(BaseModel):
     values: list[ResultValue] = Field(default_factory=list)
     result_ref: str = ""
     result_inline: str = ""
+    result_cut: bool = False
     agent: str = _AGENT_FIELD
 
 
@@ -589,6 +627,42 @@ class EvidenceSourceEvent(BaseModel):
     failed: bool = False
 
 
+class HandoffEvent(BaseModel):
+    """The conversation moved from one peer agent to another, and why.
+
+    **This event existed once, with nothing able to emit it, and that is the whole reason its
+    shape is argued here rather than assumed.** `D-2026-08-26-an-attribution-nothing-can-write-is-
+    not-an-attribution` deleted the machinery behind it; the member itself survived two more ADRs
+    on the argument that dropping a union member is a coordinated change across `Chemclaw3_ui`,
+    until `D-2026-09-07-an-event-nobody-emits-is-a-renderer-somebody-else-maintains` measured what
+    keeping it had cost — a renderer, four state modules and a UI type, all maintained for an event
+    that had never been sent. `tests/test_event_producers.py` is what stops the third occurrence,
+    and it is satisfied here by `api/graph_stream.py` constructing this class in the same commit
+    that declares it.
+
+    **What a surface should do with it is show a boundary, not a speaker.** The chemist is talking
+    to one system; the useful thing is that the answer after this point comes from an agent with a
+    different surface and a different brief, which is why `reason` is on the event. That text is
+    the handing model's own words, written to be read by the agent it hands to
+    (`agent/handoff.py`), so it is the one account of the decision that exists — the alternative,
+    inferring a reason from what the receiving agent then does, is a guess presented as a record.
+
+    **The two agent fields are named `from_agent`/`to_agent`, and the obvious `from`/`to` pair is
+    what they replaced after one measurement.** `from` is a Python keyword, so the field has to be
+    spelled `from_` and carry an alias — and `sse_frame` dumps with `model_dump_json()`, which does
+    **not** apply a serialization alias unless it is passed `by_alias=True`. Driven: the frame went
+    out carrying `"from_"`, the name the alias existed to hide, so every surface would have parsed
+    the underscore while this file claimed otherwise. Adding `by_alias=True` would fix this event
+    by changing how *sixteen* others serialise, which is a contract change three repositories read.
+    A field name that needs no alias is the smaller answer, and it cannot come apart.
+    """
+
+    type: Literal["handoff"] = "handoff"
+    from_agent: str
+    to_agent: str
+    reason: str
+
+
 # The closed set of events a turn can emit. New surfaces switch on `type`; adding an event is a new
 # class here plus one branch in the runner and the UI — never a bespoke per-surface stream.
 Event = (
@@ -608,6 +682,7 @@ Event = (
     | ToolFailedEvent
     | ToolResultEvent
     | EvidenceSourceEvent
+    | HandoffEvent
     | ErrorEvent
 )
 

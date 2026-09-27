@@ -27,6 +27,7 @@ from chemclaw.core.metrics import METRICS
 from chemclaw.kg.git_writer import BatchingNoteWriter, GitNoteWriter
 from chemclaw.kg.note import Note
 from chemclaw.kg.record import count_notes_recorded, record_note
+from chemclaw.kg.render import render_note
 
 
 def _run(*args: str, cwd: Path | None = None) -> str:
@@ -59,6 +60,27 @@ def _note(index: int) -> Note:
         created_by="agent",
         body=f"Backfilled document {index}.",
     )
+
+
+def _commit_paths(clone: Path) -> list[str]:
+    """The files `HEAD` touched, which is the independent witness the metric is checked against.
+
+    A count alone cannot tell "counted the right notes" from "counted a number that happens to
+    match", and git is the only party here that has no opinion about what a note is.
+    """
+    listed = _run(
+        "git", "-C", str(clone), "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"
+    )
+    return sorted(line for line in listed.splitlines() if line.strip())
+
+
+def _note_body(name: str, body: str) -> str:
+    """A minimal valid note document, for a test that builds `NoteFile`s by hand.
+
+    Through `Note` and the real renderer rather than a hand-written string, so a schema change turns
+    these tests red at the write rather than at whatever reads them next.
+    """
+    return render_note(Note(id=name, type="playbook", created_by="agent", body=body))
 
 
 def _commits(clone: Path) -> int:
@@ -434,3 +456,119 @@ def test_a_flush_that_fails_after_a_complete_loop_fails_the_backfill(
 
     with pytest.raises(RuntimeError, match="git push rejected"):
         asyncio.run(module.backfill(documents, tags=[], dry_run=False))
+
+
+def test_a_batch_that_changed_some_of_its_notes_counts_only_those(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The middle of the range, which neither existing test reaches and both are satisfied by.
+
+    **The two tests above sit on the two ends.** One writes seven brand-new documents and asserts 7;
+    the other re-runs over an unchanged corpus and asserts 0. `len(batch) if outcome.written else 0`
+    is correct at both, so a *partially* identical batch — the ordinary shape of a re-run backfill
+    that picked up one new document — was covered by neither. Measured against a real bare remote at
+    the shipped `backfill_commit_batch_size` of 50: 49 byte-identical notes plus one new one
+    committed
+    once, touched one file, and moved `chemclaw_notes_recorded_total` by **50**.
+
+    That is the same magnitude as the undercount `D-2026-09-14` fixed, in the other direction, and
+    it
+    fails that ADR's own guard sentence: a count that ignores what the tree already held turns
+    "notes
+    recorded" into "notes offered".
+
+    Asserted against `git diff-tree --name-only` as well as against the metric, because the metric
+    alone cannot distinguish "counted the right number" from "counted a number that happens to
+    match".
+    """
+    clone = _notes_repo(tmp_path)
+    monkeypatch.setattr(settings, "note_repo_dir", str(clone))
+    monkeypatch.setattr(settings, "backfill_commit_batch_size", 4)
+    monkeypatch.setattr(
+        backfill_corpus,
+        "default_writer",
+        lambda: GitNoteWriter(repo_dir=str(clone), base_branch="main", remote="origin"),
+    )
+    documents = tmp_path / "documents"
+    documents.mkdir()
+    for index in range(3):
+        (documents / f"sop-{index}.md").write_text(f"Standard operating procedure {index}.\n")
+
+    first, _ = asyncio.run(backfill_corpus.backfill(documents, tags=[], dry_run=False))
+    assert first == 3, "the seeding pass did not write what this test then re-runs over"
+
+    # One new document beside three the corpus already holds byte-identically.
+    (documents / "sop-new.md").write_text("A procedure nobody has filed yet.\n")
+    before_commits = _commits(clone)
+    before_notes = METRICS.value("chemclaw_notes_recorded_total")
+
+    written, skipped = asyncio.run(backfill_corpus.backfill(documents, tags=[], dry_run=False))
+
+    assert (written, skipped) == (4, 0), "the CLI still offers every document to the writer"
+    assert _commits(clone) - before_commits == 1, "the four notes must still cost one commit"
+    touched = _commit_paths(clone)
+    assert len(touched) == 1, (
+        f"the commit should carry exactly the one note whose bytes changed, and carried {touched}"
+    )
+    assert METRICS.value("chemclaw_notes_recorded_total") - before_notes == 1, (
+        "the counter moved by the batch size rather than by the notes that reached the graph — the "
+        "overcount this test exists for"
+    )
+
+
+def test_a_dependency_and_a_retirement_in_a_batch_are_not_counted_as_notes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The row behind this believed they could not be separated, and they can.
+
+    It said the changed-file count "counts *dependency* notes and retirement rewrites too, which is
+    a third meaning of the field". `record._build_write` tags a dependency `overwrite=False` and a
+    retirement `amendment=True`, and emits exactly one subject per write, so the partition is a
+    filter on two flags.
+
+    **This test builds one subject, one dependency and one retirement — three files, all three newly
+    changed — and requires the count to be 1.** An earlier version of this docstring described a
+    scenario the body does not build (four subjects, a changed-file count of two), and a review
+    caught that none of those numbers corresponded to what runs. Three files is the minimal shape
+    that separates the flags from the file count: git sees three, the flags see one subject, and the
+    honest answer is the subject.
+
+    Driven on the writer rather than through the CLI, because the CLI has no way to ask for a
+    dependency — which is also why this is the test that pins the distinction rather than a comment.
+    """
+    from chemclaw.kg.record import NoteFile, NoteWrite
+
+    clone = _notes_repo(tmp_path)
+    inner = GitNoteWriter(repo_dir=str(clone), base_branch="main", remote="origin")
+
+    def note(name: str, body: str) -> NoteFile:
+        return NoteFile(path=f"knowledge/playbook/{name}.md", content=_note_body(name, body))
+
+    # One subject that is genuinely new, plus a dependency and a retirement that also change bytes.
+    subject = note("mixed-subject", "the new one")
+    dependency = NoteFile(
+        path="knowledge/compound/compound-abcdef012345.md",
+        content=_note_body("compound-abcdef012345", "a dependency"),
+        overwrite=False,
+    )
+    retirement = note("mixed-retired", "a rewrite of somebody else")
+    retirement = NoteFile(
+        path=retirement.path, content=retirement.content, overwrite=True, amendment=True
+    )
+    before = METRICS.value("chemclaw_notes_recorded_total")
+
+    outcome = asyncio.run(
+        inner.write(
+            NoteWrite(
+                files=[subject, dependency, retirement],
+                message="Add 1 backfilled note(s)",
+            )
+        )
+    )
+    count_notes_recorded(outcome)
+
+    assert len(_commit_paths(clone)) == 3, "all three files should be in the commit"
+    assert outcome.notes == 1, (
+        f"only the subject is a note reaching the graph; the outcome reported {outcome.notes}"
+    )
+    assert METRICS.value("chemclaw_notes_recorded_total") - before == 1

@@ -1418,7 +1418,25 @@ def _thermochemistry(
         PropertyFact(property="imaginary_frequency", value=float(frequency), unit="cm^-1")
         for frequency in (payload.get("imaginary_frequencies_cm") or [])[:1]
     ]
-    return subject, conditions, level, {"properties": facts, "points": points}
+    # **Why the `ir_intensity` series above is short, published rather than left to be inferred.**
+    # The intensities are dropped from the points when they could not be paired with the modes, so a
+    # consumer of the result store otherwise sees wavenumbers with no intensities and no reason —
+    # and "this calculation produced no spectrum" is exactly the open-ended emitted assertion
+    # `FlagFact` exists for, raised by some results of this kind and by most not at all.
+    unpaired = payload.get("spectrum_unavailable")
+    flags = (
+        [
+            FlagFact(
+                ordinal=0,
+                flag="spectrum_unavailable",
+                severity="warning",
+                message=str(unpaired),
+            )
+        ]
+        if unpaired
+        else []
+    )
+    return subject, conditions, level, {"properties": facts, "points": points, "flags": flags}
 
 
 def _electronic_properties(

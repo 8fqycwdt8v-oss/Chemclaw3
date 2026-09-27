@@ -103,33 +103,61 @@ overridable as `CHEMCLAW_<FIELD>`); this runbook covers the four recurring admin
   matching no field is never seen, let alone rejected — and a ConfigMap is exactly how config
   arrives in-cluster, which is the case this entry exists for. `deploy/README.md` carries the same
   correction with the mechanism spelled out.
-- **`CHEMCLAW_NOTE_REPO_DIR` must be set on any host that submits notes — the default is always
+- **`CHEMCLAW_NOTE_REPO_DIR` must be set on any host that records notes — the default is always
   wrong in a deployment.** It ships as `.` (a dev convenience), which resolves to the process CWD.
-  Every submission creates `note/<id>` in that clone and force-pushes it to the clone's origin, so
-  pointing it at the checkout the service itself runs from would publish agent-authored notes into
-  the source repository — `_require_dedicated_checkout` refuses before any git command runs, with
-  `note_repo_dir '.' resolves to <path> — the checkout this process is running from`. That error is
-  the guard doing its job, not a broken deployment: point the variable at a **dedicated, writable,
-  non-shallow clone** of the knowledge repo, used by nothing else (`--force-with-lease` needs real
-  history, and so does the worktree each submission branches from). The Helm chart already supplies one —
-  `knowledge.noteRepoPath`, default `/var/lib/chemclaw/note-repo`, provisioned by
-  `deploy/knowledge-sync.sh`. It is also the tree the retriever serves from, because it has to be:
-  `settings.knowledge_path` is `note_repo_dir` joined with `knowledge_dir` and there is no second
-  resolution, so the sync publishes into that subdirectory (taking the submitter's checkout lock
-  while it does) rather than to a path of its own. Since D-2026-08-05 that working tree is a
-  *reader* surface only: a submission happens in a private worktree under `.git/` and never
-  switches it, and the sync is the one thing that writes it. The *shallow* replica at
-  `knowledge.sync.checkoutPath` is what it publishes from, never what anything reads.
-  Leaving it unset outside Helm is the quieter failure: `knowledge-sync.sh` logs
-  `CHEMCLAW_NOTE_REPO_DIR unset — no submitter clone provisioned` and skips the clone, so the
-  first note submission is the thing that discovers it.
+  A note write commits **straight onto the base branch** of the clone it is handed and pushes that
+  branch to the clone's remote (`kg/git_writer.py`) — there is no `note/<id>` branch, no force-push
+  and no review step since `D-2026-09-05-the-gate-follows-behaviour-not-knowledge`. Pointed at the
+  checkout the service itself runs from, that would commit into the running application's source
+  tree and push to the source repository, so `_require_dedicated_checkout` refuses before any git
+  command runs, with `note_repo_dir '.' resolves to <path> — the checkout this process is running
+  from`. That error is the guard doing its job, not a broken deployment. What the directory has to
+  be, each item driven against `GitNoteWriter` rather than recalled:
+  1. **A clone with a real `.git` directory, used by nothing else.** A linked worktree (`.git` is a
+     file) is refused by name, because the cross-process write lock is a file under `.git/`.
+  2. **Checked out on `CHEMCLAW_NOTE_BASE_BRANCH`** (default `main`). Notes are committed onto
+     that branch, and a checkout on any other is refused by name (`the notes checkout at … is on
+     'master', not the base branch 'main'`) — `git init` still names the branch `master` on many
+     installs.
+  3. **A remote named `CHEMCLAW_GIT_REMOTE`** (default `origin`) **that already carries the base
+     branch.** Every write opens with `git fetch <remote> <base>` and `merge --ff-only`, and ends
+     with `git push <remote> HEAD:refs/heads/<base>`. A bare `git init` fails here twice over — no
+     remote, and an empty remote has no `main` to fetch — and both surface as a *retryable*
+     `GitRemoteError`, so the write is retried before it is dropped. A local bare repository is
+     enough for a dev or mock stack: `git init --bare -b main /srv/notes-origin.git`, then in the
+     clone `git remote add origin /srv/notes-origin.git && git push -u origin main`. A local commit
+     of its own is not required once the remote has one.
+  4. **No committer identity is needed from the clone.** The writer hands every git child
+     `CHEMCLAW_NOTE_COMMITTER_NAME`/`CHEMCLAW_NOTE_COMMITTER_EMAIL` as `GIT_AUTHOR_*` and
+     `GIT_COMMITTER_*` (defaults `ChemClaw` / `chemclaw-notes@chemclaw.invalid`), which outrank any
+     `user.*` config. Before that it passed none, and in a container whose hostname has no domain
+     every commit failed `Author identity unknown`, as a non-retryable `GitWriteError`. Set a real
+     address only if the notes remote's forge refuses the default.
+  5. **The existing `knowledge/` tree.** Readers resolve `settings.knowledge_path`, which is
+     `note_repo_dir` joined with `knowledge_dir` and nothing else, so this clone *is* the graph every
+     reader scans: an empty clone serves an empty graph, with no error anywhere.
+
+  A shallow clone is not refused — a note lands in a `--depth 1` clone — but the chart clones full
+  history and the rebase that replays an unpushed note has not been driven on a shallow one.
+
+  The Helm chart supplies items 1, 2, 3 and 5, and the writer item 4: `deploy/knowledge-sync.sh checkout` clones
+  `knowledge.sync.repoUrl` on the base branch into `knowledge.noteRepoPath` (default
+  `/var/lib/chemclaw/note-repo`), and the sync sidecar keeps it current with the writer's own
+  `fetch` + `merge --ff-only` under the writer's lock rather than a reset, so a note whose push
+  failed stays committed, stays readable, and is replayed by the next write. The *shallow* replica
+  at `knowledge.sync.checkoutPath` is what a pod that records nothing publishes from, never what
+  the writer commits into. Leaving the variable unset outside Helm is the quieter failure:
+  `knowledge-sync.sh` logs `CHEMCLAW_NOTE_REPO_DIR unset — no writer clone provisioned` and skips
+  the clone, so the first note write is the thing that discovers it. **Nothing reports a broken
+  notes clone before that write does** — `/readyz` gates on Postgres and counts connectors, and
+  does not look at the note repository at all.
 - **Note writing is serialized per host.** Keep the background worker at one replica (see
   `deploy/helm/chemclaw/values.yaml`); the writer's checkout lock is host-local, and the
   cross-pod half is the Postgres advisory lock, which is taken only under
   `CHEMCLAW_SESSION_STORE=postgres` (the chart sets it). Two writers on one `note_repo_dir` share
   one working tree and one index, so the second stages its files into the first's in-flight commit. On a filesystem where
-  `flock` is not honoured (some NFS/ReadWriteMany setups) that assumption fails, and the blast
-  radius is a live worktree deleted mid-submission rather than two interleaved branches.
+  `flock` is not honoured (some NFS/ReadWriteMany setups) that assumption fails, and nothing
+  serialises two writes on that one index at all.
 
 ## Talk to the agent from a terminal (testing)
 
@@ -209,8 +237,8 @@ reindex` fills `note_index`; the fingerprint tables are filled only as a side ef
 sync, so start `ElnSyncWorkflow` on `background-jobs` once. The note writer needs a *dedicated*
 clone — `bootstrap.sh` creates `.live/knowledge-repo` and `processes.sh` points
 `CHEMCLAW_NOTE_REPO_DIR` at it, because `note_repo_dir` defaults to the working checkout and a write
-commits into the tree it is handed and pushes it to that clone's origin, so the writer refuses it
-(G4) and the whole knowledge-contribution half of a run silently disappears.
+commits onto the base branch of the tree it is handed and pushes that branch to its origin, so the
+writer refuses it (G4) and the whole knowledge-contribution half of a run silently disappears.
 
 **`make live-storm` is the third stage, and it needs no model at all.** The shipped default already
 points the lane at the mock (`CHEMCLAW_LLM_BASE_URL=http://127.0.0.1:8820/v1`,
@@ -311,6 +339,16 @@ must match `CHEMCLAW_ECFP_BITS` / `CHEMCLAW_DRFP_BITS` (see `core/config/fingerp
 Applied migrations are recorded in the `schema_migrations` ledger with a checksum (D-034), so
 re-running is safe and an edited already-applied file is flagged as drift rather than silently
 skipped.
+
+**A `migrate.server_warning` line is a migration asking for a person.** The one that emits it
+today is `108`: on a database an older image wrote a `NaN` or `±inf` into, it adds its finiteness
+check `NOT VALID` rather than abort the run. New writes are refused either way, but the old rows
+still reach a surrogate through `observations_for`. Confirm with `SELECT convalidated FROM
+pg_constraint WHERE conname = 'experiment_arm_results_value_finite'` (`false` means the rows are
+still there). Inspect them with `SELECT * FROM experiment_arm_results WHERE value IN
+('NaN'::float8, 'Infinity'::float8, '-Infinity'::float8)` and, once they are dealt with, run
+`ALTER TABLE experiment_arm_results VALIDATE CONSTRAINT experiment_arm_results_value_finite` by
+hand.
 
 **Always follow `make db-migrate` with `make db-grants`** (the Helm hook Job runs both, in that
 order, so this only concerns migrating by hand). The grants are *not* in the tracked migration set
@@ -515,6 +553,23 @@ override a shipped one), `CHEMCLAW_CONNECTORS_ENABLED`, `CHEMCLAW_CONNECTOR_URLS
 (`endpoint.request_timeout`, `endpoint.auth`); the `bearer` mode names an env var, so no credential is
 ever written into a bundle.
 
+**What a name collision on that path does and does not replace.** The first directory wins the name
+outright and the loser's manifest is not merged, not warned about and not logged — so the winning
+manifest is the whole of the **tool surface**, which is what `CHEMCLAW_CONNECTOR_URLS` being keyed by
+that name already forces. It is *not* the whole of the bundle: a bundle's `skills/` and `profiles/`
+directories are read from **every** directory carrying its name, winner first
+(`connectors/registry._bundle_content_dirs`). That is deliberate and was a defect until it was.
+`Chemclaw3-mcp` ports this repository's `safety` bundle under the same name and declares no `skills:`
+— correctly, because a `SKILL.md` is architecture layer 3 *here* and that fleet has no equivalent
+seam — and in the wiring order that repository's own README and its integration guide publish (a
+file in that checkout, so not linked from here), its manifest wins. Deriving the skills directory from the winner alone therefore removed
+`connectors/safety/skills/safety-screening/` silently: the judgment about *why an empty result is
+never "safe"*, gone, with the screen still answering. **You do not need `CHEMCLAW_SKILLS_DIR` to get
+it back**, and that is the point of fixing it in the registry rather than documenting a workaround —
+that variable was the only remedy and it was named in no wiring document in either repository.
+`tests/test_sibling_manifest_agreement.py` now compares every bundle-level manifest key between the
+two trees, so the next such divergence is caught or written down with what makes it harmless.
+
 **Troubleshooting.** Each enabled connector is probed as one of five states: `healthy`,
 `unreachable` (the health route did not answer), `unpolled` (Temporal answered and nothing polls the
 bundle's `connector-<name>` queue — a bundle that owns durable work and whose worker fleet is at
@@ -542,7 +597,20 @@ which this release **declares but does not run**: all three are served by
 its bearer (`CHEMCLAW_CHEM_TOKEN`, `CHEMCLAW_SAFETY_TOKEN`, `CHEMCLAW_RXNPREDICT_TOKEN`) provided,
 or every call to them is refused. The
 physics behind `calc` is served there too — `CHEMCLAW_CALC_SERVER_URL` and `CHEMCLAW_CALC_TOKEN` —
-even though the `calc` bundle's own tools, cache and durable jobs stay in this release.
+even though the `calc` bundle's own tools, cache and durable jobs stay in this release. **And five more this release declares, does not run, and
+does not bind**: `props` (solvent and pure-component properties), `thermalsafety` (runaway and
+thermal-hazard arithmetic from measured calorimetry), `kinetics` (isothermal rate and ideal-reactor
+arithmetic), `unitops` (scale-up and unit-operation sizing) and `suitability` (USP <621>
+chromatographic system suitability). These declare `default_enabled: false`, so an empty
+`CHEMCLAW_CONNECTORS_ENABLED` binds none of them and the chart ships all five at `enabled: false`
+(`D-2026-09-20-declaring-a-capability-and-binding-it-are-different-decisions`). Their manifests are
+here anyway because the declaration validators resolve tool names through them, which lets the
+judgment beside each one name the tools it is judgment about. Turning one on is the same three
+obligations as the three above — host, port, bearer (`CHEMCLAW_PROPS_TOKEN`,
+`CHEMCLAW_THERMALSAFETY_TOKEN`, `CHEMCLAW_KINETICS_TOKEN`, `CHEMCLAW_UNITOPS_TOKEN`,
+`CHEMCLAW_SUITABILITY_TOKEN`) — plus a fourth that the other three do not have: it costs prefix on
+**every** model call, not only on the calls that use it, so enable the ones a site's chemists
+actually ask for rather than the set.
 
 **`chem` is declared here and served elsewhere.** Its capability is `Chemclaw3-mcp`'s
 `servers/chem`, so this release renders no Deployment and no Service for it and dials the address
@@ -1303,6 +1371,35 @@ gauge is 0 by default.
 `chemclaw_connector_unhealthy{connector}` names which; the data dashboard has it. Then
 `ChemclawTargetDown` for whether the pod is gone or merely unreachable.
 
+**This one reads the readiness sweep, which asks `GET /healthz` and nothing else** — so it is silent
+for a connector whose pod is up and whose `/mcp` is broken. Measured on 2026-09-19 against a stub
+answering `200` on `/healthz` and `500` on `/mcp`: `/readyz` said `{"status":"ready",
+"connectors_unhealthy":0}`, the startup line said `molfp=healthy`, and this alert's series held `0`
+while every tool call to that connector failed. `ChemclawConnectorsDegradingTurns` is the rule for
+that case, and a flat `chemclaw_connectors_unhealthy` is not evidence against it.
+
+#### ChemclawConnectorsDegradingTurns
+`warning`. A turn opened this connector and it did not come up, so the turn answered without its
+tools. `chemclaw_connectors_unreachable_total{connector}` is the series, one increment per connector
+per turn, and the pod's own `connector … is unreachable` WARNING carries the reason and the
+correlation id — it names the leaf now (an `HTTPStatusError` with the status code, a
+`MissingConnectorCredential` with the variable that is unset), where it used to print the enclosing
+`ExceptionGroup` and read as a network fault whatever had happened.
+
+Three causes worth separating, because only the first is what `ChemclawConnectorsUnhealthy` would
+also catch:
+
+1. **the pod is gone or refusing connections** — `ChemclawTargetDown` and
+   `ChemclawConnectorsUnhealthy` fire beside this one;
+2. **the pod is up and `/mcp` is broken** — a 500, a garbage body, an MCP handshake that never
+   completes. The readiness sweep calls it healthy, so this alert is the *only* one that fires;
+3. **the bearer token is missing** — `CHEMCLAW_<NAME>_MCP_TOKEN` unset or empty for a connector
+   whose manifest declares `auth: {mode: bearer}`. Nothing about the pod is wrong; the WARNING names
+   the variable.
+
+`chemclaw_tool_calls_total{tool,outcome="error"}` is the other half of the same picture, for a
+connector that *does* come up and then fails its calls (§(x-c) `chemclaw.turns`).
+
 #### ChemclawSubsystemUnavailable
 `warning`. Requests are being shed with 503 because a dependency did not answer — the durable broker
 or the document index. The `shedding` log line on the same pod names the method, the path and the
@@ -1385,9 +1482,10 @@ diagnoses below have no way to name an actor without it:
 
 Three things it can mean, in the order worth checking. **A real runaway** — read
 `chemclaw_tokens_total` and the `turn_costs` rows for that actor; the per-turn ceiling
-(`agent_max_turn_billed_tokens`) ships at 0, so nothing bounds a single turn and one is enough to
-do this. **A cap set below real traffic** — if several unrelated principals cross in the same
-window, the cap is the outlier, not them. **A window that is too short for the work** —
+(`agent_max_turn_billed_tokens`) ships as a *runaway backstop*, above what the loop cap and the
+context budget already authorise, so it does not bound a turn doing ordinary heavy work — one such
+turn is enough to do this. **A cap set below real traffic** — if several unrelated principals
+cross in the same window, the cap is the outlier, not them. **A window that is too short for the work** —
 `budget_window_hours` is rolling and anchored at each principal's first turn, so a user who does a
 day's work in an hour waits out the remainder.
 
@@ -1509,8 +1607,61 @@ timeout.
 
 #### ChemclawTurnsAnsweringEmpty
 `warning`, and the quietest bad outcome in the system: the turn succeeded and produced nothing to
-read. No error counter moves. Usually a model that emitted only tool calls, or a middleware that
-short-circuited after the last one; `make explain <session>` reconstructs the turn.
+read, **and nothing explains it** — a turn stopped by either cap is excluded from the counter, so
+`ChemclawTurnsHittingACap` is the rule for that and this one is not. Usually a model that emitted
+only tool calls, or a middleware that short-circuited after the last one; `make explain <session>`
+reconstructs the turn.
+
+This entry said "No error counter moves" and that was measured false on 2026-09-19: a spend-capped
+turn with no prose booked `chemclaw_turn_empty_answers_total` *as well as*
+`chemclaw_turn_spend_caps_total`, and the chemist got `spend_cap_reached` (`retryable=false`)
+followed immediately by `empty_answer` (`retryable=true`) about the same silence. So this rule fired
+for a turn whose cause was named one event earlier, while the sentence above told the operator no
+error counter had moved. `api/runner._empty_answer_event` steps aside for a cap now, which is what
+makes the sentence true again rather than only better worded.
+
+#### ChemclawToolCallsFailing
+`warning`. Most calls to one tool are failing, and turns are still answering without whatever it
+would have contributed — so the transcript of a degraded answer looks like any other, which is why
+this is a rule and not only a panel. The `tool` label names it;
+`sum by (tool, outcome) (rate(chemclaw_tool_calls_total[15m]))` is the breakdown.
+
+`outcome="error"` is a raised exception **or** a connector answering `isError=True`
+(`agent/audit.py` records both as `error`, which is the fix for a returned failure being written as
+`ok`). It is never a governance refusal — that is `outcome="refused"` and
+`chemclaw_tool_refusals_total{reason}`, and a dry run or an unapproved plan moving those is the
+control working. So this rule is about faults, and the threshold is
+`monitoring.alerts.toolErrorRatio` rather than anything near zero because a tool legitimately
+refuses bad input by raising.
+
+For a connector tool, read `ChemclawConnectorsDegradingTurns` beside it: that one is a connector
+that never came up, this one is a connector that came up and fails its calls, and only this one can
+name the tool. An in-process tool points at this image instead.
+
+#### ChemclawTurnsHittingACap
+`warning`. A turn was cut short with work still open. **Not a silent failure** — the chemist was told
+in the same stream, as `spend_cap_reached` or `loop_cap_reached` — so the question this alert asks is
+whether the ceiling is right, not whether something broke.
+
+`sum by (outcome) (increase(chemclaw_turns_finished_total{outcome=~"spend_capped|loop_capped"}[1h]))`
+says which cap and how often. The two have different remedies:
+
+| `outcome` | the ceiling | the counter that isolates it |
+| --- | --- | --- |
+| `spend_capped` | `CHEMCLAW_AGENT_MAX_TURN_BILLED_TOKENS` | `chemclaw_turn_spend_caps_total` |
+| `loop_capped` | `CHEMCLAW_HARNESS_MAX_LOOP_ITERATIONS` | `chemclaw_turn_loop_caps_total` |
+
+The judgement is the one `deploy/helm/chemclaw/values.yaml` states beside the spend setting: if it
+moves on turns that were doing real work, the number is too low; if it moves on runaway ones, the
+guard is working and the request is what to look at. `make explain <session>` reconstructs the turn,
+and the pod's `the turn for session … hit its N billed-token cap after M tokens` WARNING carries both
+numbers. The budget is a **request**-spend bound rather than a thread bound — see
+`CHEMCLAW_AGENT_CONTEXT_TOKEN_BUDGET` and §(viii) before raising it, because a turn whose prefix is
+already large spends most of its allowance re-sending context.
+
+Until 2026-09-19 neither cap counter had an alert or an entry here, while `values.yaml` told the
+operator that `chemclaw_turn_spend_caps_total` "is what says whether the number you chose is biting"
+— a chart pointing at a control that did not exist.
 
 ### chemclaw.durable — the expensive half
 
@@ -1528,6 +1679,31 @@ the next stop (§(x)).
 progress or has already given up. The Temporal event history for a workflow using it is the fastest
 route to the exception (§(x)); `chemclaw_jobs_finished_total{outcome="failed"}` says whether jobs are
 dying with it.
+
+**`ActivityResultTooLarge` is the one exception here that is not a bug in the activity's body**, and
+it is worth recognising by name because the alert could not fire on it at all until 2026-09-19. It
+means the activity produced a result bigger than `CHEMCLAW_ACTIVITY_RESULT_MAX_BYTES`, which ships at
+the broker's own 2 MiB `limit.blobSize.error`. The refusal is raised by `durable/interceptor.py`
+*before* the result is uploaded, on purpose: the upload happens in the worker's task handler, after
+every first-party report has already been written, so when the broker refused it instead —
+
+- over 2 MiB, under the 4 MiB gRPC frame: the workflow failed immediately, and
+- over the gRPC frame: the worker retried for ever against a `ResourceExhausted` it logs as a
+  **network** error, leaving the workflow `RUNNING` until its own timeout
+
+— the only evidence either way was a Rust `temporalio_sdk_core` WARN with no correlation id, our own
+line said `activity.finished … completed`, `chemclaw_activity_failures_total` stayed flat (so *this*
+alert could not fire) and `chemclaw_jobs_finished_total{outcome="failed"}` never moved either, which
+*suppressed* `ChemclawDurableJobsFailing` by holding its numerator at zero while its denominator
+rose. All of that is measured; the refusal is non-retryable, so it costs one attempt rather than
+`CHEMCLAW_ACTIVITY_MAX_ATTEMPTS`.
+
+The fix is almost always to bound the activity's output rather than to raise the ceiling — the
+message names the activity and the byte count. `collect_digests` is the one shipped activity whose
+result has no bound of its own (one entry per subscription, each carrying every matching note id and
+headline), so a large corpus with many subscriptions is where to look first. Raising the ceiling
+means raising the broker's `limit.blobSize.error` in the same change, or the refusal simply moves
+back to the invisible side.
 
 #### ChemclawPushBackDropped
 `warning`. A finished job's result never reached the session that asked for it. The job succeeded
@@ -1795,7 +1971,13 @@ promtool     # https://github.com/prometheus/prometheus/releases  (bundled in th
 ```
 
 Drop each on `PATH` and `make helm-validate` renders the chart, checks 31 and 35 manifests against
-the Kubernetes schemas, and runs `promtool check rules` over both monitoring arms. This is the same
+the Kubernetes schemas, and runs `promtool check rules` over both monitoring arms. It also reports
+`Skipped: 1` and `Skipped: 3` — the kinds kubeconform has no schema for, which
+`tests/test_deploy_chart.py::test_every_resource_kubeconform_skips_is_one_this_file_declared` now
+takes off the tool's own summary line per arm and matches against what that file declares. Read the
+count there rather than here: the first time this target was actually run, the file's pinned figure
+turned out to be a number of *kinds* compared against a number of *resources*, and the second
+skipped kind sat in a set whose stated reason was that it could not be skipped. This is the same
 lesson the "sandbox is not offline" note in `CLAUDE.md` records about Docker: a tool that is merely
 *absent* reads exactly like a tool that is unavailable, and believing the second costs coverage in
 silence. The chart half of this repository's gate is the half a unit test cannot reach.
@@ -1912,8 +2094,9 @@ nothing", not "the database matches this image".
 | 092 | a session taking its **first** turn during the rollback window comes back with `session_owners.updated_at` NULL, so it is missing from `GET /sessions` until it is spoken in again; the pre-092 image derives the order and never maintains the column | **no — this one is silent.** Re-run 092's backfill by hand to restore it |
 | 093 | `record_observation` stops writing: the restored image's `ON CONFLICT (property, input_hash)` no longer plans against a key that now carries `source`, so no observation is recorded and no calibration is scored | yes — `InvalidColumnReference` in the log |
 | 094 | every fingerprint and corpus-reaction write stops: the restored image's `ON CONFLICT (id)` / `(source, id)` no longer plans against a key that now carries `definition` | yes — `InvalidColumnReference` in the log |
+| 106 | nothing — a plain GIN index on `turn_costs.skills_loaded` is dropped, and no `ON CONFLICT` names it and no query plans through it. Re-run 105 if you want it back | n/a |
 
-058 is exempted and does not actually break: its `CHECK` widens.
+058 and 106 are exempted and do not actually break: 058's `CHECK` widens, and 106 drops a plain index rather than a unique one — `DROP INDEX` is flagged because the pattern cannot tell the two apart.
 
 **This table is checked against the register rather than maintained beside it.** It shipped covering
 five of `_REVIEWED_ROLLBACK_BREAKS`'s eight entries and neither of `_REVIEWED_SEMANTIC_BREAKS`'s two
@@ -1929,8 +2112,10 @@ the newer generation wrote in a shape the older one cannot read.
 
 ## (xii) A caller is being refused (429 / 413), or should be and is not
 
-Three bounds sit in front of the app, at three levels, because none of them can be enforced from
-inside it (D-2026-08-01-a-cheap-request-is-still-a-request).
+Several bounds sit in front of the app, at different levels, because most of them cannot be enforced
+from inside it (D-2026-08-01-a-cheap-request-is-still-a-request). A count is not written here: the
+one that was said three while four refusals were documented below it, and the per-actor turn cap
+made it five. Read the headings.
 
 **429, `Retry-After: N`.** The per-principal request budget. It is a token bucket:
 `CHEMCLAW_SERVICE_RATE_LIMIT_PER_MINUTE` is the sustained refill and `..._BURST` is what one caller
@@ -1946,6 +2131,34 @@ Two properties worth knowing before you tune it:
 - **The probes are exempt by construction.** `/healthz`, `/readyz` and `/metrics` do not depend on
   `require_principal`, which is the only place the budget is spent. If a probe ever starts getting
   429s, the gate has been moved somewhere it should not be.
+
+**429, `Retry-After: N`, on `POST /sessions/{id}/messages` only — and this is a *different* refusal
+with the same shape.** The per-actor concurrent-turn cap
+(`D-2026-09-19-a-pod-wide-cap-is-not-a-fair-one`). It answers when one principal already holds
+`CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS_PER_ACTOR` turns *in flight* on this process, so it is a
+count of simultaneous turns rather than a rate, and the request budget above can be wide open while
+this fires. **The counter is `chemclaw_turns_refused_actor_cap_total`**, not
+`chemclaw_requests_rate_limited_total` — reading the wrong one is the likeliest way to spend an
+afternoon here, because the header and the status are identical.
+
+- **Read it beside `chemclaw_turns_shed_total`.** Rising alone means the guard is doing its job:
+  one chemist wanted more than their share and everyone else was unaffected. Rising *together* means
+  the pod is genuinely full as well, and the per-actor cap is not why anyone is waiting.
+- **`chemclaw_turn_actor_capacity` reading 0 means the guard is off**, which is the code default.
+  A deployment that meant to enable it and did not looks exactly like one where nobody has hit the
+  cap, and that gauge is the only thing that tells the two apart from a scrape.
+- **It is inert under the shared dev principal.** With `CHEMCLAW_ENTRA_REQUIRED=false` every caller
+  is one oid, so "per actor" would mean "per pod" and one client would refuse everyone; the guard
+  skips itself rather than invert. A deployment fronting the API with a single service credential
+  for many humans has the same problem and no such escape — the cap has nothing to divide there.
+- **It is not in the access log's 429 population alone.** The refusal logs at INFO naming the
+  principal, above the durable claim and the admission permit, so a refused retry costs no permit,
+  no turn slot and no Postgres claim. `Retry-After` is a jittered *cadence* (built from
+  `CHEMCLAW_SERVICE_TURN_ADMISSION_TIMEOUT_SECONDS`), not an estimate of when the caller's own turn
+  will end — that is bounded by `CHEMCLAW_SERVICE_TURN_TIMEOUT_SECONDS` and can be minutes.
+- **A chemist reporting "it says my budget is exhausted" is a client-side misclassification**, not
+  this cap: `Chemclaw3_ui` renders a 429 *without* `Retry-After` as a terminal `budget_exhausted`.
+  If you see that, something between the pod and the browser is stripping the header.
 
 **413.** The request body exceeded `CHEMCLAW_SERVICE_MAX_REQUEST_BYTES`, refused before anything
 read it. If a chemist reports that an attachment *at* the documented size is rejected, check that

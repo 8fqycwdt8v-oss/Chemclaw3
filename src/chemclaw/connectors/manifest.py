@@ -639,6 +639,31 @@ class ConnectorManifest(BaseModel):
     # minted yet is a declaration, not an error.
     note_types: list[str] = Field(default_factory=list)
     relations: list[str] = Field(default_factory=list)
+    # Whether an empty `connectors_enabled` turns this bundle on. True for every bundle that
+    # predates this field, so "discovery is enablement until you say otherwise" is unchanged for
+    # all of them.
+    #
+    # **Why a bundle would ever declare `false`.** A manifest is load-bearing for four validators
+    # whether or not a turn binds it: `chemclaw_agent.available_tool_names` builds the set
+    # `skill-validate`, `prose-validate`, `template-validate` and `connector-validate` check
+    # against by reading manifests out of `connectors_dirs`, so a skill naming `mtsr` needs a
+    # manifest declaring `mtsr` to exist — that is the D-117 defect, and it is why
+    # `connectors/safety/connector.yaml` stays here for a server this tree does not run.
+    #
+    # Binding is a different question from declaring, and it has a different price. Every bound
+    # tool's schema is serialised ahead of the system message on *every* model call, so a bundle
+    # that is on by default is charged to `tests/test_context_floor.PREFIX_BOUND`, which
+    # `core/config/agent.py` derives both compaction thresholds from — a token of prefix is a
+    # token of thread nobody gets back. The five process-development bundles
+    # (`thermalsafety`, `kinetics`, `unitops`, `props`, `suitability`) are ~22,000 tokens
+    # together, which is why they declare `false`: a deployment that wants them names them in
+    # `CHEMCLAW_CONNECTORS_ENABLED` and pays for them, and one that does not is unchanged.
+    #
+    # This is the same posture `publish/` and `deliver/` already take — off until a setting names
+    # it — applied to the one contribution that costs every turn rather than only the turn that
+    # uses it. It is not a second enablement mechanism: `connectors_enabled` remains the single
+    # switch, and this only decides what the *empty* list means for one bundle.
+    default_enabled: bool = True
 
     @model_validator(mode="after")
     def _vocabulary_is_well_formed(self) -> Self:

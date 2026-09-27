@@ -171,6 +171,12 @@ class Behaviour:
     # refuses a grown one, which is what makes `classify_model_failure`'s `context_length` label —
     # and the compaction policy that exists to prevent it — reachable from a lane at all.
     refuse_over_input_tokens: int = 0
+    # The `finish_reason` the streamed reply ends on, when it is not the natural one. `length` is
+    # the provider running out of output budget mid-emission — with a raw argument document that
+    # stops mid-string it is a call `parse_partial_json` completes into a valid-looking one, the
+    # case `agent/model_calls._demote_cut_off_calls` exists to catch. Empty means the natural
+    # value: `tool_calls` when there are calls, `stop` otherwise.
+    finish_reason: str = ""
 
 
 def already_has_tool_results(payload: dict[str, Any]) -> bool:
@@ -680,7 +686,11 @@ async def _chat_stream(
     # meters nothing. `_openai_compatible_model`'s docstring records this exact failure having
     # shipped once already, and the mock was the reason it could not recur *visibly*.
     yield frame(
-        {"delta": {}, "finish_reason": "tool_calls" if behaviour.calls else "stop"},
+        {
+            "delta": {},
+            "finish_reason": behaviour.finish_reason
+            or ("tool_calls" if behaviour.calls else "stop"),
+        },
         **({"usage": _chat_usage(behaviour, billed_input)} if include_usage else {}),
     )
     yield "data: [DONE]\n\n"
@@ -805,19 +815,54 @@ def build_app(mock: MockLlm) -> FastAPI:
     return app
 
 
+def catalogue(name: str) -> list[Behaviour]:
+    """The named behaviour set this process serves.
+
+    Two catalogues, and they may not be served together. `MockLlm.select` falls back to the *first*
+    entry of whatever it was given when a request carries no marker, so a union would silently hand
+    one lane's default to the other — and a marker collision between two independently edited files
+    would be invisible until a report read wrong. One lane, one catalogue, named on the command
+    line.
+
+    Imported here rather than at module scope because each catalogue validates itself against the
+    live tool surface, which builds the connector registry: a process that serves one must not pay
+    for the other.
+
+    Raises:
+        KeyError: No catalogue is called that, named rather than falling back to the storm's — a
+            typo would otherwise serve a measurement the wrong script and report it as a result.
+    """
+    from chemclaw.cli.delegation_behaviours import DELEGATION_BEHAVIOURS
+    from chemclaw.cli.storm_behaviours import BEHAVIOURS
+
+    catalogues = {"storm": BEHAVIOURS, "delegation": DELEGATION_BEHAVIOURS}
+    if name not in catalogues:
+        raise KeyError(f"no behaviour catalogue called {name!r}; known: {sorted(catalogues)}")
+    return catalogues[name]
+
+
 def main(argv: list[str] | None = None) -> int:
-    """Serve the storm's behaviour set until killed."""
+    """Serve one behaviour catalogue until killed."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--port", type=int, default=MOCK_PORT)
+    parser.add_argument(
+        "--catalogue",
+        default="storm",
+        choices=["storm", "delegation"],
+        help="which behaviour set to serve (default: the storm's)",
+    )
     args = parser.parse_args(argv)
 
-    from chemclaw.cli.storm_behaviours import BEHAVIOURS
+    behaviours = catalogue(args.catalogue)
 
     # The configured logging path rather than a bare `basicConfig`, so this process is swept by
     # the same redaction filter as every other entrypoint (`tests/test_logging.py` pins it).
     configure_logging()
-    mock = MockLlm(BEHAVIOURS)
-    print(f"mock LLM serving {len(BEHAVIOURS)} behaviour(s) on http://{MOCK_HOST}:{args.port}/v1")
+    mock = MockLlm(behaviours)
+    print(
+        f"mock LLM serving {len(behaviours)} {args.catalogue} behaviour(s) on "
+        f"http://{MOCK_HOST}:{args.port}/v1"
+    )
     uvicorn.run(build_app(mock), host=MOCK_HOST, port=args.port, log_level="warning")
     return 0
 

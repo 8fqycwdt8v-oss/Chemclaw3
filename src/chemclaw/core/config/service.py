@@ -148,6 +148,29 @@ class ServiceSettings(BaseSettings):
     # will actually take.
     service_max_concurrent_turns: int = Field(default=12, gt=0)
     service_turn_admission_timeout_seconds: float = Field(default=5.0, gt=0)
+    # **The cap above is actor-blind, and this is its missing half.** One principal opening
+    # `service_max_concurrent_turns` sessions holds every permit on the replica and every other
+    # chemist is shed `at_capacity` — the measurement is in `chemclaw.api.detach`, one hang-up per
+    # permit. The per-actor *rate* limit below does not reach it, and not because it is set too
+    # high — it meters a *rate* while this counts *simultaneous* turns, so a principal holds the
+    # whole replica on twelve requests. (It is also 0.0 here; 120/min is the chart's value.)
+    # `src/chemclaw/api/routes/streams.py` already bounds its own resource twice, per user and per
+    # process, on the argument that one bound does not imply the other;
+    # turns had only the second. Counted across an actor's *other* sessions, since one turn per
+    # session is already a 409.
+    #
+    # **0 disables, and off is right as a code default** (D-142/REV-16), here for a reason that is
+    # measured rather than doctrinal: `chemclaw.cli.live_storm`'s family A sweeps the *admission*
+    # cap end to end, driving 48 concurrent turns from one credential at each value — an
+    # on-by-default per-actor cap turns those sheds into 429s and breaks the one instrument that
+    # validates admission control. The chart carries the posture.
+    #
+    # Per process, like `service_max_concurrent_turns`, and with the same caveat: `maxReplicas`
+    # multiplies the real ceiling, so an actor spread over the fleet holds that multiple, and a
+    # fleet-wide per-actor limit belongs at the ingress (SCALE-1). A value at or above
+    # `service_max_concurrent_turns` enforces nothing while reading as protection, which the
+    # cross-field validator in `core/config/__init__.py` now refuses outright.
+    service_max_concurrent_turns_per_actor: int = Field(default=0, ge=0)
     # Threads kept *above* whatever this process's own admission caps can occupy, in the one
     # `asyncio.to_thread` pool they all share (`core/executor.py`). They exist for the calls that
     # are microseconds long and must never wait behind a corpus parse or an embedding: bearer-token
@@ -304,6 +327,19 @@ class ServiceSettings(BaseSettings):
     budget_max_tokens_per_session: int = Field(default=2_000_000, ge=0)
     budget_max_turns_per_user: int = Field(default=1000, ge=0)
     budget_max_tokens_per_user: int = Field(default=20_000_000, ge=0)
+    # The largest conversation a turn may be admitted onto, in bytes of the stored `messages` blob
+    # (`agent/checkpointer.stored_thread_bytes`). **A memory bound, not a cost one**, so it binds
+    # whether or not `budget_enabled` is on: every turn loads its whole thread — compaction trims
+    # only what is sent — so the front door's working set per admitted turn grows with this number
+    # times the pod's bytes per stored byte, and twelve permits on long threads OOM-killed a 1Gi
+    # front door at turn 76 with nothing else in flight
+    # (`D-2026-09-24-a-turn-costs-the-thread-it-loads`). The turn caps above cannot stand in for
+    # it: they count in process, so a restart or a second replica hands a thread a fresh 100.
+    #
+    # Derived downwards from the pod rather than chosen: `tests/test_deploy_chart.py` holds
+    # `resources.service`'s limit against `service_max_concurrent_turns` permits each loading a
+    # thread of this size, and raising it fails there. 0 disables it.
+    session_max_thread_bytes: int = Field(default=1536 * 1024, ge=0)
     # Cap on distinct users the in-process budget tracker keeps counters for. The tracker lives
     # for the pod's lifetime, so without a bound its per-user map grows with every principal
     # ever seen (a slow leak); past the cap the least-recently-active user's counters are

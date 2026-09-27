@@ -49,6 +49,7 @@ from chemclaw.science.bo.engine import (
     factorial_design,
     initial_candidates,
     interrogate_surrogate,
+    optimal_design,
     propose_candidates,
 )
 from chemclaw.science.bo.featurize import featurize_problem
@@ -58,6 +59,7 @@ from chemclaw.science.bo.problem import (
     FitQuality,
     Objective,
     Observation,
+    OptimalDesign,
     OptimizationProblem,
     ParamValue,
     Prediction,
@@ -743,7 +745,10 @@ async def generate_screening_design(
     n_center: int = 0,
     n_repetitions: int = 1,
     randomize: bool = False,
-) -> ScreeningDesign:
+    criterion: str = "factorial",
+    n_experiments: int = 0,
+    formula: str = "linear",
+) -> ScreeningDesign | OptimalDesign:
     """Generate a factorial screening design — full grid or reduced, categorical or continuous.
 
     Use this for the *other* classical DoE question — "run every combination of these conditions" —
@@ -788,10 +793,17 @@ async def generate_screening_design(
     grid instead. `n_repetitions` is unaffected: a replicate repeats whole rows, so it needs no
     midpoint.
 
-    **A problem carrying constraints is refused here.** A factorial screen enumerates the corners of
-    the space and honours no limit, so it would hand back runs that violate one. Either drop the
-    constraint and filter the returned runs yourself — saying that you did — or use
-    `suggest_next_experiment`, which does honour it.
+    **A problem carrying constraints is refused by the factorial.** It enumerates the corners of
+    the space and honours no limit, so it would hand back runs that violate one. That is what
+    `criterion` is for: pass `d-optimal` (or `i-optimal`, `a-optimal`, `space-filling`) with a run
+    budget and the design honours the constraints instead, filling the budget exactly. Use it
+    whenever the chemist has a real limit or a fixed number of runs rather than a grid.
+
+    An optimality criterion designs for a **stated model**, so `formula` is part of the question: a
+    `linear` design is blind to curvature by construction. Never report one without naming its
+    model. `space-filling` assumes no model at all. Two things in that return to repeat rather than
+    tidy away — a repeated row is intentional replication, and the design carries no alias
+    structure, so unlike a fractional factorial it cannot say what is confounded.
 
     Args:
         problem: The decision variables and the objective (its direction is not used by a screening
@@ -803,13 +815,34 @@ async def generate_screening_design(
             available on a reduced design that also has categorical factors.
         n_repetitions: How many times to replicate the design. Needs a continuous factor.
         randomize: Shuffle the run order (reproducibly).
+        criterion: `factorial` (the default, everything above) or one of `d-optimal`,
+            `i-optimal`, `a-optimal`, `space-filling` — see the paragraph below.
+        n_experiments: The run budget, required by every criterion except `factorial` and refused
+            with it (a factorial's size is the grid, not a number you choose).
+        formula: The model an optimality criterion is optimal *for*: `linear`,
+            `linear-and-interactions`, `linear-and-quadratic`, `fully-quadratic`.
 
     Returns:
-        The runs to perform, plus `resolution`, `two_level_continuous`, and a `summary` stating
-        whether the design is exhaustive, what was collapsed, and what is confounded.
+        For `factorial`, the runs plus `resolution`, `two_level_continuous` and a `summary` stating
+        whether the design is exhaustive, what was collapsed and what is confounded. For every
+        other criterion, the runs plus `formula`, `n_terms`, `duplicate_runs`,
+        `honoured_constraints` and a `summary` of what that design cannot do.
     """
     problem = OptimizationProblem.model_validate(problem)
     require_names_do_not_clash(problem)
+    if criterion != "factorial":
+        return await asyncio.to_thread(optimal_design, problem, n_experiments, criterion, formula)
+    if n_experiments:
+        # The rule this tool's own docstring already applies to `n_center` and `n_repetitions`: a
+        # silently ignored argument is worse than an error. A factorial's size is the product of its
+        # level counts, so a caller who passed a budget is asking for a design this criterion cannot
+        # give — and being handed 128 rows after asking for 24 is the failure.
+        raise ValueError(
+            f"a factorial's run count is the size of the grid, so n_experiments={n_experiments} "
+            "cannot be honoured here. Pass a criterion that takes a budget — 'd-optimal' for "
+            "estimating a model, 'space-filling' for covering the region — or reduce the grid with "
+            "n_generators."
+        )
     return await asyncio.to_thread(
         factorial_design,
         problem,

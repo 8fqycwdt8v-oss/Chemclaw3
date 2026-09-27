@@ -44,6 +44,8 @@ from chemclaw.agent.langgraph_agent import build_langgraph_agent
 from chemclaw.agent.loop_cap import loop_capped
 from chemclaw.agent.spend_cap import spend_capped
 from chemclaw.agent.state import answer_text, turn_config, turn_input
+from chemclaw.agent.turn_ambient import turn_caps
+from chemclaw.agent.turn_usage import TurnUsage
 from chemclaw.connectors.registry import open_connector_specs
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
@@ -234,10 +236,26 @@ async def converse(
     # can see differs, and this one sees less.
     token = set_current_user_texts([*earlier, prompt])
     try:
-        result = await agent.ainvoke(
-            turn_input(prompt),
-            turn_config(session_id),
-        )
+        # **The cap ambients, which this path opened none of.** Both caps are attached by the
+        # harness middleware whatever the driver does, so a CLI turn was never uncapped — but
+        # without a watch the loop cap falls back to the per-branch channel snapshot, so a `task`
+        # fan-out here gave every branch the whole iteration allowance (measured at 193 model calls
+        # against a cap of 25 at width 8). The notice this function returns is read off the state
+        # `ainvoke` gave back, so it is unaffected either way.
+        #
+        # **Two consequences worth naming rather than discovering.** The repeat guard is one of
+        # these ambients, so an identical tool call is now *refused* at this prompt as it is at the
+        # front door — driven, six identical `ls` calls in one turn produce four refusals where
+        # this path executed all six. That is the guard working, and it is a behaviour change on
+        # this surface. And the ledger is passed but nothing fills it here: `set_turn_usage` is
+        # written by `api/graph_stream.py` and by a template step's `_StepMeter`, neither of which
+        # is this path, so the spend cap still reads the channel alone and an off-stream call is
+        # still counted by nothing. The fan-out half is what this closes.
+        with turn_caps(TurnUsage(), closing=f"CLI session {session_id}"):
+            result = await agent.ainvoke(
+                turn_input(prompt),
+                turn_config(session_id),
+            )
     finally:
         reset_current_user_texts(token)
     # Read off the state this call *returned*, which is the only place either cap's flag lives —
@@ -327,10 +345,18 @@ async def _repl(agent: Any, actor: str, saver: Any) -> None:
     the front door's middleware and runner, a template activity, and the durable interceptor. So
     the gate has never applied to this REPL, `/plan` and `/approve` write `plan_approvals` rows no
     execution path here reads, and a state-changing tool typed at this prompt runs without them.
-    That is not a hole — `plan_gate` argues the session-less skip deliberately, and these calls
-    still cross `enforce_tool_authz` and `authorize_trigger`, which is what governs them — but it
-    is not what this docstring said, and D-2026-09-13 making the harness the default turned a
-    harmless overstatement into one a reader would act on.
+    That is not a hole — `plan_gate` argues the session-less skip deliberately — but it is not what
+    this docstring said, and D-2026-09-13 making the harness the default turned a harmless
+    overstatement into one a reader would act on.
+
+    **The sentence that replaced it was wrong in its own way, and this is the correction.** It said
+    these calls "still cross `enforce_tool_authz` and `authorize_trigger`, which is what governs
+    them". They do cross both, and measured against a role-less authenticated actor those two reach
+    6 of the 15 side-effecting tools in the registry — three by `DEFAULT_WRITE_TOOL_GATES` and three
+    by `expensive_actions()`. Nine, `remember_preference` and `run_composed_workflow` among them,
+    are refused by neither. What actually governs a write typed at this prompt is who has the
+    terminal: `resolve_identity` makes this surface single-user admin, running with the process's
+    own credentials. That is a defensible posture and it is not the same claim.
     """
     # **Every operator command is named here, because there is no `/help`.** `/approve-workflow`
     # is a two-step ritual — read the procedure, then type back the fingerprint it prints — and an

@@ -68,6 +68,10 @@ _EXPECTED_SUBSYSTEMS = {
     # the behaviour `D-2026-09-15-a-budget-a-restart-resets-is-not-a-quota` removed. Counted so
     # a deployment can see it has silently gone back to it.
     "budget_window",
+    # `api/budget.check_thread_size`, whose read of a thread's stored size admits the turn when the
+    # database cannot answer — the load that follows reads the same database. Silent otherwise: the
+    # memory bound it enforces would simply stop binding.
+    "thread_size",
     "cost_ledger",
     # A retrieval source that could not be asked. Added when `fanout._sweep`'s swallow was moved
     # onto `degraded()` — it had been a bare `logger.exception` plus a private counter, so the one
@@ -180,6 +184,16 @@ _EXPECTED_SUBSYSTEMS = {
     "session_transcript",
     "skill_manifest",
     "spend_cap",
+    # `agent/stored_skill_tools._unreadable`, the stored tiers' door into the same degradation
+    # `skill_manifest` counts for the filed trees — a `SKILL.md` whose frontmatter cannot be read,
+    # so the skill is scoped to nothing rather than left visible. A **separate** label rather than
+    # the same one, because what an operator does about it differs: a filed occurrence is an
+    # authoring fault in a corpus `make skill-validate` gates, while a stored one is a body somebody
+    # saved before a rule tightened, reachable only through a route and fixable only by its owner or
+    # an administrator. The message deliberately carries the exception *type* and never its text,
+    # since a parser quotes what it choked on and that would be a person's own words in a shared
+    # log.
+    "stored_skill_manifest",
     # `science/calc/geometry.check_server_address`, added with the geometry store
     # (D-2026-08-21-a-geometry-is-an-address-not-a-payload). It is the one degradation in this
     # system that is *only* visible as a counter: a `structure_id` the calculation server and this
@@ -199,6 +213,10 @@ _EXPECTED_SUBSYSTEMS = {
     # is told to mark a real chemist constraint `inferred`, which is the mislabelling that check
     # exists to prevent.
     "stated_quote_history",
+    # `api/runner.run_turn`'s review-revision loop, around the two checkpointer reads and the one
+    # write that keep the thread ending on the answer that ships. The answer is already in hand, so
+    # a checkpointer error there costs the thread its tidiness (or the round), never the turn.
+    "review_revision_thread",
     "tool_result_store",
     "transcript_projection",
 }

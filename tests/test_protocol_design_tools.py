@@ -751,6 +751,57 @@ async def test_reading_an_unknown_revision_names_the_revision(
         await tools.read_experiment_protocol(opened.design_id, revision=9)
 
 
+async def test_reading_plate_results_for_an_unknown_revision_names_the_revision(
+    store: InMemoryDesignStore,
+) -> None:
+    """`read_plate_results` reads a specific revision, so its absence must not read as no design.
+
+    It used to answer "no design 'x'" for revision 9 of a design that exists — a chemist told the
+    design is gone when only the revision they asked for is. The four readers share one refusal now.
+    """
+    opened = await _open()
+    await _draft(opened.design_id, opened.revision)
+    with pytest.raises(ChemclawError, match="at revision 9"):
+        await tools.read_plate_results(opened.design_id, revision=9)
+
+
+async def test_reading_a_plate_whose_outcome_mixes_units_keeps_the_rest_of_the_readout(
+    store: InMemoryDesignStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A mixed-unit column refuses the observations, not the whole read.
+
+    `observations_for` refuses a column mixing percent and fraction, and the tool called it bare,
+    so the refusal took the results, the disagreements and the unmeasured arms with it — the very
+    rows a chemist needs to see which arm to re-attach in the other unit.
+    """
+    from chemclaw.protocols.result_store import InMemoryArmResultStore
+    from chemclaw.protocols.results import ArmResult
+
+    opened = await _open()
+    await _draft(opened.design_id, opened.revision, arms=3)
+    results = InMemoryArmResultStore()
+    monkeypatch.setattr(tools, "default_arm_result_store", lambda: results)
+    await results.append(
+        opened.design_id,
+        2,
+        [
+            ArmResult(arm_id="A1", outcome="yield", value=85.0, unit="%"),
+            ArmResult(arm_id="A2", outcome="yield", value=0.9, unit="fraction"),
+        ],
+        author_kind="agent",
+    )
+
+    readout = tools.PlateReadout.model_validate_json(
+        await tools.read_plate_results(opened.design_id, outcome="yield")
+    )
+
+    assert readout.observations == []
+    assert "more than one unit" in readout.observations_refused
+    assert "'A1'" in readout.observations_refused and "'A2'" in readout.observations_refused
+    assert readout.outcomes.arms_without_results == ["A3"]
+    assert len(readout.outcomes.results) == 2
+
+
 async def test_a_read_returns_the_receipt_the_document_and_the_prose(
     store: InMemoryDesignStore,
 ) -> None:

@@ -11,6 +11,7 @@ one channel's failure is not everyone's, and nothing reads *from* a channel.
 """
 
 import asyncio
+import json
 import logging
 from pathlib import Path
 from typing import Any
@@ -791,6 +792,90 @@ def _post_and_capture(message: Message) -> tuple[dict[str, str], dict[str, objec
     return dict(seen[0].headers), _json.loads(seen[0].content)
 
 
+#: How each shipped driver is driven, and what the destination then saw, as text.
+#:
+#: A fixture per driver is unavoidable — a file channel needs a directory and a webhook needs a URL
+#: — but the *list* is not hand-written: the test below derives the drivers from the discovery path
+#: and refuses to run if this mapping does not cover exactly them. That is what makes a third
+#: channel owe the same proof instead of shipping with two tests that each hold one driver.
+_DRIVER_PROBES: dict[str, str] = {
+    "chemclaw.deliver.driver:file_channel": "file",
+    "chemclaw.deliver.driver:webhook_channel": "webhook",
+}
+
+
+def _file_traces(message: Message, tmp_path: Path) -> list[str]:
+    """Deliver twice through the real file driver; return what the destination holds, as names."""
+    driver = FileDeliveryDriver(name="probe", directory=str(tmp_path / "outbox"))
+    asyncio.run(driver.deliver(message))
+    asyncio.run(driver.deliver(message))
+    return [path.name for path in sorted((tmp_path / "outbox").iterdir())]
+
+
+def _webhook_traces(message: Message, _tmp_path: Path) -> list[str]:
+    """Deliver twice through the real webhook driver; return what went on the wire, as text."""
+    import httpx
+
+    from chemclaw.deliver.driver import WebhookDeliveryDriver
+
+    seen: list[str] = []
+
+    def _handle(request: httpx.Request) -> httpx.Response:
+        seen.append(f"{dict(request.headers)} {request.content.decode()}")
+        return httpx.Response(200)
+
+    real_client = httpx.AsyncClient
+    try:
+        httpx.AsyncClient = lambda *a, **k: real_client(  # type: ignore[assignment,misc]
+            *a, **{**k, "transport": httpx.MockTransport(_handle)}
+        )
+        driver = WebhookDeliveryDriver(name="probe", url="http://127.0.0.1:1/hook")
+        asyncio.run(driver.deliver(message))
+        asyncio.run(driver.deliver(message))
+    finally:
+        httpx.AsyncClient = real_client  # type: ignore[misc]
+    return seen
+
+
+def test_every_shipped_delivery_driver_makes_a_redelivery_identifiable(tmp_path: Path) -> None:
+    """The activity around these drivers is at-least-once, so the destination needs the handle.
+
+    `registry.deliver` walks the enabled channels serially and swallows each one's failure, so the
+    activity never fails *because* of a channel — what fails it is `start_to_close` expiring
+    mid-walk or the worker dying, both retryable under `BAD_DATA_RETRY`, and a retry re-walks
+    channel including the ones that already took the message. There is no per-channel delivery
+    record and deliberately none: a local row can say a POST was sent and never whether it landed,
+    and one activity per channel would shrink that window without closing it, because a retry of
+    *that* activity re-sends to *that* channel. `core/config/deliver.py` mitigated the same thing by
+    widening the budget 30 s → 300 s, which moves a threshold and bounds nothing — a worker restart
+    mid-walk is not covered by any timeout.
+
+    So what closes it is the destination being able to recognise a redelivery, and that is a
+    requirement on every driver rather than a property two of them happen to have. Two tests below
+    each hold one shipped driver to it; this one derives the set from the discovery path, so an
+    eighth channel cannot ship without either carrying `message_id` or being idempotent by
+    construction.
+    """
+    from chemclaw.deliver.driver import message_id
+
+    drivers = {manifest.driver for manifest in discovered().values()}
+    assert drivers == set(_DRIVER_PROBES), (
+        "a channel was added or its driver renamed without saying how a redelivery of one message "
+        f"is identifiable at its destination: {sorted(drivers ^ set(_DRIVER_PROBES))}"
+    )
+
+    message = Message(recipient="u-1", subject="s", body="b", kind="job-result")
+    identity = message_id(message)
+    probes = {"file": _file_traces, "webhook": _webhook_traces}
+    for driver, probe in sorted(_DRIVER_PROBES.items()):
+        traces = probes[probe](message, tmp_path)
+        assert traces, f"{driver} delivered nothing to observe"
+        assert all(identity in trace for trace in traces), (
+            f"{driver} left the destination no way to tell a redelivery of one message from a "
+            f"second message: {traces}"
+        )
+
+
 def test_the_webhook_carries_a_dedup_handle_the_file_channel_already_had() -> None:
     """Both shipped channels must answer "is this the same message" the same way.
 
@@ -962,6 +1047,58 @@ def test_an_attachment_is_redacted_like_a_body(monkeypatch: pytest.MonkeyPatch) 
     scrubbed = message.redacted().attachments[0].content
 
     assert b"hunter2-abcdefghijklmnop" not in scrubbed
+
+
+def test_a_message_carries_no_credential_a_driver_quoted_back_as_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    r"""The structural half of the outbound scrub, in the spelling a driver actually produces.
+
+    The tests above hold the *value* inventory — a credential this deployment configured, matched by
+    exact string. This holds the shapes `redact_secrets` recognises by **pattern**, which is the
+    only half that can reach a credential belonging to somebody else: a warehouse driver quoting its
+    own
+    `key=value` binding back in an error, which a tool result carries into a subject, a body and a
+    report attachment.
+
+    **Measured leaking, and the escaping was the reason.** A driver's message routinely carries a
+    JSON document *inside* a JSON string, so the text reaches the rules as
+    `{\"password\": \"...\"}` — and every key-anchored rule framed its separator `["']?\s*[=:]`,
+    which a literal backslash defeats. This is the exit path where that matters most after the
+    committed note (`tests/test_note.py`): `Message.redacted()`'s own docstring says this is "the
+    half of the redaction that leaves the cluster", and a driver writes it to a share or POSTs it.
+
+    Two credentials, from the two different rules, so a regression in either is visible here rather
+    than only in `tests/test_logging.py`: `password` is the libpq rule's, `api_key` the compound
+    key-name rule's.
+    """
+    monkeypatch.setattr(
+        "chemclaw.deliver.message._connector_secret_envs",
+        lambda: (),  # nothing in the value inventory, so only the structural rules can catch these
+    )
+    quoted = json.dumps(json.dumps({"password": "W4rehousePw1", "api_key": "sk_live_9f3a2b1c8d7"}))
+    text = f"The warehouse refused the binding. Its error was: {quoted}"
+    message = Message(
+        recipient="u-1",
+        subject=f"run failed: {quoted}",
+        body=text,
+        attachments=[Attachment(filename="report.md", content=text.encode("utf-8"))],
+    )
+
+    scrubbed = message.redacted()
+    delivered = "".join(
+        [
+            scrubbed.recipient,
+            scrubbed.subject,
+            scrubbed.body,
+            scrubbed.attachments[0].content.decode("utf-8"),
+        ]
+    )
+
+    for credential in ("W4rehousePw1", "sk_live_9f3a2b1c8d7"):
+        assert credential not in delivered, (
+            f"{credential} left the cluster in a message: {delivered}"
+        )
 
 
 def test_a_binary_attachment_survives_the_redaction_rather_than_failing_the_delivery() -> None:

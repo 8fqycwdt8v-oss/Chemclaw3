@@ -13,7 +13,15 @@ place and withholds the shell and the delete verb. Turn state is a declared sche
 `langgraph_agent.tool_call_middleware` builds, whose order is load-bearing and documented
 there. The `task` tool is not optional — upstream refuses to let a profile strip the
 middleware that registers it — so `subagents.py` supplies the helpers it reaches, compiled
-through this same builder rather than inherited ungoverned. The Microsoft Agent Framework this layer
+through this same builder rather than inherited ungoverned. **A turn may also be several
+agents rather than one** (`turn_graph.py`, `handoff.py`,
+`docs/decisions/D-2026-09-19-a-handoff-redistributes-the-turns-authority-it-cannot-extend-it.md`):
+with `CHEMCLAW_AGENT_PEER_ROSTER` set, `build_turn_agent` compiles a `StateGraph` whose nodes are
+several of these graphs, and a `transfer_to_<peer>` tool moves the conversation between them with
+`Command(goto=…, graph=Command.PARENT)`. A peer is not a helper — it keeps the acting tools and
+answers the chemist directly — and its surface is the *root's* surface intersected with its own
+profile, so a chain of any length is bounded by the agent that opened the turn. The roster is empty
+by default, `build_turn_graph` returns `None`, and the single agent above is what a turn runs on. The Microsoft Agent Framework this layer
 was first built on is gone
 (`docs/decisions/D-2026-08-10-langgraph-rebuild-of-the-conversation-layer.md`) — replaced
 for defect load rather than capability. `api/events.py` was the conformance boundary the two

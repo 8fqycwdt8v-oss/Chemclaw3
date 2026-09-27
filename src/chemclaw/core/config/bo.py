@@ -110,6 +110,16 @@ class BoSettings(BaseSettings):
     # than in the summary string because the sentence a chemist reads should not be a magic number
     # in a docstring.
     bo_fit_quality_trustworthy_observations: int = Field(default=20, ge=2)
+    # When a response counts as flat, as a fraction of its own magnitude: the fit-quality guard
+    # reports no R² once `max - min <= abs(mean) * this`. Relative rather than the exact `== 0.0`
+    # test it replaces, because exact equality is defeated by a *systematic sub-noise drift* —
+    # driven over a real BoFire fit, eight runs of 42.0 differing by 1e-10 scored R² 0.9991 and
+    # published "predicts held-out runs with R² 1.00", where the same runs at exactly 42.0 correctly
+    # reported no fit quality at all. 1e-9 is a claim about assays rather than about arithmetic, and
+    # a deliberately extreme one: no instrument resolves a billionth of what it is reading, so
+    # nothing a chemist measures can trip this, while float noise and a stuck sensor both do. It is
+    # well above float64's own 2.2e-16 epsilon, which is why the epsilon is not the number used.
+    bo_flat_response_relative_spread: float = Field(default=1e-9, gt=0.0, le=1e-3)
     # How long a measured campaign's round stays open before it expires unanswered
     # (D-2026-08-29-a-decision-that-waits-is-a-workflow). A plate turnaround is the unit here, not
     # a machine timeout: fourteen days is two working weeks, which is long enough that a batch

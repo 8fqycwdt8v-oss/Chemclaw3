@@ -20,6 +20,7 @@ found by one indexed scan. This is `note_index.fingerprint` (`infra/sql/035`) an
 `document_chunks.embedding_key` (`038`) applied to a third kind of derived data.
 """
 
+import math
 from datetime import date, datetime
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field
@@ -166,10 +167,16 @@ class CorpusCoverage(BaseModel):
                 "reached these rows. Do not present this as a finding about the chemistry."
             )
         if self.labelled < self.total:
-            share = 100 * self.labelled / self.total
+            # **Rounded away from the two readings this branch exists to refuse.** `:.0f` printed
+            # "PARTIAL … (100%)" for 4,999 of 5,000 and "(0%)" for 1 of 100,000: a reader takes 100%
+            # as complete and 0% as nothing, in the one branch whose whole job is to say the answer
+            # is neither. Truncating toward the nearest tenth keeps 99.98 → "99.9" and 0.001 →
+            # "0.1", so the printed share can never read 100 while a row is unlabelled, nor 0 while
+            # one is labelled.
+            share = min(99.9, max(0.1, math.floor(1000 * self.labelled / self.total) / 10))
             return (
                 f"PARTIAL: this answer is drawn from {self.labelled} of {self.total} matching "
-                f"reaction(s) ({share:.0f}%) — the rest are not yet labelled at the current "
+                f"reaction(s) ({share:.1f}%) — the rest are not yet labelled at the current "
                 "version. Treat counts as a lower bound and say so; a reagent absent here may "
                 "simply live in an unlabelled row."
             )

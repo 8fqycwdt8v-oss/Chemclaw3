@@ -154,7 +154,7 @@ def validate_templates(surface: TemplateSurface | None = None) -> list[str]:
             ]
         # Resolved once for the whole run, not once per template — see `TemplateSurface`, which
         # is also where the file profiles a template may name are registered.
-        surface = surface if surface is not None else TemplateSurface.resolve()
+        surface = surface if surface is not None else TemplateSurface.resolve(declared=True)
     except ValueError as exc:  # ProfileError and TemplateError are both ValueError
         return [str(exc)]
     problems = [
@@ -200,7 +200,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     # which `validate_kg.main` argues against in as many words. Reported through the same block as
     # every other problem, so there is one report shape.
     try:
-        surface = TemplateSurface.resolve()
+        # Declared rather than bound: a template naming a fleet tool is a claim about this
+        # repository, and an opt-in bundle's tools are absent from `enabled()` on every checkout
+        # that has not turned it on. `registry.unrunnable_reason` is the caller that wants the
+        # bound set, and it keeps it.
+        surface = TemplateSurface.resolve(declared=True)
     except ValueError as exc:  # ProfileError and TemplateError are both ValueError
         problems = [str(exc)]
     else:

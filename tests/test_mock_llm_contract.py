@@ -36,6 +36,7 @@ from pydantic import SecretStr
 from chemclaw.agent.context_budget import estimator_ratio, note_model_call, reset_calibration
 from chemclaw.agent.llm_provider import classify_model_failure
 from chemclaw.agent.turn_usage import graph_usage_tokens
+from chemclaw.cli.delegation_behaviours import DELEGATION_BEHAVIOURS
 from chemclaw.cli.mock_llm import Behaviour, MockLlm, ToolCall, build_app
 from chemclaw.cli.storm_behaviours import BEHAVIOURS as STORM_BEHAVIOURS
 
@@ -441,7 +442,9 @@ def _decided(app: Any, route: str, payload: dict[str, Any]) -> dict[str, Any]:
     return decided
 
 
-@pytest.mark.parametrize("behaviour", STORM_BEHAVIOURS, ids=lambda b: b.name)
+@pytest.mark.parametrize(
+    "behaviour", [*STORM_BEHAVIOURS, *DELEGATION_BEHAVIOURS], ids=lambda b: b.name
+)
 @pytest.mark.parametrize(
     ("chars", "tool_result"),
     [(0, False), (20_000, False), (0, True)],
@@ -458,6 +461,11 @@ def test_both_routes_decide_one_turn_the_same_way(
     this repository spends `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` arguing
     against. The whole storm catalogue is driven because the divergence that matters is the one in
     a behaviour nobody re-read: every lane in `infra/live/` selects by name out of *this* list.
+
+    **Both catalogues, because the property is the wire's and not one catalogue's.**
+    `cli/mock_llm.catalogue` serves one set per process and `make live-delegation` serves the
+    delegation one, so a divergence reached only by a `task`-calling behaviour would be exactly as
+    invisible as the divergence this test was written for.
 
     Three probes per behaviour, because three of the shared decisions are properties of the
     request rather than of the behaviour: a short turn, one grown past `refuse_over_input_tokens`,

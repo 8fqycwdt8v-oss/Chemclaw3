@@ -125,6 +125,76 @@ def test_an_invented_tool_is_still_rejected() -> None:
     assert "no_such_tool" in problems[0]
 
 
+def test_a_required_tool_outside_the_declaration_is_reported() -> None:
+    """`requires` is a subset of `tools`, and an entry outside it is held by nothing else.
+
+    The asymmetry is the reason this rule exists at all. A `tools` typo is caught twice — against
+    the live surface here, and by the taught-⇒-declared direction if the body names it — and its
+    run-time effect is to leave the skill visible. A `requires` typo is caught by neither, and its
+    run-time effect is the opposite: `ToolScopedSkills._permits` hides the skill wherever that name
+    is absent from the surface, which for a name no tool has is *everywhere*. So the one that fails
+    silently and removes a skill from every deployment is the one with no check, until this.
+    """
+    from chemclaw.agent.skill_manifest import SkillManifest
+    from chemclaw.cli.validate_skills import _requires_problems
+
+    problems = _requires_problems(
+        Path("probe/SKILL.md"),
+        SkillManifest(
+            name="probe",
+            description="probe",
+            tools=["gather_evidence"],
+            requires=["gather_evidenc"],
+        ),
+    )
+
+    assert len(problems) == 1
+    assert "gather_evidenc" in problems[0] and "does not declare it" in problems[0]
+
+
+def test_a_real_tool_still_has_to_be_declared_to_be_required() -> None:
+    """Existing is not enough: the two lists must describe one capability, not two.
+
+    Stated separately from the typo case because the failure it prevents is not a misspelling. A
+    `requires` naming a tool that really exists but is missing from `tools` passes every existence
+    check in this module and still means the skill's declared surface and its required surface
+    disagree — and `ToolScopedSkills` reads both, for the same skill, in the same call.
+    """
+    from chemclaw.agent.skill_manifest import SkillManifest
+    from chemclaw.cli.validate_skills import _requires_problems
+
+    problems = _requires_problems(
+        Path("probe/SKILL.md"),
+        SkillManifest(
+            name="probe",
+            description="probe",
+            tools=["gather_evidence"],
+            # A real tool — `test_a_declared_tool_resolves_wherever_the_capability_lives` proves it.
+            requires=["predict_pka"],
+        ),
+    )
+
+    assert len(problems) == 1
+    assert "predict_pka" in problems[0]
+
+
+def test_a_requires_entry_inside_the_declaration_passes(tmp_path: Path) -> None:
+    """The satisfiable half, driven end to end through `validate_skills` rather than the helper.
+
+    Through the whole gate because `requires` is a new frontmatter key: `SkillManifest` forbids
+    extras, so a rule added to this module without the field reaching the model would fail every
+    skill that uses it, and a helper-level test cannot see that.
+    """
+    root = _skill(
+        tmp_path,
+        "probe",
+        "Call gather_evidence first, then read what it cites.",
+        tools="tools:\n  - gather_evidence\nrequires:\n  - gather_evidence\n",
+    )
+
+    assert validate_skills([str(root)]) == []
+
+
 def _skill(directory: Path, name: str, body: str, tools: str = "") -> Path:
     """Write one SKILL.md with an optional `tools:` block, and return the directory it lives in."""
     skill = directory / name / "SKILL.md"

@@ -71,6 +71,8 @@ from chemclaw.agent.authz import AuthorizationError
 from chemclaw.agent.refusal_route import routed
 from chemclaw.core.logging import log_event
 from chemclaw.core.metrics_bridge import record_metric
+from chemclaw.core.model_prose import ModelProse
+from chemclaw.core.turn_signals import record_skill_loaded
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +81,7 @@ logger = logging.getLogger(__name__)
 # a tool failure it may retry. It deliberately does not say whether the skill *exists* — "not
 # available to you" is the same answer for a gated skill and for a typo, and distinguishing them
 # would turn the gate into an enumeration oracle.
-REFUSED = "This path is not part of the skills available to you."
+REFUSED = ModelProse("This path is not part of the skills available to you.")
 
 # What a refused *write* says, once, because four verbs raise it. Worded for the model rather than
 # for a log: it says nothing was changed (so there is nothing to undo or retry) and names the root a
@@ -137,7 +139,7 @@ class NarrowedSkillsBackend(FilesystemBackend):
         reference doc alike. A path with no segments is the tree root, which is neither permitted
         nor refused: listing it is how discovery starts, and `ls` filters what comes back.
         """
-        skill = _skill_of(path)
+        skill = skill_of(path)
         return not skill or self._permits(skill)
 
     def ls(self, path: str) -> LsResult:
@@ -178,7 +180,7 @@ class NarrowedSkillsBackend(FilesystemBackend):
         the first version of this paragraph was wrong: it argued that a resolved path is one inside
         `root_dir` so its first segment is a real directory, which is true and is not the property
         wanted — `skills/README.md` resolves and booked a skill called `README.md`. So
-        `_is_a_skill_body` is the second condition, and `no_lines_requested` is the third, because
+        `is_a_skill_body` is the second condition, and `no_lines_requested` is the third, because
         `read_file(limit=0)` returns empty content with no error and would otherwise book a load of
         zero bytes under a paragraph claiming the count is taken on the bytes.
 
@@ -202,7 +204,7 @@ class NarrowedSkillsBackend(FilesystemBackend):
         model-authored string that reaches a record, and it reprs, so an embedded newline can no
         longer split one refusal into two log lines.
         """
-        skill = _skill_of(file_path)
+        skill = skill_of(file_path)
         recorded = bounded_repr(file_path)
         if not self._allows(file_path):
             record_metric(lambda m: m.increment("chemclaw_skill_reads_denied_total"))
@@ -217,10 +219,15 @@ class NarrowedSkillsBackend(FilesystemBackend):
             return ReadResult(error=REFUSED, file_data=None)
         log_event(logger, "skill.read", "the model read %s", recorded, skill=skill, path=recorded)
         result = super().read(file_path, offset, limit)
-        if _is_a_skill_body(file_path) and not result.error and not result.no_lines_requested:
+        if is_a_skill_body(file_path) and not result.error and not result.no_lines_requested:
             record_metric(
                 lambda m: m.increment("chemclaw_skill_loads_total", labels={"skill": skill})
             )
+            # The same load, on the channel that can carry it into *this turn's* cost row — which a
+            # counter cannot, because it says a skill was read and never in which turn. The guard
+            # `agent/distiller.py` needs is one predicate over exactly that, so the array and the
+            # counter are taken on one condition rather than two that could drift apart.
+            record_skill_loaded(skill)
         return result
 
     def glob(self, pattern: str, path: str | None = None) -> GlobResult:
@@ -271,7 +278,7 @@ class NarrowedSkillsBackend(FilesystemBackend):
 
     def _permitted(self, hits: list[Any]) -> list[Any]:
         """The hits naming a path this turn may reach."""
-        return [hit for hit in hits if self._allows(_path_of(hit))]
+        return [hit for hit in hits if self._allows(path_of(hit))]
 
     def download_files(self, paths: list[str]) -> Any:
         """Return the bodies of the permitted paths only — the reach path the gate had missed.
@@ -310,21 +317,23 @@ class NarrowedSkillsBackend(FilesystemBackend):
         raise SkillsReadOnlyRefusal(_READ_ONLY)
 
 
-def _skill_of(path: str) -> str:
+def skill_of(path: str) -> str:
     """The skill a path belongs to — its first segment, which is what `_allows` gates on.
 
     Empty for the tree root, which belongs to no skill. One definition beside `_allows` so the
-    name a log line reports and the name the gate decided on are the same string.
+    name a log line reports and the name the gate decided on are the same string — and the stored
+    tiers (`agent/skill_store.py`) import it rather than restate it: a pure function of the path
+    string, it gives the same answer whether the path is relative to this tree or to a mount.
     """
     parts = PurePosixPath(path.strip("/")).parts
     return parts[0] if parts else ""
 
 
-def _is_a_skill_body(path: str) -> bool:
+def is_a_skill_body(path: str) -> bool:
     """Whether `path` names a document *inside* a skill, rather than one at the tree root.
 
     The clamp on `chemclaw_skill_loads_total`'s label, and it is a second predicate rather than a
-    tightening of `_skill_of` because the two questions differ. `_allows` asks which skill a path is
+    tightening of `skill_of` because the two questions differ. `_allows` asks which skill a path is
     *gated* as, and a root-level document gated under its own filename is the conservative answer
     there. This asks which skill a read is *evidence about*, and a root-level document is evidence
     about none.
@@ -344,7 +353,7 @@ def _is_a_skill_body(path: str) -> bool:
     return len(PurePosixPath(path.strip("/")).parts) > 1
 
 
-def _path_of(hit: Any) -> str:
+def path_of(hit: Any) -> str:
     """The path a glob or grep hit names — a `FileInfo` mapping, a `GrepMatch`, or a bare string."""
     if isinstance(hit, str):
         return hit

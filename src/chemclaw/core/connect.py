@@ -162,6 +162,26 @@ _ACCEPTED_SCALARS: dict[type, tuple[type, ...]] = {
 }
 
 
+def _evaluated_parameters(target: Any) -> Mapping[str, inspect.Parameter] | None:
+    """`target`'s parameters with string annotations evaluated, or `None` if it has no signature.
+
+    **Evaluated, because a module under `from __future__ import annotations` stores every
+    annotation as a string**, and `_ACCEPTED_SCALARS` is keyed by the type: `"bool"` missed it, so
+    in such a module the check passed everything — measured, `snapshot: "false"` against a
+    `snapshot: bool` factory was admitted, re-arming the sweep this check exists to stop. An
+    annotation that cannot be evaluated (a name imported only under `TYPE_CHECKING`) falls back to
+    the unevaluated signature, where that parameter is passed over as before rather than guessed at.
+    """
+    try:
+        return inspect.signature(target, eval_str=True).parameters
+    except (NameError, TypeError, ValueError, AttributeError, SyntaxError):
+        pass
+    try:
+        return inspect.signature(target).parameters
+    except (TypeError, ValueError):
+        return None
+
+
 def option_type_mismatch(target: Any, options: Mapping[str, Any]) -> str:
     """Empty if every option's value fits the parameter's annotation; a message naming the first.
 
@@ -192,9 +212,8 @@ def option_type_mismatch(target: Any, options: Mapping[str, Any]) -> str:
         An empty string when nothing is judged wrong, else one sentence naming the key, what was
         written, and what the parameter is annotated as.
     """
-    try:
-        parameters = inspect.signature(target).parameters
-    except (TypeError, ValueError):
+    parameters = _evaluated_parameters(target)
+    if parameters is None:
         # Same reason `signature_mismatch` returns empty: a callable with no introspectable
         # signature is "nothing to say", not a failure. A C `connect` is the ordinary case.
         return ""
@@ -203,7 +222,11 @@ def option_type_mismatch(target: Any, options: Mapping[str, Any]) -> str:
         if parameter is None:
             continue  # `signature_mismatch` owns the unknown-key case, and names it better.
         accepted = _ACCEPTED_SCALARS.get(parameter.annotation)
-        if accepted is None or isinstance(value, accepted):
+        # `bool` is a subclass of `int`, so `isinstance` alone would let `True` through an `int`
+        # or `float` parameter — the coercion `_ACCEPTED_SCALARS` says it refuses.
+        if accepted is None:
+            continue
+        if isinstance(value, accepted) and (bool in accepted or not isinstance(value, bool)):
             continue
         written = f"{value!r}"
         got = type(value).__name__

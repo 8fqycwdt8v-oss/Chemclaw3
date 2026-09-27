@@ -193,5 +193,14 @@ def test_every_patch_is_declared_in_this_file_so_its_removal_date_is_readable() 
         # every run with (12.6 h at the shipped default). One marker and not two because they
         # landed in one commit: a run either predates both or neither.
         "template-waves-and-resume",
+        # `CheckInWorkflow.run`. Moves the stale-notice supersede from once per page to once per
+        # batch. Removable the day after it ships, for the digest's reason: a nightly Schedule
+        # whose run is bounded by its own interval, so no older history is still replayed.
+        "check-in-supersede-per-batch",
+        # `HypothesisTournamentWorkflow._settle`. Stops dispatching a check that names no target.
+        # Removable once no tournament started before it can still be open. That run is started
+        # with **no** execution timeout (`agent/durable_tools.py`), so the bound is its activities'
+        # own timeouts rather than a setting — check the namespace for open runs before removing.
+        "tournament-empty-calls-refused-before-budget",
     }
     assert {patch_id for _, patch_id in _patch_ids()} == declared

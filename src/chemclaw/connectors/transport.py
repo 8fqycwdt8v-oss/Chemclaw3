@@ -86,6 +86,54 @@ def transport_failure(exc: BaseException) -> bool:
     return module.startswith(("httpx", "anyio"))
 
 
+def _leaves(exc: BaseException) -> list[BaseException]:
+    """Every non-group exception inside `exc`, flattening nested `BaseExceptionGroup`s.
+
+    A `TaskGroup` is what opens a connector, so what escapes an unreachable one is almost always a
+    group rather than the failure itself — and a group's `str()` is `"unhandled errors in a
+    TaskGroup (1 sub-exception)"`, which says nothing about the sub-exception. Recursive because
+    `anyio` nests groups when a scope inside a scope fails.
+    """
+    if isinstance(exc, BaseExceptionGroup):
+        return [leaf for member in exc.exceptions for leaf in _leaves(member)]
+    return [exc]
+
+
+def describe_connect_failure(exc: BaseException) -> str:
+    """What went wrong, as one grep-able line — the *leaf*, never the group that wrapped it.
+
+    **Measured, 2026-09-19.** A stub connector answering `200` on `/healthz` and `500` on `/mcp`
+    produced exactly this line: `connector molfp is unreachable (ExceptionGroup: unhandled errors
+    in a TaskGroup (1 sub-exception))`. The status code was in the group all along
+    (`httpx.HTTPStatusError: Server error '500 Internal Server Error' for url …`), and so was the
+    other leaf this path reaches — a `MissingConnectorCredential` naming the unset token variable,
+    measured in the same drive on the same stub with the token removed. Both read as a network
+    fault, and the readiness sweep said the pod was fine, so the operator was sent after the one
+    thing that was not wrong.
+
+    A cancellation leaf is dropped when any other leaf survives: a `TaskGroup` cancels its siblings
+    once one of them fails, so those are the consequence and reporting them beside the cause buries
+    it. They are kept when they are *all* there is, because then the cancellation is what happened.
+
+    Whitespace is collapsed because one leaf here is `httpx.HTTPStatusError`, whose message carries
+    a newline and an MDN link — and a WARNING an operator greps for has to be one line.
+    """
+    leaves = _leaves(exc)
+    named = [leaf for leaf in leaves if not isinstance(leaf, asyncio.CancelledError)] or leaves
+    return "; ".join(_one(leaf) for leaf in named) or type(exc).__name__
+
+
+def _one(exc: BaseException) -> str:
+    """One leaf as `Type: message`, or the bare type when it has no message.
+
+    A `TimeoutError` out of `asyncio.timeout` stringifies to `""`, so the `Type: message` form
+    alone rendered `TimeoutError: ` — a line that stops exactly where the reason should start,
+    which is the defect `health._probe`'s own comment names one module over.
+    """
+    message = " ".join(str(exc).split())
+    return f"{type(exc).__name__}: {message}" if message else type(exc).__name__
+
+
 def absorb_connect_failure(connector: str, exc: BaseException) -> None:
     """Treat `exc` as "this connector is absent this turn" — unless the caller cancelled us.
 
@@ -106,10 +154,9 @@ def absorb_connect_failure(connector: str, exc: BaseException) -> None:
     if isinstance(exc, asyncio.CancelledError) and _is_really_cancelled():
         raise exc
     logger.warning(
-        "connector %s is unreachable (%s: %s); its tools are unavailable this turn",
+        "connector %s is unreachable (%s); its tools are unavailable this turn",
         connector,
-        type(exc).__name__,
-        exc,
+        describe_connect_failure(exc),
     )
 
 
@@ -225,10 +272,22 @@ class HeldConnectorSession:
         try:
             async with asyncio.timeout(settings.connector_open_timeout_seconds):
                 await self._opened.wait()
-        except TimeoutError as exc:
+        except TimeoutError:
             await self._shut_down()
             record_reachability(self._spec.name, reachable=False, dialled=True)
-            absorb_connect_failure(self._spec.name, exc)
+            # **Named rather than rendered**, which is `health._probe`'s rule applied to the same
+            # failure one module over: `asyncio.timeout`'s `TimeoutError` carries no message, so
+            # passing it through produced `connector x is unreachable (TimeoutError: )`. Measured
+            # 2026-09-19 against a pod answering 200 on `/healthz` and `text/html` on `/mcp` — a
+            # realistic ingress-error-page shape — which is precisely the case where the sweep says
+            # the pod is fine and this line is the operator's only evidence.
+            absorb_connect_failure(
+                self._spec.name,
+                TimeoutError(
+                    "the MCP handshake did not complete within "
+                    f"{settings.connector_open_timeout_seconds}s"
+                ),
+            )
             return []
         except BaseException:
             # The caller was cancelled while we were connecting. The holder task owns a live cancel

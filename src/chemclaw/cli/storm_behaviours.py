@@ -172,6 +172,18 @@ BEHAVIOURS: list[Behaviour] = [
         adversarial=True,
     ),
     Behaviour(
+        name="f-cut-off",
+        # The truncation `f-malformed-json` stopped testing when it moved to an unclosable document:
+        # a stream cut mid-string, **and** the provider saying so. `parse_partial_json` completes
+        # the document to `{"text": "suzuki coup"}`, a valid call; only `finish_reason: length`
+        # says it was cut, and the call must be refused rather than run on the guess
+        # (`D-2026-09-25-a-call-cut-off-at-the-output-limit-does-not-run`).
+        calls=[ToolCall(tool="find_notes", arguments={}, raw_arguments='{"text": "suzuki coup')],
+        text="",
+        finish_reason="length",
+        adversarial=True,
+    ),
+    Behaviour(
         name="f-wrong-argument",
         # LOAD-1 itself, reproduced deliberately: `find_notes` takes `text`, not `query`. Every
         # measurement in the 2026-07 load test died here without anyone noticing, so the storm

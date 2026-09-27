@@ -185,6 +185,11 @@ async def open_wait(request: AwaitRequest) -> tuple[str, bool]:
 
     Passed as it is stated rather than relying on the SDK's default, which is the same value: a
     policy this function's whole docstring argues for should be visible at the call it governs.
+    **And it is now run rather than argued** — every caller's test patches this function away, so
+    all three decisions above were prose over an unexecuted path until
+    `tests/test_awaiting.py::test_the_launch_idiom_joins_an_open_wait_and_reopens_a_settled_one`
+    drove them against a broker. Mutated to `ALLOW_DUPLICATE_FAILED_ONLY`, the re-ask arm is what
+    goes red.
 
     Args:
         request: The question to hold open. Its `subject`, `kind` and `asked_of` decide what joins

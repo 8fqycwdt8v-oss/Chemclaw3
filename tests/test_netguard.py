@@ -4,7 +4,10 @@ import ast
 import os
 import pathlib
 import re
+import shutil
 import socket
+import subprocess
+import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -255,6 +258,7 @@ def test_the_allowlist_is_derived_from_the_dialled_destinations() -> None:
         vector_store_provider = "pgvector"
         vector_store_url = ""
         egress_allow = "mirror.internal"
+        egress_ssh_resolve_timeout_seconds = _SSH_TIMEOUT
 
     hosts = netguard.derive_allowed(_S())
     assert "llm.internal.example" in hosts
@@ -1496,3 +1500,438 @@ def test_a_loopback_name_does_not_seed_the_resolved_ip_allowlist() -> None:
         netguard._resolved_ips.clear()
         netguard._resolved_ips.update(saved)
         netguard._reset_for_tests(netguard.derive_allowed(settings))
+
+
+# --- the git note remote, the one destination that is a *name* rather than a field --------------
+
+#: The shipped bound on `ssh -G`, read off `Settings` so these tests exercise the default a
+#: deployment runs with rather than a second copy of it.
+_SSH_TIMEOUT: float = Settings.model_fields["egress_ssh_resolve_timeout_seconds"].default
+
+
+def _clone_with_remote(tmp_path: Path, url: str, *, name: str = "origin", push: str = "") -> str:
+    """A real checkout with a real remote, so the resolution is driven rather than mocked."""
+    repo = tmp_path / f"notes-{abs(hash((url, name, push))) % 10**8}"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "remote", "add", name, url], check=True, capture_output=True
+    )
+    if push:
+        subprocess.run(
+            ["git", "-C", str(repo), "config", "--add", f"remote.{name}.pushurl", push],
+            check=True,
+            capture_output=True,
+        )
+    return str(repo)
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://git.example.com/org/notes.git", {"git.example.com"}),
+        ("git@git.example.com:org/notes.git", {"git.example.com"}),
+        ("ssh://git@git.example.com:2222/org/notes.git", {"git.example.com"}),
+        ("https://GIT.EXAMPLE.COM/org/notes.git", {"git.example.com"}),
+        ("ssh://git@[2001:db8::1]:2222/org/notes.git", {"2001:db8::1"}),
+        # No credential reaches the allowlist, which is a host list and not a connection string.
+        ("https://user:pw@creds.example.com/org/notes.git", {"creds.example.com"}),
+        # Every spelling of "nowhere off this box". `_host_from_url` reads `../notes` as the host
+        # `..`, which is why the path forms are refused before it rather than after.
+        ("/srv/notes.git", set()),
+        ("file:///srv/notes.git", set()),
+        ("../notes", set()),
+        ("~/notes", set()),
+        ("notes", set()),
+    ],
+)
+def test_the_git_note_remote_resolves_to_the_hosts_it_would_push_to(
+    tmp_path: Path, url: str, expected: set[str]
+) -> None:
+    """Driven against real `git remote add`, because the scp-like form is the one that surprises.
+
+    `git@host:path` has no scheme, so anything reading it as a URL sees no host unless it is asked
+    the right way; `/srv/notes.git` and `../notes` have no host at all and must not contribute one.
+    """
+    netguard._push_hosts.cache_clear()
+    assert (
+        netguard._push_hosts_for(_clone_with_remote(tmp_path, url), "origin", _SSH_TIMEOUT)
+        == expected
+    )
+
+
+def test_the_push_url_is_what_is_derived_when_it_differs_from_the_fetch_url(
+    tmp_path: Path,
+) -> None:
+    """`git push` uses `remote.<name>.pushurl`, and plain `get-url` returns the *fetch* URL.
+
+    A review drove this: with a `pushurl` set, the first version of this derivation was wrong in
+    both directions at once — the host that would actually be dialled was **missing** from the
+    allowlist, so the deployment's own guard refused its own push, and a host nothing dials was
+    **added** to it. `--push` is the fix, and `--all` is for the several-push-URL case git allows.
+    """
+    netguard._push_hosts.cache_clear()
+    one = _clone_with_remote(
+        tmp_path, "https://fetch.example.com/o/n.git", push="https://push.example.com/o/n.git"
+    )
+    assert netguard._push_hosts_for(one, "origin", _SSH_TIMEOUT) == {"push.example.com"}, (
+        "the fetch host was derived, so the guard would refuse the push it is meant to permit"
+    )
+    netguard._push_hosts.cache_clear()
+    several = _clone_with_remote(
+        tmp_path, "https://fetch.example.com/o/n.git", push="https://p1.example.com/o/n.git"
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            several,
+            "config",
+            "--add",
+            "remote.origin.pushurl",
+            "https://p2.example.com/o/n.git",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    assert netguard._push_hosts_for(several, "origin", _SSH_TIMEOUT) == {
+        "p1.example.com",
+        "p2.example.com",
+    }
+
+
+def test_a_remote_url_git_accepts_and_urlsplit_refuses_does_not_crash_the_process(
+    tmp_path: Path,
+) -> None:
+    """`derive_allowed` runs at `chemclaw.core.config` import, so a raise here is a crashloop.
+
+    `urlsplit` raises `ValueError` on an unbalanced `[`, and `git remote add` accepts one — so the
+    first version of this function, which called `_host_from_url` outside its `try`, would have
+    failed every component's import on a `.git/config` a deployment could write by accident.
+    """
+    netguard._push_hosts.cache_clear()
+    for url in ("https://[oops/path", "ssh://[2001:db8::1/x"):
+        repo = _clone_with_remote(tmp_path, url)
+        netguard._push_hosts.cache_clear()
+        assert netguard._push_hosts_for(repo, "origin", _SSH_TIMEOUT) == set()
+
+
+def test_a_derived_host_can_never_carry_the_compiled_layers_separator(tmp_path: Path) -> None:
+    """A comma in one entry is *two* allowed hosts on the compiled layer and none on this one.
+
+    `core/netguard_preload.c::parse_allowlist` splits `CHEMCLAW_NETGUARD_PRELOAD_ALLOW` on commas,
+    while `_check` here compares whole strings — so a single derived entry containing a comma is
+    permitted by one layer and refused by the other, which is the divergence this function sits in
+    `derive_allowed` to prevent. Refused at the source rather than escaped at each layer.
+    """
+    netguard._push_hosts.cache_clear()
+    repo = _clone_with_remote(tmp_path, "https://harmless,target.example.com/n.git")
+    assert netguard._push_hosts_for(repo, "origin", _SSH_TIMEOUT) == set()
+    netguard._push_hosts.cache_clear()
+    multiline = _clone_with_remote(tmp_path, "https://evil.example.com\nhttps://good.example.com/x")
+    assert not any(
+        "," in host for host in netguard._push_hosts_for(multiline, "origin", _SSH_TIMEOUT)
+    )
+
+
+@pytest.mark.parametrize("spelling", [".", "./", "././", "src/..", "{cwd}", "{cwd}/"])
+def test_no_spelling_of_this_processes_own_checkout_derives_a_git_host(spelling: str) -> None:
+    """The dev checkout must not put the *source* repository's host on the allowlist.
+
+    At any of these the writer refuses the write before it can push — `git_writer` commits into the
+    running application's own tree and would push to the source repository — so there is no
+    destination to allow. The first version compared the string to `"."` and a review drove every
+    row here through it: all of them derived this repository's own remote while the writer went on
+    refusing them, which is the widening the guard was written to prevent. `core/checkout.py` is
+    now the one predicate both sides ask.
+    """
+    netguard._push_hosts.cache_clear()
+    assert (
+        netguard._push_hosts_for(spelling.format(cwd=os.getcwd()), "origin", _SSH_TIMEOUT) == set()
+    )
+
+
+def test_the_derivation_and_the_writers_refusal_ask_the_same_question(tmp_path: Path) -> None:
+    """They disagreed once, and the disagreement was the widening above.
+
+    `git_writer._require_dedicated_checkout` raises for exactly the directories
+    `is_the_processes_own_checkout` reports, so "the writer refuses anyway, therefore there is no
+    destination" is a claim this test holds rather than a sentence in a comment.
+    """
+    from chemclaw.core.checkout import is_the_processes_own_checkout
+    from chemclaw.kg.git_writer import GitWriteError, _require_dedicated_checkout
+
+    for spelling in (".", "./", "src/..", os.getcwd(), str(tmp_path)):
+        refused = False
+        try:
+            _require_dedicated_checkout(spelling)
+        except GitWriteError:
+            refused = True
+        assert refused == is_the_processes_own_checkout(spelling), spelling
+
+
+def test_an_unresolvable_remote_contributes_nothing_rather_than_failing(tmp_path: Path) -> None:
+    """Absent beats wrong: a deployment can still name the host in `egress_allow`.
+
+    Three ways to have no answer — a directory that is not a checkout, a directory that is not
+    there, and a checkout with no such remote. None of them may raise, because `derive_allowed`
+    runs at import in every process and a raise there is a crashloop.
+    """
+    netguard._push_hosts.cache_clear()
+    plain = tmp_path / "not-a-checkout"
+    plain.mkdir()
+    assert netguard._push_hosts_for(str(plain), "origin", _SSH_TIMEOUT) == set()
+    assert (
+        netguard._push_hosts_for(str(tmp_path / "does-not-exist"), "origin", _SSH_TIMEOUT) == set()
+    )
+    repo = _clone_with_remote(tmp_path, "https://git.example.com/org/notes.git", name="upstream")
+    assert netguard._push_hosts_for(repo, "origin", _SSH_TIMEOUT) == set()
+    assert netguard._push_hosts_for(repo, "upstream", _SSH_TIMEOUT) == {"git.example.com"}
+
+
+def test_a_remote_named_like_a_flag_is_a_remote(tmp_path: Path) -> None:
+    """`--` before the name, so a `.git/config` cannot turn the resolution into a git option.
+
+    Driven by creating the remote git would otherwise be asked to *run*: without the separator,
+    `get-url --upload-pack=...` is an unknown option rather than an unknown remote, and a future
+    git that accepted it would be executing a string from a config file.
+    """
+    netguard._push_hosts.cache_clear()
+    repo = _clone_with_remote(tmp_path, "https://git.example.com/o/n.git")
+    subprocess.run(
+        ["git", "-C", repo, "config", "--add", "remote.--upload-pack=id.url", "https://x.test/n"],
+        check=True,
+        capture_output=True,
+    )
+    without = subprocess.run(
+        ["git", "-C", repo, "remote", "get-url", "--push", "--all", "--upload-pack=id"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert "unknown option" in (without.stderr + without.stdout).lower(), (
+        "git no longer reads this as an option without the separator, so what `--` protects has "
+        "changed; re-read it rather than deleting it"
+    )
+    # With it, the same string is a remote *name* and resolves to that remote's URL — which is the
+    # point: a `.git/config` decides where a push goes, never what git is asked to run.
+    assert netguard._push_hosts_for(repo, "--upload-pack=id", _SSH_TIMEOUT) == {"x.test"}
+
+
+def test_the_cache_key_is_the_resolved_directory_and_not_the_string(tmp_path: Path) -> None:
+    """Two clones reached by the same relative path are two clones.
+
+    Measured before the fix: under two working directories, a relative `notes` returned the first
+    clone's host for the second, one cache hit and one miss. The resolution happens before the
+    cache rather than inside it, so the key says which directory was meant.
+    """
+    netguard._push_hosts.cache_clear()
+    first, second = tmp_path / "a", tmp_path / "b"
+    for where, host in ((first, "alpha.example.com"), (second, "beta.example.com")):
+        where.mkdir()
+        subprocess.run(
+            ["git", "-C", str(where), "init", "-q", "notes"], check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "-C", str(where / "notes"), "remote", "add", "origin", f"https://{host}/n.git"],
+            check=True,
+            capture_output=True,
+        )
+    was = os.getcwd()
+    try:
+        os.chdir(first)
+        assert netguard._push_hosts_for("notes", "origin", _SSH_TIMEOUT) == {"alpha.example.com"}
+        os.chdir(second)
+        assert netguard._push_hosts_for("notes", "origin", _SSH_TIMEOUT) == {"beta.example.com"}
+    finally:
+        os.chdir(was)
+
+
+def test_the_derived_allowlist_carries_the_git_note_remote(tmp_path: Path) -> None:
+    """End to end: the host reaches `derive_allowed`, which is what both guard layers arm from.
+
+    The compiled `LD_PRELOAD` layer reads this same set through `cli/egress_preload.py`, so a host
+    added anywhere else would be permitted by one layer and refused by the other.
+    """
+    netguard._push_hosts.cache_clear()
+
+    class _S:
+        llm_base_url = "https://llm.internal.example:8000/v1"
+        llm_fallback_base_url = ""
+        postgres_dsn = "postgresql://u:p@pg.internal:5432/db"
+        temporal_address = "temporal.internal:7233"
+        calc_server_url = ""
+        rxnlabel_server_url = ""
+        connector_urls: dict[str, str] = {}
+        egress_allow = ""
+        egress_ssh_resolve_timeout_seconds = _SSH_TIMEOUT
+        note_repo_dir = _clone_with_remote(tmp_path, "git@notes.example.com:org/knowledge.git")
+        git_remote = "origin"
+
+    assert "notes.example.com" in netguard.derive_allowed(_S())
+
+
+def _fake_ssh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str) -> Path:
+    """Put an `ssh` first on `PATH` that logs its argv to the returned file, then runs `body`.
+
+    A stand-in rather than the real client because the real one reads the *user's* configuration
+    from the password database's home directory, which a test cannot point elsewhere without
+    touching the machine it runs on. What the stand-in has to get right is the one line
+    `_ssh_hostname` reads — `hostname <host>`, lowercase key, one space — and that shape was taken
+    from a real `ssh -G` against a `Host`/`HostName` block, not written from memory.
+    """
+    bin_dir = tmp_path / "fake-bin"
+    bin_dir.mkdir(exist_ok=True)
+    calls = tmp_path / "ssh-calls.log"
+    script = bin_dir / "ssh"
+    script.write_text(f'#!/bin/sh\necho "$@" >> {calls}\n{body}\n')
+    script.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    return calls
+
+
+_ALIAS_CONFIG = """case "$3" in
+  notes-alias) echo "user git"; echo "hostname real-git.internal.example"; echo "port 22" ;;
+  *) echo "hostname $3" ;;
+esac"""
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "git@notes-alias:org/notes.git",
+        "ssh://git@notes-alias:2222/org/notes.git",
+        "git+ssh://git@notes-alias/org/notes.git",
+    ],
+)
+def test_an_ssh_alias_derives_the_host_ssh_dials_not_the_alias(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, url: str
+) -> None:
+    """`Host notes-alias` / `HostName real-git.internal.example` is a push to the second name.
+
+    Before this, the alias itself reached the allowlist and the host ssh then dialled did not, so
+    both guard layers refused the deployment's own push at `getaddrinfo` with nothing naming ssh.
+    The argv is asserted too: `--` before the alias is what keeps a remote host spelled like an
+    option from becoming one.
+    """
+    calls = _fake_ssh(tmp_path, monkeypatch, _ALIAS_CONFIG)
+    netguard._push_hosts.cache_clear()
+    repo = _clone_with_remote(tmp_path, url)
+    assert netguard._push_hosts_for(repo, "origin", _SSH_TIMEOUT) == {"real-git.internal.example"}
+    assert calls.read_text().split() == ["-G", "--", "notes-alias"]
+
+
+def test_an_https_remote_never_asks_ssh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The host of an `https://` URL is the host dialled, so no second subprocess is spent on it.
+
+    This runs at config import in every process; an https deployment pays for the `git` call and
+    nothing more.
+    """
+    calls = _fake_ssh(tmp_path, monkeypatch, 'echo "hostname elsewhere.example"')
+    netguard._push_hosts.cache_clear()
+    repo = _clone_with_remote(tmp_path, "https://git.example.com/org/notes.git")
+    assert netguard._push_hosts_for(repo, "origin", _SSH_TIMEOUT) == {"git.example.com"}
+    assert not calls.exists(), "ssh was asked about an https remote"
+
+
+@pytest.mark.parametrize(
+    ("body", "why"),
+    [
+        ("exit 255", "ssh refused its configuration"),
+        (
+            'echo "hostname harmless,target.example"',
+            "a host carrying the compiled layer's separator",
+        ),
+        ('echo "port 22"', "no hostname line at all"),
+    ],
+)
+def test_an_ssh_that_cannot_answer_leaves_the_alias(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str, why: str
+) -> None:
+    """Every failure falls back to what was derived before ssh was asked — never to nothing.
+
+    The alias is a wrong entry a deployment can correct in `egress_allow`; an exception here is a
+    crashloop at config import, and an empty set would drop an entry that was right whenever the
+    host in the URL is not an alias at all.
+    """
+    calls = _fake_ssh(tmp_path, monkeypatch, body)
+    netguard._push_hosts.cache_clear()
+    repo = _clone_with_remote(tmp_path, "git@notes-alias:org/notes.git")
+    assert netguard._push_hosts_for(repo, "origin", _SSH_TIMEOUT) == {"notes-alias"}, why
+    assert calls.exists(), "the fallback was reached without ssh ever being asked"
+
+
+def test_an_ssh_that_hangs_is_bounded_by_the_configured_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A wedged `ssh -G` must not wedge every process's start-up, which is where this runs.
+
+    The stand-in `exec`s into a long sleep — one process, as a real ssh stuck on a `Match exec`
+    or a dead mount would be, so the kill `subprocess.run` sends on timeout reaches it. The alias
+    alone would not prove the bound fired (a silent exit also falls back to it); returning in well
+    under the sleep does, and the call log proves ssh was reached at all.
+    """
+    calls = _fake_ssh(tmp_path, monkeypatch, "exec sleep 30")
+    netguard._push_hosts.cache_clear()
+    repo = _clone_with_remote(tmp_path, "git@notes-alias:org/notes.git")
+    started = time.monotonic()
+    assert netguard._push_hosts_for(repo, "origin", 0.5) == {"notes-alias"}
+    assert time.monotonic() - started < 10, "the timeout did not bound the ssh child"
+    assert calls.exists()
+
+
+def test_no_ssh_on_the_path_leaves_the_alias(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The shipped image may carry no ssh client at all, and then this is the old behaviour.
+
+    `PATH` is narrowed to a directory holding nothing but a `git` symlink, so the `ssh` lookup
+    fails the way it does on an image without one — an `OSError` from `subprocess`, which must not
+    escape. (Deliberately no `shutil.which` probe for ssh: `tests/test_deploy_chart.py` reads every
+    such call in the suite as a skip guard that CI owes the binary for.)
+    """
+    git = shutil.which("git")
+    assert git is not None
+    only_git = tmp_path / "only-git"
+    only_git.mkdir()
+    (only_git / "git").symlink_to(git)
+    netguard._push_hosts.cache_clear()
+    repo = _clone_with_remote(tmp_path, "git@notes-alias:org/notes.git")
+    monkeypatch.setenv("PATH", str(only_git))
+    assert netguard._push_hosts_for(repo, "origin", _SSH_TIMEOUT) == {"notes-alias"}
+
+
+def test_the_derived_allowlist_carries_the_host_an_ssh_alias_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End to end through `derive_allowed`, with the timeout read off the settings object."""
+    _fake_ssh(tmp_path, monkeypatch, _ALIAS_CONFIG)
+    netguard._push_hosts.cache_clear()
+    live = Settings(
+        _env_file=None,  # type: ignore[call-arg]
+        note_repo_dir=_clone_with_remote(tmp_path, "git@notes-alias:org/notes.git"),
+    )
+    allowed = netguard.derive_allowed(live)
+    assert "real-git.internal.example" in allowed
+    assert "notes-alias" not in allowed
+
+
+def test_the_git_remote_is_a_destination_no_field_suffix_would_have_found() -> None:
+    """Why this needed its own derivation, pinned so the reason cannot be forgotten.
+
+    `test_every_destination_shaped_setting_is_on_the_allowlist_it_derives` walks `Settings` for
+    names ending in `_url`, `_endpoint`, `_address` or `_dsn` — the shape every other destination
+    takes. This asserts the premise against the *live* setting rather than a string literal: a
+    first version matched the regex against `"git_remote"` written out, which no change to
+    `Settings` could ever falsify.
+    """
+    from chemclaw.core.config import settings as live
+
+    name = next(n for n in type(live).model_fields if n == "git_remote")
+    assert not _DESTINATION_FIELD.search(name), (
+        "git_remote now has a destination-shaped name, so the derived field guard reaches it and "
+        "this special case can go"
+    )
+    assert "://" not in live.git_remote and ":" not in live.git_remote, (
+        f"git_remote now holds {live.git_remote!r}, which names a host; derive it like the others"
+    )

@@ -11,7 +11,7 @@ question about a YAML file.
 Tools come from the capability-tool registry, populated as a side effect of the imports below, so
 adding a tool is a `@tool` at its definition site rather than an edit here. Skills are not in this
 list at all — they reach the model through `skill_backend`, narrowed by the same predicates
-(`skill_access`) — which is why `available_tool_names` unions six name spaces rather than reading
+(`skill_access`) — which is why `available_tool_names` unions seven name spaces rather than reading
 one (D-117 records what an omitted name space costs).
 
 **Every narrowing here attenuates and none widens.** A profile selects a subset of what the
@@ -39,7 +39,8 @@ from langchain.agents.middleware import TodoListMiddleware
 
 from chemclaw.agent import tool_modules as _tool_modules  # noqa: F401
 from chemclaw.agent.framing import ENVELOPE_TAG, SYSTEM_SPEECH_MARK
-from chemclaw.agent.profiles import AgentProfile, get_profile
+from chemclaw.agent.handoff import handoff_tool_name
+from chemclaw.agent.profiles import AgentProfile, get_profile, registered_profile_names
 from chemclaw.agent.scratchpad import scratchpad_tools
 from chemclaw.connectors.registry import (
     connector_tool_names,
@@ -57,7 +58,7 @@ from chemclaw.core.tool_registry import (
 )
 
 # `template_tool_names` is re-exported deliberately, alongside the three sibling name-space readers
-# defined below: this module is where the six of them are assembled (`available_tool_names`), and
+# defined below: this module is where the seven of them are assembled (`available_tool_names`), and
 # `connectors/registry._bound_by_this_process` reads all four from here over the already-declared
 # `connectors -> agent` edge rather than opening a `connectors -> templates` one for a single name
 # list. The `as` is what makes the re-export explicit to `mypy --strict`.
@@ -865,31 +866,114 @@ def subagent_tool_names() -> frozenset[str]:
     return frozenset(tool.name for tool in probe.tools)
 
 
-def available_tool_names() -> set[str]:
-    """Every tool name the agent can resolve, across all six name spaces.
+def handoff_tool_names() -> frozenset[str]:
+    """The `transfer_to_<peer>` tools a turn graph can bind under this deployment's peer roster.
 
-    The six are genuinely separate — in-process `@tool` functions this process holds as symbols,
+    **Empty when `agent_peer_roster` is, which is the shipped default** — `build_turn_graph` then
+    returns `None`, no handoff tool is bound on any turn, and this name space adds nothing to
+    `available_tool_names`. So widening that union by it is inert until a deployment turns
+    handoff on, and exact once it does.
+
+    **Every registered profile, not only the rostered ones, and that is the graph's own
+    arithmetic.** `agent/turn_graph.build_turn_graph` makes the turn's *root* a peer so another
+    peer can hand back to it, and the root is whichever profile the session runs under — any
+    registered one. So across the turns this process can serve, a handoff can target any rostered
+    name or any profile a session may open on. The roster is unioned in explicitly rather than
+    trusted to be registered, and discovery is run first (it is idempotent), because profile files
+    are discovered lazily and a set that depended on whether the files had been globbed yet would
+    answer differently on the first call than on the second — which is exactly what reading the
+    registry alone did: a process that never ran discovery (the mock LLM, a validator) refused a
+    hand-back to a file-profile root the real mesh binds.
+
+    **Why this is a name space at all.** `cli/mock_llm._validate` resolves every scripted call
+    against `available_tool_names`, and without this set a behaviour calling a real handoff was
+    refused as a tool "the agent does not advertise" — so the delegation suite's peer arm could
+    never record the act it exists to observe. The names are minted by
+    `agent/handoff.handoff_tool_name`, the one function every other reader derives them from.
+    """
+    roster = settings.peer_roster
+    if not roster:
+        return frozenset()
+    # Imported here: profile_discovery imports connectors.registry, which imports this module.
+    from chemclaw.agent.profile_discovery import load_profiles
+
+    load_profiles()
+    return frozenset(handoff_tool_name(name) for name in {*roster, *registered_profile_names()})
+
+
+def available_tool_names() -> set[str]:
+    """Every tool name the agent can resolve, across all seven name spaces.
+
+    The seven are genuinely separate — in-process `@tool` functions this process holds as symbols,
     connector endpoint tools named only by a manifest allow-list, the `run_<name>` launchers
-    generated from step templates, the harness's own, the backend's filesystem verbs, and the
-    subagent spawner — and only the union is meaningful. Exposed rather than inlined because four
-    other places need exactly this set: the skill validator, the template validator, the
-    prose-contract validator, and the test that checks the instructions against it. Three of those
-    unioned only the first two name spaces, so a skill or template step naming a template launcher
-    failed validation although the tool exists (D-117). One definition, one answer.
+    generated from step templates, the harness's own, the backend's filesystem verbs, the
+    subagent spawner, and the peer handoffs — and only the union is meaningful. Exposed rather
+    than inlined because four other places need exactly this set: the skill validator, the
+    template validator, the prose-contract validator, and the test that checks the instructions
+    against it. Three of those unioned only the first two name spaces, so a skill or template step
+    naming a template launcher failed validation although the tool exists (D-117). One
+    definition, one answer.
 
     The skill name space was the same omission a second time. Skills are attached
     unconditionally, and a live run recorded skill tools on five turns while this function reported
     them absent — so every validator built on it would have rejected a correct reference to a tool
     the agent had just called. `task` is the same shape a third time and was added with the
     middleware that registers it, rather than after a validator rejected a correct reference to it.
+    The handoffs were the fourth time, found by the mock double refusing the one call the peer arm
+    of the delegation experiment is built to observe (`handoff_tool_names`).
     """
-    return {
-        *registered_tool_names(),
-        *connector_tool_names(),
-        *template_tool_names(),
+    return capability_tool_names() | {
         *skill_tool_names(),
         *harness_tool_names(),
         *subagent_tool_names(),
+        *handoff_tool_names(),
+    }
+
+
+def declared_tool_names() -> set[str]:
+    """Every tool name this *tree* declares, whether or not this deployment binds it.
+
+    `available_tool_names` above answers "what can this turn call" and is the runtime answer.
+    This is the validator's answer, and the two diverged the moment a bundle could declare
+    `default_enabled: false` (`connectors/manifest.py`): an opt-in bundle's tools are absent from
+    `enabled()` on every checkout that has not turned it on, which is every checkout by default,
+    so checking a skill or a prompt clause against the runtime set would reject a correct reference
+    to a tool this repository ships a manifest for.
+
+    Two halves differ. The connector half is `declared_connector_tool_names` in place of
+    `connector_tool_names`, and the template half is every *enabled* launcher rather than the bound
+    ones, because a launcher for an opt-in capability that is off is withheld
+    (`templates.registry.withheld_reason`) for exactly the reason that bundle's tools are absent.
+    A deletion is still caught because a tool nothing declares is in neither.
+    """
+    from chemclaw.connectors.registry import declared_connector_tool_names
+
+    return (
+        available_tool_names()
+        | set(declared_connector_tool_names())
+        | set(template_tool_names(declared=True))
+    )
+
+
+def capability_tool_names() -> set[str]:
+    """The three name spaces that are a *capability* — a calculation, a lookup, a search.
+
+    The other four in `available_tool_names` are the agent's own scaffolding: the harness's todo
+    writer, the backend's filesystem verbs (`ls`, `grep`, `glob`, `read_file`), the subagent
+    spawner (`task`) and the peer handoffs (`transfer_to_…`). Nothing promises a chemist one of
+    those, and four of their names are ordinary English words.
+
+    That distinction is here rather than at its caller because the union above is written in terms
+    of it, so the two cannot drift: a new name space lands in `available_tool_names` without
+    silently joining the set the verifier scans for a bare token.
+    `agent/verifier.promised_uncalled_tools` is the caller, and
+    `tests/test_verifier.py::test_no_capability_tool_is_short_enough_to_collide_with_english`
+    asserts the property that makes a bare-token match safe over this set and unsafe over that one.
+    """
+    return {
+        *(name for name in registered_tool_names() if name not in _withheld_launcher_names()),
+        *connector_tool_names(),
+        *template_tool_names(),
     }
 
 
@@ -994,7 +1078,24 @@ def _register_generated_tools() -> list[CapabilityTool]:
         for tool_fn in [*job_tools(), *template_tools()]:
             if tool_fn.__name__ not in known:
                 register_tool(tool_fn)
-        return registered_tools()
+        withheld = _withheld_launcher_names()
+        return [tool for tool in registered_tools() if tool.__name__ not in withheld]
+
+
+def _withheld_launcher_names() -> set[str]:
+    """Template launchers this deployment declares and does not bind, read at the moment of asking.
+
+    **The registry only grows, so what it holds is not the surface.** A launcher registered by an
+    earlier build under a different configuration stays registered for the life of the process.
+    Measured in CI: the full serial suite bound `run_scale_up_thermal_envelope` on `default`
+    (73,181 tokens against the 72,850 ceiling) while the same files run alone withheld it, because
+    some earlier build in that process had registered it. So
+    the withholding `templates.registry.withheld_reason` decides is applied where the registry is
+    *read*, not only where it is filled. A production process never changes its configuration, so
+    there this subtracts nothing that was registered; in a process that does, it is the difference
+    between the rule and the history.
+    """
+    return set(template_tool_names(declared=True)) - set(template_tool_names())
 
 
 def _narrow(

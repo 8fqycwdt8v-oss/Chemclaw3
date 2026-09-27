@@ -27,12 +27,19 @@ disables `app.dependency_overrides`.)
 | `notes.py` | `GET /notes/{id}` — one knowledge note as the `NoteView` `expand_note` returns, so a citation chip resolves to the note it cites. `CurrentUser`-gated, not owner-scoped: the graph has no owner |
 | `jobs.py` | `GET/DELETE /jobs[...]` — the durable-run surface over `job_records` |
 | `workflows.py` | `GET /workflows`, `GET/DELETE /workflows/{name}`, `POST /workflows/{name}/approval` — a chemist's own composed workflows, and the standing approval that lets one launch durable jobs. **Routes and deliberately not agent tools**, for `plan.py`'s reason: a model must never authorize its own plan, and the guarantee is obtained by not building the tool. Owner-scoped, so somebody else's name is a 404 rather than a 403 |
+| `skills.py` | `GET/POST /skills/mine`, `GET/DELETE /skills/mine/{name}` — a chemist's own skills: judgment that reshapes their turns and nobody else's. **Routes and deliberately not agent tools**, for `plan.py`'s and `workflows.py`'s reason and one stronger: a skill is injected into the prompt with no citation trail, so `agent/skill_backend.SkillsReadOnlyRefusal` refuses every write a turn could attempt and this is the only way in. Owner-scoped by construction — no parameter names whose tier is touched, so there is no authorization decision here to get wrong — and a 503 rather than an empty list when the deployment keeps no store |
+| `proposals.py` | `GET /proposals`, `POST /proposals/{kind}/{name}` — the human gate on a change to what the agent *does*. The agent proposes with `propose_skill`; nothing it can call decides, which is `plan.py`'s reason and `skills.py`'s. Owner-scoped by construction. A decision binds to the `content_hash` the person was shown, so a proposal superseded between the read and the click is a 404 rather than a decision about a document nobody read — the control `plan_approvals` gets from keying on `plan_hash`. Accepting writes the skill inside the decision, and refuses with the same 409 `POST /skills/mine` gives at `agent_local_skills_max`, leaving the proposal open |
 
 `caching.py` holds no route. It is the conditional-GET policy the two *read* routes above share —
 `results.py` and `notes.py` — and it exists because the caching header a surface asked for
 (`public, max-age=31536000, immutable`) is wrong on both of them, in two different ways its module
 docstring sets out. One module rather than two header literals, so the two routes cannot drift into
 disagreeing policies.
+
+`skill_http.py` holds no route either. It is the one translation the three skill-writing surfaces —
+`skills.py`, `org_skills.py` and `proposals.py` — share: a `SkillRefused` as 409 or 422, and a
+missing store as a 503 rather than an empty tier. It was four copies of the one and three of the
+other, and a status code that drifted on one surface would give a refusal two meanings.
 
 Two conventions to keep, both enforced by tests rather than asked for:
 

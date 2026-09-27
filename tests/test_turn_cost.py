@@ -293,10 +293,18 @@ def test_every_turn_cost_reader_has_the_surface_that_asks_it() -> None:
 
     - `operations/activity.py` — the aggregate read model, reached by the `review_activity` tool.
     - `operations/evidence_pack.py` — `assemble`, the context-of-use record for one session.
+    - `cli/distill.py` — `make distill`, which reads `skills_loaded` and nothing else: it is the
+      self-confirmation guard's input, and the guard is why that column exists at all
+      (`D-2026-09-18-a-guard-with-nothing-to-read-is-not-a-guard`).
     - `cli/explain.py` — `python -m chemclaw.cli.explain`, the audit reconstruction.
     - `cli/live_turn_cost.py` — `make live-turn-cost`, which drives a fixed workload and scores
       what the ledger says it cost. Its surface is the command itself, and it reads back only the
       session it just opened.
+    - `evals/delegation_run.py` — `make live-delegation`, which reads back only the sessions it just
+      drove, one arm-run at a time. `ArmRun.billed_tokens`' own comment is why it has to come from
+      here: the delegation experiment's cost claim is about what a turn *billed*, and an estimator
+      would measure the wrong thing through a ratio `agent/context_budget.py` has twice found to be
+      content-dependent.
 
     Note what the count never protected: `evidence_pack.py` has always read `audit_events`,
     `job_records`, `effects` and `plan_approvals` with its own SQL, so "operations/activity.py is
@@ -312,8 +320,10 @@ def test_every_turn_cost_reader_has_the_surface_that_asks_it() -> None:
         if "FROM turn_costs" in path.read_text(encoding="utf-8")
     )
     assert readers == [
+        "cli/distill.py",
         "cli/explain.py",
         "cli/live_turn_cost.py",
+        "evals/delegation_run.py",
         "operations/activity.py",
         "operations/evidence_pack.py",
     ], (

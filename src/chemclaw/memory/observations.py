@@ -260,7 +260,8 @@ class Observation(BaseModel):
         actual check.** It read: promotion runs on every mining pass, so a row over both thresholds
         is already `promoted` — and out of `_SELECT_PROMOTABLE` — before any later run can move the
         anchor. That was true while one workflow did both. D-2026-08-25 split promotion out so that
-        no timer opens a pull request, and the precondition went with it: mining now runs daily
+        no timer mines and promotes in one pass, and the precondition went with it: mining
+        now runs daily
         with no promotion, so a subset row can sit `open` and over-threshold while an anchor move
         mints a superset row that is over-threshold too, and one later promotion writes two
         playbook notes for one finding. `durable.observation_jobs.promote_observations_activity`

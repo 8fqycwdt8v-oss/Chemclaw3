@@ -1321,3 +1321,41 @@ def test_a_single_species_distribution_publishes_no_gap() -> None:
     )
 
     assert "species_gap" not in {f.property for f in record.properties}
+
+
+def test_an_unpairable_spectrum_publishes_the_reason_beside_the_missing_intensities() -> None:
+    """The points already go short; without this the record says nothing about why.
+
+    `_thermochemistry` emits an `ir_intensity` point only where the payload has one, and a result
+    whose intensities could not be paired with its modes carries `None` for every mode — so a
+    consumer of the result store saw a wavenumber series with no intensity series and no reason for
+    it. A calculation that produced no spectrum is the open-ended emitted assertion `FlagFact` is
+    for: most thermochemistry raises none, and enumerating it as a property would put a 0..1 column
+    on every row for the exceptional case.
+    """
+    payload: dict[str, Any] = {
+        "smiles": "O=C=O",
+        "structure_id": "st_co2",
+        "method": "GFN2-xTB",
+        "mode_count": 4,
+        "modes": [
+            {"wavenumber_cm": 667.0, "ir_intensity_km_per_mol": None},
+            {"wavenumber_cm": 2593.0, "ir_intensity_km_per_mol": None},
+        ],
+        "spectrum_unavailable": "the server projected out 6 external mode(s) leaving 3",
+    }
+
+    _, _, _, extra = projection.PAYLOAD_PROJECTORS["ThermochemistryResult"](payload)
+
+    assert [point.property for point in extra["points"]] == ["wavenumber", "wavenumber"], (
+        "the premise: no intensity point is published when there is no intensity"
+    )
+    flags = extra["flags"]
+    assert [(flag.flag, flag.severity) for flag in flags] == [("spectrum_unavailable", "warning")]
+    assert "projected out 6" in flags[0].message
+
+    payload["spectrum_unavailable"] = None
+    payload["modes"] = [{"wavenumber_cm": 667.0, "ir_intensity_km_per_mol": 68.71}]
+    _, _, _, paired = projection.PAYLOAD_PROJECTORS["ThermochemistryResult"](payload)
+    assert paired["flags"] == [], "and nothing is flagged when the spectrum is there"
+    assert "ir_intensity" in {point.property for point in paired["points"]}

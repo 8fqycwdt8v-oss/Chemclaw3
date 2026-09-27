@@ -51,7 +51,9 @@ endpoint:
     - predict_outcome
   # These three touch nothing: `resume_campaign` reads the campaign record back, and
   # `generate_screening_design` and `campaign_progress` never featurize — the first enumerates
-  # corners, the second is pure arithmetic over the runs it is handed and asks no surrogate at all.
+  # corners or solves a criterion over the domain it is handed, neither of which reaches the
+  # calculation cache for a descriptor, and the second is pure arithmetic over the runs it is
+  # given and asks no surrogate at all.
   read_only:
     - resume_campaign
     - generate_screening_design

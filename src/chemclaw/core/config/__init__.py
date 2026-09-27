@@ -62,6 +62,7 @@ from chemclaw.core.config.eln import ElnSettings
 from chemclaw.core.config.entra import EntraSettings
 from chemclaw.core.config.evals import EvalSettings
 from chemclaw.core.config.fingerprints import FingerprintSettings
+from chemclaw.core.config.hypotheses import HypothesisSettings
 from chemclaw.core.config.kg import KgSettings
 from chemclaw.core.config.labels import LabelSettings
 from chemclaw.core.config.llm import LlmSettings
@@ -256,6 +257,15 @@ def pg_endpoint(dsn: str) -> tuple[str, str] | None:
     is where a measurement could live, and `core/db._session_store_max_connections` deliberately
     reuses *this* comparison so the two halves cannot disagree about how many servers there are.
 
+    **The runtime half now has one** (`D-2026-09-23-the-server-says-which-server-it-is`).
+    `core/db.same_server` reads `system_identifier` off a borrow that has already succeeded and
+    caches it per endpoint, so the *gauge* can tell one box spelled two ways from two boxes while
+    this function keeps comparing strings — which is still the only thing it can do, for every
+    reason above. The two halves therefore *can* now disagree, deliberately and in one direction:
+    the startup check charges a phantom split to two ceilings, and the runtime half collapses it
+    back to one once a borrow has disproved it. Nothing here changes; this paragraph exists so the
+    next reader of "the two halves cannot disagree" knows where the exception is.
+
     Imported lazily for the reason `_pg_dial` gives: `chemclaw.core.config` is imported by the
     datasource manifests' offline validation, which may not have psycopg installed.
     """
@@ -346,6 +356,7 @@ class Settings(
     MemorySettings,
     RetrievalSettings,
     ReportSettings,
+    HypothesisSettings,
     DeliverySettings,
     PublishSettings,
 ):
@@ -686,6 +697,26 @@ class Settings(
                     "service_max_concurrent_turns or the replica ceiling, or raise "
                     "service_fleet_max_concurrent_turns if the LLM endpoint can serve it."
                 )
+        # **A fairness cap at or above the cap it divides refuses nothing while reading as
+        # protection**, and it publishes that reading on `chemclaw_turn_actor_capacity`. The chart's
+        # own pair is held apart by `tests/test_deploy_chart.py`, but that test reads `values.yaml`
+        # — so a `--set config.CHEMCLAW_SERVICE_MAX_CONCURRENT_TURNS=4` on a small node, or an env
+        # override of either key, escapes it entirely and ships a guard consulted on every request
+        # that can never fire. Checked here because this is the only place that sees the
+        # configuration a pod actually runs, which is the same argument the fleet product above
+        # makes. Zero is untouched: it is the documented off switch, not a narrow cap.
+        if (
+            self.service_max_concurrent_turns_per_actor
+            and self.service_max_concurrent_turns_per_actor >= self.service_max_concurrent_turns
+        ):
+            raise ValueError(
+                f"service_max_concurrent_turns_per_actor is "
+                f"{self.service_max_concurrent_turns_per_actor} against a per-process "
+                f"admission cap of {self.service_max_concurrent_turns}, so one actor may "
+                "hold every permit and "
+                "the guard refuses nothing. Set it strictly below "
+                "service_max_concurrent_turns, or to 0 to disable it deliberately."
+            )
         # The socket backstop against what this process's own caps can occupy — the cross-check
         # that was missing beside the three fleet ones below it.
         #
