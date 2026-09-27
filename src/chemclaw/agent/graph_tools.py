@@ -11,6 +11,7 @@ it runs off the event loop.
 
 import asyncio
 import logging
+import re
 from collections.abc import Sequence
 from datetime import date
 from pathlib import Path
@@ -21,11 +22,12 @@ from pydantic import BaseModel, Field, computed_field
 from chemclaw.agent.authz import require_actor
 from chemclaw.agent.framing import SYSTEM_SPEECH_MARK, frame_untrusted
 from chemclaw.agent.tool_framing import defanged_payload
+from chemclaw.core.chem import InvalidSmilesError, compound_id
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.tool_registry import tool
 from chemclaw.core.turn_signals import record_note_written
-from chemclaw.ingest.eln.compound import compound_dependencies
+from chemclaw.ingest.eln.compound import compound_dependencies, compound_note
 from chemclaw.ingest.eln.records import RECORD_TYPE, default_record_store
 from chemclaw.kg.analytics import GraphGaps, analyze
 from chemclaw.kg.git_writer import default_writer
@@ -35,6 +37,11 @@ from chemclaw.kg.record import record_note
 from chemclaw.kg.relations import DEFAULT_RELATION
 from chemclaw.kg.search import query_terms, term_coverage
 from chemclaw.memory.failure import close_refuted_note, failure_note
+from chemclaw.science.fingerprints.molfp.search import indexed_structure
+from chemclaw.science.fingerprints.store import default_molecule_store
+
+# The molecule index `_expand_compound` falls back to, as a seam a test replaces.
+_molecule_store = default_molecule_store
 
 log = logging.getLogger(__name__)
 
@@ -391,6 +398,71 @@ def _require_note(graph: nx.DiGraph, note_id: str) -> Note:
     return note
 
 
+# `core.chem.compound_id`'s shape: the prefix and a 12-hex-digit structure hash. A slug-named seed
+# note (`compound-thf`) never matches, and neither does anything a person would type as a name.
+_STRUCTURAL_COMPOUND_ID = re.compile(r"compound-[0-9a-f]{12}")
+
+
+def _notes_carrying(graph: nx.DiGraph, note_id: str) -> list[Note]:
+    """The current notes whose `compound_smiles` is the structure `note_id` was derived from."""
+    today = date.today()
+    carrying = []
+    for _, data in graph.nodes(data=True):
+        note = data.get("note")
+        if note is None or not note.compound_smiles or not note.is_current(today):
+            continue
+        try:
+            if compound_id(note.compound_smiles) == note_id:
+                carrying.append(note)
+        except InvalidSmilesError:
+            continue
+    return sorted(carrying, key=lambda note: note.id)
+
+
+async def _expand_compound(graph: nx.DiGraph, note_id: str, hops: int) -> NoteView:
+    """Resolve a structure-derived compound id that no note was written under.
+
+    Found live: one turn called `expand_note` on thirteen `similar_molecules` ids and got "no note
+    with id" thirteen times. A hit's id is `core.chem.compound_id` of the structure — the note an
+    ingest *would* write — and none is written for a molecule indexed from an ELN run, while the
+    seed corpus files its compounds under slugs (`compound-4-bromoanisole`) the hash never equals
+    (`D-2026-07-31-two-spellings-of-one-molecule` left that open). Three answers, in order:
+
+    1. **A compound note filed under another id carries this structure** — it *is* the note, so it
+       is expanded as itself, neighbourhood and all.
+    2. **Other notes carry the structure** (a reaction, an observation) — the compound view is
+       rendered and they are its neighbours.
+    3. **Only the molecule index holds it** — the compound view alone, which is exactly what
+       `ingest.eln.compound.compound_note` would have written: the structure, its recognised name,
+       its synonyms, and nothing inferred.
+
+    The rendered view says it was not written, as system text outside the framed body, so it is not
+    mistaken for something a chemist recorded.
+    """
+    carrying = await asyncio.to_thread(_notes_carrying, graph, note_id)
+    for note in carrying:
+        if note.type == "compound":
+            return _expand_in_graph(graph, note.id, hops)
+    smiles = (
+        carrying[0].compound_smiles
+        if carrying
+        else await indexed_structure(_molecule_store(), note_id)
+    )
+    if smiles is None:
+        raise ChemclawError(f"no note with id {note_id!r}")
+    rendered = compound_note(smiles)
+    notice = (
+        "No note has been written about this compound; this view is derived from its structure. "
+        "What was run with it is in the reaction records — search them by this SMILES "
+        f"(similar_reactions, substrate_precedent). {SYSTEM_SPEECH_MARK}"
+    )
+    return NoteView(
+        note=_ref(rendered),
+        body=f"{notice}\n\n{frame_untrusted(rendered.body, note_id=note_id)}",
+        neighbors=[_neighbor_ref(graph, note_id, note) for note in carrying],
+    )
+
+
 async def _expand_record(note_id: str) -> NoteView:
     """Expand a `reaction-<id>` citation from the transcription store (D-2026-08-25).
 
@@ -492,6 +564,15 @@ async def expand_note(note_id: str, hops: int = 1) -> NoteView:
     # differ, and this line testing membership instead was the defect it now prevents.
     if note_in(graph, note_id) is None and resolves_outside_graph(note_id):
         return await _expand_record(note_id)
+    # A structure-derived compound id with no note under it — what nearly every `similar_molecules`
+    # hit cites, since an ELN run is a record and not a note. See `_expand_compound`.
+    if note_in(graph, note_id) is None and _STRUCTURAL_COMPOUND_ID.fullmatch(note_id):
+        return await _expand_compound(graph, note_id, hops)
+    return _expand_in_graph(graph, note_id, hops)
+
+
+def _expand_in_graph(graph: nx.DiGraph, note_id: str, hops: int) -> NoteView:
+    """`expand_note` over a note the graph holds: its body and its current neighbourhood."""
     note = _require_note(graph, note_id)
     # `hops` comes from the model; clamp it to [0, graph_max_hops] so a large value is bounded
     # rather than traversing the whole graph (SEC-4).

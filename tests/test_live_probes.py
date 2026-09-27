@@ -36,7 +36,7 @@ from chemclaw.core.errors import SubsystemUnavailableError
 from chemclaw.evals.live import ProbeOutcome, _score_citations, load_probes, run_probe
 from chemclaw.evals.probe import Probe, ProbeSet
 from chemclaw.kg.note import mentioned_ids
-from tests.test_probe_coverage import fleet_expected_tools
+from tests.test_probe_coverage import fleet_expected_tools, withheld_tools
 
 PROBE_DIR = Path(__file__).resolve().parent.parent / "data" / "evals" / "probes"
 
@@ -602,8 +602,9 @@ def test_every_expected_tool_in_the_shipped_corpus_exists_on_the_agent_surface()
     """
     surface = available_tool_names()
     unknown = {t for p in load_probes(str(PROBE_DIR)) for t in p.expects_tools if t not in surface}
-    assert unknown - fleet_expected_tools() == set(), (
-        f"probes expect tools that do not exist: {sorted(unknown - fleet_expected_tools())}"
+    exempt = fleet_expected_tools() | withheld_tools()
+    assert unknown - exempt == set(), (
+        f"probes expect tools that do not exist: {sorted(unknown - exempt)}"
     )
 
 
@@ -1371,3 +1372,82 @@ def test_the_plan_gate_suite_refuses_to_stage_against_the_scripted_mock(
     monkeypatch.setattr(live_probes, "_client", no_front_door)
     args = live_probes._parse_args(["--suite", "plan-gate"])
     assert asyncio.run(live_probes._run_plan_gate(args)) == 3
+
+
+#: Openings of live answers (2026-09-27, DeepSeek V4 Pro) that replied to the verifier's revision
+#: note instead of to the chemist, verbatim — every one from a single-question probe, so there was
+#: no earlier turn for the model to be "right" about.
+_LEAKED_OPENINGS = [
+    "You're right — I wrote `compute_thermochemistry` in prose without calling it, which is the",
+    "Understood. I am dropping both claims. Here is the corrected assessment.\n\n---\n\n## What",
+    "Understood. Looking back at what the tools actually returned this turn:\n\n- **`screen_",
+    "Good catch — my closing sentence named tools I did not call, which is exactly the rule.",
+    "You're right, and I'll be direct about where things stand.\n\nI searched the durable job",
+    "## Corrected answer\n\n### What the evidence supports\n\nThe record is silent on HPLC",
+    "Here is the corrected answer, with every claim traced to the evidence that supports it.",
+    "Here is the answer, stripped of the unsupported claim and built strictly from what was",
+    "---\n\n# Pd-catalysed couplings of deactivated aryl chlorides — evidence sweep (corrected)",
+    # From the measurement of the old note against the same model: a reply to the critic that
+    # names neither agreement nor a correction in its first words.
+    "I acknowledge your note, but the two claims you flagged — the decomposition onset is 180",
+    "The note retrieved in this turn corrects two physicochemical estimates from my last answer",
+]
+
+#: Openings that must *not* count: ordinary answers, and one that correctly acknowledges something
+#: the chemist themselves said (live probe ws-03), which is why "Got it" is not in the pattern.
+_CHEMIST_FACING_OPENINGS = [
+    "Got it — DMF is off the table for this project, permanently. I've recorded that as a",
+    "Here's what the evidence actually supports:\n\n- **The knowledge graph is silent.**",
+    "## ⚠️ High-severity hazard: do not isolate this solid\n\nThe hazard screen returned",
+    "Yes — 4-bromoanisole has been used in two distinct Pd-catalysed couplings in this programme",
+    "I don't see any structures attached or listed in your message. Could you share the twelve",
+    "The record doesn't hold the yield data needed to run this test — no past job, no stored",
+    "You can run this at 40 °C, but you're right to worry about the exotherm: the record shows",
+]
+
+
+@pytest.mark.parametrize("opening", _LEAKED_OPENINGS)
+def test_an_answer_replying_to_the_revision_note_is_counted(opening: str) -> None:
+    """The eval half of the revision-note fix: whether the model wrote to the chemist is scored."""
+    from chemclaw.evals.live import opens_by_acknowledging_a_critique
+
+    assert opens_by_acknowledging_a_critique(opening)
+
+
+@pytest.mark.parametrize("opening", _CHEMIST_FACING_OPENINGS)
+def test_an_answer_written_to_the_chemist_is_not_counted(opening: str) -> None:
+    """The control: the pattern must not fire on an answer that simply answers."""
+    from chemclaw.evals.live import opens_by_acknowledging_a_critique
+
+    assert not opens_by_acknowledging_a_critique(opening)
+
+
+def test_the_signal_reaches_the_run_summary() -> None:
+    """A signal the summary never prints is a field nobody reads.
+
+    Driven through the real `_summary` with one outcome that leaked and one that did not, so the
+    row and its count are both what is asserted.
+    """
+    probes = [_probe(id="t-01"), _probe(id="t-02")]
+
+    def _outcome(probe: Probe, answer: str) -> ProbeOutcome:
+        """One answered outcome for `probe`, scored the way `run_probe` scores it."""
+        from chemclaw.evals.live import opens_by_acknowledging_a_critique
+
+        return ProbeOutcome(
+            probe_id=probe.id,
+            section=probe.section,
+            persona=probe.persona,
+            bucket=probe.bucket,
+            question=probe.question,
+            answer=answer,
+            answered=True,
+            acknowledged_critique=opens_by_acknowledging_a_critique(answer),
+        )
+
+    outcomes = [
+        _outcome(probes[0], _LEAKED_OPENINGS[0]),
+        _outcome(probes[1], _CHEMIST_FACING_OPENINGS[1]),
+    ]
+    report = live_probes._summary(probes, outcomes, [], "provenance: a test")
+    assert "answers opening on a critique the chemist never made** | **1**" in report

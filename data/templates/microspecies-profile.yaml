@@ -24,7 +24,9 @@ inputs:
     description: The neutral molecule, as SMILES.
   - name: solvent
     type: string
-    description: Implicit solvent name; "water" for an aqueous speciation question.
+    description: >-
+      Implicit solvent name; "water" for an aqueous speciation question. Needed: the microstates
+      differ in charge, and a gas-phase ranking over them is refused.
     required: false
 
 steps:

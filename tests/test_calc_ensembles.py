@@ -845,3 +845,83 @@ def test_a_search_is_given_the_samplers_budget_not_a_hessians(
     # the point — widening the bound for *every* call would drop the one that catches a mute host.
     assert server.timeouts == [None, calc_settings.calc_sampling_timeout_seconds]
     assert calc_settings.calc_sampling_timeout_seconds > calc_settings.calc_server_timeout_seconds
+
+
+# --- a species set with a charged member: the pc-03 defect as a ranking -------------------------
+
+# Glycine's protonation microstates as `enumerate_protonation_states` hands them over: cation,
+# neutral, anion. Net charges +1, 0, -1 — the mixed-charge set `ranking="microstates"` exists for,
+# and the worst case of a gas-phase difference, since every gap between them is unscreened charge.
+_GLYCINE_MICROSTATES = [
+    ("[NH3+]CC(=O)O", "cation"),
+    ("NCC(=O)O", "neutral"),
+    ("NCC(=O)[O-]", "anion"),
+]
+
+
+def test_a_gas_phase_ranking_of_mixed_charge_microstates_is_refused_before_anything_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`species_ranking(solvent=None)` over microstates is refused, naming the charged members."""
+    server = install(monkeypatch, FakeCalcServer())
+    with pytest.raises(ValueError, match="not physically meaningful") as refused:
+        _run(
+            compose.species_ranking(
+                InMemoryStore(), _GLYCINE_MICROSTATES, kind="microstates", level="quick"
+            )
+        )
+    assert "[NH3+]CC(=O)O" in str(refused.value) and "NCC(=O)[O-]" in str(refused.value)
+    assert server.calls == [], "the refusal came after work had started"
+
+
+def test_the_same_microstates_in_water_rank_and_carry_the_ion_caveat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With a continuum the ranking runs, and its result says what an ion's energy there is."""
+    install(monkeypatch, FakeCalcServer())
+    ranking = _run(
+        compose.species_ranking(
+            InMemoryStore(),
+            _GLYCINE_MICROSTATES,
+            kind="microstates",
+            solvent="water",
+            level="quick",
+        )
+    )
+    assert len(ranking.species) == 3
+    assert any("charged species present" in line for line in ranking.warnings)
+
+
+def test_a_neutral_tautomer_ranking_still_runs_in_the_gas_phase(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The refusal's boundary: a same-charge neutral set is unaffected and carries no caveat."""
+    install(monkeypatch, FakeCalcServer())
+    ranking = _run(
+        compose.species_ranking(
+            InMemoryStore(),
+            [("CC(=O)CC(C)=O", "keto"), ("CC(O)=CC(C)=O", "enol")],
+            kind="tautomers",
+            level="quick",
+        )
+    )
+    assert not any("charged species" in line for line in ranking.warnings)
+
+
+def test_a_screen_over_charged_microstates_drops_the_gas_reference_and_says_so(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The across-solvents screen's automatic gas row is the refused number, so it is left out."""
+    install(monkeypatch, FakeCalcServer())
+    comparison = _run(
+        compose.species_solvent_comparison(
+            InMemoryStore(),
+            _GLYCINE_MICROSTATES,
+            ["water", "dmso"],
+            kind="microstates",
+            level="quick",
+        )
+    )
+    assert [d.solvent for d in comparison.distributions] == ["water", "dmso"]
+    assert any("no gas-phase reference" in line for line in comparison.warnings)
+    assert any("charged species present" in line for line in comparison.warnings)

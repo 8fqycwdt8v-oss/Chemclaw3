@@ -20,7 +20,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.durable.connector_job import ConnectorJobResult
     from chemclaw.durable.registry import durable_activity, durable_workflow
     from chemclaw.publish.backfill import backfill_cached, backfill_jobs, requeue_failed
-    from chemclaw.publish.registry import ResultSinkError, publishing_enabled
+    from chemclaw.publish.registry import ResultSinkError, unpublishable_reason
 
 from chemclaw.durable.heartbeat import beating
 from chemclaw.durable.publish import BAD_DATA_RETRY, connector_queue_wait_timeout
@@ -62,11 +62,9 @@ async def _walk(spec: RepublishSpec) -> dict[str, int]:
     eight attempts on a setting no retry changes, and the chemist reads it in the push-back rather
     than in a count.
     """
-    if not publishing_enabled():
-        raise ResultSinkError(
-            "no result sink is enabled (CHEMCLAW_RESULT_SINKS is empty), so a republish would "
-            "scan the whole stored corpus and queue nothing. Enable a sink first."
-        )
+    reason = unpublishable_reason()
+    if reason is not None:
+        raise ResultSinkError(reason)
     requeued = await requeue_failed() if spec.requeue_failed else 0
     cached = await backfill_cached(dry_run=False, batch=spec.batch)
     jobs = await backfill_jobs(dry_run=False, batch=spec.batch)

@@ -486,7 +486,10 @@ def test_a_corrected_turn_still_hits_the_runaway_cap() -> None:
         settings.harness_max_loop_iterations = original
 
     assert loop_capped(final), "the cap must still stop a turn whose model call was promoted"
-    assert len(model.seen) == 1, "the cap ended the run before a second attempt"
+    # One capped call, then the one wrap-up call a graph at the cap is owed to write its answer
+    # (`loop_cap.AnswerAtTheCap` is not attached here, so its tools stay on and the next arrival at
+    # the cap is what ends the run) — never a third.
+    assert len(model.seen) == 2, "the cap did not bound the turn to its call plus one wrap-up"
 
 
 def test_the_guard_sits_below_every_gate_that_decides_including_the_plan_gate() -> None:

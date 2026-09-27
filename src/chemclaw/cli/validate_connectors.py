@@ -61,6 +61,7 @@ from chemclaw.connectors.jobs import (
     build_job_tool,
     require_funded_ceiling,
     resolve_precondition,
+    unavailable_reason,
 )
 from chemclaw.connectors.manifest import ConnectorManifest, JobSpec
 from chemclaw.connectors.queues import bundle_queue
@@ -287,6 +288,30 @@ def _precondition_problems(connector: str, job: JobSpec) -> list[str]:
     ]
 
 
+def _unavailable_reason_problems(connector: str, job: JobSpec) -> list[str]:
+    """Check that a declared `unavailable_reason` resolves, takes nothing, and answers str | None.
+
+    Called rather than only resolved, because the launcher filter calls it on every agent build and
+    a hook that raised there would take `registry.job_tools()` — and every other bundle's
+    launchers — down with it; the validator is where that belongs to be found first.
+    """
+    if job.unavailable_reason is None:
+        return []
+    try:
+        reason = unavailable_reason(job)
+    except (ValueError, TypeError) as exc:
+        return [
+            f"connector {connector!r}: job {job.name!r} unavailable_reason "
+            f"{job.unavailable_reason!r} cannot be called with no arguments: {exc}"
+        ]
+    if reason is not None and not isinstance(reason, str):
+        return [
+            f"connector {connector!r}: job {job.name!r} unavailable_reason "
+            f"{job.unavailable_reason!r} returned {type(reason).__name__}, not a sentence or None"
+        ]
+    return []
+
+
 def _registered_workflow_names(connector: str) -> set[str] | None:
     """The Temporal type names this bundle's own modules register, or `None` if it has no worker.
 
@@ -331,6 +356,7 @@ def _job_problems(manifest: ConnectorManifest) -> list[str]:
         except ValueError as exc:
             problems.append(f"connector {manifest.name!r}: {exc}")
         problems.extend(_precondition_problems(manifest.name, job))
+        problems.extend(_unavailable_reason_problems(manifest.name, job))
         # **The last unchecked string in a seam whose design is two plain strings.** `workflow` is a
         # Temporal type name, resolved at dispatch against whatever the bundle's worker registered —
         # so `mypy` cannot see it, no test covered it, and a typo passed lint, type, pytest and

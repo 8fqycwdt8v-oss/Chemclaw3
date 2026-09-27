@@ -1016,7 +1016,7 @@ def test_a_turn_runs_under_a_chosen_step_ceiling_not_the_frameworks_9999() -> No
     turn had done; `agent/loop_cap.py` takes the opposite position deliberately, that the partial
     answer still goes out. So the cap is the graceful stop and this is the backstop under it.
 
-    Asserted against the derivation rather than a literal, so the test says *why* 158 is the number
+    Asserted against the derivation rather than a literal, so the test says *why* the ceiling is
     and follows the two settings it comes from. `9999` is named explicitly because that is the value
     this exists to displace.
 
@@ -1034,8 +1034,9 @@ def test_a_turn_runs_under_a_chosen_step_ceiling_not_the_frameworks_9999() -> No
 
     assert config["recursion_limit"] == settings.agent_recursion_limit
     assert config["recursion_limit"] != 9999
+    # `+ 1`: the tool-less wrap-up call a capped graph is owed (`agent/loop_cap.py`).
     assert config["recursion_limit"] == (
-        settings.harness_max_loop_iterations * settings.agent_supersteps_per_model_call + 8
+        (settings.harness_max_loop_iterations + 1) * settings.agent_supersteps_per_model_call + 8
     )
     assert config["configurable"] == {"thread_id": "session-1"}
 
