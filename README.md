@@ -58,7 +58,11 @@ CHEMCLAW_SERVICE_HOST=127.0.0.1 CHEMCLAW_LLM_ALLOW_LOOPBACK_GATEWAY=true \
 
 # Durable workers (separate processes; need Temporal + Postgres from `make up`). The
 # background worker takes agent turns inside an activity, so it asks the same gateway
-# question; the two connector workers reach no model and do not.
+# question; the two connector workers reach no model and do not. Every worker binds no
+# request surface, so the loopback-bind exemption above means nothing to it: with no
+# identity provider configured it refuses to boot until the unauthenticated posture is
+# stated (`src/chemclaw/durable/serve.py`).
+export CHEMCLAW_WORKER_ALLOW_UNAUTHENTICATED=true
 CHEMCLAW_LLM_ALLOW_LOOPBACK_GATEWAY=true \
   python -m chemclaw.durable.background_worker  # background-jobs (ELN sync, reports, memory)
 python -m chemclaw.connectors.calc.worker       # connector-calc (the expensive xTB calculations)

@@ -124,7 +124,14 @@ from chemclaw.agent.tool_result_shape import (
     helper_stopped_by,
     rewritten_tool_messages,
 )
-from chemclaw.agent.tool_result_size import bounded_for_batch, original_chars, text_chars
+from chemclaw.agent.tool_result_size import (
+    bounded_for_batch,
+    full_text,
+    kept_in_full,
+    original_chars,
+    text_chars,
+    was_cut,
+)
 from chemclaw.connectors.transport import SERVED_BY
 
 #: What `defanged_payload` preserves: a payload comes back as the type it went in as.
@@ -460,6 +467,16 @@ async def frame_connector_results(request: Any, handler: Callable[[Any], Any]) -
     from chemclaw.agent.scratchpad import scratchpad_tools
 
     result = await handler(request)
+    # A result only *this* pass cuts — under the ceiling until escaping pushed it over, so the
+    # nested `bound_tool_results` stamped nothing — still reaches the model shortened, and its full
+    # text is kept exactly as the inner pass keeps one (`tool_result_size.kept_in_full`). The text
+    # recorded is the pre-escape content, which on that path *is* what the tool returned.
+    originals: dict[str, str] = {}
+
+    def _kept(message: ToolMessage, offered: Any, bounded: Any) -> None:
+        if bounded is not offered and not was_cut(message):
+            originals[message.tool_call_id] = full_text(message.content)
+
     # A helper a turn limit stopped says so before anything it wrote. Read off the `Command`
     # before the per-message rewrite, which sees only the `ToolMessage` — see
     # `tool_result_shape.helper_stopped_by`. `None` for every other tool and for a helper that
@@ -498,19 +515,18 @@ async def frame_connector_results(request: Any, handler: Callable[[Any], Any]) -
         if stopped is not None and isinstance(escaped, str):
             # After the defang, so the mark this adds is live and anything the helper wrote that
             # imitates it is not; before the bound, so the bound charges it and the head-and-tail
-            # cut keeps it.
+            # cut keeps it. `_kept` below still records `message.content` — what the helper
+            # returned — so the full text kept for the chemist never carries this system mark.
             escaped = cut_short_report(escaped, stopped)
-        return message.model_copy(
-            update={
-                "content": bounded_for_batch(
-                    request,
-                    escaped,
-                    charged_total=original_chars(message) or in_hand,
-                    expanded_from=in_hand,
-                    count=original_chars(message) is None,
-                )
-            }
+        bounded = bounded_for_batch(
+            request,
+            escaped,
+            charged_total=original_chars(message) or in_hand,
+            expanded_from=in_hand,
+            count=original_chars(message) is None,
         )
+        _kept(message, escaped, bounded)
+        return message.model_copy(update={"content": bounded})
 
     origin = served_by(request)
     if origin:
@@ -573,10 +589,13 @@ async def frame_connector_results(request: Any, handler: Callable[[Any], Any]) -
                 expanded_from=in_hand,
                 count=original_chars(message) is None,
             )
+            _kept(message, framed, bounded)
             return message.model_copy(update={"content": bounded})
 
-        return rewritten_tool_messages(result, _framed)
+        return await kept_in_full(
+            rewritten_tool_messages(result, _framed), originals, str(request.tool_call["name"])
+        )
     name = request.tool_call["name"]
     if name in subagent_tool_names() or name in scratchpad_tools():
-        return rewritten_tool_messages(result, _defanged)
+        return await kept_in_full(rewritten_tool_messages(result, _defanged), originals, str(name))
     return result

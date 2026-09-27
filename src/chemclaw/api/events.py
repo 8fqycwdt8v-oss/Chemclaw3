@@ -496,6 +496,16 @@ class ToolResultEvent(BaseModel):
     has exactly one thing to check, and none of the three ever costs the turn its answer: storing a
     trace blob is a rendering, and no rendering is worth failing a turn over
     (`chemclaw.api.tool_results`).
+
+    **`result_cut` says the model was shown less than the tool returned**, and when it is set
+    `result_ref` addresses the *full* text rather than the model's cut
+    (`D-2026-09-27-a-cut-result-is-kept-for-the-chemist-not-the-model`). A result over the model's
+    share of `agent_max_tool_result_chars` is cut head-and-tail before the model reads it; the full
+    text is kept for the chemist, never offered back to the model. `preview`, `note_ids`, `numbers`
+    and `values` stay on what the model read, because they are what a grounding check asks about.
+    One case keeps `result_ref` on the cut: the full text was over `stream_max_result_bytes` (or
+    its write failed), and then the fetched text is the model's own, carrying the cut's notice
+    in-band — so it never reads as whole.
     """
 
     type: Literal["tool_result"] = "tool_result"
@@ -506,6 +516,7 @@ class ToolResultEvent(BaseModel):
     values: list[ResultValue] = Field(default_factory=list)
     result_ref: str = ""
     result_inline: str = ""
+    result_cut: bool = False
     agent: str = _AGENT_FIELD
 
 

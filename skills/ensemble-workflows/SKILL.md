@@ -14,6 +14,7 @@ tools:
   - enumerate_protonation_states
   - enumerate_stereoisomers
   - enumerate_bond_cleavages
+  - enumerate_substitutions
   - describe_topology
   - compute_reaction_energy
   - compute_thermochemistry
@@ -27,6 +28,7 @@ tools:
   - run_microspecies_profile
   - run_regioselectivity_in_conformer
   - run_stereoisomer_ranking
+  - run_substitution_series
   - run_tautomer_resolution
   - scan_coordinate
 tags:
@@ -57,6 +59,7 @@ of error. Populations of 60/40 and 55/45 are the same answer.
 | Is this dipole/gap/charge a real number for a floppy molecule? | `run_regioselectivity_in_conformer` for sites, `compute_ensemble_property` otherwise |
 | Which bond breaks first? | `run_bond_strength_survey` |
 | Which diastereomer is favoured? | `run_stereoisomer_ranking` |
+| Which positional isomer is most stable — what does moving this group do? | `run_substitution_series` — a stability order, **not** a regioselectivity |
 | What could this have degraded into? | `run_degradant_triage` — a structural short list, **not** a ranking |
 
 **Ask `describe_topology` first when you are not sure it is worth it.** It is free and structural:
@@ -67,8 +70,8 @@ structure. Spending a search to discover the molecule was rigid is the commonest
 ## Enumerate, then compute — and never the reverse
 
 The enumeration tools (`enumerate_tautomers`, `enumerate_protonation_states`,
-`enumerate_stereoisomers`, `enumerate_bond_cleavages`) are **free**: pure graph operations, no
-calculation, no cache. The ranking jobs that take their output are the expensive half.
+`enumerate_stereoisomers`, `enumerate_bond_cleavages`, `enumerate_substitutions`) are **free**:
+pure graph operations, no calculation, no cache. The ranking jobs that take their output are the expensive half.
 
 That split is why they are separate tools rather than one. It means you can look at the species set
 — how many forms, which sites — and decide whether to spend anything at all. It also means the set

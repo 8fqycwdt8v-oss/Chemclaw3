@@ -739,3 +739,144 @@ def test_the_migrate_role_creates_the_store_tables_it_is_about_to_grant_on(
     # constructed with an `index_config`, and none is passed. `STORE_TABLES` names both because
     # erasure must reach both wherever a site does set one.
     assert "store" in tables, f"the grants would find no `store` to grant on: {tables}"
+
+
+# ------------------------------------------------ a turn's own files: the per-write cap and expiry
+#
+# `D-2026-09-26-a-chemists-scratch-write-is-bounded-and-expires`. Both halves are driven through the
+# graph that really compiles, for the reason `test_a_write_out_of_bounds_is_refused_by_the_graph_
+# that_really_compiles` gives: a caller's `write_file` reaches `StateBackend` as a channel write,
+# so a control tested on the backend alone could be connected to nothing.
+
+
+def _run_scripted(calls: list[Any], seed: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Run the compiled agent over scripted tool calls and return its final state."""
+    from chemclaw.agent.audit import NullAuditSink
+    from chemclaw.agent.langgraph_agent import build_langgraph_agent
+    from chemclaw.agent.state import turn_config, turn_input
+    from tests.fakes_langgraph import ScriptedChatModel
+
+    graph = build_langgraph_agent(
+        model=ScriptedChatModel([*calls, "done"]), audit_sink=NullAuditSink()
+    )
+    payload = {**turn_input("work in the scratchpad"), **({"files": seed} if seed else {})}
+    return cast(dict[str, Any], asyncio.run(graph.ainvoke(payload, config=turn_config())))
+
+
+def _answer(final: dict[str, Any], tool: str, path: str) -> str:
+    """What the model was told for the one call to `tool` naming `path`."""
+    return str(
+        next(
+            message.text
+            for message in final["messages"]
+            if getattr(message, "name", None) == tool and path in message.text
+        )
+    )
+
+
+def test_a_scratch_write_past_the_cap_is_refused_and_one_at_the_cap_lands(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Refused whole — never truncated — and the boundary is inclusive, both from one run."""
+    monkeypatch.setattr(settings, "agent_scratch_file_max_chars", 100)
+    final = _run_scripted(
+        [
+            {"name": "write_file", "args": {"file_path": "/scratch/fits.md", "content": "a" * 100}},
+            {"name": "write_file", "args": {"file_path": "/scratch/big.md", "content": "b" * 101}},
+        ]
+    )
+    files = final.get("files") or {}
+    assert "/scratch/fits.md" in files, "a file exactly at the cap was refused"
+    assert "/scratch/big.md" not in files, (
+        "a caller's own write past agent_scratch_file_max_chars reached the files channel — "
+        "nothing bounds what StateBackend writes directly"
+    )
+    refusal = _answer(final, "write_file", "/scratch/big.md")
+    assert "agent_scratch_file_max_chars" in refusal and "Nothing was truncated" in refusal, refusal
+
+
+def test_an_edit_that_would_grow_a_file_past_the_cap_is_refused_and_changes_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An edit is how a file walks past a write-only bound, one append at a time."""
+    monkeypatch.setattr(settings, "agent_scratch_file_max_chars", 100)
+    final = _run_scripted(
+        [
+            {"name": "write_file", "args": {"file_path": "/scratch/log.md", "content": "head\n"}},
+            {
+                "name": "edit_file",
+                "args": {
+                    "file_path": "/scratch/log.md",
+                    "old_string": "head\n",
+                    "new_string": "head\n" + "c" * 200,
+                },
+            },
+            {
+                "name": "edit_file",
+                "args": {"file_path": "/scratch/log.md", "old_string": "head", "new_string": "top"},
+            },
+        ]
+    )
+    content = (final.get("files") or {})["/scratch/log.md"]["content"]
+    assert "c" not in content, "an edit grew the file past the cap"
+    assert content.startswith("top"), "an edit under the cap was refused along with the one over it"
+
+
+def test_a_memory_write_past_the_cap_is_refused_before_it_lands() -> None:
+    """The `/memories/` route takes the same `write_file`, so it is held to the same number."""
+    from langgraph.store.memory import InMemoryStore
+
+    patch = pytest.MonkeyPatch()
+    patch.setattr(settings, "agent_scratch_file_max_chars", 50)
+    try:
+        store = InMemoryStore()
+        namespace = scratchpad.memory_namespace("cap-probe")
+        backend = scratchpad.BoundedStoreBackend(namespace=lambda _runtime: namespace, store=store)
+        big = asyncio.run(backend.awrite("/memories/big.md", "x" * 51))
+        small = asyncio.run(backend.awrite("/memories/small.md", "x" * 50))
+        grown = asyncio.run(backend.aedit("/memories/small.md", "x", "yy", replace_all=True))
+        held = {item.key for item in store.search(namespace, limit=10)}
+    finally:
+        patch.undo()
+    assert big.error and "agent_scratch_file_max_chars" in big.error, big
+    assert small.error is None, small
+    assert grown.error and "agent_scratch_file_max_chars" in grown.error, grown
+    assert held == {"/memories/small.md"}, held
+
+
+def _file(text: str, days_ago: float | None) -> dict[str, Any]:
+    """A `files` entry in upstream's shape, last written `days_ago` (or undated when `None`)."""
+    from datetime import UTC, datetime, timedelta
+
+    entry: dict[str, Any] = {"content": text, "encoding": "utf-8"}
+    if days_ago is not None:
+        stamp = (datetime.now(UTC) - timedelta(days=days_ago)).isoformat()
+        entry["created_at"] = entry["modified_at"] = stamp
+    return entry
+
+
+def test_a_file_past_the_retention_window_is_removed_at_the_next_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shipped 90 days, on either side of it, plus a file that carries no date at all."""
+    assert settings.agent_scratch_retention_days == 90, "the owner's default moved"
+    final = _run_scripted(
+        [],
+        seed={
+            "/scratch/stale.md": _file("old", 91),
+            "/scratch/fresh.md": _file("new", 89),
+            "/scratch/undated.md": _file("legacy", None),
+        },
+    )
+    files = set(final.get("files") or {})
+    assert "/scratch/stale.md" not in files, (
+        "a file not written for 91 days survived a 90-day window"
+    )
+    assert {"/scratch/fresh.md", "/scratch/undated.md"} <= files, files
+
+
+def test_a_retention_of_zero_keeps_every_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    """0 is "keep for ever", and it is a value a deployment sets rather than the default."""
+    monkeypatch.setattr(settings, "agent_scratch_retention_days", 0)
+    final = _run_scripted([], seed={"/scratch/ancient.md": _file("old", 3_650)})
+    assert "/scratch/ancient.md" in (final.get("files") or {})

@@ -102,6 +102,7 @@
       "note_ids": "list[str]",
       "numbers": "list[float]",
       "preview": "str",
+      "result_cut": "bool",
       "result_inline": "str",
       "result_ref": "str",
       "tool": "str",

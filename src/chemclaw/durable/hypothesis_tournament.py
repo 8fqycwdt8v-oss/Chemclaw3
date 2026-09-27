@@ -566,6 +566,7 @@ _TEMPLATE_HINTS: Mapping[str, ModelProse] = {
     "microspecies-profile": ModelProse("which protonation state dominates"),
     "regioselectivity-in-conformer": ModelProse("which site reacts, averaged over conformers"),
     "stereoisomer-ranking": ModelProse("which stereoisomer is favoured"),
+    "substitution-series": ModelProse("which positional isomer is most stable"),
     "tautomer-resolution": ModelProse("which tautomer dominates"),
 }
 

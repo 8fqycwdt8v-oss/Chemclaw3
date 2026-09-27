@@ -17,6 +17,7 @@ Two halves, asserted on a compiled graph because both live in the wiring:
 """
 
 import asyncio
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -197,3 +198,59 @@ def test_a_second_arrival_at_the_cap_ends_the_graph() -> None:
         cast(Any, {**spent, "loop_wrap_up": True}), cast(Any, None)
     )
     assert second == {"jump_to": "end", "loop_capped": True}
+
+
+def test_a_capped_helper_report_the_mark_pushes_over_the_ceiling_keeps_the_helpers_own_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The two behaviours of `tool_framing`'s outer pass, composed: mark, bound, keep the original.
+
+    A report just under the ceiling passes the inner `bound_tool_results` whole; the cut-short mark
+    this pass adds pushes it over, so this pass cuts it and keeps its full text for the chemist
+    (`tool_result_size.kept_in_full`, #473). What is kept must be what the helper returned — the
+    system's mark is a note to the calling model, not part of the tool's output.
+    """
+    from langgraph.types import Command
+
+    from chemclaw.agent.tool_framing import frame_connector_results
+    from chemclaw.agent.tool_result_size import (
+        bound_tool_results,
+        full_result_ref,
+        reset_full_result_sink,
+        set_full_result_sink,
+        was_cut,
+    )
+
+    monkeypatch.setattr(settings, "agent_max_tool_result_chars", 5_000)
+    report = "r" * 4_990
+    kept: dict[str, str] = {}
+
+    async def _sink(_tool: str, text: str) -> str:
+        kept["ref"] = text
+        return "ref"
+
+    async def _helper(_request: Any) -> Any:
+        message = ToolMessage(content=report, tool_call_id="t1", name="task")
+        return Command(update={"loop_capped": True, "messages": [message]})
+
+    async def _inner(inner_request: Any) -> Any:
+        return await bound_tool_results.awrap_tool_call(inner_request, _helper)
+
+    request = SimpleNamespace(
+        tool_call={"name": "task", "id": "t1", "args": {}},
+        state={"messages": []},
+        tool=SimpleNamespace(metadata={}),
+    )
+    token = set_full_result_sink(_sink)
+    try:
+        result = asyncio.run(frame_connector_results.awrap_tool_call(cast(Any, request), _inner))
+    finally:
+        reset_full_result_sink(token)
+
+    assert isinstance(result, Command) and isinstance(result.update, dict)
+    (message,) = result.update["messages"]
+    text = str(message.content)
+    assert text.startswith("[The helper was stopped by this turn's step limit"), text[:120]
+    assert len(text) <= settings.agent_max_tool_result_chars
+    assert was_cut(message) and full_result_ref(message) == "ref"
+    assert kept["ref"] == report, "the kept full text carries the system mark, not the tool's text"
