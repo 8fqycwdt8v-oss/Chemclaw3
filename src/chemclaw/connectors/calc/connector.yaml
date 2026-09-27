@@ -285,6 +285,7 @@ jobs:
       host-guest binding, solvent-solute association. Searches complex geometries rather than
       assuming one, then reports the interaction energy of the best. Semiempirical and in continuum
       solvent, so treat it as a ranking between candidate partners, not an absolute binding energy.
+      A charged partner (an ion, a salt as its ions) needs `solvent`; in the gas phase it is refused.
     params_model: chemclaw.connectors.calc.specs:ComplexJobSpec
     precondition: chemclaw.science.calc.solvents:require_supported_solvents
     # A CREST search is the one genuinely costly thing in this bundle — minutes of saturated
@@ -365,7 +366,8 @@ jobs:
       One job for the three questions that are the same arithmetic over different species sets:
       which tautomer dominates, which protonation microstate is present, which diastereomer is
       favoured. Set `ranking` to say which you are asking — the number means something different in
-      each, and a reader should not have to infer it from the SMILES.
+      each, and a reader should not have to infer it from the SMILES. A set with a charged member —
+      any protonation-microstate set — needs `solvent`; in the gas phase it is refused.
 
       **Enumerate first; this does not.** Use `chem`'s enumerate_tautomers,
       enumerate_protonation_states or enumerate_stereoisomers to build the list. That split is not
@@ -393,7 +395,7 @@ jobs:
     description: >-
       `rank_species` answers in one medium, so "which tautomer dominates in water against toluene"
       was a job per solvent and a comparison assembled by hand. This runs the ranking in each
-      solvent plus the gas phase and reports how it moves — the shift, rather than absolute
+      solvent plus the gas phase (left out when a member is charged) and reports how it moves — the shift, rather than absolute
       distributions each carrying the method's full error. It is what implicit solvation is best at:
       every medium ranks the same species, so the continuum model's systematic error largely
       cancels in the relative energies.

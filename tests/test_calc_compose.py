@@ -365,7 +365,7 @@ def test_the_same_reaction_in_a_solvent_runs_and_says_what_it_is(
         compose.reaction_energy(InMemoryStore(), *_NEUTRALISATION, solvent="water", level="quick")
     )
     (caveat,) = [line for line in result.warnings if "charged species present" in line]
-    assert "not as a heat of reaction" in caveat
+    assert "not as a heat" in caveat
 
 
 @pytest.mark.parametrize(
@@ -770,3 +770,13 @@ def test_a_hessian_carries_the_gradient_that_says_it_was_a_stationary_point(
 
     payload, _ = _run(_go())
     assert payload.max_gradient_hartree_per_angstrom == pytest.approx(1e-4)
+
+
+def test_an_ion_pair_interaction_in_the_gas_phase_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two bare opposite charges attract by hundreds of kcal/mol in vacuum; the job refuses it."""
+    server = install(monkeypatch, FakeCalcServer())
+    with pytest.raises(ValueError, match="not physically meaningful"):
+        _run(compose.interaction(InMemoryStore(), "C[NH3+]", "CC(=O)[O-]"))
+    assert server.calls == []
