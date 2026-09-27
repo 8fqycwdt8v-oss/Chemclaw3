@@ -112,19 +112,14 @@ topic).
 
 ## 2 — Answers that are wrong without saying so
 
-- [ ] **`standardize` is not idempotent on ferrocenyl palladacycles, so `compound_id(raw)` is not
-      the id of `compound_note(raw)`** (issue #485) — [M], opened 2026-09-27 by the seeded-corpus measurement of
-      `D-2026-09-27-a-compound-id-a-bump-moves-is-superseded-not-orphaned`. Three of the 129
-      molecules in `Chemclaw3_mock`'s ORD seed — the dtbpf-, dppf- and Josiphos-type Pd G3
-      precatalysts — standardize to a kekulé Cp anion from the raw string and to the aromatic one
-      from that standard form, so `standard_smiles(standard_smiles(x)) != standard_smiles(x)`.
-      Driven: `compound_id(raw)` is `compound-bd1143cc135d` while `compound_note(raw).id` and every
-      `similar_molecules` hit cite `compound-626ec3b8d0ae` — so `compound_dependencies` on a note
-      carrying the raw string links an id no note is written under. It is also why a molecule-row
-      re-key moves those three keys although the bump did not touch them. The candidates are
-      iterating `standardize` to a fixed point (a bump, and the cost of a second pass on every
-      structure) or finding which `Cleanup`/tautomer step re-aromatizes and pinning it. Anchors:
-      `core/chem.py::standardize`, `core/chem.py::compound_id`, `ingest/eln/compound.py`.
+- [ ] **A metal hydride standardizes to its metal without the hydride** — [S], opened 2026-09-27
+      while fixing the cyclopentadienyl fixed point. Measured on this build and on `main` alike:
+      `standard_smiles("[PdH]Cl")` is `[Cl-].[Pd+]` and `[RuH2](C#[O+])Cl` is
+      `[C-]#[O+].[Cl-].[Ru+]` — the hydrogen on the metal is gone, so a hydride and the bare
+      metal salt would share a `compound_id`. The same class `D-2026-08-01` rescued NaBH4 from,
+      arriving through `Cleanup`'s metal disconnection rather than through `Uncharger`; not yet
+      traced to the step that drops it. Anchors: `core/chem.py::_cleaned`,
+      `core/chem.py::standardize`.
 
 - [ ] **`plan_gate.py` is paired with one of the five test files that cover it** — [S], opened
       2026-09-23 by the review of the wave that added it to the mutation backstop.
