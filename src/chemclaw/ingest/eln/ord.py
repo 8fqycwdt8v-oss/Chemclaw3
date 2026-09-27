@@ -20,7 +20,7 @@ from datetime import date
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from chemclaw.core.chem import standard_smiles
 
@@ -40,6 +40,36 @@ class Role(StrEnum):
 # agree on which species the middle slot names — one showing them and the other omitting them is
 # the whole distinction between the two methods.
 _AGENT_ROLES = frozenset({Role.SOLVENT, Role.CATALYST})
+
+
+class RoleSpecies(BaseModel):
+    """The canonical structures of each role two runs are compared on — a projection, not a charge.
+
+    **Which roles, defined once.** `product` is not here: a changed product is a different
+    transformation, which is the grouping layer's business rather than a condition the chemist
+    turned. `memory.progression` diffs exactly these fields and `reaction_records.species` stores
+    exactly these fields, so the campaign note mined from `OrdReaction`s and the turn-time
+    comparison read from stored rows cannot disagree about which roles count.
+
+    **A projection rather than the component list**: structures only, no amounts and no order,
+    because amounts are optional on `Component` and diffing them reports a change whenever one run
+    happened to record a mass and its neighbour did not. So a row stays a serving copy of what the
+    source said, never a second transcription of it. An empty list is the record saying the run
+    used nothing in that role, which is a real answer (`memory.progression.species_change`); a
+    record with no projection at all is `None` on the record, never an instance of this with four
+    empty lists.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    reactant: list[str] = Field(default_factory=list)
+    reagent: list[str] = Field(default_factory=list)
+    solvent: list[str] = Field(default_factory=list)
+    catalyst: list[str] = Field(default_factory=list)
+
+    def of(self, role: Role) -> frozenset[str]:
+        """One role's structures as a set, which is the form every comparison wants."""
+        return frozenset(getattr(self, role.value))
 
 
 class Component(BaseModel):
@@ -348,6 +378,26 @@ class OrdReaction(BaseModel):
         false rejection, but they stay out of the fingerprinted reaction.
         """
         return [c for step in self.steps for c in step.components]
+
+    def species(self, role: Role) -> frozenset[str]:
+        """The canonical structures playing `role` in this run, a mid-procedure step's included.
+
+        A reagent added partway through the recipe lives on the step, not on `inputs` — and
+        swapping it is exactly the kind of change an optimization series is made of, so it must
+        not be invisible to anything that compares two runs. Canonical, so a source spelling one
+        molecule two ways cannot fabricate a change.
+        """
+        return frozenset(
+            standard_smiles(c.smiles)
+            for c in [*self.inputs, *self.step_components()]
+            if c.role == role
+        )
+
+    def role_species(self) -> "RoleSpecies":
+        """Every compared role's species set at once — the projection a stored record carries."""
+        return RoleSpecies(
+            **{name: sorted(self.species(Role(name))) for name in RoleSpecies.model_fields}
+        )
 
     def reaction_smiles(self) -> str:
         """The **record** form: `reactants>agents>products`, exactly as the chemist wrote it.
