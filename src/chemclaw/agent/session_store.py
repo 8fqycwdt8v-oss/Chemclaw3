@@ -80,9 +80,10 @@ from chemclaw.agent.message_migration import (
     to_langchain,
 )
 from chemclaw.core import db
+from chemclaw.core.authorship import UNNAMED_AGENT, Authorship
 from chemclaw.core.config import settings
 from chemclaw.core.db import existing_tables
-from chemclaw.core.identity_context import get_current_correlation_id
+from chemclaw.core.identity_context import get_current_actor, get_current_correlation_id
 from chemclaw.core.metrics_bridge import degraded
 
 log = logging.getLogger(__name__)
@@ -131,10 +132,44 @@ def stored_correlation_id(message: BaseMessage) -> str | None:
     return str(value) if value else None
 
 
-def _stamped(message: BaseMessage, correlation_id: str) -> BaseMessage:
-    """`message` carrying its turn's correlation id, or unchanged when there is none."""
+#: Where a stored message carries who wrote it (`core/authorship.py`): the `actor`/`agent` pair
+#: `109_session_message_authorship.sql` added, stamped on read by the durable provider and on save
+#: by the in-memory one — the same arrangement as the correlation id above, for the same reason.
+STORED_AUTHORSHIP = "chemclaw_authorship"
+
+
+def stored_authorship(message: BaseMessage) -> Authorship | None:
+    """Who wrote `message` — the person it was written for and the agent that wrote it.
+
+    `None` when the row records neither half: written off the request path by a writer that knew
+    nobody, or a legacy row whose speaker the backfill could not read. Public for the transcript
+    route, which is this column pair's reader.
+    """
+    value = message.additional_kwargs.get(STORED_AUTHORSHIP)
+    return Authorship.model_validate(value) if isinstance(value, dict) else None
+
+
+def message_authorship(message: BaseMessage, actor: str | None) -> Authorship:
+    """Who wrote a message this system is about to store, on behalf of `actor`.
+
+    **The speaker decides the agent half, and nothing else does.** A `HumanMessage` is the chemist's
+    own words — a human wrote it directly, so there is no agent. Everything else the transcript
+    stores is the agent's: its answer, the tool calls it made and the results those returned.
+    Which agent is `UNNAMED_AGENT`, not a guess: the graph that wrote a message is known to the
+    audit middleware as a build-time argument and reaches nothing that saves a transcript, and the
+    audit trail's own convention is that the agent the chemist talks to goes unnamed.
+    """
+    return Authorship(actor=actor, agent=None if message.type == "human" else UNNAMED_AGENT)
+
+
+def _stamped(
+    message: BaseMessage, correlation_id: str, authorship: Authorship | None = None
+) -> BaseMessage:
+    """`message` carrying its turn's correlation id and its authorship, where either is known."""
     if correlation_id:
         message.additional_kwargs[STORED_CORRELATION_ID] = correlation_id
+    if authorship is not None and (authorship.actor is not None or authorship.agent is not None):
+        message.additional_kwargs[STORED_AUTHORSHIP] = authorship.model_dump()
     return message
 
 
@@ -312,9 +347,14 @@ def _stored_prose(payload: dict[str, Any]) -> str:
 # Without it the two halves of "what happened in this conversation" — the words and the
 # tool calls — sat in tables with no key between them, so the trail could show *that* a tool ran
 # and never *why*.
+#
+# `actor`/`agent` are who wrote the row (`core/authorship.py`,
+# `D-2026-09-27-an-author-is-a-person-and-an-agent`) — the same two names `audit_events` spells the
+# same pair in, so a shared transcript can say whose words each message is.
 _INSERT = (
-    "INSERT INTO session_messages (session_id, message, message_shape, correlation_id) "
-    "VALUES (%s, %s, %s, %s)"
+    "INSERT INTO session_messages "
+    "(session_id, message, message_shape, correlation_id, actor, agent) "
+    "VALUES (%s, %s, %s, %s, %s, %s)"
 )
 # Row ids come back too. The repair that used to write a fixed message back to its own row is gone
 # (D-2026-08-10 §2), so what the id serves now is the caller that needs to name a row — the
@@ -326,8 +366,11 @@ _INSERT = (
 # (`D-2026-08-11-what-the-removal-found`), so the SELECT that feeds it is single too. It used to be
 # written twice, byte-identically, and the destructive copy was the one living furthest from this
 # rule.
+#
+# The authorship pair rides at the end, so a reader that indexes the first four columns — the
+# retention sweep does — reads exactly what it did.
 SELECT_SESSION_ROWS = (
-    "SELECT id, message, message_shape, correlation_id FROM session_messages "
+    "SELECT id, message, message_shape, correlation_id, actor, agent FROM session_messages "
     "WHERE session_id = %s ORDER BY id"
 )
 
@@ -833,7 +876,14 @@ class PostgresHistoryProvider:
             async with conn.cursor() as cur:
                 await cur.execute(SELECT_SESSION_ROWS, (session_id,))
                 rows = await cur.fetchall()
-        return [_stamped(message_from_row(row[1], row[2]), str(row[3] or "")) for row in rows]
+        return [
+            _stamped(
+                message_from_row(row[1], row[2]),
+                str(row[3] or ""),
+                Authorship(actor=row[4], agent=row[5]),
+            )
+            for row in rows
+        ]
 
     async def recent_user_texts(
         self,
@@ -903,10 +953,21 @@ class PostgresHistoryProvider:
         # Read once for the whole batch: these messages are one turn's work, so they share its
         # correlation id. Empty off the request path (the CLI, tests), where there is no turn.
         correlation_id = get_current_correlation_id() or ""
-        rows = [
-            (session_id, Jsonb(message_to_dict(message)), LANGCHAIN_SHAPE, correlation_id)
-            for message in messages
-        ]
+        # The person the turn runs for, read once for the batch for the correlation id's reason.
+        actor = get_current_actor()
+        rows = []
+        for message in messages:
+            authorship = message_authorship(message, actor)
+            rows.append(
+                (
+                    session_id,
+                    Jsonb(message_to_dict(message)),
+                    LANGCHAIN_SHAPE,
+                    correlation_id,
+                    authorship.actor,
+                    authorship.agent,
+                )
+            )
         async with self._connection() as conn:
             async with conn.cursor() as cur:
                 await cur.executemany(_INSERT, rows)
@@ -1342,10 +1403,12 @@ class InMemoryHistoryProvider:
         # reports a turn's correlation id under either store. Copies because these are the turn's
         # own message objects, and the stamp belongs to the stored transcript, not to them.
         correlation_id = get_current_correlation_id() or ""
+        actor = get_current_actor()
         state.setdefault(self._KEY, []).extend(
             _stamped(
                 message.model_copy(update={"additional_kwargs": dict(message.additional_kwargs)}),
                 correlation_id,
+                message_authorship(message, actor),
             )
             for message in messages
         )

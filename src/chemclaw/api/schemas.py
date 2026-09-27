@@ -21,9 +21,10 @@ from typing import Any
 
 from pydantic import BaseModel, Field, computed_field, field_validator
 
-from chemclaw.agent.session_store import stored_correlation_id
+from chemclaw.agent.session_store import stored_authorship, stored_correlation_id
 from chemclaw.agent.tool_result_size import full_result_ref, was_cut
 from chemclaw.api.tool_results import content_address
+from chemclaw.core.authorship import Authorship
 from chemclaw.core.config import settings
 
 # How much of a tool's arguments or result the transcript carries. The same bound the audit trail
@@ -166,6 +167,12 @@ class TranscriptMessage(BaseModel):
     # `None` for a row stored off the request path or before the column existed. Optional and
     # additive: a client that does not read it sees the contract it always did.
     correlation_id: str | None = None
+    # Who wrote this message: the person it was written for and the agent that wrote it, `agent`
+    # null for the chemist's own words (`session_messages.actor`/`agent`, `core/authorship.py`).
+    # What a transcript needs before a session can hold two people — whose words each bubble is —
+    # and the same pair the audit trail and a knowledge note carry. `None` for a row that records
+    # neither half. Optional and additive, like `correlation_id` above.
+    author: Authorship | None = None
 
 
 class PlanDecisionIn(BaseModel):
@@ -536,6 +543,7 @@ def _transcript(
                 text=message_text(message),
                 tool_calls=calls,
                 correlation_id=stored_correlation_id(message),
+                author=stored_authorship(message),
             )
         )
     return transcript
