@@ -29,7 +29,13 @@ from chemclaw.ingest.eln.compound import compound_dependencies
 from chemclaw.ingest.eln.records import RECORD_TYPE, default_record_store
 from chemclaw.kg.analytics import GraphGaps, analyze
 from chemclaw.kg.git_writer import default_writer
-from chemclaw.kg.graph import build_graph, load_notes, neighborhood, note_in
+from chemclaw.kg.graph import (
+    build_graph,
+    current_successor,
+    load_notes,
+    neighborhood,
+    note_in,
+)
 from chemclaw.kg.note import Note, Relation, external_record_ref, resolves_outside_graph
 from chemclaw.kg.record import record_note
 from chemclaw.kg.relations import DEFAULT_RELATION
@@ -356,8 +362,14 @@ def _edge_relations(graph: nx.DiGraph, source: str, target: str) -> list[str]:
     return sorted({relation.rel for relation in graph[source][target].get("relations", ())})
 
 
-def _neighbor_ref(graph: nx.DiGraph, anchor_id: str, note: Note) -> NeighborRef:
+def _neighbor_ref(
+    graph: nx.DiGraph, anchor_id: str, note: Note, via: str | None = None
+) -> NeighborRef:
     """One neighbour of `anchor_id`, carrying the typed edges between the two.
+
+    `via` is the node the edges actually join when `note` stands in for it — a retired compound id
+    reported as the note that superseded it (`_current_compound`). The edge the author typed is to
+    the old id, and reading it there is what keeps a `computed-from` from becoming a bare neighbour.
 
     `cites` is dropped from both directions deliberately. It is `relations.DEFAULT_RELATION` — what
     every untyped `[[wikilink]]` in the corpus already means — so reporting it would put the word
@@ -366,15 +378,36 @@ def _neighbor_ref(graph: nx.DiGraph, anchor_id: str, note: Note) -> NeighborRef:
     a reader has to weigh: a `contradicts` neighbour is not the same evidence as an `analogue-of`
     one, and before this the two arrived indistinguishable.
     """
+    joined = via if via is not None else note.id
     return NeighborRef(
         **_ref(note).model_dump(),
         relations_out=[
-            rel for rel in _edge_relations(graph, anchor_id, note.id) if rel != DEFAULT_RELATION
+            rel for rel in _edge_relations(graph, anchor_id, joined) if rel != DEFAULT_RELATION
         ],
         relations_in=[
-            rel for rel in _edge_relations(graph, note.id, anchor_id) if rel != DEFAULT_RELATION
+            rel for rel in _edge_relations(graph, joined, anchor_id) if rel != DEFAULT_RELATION
         ],
     )
+
+
+def _current_compound(graph: nx.DiGraph, note_id: str, today: date) -> Note | None:
+    """The current compound note that replaced `note_id`, when `note_id` is a superseded compound.
+
+    **Compounds only, and that is the argument rather than a scope cut.** A compound note's id *is*
+    its identity — a hash of its standardized structure — so when a `STANDARDIZATION_VERSION` bump
+    moves it (`memory.compound_rekey`), the retired note is the same substance under an id that
+    went stale, and a citation to it means the substance: the current note is the answer. A retired
+    *claim* is a different claim, and a by-id lookup of one keeps returning it as written, with its
+    successor among its neighbours (KM-7), because the chemist asked about that claim.
+
+    `None` when `note_id` names a current note, a non-compound, or nothing a supersede link reaches.
+    An id no note defines qualifies when a compound note declares that it supersedes it.
+    """
+    note = note_in(graph, note_id)
+    if note is not None and (note.type != "compound" or note.is_current(today)):
+        return None
+    successor = current_successor(graph, note_id, today)
+    return successor if successor is not None and successor.type == "compound" else None
 
 
 def _require_note(graph: nx.DiGraph, note_id: str) -> Note:
@@ -492,21 +525,49 @@ async def expand_note(note_id: str, hops: int = 1) -> NoteView:
     # differ, and this line testing membership instead was the defect it now prevents.
     if note_in(graph, note_id) is None and resolves_outside_graph(note_id):
         return await _expand_record(note_id)
+    # A compound id a standardization bump superseded resolves to the note that replaced it, and
+    # says so as system text outside the framed body — see `_current_compound`.
+    today = date.today()
+    successor = _current_compound(graph, note_id, today)
+    if successor is not None:
+        view = _expand_in_graph(graph, successor.id, hops)
+        notice = (
+            f"{note_id} is a superseded id for this compound: the current standardization files "
+            f"the same structure as {successor.id}, shown here. {SYSTEM_SPEECH_MARK}"
+        )
+        return view.model_copy(update={"body": f"{notice}\n\n{view.body}"})
+    return _expand_in_graph(graph, note_id, hops)
+
+
+def _expand_in_graph(graph: nx.DiGraph, note_id: str, hops: int) -> NoteView:
+    """`expand_note` over a note the graph holds: its body and its current neighbourhood."""
     note = _require_note(graph, note_id)
     # `hops` comes from the model; clamp it to [0, graph_max_hops] so a large value is bounded
     # rather than traversing the whole graph (SEC-4).
     hops = min(max(hops, 0), settings.graph_max_hops)
     today = date.today()
     # The anchor is an explicit by-id lookup, so it is returned even if expired; its neighbors are a
-    # discovery sweep, so non-current ones are dropped from the current-evidence view (KM-7).
-    neighbors = [
-        _neighbor_ref(graph, note_id, graph.nodes[nid]["note"])
-        for nid in sorted(neighborhood(graph, note_id, hops=hops))
-        if graph.nodes[nid].get("note") is not None and graph.nodes[nid]["note"].is_current(today)
-    ]
+    # discovery sweep, so non-current ones are dropped from the current-evidence view (KM-7) —
+    # except a retired compound, which stands for the compound note that superseded it, so a note
+    # citing a pre-bump compound id keeps its compound neighbour rather than silently losing it.
+    neighbors: dict[str, NeighborRef] = {}
+    for nid in sorted(neighborhood(graph, note_id, hops=hops)):
+        neighbor = note_in(graph, nid)
+        if neighbor is None:
+            continue
+        if neighbor.is_current(today):
+            neighbors.setdefault(nid, _neighbor_ref(graph, note_id, neighbor))
+            continue
+        replacement = _current_compound(graph, nid, today)
+        if replacement is not None and replacement.id != note_id:
+            neighbors.setdefault(
+                replacement.id, _neighbor_ref(graph, note_id, replacement, via=nid)
+            )
     # The body is note content (possibly ingested, not agent-authored): frame it as data.
     return NoteView(
-        note=_ref(note), body=frame_untrusted(note.body, note_id=note.id), neighbors=neighbors
+        note=_ref(note),
+        body=frame_untrusted(note.body, note_id=note.id),
+        neighbors=sorted(neighbors.values(), key=lambda ref: ref.id),
     )
 
 

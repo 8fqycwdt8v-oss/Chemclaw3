@@ -757,6 +757,26 @@ _STANDARDIZATION_AT_THIS_VERSION = (
     ("CCN.OO", "CCN.OO"),
     ("CCN.O", "CCN"),
     ("CN(C)C(=[N+](C)C)On1nnc2ccccc21.F[B-](F)(F)F", "CN(C)C(On1nnc2ccccc21)=[N+](C)C"),
+    # `std12`: a salt of an acid the catalogue omits, both spellings, one per acid in
+    # `_IONISABLE_NEUTRAL_ACIDS`. Under `std11` every neutral spelling here kept its acid.
+    ("CCN.OCl(=O)(=O)=O", "CCN"),
+    ("CC[NH3+].[O-]Cl(=O)(=O)=O", "CCN"),
+    ("CCN.F[B-](F)(F)[FH+]", "CCN"),
+    ("CC[NH3+].F[B-](F)(F)F", "CCN"),
+    ("CCN.NS(=O)(=O)O", "CCN"),
+    ("CC[NH3+].NS(=O)(=O)[O-]", "CCN"),
+    ("CCN.SC#N", "CCN"),
+    ("CCN.N=C=S", "CCN"),
+    ("CC[NH3+].[S-]C#N", "CCN"),
+    ("CCN.OC(=O)O", "CCN"),
+    ("CC[NH3+].OC(=O)[O-]", "CCN"),
+    ("CCN.O[PH2]=O", "CCN"),
+    ("CC[NH3+].[O-][PH2]=O", "CCN"),
+    ("CCN.OB(O)O", "CCN"),
+    ("CC[NH3+].[O-]B(O)O", "CCN"),
+    # and the neutrals that cannot ionise stay, which is the line the table draws
+    ("CCN.FB(F)F", "CCN.FB(F)F"),
+    ("CCN.O=C=O", "CCN.O=C=O"),
 )
 
 
@@ -955,6 +975,58 @@ def test_a_neutral_co_former_is_not_a_counterion() -> None:
     )
 
 
+#: One salt per acid in `_IONISABLE_NEUTRAL_ACIDS`, written neutral and written ionic.
+_IONISABLE_SALTS = (
+    ("perchloric acid", "CCN.OCl(=O)(=O)=O", "CC[NH3+].[O-]Cl(=O)(=O)=O"),
+    ("tetrafluoroboric acid", "CCN.F[B-](F)(F)[FH+]", "CC[NH3+].F[B-](F)(F)F"),
+    ("sulfamic acid", "CCN.NS(=O)(=O)O", "CC[NH3+].NS(=O)(=O)[O-]"),
+    ("thiocyanic acid", "CCN.SC#N", "CC[NH3+].[S-]C#N"),
+    ("carbonic acid", "CCN.OC(=O)O", "CC[NH3+].OC(=O)[O-]"),
+    ("hypophosphorous acid", "CCN.O[PH2]=O", "CC[NH3+].[O-][PH2]=O"),
+    ("boric acid", "CCN.OB(O)O", "CC[NH3+].[O-]B(O)O"),
+)
+
+
+@pytest.mark.parametrize(("acid", "neutral", "ionic"), _IONISABLE_SALTS)
+def test_a_salt_written_neutral_or_ionic_is_one_compound(
+    acid: str, neutral: str, ionic: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`D-2026-09-27-a-compound-id-a-bump-moves-is-superseded-not-orphaned`: one substance, one id.
+
+    **And the table is what does it**, driven rather than assumed: with it emptied — which is
+    `std11` — the same two spellings get two ids, so this is not a pair that agreed anyway.
+    """
+    from chemclaw.core import chem
+
+    assert acid in chem._IONISABLE_NEUTRAL_ACIDS
+    assert compound_id(neutral) == compound_id(ionic) == compound_id("CCN")
+    chem._standardized.cache_clear()
+    monkeypatch.setattr(chem, "_IONISABLE_NEUTRAL_SPECTATORS", frozenset())
+    try:
+        assert compound_id(neutral) != compound_id(ionic), f"{acid} agreed without the table"
+    finally:
+        chem._standardized.cache_clear()
+
+
+def test_the_table_is_exactly_the_acids_the_catalogue_omits() -> None:
+    """Every acid on it is one RDKit's catalogue does not strip, so no row is redundant.
+
+    The day upstream adds one, this reds and the row is deleted rather than kept as a second
+    answer to a question the catalogue already answers — which is how a table and a list drift.
+    """
+    from rdkit.Chem.MolStandardize import rdMolStandardize
+
+    from chemclaw.core import chem
+
+    remover = rdMolStandardize.FragmentRemover()
+    for acid, spellings in chem._IONISABLE_NEUTRAL_ACIDS.items():
+        for spelling in spellings:
+            pair = rdMolStandardize.Cleanup(Chem.MolFromSmiles(f"CCN.{spelling}"))
+            left = Chem.GetMolFrags(remover.remove(pair), asMols=True)
+            assert len(left) == 2, f"RDKit's catalogue now strips {acid} ({spelling})"
+    assert len(chem._IONISABLE_NEUTRAL_ACIDS) == 7
+
+
 def test_the_standardization_version_is_pinned_to_the_behaviour_it_names() -> None:
     """A bump is the only thing that retires a stale row, and nothing held the number to the rules.
 
@@ -977,10 +1049,11 @@ def test_the_standardization_version_is_pinned_to_the_behaviour_it_names() -> No
     **The table is what a bump has to be weighed against, and the cost is in `durable/retention.py`:
     a bump is a permanent doubling of `molecule_fingerprints` and `reaction_fingerprints`, because
     the runtime role holds no `DELETE` and superseded rows are never reclaimed.** The recovery is
-    the runbook's — delete the corpus's `corpus_cursors` row and re-run the ELN sync. Read that
-    before adding a row here with a new number.
+    `make rekey-compounds`, which re-fingerprints the shelved rows and supersedes every compound
+    note whose id moved (`tests/test_compound_rekey.py`). Read that before adding a row here with a
+    new number.
     """
-    assert STANDARDIZATION_VERSION == "std11", (
+    assert STANDARDIZATION_VERSION == "std12", (
         "the standardization version changed. That is a decision with a cost — see this test's "
         "docstring — so update the literal and the table below together, and say in the commit "
         "message which rows moved"

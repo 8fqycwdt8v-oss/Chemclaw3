@@ -10,7 +10,9 @@ new infrastructure, by design.
   (what a BO campaign converged on), `interaction.py` (what a human decided and why).
 - **Plumbing** — `similarity.py` (structural identity via DRFP), `ids.py`, `supersede.py` (a newer
   finding retiring an older one without deleting it), `jobs.py` (the durable side),
-  `progression.py` (the order runs were performed in and what each changed).
+  `progression.py` (the order runs were performed in and what each changed), and
+  `compound_rekey.py` (a compound note a `STANDARDIZATION_VERSION` bump moved, superseded by the
+  note under its new id rather than left current beside it).
 - **The comparative table** — `comparison.py`. Cells, the empty-column rule and the grid, extracted
   from `optimization.py` when `agent/condense.py` became a second caller. It lives here rather
   than there because this is where the artifact was invented; two copies would be two tables that

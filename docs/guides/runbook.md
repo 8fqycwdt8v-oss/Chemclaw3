@@ -765,6 +765,19 @@ until you **re-index** them (re-run the ELN sync / re-add molecules). If search 
 empty after a config change, that is the tell: the index predates the new definition and needs
 rebuilding.
 
+## (vi-a) After an upgrade that bumps `STANDARDIZATION_VERSION`
+
+A bump changes the fingerprint definitions (the version is a token in both), so every row indexed
+under the old one falls out of similarity search — and when it changes what a structure
+standardizes to, it moves that compound to a new `compound_id`, leaving the old compound note
+current beside the new one. **Run `make rekey-compounds` once after upgrading past a bump**: it
+previews the per-kind counts; `make rekey-compounds APPLY=1` writes them. It supersedes each moved
+compound note by the note under its new id (the old one is retired, never deleted, and its id keeps
+resolving through `expand_note`), and re-fingerprints the shelved rows of both indexes from what
+each row stores, so the full ELN re-sync below is no longer needed for a bump. It is idempotent: a
+second run reports nothing left to write. Run it where the note writer runs — it commits through
+the same dedicated checkout (`D-2026-09-27-a-compound-id-a-bump-moves-is-superseded-not-orphaned`).
+
 ## (vi-b) After an upgrade that changes what a note's indexed text is
 
 `note_index` rows are keyed on a **stat** fingerprint (mtime + size), which detects a changed

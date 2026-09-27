@@ -146,11 +146,11 @@ from chemclaw.core.ids import stable_hash
 # **The bump was argued rather than assumed, because it is not free.** `durable/retention.py`
 # records that a bump is a *permanent* doubling of `molecule_fingerprints` and
 # `reaction_fingerprints` — `app_privileges.sql` grants those tables INSERT and UPDATE only, so
-# nothing reclaims the superseded generation — and the only recovery is the runbook's: delete the
-# corpus's `corpus_cursors` row and re-run the ELN sync. Measured against that: **zero** of the 68
-# distinct structures in the shipped reagent table and zero of the 15 multi-fragment charged SMILES
-# anywhere in `data/` or `knowledge/` match the affected shape, so in *this* repository's corpus the
-# bump retires everything to reclaim nothing.
+# nothing reclaims the superseded generation — and the only recovery was then the runbook's: delete
+# the corpus's `corpus_cursors` row and re-run the ELN sync (since `std12`, `make rekey-compounds`).
+# Measured against that: **zero** of the 68 distinct structures in the shipped reagent table and
+# zero of the 15 multi-fragment charged SMILES anywhere in `data/` or `knowledge/` match the
+# affected shape, so in *this* repository's corpus the bump retires everything to reclaim nothing.
 #
 # It is taken anyway, for three reasons. The corpus measured above is the seed data and not the
 # population at risk: the reachable writers are an ELN component, `memory/chains.py`,
@@ -199,7 +199,16 @@ from chemclaw.core.ids import stable_hash
 # beside one organic fragment is that fragment's counterion by construction — or if it is a solvent
 # RDKit's curated list knows. Asking that list *alone* was the first spelling and it regressed TBTU:
 # it is a pharmaceutical salt list and knows neither tetrafluoroborate nor hexafluorophosphate.
-STANDARDIZATION_VERSION = "std11"
+#
+# `std11` -> `std12` because that change split one salt into two ids by spelling
+# (`D-2026-09-27-a-compound-id-a-bump-moves-is-superseded-not-orphaned`): for a counterion the
+# catalogue omits, `CCN.OCl(=O)(=O)=O` kept its perchloric acid while `CC[NH3+].[O-]Cl(=O)(=O)=O`
+# stripped the perchlorate. `_IONISABLE_NEUTRAL_ACIDS` is the seven acids that do it, and a neutral
+# spectator on it is now discarded like its anion. **This is the first bump that re-keys rather than
+# only retiring**: `chemclaw.cli.rekey_compounds` writes the `supersedes` link from each compound
+# note's new id to its old one and re-fingerprints the shelved rows, so a citation to a pre-bump id
+# still resolves and the graph does not keep a note per spelling.
+STANDARDIZATION_VERSION = "std12"
 
 # The d- and f-block by atomic number — Sc→Zn, Y→Cd, La→Hg (lanthanides included) and Ac onward.
 # A block rather than a hand-picked element list, because the property being asserted is a block
@@ -271,6 +280,35 @@ _METALS = _REACTIVE_METALS | frozenset(
 #: whether a **neutral** spectator is one it knows — the charged ones are read off their charge,
 #: because this list is a pharmaceutical salt list and does not know tetrafluoroborate.
 _KNOWN_SPECTATORS = rdMolStandardize.FragmentRemover()
+
+#: The neutral acids that can also be written as their anion, and that RDKit's catalogue omits — so
+#: without this, a salt of one got one `compound_id` written ionic and another written neutral
+#: (`D-2026-09-27-a-compound-id-a-bump-moves-is-superseded-not-orphaned`). **A table, which this
+#: module otherwise refuses, and the refusal's reason does not reach it**: the alternative the
+#: backlog row weighed was a pKa-shaped predicate, which is the bespoke notion of sameness the
+#: module docstring declines, while this set is measured, closed and small — every neutral
+#: spectator the catalogue omits that has an anion a chemist writes. Everything the catalogue does
+#: carry (HCl, HBr, HF, HI, H2SO4, H3PO4, HNO3) already agrees from both spellings, and an adduct
+#: that cannot ionise (H2O2, BH3, I2, CO2) is not on it and stays, which is what keeps urea hydrogen
+#: peroxide an oxidant. Thiocyanic acid is written as either tautomer, so both are listed.
+#:
+#: Matched on the fragment **after `Cleanup`**, because that is the molecule `standardize` asks the
+#: question of, and `Cleanup` rewrites perchloric acid into a charge-separated net-neutral form that
+#: no hand-written SMILES would match.
+_IONISABLE_NEUTRAL_ACIDS: dict[str, tuple[str, ...]] = {
+    "perchloric acid": ("OCl(=O)(=O)=O",),
+    "tetrafluoroboric acid": ("F[B-](F)(F)[FH+]",),
+    "sulfamic acid": ("NS(=O)(=O)O",),
+    "thiocyanic acid": ("SC#N", "N=C=S"),
+    "carbonic acid": ("OC(=O)O",),
+    "hypophosphorous acid": ("O[PH2]=O",),
+    "boric acid": ("OB(O)O",),
+}
+_IONISABLE_NEUTRAL_SPECTATORS = frozenset(
+    Chem.MolToSmiles(rdMolStandardize.Cleanup(Chem.MolFromSmiles(spelling)))
+    for spellings in _IONISABLE_NEUTRAL_ACIDS.values()
+    for spelling in spellings
+)
 
 _TAUTOMERS = rdMolStandardize.TautomerEnumerator()
 _TAUTOMERS.SetRemoveSp3Stereo(False)
@@ -546,6 +584,10 @@ def standardize(mol: Chem.Mol) -> Chem.Mol:
         #   upstream, and it is delegated because a solvent list is exactly the table
         #   `D-2026-08-01-a-reagent-is-not-its-largest-fragment` refuses to keep in step by hand.
         #
+        # - **It is the neutral form of a counterion the list omits** (`_IONISABLE_NEUTRAL_ACIDS`),
+        #   so a perchlorate salt written as the amine beside perchloric acid is the salt written
+        #   ionic, not a co-crystal of two reagents.
+        #
         # Anything else neutral and unrecognised — H2O2, a co-crystal former, a second reagent —
         # leaves the string whole, which is what `standardize` already does for two organic
         # fragments.
@@ -563,6 +605,7 @@ def standardize(mol: Chem.Mol) -> Chem.Mol:
             if not _is_organic(f)
             and Chem.GetFormalCharge(f) == 0
             and Chem.MolToSmiles(f) in survived
+            and Chem.MolToSmiles(f) not in _IONISABLE_NEUTRAL_SPECTATORS
         ]
         # Rebuilt rather than edited in place: `Chem.MolFromSmiles` over the kept fragments is one
         # sanitized molecule, and the common case (everything discarded) is the organic fragment

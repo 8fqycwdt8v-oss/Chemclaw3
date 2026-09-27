@@ -112,53 +112,19 @@ topic).
 
 ## 2 — Answers that are wrong without saying so
 
-- [ ] **A salt written neutral and the same salt written ionic get two `compound_id`s, for the
-      counterions RDKit's catalogue omits** — [M], opened 2026-09-22 by the review of
-      `D-2026-09-22-the-parent-is-the-fragment-this-module-calls-organic`. That decision discards a
-      *neutral* spectator only when RDKit's fragment catalogue knows it, so the two spellings of one
-      salt diverge whenever the catalogue does not carry the counterion: driven,
-      `CCN.OCl(=O)(=O)=O` keeps its perchloric acid while `CC[NH3+].[O-]Cl(=O)(=O)=O` strips the
-      perchlorate. One substance, two ids — which is `D-2026-07-31-two-spellings-of-one-molecule`,
-      the defect `core/chem.py` exists to prevent.
-
-      **Measured, the set is small and enumerable**: the neutral spectators the catalogue omits that
-      can also ionise — perchloric, tetrafluoroboric, sulfamic, thiocyanic, carbonic,
-      hypophosphorous and boric acid. Everything it carries (HCl, HBr, HF, HI, H2SO4, H3PO4, HNO3,
-      the group-1/2 metals) agrees from both spellings, and an adduct that cannot ionise (H2O2, BH3,
-      I2, CO2) is correctly kept from both.
-
-      **`Reionizer` does not close it** — driven, `Cleanup` normalises perchloric acid to a
-      charge-separated but net-neutral form and reionizing does not move the proton to the amine, so
-      the charge clause cannot see it. The candidates are a pKa-shaped predicate (the same one
-      `D-2026-09-09-a-map-number-is-not-a-molecule` declines for the alkali/alkoxide case) or an
-      explicit list of ionisable neutrals, which is the table this module opens by refusing. Weigh
-      both against how rare the neutral spelling of a perchlorate salt is; the trade was taken
-      knowingly, against four wrong identities that shipped. Anchors:
-      `core/chem.py::standardize`, `tests/test_compound_identity.py::_STANDARDIZATION_AT_THIS_VERSION`.
-
-- [ ] **A `STANDARDIZATION_VERSION` bump retires the fingerprint rows and re-keys nothing, so the
-      graph keeps a note per superseded spelling forever** — [L],
-      `src/chemclaw/core/chem.py::compound_id`, `src/chemclaw/ingest/eln/compound.py:85-92`.
-      Driven against the live Postgres at `std7` -> `std8`: the fingerprint half works exactly as
-      designed — `CC[NH3+].[Br-]` keys to `compound-b3ba1c117ed7` under `ecfp:…:std7` and
-      `compound-bb572bdd9031` under `…:std8`, and a std8 similarity search returns only the
-      corrected row. `compound_id` carries no version, so the std7-era `compound_note` keeps its own
-      id in the knowledge graph with no cleanup path, which is the **first** consequence the fix
-      commit named ("two `compound_id`s and two `compound_note`s for one substance") and the half a
-      definition bump does not reach.
-
-      Secondary and driven: `compound_dependencies` re-derives `compound_id(note.compound_smiles)`
-      and returns `[]` when it no longer matches the note's own wikilink — so a std7-era note
-      re-submitted under std8 silently loses its compound dependency rather than failing.
-
-      Not fixed here because the two candidate fixes are both decisions rather than defect fixes:
-      folding the version into `compound_id` invalidates every stored id at every future bump and
-      breaks every citation to one, and rewriting the notes is a migration over layer 4 that
-      `kg/record.py` — append and supersede, never rewrite — has no verb for. The recovery that
-      *does* exist is `docs/guides/runbook.md:2015`: delete the corpus's `corpus_cursors` row and
-      re-run the ELN sync. Weigh it against `src/chemclaw/durable/retention.py:516`, which records
-      that a bump is "a permanent doubling" of `molecule_fingerprints`/`reaction_fingerprints`
-      because the runtime role holds no `DELETE`.
+- [ ] **`standardize` is not idempotent on ferrocenyl palladacycles, so `compound_id(raw)` is not
+      the id of `compound_note(raw)`** — [M], opened 2026-09-27 by the seeded-corpus measurement of
+      `D-2026-09-27-a-compound-id-a-bump-moves-is-superseded-not-orphaned`. Three of the 129
+      molecules in `Chemclaw3_mock`'s ORD seed — the dtbpf-, dppf- and Josiphos-type Pd G3
+      precatalysts — standardize to a kekulé Cp anion from the raw string and to the aromatic one
+      from that standard form, so `standard_smiles(standard_smiles(x)) != standard_smiles(x)`.
+      Driven: `compound_id(raw)` is `compound-bd1143cc135d` while `compound_note(raw).id` and every
+      `similar_molecules` hit cite `compound-626ec3b8d0ae` — so `compound_dependencies` on a note
+      carrying the raw string links an id no note is written under. It is also why a molecule-row
+      re-key moves those three keys although the bump did not touch them. The candidates are
+      iterating `standardize` to a fixed point (a bump, and the cost of a second pass on every
+      structure) or finding which `Cleanup`/tautomer step re-aromatizes and pinning it. Anchors:
+      `core/chem.py::standardize`, `core/chem.py::compound_id`, `ingest/eln/compound.py`.
 
 - [ ] **`plan_gate.py` is paired with one of the five test files that cover it** — [S], opened
       2026-09-23 by the review of the wave that added it to the mutation backstop.
