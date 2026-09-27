@@ -113,7 +113,7 @@ topic).
 ## 2 — Answers that are wrong without saying so
 
 - [ ] **`standardize` is not idempotent on ferrocenyl palladacycles, so `compound_id(raw)` is not
-      the id of `compound_note(raw)`** — [M], opened 2026-09-27 by the seeded-corpus measurement of
+      the id of `compound_note(raw)`** (issue #485) — [M], opened 2026-09-27 by the seeded-corpus measurement of
       `D-2026-09-27-a-compound-id-a-bump-moves-is-superseded-not-orphaned`. Three of the 129
       molecules in `Chemclaw3_mock`'s ORD seed — the dtbpf-, dppf- and Josiphos-type Pd G3
       precatalysts — standardize to a kekulé Cp anion from the raw string and to the aromatic one
@@ -285,7 +285,7 @@ only holds defects can only ever restore the system to what it already intended 
       question.
 
 - [ ] **About a third of tools still rest on one probe, and they are the compute and job tail**
-      — [S], narrowed 2026-09-24. Derived from `tests/test_probe_coverage.py::_probes` and
+      (issue #487) — [S], narrowed 2026-09-24. Derived from `tests/test_probe_coverage.py::_probes` and
       `::_expected_tools` with `load_profiles()` called first (two earlier measurements disagreed
       on exactly that): 47 of 124 tools had one probe. The seven whose effect persists past the turn
       — preferences, watches, skill proposals, plate observations, the results store, the knowledge
@@ -296,7 +296,7 @@ only holds defects can only ever restore the system to what it already intended 
       bounding risk. Choose the next second questions by what a deployment calls —
       `audit_events` per tool name — once one exists to read.
 
-- [ ] **`deep-research` has no index behind it** — [M]. `agent/research_tools.py::gather_evidence`
+- [ ] **`deep-research` has no index behind it** (issue #486) — [M]. `agent/research_tools.py::gather_evidence`
       sweeps the knowledge graph, the ELN, the mounted document share and the fingerprint store —
       every one internal. `skills/deep-research/SKILL.md` describes a capability whose corpus is
       whatever notes exist (41 on this checkout, 2026-09-22). `Chemclaw3-mcp/MODULES.md` files `litsearch`
