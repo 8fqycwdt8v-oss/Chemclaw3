@@ -332,6 +332,86 @@ def test_charge_imbalance_is_named_separately(monkeypatch: pytest.MonkeyPatch) -
         _run(compose.reaction_energy(InMemoryStore(), ["[Na+]"], ["[Na]"]))
 
 
+# Probe pc-03's inputs verbatim, as the live model sent them: TFA and carbonate dianion to
+# trifluoroacetate and bicarbonate. Atom- and charge-balanced (-2 on both sides), so `check_balance`
+# passed it, and gas phase it came back at dE -185 kcal/mol.
+_NEUTRALISATION = (["OC(=O)C(F)(F)F", "O=C([O-])[O-]"], ["[O-]C(=O)C(F)(F)F", "O=C(O)[O-]"])
+
+
+def test_a_gas_phase_reaction_over_ions_is_refused_before_anything_is_computed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """pc-03: a gas-phase energy over free ions is refused, not reported.
+
+    The value it produced was presented to a chemist as "exothermic enough to matter at scale". In
+    vacuum each ion is bare, so the difference is unscreened charge rather than a reaction energy,
+    and the message has to name the ions and the remedy (a solvent) the caller can act on.
+    """
+    server = install(monkeypatch, FakeCalcServer())
+    with pytest.raises(ValueError, match="not physically meaningful") as refused:
+        _run(compose.reaction_energy(InMemoryStore(), *_NEUTRALISATION, level="quick"))
+    named = str(refused.value).split(": ", 1)[1].split(" carry")[0]
+    assert named == "O=C([O-])[O-], [O-]C(=O)C(F)(F)F, O=C(O)[O-]", "the neutral TFA was named"
+    assert "solvent=" in str(refused.value)
+    assert server.calls == [], "the refusal came after work had started"
+
+
+def test_the_same_reaction_in_a_solvent_runs_and_says_what_it_is(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With an implicit solvent the ions are screened, so it runs — carrying the caveat for ions."""
+    install(monkeypatch, FakeCalcServer())
+    result = _run(
+        compose.reaction_energy(InMemoryStore(), *_NEUTRALISATION, solvent="water", level="quick")
+    )
+    (caveat,) = [line for line in result.warnings if "charged species present" in line]
+    assert "not as a heat of reaction" in caveat
+
+
+@pytest.mark.parametrize(
+    ("species", "ionic"),
+    [
+        (["O=C([O-])[O-]"], ["O=C([O-])[O-]"]),
+        # A salt written as its ions is net neutral and still two free ions in vacuum.
+        (["[Na+].[Cl-]"], ["[Na+].[Cl-]"]),
+        # Charge-separated *neutral* functional groups are not ions: the energetic groups a thermal
+        # screen most needs (nitro, azide) must not be refused.
+        (["C[N+](=O)[O-]", "CN=[N+]=[N-]", "CCO"], []),
+    ],
+)
+def test_only_a_fragment_carrying_a_net_charge_is_an_ion(
+    species: list[str], ionic: list[str]
+) -> None:
+    """The predicate's boundary: a charged fragment is an ion, a zero-sum one is a molecule."""
+    assert compose.ionic_species(species) == ionic
+
+
+def test_a_neutral_nitro_reaction_still_runs_in_the_gas_phase(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The refusal's other side: nitromethane to methyl nitrite is written with formal charges."""
+    install(monkeypatch, FakeCalcServer())
+    result = _run(
+        compose.reaction_energy(InMemoryStore(), ["C[N+](=O)[O-]"], ["CON=O"], level="quick")
+    )
+    assert not any("charged species" in line for line in result.warnings)
+
+
+def test_a_solvent_screen_over_ions_drops_the_gas_reference_and_says_so(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The screen's automatic gas-phase row would be the refused number, so it is left out."""
+    install(monkeypatch, FakeCalcServer())
+    result = _run(
+        compose.solvent_comparison(
+            InMemoryStore(), *_NEUTRALISATION, ["water", "dmso"], level="quick"
+        )
+    )
+    assert [effect.solvent for effect in result.effects].count(None) == 0
+    assert len(result.effects) == 2
+    assert any("no gas-phase reference" in line for line in result.warnings)
+
+
 def test_a_shared_species_is_computed_once_across_two_reactions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

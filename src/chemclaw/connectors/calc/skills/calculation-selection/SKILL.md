@@ -199,7 +199,11 @@ electronic energies is needed; it skips every Hessian.
   carries `is_strongly_exothermic` against a configured threshold. Use `level="quick"` when the
   flag is all you need: it skips every Hessian and differences electronic energies only.
   Advisory, like the structural hazard screen (`screen_hazards`) — a flag for attention, never
-  a safety certification.
+  a safety certification. **An acid-base quench or neutralisation is not a candidate**: its
+  species are ions, a gas-phase run over them is refused (a bare ion in vacuum is off by hundreds
+  of kcal/mol), and even with `solvent` the continuum is the weakest part of the method for an
+  ion, so the number orders related reactions and is never a heat of neutralisation. Say that a
+  quench exotherm needs calorimetry rather than computing one.
 
 ## Reading results honestly
 

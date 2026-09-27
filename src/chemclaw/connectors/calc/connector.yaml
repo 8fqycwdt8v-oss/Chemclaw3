@@ -133,7 +133,9 @@ jobs:
       same solvent, and — at `standard` level — given its own frequency calculation, so the
       comparison is internally consistent. List each species once per stoichiometric equivalent
       (two waters is ["O", "O"]). The equation must balance in atoms and charge; an unbalanced one
-      is rejected rather than returning a difference that includes the missing atoms. Radicals
+      is rejected rather than returning a difference that includes the missing atoms. A charged
+      species (an ion, or a salt written as ions) needs `solvent`: in the gas phase it is refused,
+      because a bare ion's energy there is off by hundreds of kcal/mol. Radicals
       written with explicit radical electrons ([CH3], [OH]) work, so homolysis and bond dissociation
       energies do too. A negative ΔG means products are favoured *at equilibrium* — it says nothing
       about rate, since there are no transition states here. Quote the reported uncertainty: a
