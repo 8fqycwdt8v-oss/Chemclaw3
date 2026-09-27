@@ -273,6 +273,72 @@ def test_a_reload_names_the_same_full_text_the_stream_named(sink: _Collecting) -
     assert reloaded.result is not None and _MIDDLE not in reloaded.result
 
 
+def test_a_turn_through_the_front_door_names_the_full_text_it_kept(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """From `run_turn` in: the runner installs the sink, the real chain cuts, the event names it.
+
+    The production entry point rather than the middleware alone, because the one hop no unit test
+    above can see is the runner installing the sink for the turn (`_turn_ambient`) — without it
+    every cut stamps `""` and the feature is silently off. The store is replaced by a collecting
+    sink at the runner's own import, so this needs no database; the rest is the compiled graph.
+    """
+    from langchain_core.tools import tool as make_tool
+
+    from chemclaw.agent.audit import NullAuditSink
+    from chemclaw.agent.langgraph_agent import build_langgraph_agent
+    from chemclaw.agent.session import TurnSession
+    from chemclaw.api import runner
+    from tests.fakes_langgraph import ScriptedChatModel
+
+    raw = _full_output()
+    kept = _Collecting()
+    installed: list[tuple[str, str]] = []
+
+    def _sink_for(session_id: str, correlation_id: str) -> Any:
+        installed.append((session_id, correlation_id))
+        return kept
+
+    monkeypatch.setattr(runner, "full_result_sink", _sink_for)
+
+    @make_tool
+    def read_long_document(query: str) -> str:
+        """Return a document far longer than the model may read in one result."""
+        return raw
+
+    history: list[Any] = []
+
+    class _History:
+        async def save_messages(self, _session_id: str, messages: Any, **_kw: Any) -> None:
+            history.extend(messages)
+
+    def _graph(**build_kwargs: Any) -> Any:
+        build_kwargs["connectors"] = [*(build_kwargs.get("connectors") or []), read_long_document]
+        build_kwargs["audit_sink"] = NullAuditSink()
+        script: list[Any] = [{"name": "read_long_document", "args": {"query": "x"}}, "Done."]
+        return build_langgraph_agent(ScriptedChatModel(script), **build_kwargs)
+
+    async def _collect() -> list[Any]:
+        session = TurnSession(session_id="s-full-result-turn")
+        return [
+            event
+            async for event in runner.run_turn(
+                session, "read it", connectors=[], graph_factory=_graph, history=_History()
+            )
+        ]
+
+    events = asyncio.run(_collect())
+
+    [result] = [e for e in events if e.type == "tool_result"]
+    assert [sid for sid, _ in installed] == ["s-full-result-turn"], "no sink for this turn"
+    assert result.result_cut is True
+    assert result.result_ref == content_address(raw)
+    assert kept.kept == {content_address(raw): raw}
+    [stored] = [m for m in history if getattr(m, "tool_call_id", None)]
+    assert _MIDDLE not in message_text(stored), "the thread the model reads holds the whole result"
+    assert full_result_ref(stored) == content_address(raw)
+
+
 # --- the size bound --------------------------------------------------------------------------------
 
 

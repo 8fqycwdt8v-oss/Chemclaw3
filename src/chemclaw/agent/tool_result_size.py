@@ -556,9 +556,10 @@ async def kept_in_full(result: Any, originals: dict[str, str], tool: str) -> Any
     Written before the message leaves the middleware, so the bytes are durable before the stream
     can announce the ref naming them — the ordering `api/runner_trace.py` states for its own write.
 
-    **A message already carrying `FULL_RESULT_REF_KEY` is left alone.** The chain cuts in two places
-    (`bound_tool_results`, then `frame_connector_results`' re-bound after escaping), and the first
-    one to cut saw more of the tool's output than the second; its stamp is the truer one.
+    **A caller records only a message not already carrying `FULL_RESULT_REF_KEY`.** The chain cuts
+    in two places (`bound_tool_results`, then `frame_connector_results`' re-bound after escaping),
+    and the first one to cut saw more of the tool's output than the second, so its stamp stands and
+    the outer pass records nothing for that message (`tool_framing`'s `_kept` checks `was_cut`).
 
     Returns `result` itself when nothing was cut, so identity still means "unchanged".
     """
@@ -571,7 +572,7 @@ async def kept_in_full(result: Any, originals: dict[str, str], tool: str) -> Any
     }
 
     def _stamped(message: ToolMessage) -> ToolMessage:
-        if message.tool_call_id not in refs or was_cut(message):
+        if message.tool_call_id not in refs:
             return message
         return message.model_copy(
             update={
