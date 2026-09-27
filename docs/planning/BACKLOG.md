@@ -633,23 +633,24 @@ those belong in.
       The next step is to record the bound tool names and the schema gauge at each boot and compare, which
       `make live-turn-cost`'s regime line now makes visible from outside.
 
-## Recover the flow-Suzuki screen, or decide it stays out
+## What the citation-only tier still cannot do
 
-- [ ] **5,760 ORD records — 57% of the seeded corpus — cannot be ingested at all** — [L] (issue #477).
-      `Chemclaw3_mock` seeds 10,011 ORD records and **5,760 of them — 57% — cannot be ingested at all**.
-      Every refusal is the Perera flow-Suzuki set (*Science* 2018, 359, 429), whose second coupling
-      partner the source spreadsheet publishes only as its own shorthand (`2a, Boronic Acid`).
-      `ord_adapter._smiles` refuses rather than inventing a structure, which is right and is pinned by
-      `test_ord_compound_with_no_resolvable_identifier_is_still_refused` — but that docstring's own words
-      are "57% of a real corpus lost, including the yield data on components that *were* resolvable",
-      and the widening it documents (INCHI, then NAME through `resolve_compound_name`) moved the number
-      from 5,761 refused to 5,760.
-
-      The open question is whether a reaction with one structure-less participant is worth keeping as
-      *evidence*: its yield, ligand, base and halide are all real, and questions like "which base wins on
-      this halide" need none of the missing structure. The two candidate shapes are (a) a `Component`
-      that may carry a name instead of SMILES, with the reaction excluded from every fingerprint index,
-      and (b) a separate lower-tier record type that retrieval can cite but similarity cannot reach.
-      Both change what a `Component` is, so this wants its own ADR and its own measurement of what a
-      partially-structured reaction does to retrieval — not a patch to `_smiles`. Measured and declared
-      by `make live-data`; see `D-2026-08-18-a-corpus-is-not-reachable-because-it-is-on-disk`.
+- [ ] **A citation-only record can be cited and cannot be found** — [M].
+      `ingest/eln/ingest.py::ingest_reaction` writes a citation-only record to `reaction_records`
+      and nothing else, and every path that *finds* a reaction record starts from structure
+      (`retrieval/retrievers.py::FingerprintReactionRetriever`, the `rxnfp` facet tools over
+      `reaction_labels`). So the mock's 5,760 flow-Suzuki records are reachable by
+      `reaction-<source>.<id>` citation (`agent/graph_tools.py::_expand_record`, `kg/validate.py`)
+      and by no question — "which base wins on 6-chloroquinoline" is what they answer and cannot
+      reach them. The candidate is a label row whose record phase carries the structured species
+      and marks the named ones, with the labeller deriving nothing for it; that changes
+      `science/labels/records.py`'s row and wants its own measurement of what a partially
+      structured row does to the facet counts. See
+      `D-2026-09-27-a-reaction-without-a-structure-is-citable-not-searchable`.
+- [ ] **An entry amended from structured to citation-only keeps its old label row** — [S].
+      `reaction_labels` is INSERT/UPDATE-only for the app role
+      (`infra/sql/grants/app_privileges.sql`), so the label row written while the entry was drawn
+      survives the amendment and `connectors/rxnfp/server/tools.py`'s `reagent_frequency` and
+      `workup_precedent` can still count the run. The fingerprint half of the same residue is
+      guarded on read (`ReactionRecordStore.structurally_withheld`);
+      `agent/protocol_design_tools.py::_uncited_precedents` asks neither that nor `retracted`.

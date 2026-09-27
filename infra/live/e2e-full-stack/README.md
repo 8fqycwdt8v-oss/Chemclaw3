@@ -104,20 +104,22 @@ The last thing `up` does is start an `ElnSyncWorkflow` from the epoch. Without i
 the seeded data is **permanently invisible**: all ~10,000 exports share one mtime (the moment the
 repo was cloned) and carry older payload timestamps, so the incremental cursor passes them on its
 first firing and no later run can qualify them again. The bring-up only *starts* the drain and
-waits 120 s — a note write costs ~1.8 s, so the 4,251 ingestible records take a little over
-two hours — and the log lands in `.live/e2e-corpus-backfill.log`.
+waits 120 s — measured at ~1.8 s per record when 4,251 records were ingestible, a little over two
+hours, and all 10,011 seeded records ingest now — and the log lands in
+`.live/e2e-corpus-backfill.log`.
 
 `make live-data` is where a shortfall shows up, and it names the number:
 
 ```sh
-make live-data                       # ... | corpus is reachable | FAIL | 1936/4251 ... |
+make live-data                       # ... | corpus is reachable | FAIL | 1936/10011 ... |
 make live-data ARGS=--corpus-only    # the value checks alone, ~7s, no infrastructure needed
 ```
 
-It also reports what can never arrive: 5,760 of the seeded ORD records (the flow-Suzuki screen)
-carry a coupling partner the source paper publishes only as a shorthand, so the adapter refuses
-them rather than inventing a structure. That is declared, not discovered — see
-`D-2026-08-18-a-corpus-is-not-reachable-because-it-is-on-disk`.
+It also reports the tier each dataset arrives in. 5,760 of the seeded ORD records (the flow-Suzuki
+screen) carry a coupling partner the source paper publishes only as a shorthand, so they arrive
+**citation-only**: stored and citable, the shorthand carried verbatim as a species with no
+structure, and in no fingerprint or label index — never an invented structure. That is declared,
+not discovered — see `D-2026-09-27-a-reaction-without-a-structure-is-citable-not-searchable`.
 
 ## Checking it is really wired up
 

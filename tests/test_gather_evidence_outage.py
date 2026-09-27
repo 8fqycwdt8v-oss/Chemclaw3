@@ -54,8 +54,8 @@ class _NoMetadata:
         """Every id passes; no filter is ever given here."""
         return set(reaction_ids)
 
-    async def retracted(self, refs: Sequence[tuple[str, str]]) -> set[tuple[str, str]]:
-        """Nothing is withdrawn, which is what makes the unfiltered path below the subject."""
+    async def structurally_withheld(self, refs: Sequence[tuple[str, str]]) -> set[tuple[str, str]]:
+        """Nothing is withheld, which is what makes the unfiltered path below the subject."""
         return set()
 
 
