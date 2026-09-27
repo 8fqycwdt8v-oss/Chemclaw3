@@ -69,12 +69,18 @@ nothing had been started. The fix is not a name added to that set: `write_file` 
 """
 
 import logging
+from collections.abc import Mapping
+from datetime import UTC, datetime, timedelta
 from functools import cache
 from typing import Any, cast
 
 from deepagents import FsToolName
 from deepagents.backends import CompositeBackend, StateBackend, StoreBackend
 from deepagents.backends.protocol import EditResult, WriteResult
+from deepagents.backends.utils import file_data_to_string, perform_string_replacement
+from deepagents.middleware.filesystem import FilesystemState
+from langchain.agents.middleware import before_agent
+from langgraph.runtime import Runtime
 from langgraph.store.base import SearchItem
 from langgraph.store.postgres.aio import AsyncPostgresStore
 
@@ -281,8 +287,12 @@ class BoundedStoreBackend(StoreBackend):
 
         Returns:
             Upstream's result, unchanged — the cap is about what stays, not about what a turn is
-            told it wrote.
+            told it wrote — or a refusal when `content` is past `agent_scratch_file_max_chars`,
+            checked first so an oversized memory never lands and is never counted.
         """
+        refusal = oversized_file(file_path, content)
+        if refusal is not None:
+            return WriteResult(error=refusal)
         result = await super().awrite(file_path, content)
         await self._evict_past_the_cap()
         return result
@@ -331,8 +341,16 @@ class BoundedStoreBackend(StoreBackend):
             replace_all: Replace every occurrence rather than requiring exactly one.
 
         Returns:
-            Upstream's result, or a refusal naming the repeat.
+            Upstream's result, a refusal naming the repeat, or a refusal when the edited memory
+            would be past `agent_scratch_file_max_chars`.
         """
+        edited = _edited_content(
+            await self._current_content(file_path), old_string, new_string, replace_all
+        )
+        if edited is not None:
+            refusal = oversized_file(file_path, edited)
+            if refusal is not None:
+                return EditResult(error=refusal)
         if old_string and old_string in new_string:
             # The raw store value, not `aread`: that method paginates at 2,000 lines by default, so
             # a long memory would come back truncated and `new_string in content` would answer
@@ -439,6 +457,152 @@ class BoundedStoreBackend(StoreBackend):
 _EVICTION_PAGE = 64
 
 
+def oversized_file(file_path: str, content: str) -> str | None:
+    """The refusal for a file a turn is about to store past `agent_scratch_file_max_chars`, if any.
+
+    **A refusal, never a cut** (`D-2026-09-26-a-chemists-scratch-write-is-bounded-and-expires`). A
+    helper's file is cut on its way into the caller (`tool_result_size._bounded_file`), because
+    nobody is there to be told; this is the caller's *own* document, written by a model that can
+    act on a sentence, and a truncated file would hand the chemist a document that simply stops.
+    So the write does not happen and the model is told the limit, which leaves splitting the file
+    or writing less as its choices.
+
+    One function for both routes that take a `write_file` — `/scratch/` and `/memories/` — so the
+    two cannot disagree about the number or the wording.
+
+    Args:
+        file_path: The path the turn named, for the message.
+        content: The whole text the file would hold after this write or edit.
+
+    Returns:
+        The error text to return in place of the write, or `None` when it fits.
+    """
+    limit = settings.agent_scratch_file_max_chars
+    if len(content) <= limit:
+        return None
+    return (
+        f"Error: {file_path} was not written. It would hold {len(content):,} characters and one "
+        f"file may hold at most {limit:,} (agent_scratch_file_max_chars). Nothing was truncated "
+        "and nothing was stored: split it across several files, or write less."
+    )
+
+
+def _edited_content(
+    current: str | None, old_string: str, new_string: str, replace_all: bool
+) -> str | None:
+    """The text an edit would leave, computed the way upstream's own `edit` computes it.
+
+    `perform_string_replacement` is the function both upstream backends call, so the size checked
+    is the size that would be stored. `None` when there is no file or the replacement would fail —
+    upstream's own error is the right answer then, and this returns nothing to check.
+    """
+    if current is None:
+        return None
+    result = perform_string_replacement(current, old_string, new_string, replace_all)
+    return result[0] if isinstance(result, tuple) else None
+
+
+class BoundedStateBackend(StateBackend):
+    """`StateBackend` whose `write`/`edit` refuse a file past `agent_scratch_file_max_chars`.
+
+    **Why here and not in a middleware.** A caller's `write_file` and `edit_file` reach this backend
+    and it writes the `files` channel directly through `CONFIG_KEY_SEND` — a channel write, not a
+    tool result — so no `wrap_tool_call` middleware ever sees the content, and
+    `tool_result_shape.rewritten_command_files` (which bounds a *helper's* files) is never on the
+    path. Everything stored here is charged against every later helper's share of
+    `agent_subagent_files_max_chars` (`tool_result_size._files_already_held`), so the arm nobody
+    bounded was spending the budget the bounded arm is measured against.
+
+    Only the two write verbs. `awrite`/`aedit` are upstream's `to_thread` over these, so the async
+    path a turn takes is covered by the same override.
+    """
+
+    def write(self, file_path: str, content: str) -> WriteResult:
+        """Write, unless the file would be past the cap — then refuse and store nothing."""
+        refusal = oversized_file(file_path, content)
+        if refusal is not None:
+            return WriteResult(error=refusal)
+        return super().write(file_path, content)
+
+    def edit(
+        self, file_path: str, old_string: str, new_string: str, replace_all: bool = False
+    ) -> EditResult:
+        """Edit, unless the edited file would be past the cap — then refuse and change nothing.
+
+        The size checked is the *result's*, because an edit is how a file grows past any bound a
+        write alone was held to: one `edit_file` per call, each appending, would otherwise walk a
+        file past the cap in steps the write check never sees.
+        """
+        stored = self._read_files().get(file_path)
+        current = file_data_to_string(stored) if stored is not None else None
+        edited = _edited_content(current, old_string, new_string, replace_all)
+        if edited is not None:
+            refusal = oversized_file(file_path, edited)
+            if refusal is not None:
+                return EditResult(error=refusal)
+        return super().edit(file_path, old_string, new_string, replace_all)
+
+
+def _stale_files(files: Mapping[str, Any], cutoff: datetime) -> list[str]:
+    """The paths in a `files` channel whose last write is older than `cutoff`.
+
+    Dated by upstream's own `modified_at`, which `create_file_data` stamps and `update_file_data`
+    restamps on every write and edit, so "last written" is the channel's own record rather than a
+    second clock this module keeps. A file that carries no parseable `modified_at` is **kept**: it
+    predates the stamp, and deleting what cannot be dated would be a retention policy applied to
+    an unknown age.
+    """
+    stale = []
+    for path, data in files.items():
+        stamp = data.get("modified_at") if isinstance(data, Mapping) else None
+        try:
+            written = datetime.fromisoformat(stamp) if isinstance(stamp, str) else None
+        except ValueError:
+            written = None
+        if written is None:
+            continue
+        if written.tzinfo is None:
+            written = written.replace(tzinfo=UTC)
+        if written < cutoff:
+            stale.append(path)
+    return stale
+
+
+@before_agent(state_schema=FilesystemState)
+def expire_stale_scratch(state: FilesystemState, runtime: Runtime[Any]) -> dict[str, Any] | None:
+    """Drop every file this thread has not written for `agent_scratch_retention_days`.
+
+    **At the start of a turn, through the channel's own reducer, and that is the whole design**
+    (`D-2026-09-26-a-chemists-scratch-write-is-bounded-and-expires`). `files` is a `DeltaChannel`
+    checkpointed under the thread: there is no row a sweep could delete a single file from, and
+    rewriting a checkpoint by hand would mean re-deriving a beta on-disk format and every other
+    channel of the graph. A `{path: None}` update is how the channel's reducer deletes a key, so the
+    graph's own write path does the disposal and the next checkpoint is simply the thread without
+    them; `checkpoint_retain_per_thread` then prunes the superseded copies that still held them.
+
+    **What it does not reach**: a thread nobody returns to runs no turn, so its files stay until the
+    thread itself is disposed of by `retention_checkpoints_days` — a stated policy, off by default,
+    which is where a deployment decides how long an idle conversation is kept.
+
+    `agent_scratch_retention_days = 0` keeps every file — how a deployment states "for ever".
+    """
+    del runtime  # the hook's signature; nothing here depends on the run
+    days = settings.agent_scratch_retention_days
+    files = state.get("files") or {}
+    if days <= 0 or not files:
+        return None
+    stale = _stale_files(files, datetime.now(UTC) - timedelta(days=days))
+    if not stale:
+        return None
+    logger.info(
+        "removed %d file(s) not written for %d day(s) (agent_scratch_retention_days): %s",
+        len(stale),
+        days,
+        ", ".join(sorted(stale)),
+    )
+    return {"files": dict.fromkeys(stale)}
+
+
 def scratchpad_backend(
     skills: CompositeBackend,
     store: Any | None = None,
@@ -478,7 +642,8 @@ def scratchpad_backend(
     Returns:
         A backend routing `/skills/…` as given, `/org/…` to the store whenever there is one,
         `/memories/…` and `/mine/…` to the store when there is also an actor, and everything else —
-        `/scratch/…` included — to graph state.
+        `/scratch/…` included — to graph state, through `BoundedStateBackend` so a turn's own
+        write is held to `agent_scratch_file_max_chars`.
     """
     routes = dict(skills.routes)
     actor = get_current_actor()
@@ -499,7 +664,7 @@ def scratchpad_backend(
     # leaving as an absence.
     if store is not None:
         routes[ORG_SKILLS_ROOT] = org_skills_backend(store, permits.stored)
-    return CompositeBackend(default=StateBackend(), routes=routes)
+    return CompositeBackend(default=BoundedStateBackend(), routes=routes)
 
 
 @cache

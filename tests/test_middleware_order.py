@@ -90,6 +90,10 @@ _EXPECTED_ORDER = (
     "enforce_loop_cap",
     "enforce_spend_cap",
     "MeterTurnSpend",
+    # A `before_agent` hook, so its position carries no nesting argument: it runs once, before the
+    # first model call, and removes the `files` entries past `agent_scratch_retention_days`
+    # (`D-2026-09-26-a-chemists-scratch-write-is-bounded-and-expires`).
+    "expire_stale_scratch",
     "ReloadingSkillsMiddleware",
     "surface_authorization_denials",
     "surface_domain_errors",

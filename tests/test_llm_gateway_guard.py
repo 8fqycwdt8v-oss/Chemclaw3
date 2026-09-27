@@ -100,6 +100,10 @@ def unreachable_temporal() -> dict[str, str]:
     return {
         "CHEMCLAW_TEMPORAL_ADDRESS": f"127.0.0.1:{_free_port()}",
         "CHEMCLAW_TEMPORAL_NAMESPACE": "guard-probe",
+        # Sign-in is off in these children, and a worker refuses that unless it is stated
+        # (`tests/test_worker_posture.py` drives that guard). Stated here so the only difference
+        # between the two arms stays the gateway address.
+        "CHEMCLAW_WORKER_ALLOW_UNAUTHENTICATED": "true",
     }
 
 

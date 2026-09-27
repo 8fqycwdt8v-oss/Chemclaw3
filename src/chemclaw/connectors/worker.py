@@ -24,7 +24,11 @@ from chemclaw.core.config import settings
 from chemclaw.core.logging import configure_logging, configure_telemetry
 from chemclaw.core.temporal_client import connect
 from chemclaw.durable.registry import describe, registered_activities, registered_workflows
-from chemclaw.durable.serve import serve_worker, worker_interceptors
+from chemclaw.durable.serve import (
+    refuse_unauthenticated_worker,
+    serve_worker,
+    worker_interceptors,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +43,9 @@ async def run_bundle_worker(connector: str) -> None:
     """
     configure_logging()
     configure_telemetry()
+    # Before `connect()`, so a worker with sign-in off and no stated posture never polls — the same
+    # refusal core's `background-worker` makes (`durable/serve.refuse_unauthenticated_worker`).
+    refuse_unauthenticated_worker()
     queue = bundle_queue(connector)
     client = await connect()
     worker = Worker(
