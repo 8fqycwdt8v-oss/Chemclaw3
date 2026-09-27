@@ -908,10 +908,60 @@ def test_a_run_where_every_judgement_is_ungraded_is_not_a_pass() -> None:
 
     ungraded = Judgement(probe_id="an-01", verdict="ungraded")
     served = Judgement(probe_id="an-02", verdict="served")
+    answered = [_answered("an-01"), _answered("an-02")]
 
-    assert _grading_status([]) == 2
-    assert _grading_status([ungraded]) == 2
-    assert _grading_status([ungraded, served]) == 0
+    assert _grading_status([], [], scripted=False) == 2
+    assert _grading_status([ungraded], answered, scripted=False) == 2
+    assert _grading_status([ungraded, served], answered, scripted=False) == 0
+
+
+def _answered(probe_id: str, *, answered: bool = True) -> ProbeOutcome:
+    """An outcome that did (or did not) produce an answer event — all `_grading_status` reads."""
+    return ProbeOutcome(
+        probe_id=probe_id,
+        section=1,
+        persona="lab_technician",
+        bucket="A",
+        question="q",
+        answer="an answer" if answered else "",
+        answered=answered,
+    )
+
+
+def test_an_unserved_turn_that_never_answered_is_not_a_graded_verdict() -> None:
+    """The mock run of 2026-09-27: one broken stream, every other probe ungraded, exit **0**.
+
+    `judge_outcome` returns `unserved` for a turn with no answer *without asking the judge*, so it
+    records a transport failure, not a grade — and `_grading_status` counted it as one, under the
+    very warning that said the run "will exit non-zero". The same verdict from a judge that read a
+    real answer is a grade and still counts.
+    """
+    from chemclaw.cli.live_probes import _grading_status
+    from chemclaw.evals.live_judge import Judgement
+
+    grades = [
+        Judgement(probe_id="an-01", verdict="ungraded"),
+        Judgement(probe_id="an-02", verdict="unserved", reason="no answer event was produced"),
+    ]
+    broken = [_answered("an-01"), _answered("an-02", answered=False)]
+    assert _grading_status(grades, broken, scripted=False) == 2
+
+    judged = [_answered("an-01"), _answered("an-02")]
+    assert _grading_status(grades, judged, scripted=False) == 0
+
+
+def test_a_run_against_the_scripted_mock_exits_non_zero_whatever_it_graded() -> None:
+    """`_gateway_line` promises a mock run "will exit non-zero"; this is the promise kept.
+
+    A judge on the mock's gateway is the mock, so even a clean `served` is a script grading a
+    script — evidence about the double, never about the system.
+    """
+    from chemclaw.cli.live_probes import _grading_status
+    from chemclaw.evals.live_judge import Judgement
+
+    grades = [Judgement(probe_id="an-01", verdict="served")]
+    assert _grading_status(grades, [_answered("an-01")], scripted=True) == 2
+    assert _grading_status(grades, [_answered("an-01")], scripted=False) == 0
 
 
 def test_a_run_that_reached_nothing_is_not_a_pass() -> None:
@@ -1302,3 +1352,22 @@ def test_the_probe_client_does_not_hand_its_bearer_to_an_ambient_proxy(
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_the_plan_gate_suite_refuses_to_stage_against_the_scripted_mock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exit 3, before a probe is asked — not the 0/5 FAIL the mock used to earn.
+
+    `cli.mock_llm` never writes a plan, so every approval POST is a 409 and each check failed on a
+    scenario that was never staged. "Could not reach it" is this harness's exit 3.
+    """
+    from chemclaw.cli.mock_llm import MOCK_BASE_URL
+
+    def no_front_door(base_url: str | None) -> httpx.AsyncClient:
+        raise AssertionError("the suite dialled the front door against a gateway that cannot plan")
+
+    monkeypatch.setattr(settings, "llm_base_url", MOCK_BASE_URL)
+    monkeypatch.setattr(live_probes, "_client", no_front_door)
+    args = live_probes._parse_args(["--suite", "plan-gate"])
+    assert asyncio.run(live_probes._run_plan_gate(args)) == 3
