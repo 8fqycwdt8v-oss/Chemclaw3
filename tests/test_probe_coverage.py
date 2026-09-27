@@ -48,7 +48,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from chemclaw.agent.chemclaw_agent import available_tool_names
+from chemclaw.agent.chemclaw_agent import _withheld_launcher_names, available_tool_names
 from chemclaw.agent.profile_discovery import load_profiles
 from chemclaw.evals.probe import ABSENT_MARKER, Probe, ProbeSet
 from tests.siblings import SIBLING_SKIP, fleet_published_tool_names, sibling_root
@@ -115,13 +115,27 @@ def test_no_probe_expects_a_tool_that_does_not_exist() -> None:
     surface — so the probe stops testing while still counting toward the corpus. Measured zero on
     2026-08-25, and worth keeping at zero.
     """
-    phantom = sorted(_expected_tools() - available_tool_names() - fleet_expected_tools())
+    phantom = sorted(
+        _expected_tools() - available_tool_names() - fleet_expected_tools() - withheld_tools()
+    )
     assert not phantom, (
         f"these probes expect tools that no longer exist: {phantom}. Either the tool was renamed "
         "and the probe was not, or the probe outlived its capability. A tool the fleet serves and "
         "this tree declares no bundle for is not a phantom — say so with `needs_bundle:` on the "
         "probe, which is checked against the fleet's own manifests separately."
     )
+
+
+def withheld_tools() -> set[str]:
+    """Launchers this tree declares and this deployment withholds — real tools, not phantoms.
+
+    `republish_calculations` is withheld while no result sink is enabled (its manifest's
+    `unavailable_reason`), which is the shipped default, so du-05 and du-11 name a tool the bare
+    surface lacks and that exists the moment a sink is named. Public for the reason
+    `fleet_expected_tools` is: `tests/test_live_probes.py` asserts the same rule and imports this
+    rather than restating it.
+    """
+    return _withheld_launcher_names()
 
 
 def fleet_expected_tools() -> set[str]:

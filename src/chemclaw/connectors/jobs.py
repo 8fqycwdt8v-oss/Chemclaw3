@@ -130,33 +130,62 @@ def resolve_params_model(reference: str) -> type[BaseModel]:
     return model
 
 
+def _resolve_job_hook(reference: str, field: str) -> Any:
+    """Import the `module:function` a job's `field` names and return it, or raise naming both.
+
+    One resolver for the two job fields that name code — `precondition` and `unavailable_reason` —
+    held to the package allow-list `resolve_params_model` is, and for the sharper reason: what they
+    name is not merely imported, it is *called*.
+
+    Raises:
+        ConnectorJobError: When the package is not allowed, the module or attribute does not
+            exist, or the attribute is not callable.
+    """
+    check_driver_module(reference, ConnectorJobError, field)
+    module_name, _, attribute = reference.partition(":")
+    try:
+        module = import_module(module_name)
+    except ImportError as exc:
+        raise ConnectorJobError(f"{field} {reference!r}: cannot import {module_name!r}") from exc
+    hook = getattr(module, attribute, None)
+    if hook is None:
+        raise ConnectorJobError(f"{field} {reference!r}: {module_name!r} has no {attribute!r}")
+    if not callable(hook):
+        raise ConnectorJobError(f"{field} {reference!r} is not callable")
+    return hook
+
+
 def resolve_precondition(reference: str) -> Callable[[Any], None]:
     """Import the `module:function` a job's `precondition` names, for the pre-launch domain check.
 
     Resolved at build time (and by `make connector-validate`), not at call time, so a typo is a
     configuration error a deployment finds before a chemist does.
 
-    Held to the same package allow-list `resolve_params_model` is, and for the sharper reason: a
-    precondition is not merely imported, it is *called*.
+    Raises:
+        ConnectorJobError: See `_resolve_job_hook`.
+    """
+    check: Callable[[Any], None] = _resolve_job_hook(reference, "precondition")
+    return check
+
+
+def unavailable_reason(job: JobSpec) -> str | None:
+    """Why this deployment cannot run `job` at all, or `None` when it can — asked at this moment.
+
+    Distinct from `precondition`, which judges one launch's *arguments*: this is about the
+    deployment, so no argument can change the answer and the launcher is withheld rather than
+    offered to be refused (`registry.job_tools`). Found live: `republish_calculations` was bound
+    with `CHEMCLAW_RESULT_SINKS` empty, the model called it three times, and every run failed with
+    the same `ResultSinkError` its own body raises — a tool whose only outcome was a failed job.
+    Read at call time rather than cached, because it reads configuration a test (and an operator
+    restarting with a sink) can change.
 
     Raises:
-        ConnectorJobError: When the package is not allowed, the module or attribute does not
-            exist, or the attribute is not callable.
+        ConnectorJobError: The declared reference does not resolve (see `_resolve_job_hook`).
     """
-    check_driver_module(reference, ConnectorJobError, "precondition")
-    module_name, _, attribute = reference.partition(":")
-    try:
-        module = import_module(module_name)
-    except ImportError as exc:
-        raise ConnectorJobError(
-            f"precondition {reference!r}: cannot import {module_name!r}"
-        ) from exc
-    check = getattr(module, attribute, None)
-    if check is None:
-        raise ConnectorJobError(f"precondition {reference!r}: {module_name!r} has no {attribute!r}")
-    if not callable(check):
-        raise ConnectorJobError(f"precondition {reference!r} is not callable")
-    return check  # type: ignore[no-any-return]
+    if job.unavailable_reason is None:
+        return None
+    reason: str | None = _resolve_job_hook(job.unavailable_reason, "unavailable_reason")()
+    return reason
 
 
 # One generated params class per (connector, job definition), because a *class* is an identity and
@@ -372,6 +401,12 @@ def prepare_job_launch(connector: str, job: JobSpec, params: Any) -> dict[str, A
     # the tool was built — see `require_funded_ceiling`. First of the four so an unfunded job is
     # refused without running its precondition, which is a bundle's own code.
     require_funded_ceiling(connector, job)
+    # A job this deployment cannot run is withheld from the model (`registry.job_tools`); a template
+    # step names its job by string and reaches here without that filter, so it is refused here too,
+    # before authorization, because no entitlement makes it runnable.
+    reason = unavailable_reason(job)
+    if reason is not None:
+        raise ConnectorJobError(f"{connector}.{job.name} is unavailable here: {reason}")
     # Authorize the expensive trigger against the turn's user *before* any durable work (F4-T5), so
     # an autonomously-planned todo — or a template step — cannot start a costly run outside the
     # user's entitlements.

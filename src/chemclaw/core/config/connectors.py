@@ -218,8 +218,8 @@ class ConnectorSettings(BaseSettings):
     connector_stdio_enabled: bool = False
 
     # Which top-level packages a manifest may name in a field that is **imported and called**:
-    # `params_model`, `precondition`, `ingest`, `retrieve`, `commitments`, `driver`. Comma
-    # separated; `chemclaw` is always allowed and does not need listing.
+    # `params_model`, `precondition`, `unavailable_reason`, `ingest`, `retrieve`, `commitments`,
+    # `driver`. Comma separated; `chemclaw` is always allowed and does not need listing.
     #
     # **The same sentence as the setting above, applied to the other field family that executes.**
     # `connector_stdio_enabled` refuses `command:` because "a manifest is data"; the

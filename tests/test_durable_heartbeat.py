@@ -280,7 +280,7 @@ def test_the_republish_walk_beats_and_is_bounded_below_the_job_ceiling(
     from chemclaw.publish.backfill import WalkCounts
 
     # A republish refuses before it scans when no sink is enabled, which is the shipped default.
-    monkeypatch.setattr(republish, "publishing_enabled", lambda: True)
+    monkeypatch.setattr(republish, "unpublishable_reason", lambda: None)
 
     async def _empty_walk(**kwargs: object) -> WalkCounts:
         return WalkCounts()

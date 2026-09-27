@@ -36,6 +36,10 @@ jobs:
       release has no projector for are skipped and counted, not treated as failures — a deployment
       legitimately holds rows from calculators that no longer ship.
     params_model: chemclaw.connectors.results.specs:RepublishSpec
+    # Withheld while `CHEMCLAW_RESULT_SINKS` names nothing: with no sink the walk can only refuse,
+    # and a live run offered it anyway and watched it fail `ResultSinkError` three times out of
+    # three. The job's own guard raises the same sentence, for a launch that reaches it regardless.
+    unavailable_reason: chemclaw.publish.registry:unpublishable_reason
     # A full corpus walk over two never-pruned tables, on a deployment that may have been running
     # for years. That is the same unbounded cost `sample_conformers` carries the gate for: bounded
     # by the data rather than by the request, so an authenticated chemist is not enough — it needs
