@@ -291,19 +291,6 @@ only holds defects can only ever restore the system to what it already intended 
       bounding risk. Choose the next second questions by what a deployment calls —
       `audit_events` per tool name — once one exists to read.
 
-- [ ] **`deep-research` has no index behind it** (issue #486) — [M]. `agent/research_tools.py::gather_evidence`
-      sweeps the knowledge graph, the ELN, the mounted document share and the fingerprint store —
-      every one internal. `skills/deep-research/SKILL.md` describes a capability whose corpus is
-      whatever notes exist (41 on this checkout, 2026-09-22). `Chemclaw3-mcp/MODULES.md` files `litsearch`
-      (Europe PMC / OpenAlex / Crossref bulk, built at image time, no egress) as *proposed*, and says
-      in as many words that it "gives Chemclaw3's existing `deep-research` skill a real index".
-      ChemRAG measured **+17.4% average relative gain** from a chemistry corpus and — the design input
-      that matters — that corpus choice is task-dependent: reaction prediction wants literature,
-      nomenclature wants structured databases. A process chemist asking "has anyone run this coupling
-      on a deactivated aryl chloride" currently gets whatever that corpus happens to say — this row
-      said 39 and then 40 for one count three sentences apart, which is why the number now appears
-      once, with the date it was measured.
-
 - [ ] **A shared session serialises by refusing and streams to one reader** — [M]. What is left of
       the multi-human-session work after `D-2026-09-27-in-a-shared-session-the-sender-governs`
       settled the authority questions and shipped membership (`session_members`, the sender

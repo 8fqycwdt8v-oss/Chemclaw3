@@ -3,8 +3,8 @@ name: deep-research
 description: >-
   How to answer any open-ended process-R&D question — about any output (yield, purity,
   impurities), any process detail or observation, or general protocol guidance — by
-  composing every data source and tool, and how to draft new conditions/protocols grounded
-  in that evidence. Cite everything, separate evidence from analogy, and route anything new
+  composing this deployment's own records and tools (there is no literature index), and how
+  to draft new conditions/protocols grounded in that evidence. Cite everything, separate evidence from analogy, and route anything new
   into the knowledge graph.
 tools:
   - gather_evidence
@@ -28,6 +28,22 @@ open-ended and the answer must be assembled from whatever the system knows, acro
 It is not tied to one output (yield) or one reaction — treat yield, impurities, robustness,
 observations, and process choices all the same way, and reason across similar *and* unrelated
 chemistry when that is what answers the question.
+
+## What this searches — and what it does not
+
+**There is no literature index behind this skill.** `gather_evidence` sweeps this deployment's
+own records: the knowledge graph, the ELN, and whatever further sources the deployment has
+enabled — a mounted document share, or a licensed patent-reaction corpus if one was loaded. No
+journal articles, abstracts, DOIs or citation databases are searchable, and the system makes no
+outbound call to find them. So:
+
+- **Never say or imply that you searched the literature.** "Nothing on file" is a statement about
+  this organisation's records; it is not "no precedent exists". Say which it is.
+- **A precedent you know from training is your recollection, not a retrieved citation.** If it
+  helps, offer it labelled that way — no note id, no invented reference, no DOI — and suggest the
+  chemist confirm it in the literature themselves.
+- **A hit from a patent-reaction source is precedent from elsewhere**, not this site's
+  experience; its chunk names the retriever that found it, and the answer should too.
 
 ## The loop
 
@@ -129,7 +145,7 @@ untried substrate):
 
 ## Keep integrations dumb, reason here
 
-Data sources (ELN, ORD, future analytical or literature feeds) only map their content into the
-canonical schema and the graph. All the intelligence — which sources to combine, how to weigh
+Data sources (ELN, ORD, and any analytical or literature feed a deployment later mounts — none
+ships today) only map their content into the canonical schema and the graph. All the intelligence — which sources to combine, how to weigh
 them, what to generate — is this loop. If a needed source is missing, that is a new retriever
 behind the one contract, not a special case in the answer.

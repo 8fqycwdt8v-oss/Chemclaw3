@@ -341,6 +341,9 @@ async def gather_evidence(
 ) -> EvidenceSweepWithRefusals:
     """Gather cited evidence for a research question from every internal source at once.
 
+    Internal means this deployment's own records. There is no literature index: an empty sweep
+    says nothing about what is published.
+
     Runs each text source on `query`, and — when an anchor reaction is given — also pulls
     structurally similar past reactions (DRFP). Results are merged and de-duplicated. Empty is a
     valid answer (nothing on file) and never invented: if every source is unreachable this raises
