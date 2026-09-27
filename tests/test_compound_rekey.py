@@ -288,12 +288,15 @@ def test_the_preview_counts_what_the_apply_writes_and_a_second_apply_writes_noth
     assert again.notes["successors"] == again.notes["retired"] == 0
 
 
-def test_a_successor_a_person_wrote_is_not_recorded_onto(
-    tmp_path: Path, corpus: dict[str, str]
+@pytest.mark.parametrize(
+    "person", [{"created_by": "human"}, {"actor": "oid-of-a-chemist"}], ids=["wrote", "written-for"]
+)
+def test_a_successor_a_person_wrote_or_was_written_for_is_not_recorded_onto(
+    tmp_path: Path, corpus: dict[str, str], person: dict[str, str]
 ) -> None:
-    """`record_note` refuses a human subject, so the plan does not offer one."""
+    """`record_note` refuses both from an operator's run, so the plan does not offer either."""
     ionic = next(n for n in load_notes(settings.knowledge_path) if n.id == corpus["ionic"])
-    _write(tmp_path, ionic.model_copy(update={"created_by": "human"}))
+    _write(tmp_path, ionic.model_copy(update=person))
     plan = plan_compound_rekey(load_notes(settings.knowledge_path), _RETIRED_ON)
     assert plan.blocked == [corpus["ionic"]]
     assert corpus["ionic"] not in {rekey.successor.id for rekey in plan.rekeys}
