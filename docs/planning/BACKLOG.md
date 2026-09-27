@@ -330,7 +330,7 @@ topic).
       model, so it belongs with the delegation row below rather than ahead of it.
 
 - [ ] **The delegation experiment: run it against a gateway** — [M]
-      (issue #359; code half #447), opened by `D-2026-08-29-a-helper-is-cheaper-and-narrower-than-its-caller` and
+      (issue #359, run half claimed in #472; code half #447), opened by `D-2026-08-29-a-helper-is-cheaper-and-narrower-than-its-caller` and
       the gate on Wave 3's roster. **It is one row because it was four**, and four statements of a
       single blocked experiment made the queue read four times more blocked than it is: "the
       delegation A/B has a comparator and no runner", "measure whether delegation pays", "run the
