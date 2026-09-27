@@ -799,6 +799,17 @@ def test_deleting_a_session_clears_every_table_it_reaches_and_no_one_elses() -> 
                         "VALUES (%s, '', 'ckpt-1', 'task-1', 0, 'messages', 'msgpack', %s)",
                         (session_id, b"payload"),
                     )
+                    # A shared session's two tables (`infra/sql/110_shared_sessions.sql`): one
+                    # member and one plan author each, so the bystander check covers them too.
+                    await cur.execute(
+                        "INSERT INTO session_members (session_id, actor) VALUES (%s, 'member')",
+                        (session_id,),
+                    )
+                    await cur.execute(
+                        "INSERT INTO plan_authors (session_id, plan_hash, actor) "
+                        "VALUES (%s, 'plan', 'member')",
+                        (session_id,),
+                    )
                 await conn.commit()
             await SessionTurnClaims().claim(session_id, f"holder-{session_id}", 60)
             # One result only this session has, and one both of them do — the same bytes under the
@@ -838,7 +849,14 @@ def test_deleting_a_session_clears_every_table_it_reaches_and_no_one_elses() -> 
         "the report must name every table the sweep covers, so an operator comparing two runs "
         f"sees the same keys: {sorted(removed)}"
     )
-    for table in ("session_messages", "session_events", "session_turns", "session_owners"):
+    for table in (
+        "session_messages",
+        "session_events",
+        "session_turns",
+        "session_members",
+        "plan_authors",
+        "session_owners",
+    ):
         assert removed[table] == 1, f"{table} kept a deleted session's row: {removed}"
     for table in ("checkpoints", "checkpoint_blobs", "checkpoint_writes"):
         assert removed[table] == 1, f"the graph state outlived the conversation: {removed}"

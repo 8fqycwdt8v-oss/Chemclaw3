@@ -51,6 +51,9 @@ SELECTABLE = {
     "InMemoryComposedStore": "session_store",
     "InMemoryDesignStore": "session_store",
     "InMemoryArmResultStore": "session_store",
+    # Same switch, for `InMemoryPlanApprovalStore`'s reason: a membership admits somebody to a
+    # session, and under `session_store="memory"` the session is a process.
+    "InMemorySessionMemberStore": "session_store",
     "InMemoryVectorStore": "vector_store_provider",
 }
 

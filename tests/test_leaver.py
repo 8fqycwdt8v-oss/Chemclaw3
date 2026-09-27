@@ -711,6 +711,10 @@ async def test_the_erase_statements_are_valid_sql() -> None:
         # no evidence, so it is part of their conversation with this system rather than part of
         # the record of what they did to the science.
         "composed_workflows",
+        # A shared session's standing and authorship in sessions somebody else owns
+        # (`D-2026-09-27-in-a-shared-session-the-sender-governs`).
+        "session_members",
+        "plan_authors",
         "session_owners",
     }
 

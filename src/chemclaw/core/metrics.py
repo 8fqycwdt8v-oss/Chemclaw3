@@ -1337,12 +1337,15 @@ _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
 # templates plus `<unmatched>`, with no route producing more than three status classes — a worst
 # case of 63 against a cap of 64. That is not a cardinality problem, it is a *sizing* one: the label
 # domain is the route table, enumerable from `app.routes`, and it grows by one whenever somebody
-# adds a route. 128 is sized against that table with room for it to double.
+# adds a route. 128 was sized against that table with room for it to double, and the table did:
+# the shared-session routes (`D-2026-09-27-in-a-shared-session-the-sender-governs`) took it past
+# the three-per-route worst case, which `tests/test_api_observability.py` reports rather than this
+# comment. 256 is the same sizing taken again — the table with room to double.
 #
 # Still generous for every other counter here: `profile` is a handful of names, so a *different*
 # metric reaching this means something is generating values it should not — which is the case this
 # cap exists for, and the reason it is raised rather than removed.
-_MAX_SERIES_PER_COUNTER = 128
+_MAX_SERIES_PER_COUNTER = 256
 
 _GAUGES: dict[str, str] = {
     "chemclaw_turns_in_flight": "Turns currently streaming.",
