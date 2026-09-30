@@ -55,6 +55,10 @@ Compare against the gas-phase entry too. Little movement from gas phase to a pol
 solvent means this reaction is simply not solvent-sensitive in the way a continuum can
 model, which is itself a useful finding.
 
+A medium the calculation could not compute — the gas phase included — is listed under
+`failed` with its reason, and the ranking covers the rest. Name what is missing; with one
+medium left there is no comparison at all, whatever the spread reads.
+
 ## The criteria that usually bind first
 
 - **Safety and regulatory.** `screen_hazards` on every candidate. ICH Q3C classes are

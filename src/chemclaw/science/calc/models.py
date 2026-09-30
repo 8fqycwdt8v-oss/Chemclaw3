@@ -1259,12 +1259,15 @@ class FailedMedium(BaseModel):
     """One medium of a solvent screen that could not be computed, and the reason it could not.
 
     **A screen's media are independent answers**, so one medium the calculation refuses — an
-    unparameterised solvent, an SCF that will not converge there — is reported beside the ones
-    that worked rather than failing the whole screen or vanishing from it. `solvent=None` is the
-    gas-phase reference. `reason` is the refusal's own sentence, which is written for the chemist.
+    optimisation that will not converge in that continuum, a run the server's time budget stopped —
+    is reported beside the ones that worked rather than failing the whole screen or vanishing from
+    it. `reason` is the refusal's own sentence, which is written for the chemist.
+
+    `solvent=None` is the gas-phase reference, and the default because the job wire drops `None`s:
+    a failed gas phase arrives with no `solvent` key at all, as a gas-phase `SolventEffect` does.
     """
 
-    solvent: str | None
+    solvent: str | None = None
     reason: str
 
 

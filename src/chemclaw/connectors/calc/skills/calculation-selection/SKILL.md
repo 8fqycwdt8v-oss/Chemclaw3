@@ -143,7 +143,9 @@ that a single-structure answer is good enough.
   assay in water and a crystallisation out of toluene — rather than running `rank_species` twice
   and comparing: the ranking is sorted by energy, so two payloads are not a diff, and the result's
   `dominance_changes` is the finding. If it is true, no single-structure number above is a number
-  about "the compound" without naming the medium.
+  about "the compound" without naming the medium. It is computed over the media that were ranked:
+  a medium listed under `failed` was not compared, so name it — its absence is not evidence that
+  nothing moved there.
 - **What is charged, at which pH?** → `enumerate_protonation_states` then `rank_species`, or
   `run_microspecies_profile` — always with a `solvent`: microstates differ in charge, and a
   gas-phase ranking over them is refused (a bare ion in vacuum is off by hundreds of kcal/mol). This is the amphoteric and polyprotic case `predict_pka` and

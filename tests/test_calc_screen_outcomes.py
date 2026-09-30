@@ -160,7 +160,12 @@ def test_an_outage_during_a_survey_is_not_reported_as_a_failed_bond(
 def test_a_refused_medium_is_reported_and_the_rest_are_still_ranked(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A solvent the server has no parameters for costs that row, not the screen."""
+    """A medium the server refuses — an optimisation that will not converge there — costs that row.
+
+    Not an unparameterised solvent: the job's precondition refuses those before launch
+    (`science/calc/solvents.require_supported_solvents`), so what reaches a screen is a refusal
+    the server makes while computing.
+    """
     server = install(monkeypatch, FakeCalcServer())
     _refuse(server, "relax_structure", _relaxing(solvent="toluene"))
 
@@ -253,20 +258,24 @@ def test_a_ranking_with_a_refused_form_refuses_after_trying_every_form(
 
     Usefully means two things, and both are asserted. The refusal names the form, and it comes
     after every other form was computed: each one that could be is now cached (D-011), so the rerun
-    without the offender pays for nothing a second time.
+    without the offender pays for nothing a second time. The *first* form is the refused one, so
+    stopping at the first failure — the old behaviour — would never have reached the second.
     """
     server = install(monkeypatch, FakeCalcServer())
-    _refuse(server, "embed_structure", _embedding(_ENOL))
+    _refuse(server, "embed_structure", _embedding(_KETO))
     store = InMemoryStore()
 
     with pytest.raises(ValueError, match="1 of 2 species could not be computed") as refused:
         _run(compose.species_ranking(store, _TAUTOMERS, kind="tautomers"))
-    assert _ENOL in str(refused.value)
+    assert _KETO in str(refused.value)
     assert _REFUSAL in str(refused.value)
+    enol = Chem.MolToSmiles(Chem.MolFromSmiles(_ENOL))
     relaxed = server.count("relax_structure")
-    assert relaxed >= 1, "the keto form was computed although the enol was refused"
+    assert any(a["structure"]["smiles"] == enol for a in server.arguments("relax_structure")), (
+        "the enol, after the refused keto form, was still computed"
+    )
 
-    _run(compose.species_ranking(store, [(_KETO, "keto")], kind="tautomers"))
+    _run(compose.species_ranking(store, [(_ENOL, "enol")], kind="tautomers"))
     assert server.count("relax_structure") == relaxed, "the rerun recomputed nothing"
 
 
@@ -469,3 +478,56 @@ def test_a_gas_row_alone_is_not_described_against_solvent_rows_that_failed(
 
     assert [effect.solvent for effect in result.effects] == [None]
     assert not [w for w in result.warnings if "standard state" in w]
+
+
+def test_a_species_screen_in_which_every_medium_is_refused_names_each(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every medium refused is no answer, and the refusal says which media and why."""
+    server = install(monkeypatch, FakeCalcServer())
+    _refuse(server, "relax_structure", _relaxing(smiles=_ENOL))
+
+    with pytest.raises(ValueError, match="no medium of this species screen") as refused:
+        _run(
+            compose.species_solvent_comparison(
+                InMemoryStore(), _TAUTOMERS, ["water"], kind="tautomers"
+            )
+        )
+    assert "gas phase" in str(refused.value)
+    assert "water" in str(refused.value)
+
+
+def test_an_outage_in_one_medium_fails_the_species_screen_rather_than_the_medium(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ranking inside the medium and the medium's own boundary both let an outage through."""
+    server = install(monkeypatch, FakeCalcServer())
+    _refuse(
+        server,
+        "relax_structure",
+        _relaxing(solvent="toluene"),
+        message=f"{SERVER_INTERNAL_ERROR} while relaxing",
+    )
+
+    with pytest.raises(CalcServerError):
+        _run(
+            compose.species_solvent_comparison(
+                InMemoryStore(), _TAUTOMERS, ["water", "toluene"], kind="tautomers"
+            )
+        )
+
+
+def test_a_species_screen_left_with_one_medium_makes_no_comparison_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A swing over one medium is zero by construction, not a finding about the media."""
+    server = install(monkeypatch, FakeCalcServer())
+    _refuse(server, "relax_structure", _relaxing(solvent="water"))
+
+    screen = _run(
+        compose.species_solvent_comparison(InMemoryStore(), _TAUTOMERS, ["water"], kind="tautomers")
+    )
+
+    assert [d.solvent for d in screen.distributions] == [None]
+    assert not [w for w in screen.warnings if "does not distinguish" in w]
+    assert any("nothing to compare" in w for w in screen.warnings)

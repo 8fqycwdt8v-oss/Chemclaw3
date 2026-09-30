@@ -7,9 +7,12 @@
 Four durable calc composites take a list and loop over it: `bond_dissociation_survey` (bonds),
 `solvent_comparison` and `species_solvent_comparison` (media), and `species_ranking` (species).
 None had a per-item boundary, so the **first** item that raised ended the job, and a chemist
-learned about the one item that failed first and nothing about the rest. One unparameterised
-solvent cost a five-solvent screen; one fragment the server would not embed cost a twenty-bond
-survey.
+learned about the one item that failed first and nothing about the rest. One medium whose
+optimisation would not converge cost a five-solvent screen; one fragment the server would not embed
+cost a twenty-bond survey. (Not an unparameterised solvent: every one of these jobs declares
+`require_supported_solvents` as its precondition, which refuses those before launch. What reaches a
+composite is a refusal the server makes while computing — an embedding, a non-converged
+optimisation, a domain or size refusal, a time budget.)
 
 The pattern that answers this is from El Agente Potente (arXiv 2609.14840, §A.3-A.4): in its
 high-throughput graph *every input ends as a typed outcome*: a result, or a typed failure
@@ -30,6 +33,10 @@ fails identically. An outage is the opposite claim: `CalcServerError` and `CalcB
 `SubsystemUnavailableError`s, they pass through the boundary untouched, and Temporal retries the
 activity. A pod restart must not be reported as N chemistry failures.
 
+The class carries more than bad input, because `CalcToolError` is also what a refused credential
+and a contract skew between client and server arrive as. Those fail every item identically, so
+they reach the caller as the all-failed refusal below, exactly as non-retryable as before.
+
 **One refusal in that family is not about the input.** The calc server's inline time budget stops
 a run with a plain `ValueError`, which arrives as `CalcToolError` like any refusal, although the
 same item can pass on an idle pod and be stopped on a busy one. It was already misclassified as bad
@@ -46,9 +53,14 @@ over what was computed, and the warnings say so:
   row is zero by construction;
 - `considered == len(bonds) + len(failed)`.
 
-The warnings are what reaches a published record: the projection already turns them into
-`calculation_flag` rows. Each job summary names the count, because the summary is the line people
-read.
+What the published record says follows the same rule. Each failed item is its own
+`calculation_flag` row — `medium_not_computed` or `bond_not_computed` — with the reason in the
+JSONB `detail`, so "which screens are partial" is a query; the warnings name items and leave the
+reasons in `failed`, because a warning becomes a `VARCHAR(2000)` flag message and a reason is
+unbounded. A screen that compared fewer than two media publishes no spread, winner or swing, and a
+survey with a failed bond publishes its bonds but no `weakest_bond`, since a query reads that fact
+without the flags beside it. Each job summary names the count, because the summary is the line
+people read.
 
 **3. A distribution refuses, by name, after trying every species.** A population is normalised
 over the set, so ranking the survivors hands the missing forms' share to the forms that were
@@ -78,7 +90,9 @@ failure can lose a comparison.
   changes every population.
 - **Return a distribution over the survivors with the populations withheld.** This makes
   `population` optional on `RankedSpecies`, and a `SpeciesDistribution` is consumed by the species
-  screen, three templates, the job summary and the publish projection, all of which read it as
+  screen, the four templates that run `rank_species` (`tautomer-resolution`,
+  `microspecies-profile`, `stereoisomer-ranking`, `substitution-series`), the hypothesis checks
+  that dispatch to it, the job summary and the publish projection, all of which read it as
   present. A refusal naming every form gives the chemist the same information, and the cache makes
   acting on it free.
 - **Catch every exception per item.** This turns an outage into a completed job that confidently
@@ -100,17 +114,16 @@ or a consumer of `SpeciesDistribution` can act on a distribution with withheld p
 
 `tests/test_calc_screen_outcomes.py` drives every case through `FakeCalcServer.overrides`, so a
 refusal arrives down the real wire path as `CalcToolError`, a full pod as `CalcBusyError` and a
-fault as `CalcServerError`. For each screen it covers:
-- a refused item reported beside the computed ones;
-- every item refused, naming each;
-- an outage propagating as itself.
+fault as `CalcServerError`. For the bond survey and both solvent screens it covers a refused item
+reported beside the computed ones, every item refused (named, each), and an outage propagating as
+itself; for the ranking, a refused *first* form with the later one still computed, the rerun
+recomputing nothing, every refused form named, and a full pod staying retryable. The input-level
+rules (the parent computed once, the equation checked once), the one-medium cases and the
+standard-state caveat each have a test red on the first cut of this change.
+`tests/test_calc_jobs.py` holds the three summaries, `tests/test_publish_projection.py` the flags,
+the withheld spread and the withheld weakest bond, and a `BondDissociationSurvey` case in its
+field guard.
 
-For the ranking it covers the refusal after every form was tried, the rerun recomputing nothing,
-and every refused form being named. It also checks that a payload without `failed` still decodes.
-Measured against the two files together: mutating `_attempt` to catch `Exception` turns the four
-outage tests red, and removing the boundary turns eleven red — nine per-item tests there and the two
-summary tests in `tests/test_calc_jobs.py`
-(`test_a_survey_that_lost_a_bond_says_so_in_its_summary`,
-`test_a_screen_left_with_one_medium_does_not_summarise_a_comparison`). The review fixes (the parent
-computed once, the equation checked once, a one-medium screen nothing failed in, the standard-state
-caveat over a lone gas row) have tests of their own that are red on the first cut.
+Measured over the first two files: mutating `_attempt` to catch `Exception` turns the five outage
+tests red, and removing the boundary turns fourteen red — eleven in
+`tests/test_calc_screen_outcomes.py` and the three summary tests.

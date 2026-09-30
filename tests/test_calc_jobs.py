@@ -41,6 +41,7 @@ from chemclaw.connectors.calc.specs import (
     RotationJobSpec,
     ScanJobSpec,
     SolventScreenJobSpec,
+    SpeciesSolventScreenJobSpec,
     TorsionSpec,
     XtbJobSpec,
 )
@@ -338,6 +339,30 @@ def test_a_screen_left_with_one_medium_does_not_summarise_a_comparison(
 
     assert "nothing was compared" in result.summary
     assert "spread" not in result.summary
+    assert "1 of the media could not be computed" in result.summary
+
+
+def test_a_species_screen_that_lost_a_medium_says_so_in_its_summary(
+    server: FakeCalcServer,
+) -> None:
+    """The count of media not ranked is in the line people read, not only in the payload."""
+
+    def refusing(arguments: dict[str, object]) -> dict[str, object]:
+        if arguments.get("solvent") == "toluene":
+            raise ValueError("no parameters for this input on the server")
+        return server._relax_structure(arguments)
+
+    server.overrides["relax_structure"] = refusing
+    result = _run(
+        SpeciesSolventScreenJobSpec(
+            species=["CC(=O)CC(C)=O", "CC(O)=CC(C)=O"],
+            labels=["keto", "enol"],
+            solvents=["water", "toluene"],
+            ranking="tautomers",
+        )
+    )
+
+    assert "across 2 media" in result.summary
     assert "1 of the media could not be computed" in result.summary
 
 

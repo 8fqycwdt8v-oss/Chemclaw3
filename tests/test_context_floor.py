@@ -774,12 +774,15 @@ KNOWN_OVERSIZED: dict[str, int] = {
     # 1,075 → 1,095 — which is why `test_the_recorded_cost_of_a_known_oversized_tool_is_still_true`
     # below now exists. The +148 is a schema change on a branch that never touched this file; the
     # +20 is wording. Until that test, this dict was prose: a claim about somebody's afternoon.
+    # Re-derived 2026-09-30 for three calc jobs: `D-2026-09-27-a-screen-answers-per-item-a-
+    # distribution-refuses-by-name` added one sentence each on per-item failure (+17, +11, +21),
+    # and `rank_species` had already drifted +30 on `main` before it (1,094 → 1,124), by wording.
     "draft_experiment_protocol": 2_738,
     "structure_experiment_request": 1_095,
-    "rank_species": 1_094,
-    "rank_species_across_solvents": 1_039,
+    "rank_species": 1_141,
+    "rank_species_across_solvents": 1_058,
     "compute_reaction_energy": 1_018,
-    "survey_bond_strengths": 989,
+    "survey_bond_strengths": 1_009,
     "refine_ensemble": 984,
     "profile_rotation": 936,
 }

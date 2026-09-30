@@ -1389,6 +1389,12 @@ async def _attempt(awaitable: Awaitable[_Result]) -> _Result | ValueError:
     `CalcBusyError` are `SubsystemUnavailableError`s, not `ValueError`s, and they propagate so the
     activity is retried rather than a pod restart being reported as N chemistry failures.
     Cancellation is a `BaseException` and propagates too.
+
+    **What the class carries is wider than bad input, and that is the server's taxonomy, not this
+    boundary's.** The calc server's inline time budget refuses with a plain `ValueError`, so a stop
+    that depends on load lands here as one item's failure (a `BACKLOG.md` row); a refused
+    credential and a contract skew arrive as `CalcToolError` too, but those fail every item alike
+    and reach the caller as the all-failed refusal.
     """
     try:
         return await awaitable
@@ -1425,10 +1431,14 @@ def _media_warnings(failed: Sequence[FailedMedium], computed: int) -> list[str]:
     """
     warnings: list[str] = []
     if failed:
+        # Names only; each reason is under `failed`. A reason is the server's own sentence, and a
+        # species screen's nests a whole ranking refusal, so joining them here made one warning of
+        # unbounded length — and every warning becomes a published flag row.
         warnings.append(
             f"{len(failed)} of {computed + len(failed)} media could not be computed and are not in "
             "this comparison: "
-            + _named([(_medium(entry.solvent), entry.reason) for entry in failed])
+            + ", ".join(_medium(entry.solvent) for entry in failed)
+            + " (each reason is under `failed`)"
         )
     if lost_the_comparison(failed, computed):
         warnings.append(
@@ -2306,15 +2316,20 @@ async def bond_dissociation_survey(
         )
 
     # A bond is named with its atoms: "C-H" alone is ambiguous in any molecule with two of them.
-    lost_bonds = _named([(f"{entry.bond} {entry.atoms}", entry.reason) for entry in failed])
+    names = [f"{entry.bond} {entry.atoms}" for entry in failed]
     if not results:
-        raise ValueError(f"no bond of {smiles} could be computed: {lost_bonds}")
+        raise ValueError(
+            f"no bond of {smiles} could be computed: "
+            + _named([(name, entry.reason) for name, entry in zip(names, failed, strict=True)])
+        )
     results.sort(key=lambda entry: entry.dissociation_energy_kcal)
     results[0] = results[0].model_copy(update={"is_weakest": True})
     lost = (
         [
             f"{len(failed)} of {len(cleavages)} bonds could not be computed, so the weakest bond "
-            f"flagged here is the weakest of the rest and any of these may be weaker: {lost_bonds}"
+            "flagged here is the weakest of the rest and any of these may be weaker: "
+            + ", ".join(names)
+            + " (each reason is under `failed`)"
         ]
         if failed
         else []
