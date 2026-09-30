@@ -65,36 +65,54 @@ boundary, so the **first** item that raises aborts the whole durable job.
 
 ## Items
 
-- [ ] `science/calc/models.py`: `FailedMedium`, `FailedBond`, `failed` fields (defaulted).
-- [ ] `compose.py`: `_attempt` helper; `bond_dissociation_survey` per bond; `solvent_comparison`
+- [x] `science/calc/models.py`: `FailedMedium`, `FailedBond`, `failed` fields (defaulted).
+- [x] `compose.py`: `_attempt` helper; `bond_dissociation_survey` per bond; `solvent_comparison`
       and `species_solvent_comparison` per medium (inside `one()`, so `gather` still propagates
       outages); `species_ranking` try-all-then-refuse-by-name; the all-failed refusals; the
       fewer-than-two-media wording.
-- [ ] `activities.py`: summaries for the three screens name the failed count.
-- [ ] `connector.yaml`: four descriptions.
-- [ ] Tests (`tests/test_calc_ensembles.py`, `tests/test_calc_compose.py`, `tests/test_calc_jobs.py`),
+- [x] `activities.py`: summaries for the three screens name the failed count.
+- [x] `connector.yaml`: four descriptions.
+- [x] Tests (`tests/test_calc_ensembles.py`, `tests/test_calc_compose.py`, `tests/test_calc_jobs.py`),
       driven through `FakeCalcServer.overrides` so a refusal arrives on the real wire path as
       `CalcToolError`:
-  - [ ] survey: one bond refused → other bond answered, `failed` names it with the server's reason,
+  - [x] survey: one bond refused → other bond answered, `failed` names it with the server's reason,
         `considered == bonds + failed`, warning says a failed bond may be weaker.
-  - [ ] survey: every bond refused → `ValueError` naming each.
-  - [ ] survey: an outage (`CalcServerError`) on one bond propagates, nothing is returned.
-  - [ ] solvent screen: one medium refused → ranked over the rest, `failed == [FailedMedium]`.
-  - [ ] solvent screen: only one medium left → no "does not distinguish" claim, says nothing to compare.
-  - [ ] solvent screen: every medium refused → `ValueError`.
-  - [ ] species screen: a species refused in one medium only → that medium in `failed`, others ranked.
-  - [ ] ranking: one species refused → `ValueError` naming it; every other species was still relaxed,
+  - [x] survey: every bond refused → `ValueError` naming each.
+  - [x] survey: an outage (`CalcServerError`) on one bond propagates, nothing is returned.
+  - [x] solvent screen: one medium refused → ranked over the rest, `failed == [FailedMedium]`.
+  - [x] solvent screen: only one medium left → no "does not distinguish" claim, says nothing to compare.
+  - [x] solvent screen: every medium refused → `ValueError`.
+  - [x] species screen: a species refused in one medium only → that medium in `failed`, others ranked.
+  - [x] ranking: one species refused → `ValueError` naming it; every other species was still relaxed,
         and ranking the set without it relaxes nothing new.
-  - [ ] ranking: two species refused → both named in one error.
-  - [ ] ranking: `CalcBusyError` propagates as itself (stays retryable).
-  - [ ] jobs: a survey job with a refused bond has a summary naming the failure.
-  - [ ] wire: a payload without `failed` still validates.
-  - [ ] mutation check: remove the boundary → the per-item tests go red.
-- [ ] ADR + ledger row.
-- [ ] `make lint type`, targeted tests, then full serial `make test` with Postgres up; report skips.
-- [ ] Fresh-context subagent review (correctness; contract/wire/publish; docs-vs-code), fix findings.
+  - [x] ranking: two species refused → both named in one error.
+  - [x] ranking: `CalcBusyError` propagates as itself (stays retryable).
+  - [x] jobs: a survey job with a refused bond has a summary naming the failure.
+  - [x] wire: a payload without `failed` still validates.
+  - [x] mutation check: remove the boundary → the per-item tests go red.
+- [x] ADR + ledger row.
+- [x] `make lint type`, targeted tests, then full serial `make test` with Postgres up; report skips.
+- [x] Fresh-context subagent review (correctness; contract/wire/publish; docs-vs-code), fix findings.
 - [ ] PR, CI green, merge, delete branch.
 
 ## Review
 
-(filled in at the end)
+Three fresh-context reviews (correctness; contracts and consumers; prose and tests), every finding
+reproduced before acting. What they changed, beyond the plan:
+
+- **Two CI blockers the local calc tests could not see**: the publish field guard (`failed` read by
+  no projector) and the context-floor ratchet (`rank_species` +77). Fixed by publishing each failed
+  item as its own flag, and by trimming the description sentences to 11-21 tokens before
+  re-recording three figures.
+- **The parent of a bond survey and a screen's equation are input, not items** — as items, a
+  refused parent was asked for once per bond. Computed/checked once, up front.
+- **A published record must not overstate a partial answer**: no spread/winner/swing from one
+  medium, no `weakest_bond` from a survey with a missing bond, and reasons in JSONB `detail`
+  because a flag message is `VARCHAR(2000)` at the sink.
+- **The ADR's own headline example was false** (the jobs' precondition refuses an unparameterised
+  solvent before launch) and its mutation counts were stale twice; both re-measured.
+- **Out of scope, filed**: the calc server's inline time budget refuses as a plain `ValueError`,
+  so a load-dependent stop is one item's failure. A server-side marker is a cross-repository
+  contract change — `BACKLOG.md` row.
+- Lesson: a count or example written into an ADR before its review round is written twice; measure
+  it last.
