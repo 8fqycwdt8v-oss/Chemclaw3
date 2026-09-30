@@ -1406,12 +1406,22 @@ def _medium(solvent: str | None) -> str:
     return solvent or "gas phase"
 
 
-def _media_warnings(failed: Sequence[FailedMedium], computed: int) -> list[str]:
-    """What a solvent screen must say about the media it lost and whether the rest can be compared.
+def lost_the_comparison(failed: Sequence[FailedMedium], computed: int) -> bool:
+    """Whether failures left a screen with fewer than two media, so nothing was compared.
 
-    A spread over one medium is zero by construction, so the "does not distinguish them" sentence
-    the caller would otherwise write is a claim about a comparison that never happened; below two
-    media this says there is nothing to compare instead, and returns no spread verdict at all.
+    Only a *failure* can do that. A screen asked for one medium and nothing else — one solvent over
+    an ionic set, which has no gas reference — never had a comparison to lose, and says what it
+    always said. Public because the job summary asks the same question of the finished result.
+    """
+    return bool(failed) and computed < 2
+
+
+def _media_warnings(failed: Sequence[FailedMedium], computed: int) -> list[str]:
+    """What a solvent screen must say about the media it lost, and about a comparison they cost.
+
+    A spread over one medium is zero by construction, so when failures leave one medium the
+    "does not distinguish them" verdict would be about a comparison that never happened; the caller
+    withholds it (`lost_the_comparison`) and this says there is nothing to compare instead.
     """
     warnings: list[str] = []
     if failed:
@@ -1420,7 +1430,7 @@ def _media_warnings(failed: Sequence[FailedMedium], computed: int) -> list[str]:
             "this comparison: "
             + _named([(_medium(entry.solvent), entry.reason) for entry in failed])
         )
-    if computed < 2:
+    if lost_the_comparison(failed, computed):
         warnings.append(
             "only one medium could be computed, so there is nothing to compare it against"
         )
@@ -1457,6 +1467,11 @@ async def solvent_comparison(
     # `calc_screen_max_parallel` bounds only how many media run at once, not how many run in total
     # (every medium in `solvents` is eventually run via the `gather` below) — the analogue of
     # `rank_species_across_solvents`'s species x media multiplication, checked the same way here.
+    # The equation's own checks, once and before the fan-out: every medium runs the same equation,
+    # so an unbalanced one or a mistyped sigma key would otherwise be refused once per medium and
+    # reported as N copies of one sentence. `reaction_energy` still runs them itself.
+    check_balance(reactants, products)
+    _checked_symmetry_numbers(symmetry_numbers, set(reactants) | set(products))
     media, no_reference = media_with_gas_reference([*reactants, *products], solvents)
     species_count = len(reactants) + len(products)
     require_within_budget(
@@ -1538,8 +1553,10 @@ async def solvent_comparison(
     # 1.894·Δn kcal/mol of reference state on top of the solvation, and a reader differencing the
     # two columns without being told would read that as a solvent effect.
     delta_n = len(products) - len(reactants)
-    gas_row = any(effect.solvent is None for effect in effects)
-    if delta_n and gas_row and any(effect.delta_g_kcal is not None for effect in effects):
+    # Both phases present, not just the gas row: a screen whose every solvent failed has no
+    # solution row for this sentence to be about.
+    both_phases = {effect.solvent is None for effect in effects} == {True, False}
+    if delta_n and both_phases and any(effect.delta_g_kcal is not None for effect in effects):
         warnings.append(
             f"this equation changes the molecule count by {delta_n:+d}, and the gas-phase row is "
             "quoted at the 1 atm standard state while every solvent row is quoted at 1 mol/L (the "
@@ -1547,7 +1564,7 @@ async def solvent_comparison(
             f"gas-to-solution difference additionally carries {abs(delta_n) * 1.894:.2f} kcal/mol "
             "of standard state and is not a solvation energy"
         )
-    if len(effects) > 1 and spread <= uncertainty:
+    if not lost_the_comparison(failed, len(effects)) and spread <= uncertainty:
         warnings.append(
             f"the solvents span {spread:.1f} kcal/mol, within the method's "
             f"±{uncertainty:.1f}: this calculation does not distinguish them"
@@ -1927,7 +1944,9 @@ async def species_ranking(
         raise ValueError(
             f"{len(refused)} of {len(considered)} species could not be computed, and a "
             "distribution over the rest would re-share their population among the forms that "
-            "were: " + _named(refused) + ". Remove or correct them and rank again; the "
+            "were: " + _named(refused) + ". Each reason says what that form needs — a form "
+            "the server cannot handle is removed or corrected, one stopped by a time budget "
+            "needs a smaller calculation or a larger budget. The "
             f"{len(energies)} that were computed are cached and will not be recomputed"
         )
 
@@ -2142,7 +2161,7 @@ async def species_solvent_comparison(
     if no_reference:
         warnings.append(no_reference)
     warnings.extend(_media_warnings(failed, len(distributions)))
-    if len(distributions) > 1 and largest <= uncertainty:
+    if not lost_the_comparison(failed, len(distributions)) and largest <= uncertainty:
         warnings.append(
             f"no species moves by more than {largest:.1f} kcal/mol across these media, within the "
             f"method's ±{uncertainty:.1f}: this calculation does not distinguish them"
@@ -2202,6 +2221,27 @@ async def bond_dissociation_survey(
     require_within_budget(
         estimate_units(len(cleavages) * 3, level=level),
         f"a {len(cleavages)}-bond dissociation survey of {smiles}",
+    )
+
+    # **The parent is the survey's input, not one of its items.** It is the left-hand side of every
+    # bond's reaction and a refusal is not cached, so a parent the server refuses was asked for —
+    # and refused — once per bond, each attempt possibly minutes of server time, and reported as N
+    # copies of one reason. So it is computed once here and allowed to fail the survey, since no
+    # bond can be answered without it. Through `_species_energy` with exactly the settings
+    # `reaction_energy` derives, so every bond then reads it as a cache hit; the survey tests pin
+    # that as one relaxation of the parent, which is what goes red if the two ever diverge.
+    require_solvent_for_ions([smiles], solvent)
+    temperature = temperature_k or settings.xtb_thermo_temperature_k
+    progress(f"parent {smiles}")
+    await _species_energy(
+        store,
+        smiles,
+        "reactant",
+        solvent,
+        ThermoSettings(temperature_k=temperature) if level != "quick" else None,
+        None,
+        level,
+        run,
     )
 
     results: list[DissociatedBond] = []

@@ -316,6 +316,31 @@ def test_a_survey_that_lost_a_bond_says_so_in_its_summary(server: FakeCalcServer
     assert "1 of the bonds could not be computed" in result.summary
 
 
+def test_a_screen_left_with_one_medium_does_not_summarise_a_comparison(
+    server: FakeCalcServer,
+) -> None:
+    """A spread over one surviving medium is a finding about a comparison that never happened."""
+
+    def refusing(arguments: dict[str, object]) -> dict[str, object]:
+        if arguments.get("solvent") == "water":
+            raise ValueError("no parameters for this input on the server")
+        return server._relax_structure(arguments)
+
+    server.overrides["relax_structure"] = refusing
+    result = _run(
+        SolventScreenJobSpec(
+            reactants=["CC(=O)O", "CCO"],
+            products=["CC(=O)OCC", "O"],
+            solvents=["water"],
+            symmetry_numbers={"CC(=O)O": 1, "CCO": 1, "CC(=O)OCC": 1, "O": 2},
+        )
+    )
+
+    assert "nothing was compared" in result.summary
+    assert "spread" not in result.summary
+    assert "1 of the media could not be computed" in result.summary
+
+
 def test_a_pka_job_carries_the_branch_into_its_summary(server: FakeCalcServer) -> None:
     """A base reports `pKaH`, not `pKa`, and the summary is where a reader sees which.
 

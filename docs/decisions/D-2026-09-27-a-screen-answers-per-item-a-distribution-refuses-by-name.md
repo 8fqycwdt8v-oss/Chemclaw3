@@ -30,6 +30,13 @@ fails identically. An outage is the opposite claim: `CalcServerError` and `CalcB
 `SubsystemUnavailableError`s, they pass through the boundary untouched, and Temporal retries the
 activity. A pod restart must not be reported as N chemistry failures.
 
+**One refusal in that family is not about the input.** The calc server's inline time budget stops
+a run with a plain `ValueError`, which arrives as `CalcToolError` like any refusal, although the
+same item can pass on an idle pod and be stopped on a busy one. It was already misclassified as bad
+data before this decision, which failed the whole job with it; now it is one item's `failed` entry
+carrying the server's sentence. Telling it apart needs a server-side marker, a cross-repository
+contract change filed as its own `BACKLOG.md` row rather than taken here.
+
 **2. Independent items end as typed outcomes.** A survey's bonds and a screen's media are separate
 answers, so a refused one becomes a `FailedBond` or `FailedMedium` in a new `failed` field, carrying
 the server's own sentence as `reason`, and the rest are still reported. The aggregates are stated
@@ -56,6 +63,13 @@ distribution always ranks the whole set.
 naming them all. It never returns an empty ranking.
 
 The fields are defaulted, so a payload written by a run in flight across the deploy still decodes.
+
+**Two things are the input rather than items, and fail the job as before.** The survey's parent is
+the left-hand side of every bond's reaction, and a refusal is not cached, so as an item it was
+asked for once per bond; it is computed once, up front, and its failure ends the survey. A screen's
+equation checks (balance, the sigma map) are the same in every medium and run once before the
+fan-out. A screen that nothing failed in says what it always said, even over one medium: only a
+failure can lose a comparison.
 
 ## Options not taken
 
@@ -93,6 +107,10 @@ fault as `CalcServerError`. For each screen it covers:
 
 For the ranking it covers the refusal after every form was tried, the rerun recomputing nothing,
 and every refused form being named. It also checks that a payload without `failed` still decodes.
-Mutating `_attempt` to catch `Exception` turns the four outage tests red, and removing it turns the
-eight per-item tests red. `tests/test_calc_jobs.py::test_a_survey_that_lost_a_bond_says_so_in_its_summary`
-holds the summary.
+Measured against the two files together: mutating `_attempt` to catch `Exception` turns the four
+outage tests red, and removing the boundary turns eleven red — nine per-item tests there and the two
+summary tests in `tests/test_calc_jobs.py`
+(`test_a_survey_that_lost_a_bond_says_so_in_its_summary`,
+`test_a_screen_left_with_one_medium_does_not_summarise_a_comparison`). The review fixes (the parent
+computed once, the equation checked once, a one-medium screen nothing failed in, the standard-state
+caveat over a lone gas row) have tests of their own that are red on the first cut.

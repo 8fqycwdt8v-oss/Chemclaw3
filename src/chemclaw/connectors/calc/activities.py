@@ -232,13 +232,17 @@ async def _dispatch(spec: XtbJobSpec) -> XtbJobResult:
             run=_beating,
         )
         best = comparison.best_solvent or "gas phase"
-        return XtbJobResult(
-            kind=spec.kind,
-            summary=(
+        finding = (
+            f"only {best} could be computed, so nothing was compared"
+            if compose.lost_the_comparison(comparison.failed, len(comparison.effects))
+            else (
                 f"most favourable of {len(comparison.effects)}: {best} "
                 f"(spread {comparison.spread_kcal:.1f} kcal/mol)"
-                + _not_computed(len(comparison.failed), "media")
-            ),
+            )
+        )
+        return XtbJobResult(
+            kind=spec.kind,
+            summary=finding + _not_computed(len(comparison.failed), "media"),
             solvents=comparison,
         )
     if isinstance(spec, ScanJobSpec):
@@ -450,13 +454,19 @@ async def _dispatch(spec: XtbJobSpec) -> XtbJobResult:
             if screen.dominance_changes
             else f"{screen.distributions[0].dominant.label or 'the same form'} dominates in all"
         )
-        return XtbJobResult(
-            kind=spec.kind,
-            summary=(
+        only = screen.distributions[0]
+        finding = (
+            f"{spec.ranking} of {len(spec.species)}: only "
+            f"{only.solvent or 'the gas phase'} could be ranked, so nothing was compared"
+            if compose.lost_the_comparison(screen.failed, len(screen.distributions))
+            else (
                 f"{spec.ranking} of {len(spec.species)} across {len(screen.distributions)} "
                 f"media: {verdict}, largest swing {screen.largest_swing_kcal:.1f} kcal/mol"
-                + _not_computed(len(screen.failed), "media")
-            ),
+            )
+        )
+        return XtbJobResult(
+            kind=spec.kind,
+            summary=finding + _not_computed(len(screen.failed), "media"),
             species_solvents=screen,
         )
     if isinstance(spec, BondSurveyJobSpec):

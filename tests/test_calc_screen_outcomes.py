@@ -363,3 +363,109 @@ def test_a_payload_written_before_failed_existed_still_decodes(
 def test_a_failed_medium_names_the_gas_phase_as_none() -> None:
     """`solvent=None` is the gas-phase reference, the convention every row in these models uses."""
     assert FailedMedium(solvent=None, reason="x").solvent is None
+
+
+# --- what the review of the first cut found -------------------------------------------------------
+
+
+def test_a_survey_computes_its_parent_once_and_reads_it_back_for_every_bond(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The parent is computed up front and every bond's reaction must find it in the cache.
+
+    One relaxation of the parent across a two-bond survey is what proves the up-front computation
+    and the per-bond one share a key: if the settings ever diverged, the bonds would relax it again.
+    """
+    server = install(monkeypatch, FakeCalcServer())
+
+    _run(compose.bond_dissociation_survey(InMemoryStore(), _ETHYLBENZENE, _CLEAVAGES))
+
+    parent = Chem.MolToSmiles(Chem.MolFromSmiles(_ETHYLBENZENE))
+    relaxed = [a for a in server.arguments("relax_structure") if a["structure"]["smiles"] == parent]
+    assert len(relaxed) == 1
+
+
+def test_a_refused_parent_fails_the_survey_once_rather_than_once_per_bond(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The parent is the survey's input, not one of its items, and a refusal is not cached.
+
+    As an item it was asked for — and refused — once per bond, each attempt possibly minutes of
+    server time, and the error repeated one reason N times.
+    """
+    server = install(monkeypatch, FakeCalcServer())
+    _refuse(server, "embed_structure", _embedding(_ETHYLBENZENE))
+
+    with pytest.raises(ValueError, match=_REFUSAL) as refused:
+        _run(compose.bond_dissociation_survey(InMemoryStore(), _ETHYLBENZENE, _CLEAVAGES))
+
+    asked = [a for a in server.arguments("embed_structure") if a["smiles"] == _ETHYLBENZENE]
+    assert len(asked) == 1
+    assert str(refused.value).count(_REFUSAL) == 1
+
+
+def test_a_one_medium_screen_nothing_failed_in_does_not_report_a_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One solvent over an ionic set has no gas reference, and that is not a lost comparison.
+
+    The "only one medium could be computed" sentence asserts that something failed; with `failed`
+    empty it would be telling the chemist about a failure that never happened.
+    """
+    install(monkeypatch, FakeCalcServer())
+
+    screen = _run(
+        compose.species_solvent_comparison(
+            InMemoryStore(),
+            [("CC(=O)O", "acid"), ("CC(=O)[O-]", "acetate")],
+            ["water"],
+            kind="microstates",
+            level="quick",
+        )
+    )
+
+    assert screen.failed == []
+    assert not [w for w in screen.warnings if "could be computed" in w]
+
+
+def test_an_equation_the_screen_refuses_is_refused_once_not_once_per_medium(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every medium runs the same equation, so its own checks run before the fan-out.
+
+    Otherwise a mistyped sigma key came back as "no medium could be computed" followed by the same
+    sentence once per medium.
+    """
+    install(monkeypatch, FakeCalcServer())
+
+    with pytest.raises(ValueError, match="symmetry_numbers names species") as refused:
+        _run(
+            compose.solvent_comparison(
+                InMemoryStore(),
+                *_ESTERIFICATION,
+                ["water", "toluene"],
+                symmetry_numbers={**_ESTER_SIGMAS, "OCC": 1},
+            )
+        )
+    assert "no medium" not in str(refused.value)
+
+
+def test_a_gas_row_alone_is_not_described_against_solvent_rows_that_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The standard-state caveat compares the gas row with solution rows; with none it is moot."""
+    server = install(monkeypatch, FakeCalcServer())
+    _refuse(server, "relax_structure", _relaxing(solvent="water"))
+
+    result = _run(
+        compose.solvent_comparison(
+            InMemoryStore(),
+            ["C=C", "C=C"],
+            ["C1CCC1"],
+            ["water"],
+            symmetry_numbers={"C=C": 4, "C1CCC1": 8},
+        )
+    )
+
+    assert [effect.solvent for effect in result.effects] == [None]
+    assert not [w for w in result.warnings if "standard state" in w]
