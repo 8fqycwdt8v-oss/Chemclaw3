@@ -1255,6 +1255,22 @@ class SpeciesDistribution(BaseModel):
         return max(self.species, key=lambda candidate: candidate.population)
 
 
+class FailedMedium(BaseModel):
+    """One medium of a solvent screen that could not be computed, and the reason it could not.
+
+    **A screen's media are independent answers**, so one medium the calculation refuses — an
+    optimisation that will not converge in that continuum, a run the server's time budget stopped —
+    is reported beside the ones that worked rather than failing the whole screen or vanishing from
+    it. `reason` is the refusal's own sentence, which is written for the chemist.
+
+    `solvent=None` is the gas-phase reference, and the default because the job wire drops `None`s:
+    a failed gas phase arrives with no `solvent` key at all, as a gas-phase `SolventEffect` does.
+    """
+
+    solvent: str | None = None
+    reason: str
+
+
 class SpeciesStanding(BaseModel):
     """Where one species stands in one medium. `solvent=None` is the gas phase."""
 
@@ -1316,6 +1332,17 @@ class SpeciesSolventComparison(BaseModel):
     largest_swing_kcal: float
     uncertainty_kcal: float
     warnings: list[str] = Field(default_factory=list)
+    # The media that could not be ranked. Defaulted so a payload written before it decodes.
+    failed: list[FailedMedium] = Field(default_factory=list)
+
+
+class FailedBond(BaseModel):
+    """One bond of a survey that could not be computed, and the reason it could not."""
+
+    atoms: list[int]
+    bond: str
+    fragments: list[str]
+    reason: str
 
 
 class DissociatedBond(BaseModel):
@@ -1346,6 +1373,8 @@ class BondDissociationSurvey(BaseModel):
     considered: int
     uncertainty_kcal: float
     warnings: list[str] = Field(default_factory=list)
+    # `considered == len(bonds) + len(failed)`. Defaulted so a payload written before it decodes.
+    failed: list[FailedBond] = Field(default_factory=list)
 
 
 class InteractionResult(BaseModel):
@@ -1490,3 +1519,5 @@ class SolventComparisonResult(BaseModel):
     spread_kcal: float
     uncertainty_kcal: float
     warnings: list[str] = Field(default_factory=list)
+    # The media that could not be computed. Defaulted so a payload written before it decodes.
+    failed: list[FailedMedium] = Field(default_factory=list)

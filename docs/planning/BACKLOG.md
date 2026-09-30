@@ -112,6 +112,21 @@ topic).
 
 ## 2 — Answers that are wrong without saying so
 
+- [ ] **The calc server's inline time budget refuses as bad data, so a load-dependent stop reads
+      as a property of the molecule** — [S], opened 2026-09-27 by the review of
+      `D-2026-09-27-a-screen-answers-per-item-a-distribution-refuses-by-name`. `servers/calc`'s
+      `engine/budget.py` raises a plain `ValueError` when a Hessian or relaxation exceeds
+      `CHEMCLAW_XTB_INLINE_TIMEOUT_SECONDS`; the kit passes it through, and here it becomes
+      `McpRequestRefused` → `CalcToolError`, the non-retryable bad-data class. Wall clock depends
+      on contention, so the same item can pass on an idle pod and be refused on a busy one. Before
+      the per-item ADR that failed the whole job; now it is one entry in a screen's `failed`, with
+      the server's own sentence as its reason. That is visible but not *classified*: nothing can
+      tell a timeout from a malformed input without reading prose. The fix is a server-side marker
+      at the message head, as `[calc-at-capacity]` already is (`core/mcp_session.server_marked`),
+      and a client class chosen for it — which is a cross-repository contract change, so it needs
+      its own decision about whether a budget stop is retried. Anchors:
+      `Chemclaw3-mcp/servers/calc/src/chemclaw_mcp_calc/engine/budget.py`,
+      `connectors/calc/remote.py::_call`, `connectors/calc/compose.py::_attempt`.
 - [ ] **`standardize` is not idempotent on ferrocenyl palladacycles, so `compound_id(raw)` is not
       the id of `compound_note(raw)`** (issue #485) — [M], opened 2026-09-27 by the seeded-corpus measurement of
       `D-2026-09-27-a-compound-id-a-bump-moves-is-superseded-not-orphaned`. Three of the 129

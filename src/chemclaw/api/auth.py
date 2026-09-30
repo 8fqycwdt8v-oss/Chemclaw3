@@ -217,7 +217,16 @@ def _client_for(endpoint: str) -> PyJWKClient:
     client = _jwks_clients.get(endpoint)
     if client is None:
         client = _jwks_clients.setdefault(
-            endpoint, _HttpxJwkClient(endpoint, timeout=settings.entra_http_timeout_seconds)
+            endpoint,
+            # **`cooldown_duration=0`: the refresh cooldown is ours, and one is the policy.**
+            # PyJWT 2.14 added its own — 30 s by default, restarted by every successful fetch —
+            # inside `get_signing_key`, which is the call `_signing_key` makes only after
+            # `_forced_refresh_allowed` has already granted a refresh. Two cooldowns compose to
+            # the longer one, so `entra_jwks_refresh_cooldown_seconds` stopped being the rotation
+            # latency it is configured as: measured, a rotated key was still refused with ours at 0.
+            _HttpxJwkClient(
+                endpoint, timeout=settings.entra_http_timeout_seconds, cooldown_duration=0
+            ),
         )
     return client
 

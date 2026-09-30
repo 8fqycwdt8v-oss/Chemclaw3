@@ -63,6 +63,8 @@ from chemclaw.science.calc.models import (
     EnsemblePayload,
     EnsembleProperty,
     EnsembleSearch,
+    FailedBond,
+    FailedMedium,
     HessianPayload,
     InteractionResult,
     MicrostatePka,
@@ -1376,6 +1378,75 @@ async def reaction_energy(
     )
 
 
+async def _attempt(awaitable: Awaitable[_Result]) -> _Result | ValueError:
+    """Await one item of a screen, handing back its refusal instead of raising it.
+
+    **The boundary is `ValueError` and nothing wider, and that is the whole design.** `ValueError`
+    is this repository's "this input is bad" contract — `ChemclawError` and `CalcToolError` (the
+    server refusing) are both one, and `durable/publish.py` registers the family non-retryable
+    because the identical call fails identically. So it is exactly the failure that belongs to one
+    item and that no retry can fix. An outage is the opposite claim: `CalcServerError` and
+    `CalcBusyError` are `SubsystemUnavailableError`s, not `ValueError`s, and they propagate so the
+    activity is retried rather than a pod restart being reported as N chemistry failures.
+    Cancellation is a `BaseException` and propagates too.
+
+    **What the class carries is wider than bad input, and that is the server's taxonomy, not this
+    boundary's.** The calc server's inline time budget refuses with a plain `ValueError`, so a stop
+    that depends on load lands here as one item's failure (a `BACKLOG.md` row); a refused
+    credential and a contract skew arrive as `CalcToolError` too, but those fail every item alike
+    and reach the caller as the all-failed refusal.
+    """
+    try:
+        return await awaitable
+    except ValueError as refusal:
+        return refusal
+
+
+def _named(failures: Sequence[tuple[str, str]]) -> str:
+    """`label (reason); label (reason)`: every failed item of a screen, in the order asked."""
+    return "; ".join(f"{label} ({reason})" for label, reason in failures)
+
+
+def _medium(solvent: str | None) -> str:
+    """How a medium is named to a chemist: its solvent, or the gas phase."""
+    return solvent or "gas phase"
+
+
+def lost_the_comparison(failed: Sequence[FailedMedium], computed: int) -> bool:
+    """Whether failures left a screen with fewer than two media, so nothing was compared.
+
+    Only a *failure* can do that. A screen asked for one medium and nothing else — one solvent over
+    an ionic set, which has no gas reference — never had a comparison to lose, and says what it
+    always said. Public because the job summary asks the same question of the finished result.
+    """
+    return bool(failed) and computed < 2
+
+
+def _media_warnings(failed: Sequence[FailedMedium], computed: int) -> list[str]:
+    """What a solvent screen must say about the media it lost, and about a comparison they cost.
+
+    A spread over one medium is zero by construction, so when failures leave one medium the
+    "does not distinguish them" verdict would be about a comparison that never happened; the caller
+    withholds it (`lost_the_comparison`) and this says there is nothing to compare instead.
+    """
+    warnings: list[str] = []
+    if failed:
+        # Names only; each reason is under `failed`. A reason is the server's own sentence, and a
+        # species screen's nests a whole ranking refusal, so joining them here made one warning of
+        # unbounded length — and every warning becomes a published flag row.
+        warnings.append(
+            f"{len(failed)} of {computed + len(failed)} media could not be computed and are not in "
+            "this comparison: "
+            + ", ".join(_medium(entry.solvent) for entry in failed)
+            + " (each reason is under `failed`)"
+        )
+    if lost_the_comparison(failed, computed):
+        warnings.append(
+            "only one medium could be computed, so there is nothing to compare it against"
+        )
+    return warnings
+
+
 async def solvent_comparison(
     store: ResultStore,
     reactants: list[str],
@@ -1406,6 +1477,11 @@ async def solvent_comparison(
     # `calc_screen_max_parallel` bounds only how many media run at once, not how many run in total
     # (every medium in `solvents` is eventually run via the `gather` below) — the analogue of
     # `rank_species_across_solvents`'s species x media multiplication, checked the same way here.
+    # The equation's own checks, once and before the fan-out: every medium runs the same equation,
+    # so an unbalanced one or a mistyped sigma key would otherwise be refused once per medium and
+    # reported as N copies of one sentence. `reaction_energy` still runs them itself.
+    check_balance(reactants, products)
+    _checked_symmetry_numbers(symmetry_numbers, set(reactants) | set(products))
     media, no_reference = media_with_gas_reference([*reactants, *products], solvents)
     species_count = len(reactants) + len(products)
     require_within_budget(
@@ -1415,9 +1491,13 @@ async def solvent_comparison(
     )
     limit = asyncio.Semaphore(settings.calc_screen_max_parallel)
 
-    async def one(solvent: str | None) -> ReactionEnergyResult:
-        """One medium, under the fan-out bound, reporting progress prefixed with its own name."""
-        label = solvent or "gas phase"
+    async def one(solvent: str | None) -> ReactionEnergyResult | ValueError:
+        """One medium, under the fan-out bound, reporting progress prefixed with its own name.
+
+        Returns the medium's refusal rather than raising it (`_attempt`), so one medium the
+        calculation cannot do is reported beside the others instead of failing the screen.
+        """
+        label = _medium(solvent)
 
         def relay(line: str) -> None:
             """Prefix the inner reaction's progress with which medium it is running in.
@@ -1428,21 +1508,34 @@ async def solvent_comparison(
             progress(f"{label}: {line}")
 
         async with limit:
-            return await reaction_energy(
-                store,
-                reactants,
-                products,
-                solvent,
-                temperature_k,
-                level,
-                symmetry_numbers,
-                progress=relay,
-                run=run,
+            return await _attempt(
+                reaction_energy(
+                    store,
+                    reactants,
+                    products,
+                    solvent,
+                    temperature_k,
+                    level,
+                    symmetry_numbers,
+                    progress=relay,
+                    run=run,
+                )
             )
 
     # `gather` preserves argument order, so the gas-phase reference stays first and the ranking
     # below sorts from a list whose order does not depend on which branch finished first.
-    results = list(await asyncio.gather(*(one(solvent) for solvent in media)))
+    outcomes = await asyncio.gather(*(one(solvent) for solvent in media))
+    failed = [
+        FailedMedium(solvent=solvent, reason=str(outcome))
+        for solvent, outcome in zip(media, outcomes, strict=True)
+        if isinstance(outcome, ValueError)
+    ]
+    results = [outcome for outcome in outcomes if not isinstance(outcome, ValueError)]
+    if not results:
+        raise ValueError(
+            "no medium of this solvent screen could be computed: "
+            + _named([(_medium(entry.solvent), entry.reason) for entry in failed])
+        )
     effects = [
         SolventEffect(
             solvent=result.solvent,
@@ -1463,13 +1556,17 @@ async def solvent_comparison(
     warnings = list(dict.fromkeys(warning for result in results for warning in result.warnings))
     if no_reference:
         warnings.append(no_reference)
+    warnings.extend(_media_warnings(failed, len(results)))
     # **The gas reference and the solution rows are in different standard states**, because each is
     # in the convention its own phase uses. Solvent against solvent — what this screen ranks — is
     # like against like and needs no caveat. The gas-to-solution gap does: for Δn != 0 it carries
     # 1.894·Δn kcal/mol of reference state on top of the solvation, and a reader differencing the
     # two columns without being told would read that as a solvent effect.
     delta_n = len(products) - len(reactants)
-    if delta_n and not no_reference and any(effect.delta_g_kcal is not None for effect in effects):
+    # Both phases present, not just the gas row: a screen whose every solvent failed has no
+    # solution row for this sentence to be about.
+    both_phases = {effect.solvent is None for effect in effects} == {True, False}
+    if delta_n and both_phases and any(effect.delta_g_kcal is not None for effect in effects):
         warnings.append(
             f"this equation changes the molecule count by {delta_n:+d}, and the gas-phase row is "
             "quoted at the 1 atm standard state while every solvent row is quoted at 1 mol/L (the "
@@ -1477,7 +1574,7 @@ async def solvent_comparison(
             f"gas-to-solution difference additionally carries {abs(delta_n) * 1.894:.2f} kcal/mol "
             "of standard state and is not a solvation energy"
         )
-    if spread <= uncertainty:
+    if not lost_the_comparison(failed, len(effects)) and spread <= uncertainty:
         warnings.append(
             f"the solvents span {spread:.1f} kcal/mol, within the method's "
             f"±{uncertainty:.1f}: this calculation does not distinguish them"
@@ -1493,6 +1590,7 @@ async def solvent_comparison(
         spread_kcal=round(spread, 2),
         uncertainty_kcal=uncertainty,
         warnings=warnings,
+        failed=failed,
     )
 
 
@@ -1828,17 +1926,38 @@ async def species_ranking(
     )
     stated = dict(symmetry_numbers or {})
     energies: list[SpeciesEnergy] = []
+    refused: list[tuple[str, str]] = []
     for index, (smiles, _) in enumerate(considered, start=1):
         progress(f"species {index}/{len(considered)}: {smiles}")
-        energies.append(
-            # **`stated.get(smiles)`, not a literal 1.** Passing 1 marked the number *stated*, so
-            # the machinery `reaction_energy` uses to withhold or flag an assumed sigma never ran
-            # here — and this composite ranks by the free energy that sigma shifts. `None` computes
-            # at sigma=1 exactly as before but records that nobody said so, which is what makes the
-            # warning below possible.
-            await _species_energy(
+        # **`stated.get(smiles)`, not a literal 1.** Passing 1 marked the number *stated*, so the
+        # machinery `reaction_energy` uses to withhold or flag an assumed sigma never ran here — and
+        # this composite ranks by the free energy that sigma shifts. `None` computes at sigma=1
+        # exactly as before but records that nobody said so, which is what makes the warning below
+        # possible.
+        outcome = await _attempt(
+            _species_energy(
                 store, smiles, "reactant", solvent, thermo, stated.get(smiles), level, run
             )
+        )
+        if isinstance(outcome, ValueError):
+            # By SMILES rather than label: it is the string the caller removes and passes back.
+            refused.append((smiles, str(outcome)))
+        else:
+            energies.append(outcome)
+    if refused:
+        # **Refused rather than ranked over the rest, and only after every species was tried.** A
+        # population is normalised over the set, so dropping a form re-distributes its share over
+        # the survivors — the incomplete-universe error above, made by this function instead of by
+        # the enumeration. Trying the rest first is what makes the refusal useful: it names every
+        # form that cannot be computed, not only the first, and each one that could is now cached
+        # (D-011), so the rerun without the offenders pays for none of them again.
+        raise ValueError(
+            f"{len(refused)} of {len(considered)} species could not be computed, and a "
+            "distribution over the rest would re-share their population among the forms that "
+            "were: " + _named(refused) + ". Each reason says what that form needs — a form "
+            "the server cannot handle is removed or corrected, one stopped by a time budget "
+            "needs a smaller calculation or a larger budget. The "
+            f"{len(energies)} that were computed are cached and will not be recomputed"
         )
 
     gibbs = [energy.gibbs_free_energy_hartree for energy in energies]
@@ -1957,6 +2076,10 @@ async def species_solvent_comparison(
     if not solvents:
         raise ValueError("give at least one solvent to compare")
     considered = list(species)
+    if not considered:
+        # Here rather than left to `species_ranking`: every medium would refuse it identically,
+        # and one sentence is the answer rather than the same one per medium.
+        raise ValueError("a distribution needs at least one species")
     media, no_reference = media_with_gas_reference(
         [smiles for smiles, _ in considered[: settings.species_ranking_max]], solvents
     )
@@ -1966,29 +2089,47 @@ async def species_solvent_comparison(
     )
     limit = asyncio.Semaphore(settings.calc_screen_max_parallel)
 
-    async def one(solvent: str | None) -> SpeciesDistribution:
-        """One medium, under the fan-out bound, with its progress attributed to its own branch."""
-        label = solvent or "gas phase"
+    async def one(solvent: str | None) -> SpeciesDistribution | ValueError:
+        """One medium, under the fan-out bound, with its progress attributed to its own branch.
+
+        Returns the medium's refusal rather than raising it (`_attempt`). `species_ranking` refuses
+        a medium where any species failed, so a medium is either whole or in `failed` — never a
+        distribution over part of the set.
+        """
+        label = _medium(solvent)
 
         def relay(line: str) -> None:
             progress(f"{label}: {line}")
 
         async with limit:
-            return await species_ranking(
-                store,
-                considered,
-                kind=kind,
-                solvent=solvent,
-                temperature_k=temperature_k,
-                level=level,
-                symmetry_numbers=symmetry_numbers,
-                progress=relay,
-                run=run,
+            return await _attempt(
+                species_ranking(
+                    store,
+                    considered,
+                    kind=kind,
+                    solvent=solvent,
+                    temperature_k=temperature_k,
+                    level=level,
+                    symmetry_numbers=symmetry_numbers,
+                    progress=relay,
+                    run=run,
+                )
             )
 
     # `gather` preserves argument order, so the gas-phase reference (when present) stays first and
     # every `standings` list is in the order the caller can read against `media`.
-    distributions = list(await asyncio.gather(*(one(solvent) for solvent in media)))
+    outcomes = await asyncio.gather(*(one(solvent) for solvent in media))
+    failed = [
+        FailedMedium(solvent=solvent, reason=str(outcome))
+        for solvent, outcome in zip(media, outcomes, strict=True)
+        if isinstance(outcome, ValueError)
+    ]
+    distributions = [outcome for outcome in outcomes if not isinstance(outcome, ValueError)]
+    if not distributions:
+        raise ValueError(
+            "no medium of this species screen could be ranked: "
+            + _named([(_medium(entry.solvent), entry.reason) for entry in failed])
+        )
 
     # Keyed by SMILES rather than by position: `species_ranking` sorts its output by relative
     # energy, so the same index is a different species in two media whenever the ranking reorders —
@@ -2029,7 +2170,8 @@ async def species_solvent_comparison(
     )
     if no_reference:
         warnings.append(no_reference)
-    if largest <= uncertainty:
+    warnings.extend(_media_warnings(failed, len(distributions)))
+    if not lost_the_comparison(failed, len(distributions)) and largest <= uncertainty:
         warnings.append(
             f"no species moves by more than {largest:.1f} kcal/mol across these media, within the "
             f"method's ±{uncertainty:.1f}: this calculation does not distinguish them"
@@ -2050,6 +2192,7 @@ async def species_solvent_comparison(
         largest_swing_kcal=largest,
         uncertainty_kcal=uncertainty,
         warnings=warnings,
+        failed=failed,
     )
 
 
@@ -2090,7 +2233,29 @@ async def bond_dissociation_survey(
         f"a {len(cleavages)}-bond dissociation survey of {smiles}",
     )
 
+    # **The parent is the survey's input, not one of its items.** It is the left-hand side of every
+    # bond's reaction and a refusal is not cached, so a parent the server refuses was asked for —
+    # and refused — once per bond, each attempt possibly minutes of server time, and reported as N
+    # copies of one reason. So it is computed once here and allowed to fail the survey, since no
+    # bond can be answered without it. Through `_species_energy` with exactly the settings
+    # `reaction_energy` derives, so every bond then reads it as a cache hit; the survey tests pin
+    # that as one relaxation of the parent, which is what goes red if the two ever diverge.
+    require_solvent_for_ions([smiles], solvent)
+    temperature = temperature_k or settings.xtb_thermo_temperature_k
+    progress(f"parent {smiles}")
+    await _species_energy(
+        store,
+        smiles,
+        "reactant",
+        solvent,
+        ThermoSettings(temperature_k=temperature) if level != "quick" else None,
+        None,
+        level,
+        run,
+    )
+
     results: list[DissociatedBond] = []
+    failed: list[FailedBond] = []
     methods: list[str] = []
     # Every composed reaction's own caveats, deduplicated on the way out — the idiom
     # `solvent_comparison` already uses over its fan-out. Without it a survey swallowed the
@@ -2103,26 +2268,39 @@ async def bond_dissociation_survey(
         # positional payload is one field-order change away from computing a different bond than
         # the caller named, and seven positionals here — with the symmetry map in slot seven — is
         # the same hazard one call up.
-        reaction = await reaction_energy(
-            store,
-            [smiles],
-            list(fragments),
-            solvent=solvent,
-            temperature_k=temperature_k,
-            level=level,
-            # **No symmetry map, not a map of fabricated ones.** This passed
-            # `dict.fromkeys([smiles, *fragments], 1)`, which marked sigma *stated* for the parent
-            # and both fragments — so `reaction_energy`'s withhold-and-warn machinery never ran,
-            # and sigma=1 is wrong for most of what a homolysis produces (benzene 12, phenyl 2,
-            # methyl 6, ethane 6). It was harmless only because the ΔG is discarded below; the
-            # moment anything reads it, or this grows a BDFE, the control was already disarmed and
-            # would not have said so. `None` computes at sigma=1 exactly as before and records that
-            # nobody said so — the same fix `species_ranking` carries, now uniform across the three
-            # composites that share `_species_energy`.
-            symmetry_numbers=None,
-            progress=no_progress,
-            run=run,
+        outcome = await _attempt(
+            reaction_energy(
+                store,
+                [smiles],
+                list(fragments),
+                solvent=solvent,
+                temperature_k=temperature_k,
+                level=level,
+                # **No symmetry map, not a map of fabricated ones.** This passed
+                # `dict.fromkeys([smiles, *fragments], 1)`, which marked sigma *stated* for the
+                # parent and both fragments — so `reaction_energy`'s withhold-and-warn machinery
+                # never ran, and sigma=1 is wrong for most of what a homolysis produces (benzene 12,
+                # phenyl 2, methyl 6, ethane 6). It was harmless only because the ΔG is discarded
+                # below; the moment anything reads it, or this grows a BDFE, the control was
+                # already disarmed and would not have said so. `None` computes at sigma=1 exactly
+                # as before and records that nobody said so — the same fix `species_ranking`
+                # carries, now uniform across the three composites that share `_species_energy`.
+                symmetry_numbers=None,
+                progress=no_progress,
+                run=run,
+            )
         )
+        if isinstance(outcome, ValueError):
+            # One bond the calculation refuses is that bond's answer, not the survey's: the bonds
+            # are independent reactions, and the rest still rank each other.
+            progress(f"bond {index}/{len(cleavages)} ({bond}) could not be computed: {outcome}")
+            failed.append(
+                FailedBond(
+                    atoms=list(atoms), bond=bond, fragments=list(fragments), reason=str(outcome)
+                )
+            )
+            continue
+        reaction = outcome
         methods.append(reaction.method)
         caveats.extend(reaction.warnings)
         energy = (
@@ -2137,9 +2315,25 @@ async def bond_dissociation_survey(
             )
         )
 
+    # A bond is named with its atoms: "C-H" alone is ambiguous in any molecule with two of them.
+    names = [f"{entry.bond} {entry.atoms}" for entry in failed]
+    if not results:
+        raise ValueError(
+            f"no bond of {smiles} could be computed: "
+            + _named([(name, entry.reason) for name, entry in zip(names, failed, strict=True)])
+        )
     results.sort(key=lambda entry: entry.dissociation_energy_kcal)
-    if results:
-        results[0] = results[0].model_copy(update={"is_weakest": True})
+    results[0] = results[0].model_copy(update={"is_weakest": True})
+    lost = (
+        [
+            f"{len(failed)} of {len(cleavages)} bonds could not be computed, so the weakest bond "
+            "flagged here is the weakest of the rest and any of these may be weaker: "
+            + ", ".join(names)
+            + " (each reason is under `failed`)"
+        ]
+        if failed
+        else []
+    )
     return BondDissociationSurvey(
         smiles=require_canonical_smiles(smiles),
         # **The server's method, not this deployment's configured name** — the argument
@@ -2159,8 +2353,10 @@ async def bond_dissociation_survey(
         warnings=[
             "semiempirical bond dissociation energies carry several kcal/mol of error, so the "
             "ordering is the answer and the magnitudes are not",
+            *lost,
             *dict.fromkeys(caveats),
         ],
+        failed=failed,
     )
 
 
