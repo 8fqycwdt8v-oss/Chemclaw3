@@ -1,3 +1,102 @@
+# Queued, autoscaled compute — near-real-time for many concurrent chemists
+
+**Goal.** Every compute-heavy tool call waits in a global queue instead of being refused, the chemist
+waits briefly in the turn and gets the answer, and capacity follows the queue. Target to agree:
+seconds-class calls (xTB single point, pKa, properties, reaction prediction) answer **p95 ≤ 30 s at
+50 concurrent chemists** on warm capacity. Hours-class work (CREST, scans) is queued fairly, not
+real-time.
+
+## What exists, and the gap (from the two code maps)
+
+- `connectors/jobs.py::build_job_tool` + `_await_briefly` already do "start a Temporal workflow,
+  wait `inline_wait_seconds`, else return a job id and push the result later". Only the 12 calc
+  `jobs:` use it.
+- The 17 inline calc tools, BO `suggest_next_experiment`/`predict_outcome`, and every remote MCP
+  tool (rxnpredict, pyexec, chem) bypass Temporal. A full pod refuses; inline nothing retries.
+- The durable retry waits 112 → 900 s between asks: polling, idle slots, no FIFO.
+- No HPA on any worker; MCP servers scale on CPU only; no admission-slot gauge exists.
+- rxnpredict/pyexec/rxnlabel/chem refuse with a plain `ValueError` — no at-capacity marker, so a
+  full pod reads as bad input.
+
+## Design
+
+1. **One mechanism: a tool may declare `dispatch: queued` in its manifest** (with
+   `inline_wait_seconds`). The chat service wraps it: authz/audit/plan-gate run as today, then it
+   starts `QueuedToolWorkflow` on the bundle's **interactive lane** `connector-<name>-interactive`
+   and reuses `_await_briefly`. Answer inside the wait → ordinary tool result. Otherwise → job id,
+   result pushed through the existing session mailbox. No new result path.
+2. **The activity calls the connector's own MCP tool** (same session helper, same identity headers),
+   so no tool body moves and the calc cache (`cached_compute`) stays where it is. Works unchanged for
+   Chemclaw3 bundles and for `Chemclaw3-mcp` servers.
+3. **Two lanes per bundle so hours never block seconds**: interactive (queued tools, short
+   `start_to_close`) and the existing batch lane `connector-<name>` (jobs, CREST).
+4. **Pull, don't push**: a worker's `max_concurrent_activities` equals the downstream slots it owns,
+   so excess work waits *in Temporal* (FIFO, visible) instead of being refused. At-capacity becomes a
+   rare race, retried at seconds on the interactive lane (new `interactive_retry`), not minutes.
+5. **One at-capacity marker for the whole fleet**: move `[…-at-capacity]` into
+   `mcp_server_kit.Admission` so every gated server signals it, and Chemclaw3's generic connector path
+   classifies it too.
+6. **Autoscaling on backlog, not CPU** (KEDA = OpenShift "Custom Metrics Autoscaler"):
+   - interactive workers scale on the Temporal task-queue backlog;
+   - MCP servers scale on a new `chemclaw_mcp_admission_in_flight / _ceiling` gauge;
+   - warm floor (`minReplicas`) sized for the expected peak — pod start (~60 s+) is too slow to be
+     the real-time answer, so scaling handles sustained load and the floor handles bursts.
+   - Shipped **optional** (`autoscaling.keda.enabled`), CPU HPA stays the default where KEDA is absent.
+7. **The chemist sees it**: new `ToolQueuedEvent` (position ≈ backlog ahead, then running) over the
+   existing signal stream; UI renders it on the tool call.
+
+## Steps
+
+### Chemclaw3-mcp (PR 1)
+- [x] ADR: admission refusal carries one fleet-wide marker; autoscaling may read admission occupancy.
+- [x] `mcp_server_kit.limits.Admission`: server name, fleet marker, gauges `admission_in_flight`,
+      `admission_ceiling`, counter `admission_refused_total`; all five gated servers inherit.
+- [x] Optional `deploy/keda/scaledobject.yaml` per gated server (Prometheus scaler on occupancy);
+      extend `tests/test_deploy_shape.py` to hold it against the HPA (same bounds, never both applied).
+- [x] `make check` green (deps-audit red on pyjwt/urllib3 advisories, identical on main). Pushed.
+
+### Chemclaw3 (PR 2)
+- [x] ADR superseding the "inline compute is synchronous" half of the calc/connector ADRs; states the
+      two lanes, pull-based concurrency, and what stays refused-at-server (safety net).
+- [x] Manifest: `dispatch: queued` + `inline_wait_seconds` on a tool; `connector-validate` checks the
+      wait against the turn budget (reuse the jobs check).
+- [x] `QueuedToolWorkflow` + generic `call_connector_tool` activity; `interactive_retry` policy.
+- [x] Registry wraps queued tools; generic path classifies the fleet at-capacity marker.
+- [x] Mark heavy tools queued: calc compute tools, BO `suggest_next_experiment`/`predict_outcome`,
+      rxnpredict predictions, pyexec `run_python`. Cheap ones (solubility, developability, lookups)
+      stay direct.
+- [x] Worker per bundle per lane; concurrency derived from the downstream ceiling, validated at startup.
+- [ ] ~~`ToolQueuedEvent`~~ not built: a call that outlasts the wait already announces `job_started` and lands as `job_completed`, which the UI renders. A position indicator is a follow-up.
+- [x] Helm: interactive worker Deployments, optional KEDA ScaledObjects, warm floors; `helm-validate`.
+- [ ] `make lint type test` green with Docker/Postgres/Temporal up (report skips).
+
+### Chemclaw3_ui (PR 3)
+- [ ] Not needed for this change (existing job events cover a deferred call); a queued/position badge is a follow-up.
+
+### Verification (the claim is a number)
+- [x] Load test in the local stack: 50 concurrent sessions each asking a seconds-class calc tool,
+      before vs after. Report p50/p95 time-to-answer and refusal rate. Same for a mixed load with
+      CREST running, to show the lanes isolate.
+
+## Decided with the user (2026-09-30)
+- Target: seconds-class calls **p95 ≤ 30 s at 50 concurrent chemists**.
+- KEDA availability unknown → ScaledObjects ship behind a switch, **default off**; CPU HPA stays default.
+- retro (`chemclaw2_retrosynthesis`) out of scope; `dispatch: queued` makes it a one-line opt-in later.
+
+## Review (2026-09-30)
+
+- Measured, 50 concurrent calls vs a stand-in server (worker concurrency = slots): direct refused
+  68% at 8 slots; queued answered 50/50 in the turn, p95 14.9 s (2-s calls, 8 slots), 8.7 s (16),
+  6.9 s (32); 5-s calls need 16 slots for p95 ≤ 30 s. The warm floor is the sizing decision.
+- Found on the way: `CalcBusyError` reached callers of our own bundles as "internal error" (the
+  sanitizer only passed `ValueError`) — fixed with `AtCapacityError` + the fleet marker.
+- A retry policy with initial > max is rejected by Temporal as "missing task queue name"; clamped.
+- The interactive worker opens no Postgres pool (measured 0 connections); budgeted at zero with a test.
+- Follow-ups: `queued:` for `Chemclaw3-mcp`'s `pyexec`/`chem` manifests once this lands on main (the
+  consumer must accept the key first); a queued/position badge in the UI.
+
+---
+
 # Wave 11 — what a worker holds between tasks
 
 ## Items

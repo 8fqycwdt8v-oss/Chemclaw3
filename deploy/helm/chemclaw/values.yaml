@@ -395,6 +395,13 @@ connectors:
     enabled: true
     server: true
     url: http://chemclaw-mcp-rxnpredict:8857/mcp
+    # Its four predictions are queued (`connectors/rxnpredict/connector.yaml` `queued:`), so this
+    # release runs their interactive worker even though the server is hosted elsewhere. 2 x 2 in
+    # flight is the server's floor (2 pods x 2 admission slots); `maxReplicas` follows its HPA ceiling.
+    interactive:
+      replicas: 2
+      maxReplicas: 4
+      maxConcurrentActivities: 2
   calc:
     enabled: true
     server: true
@@ -415,6 +422,15 @@ connectors:
     # `networkPolicy.egressDestinations`, and provide `CHEMCLAW_CALC_TOKEN` if that server enforces
     # a bearer.
     worker: true
+    # **The queued calculations' worker** (`connector.yaml` `queued:`): a turn's `optimize_geometry`
+    # or `predict_pka` waits here for a slot instead of being refused by a full backend pod. Sized
+    # to the backend's floor — `Chemclaw3-mcp` `servers/calc` ships 2 pods x 4 admission slots, and
+    # 2 replicas x 4 in flight is those 8 — so the backlog waits in Temporal, first come first
+    # served. `maxReplicas: 8` x 4 matches that server's 8-pod ceiling. Raise the two together.
+    interactive:
+      replicas: 2
+      maxReplicas: 8
+      maxConcurrentActivities: 4
   bo:
     enabled: true
     server: true
@@ -422,6 +438,12 @@ connectors:
     # This bundle owns durable work, so it also gets a Temporal worker Deployment polling the queue
     # its manifest declares. Bundles without a `jobs:` entry leave this unset and get only the app.
     worker: true
+    # `predict_outcome` is queued (`connector.yaml` `queued:`); its surrogate fit runs on this
+    # bundle's one server pod, so two in flight is what that pod serves without thrashing.
+    interactive:
+      replicas: 1
+      maxReplicas: 2
+      maxConcurrentActivities: 2
   results:
     # Republishing computed results to an external results store (D-2026-08-25). A jobs-only
     # bundle, so `server: false` and no app pod or Service renders.
@@ -1777,6 +1799,17 @@ securityContext:
 # namespace; nothing here can check that, which is why it is written down here.
 temporal:
   namespace: ""
+
+# **Scaling the interactive workers on their queue's backlog**, through KEDA — OpenShift's Custom
+# Metrics Autoscaler operator, at a version with the `temporal` scaler. Off by default: whether the
+# operator is installed is a property of the cluster, and a ScaledObject on a cluster without it is
+# rejected by the API server. With it off, each `connectors.<name>.interactive.replicas` is a fixed
+# count — size it to the peak you expect, because a pod started on demand takes a minute or more to
+# be ready, which is too slow to be the real-time answer to a burst. `templates/keda-interactive.yaml`.
+keda:
+  enabled: false
+  pollingInterval: 15
+  cooldownPeriod: 300
 
 # What happens to the durable tables' history — a posture this chart refuses to leave unstated,
 # by the same rule as the egress block below (D-2026-08-26-a-knob-that-renders-nothing-is-not-a-knob):

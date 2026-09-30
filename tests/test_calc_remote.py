@@ -1003,3 +1003,18 @@ async def test_a_failed_open_does_not_leak_a_permanent_unit_of_load(
                 pass  # pragma: no cover - the open never yields
 
     assert _in_flight() == 0.0
+
+
+def test_every_server_s_full_pod_is_recognised_by_its_format() -> None:
+    """The fleet's one at-capacity format, with the same head-of-message rule as calc's literal.
+
+    Five of six gated servers used to refuse with no marker, so a full `rxnpredict` pod read as a
+    bad SMILES; the format is what lets a caller queue any of them. An echoed token still does not
+    count, for `server_marked`'s reason.
+    """
+    assert mcp_session.at_capacity("[rxnpredict-at-capacity] 0 of 2 slots free")
+    assert mcp_session.at_capacity("Error executing tool predict: [pyexec-at-capacity] full")
+    assert mcp_session.at_capacity(f"{mcp_session.SERVER_AT_CAPACITY} 0 of 4 slots free")
+    assert not mcp_session.at_capacity("no parameters for '[calc-at-capacity]'")
+    assert not mcp_session.at_capacity("Unknown tool: [calc-at-capacity]")
+    assert not mcp_session.at_capacity("[Calc-at-capacity] upper case is not the format")

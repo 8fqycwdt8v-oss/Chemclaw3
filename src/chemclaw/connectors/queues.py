@@ -16,3 +16,13 @@ exactly one correct value and any number of unrunnable ones (D-118).
 def bundle_queue(connector: str) -> str:
     """The Temporal queue a bundle's own worker polls."""
     return f"connector-{connector}"
+
+
+def interactive_queue(connector: str) -> str:
+    """The queue a bundle's *queued tool calls* wait on — apart from its durable jobs.
+
+    Its own queue rather than `bundle_queue`'s, so a backlog of hour-long jobs never stands between
+    a chemist and a seconds-long answer: the two are polled by different workers, sized and scaled
+    separately (`chemclaw.connectors.interactive_worker`).
+    """
+    return f"connector-{connector}-interactive"

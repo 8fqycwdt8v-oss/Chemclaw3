@@ -894,6 +894,12 @@ strategy:
        budget, since `replicas` was never required of one. */ -}}
 {{- if and $cfg.server (not $cfg.url) -}}{{- $total = add $total ($cfg.serverReplicas | default $cfg.replicas | int) -}}{{- end -}}
 {{- if $cfg.worker -}}{{- $total = add $total ($cfg.workerReplicas | default $cfg.replicas | int) -}}{{- end -}}
+{{- /* No term for a connector's interactive worker, and that is measured rather than forgotten:
+       it serves one activity that makes an MCP call and one workflow, touches no table, and
+       opened **zero** connections against the dev Postgres while polling. So it holds no pool, and
+       charging it one per pod would have raised the declared ceiling past 256 for connections no
+       process opens. `tests/test_queued_tools.py::test_a_queued_call_touches_no_database` is what
+       keeps that true. */ -}}
 {{- end -}}
 {{- end -}}
 {{- $total -}}
