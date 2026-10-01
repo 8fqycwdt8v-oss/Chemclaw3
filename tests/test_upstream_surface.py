@@ -2311,3 +2311,38 @@ def test_rdkits_fragment_catalogue_still_carries_what_this_module_assumes() -> N
             "alone "
             "regressed TBTU — so the argument for its order is worth re-reading, not the code"
         )
+
+
+def test_pyjwt_refetches_an_unknown_kid_at_once_when_its_own_cooldown_is_off() -> None:
+    """`api/auth.py` builds its JWKS client with `cooldown_duration=0` and owns the cooldown itself.
+
+    PyJWT 2.14 put a refresh cooldown of its own inside `get_signing_key` (30 s by default), which
+    silently composed with `entra_jwks_refresh_cooldown_seconds` and outvoted it. If upstream ever
+    stops honouring `0` — renames the keyword, or floors it — a rotated signing key is refused for
+    upstream's window whatever this deployment configured, and nothing else here would say so
+    before `tests/test_entra_end_to_end.py`'s rotation test did.
+    """
+    from jwt import PyJWKClient
+    from jwt.exceptions import PyJWKClientError
+
+    fetches = 0
+
+    class _Offline(PyJWKClient):
+        def fetch_data(self) -> Any:
+            nonlocal fetches
+            fetches += 1
+            data: Any = {"keys": [{"kty": "oct", "kid": "kid-a", "k": "c2VjcmV0"}]}
+            if self.jwk_set_cache is not None:
+                self.jwk_set_cache.put(data)
+            return data
+
+    client = _Offline("https://tenant.invalid/keys", cooldown_duration=0)
+    client.get_signing_keys()
+    for _ in range(2):
+        with pytest.raises(PyJWKClientError):
+            client.get_signing_key("kid-b")
+    assert fetches == 3, (
+        f"two lookups of an unknown kid made {fetches - 1} refetches, not 2; PyJWT's own cooldown "
+        "is holding despite `cooldown_duration=0`, so api/auth.py's configured cooldown is not "
+        "the one deciding rotation latency"
+    )

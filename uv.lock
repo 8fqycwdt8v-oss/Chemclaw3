@@ -541,7 +541,7 @@ requires-dist = [
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
     { name = "psycopg-pool", specifier = ">=3.2" },
     { name = "pydantic-settings", specifier = ">=2.5" },
-    { name = "pyjwt", extras = ["crypto"], specifier = ">=2.15.1" },
+    { name = "pyjwt", extras = ["crypto"], specifier = ">=2.15" },
     { name = "pypdf", specifier = ">=6.15.0" },
     { name = "python-docx", specifier = ">=1.2.0" },
     { name = "python-frontmatter", specifier = ">=1.3.0" },

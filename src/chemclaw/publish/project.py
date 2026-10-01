@@ -311,6 +311,44 @@ def _warnings(messages: list[str]) -> list[FlagFact]:
     ]
 
 
+def _not_computed(
+    failed: list[dict[str, Any]], flag: str, label: Callable[[dict[str, Any]], str], start: int
+) -> list[FlagFact]:
+    """One flag per item a screen could not compute, so "which screens are partial" is a query.
+
+    The message is the item's name alone and the server's reason rides in `detail`, which is JSONB:
+    a reason is the calculation service's own sentence and a species screen's nests a whole ranking
+    refusal, so putting it in `message` — `VARCHAR(2000)` at every sink — would let one partial
+    screen fail its whole record at the sink and dead-letter the items that *were* computed.
+    """
+    return [
+        FlagFact(
+            ordinal=start + index,
+            flag=flag,
+            severity="warning",
+            # A time-budget stop says so in the message too, because it is the one cause a reader
+            # must not take as a property of the item: the same item may pass on an idle pod.
+            message=(
+                f"{label(entry)} was stopped by the calculation service's time budget"
+                if entry.get("cause") == "time_budget"
+                else f"{label(entry)} could not be computed"
+            ),
+            detail=dict(entry),
+        )
+        for index, entry in enumerate(failed)
+    ]
+
+
+def _medium_label(entry: dict[str, Any]) -> str:
+    """A failed medium's name: its solvent, or the gas phase (`solvent` is absent on the wire)."""
+    return str(entry.get("solvent") or "gas phase")
+
+
+def _bond_label(entry: dict[str, Any]) -> str:
+    """A failed bond's name with its atoms: "C-H" alone is ambiguous in most molecules."""
+    return f"{entry.get('bond') or 'bond'} {list(entry.get('atoms') or [])}"
+
+
 def _renamed(payload: dict[str, Any], current: str, legacy: str, what: str) -> Any:
     """A payload field read under its current name, falling back to the name it used to have.
 
@@ -518,16 +556,27 @@ def _solvent_screen(
         engine="xtb",
         treatment=payload.get("level") or "",
     )
+    # **A spread and a winner are findings about a comparison, and one medium is not one.** Over a
+    # single row the spread is zero by construction, so publishing it would answer "screens where
+    # the solvent does not matter" with a screen that compared nothing — which a screen reduced to
+    # one medium by failures, or asked for one solvent over ions, is. Both are read either way, so
+    # the field guard sees them consumed.
+    spread, best = payload.get("spread_kcal"), payload.get("best_solvent")
+    compared = len(payload.get("effects") or []) >= 2
     facts = _kept(
         _fact(
             "solvent_spread",
-            payload.get("spread_kcal"),
+            spread if compared else None,
             "kcal/mol",
             uncertainty=payload.get("uncertainty_kcal"),
             uncertainty_kind="reported",
         ),
-        _text("best_solvent", canonical_solvent(payload.get("best_solvent"))),
+        _text("best_solvent", canonical_solvent(best) if compared else None),
         _text("reaction_level", payload.get("level")),
+    )
+    flags = _warnings(list(payload.get("warnings") or []))
+    flags += _not_computed(
+        list(payload.get("failed") or []), "medium_not_computed", _medium_label, len(flags)
     )
     return (
         subject,
@@ -535,7 +584,7 @@ def _solvent_screen(
         level,
         {
             "properties": facts,
-            "flags": _warnings(list(payload.get("warnings") or [])),
+            "flags": flags,
         },
     )
 
@@ -584,10 +633,12 @@ def _species_solvent_screen(
         engine="xtb",
         treatment=payload.get("level") or "",
     )
+    # The swing is a comparison's finding, so one medium publishes none: `_solvent_screen`'s reason.
+    swing = payload.get("largest_swing_kcal")
     facts = _kept(
         _fact(
             "solvent_swing",
-            payload.get("largest_swing_kcal"),
+            swing if len(distributions) >= 2 else None,
             "kcal/mol",
             uncertainty=payload.get("uncertainty_kcal"),
             uncertainty_kind="reported",
@@ -597,6 +648,9 @@ def _species_solvent_screen(
         _text("reaction_level", payload.get("level")),
     )
     flags = _warnings(list(payload.get("warnings") or []))
+    flags += _not_computed(
+        list(payload.get("failed") or []), "medium_not_computed", _medium_label, len(flags)
+    )
     if payload.get("dominance_changes"):
         flags.append(
             FlagFact(
@@ -1044,6 +1098,13 @@ def _bond_survey(
         )
         if bond.get("is_weakest"):
             weakest = bond
+    failed = list(payload.get("failed") or [])
+    if failed:
+        # **The weakest of the bonds that were computed is not the molecule's weakest bond.** A
+        # refused bond may be weaker, and `weakest_bond` is a calculation-scope fact a query reads
+        # without the flag rows beside it, so a partial survey publishes its bonds as sites and no
+        # weakest at all; the `bond_not_computed` flags name what is missing.
+        weakest = None
     uncertainty = payload.get("uncertainty_kcal")
     facts = _kept(
         _fact("bonds_considered", payload.get("considered"), ""),
@@ -1057,6 +1118,8 @@ def _bond_survey(
             uncertainty_kind="reported" if uncertainty is not None else "",
         ),
     )
+    flags = _warnings(list(payload.get("warnings") or []))
+    flags += _not_computed(failed, "bond_not_computed", _bond_label, len(flags))
     return (
         subject,
         conditions,
@@ -1064,7 +1127,7 @@ def _bond_survey(
         {
             "properties": facts,
             "sites": sites,
-            "flags": _warnings(list(payload.get("warnings") or [])),
+            "flags": flags,
         },
     )
 

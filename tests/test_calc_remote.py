@@ -36,6 +36,7 @@ from chemclaw.connectors.calc import remote
 from chemclaw.connectors.calc.remote import (
     CalcBusyError,
     CalcServerError,
+    CalcTimeBudgetError,
     CalcToolError,
     cached_remote,
     remote_key,
@@ -1018,3 +1019,61 @@ def test_every_server_s_full_pod_is_recognised_by_its_format() -> None:
     assert not mcp_session.at_capacity("no parameters for '[calc-at-capacity]'")
     assert not mcp_session.at_capacity("Unknown tool: [calc-at-capacity]")
     assert not mcp_session.at_capacity("[Calc-at-capacity] upper case is not the format")
+
+
+async def test_a_time_budget_stop_is_named_and_stays_a_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The server's inline clock stopping a calculation is told apart from a refusal of the input.
+
+    Wall clock depends on load, so this is the one refusal that is not a property of the molecule.
+    Named — `CalcTimeBudgetError`, which a screen records as a `time_budget` stop — and still
+    non-retryable, because a retry runs the same work against the same clock
+    (`D-2026-10-01-a-stop-by-the-clock-is-named-not-retried`). The marker is the literal the
+    calc server writes at the head (`engine/budget.TIME_BUDGET_MARKER`), transcribed for the reason
+    the capacity test above gives; the sentence after it is *shaped like* `Deadline.check`'s, not
+    copied, because only the head is matched.
+    """
+
+    class _Stopped(_FakeSession):
+        async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+            if name == "calculation_key":
+                return _Result({"key": _KEY})
+            return _Result(
+                "Error executing tool predict_pka: [calc-time-budget] a geometry optimization "
+                "exceeded this server's inline budget of 780s (spent 781.2s; stopped after 11 "
+                "gradient evaluations past the input geometry).",
+                is_error=True,
+            )
+
+    _session(monkeypatch, _Stopped(_KEY, {}))
+
+    with pytest.raises(CalcTimeBudgetError) as stopped:
+        await cached_remote(InMemoryStore(), "predict_pka", {"smiles": "CC(=O)O"})
+    assert "inline budget" in str(stopped.value), "the server's own sentence reaches the chemist"
+    assert issubclass(CalcTimeBudgetError, CalcToolError)
+    assert not issubclass(CalcTimeBudgetError, SubsystemUnavailableError)
+    assert CalcTimeBudgetError.__name__ in _BAD_DATA_TYPES
+    assert mcp_session.SERVER_TIME_BUDGET == "[calc-time-budget]"
+
+
+async def test_a_time_budget_marker_quoted_back_is_not_a_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A solvent named "[calc-time-budget]" is a bad input, not a busy pod's clock."""
+
+    class _Echo(_FakeSession):
+        async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+            if name == "calculation_key":
+                return _Result({"key": _KEY})
+            return _Result(
+                "Error executing tool predict_pka: GFN2-xTB's ALPB solvation model has no "
+                "parameters for '[calc-time-budget]'.",
+                is_error=True,
+            )
+
+    _session(monkeypatch, _Echo(_KEY, {}))
+
+    with pytest.raises(CalcToolError) as refused:
+        await cached_remote(InMemoryStore(), "predict_pka", {"smiles": "CC(=O)O"})
+    assert not isinstance(refused.value, CalcTimeBudgetError)

@@ -163,7 +163,7 @@ dependencies = [
     "psycopg-pool>=3.2",
     "psycopg[binary]>=3.2",
     "pydantic-settings>=2.5",
-    "pyjwt[crypto]>=2.15.1",
+    "pyjwt[crypto]>=2.15",
     # Gitwildmatch path matching for the mounted share's `exclude:` globs
     # (`ingest/documents/crawl.py`). Already in `uv.lock` through `mypy`, promoted to a runtime
     # dependency because `fnmatch` gives `**` no special meaning: the crawler tried every pattern

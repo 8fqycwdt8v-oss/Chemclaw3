@@ -48,6 +48,7 @@ from chemclaw.core.mcp_session import (
     McpCredentialRefused,
     McpRequestRefused,
     McpServerFault,
+    McpTimeBudget,
     invoke,
     open_session,
 )
@@ -114,6 +115,20 @@ class CalcToolError(ChemclawError):
     **A full pod is not this**, and it used to be. `CalcBusyError` below is that third case; the
     premise this class is registered on — "the identical call fails identically" — is precisely
     what a saturation refusal violates.
+    """
+
+
+class CalcTimeBudgetError(CalcToolError):
+    """The calculation server's inline wall clock stopped this calculation before it answered.
+
+    **Still a refusal, and still non-retryable** — registered in `durable/publish.py`'s
+    `_BAD_DATA_TYPES` under its own name, because Temporal matches by name and a subclass inherits
+    nothing there. The budget is spent work, not an empty slot: a retry re-runs the same calculation
+    against the same clock, and pays for it again, which is the opposite of `CalcBusyError` below.
+    What the class buys is the *name*: wall clock depends on load, so this is the one refusal that
+    is not a property of the input, and a screen that answers per item records it as a time-budget
+    stop rather than beside a structure that would not embed
+    (`D-2026-10-01-a-stop-by-the-clock-is-named-not-retried`).
     """
 
 
@@ -300,6 +315,9 @@ async def _call(session: ClientSession, tool: str, arguments: dict[str, Any]) ->
             "was asked, and the same request succeeds once a calculation finishes: a durable job "
             "waits and asks again on its own, and a direct call has to be made again."
         ) from exc
+    except McpTimeBudget as exc:
+        # Before `McpRequestRefused`, of which this is a subclass: order is the whole behaviour.
+        raise CalcTimeBudgetError(str(exc)) from exc
     except McpRequestRefused as exc:
         raise CalcToolError(str(exc)) from exc
     except McpServerFault as exc:

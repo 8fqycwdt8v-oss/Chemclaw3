@@ -48,3 +48,20 @@ vulnerabilities:
       upgraded to 84.0.0 by deploy/Containerfile and the application venv pins 83.0.0; this entry
       is pip's bundled copy, which no pip release has yet moved.
     expired_at: 2027-03-14
+  # **urllib3 2.7.0, also pip 26.2.1's vendored copy, found the same way and argued the same way.**
+  # Measured 2026-10-01: the image scan reported CVE-2026-97687 and CVE-2026-97689 against urllib3
+  # 2.7.0 with no `PkgPath` (the bare `Python` target, as above), and pip 26.2.1 — the current
+  # release — lists `urllib3==2.7.0` in `pip/_vendor/vendor.txt`. The application venv pins 2.8.0
+  # (`uv.lock`, the fixed version), which `make deps-audit` checks on every push, so the lockfile
+  # half of the id-wide hole this file describes is covered there. pip runs only at build time.
+  # Expiry is shorter than the two above: drop both entries when pip vendors urllib3 >= 2.8.0.
+  - id: CVE-2026-97687
+    statement: >-
+      urllib3 2.7.0 vendored inside pip 26.2.1 (the current release); the application venv pins
+      the fixed 2.8.0. Reached only by running pip, which this image never does at runtime.
+    expired_at: 2027-01-31
+  - id: CVE-2026-97689
+    statement: >-
+      urllib3 2.7.0 vendored inside pip 26.2.1 (the current release); the application venv pins
+      the fixed 2.8.0. Reached only by running pip, which this image never does at runtime.
+    expired_at: 2027-01-31
