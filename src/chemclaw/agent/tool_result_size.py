@@ -730,8 +730,10 @@ def batch_siblings(request: Any) -> int:
     beside silent siblings: 199,999 characters land whole at width 1, 100,000 at width 2, 50,000 at
     4 and 25,000 at 8. The bound still holds — an unused sibling's share is wasted allowance, never
     spent — so this fails closed, and what it costs is a note cut for company it did not keep.
-    Counting writers instead needs their results, which do not exist when this runs;
-    `docs/planning/BACKLOG.md` carries the exact-accounting design and why it is not a free win.
+    Counting writers instead needs their results, which do not exist when this runs, and the exact
+    post-merge alternative is declined until a helper is seen writing at all
+    (`D-2026-10-01-exact-helper-file-accounting-waits-for-a-helper-that-writes`: 0 of 11 live-lane
+    `task` calls carried a non-empty `files` update).
 
     Args:
         request: The tool-call request the middleware chain is running.

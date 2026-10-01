@@ -166,9 +166,9 @@ def both_recorded(before: Recorded, after: Recorded) -> bool:
     condenser reads out of prose. `species_change` is deliberately outside it: a role's species set
     is derived from a components list that is present either way, so an empty `reagent` set is the
     record stating that the run used no reagent, not a gap in it. `BACKLOG.md` asked for the rule
-    over the species sets too; measured against `OrdReaction.species`, that would have erased the most
-    common real change a run-to-run series carries — a reagent added mid-procedure — to suppress a
-    fabrication that needs a *partially transcribed* source to happen at all.
+    over the species sets too; measured against `OrdReaction.species`, that would have erased the
+    most common real change a run-to-run series carries — a reagent added mid-procedure — to
+    suppress a fabrication that needs a *partially transcribed* source to happen at all.
     """
     return all(_recorded(value) for value in (before, after))
 
@@ -257,10 +257,11 @@ def canonical_condition(species: str) -> str:
 def text_change(variable: str, before: str | None, after: str | None) -> ConditionChange | None:
     """A change in a condition the record only carries as words, or None when they agree.
 
-    The condenser's counterpart to `species_change`: a solvent read out of a procedure is a name,
-    not a structure, so it cannot be compared as a graph the way `species_change` does — but it can be
-    *resolved*, and `canonical_condition` is the one table that does it. Two spellings of one
-    solvent therefore agree here: `DMF` and `N,N-dimethylformamide`, `DIPEA` and
+    The condenser's counterpart to `species_change`, for a protocol with no stored species
+    projection: a solvent read out of a procedure is a name, not a structure, so it cannot be
+    compared as a graph the way `species_change` does — but it can be *resolved*, and
+    `canonical_condition` is the one table that does it. Two spellings of one solvent therefore
+    agree here: `DMF` and `N,N-dimethylformamide`, `DIPEA` and
     `N,N-diisopropylethylamine`, a name and its SMILES. Before that fold this compared casefolded,
     whitespace-collapsed prose, so a technician writing the long name in one entry and the acronym
     in the next produced `solvent DMF → N,N-dimethylformamide` in the "Changed vs previous" column

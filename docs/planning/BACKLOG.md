@@ -215,23 +215,6 @@ topic).
       The candidates are a short negative cache on a failed fetch, and one lock around both refresh
       paths. Anchors: `api/auth.py::_HttpxJwkClient.fetch_data`, `api/auth.py::_signing_key`,
       `api/auth.py::_forced_refresh_allowed`.
-- [ ] **The helper file budget is charged to siblings that wrote nothing** (issue #463, #489) — [M],
-  opened by `D-2026-09-18-a-pre-batch-snapshot-cannot-see-its-own-superstep`; its other half, the
-  two write verbs nothing bounded, is closed by
-  `D-2026-09-26-a-helpers-unbounded-write-verbs-take-the-scratch-cap`.
-  `batch_siblings` divides the remaining budget by the batch's calls *naming* `task`, because the
-  siblings' results do not exist when it runs. Most `task` calls read and write nothing, so one
-  helper filing a note beside seven silent ones is charged an eighth: driven at the shipped budget,
-  a 199,999-character note lands whole at width 1 and as 25,000 at width 8. The bound holds — an
-  unclaimed share is wasted, never spent — so this is lost allowance rather than a hole. The shape
-  that would be exact is a trim over the **merged** channel after the superstep, where every real
-  contribution is visible, and it is not free: the exemption that keeps a chemist's own documents
-  out of this budget is `rewritten_command_files` comparing each command against the state
-  *before* it, and a post-merge trim has nothing to compare against, so exact accounting has to buy
-  the channel provenance first.
-  `test_a_chemists_own_file_survives_a_delegation_it_had_nothing_to_do_with` is what a naive
-  version breaks, which makes this a design with an ADR rather than an edit. Anchors:
-  `agent/tool_result_size.py::batch_siblings`, `agent/tool_result_shape.py::rewritten_command_files`.
 
 ## 4 — Operating it
 
@@ -488,29 +471,6 @@ re-proposal a future session can settle in an afternoon and a fabricated number 
    structure string changes. The honest key was a digest of the data already fetched.
 
 ---
-
-## The turn-time comparison cannot diff what the ELN gives structured
-
-- [ ] **The turn-time comparison cannot diff what the ELN gives structured** (issue #490) — [M].
-      On a prose-only ELN the *mined* `optimization-campaign` note produces excellent condition deltas —
-      `solvent DMF → 2-MeTHF`, `reagent cesium carbonate → potassium carbonate` — because
-      `memory.progression.changes_between` reads the species set of each role off `OrdReaction.inputs`.
-      The **turn-time** comparison cannot: `agent.condense._changes` diffs `ProcessConditions` plus the
-      solvent its prose reader extracted, and `reaction_records` keeps `reaction_id, body,
-      compound_smiles, project, performed_at, conditions, source` — the component list survives only as
-      prose inside `body`. So on the one schema where the components are the *most* reliable thing the
-      source provides, the artifact a chemist is answered with in the turn is the one that cannot use them.
-
-      Measured (`D-2026-08-26-silence-is-not-a-successful-run`, four runs): the mined note named all three
-      swaps; the turn-time table rendered `—` in every "Changed vs previous" cell.
-
-      Nothing is wrong today — the campaign note is retrievable, `experiment-progression` already starts
-      from it, and the two artifacts together answer the question. What is unresolved is whether the
-      deterministic delta should be available without a mining pass. The cheap shape is a column on
-      `reaction_records` carrying the per-role canonical species sets (a projection, not the charge list,
-      so it stays a serving copy rather than a second record); the expensive one is handing `Protocol` a
-      component list, which `agent.condense` deliberately does not have because a share document has none.
-      Wants its own ADR and a measurement of what the extra column costs on a real corpus.
 
 ## Everything else
 

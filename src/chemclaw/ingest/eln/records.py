@@ -43,6 +43,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
+from chemclaw.ingest.eln.ord import RoleSpecies
 from chemclaw.kg.note import ProcessConditions, require_note_slug
 
 logger = logging.getLogger(__name__)
@@ -158,13 +159,14 @@ def _one_of(reaction_id: str, found: Sequence[tuple[str, "ReactionRecord"]]) -> 
 
 # The columns an ingest writes, which is also everything a read selects.
 _COLUMNS = (
-    "reaction_id, body, compound_smiles, project, performed_at, conditions, source, retracted_at"
+    "reaction_id, body, compound_smiles, project, performed_at, conditions, source, retracted_at, "
+    "species"
 )
 
 _UPSERT = f"""
 INSERT INTO reaction_records (ingest_source, {_COLUMNS})
 VALUES (%(ingest_source)s, %(reaction_id)s, %(body)s, %(compound_smiles)s, %(project)s,
-        %(performed_at)s, %(conditions)s, %(source)s, %(retracted_at)s)
+        %(performed_at)s, %(conditions)s, %(source)s, %(retracted_at)s, %(species)s)
 ON CONFLICT (ingest_source, reaction_id) DO UPDATE SET
     -- Every field is refreshed, because an ELN amends an entry *in place*: a yield corrected after
     -- assay, an impurity added, a retraction. The old note path compared bodies to notice that and
@@ -181,6 +183,7 @@ ON CONFLICT (ingest_source, reaction_id) DO UPDATE SET
     -- would make a retraction permanent on a tier whose whole rule is that the row is what the
     -- source last said.
     retracted_at = EXCLUDED.retracted_at,
+    species = EXCLUDED.species,
     last_seen = now()
 """
 
@@ -236,6 +239,12 @@ class ReactionRecord(BaseModel):
     # Set from `RawEntry.retracted_at`, never inferred from absence
     # (`D-2026-09-13-a-withdrawal-is-a-fact-a-source-reports`, and `infra/sql/066`).
     retracted_at: datetime | None = None
+    # Each compared role's canonical structures (`ingest.eln.ord.RoleSpecies`), so the turn-time
+    # comparison can diff what the source gave structured without the component list it rendered
+    # into `body` (`D-2026-10-01-the-turn-time-comparison-reads-the-species-the-row-keeps`).
+    # `None` is "no projection stored" — a row written before `infra/sql/111` — and is skipped by
+    # every comparison; it is never the same claim as four empty roles.
+    species: RoleSpecies | None = None
 
     @field_validator("reaction_id")
     @classmethod
@@ -515,6 +524,9 @@ class PostgresReactionRecordStore:
                             else None,
                             "source": item.source,
                             "retracted_at": item.retracted_at,
+                            "species": Jsonb(item.species.model_dump())
+                            if item.species is not None
+                            else None,
                         }
                         for item in records
                     ],
@@ -694,6 +706,10 @@ def _record(row: tuple[Any, ...]) -> ReactionRecord:
         conditions=_stored_conditions(row[0], row[5]),
         source=row[6],
         retracted_at=row[7],
+        # Validated rather than trusted, and unknown keys dropped by `RoleSpecies`' default rather
+        # than refused — the rolling-upgrade argument `_stored_conditions` makes, for a role a
+        # newer build may add.
+        species=RoleSpecies.model_validate(row[8]) if row[8] is not None else None,
     )
 
 

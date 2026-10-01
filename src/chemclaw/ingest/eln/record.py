@@ -114,6 +114,11 @@ def record_from_ord_reaction(reaction: OrdReaction) -> ReactionRecord:
         # (D-2026-08-25), so these ride on it and there is still exactly one place a run's numbers
         # live. What it rejected was a store *just* for conditions, which this is not.
         conditions=_conditions(reaction),
+        # Each compared role's structures, so the turn-time comparison diffs the same sets the
+        # mined campaign note does (`memory.progression.changes_between`) instead of only what a
+        # model can read back out of `body`. A projection, not the charge sheet: `RoleSpecies`
+        # says why amounts and order stay in the body alone.
+        species=reaction.role_species(),
         body=body,
     )
 
