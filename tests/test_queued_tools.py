@@ -21,6 +21,7 @@ import threading
 from contextlib import AsyncExitStack
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import AsyncMock
 
 import pytest
 from mcp.server.fastmcp import FastMCP
@@ -462,6 +463,8 @@ def test_a_waiting_call_says_it_is_queued_and_then_that_it_runs(
         lambda tool, job_id, state, waiting: reported.append((tool, job_id, state, waiting)),
     )
     monkeypatch.setattr("chemclaw.core.config.settings.queued_tool_progress_seconds", 0.3)
+    monkeypatch.setattr("chemclaw.connectors.queued._STATS_UNSUPPORTED", False)
+    monkeypatch.setattr("chemclaw.connectors.queued._BACKLOG", {})
 
     async def body(client: Any) -> CallToolResult:
         _bind_turn(monkeypatch, client)
@@ -484,7 +487,51 @@ def test_a_waiting_call_says_it_is_queued_and_then_that_it_runs(
     assert states[:1] == ["queued"], reported
     assert states[-1] == "running", reported
     counts = [n for _t, job_id, state, n in reported if job_id == waiting_id and state == "queued"]
-    assert all(n is None or n >= 0 for n in counts)
+    # The test server reports task-queue stats, so a count must arrive: an always-`None` read
+    # would pass a weaker assertion and leave every card without one.
+    assert counts and all(isinstance(n, int) and n >= 0 for n in counts), reported
+
+
+class _Description:
+    """A `describe()` answer carrying only the pending activities `_progress` reads."""
+
+    def __init__(self, *states: int) -> None:
+        self.raw_description = SimpleNamespace(
+            pending_activities=[SimpleNamespace(state=s) for s in states]
+        )
+
+
+def test_progress_says_nothing_when_no_activity_is_pending(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Between a finished activity and the closed run, a running call must not read "queued"."""
+    from chemclaw.connectors import queued
+
+    handle = SimpleNamespace(id="q", describe=AsyncMock(return_value=_Description()))
+    client = SimpleNamespace(workflow_service=SimpleNamespace(describe_task_queue=AsyncMock()))
+    assert asyncio.run(queued._progress(client, handle, _CONNECTOR, 1.0)) is None  # type: ignore[arg-type]
+    client.workflow_service.describe_task_queue.assert_not_called()
+
+
+def test_a_broker_without_stats_is_asked_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A server that answers without stats (1.25.2) is not asked again on every tick."""
+    from temporalio.api.enums.v1 import PendingActivityState
+    from temporalio.api.workflowservice.v1 import DescribeTaskQueueResponse
+
+    from chemclaw.connectors import queued
+
+    monkeypatch.setattr(queued, "_STATS_UNSUPPORTED", False)
+    monkeypatch.setattr(queued, "_BACKLOG", {})
+    scheduled = PendingActivityState.PENDING_ACTIVITY_STATE_SCHEDULED
+    handle = SimpleNamespace(id="q", describe=AsyncMock(return_value=_Description(scheduled)))
+    ask = AsyncMock(return_value=DescribeTaskQueueResponse())
+    client = SimpleNamespace(
+        namespace="default", workflow_service=SimpleNamespace(describe_task_queue=ask)
+    )
+
+    async def twice() -> list[Any]:
+        return [await queued._progress(client, handle, _CONNECTOR, 1.0) for _ in range(2)]  # type: ignore[arg-type]
+
+    assert asyncio.run(twice()) == [("queued", None), ("queued", None)]
+    assert ask.await_count == 1
 
 
 def test_a_queued_signal_becomes_a_tool_queued_event() -> None:
