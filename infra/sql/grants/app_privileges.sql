@@ -216,7 +216,7 @@ BEGIN
     -- go by cascade behind their session's ownership row, which needs no grant of its own.
     EXECUTE format('GRANT INSERT, DELETE ON session_members TO %I', app_role);
     EXECUTE format('GRANT INSERT, UPDATE, DELETE ON plan_authors TO %I', app_role);
-    -- `session_turn_queue` (`111_session_turn_queue.sql`) takes all three, each for one write: a
+    -- `session_turn_queue` (`113_session_turn_queue.sql`) takes all three, each for one write: a
     -- sender joins the line (INSERT), a waiter refreshes its lease each time it asks for its place
     -- (UPDATE), and a ticket leaves when it runs, is withdrawn, lapses or its sender is erased
     -- (DELETE). A session's whole line also goes by cascade behind its ownership row.

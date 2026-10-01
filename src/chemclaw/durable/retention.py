@@ -511,7 +511,7 @@ _NOT_PRUNED: dict[str, str] = {
     "session's ownership row as `session_members` does and for the same reason",
     "session_turn_queue": "a lease per waiting message, deleted when it runs; a lapsed one is "
     "swept by the next enqueue on its session, and the whole line cascades from the session's "
-    "ownership row (`infra/sql/111_session_turn_queue.sql`) — never on a clock of its own, "
+    "ownership row (`infra/sql/113_session_turn_queue.sql`) — never on a clock of its own, "
     "because a live row is a person waiting",
     "audit_anchors": "retired with the audit hash chain; nothing writes it and the table is empty",
     "store_vectors": "not created in this deployment — the memory store is built without an "

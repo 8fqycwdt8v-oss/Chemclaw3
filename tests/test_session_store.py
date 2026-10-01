@@ -810,7 +810,7 @@ def test_deleting_a_session_clears_every_table_it_reaches_and_no_one_elses() -> 
                         "VALUES (%s, 'plan', 'member')",
                         (session_id,),
                     )
-                    # A waiting message's place in line (`infra/sql/111_session_turn_queue.sql`).
+                    # A waiting message's place in line (`infra/sql/113_session_turn_queue.sql`).
                     await cur.execute(
                         "INSERT INTO session_turn_queue (session_id, sender, lease_until) "
                         "VALUES (%s, 'member', now() + interval '1 minute')",

@@ -20,7 +20,7 @@ therefore delays the queue by at most one lease, exactly as it delays the sessio
 
 **Two backends, chosen as `session_members` chooses one**: durable where sessions are durable (two
 replicas share one session, so they must share one order), process-lifetime where they are not.
-The durable rows cascade from `session_owners` (`infra/sql/111_session_turn_queue.sql`), so deleting
+The durable rows cascade from `session_owners` (`infra/sql/113_session_turn_queue.sql`), so deleting
 a session, the retention sweep and an owner's erasure take its queue with it — which a waiter
 notices on its next poll as its ticket being gone.
 """

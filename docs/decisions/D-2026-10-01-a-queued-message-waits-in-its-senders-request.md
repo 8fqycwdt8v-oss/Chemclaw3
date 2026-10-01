@@ -27,7 +27,7 @@ conversation layer's own stores.
 
 ### 1. The line's *order* is in Postgres; the *message* stays in its sender's request
 
-`session_turn_queue` (migration 111, `agent/session_queue.py`) holds, per waiting message, a session,
+`session_turn_queue` (migration 113, `agent/session_queue.py`) holds, per waiting message, a session,
 a sender, an identity-column ticket and a lease — **no text and no roles**. The waiting happens in the
 sender's own `POST /sessions/{id}/messages`: its stream reports `queued` with the ticket and the
 place, and when the ticket is at the head and the session's two existing claims (the in-process slot

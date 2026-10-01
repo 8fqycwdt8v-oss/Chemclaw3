@@ -137,7 +137,7 @@ def test_the_reachability_guard_names_every_session_scoped_erasure_table() -> No
         # outlive it and have nothing to guard.
         "session_members",
         "plan_authors",
-        # Cascades the same way (`infra/sql/111_session_turn_queue.sql`).
+        # Cascades the same way (`infra/sql/113_session_turn_queue.sql`).
         "session_turn_queue",
     }
     assert set(_SESSION_SCOPED_ROWS) == expected, (
