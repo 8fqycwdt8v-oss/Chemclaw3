@@ -14,7 +14,7 @@ import time
 import urllib.request
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from typing import Any
 
 import jwt
@@ -761,3 +761,120 @@ def test_entra_required_exposed_boots_without_warning(
 # because `create_app` was its only caller, which is exactly the defect that ADR closes: the
 # refusal now has to hold in the background worker and the mcp face as well, and a test that can
 # only reach it through `create_app` cannot say so.
+
+
+@contextmanager
+def _counting_jwks_server(
+    status: int, body: str, delay: float = 0.0
+) -> Iterator[tuple[str, list[str]]]:
+    """`_jwks_server`, counting every request it answers and optionally slow to answer.
+
+    The subject of the tests below is how many fetches reach the tenant, so the count is taken where
+    the fetch lands rather than inferred from the client — a client that coalesced only in its own
+    bookkeeping would pass a count taken there.
+    """
+    hits: list[str] = []
+    lock = threading.Lock()
+
+    class _Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.0"
+
+        def do_GET(self) -> None:
+            with lock:
+                hits.append(self.path)
+            time.sleep(delay)
+            payload = body.encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *args: Any) -> None:
+            """Silence the handler's stderr logging."""
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}/keys", hits
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+@pytest.mark.parametrize(
+    ("name", "status", "body"),
+    [
+        ("the IdP is failing", 500, "{}"),
+        # PyJWT >= 2.15 refuses this inside the cache `put`, before storing anything: the shape
+        # the post-merge audit of #494 found asked for again on every request.
+        ("the IdP answers 200 with something that is not a key set", 200, '{"error": "nope"}'),
+    ],
+)
+def test_a_failed_fetch_is_remembered_rather_than_repeated_per_request(
+    monkeypatch: pytest.MonkeyPatch, name: str, status: int, body: str
+) -> None:
+    """During an IdP fault, a crowd of requests costs one fetch per backoff window, not one each.
+
+    A key set is cached only when it parses, so before this every request carrying any `kid` —
+    unauthenticated ones included — paid its own outbound fetch while the tenant was failing:
+    measured, 20 requests, 20 fetches, every one a 503. Each answer must still be the 503.
+    """
+    monkeypatch.setattr(settings, "entra_jwks_failure_backoff_seconds", 60.0)
+    with _counting_jwks_server(status, body) as (url, hits):
+        client = auth._HttpxJwkClient(url, timeout=5.0)
+        for _ in range(20):
+            with pytest.raises(auth.IdentityProviderUnavailable):
+                client.fetch_data()
+    assert len(hits) == 1, f"{name}: {len(hits)} fetches reached the tenant for 20 requests"
+
+
+def test_a_remembered_failure_is_asked_about_again_once_the_backoff_passes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The memory is a window, not a verdict: a recovered IdP is noticed after it."""
+    monkeypatch.setattr(settings, "entra_jwks_failure_backoff_seconds", 0.05)
+    with _counting_jwks_server(500, "{}") as (url, hits):
+        client = auth._HttpxJwkClient(url, timeout=5.0)
+        with pytest.raises(auth.IdentityProviderUnavailable):
+            client.fetch_data()
+        time.sleep(0.1)
+        with pytest.raises(auth.IdentityProviderUnavailable):
+            client.fetch_data()
+    assert len(hits) == 2
+
+
+def test_a_backoff_of_zero_turns_the_memory_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`0` is the documented off switch, so a deployment can choose the old behaviour by name."""
+    monkeypatch.setattr(settings, "entra_jwks_failure_backoff_seconds", 0.0)
+    with _counting_jwks_server(500, "{}") as (url, hits):
+        client = auth._HttpxJwkClient(url, timeout=5.0)
+        for _ in range(3):
+            with pytest.raises(auth.IdentityProviderUnavailable):
+                client.fetch_data()
+    assert len(hits) == 3
+
+
+def test_a_crowd_arriving_at_an_expired_cache_pays_one_fetch() -> None:
+    """Concurrent fetches queue behind one, and the ones that waited are answered by it.
+
+    The cache-expiry read in `get_signing_keys` is outside every upstream lock, so sixteen requests
+    landing on an expired key set used to send sixteen fetches to the tenant at once.
+    """
+    key_set = '{"keys": [{"kty": "oct", "kid": "kid-a", "use": "sig", "k": "c2VjcmV0"}]}'
+    with _counting_jwks_server(200, key_set, delay=0.2) as (url, hits):
+        client = auth._HttpxJwkClient(url, timeout=5.0)
+        start = threading.Barrier(16)
+        answers: list[Any] = []
+
+        def ask() -> None:
+            start.wait()
+            answers.append(client.fetch_data())
+
+        threads = [threading.Thread(target=ask) for _ in range(16)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+    assert len(hits) == 1, f"{len(hits)} fetches for one expired key set"
+    assert answers == [json.loads(key_set)] * 16

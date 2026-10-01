@@ -199,17 +199,6 @@ topic).
 
 ## 3 — Work that is lost, dropped or invisible
 
-- [ ] **A failed JWKS fetch is not cached, so every request during an IdP fault pays an outbound
-      fetch** — [S], opened 2026-10-01 by the post-merge audit of PR #494. `api/auth.py`'s
-      `_HttpxJwkClient` caches only a key set that parsed, so while the tenant is unreachable — or,
-      since PyJWT 2.15, answers 200 with a body that is not a key set (`JWKSetCache.put` now raises
-      before storing; 2.13 cached the raw dict for the cache lifespan) — every request carrying any
-      `kid`, an unauthenticated one included, triggers a fetch. Measured: 20 requests, 20 fetches,
-      every one a 503. `_forced_refresh_allowed` bounds only the *unknown-kid* path, and it is an
-      unlocked check-then-set; the cache-expiry fetch in `get_signing_keys` is outside any lock too.
-      The candidates are a short negative cache on a failed fetch, and one lock around both refresh
-      paths. Anchors: `api/auth.py::_HttpxJwkClient.fetch_data`, `api/auth.py::_signing_key`,
-      `api/auth.py::_forced_refresh_allowed`.
 - [ ] **The helper file budget is charged to siblings that wrote nothing** (issue #463, #489) — [M],
   opened by `D-2026-09-18-a-pre-batch-snapshot-cannot-see-its-own-superstep`; its other half, the
   two write verbs nothing bounded, is closed by
