@@ -216,8 +216,17 @@ def _client_for(endpoint: str) -> PyJWKClient:
     """
     client = _jwks_clients.get(endpoint)
     if client is None:
+        # `cooldown_duration=0`: PyJWT 2.15 added a refresh cooldown of its own (30 s by default)
+        # inside `get_signing_key`, which stacked on `_forced_refresh_allowed` — so a rotated key
+        # waited for both, and `entra_jwks_refresh_cooldown_seconds` stopped being the number that
+        # decides rotation latency. Ours is per endpoint and checked before this call, so upstream's
+        # is turned off and there is one control. `tests/test_entra_end_to_end.py::
+        # test_a_rotated_signing_key_is_picked_up_after_the_cooldown` is what caught it.
         client = _jwks_clients.setdefault(
-            endpoint, _HttpxJwkClient(endpoint, timeout=settings.entra_http_timeout_seconds)
+            endpoint,
+            _HttpxJwkClient(
+                endpoint, timeout=settings.entra_http_timeout_seconds, cooldown_duration=0
+            ),
         )
     return client
 

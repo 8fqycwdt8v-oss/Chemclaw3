@@ -334,14 +334,19 @@ def _token_with_kid(rsa_key: Any, kid: str) -> str:
 
 
 def test_jwks_client_uses_the_configured_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The JWKS client is bounded by `entra_http_timeout_seconds`, not PyJWT's 30s default."""
+    """The JWKS client is bounded by `entra_http_timeout_seconds`, not PyJWT's 30s default.
+
+    And PyJWT's own refresh cooldown is off (`cooldown_duration=0`), so the one rotation delay is
+    `entra_jwks_refresh_cooldown_seconds` rather than both stacked.
+    """
     captured: dict[str, object] = {}
 
     class _RecordingClient(_CountingJwksClient):
-        def __init__(self, endpoint: str, *, timeout: float) -> None:
+        def __init__(self, endpoint: str, *, timeout: float, cooldown_duration: float) -> None:
             super().__init__(endpoint, timeout=timeout)
             captured["endpoint"] = endpoint
             captured["timeout"] = timeout
+            captured["cooldown_duration"] = cooldown_duration
 
     monkeypatch.setattr(settings, "entra_tenant_id", "tid-1")
     monkeypatch.setattr(settings, "entra_http_timeout_seconds", 7.5)
@@ -351,6 +356,7 @@ def test_jwks_client_uses_the_configured_timeout(monkeypatch: pytest.MonkeyPatch
     rsa_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     assert _REAL_SIGNING_KEY(_token_with_kid(rsa_key, "known-kid")) == "the-key"
     assert captured["timeout"] == 7.5
+    assert captured["cooldown_duration"] == 0
     assert captured["endpoint"] == settings.entra_jwks_endpoint
 
 
