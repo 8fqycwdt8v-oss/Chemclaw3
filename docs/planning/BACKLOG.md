@@ -320,17 +320,18 @@ only holds defects can only ever restore the system to what it already intended 
       argument contract still reaches the right tool is a `make live-ab` question, not a reading
       question.
 
-- [ ] **About a third of tools still rest on one probe, and they are the compute and job tail** (issue #487)
-      — [S], narrowed 2026-09-24. Derived from `tests/test_probe_coverage.py::_probes` and
-      `::_expected_tools` with `load_profiles()` called first (two earlier measurements disagreed
-      on exactly that): 47 of 124 tools had one probe. The seven whose effect persists past the turn
-      — preferences, watches, skill proposals, plate observations, the results store, the knowledge
-      graph, a saved workflow — now have a second phrasing (ws-21..24, pt-08, du-11, du-12). What
-      remains is the semiempirical and prediction surface (`run_*`, `compute_*`, `enumerate_*`,
-      `predict_*`), where a missed call costs a re-run rather than a state change. It is **not** a
-      ratchet on the count, for the reason it never was: that taxes adding a tool rather than
-      bounding risk. Choose the next second questions by what a deployment calls —
-      `audit_events` per tool name — once one exists to read.
+- [ ] **The enumeration and scan tail still rests on one probe per tool** — [S], narrowed
+      2026-10-01. Counted from every probe's `expects_tools` in `data/evals/probes/`: 26 tool names
+      have exactly one probe. The seven whose effect persists past the turn have a second phrasing
+      (ws-21..24, pt-08, du-11, du-12), and so does every `run_*`, `compute_*` and `predict_*` tool
+      that had one (ms-22..29, ws-25..26, an-38..40, gr-37, pr-07..08, op-35). What remains is the
+      `enumerate_*` family, the scans (`scan_coordinate`, `profile_rotation`), `optimize_geometry`,
+      `rank_species_across_solvents`, and a scatter of single tools elsewhere, where a missed
+      call costs a re-run rather than a state change. It is **not** a ratchet on the count, for
+      the reason it never was: that taxes adding a tool rather than bounding risk. Choose the next
+      second questions by what a deployment calls — `audit_events` per tool name — once one exists
+      to read; none does yet, which is why the last batch covered a whole prefix family rather
+      than a ranked few.
 
 - [ ] **A shared session serialises by refusing and streams to one reader** (issue #488) — [M]. What is left of
       the multi-human-session work after `D-2026-09-27-in-a-shared-session-the-sender-governs`

@@ -879,3 +879,33 @@ probes:
       blocker and the design is not draftable until the chemist's precedent goes in. Naming the
       parameters that turned out to be the same in every run as *setpoints* rather than factors is
       the mark of an answer that read what came back instead of paraphrasing it.
+
+  # Second phrasing for the surrogate query, which rested on one probe (issue #487).
+
+  - id: op-35
+    section: 3
+    persona: lab_technician
+    bucket: A
+    question: |-
+      Eight runs on the Buchwald amination so far (temperature and base equivalents, everything
+      else fixed):
+
+        60 C / 1.2 eq -> 41%     80 C / 1.2 eq -> 58%
+        60 C / 2.0 eq -> 47%     80 C / 2.0 eq -> 66%
+        70 C / 1.6 eq -> 55%     90 C / 1.6 eq -> 69%
+        90 C / 2.0 eq -> 71%     70 C / 2.0 eq -> 60%
+
+      The leader wants to know what we would get at 100 C and 2.4 eq before we commit material.
+      What does the model expect there, and how sure is it?
+    expects_tools: [predict_outcome]
+    forbids_claims:
+      - "a predicted yield presented without its uncertainty"
+      - "the predicted point presented as the optimizer's recommendation"
+      - "a prediction outside the explored ranges presented as interpolation"
+    direction: >-
+      A named point, not a request for the next experiment, so the surrogate query is the tool
+      and a suggestion is the wrong answer. A good answer reports the predicted mean with its
+      standard deviation, and says plainly that 100 C and 2.4 eq lie outside every run so far — the
+      model is extrapolating, and the wider uncertainty is the honest part of the number. It may
+      offer to compare against a point among the runs, and closes on whether the prediction is
+      informative enough to justify the material, not on a yield promise.
