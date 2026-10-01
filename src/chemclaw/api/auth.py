@@ -16,6 +16,7 @@ apply here — this is a user-scoped resource access, so it is fully Entra-scope
 
 import asyncio
 import logging
+import threading
 import time
 from typing import Annotated, Any
 
@@ -119,7 +120,56 @@ class _HttpxJwkClient(PyJWKClient):
     "a bundle" one decision about CAs instead of two.
     """
 
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Upstream's client, plus the lock and the memory that make one fetch serve a crowd.
+
+        **Every fetch of one client is serialised, and a caller that waited is answered by the
+        fetch it waited behind.** The validation pool runs `fetch_data` concurrently from two
+        paths — the cache-expiry read in `get_signing_keys`, which no lock upstream covers, and the
+        forced refresh `_signing_key` grants — so an expiry under load, or two unknown-`kid` tokens
+        racing the cooldown gate, each paid a fetch. And a failure is remembered for
+        `entra_jwks_failure_backoff_seconds`: a key set is cached only when it parses, so an IdP
+        fault was otherwise one outbound fetch per request, unauthenticated requests included.
+        """
+        super().__init__(*args, **kwargs)
+        self._fetch_lock = threading.Lock()
+        # When the last fetch finished, and what it yielded: the key set, or the 503 it raised.
+        self._fetched_at: float | None = None
+        self._outcome: Any = None
+
     def fetch_data(self) -> Any:
+        """One fetch at a time per client; a caller that waited for one is answered by it.
+
+        A failure is answered for `entra_jwks_failure_backoff_seconds` from memory, as the same
+        `IdentityProviderUnavailable`, without asking the tenant again — `_fetch` below is the
+        fetch itself and its 401/503 split.
+        """
+        asked = time.monotonic()
+        with self._fetch_lock:
+            outcome, fetched_at = self._outcome, self._fetched_at
+            if fetched_at is not None:
+                # A fetch finished while this caller queued: its answer is this caller's too.
+                waited_behind_one = fetched_at >= asked
+                failing = isinstance(outcome, IdentityProviderUnavailable)
+                backing_off = failing and (
+                    time.monotonic() - fetched_at < settings.entra_jwks_failure_backoff_seconds
+                )
+                if waited_behind_one or backing_off:
+                    if failing:
+                        # A fresh instance: re-raising the stored one would grow its traceback
+                        # by a frame on every request it answered.
+                        raise IdentityProviderUnavailable(str(outcome)) from outcome
+                    return outcome
+            try:
+                outcome = self._fetch()
+            except IdentityProviderUnavailable as unavailable:
+                outcome = unavailable
+            self._outcome, self._fetched_at = outcome, time.monotonic()
+            if isinstance(outcome, IdentityProviderUnavailable):
+                raise outcome
+            return outcome
+
+    def _fetch(self) -> Any:
         """The tenant's key set, fetched off the environment's proxy and mapped onto our split.
 
         **The 401/503 split is decided here, at the raise**, because this is the frame that knows
@@ -184,7 +234,13 @@ class _HttpxJwkClient(PyJWKClient):
         except ValueError as exc:
             raise IdentityProviderUnavailable(f"tenant JWKS unusable: {exc}") from exc
         if self.jwk_set_cache is not None:
-            self.jwk_set_cache.put(jwk_set)
+            try:
+                self.jwk_set_cache.put(jwk_set)
+            except (jwt.PyJWTError, ValueError) as exc:
+                # PyJWT >= 2.15 parses inside `put` and raises before storing, so a 200 that is not
+                # a key set reached `_signing_key` uncached and was asked for again on the next
+                # request. Raised here as the fetch failure it is, so `fetch_data` remembers it.
+                raise IdentityProviderUnavailable(f"tenant JWKS unusable: {exc}") from exc
         return jwk_set
 
 
@@ -198,6 +254,7 @@ _jwks_clients: dict[str, PyJWKClient] = {}
 # retries with `refresh=True` whenever the `kid` is absent from the cached set, and the `kid` comes
 # from an unauthenticated caller's token header. That made one credential-less request cost one
 # outbound fetch to the tenant IdP, and stalled the shared validation thread pool while it ran.
+_forced_refresh_lock = threading.Lock()
 _last_forced_refresh: dict[str, float] = {}
 
 
@@ -250,10 +307,14 @@ def _forced_refresh_allowed(endpoint: str, now: float) -> bool:
     Records the attempt when it grants one, so the *first* caller to hit a genuinely rotated key
     pays the fetch and every later caller reads the refreshed cache.
     """
-    last = _last_forced_refresh.get(endpoint)
-    if last is not None and now - last < settings.entra_jwks_refresh_cooldown_seconds:
-        return False
-    _last_forced_refresh[endpoint] = now
+    # Locked, because the validation pool runs this concurrently and a check-then-set would grant
+    # two callers the same refresh. The fetch they would both make is also coalesced by the
+    # client's own lock, so this is about the gate saying what it means rather than about cost.
+    with _forced_refresh_lock:
+        last = _last_forced_refresh.get(endpoint)
+        if last is not None and now - last < settings.entra_jwks_refresh_cooldown_seconds:
+            return False
+        _last_forced_refresh[endpoint] = now
     return True
 
 
