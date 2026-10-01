@@ -4,8 +4,8 @@ description: >-
   How to answer any open-ended process-R&D question — about any output (yield, purity,
   impurities), any process detail or observation, or general protocol guidance — by
   composing this deployment's own records and tools (there is no literature index), and how
-  to draft new conditions/protocols grounded in that evidence. Cite everything, separate evidence from analogy, and route anything new
-  into the knowledge graph.
+  to draft new conditions/protocols grounded in that evidence. Cite everything, separate
+  evidence from analogy, and route anything new into the knowledge graph.
 tools:
   - gather_evidence
   - find_notes
@@ -33,9 +33,10 @@ chemistry when that is what answers the question.
 
 **There is no literature index behind this skill.** `gather_evidence` sweeps this deployment's
 own records: the knowledge graph, the ELN, and whatever further sources the deployment has
-enabled — a mounted document share, or a licensed patent-reaction corpus if one was loaded. No
-journal articles, abstracts, DOIs or citation databases are searchable, and the system makes no
-outbound call to find them. So:
+enabled — a mounted document share, a vendored reference table, or a licensed patent-reaction
+corpus if one was loaded. No literature database, abstract index or citation graph is
+searchable, and the system makes no outbound call to find one; a paper is found only if someone
+filed it on a mounted share. So:
 
 - **Never say or imply that you searched the literature.** "Nothing on file" is a statement about
   this organisation's records; it is not "no precedent exists". Say which it is.
@@ -145,7 +146,7 @@ untried substrate):
 
 ## Keep integrations dumb, reason here
 
-Data sources (ELN, ORD, and any analytical or literature feed a deployment later mounts — none
-ships today) only map their content into the canonical schema and the graph. All the intelligence — which sources to combine, how to weigh
-them, what to generate — is this loop. If a needed source is missing, that is a new retriever
+Data sources (ELN, ORD, and any analytical or literature feed a deployment later mounts — no
+literature feed ships today) only map their content into the canonical schema and the graph. All
+the intelligence — which sources to combine, how to weigh them, what to generate — is this loop. If a needed source is missing, that is a new retriever
 behind the one contract, not a special case in the answer.
