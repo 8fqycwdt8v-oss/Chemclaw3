@@ -1386,5 +1386,5 @@ def test_standardize_is_a_fixed_point_on_every_molecule_of_the_mock_seed() -> No
                         written.update(cell.split("."))
     parsed = sorted(s for s in written if Chem.MolFromSmiles(s) is not None)
     assert any("[Fe]" in s for s in parsed), "the seed no longer carries a ferrocene to test"
-    failures = [reason for s in parsed if (reason := _not_a_fixed_point(s))]
+    failures = [why for s in parsed if (why := _not_a_fixed_point(s))]
     assert not failures, "\n".join(failures)

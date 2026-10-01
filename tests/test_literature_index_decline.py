@@ -1,4 +1,4 @@
-"""The trigger of `D-2026-09-27-a-literature-index-waits-for-a-corpus-and-a-licence`, made executable.
+"""The trigger of `D-2026-09-27-a-literature-index-waits-for-a-corpus-and-a-licence`, executable.
 
 That ADR declines building a literature index and names two conditions that reopen it. One is a
 deployment's own act and no file here can see it. The other is a row in the sibling fleet's
@@ -33,9 +33,9 @@ def test_the_literature_server_is_still_only_proposed() -> None:
         f"reads has moved or been removed, so re-read {_ADR} and re-point the trigger"
     )
     assert found[0] == "proposed", (
-        f"`litsearch` is now {found[0]!r} in {modules}. That is the trigger of {_ADR}: a literature "
-        "index may exist to bind, so the decline and skills/deep-research/SKILL.md's statement "
-        "that there is no literature index both need revisiting"
+        f"`litsearch` is now {found[0]!r} in {modules}. That is the trigger of {_ADR}: a "
+        "literature index may exist to bind, so the decline and the statement in "
+        "skills/deep-research/SKILL.md that there is no literature index both need revisiting"
     )
 
 

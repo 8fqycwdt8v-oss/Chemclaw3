@@ -49,9 +49,11 @@ What ships instead is the honest half:
   reference or DOI invented for it; a patent-reaction hit is precedent from elsewhere and named as
   such. Its description says "this deployment's own records and tools (there is no literature
   index)" instead of "every data source".
-- `gather_evidence`'s docstring — the tool description the model reads — says the same in two lines:
-  internal means this deployment's own records, and an empty sweep says nothing about what is
-  published.
+- `gather_evidence`'s docstring — the tool description the model reads — says the same in its
+  first line and its empty-result sentence: it searches this deployment's own records, there is no
+  literature index, and "nothing on file" is not "nothing published". Said in place of the old
+  wording rather than beside it, because that schema sits at the per-tool ceiling
+  `tests/test_context_floor.py::test_no_single_tool_schema_dominates_the_floor` holds.
 
 Revisit when: a deployment mounts a licensed literature export as a retrieve source (a
 `datasource.yaml` under `src/chemclaw/ingest/sources/` whose corpus is journal text, the shape

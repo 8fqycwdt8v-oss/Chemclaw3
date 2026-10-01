@@ -339,15 +339,13 @@ async def gather_evidence(
     since: str | None = None,
     until: str | None = None,
 ) -> EvidenceSweepWithRefusals:
-    """Gather cited evidence for a research question from every internal source at once.
-
-    Internal means this deployment's own records. There is no literature index: an empty sweep
-    says nothing about what is published.
+    """Gather cited evidence from this deployment's own records; there is no literature index.
 
     Runs each text source on `query`, and — when an anchor reaction is given — also pulls
     structurally similar past reactions (DRFP). Results are merged and de-duplicated. Empty is a
-    valid answer (nothing on file) and never invented: if every source is unreachable this raises
-    rather than returning empty, so an outage is never reported as an absence.
+    valid answer (nothing on file, not nothing published) and never invented: if every source is
+    unreachable this raises rather than returning empty, so an outage is never reported as an
+    absence.
 
     Args:
         query: The natural-language question or key terms (matched over note id/tags/body).
