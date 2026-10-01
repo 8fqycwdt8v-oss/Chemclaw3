@@ -44,7 +44,8 @@ _MEMBERS = "SELECT actor, added_at FROM session_members WHERE session_id = %s OR
 # shows about each. Joined to `session_owners` rather than stored twice: the owner and the title are
 # that row's facts, and a copy here would be a second answer to "whose session is this".
 _SHARED_WITH = (
-    "SELECT m.session_id, o.owner, o.title, m.added_at FROM session_members m "
+    "SELECT m.session_id, o.owner, o.title, m.added_at, o.updated_at, o.profile "
+    "FROM session_members m "
     "JOIN session_owners o ON o.session_id = m.session_id "
     "WHERE m.actor = %s ORDER BY m.added_at DESC"
 )
@@ -60,14 +61,18 @@ class Member(NamedTuple):
 class SharedSession(NamedTuple):
     """A session somebody else owns that the caller is a member of.
 
-    `owner` and `title` are `None` under the in-process backend, which keeps memberships and nothing
-    else; the durable one reads both off the session's ownership row.
+    `owner`, `title`, `updated_at` and `profile` are `None` under the in-process backend, which
+    keeps memberships and nothing else; the durable one reads them off the session's ownership row.
+    The last two are what `GET /plans/pending` needs to fold a member's sessions into the same scan
+    as the caller's own: the order it reads plans in, and whether a plan can be waiting at all.
     """
 
     session_id: str
     owner: str | None
     title: str | None
     added_at: datetime
+    updated_at: datetime | None = None
+    profile: str | None = None
 
 
 class MemberStore(Protocol):
@@ -141,7 +146,7 @@ class SessionMemberStore:
             async with conn.cursor() as cur:
                 await cur.execute(_SHARED_WITH, (actor,))
                 return [
-                    SharedSession(str(row[0]), row[1], row[2], row[3])
+                    SharedSession(str(row[0]), row[1], row[2], row[3], row[4], row[5])
                     for row in await cur.fetchall()
                 ]
 

@@ -810,6 +810,12 @@ def test_deleting_a_session_clears_every_table_it_reaches_and_no_one_elses() -> 
                         "VALUES (%s, 'plan', 'member')",
                         (session_id,),
                     )
+                    # A waiting message's place in line (`infra/sql/113_session_turn_queue.sql`).
+                    await cur.execute(
+                        "INSERT INTO session_turn_queue (session_id, sender, lease_until) "
+                        "VALUES (%s, 'member', now() + interval '1 minute')",
+                        (session_id,),
+                    )
                 await conn.commit()
             await SessionTurnClaims().claim(session_id, f"holder-{session_id}", 60)
             # One result only this session has, and one both of them do — the same bytes under the
@@ -855,6 +861,7 @@ def test_deleting_a_session_clears_every_table_it_reaches_and_no_one_elses() -> 
         "session_turns",
         "session_members",
         "plan_authors",
+        "session_turn_queue",
         "session_owners",
     ):
         assert removed[table] == 1, f"{table} kept a deleted session's row: {removed}"

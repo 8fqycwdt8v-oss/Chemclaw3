@@ -128,6 +128,34 @@ class SharedSessionSummary(BaseModel):
     added_at: datetime
 
 
+class QueuedMessageOut(BaseModel):
+    """One message waiting in a session's line — `GET /sessions/{id}/queue`.
+
+    No text: the line holds the order and never the message
+    (`D-2026-10-01-a-queued-message-waits-in-its-senders-request`), which lives in the sender's own
+    waiting request until it runs. `position` is how many are ahead (0 = next); `mine` is whether
+    the caller sent it — the one they may withdraw with `DELETE /sessions/{id}/queue/{ticket}`,
+    beside the owner, who may withdraw any.
+    """
+
+    ticket: int
+    sender: str
+    enqueued_at: datetime
+    position: int
+    mine: bool
+
+
+class SessionQueueOut(BaseModel):
+    """A session's line, first in line first, and whether a turn is running ahead of it here.
+
+    `running` is this replica's view: the turn's pump lives in one process, so another replica
+    answers `false` for a turn it cannot see — the same scope `POST /sessions/{id}/turn/stop` has.
+    """
+
+    running: bool
+    waiting: list[QueuedMessageOut]
+
+
 class TranscriptToolCall(BaseModel):
     """One tool the agent invoked during a turn, as the transcript remembers it.
 

@@ -79,6 +79,24 @@ class ServiceSettings(BaseSettings):
     # delay (~10 s under 50 concurrent users) and well below the wall-clock turn timeout, so a
     # crashed worker frees its session in about a minute rather than at the next restart.
     service_turn_claim_lease_seconds: float = Field(default=60.0, gt=0)
+    # How many messages may wait in one session for its running turn to end
+    # (`D-2026-10-01-a-queued-message-waits-in-its-senders-request`). A message sent while another
+    # turn runs joins the session's line instead of being refused, and runs as its own sender's
+    # turn when it reaches the head; past this many the next one is refused 409, as every second
+    # message used to be. Each sender may hold one place per session whatever this is, so the
+    # number bounds the *people* waiting rather than one person's retries. A waiter holds an open
+    # stream for as long as it waits, so this is also a socket bound: the connection backstop in
+    # `core/config/__init__.py` charges it per concurrent turn.
+    service_turn_queue_max: int = Field(default=4, ge=1)
+    # How often a waiting message asks whether it is next. The ask also refreshes its lease (the
+    # turn-claim lease above), so this must stay well under that. In-process a finishing turn wakes
+    # its waiters at once; this interval is what a waiter on *another* replica pays, and what a
+    # shift in its position takes to reach the sender's screen.
+    service_turn_queue_poll_seconds: float = Field(default=1.0, gt=0)
+    # How many participants besides the sender may follow one running turn's live stream at once
+    # (`GET /sessions/{id}/turn/stream`). Each has its own bounded buffer, so a stalled one is cut
+    # off without holding the others; this bounds the memory and the sockets one turn can gather.
+    service_turn_max_watchers: int = Field(default=4, ge=0)
     # Max characters accepted in one chat message at the front door (SEC-4). Bounds the request
     # body at the trust boundary so an oversized POST is a clean 422, not an unbounded
     # allocation. Generous for a real message (~25k tokens); raise it for a workflow that posts

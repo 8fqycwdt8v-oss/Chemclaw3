@@ -316,21 +316,12 @@ only holds defects can only ever restore the system to what it already intended 
       to read; none does yet, which is why the last batch covered a whole prefix family rather
       than a ranked few.
 
-- [ ] **A shared session serialises by refusing and streams to one reader** (issue #488) — [M]. What is left of
-      the multi-human-session work after `D-2026-09-27-in-a-shared-session-the-sender-governs`
-      settled the authority questions and shipped membership (`session_members`, the sender
-      governing each turn, a plan decided only by its author). Three pieces, in dependency order:
-      **a queued turn** — a member's message while another participant's turn runs is refused 409 by
-      `SessionTurnClaims`, which is the right serialisation and the wrong answer; it becomes a
-      bounded wait with a position, and the lease already handles a dead holder. **Reader fan-out** —
-      `api/detach.DetachableTurn` holds one queue and one `_attached` flag, so a second participant
-      reattaching *steals* events rather than seeing a copy; it needs N readers with per-reader
-      backpressure so one stalled browser cannot hold the turn (the bound
-      `service_sse_send_timeout_seconds` sets for one reader). **The plan inbox for members** —
-      `GET /plans/pending` pages the caller's *owned* sessions, so a plan a member's turn wrote in
-      somebody else's session reaches that member only through the in-turn card; it wants the
-      sessions `GET /sessions/shared` lists as well. A chat-room connector is separate work on top
-      and wants all three finished first.
+- [ ] **A chat-room connector over a shared session** — [M]. Its prerequisites are shipped: the
+      sender governs each turn (`D-2026-09-27-in-a-shared-session-the-sender-governs`), and a busy
+      session queues, fans one turn out to every participant and lists members' own plans
+      (`D-2026-10-01-a-queued-message-waits-in-its-senders-request`). What is left is the connector
+      itself, and the UI for the line (`queued.ticket`/`position`, `GET`/`DELETE /sessions/{id}/queue`)
+      and for following a turn (`GET /sessions/{id}/turn/stream`) in `Chemclaw3_ui`.
 
 - [ ] **A routing corpus where the right profile is not inferable from the question's surface**
       — [M]. Seven profiles ship and genuinely narrow (`evidence` reaches zero side-effecting tools,

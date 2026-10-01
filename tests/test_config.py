@@ -842,7 +842,11 @@ def test_an_undeclared_fleet_ceiling_checks_nothing() -> None:
     to start because it can admit eight turns and was allowed none.
     """
     settings = Settings(  # type: ignore[call-arg]
-        _env_file=None, service_fleet_replicas=99, service_max_concurrent_turns=64
+        _env_file=None,
+        service_fleet_replicas=99,
+        service_max_concurrent_turns=64,
+        # Room for 64 turns' sockets, so the connection backstop is not what this test trips.
+        service_max_connections=2048,
     )
     assert settings.service_fleet_max_concurrent_turns == 0
 

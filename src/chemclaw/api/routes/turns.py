@@ -1,7 +1,9 @@
 """The SSE turn stream — the one route with real concurrency machinery, kept in one place.
 
 `POST /sessions/{id}/messages` runs a turn under five guards that must compose exactly: the
-per-session in-process lease and the durable cross-process claim (both 409), the per-actor
+per-session in-process lease and the durable cross-process claim (a busy session is a *line* — the
+message waits in it and runs as its sender when its turn comes, and only a full line is a 409:
+`D-2026-10-01-a-queued-message-waits-in-its-senders-request`), the per-actor
 concurrent-turn cap (429, above the claim — `D-2026-09-19-a-pod-wide-cap-is-not-a-fair-one`), the
 admission semaphore (queued/shed on the open stream, D-166), and the budget (429). A sixth is
 spent before this module is reached at all: `api/rate_limit.py`'s token bucket, inside
@@ -11,6 +13,10 @@ body, principal, lease bookkeeping — is per-request state that exists nowhere 
 frame, so hoisting it would mean re-threading eight arguments to move code that has exactly one
 caller. The app-wide structures it touches are read through `chemclaw.api.state.state(request)`
 at request time, which is the seam that let this route leave `create_app` unchanged (R3.2).
+
+Beside it: the stop route, the session's line (`GET /sessions/{id}/queue`, and `DELETE …/{ticket}`
+to withdraw a waiting message), and `GET /sessions/{id}/turn/stream`, which lets any other
+participant follow the running turn live.
 """
 
 import asyncio
@@ -22,16 +28,18 @@ from collections.abc import AsyncIterator
 
 from fastapi import FastAPI, HTTPException, Request
 from sse_starlette.sse import EventSourceResponse, SendTimeoutError
+from starlette.responses import Response
 from starlette.types import Receive, Scope, Send
 
+from chemclaw.agent.session_queue import QueueRefused, TurnQueue
 from chemclaw.api.auth import DEV_PRINCIPAL_OID
 from chemclaw.api.budget import BudgetExceeded, check_thread_size, refused_metric
-from chemclaw.api.deps import CurrentSession, CurrentUser, require_owner
+from chemclaw.api.deps import CurrentSession, CurrentUser, _resolve_session, require_owner
 from chemclaw.api.detach import DetachableTurn
 from chemclaw.api.events import TURN_EVENT_REF, ErrorEvent, QueuedEvent, sse_frame
 from chemclaw.api.middleware import AT_CAPACITY
 from chemclaw.api.runner import failure_event, run_turn
-from chemclaw.api.schemas import MessageIn, session_title
+from chemclaw.api.schemas import MessageIn, QueuedMessageOut, SessionQueueOut, session_title
 from chemclaw.api.state import (
     SessionTurns,
     TurnLease,
@@ -143,9 +151,18 @@ async def post_message(
     durable claim in `session_turns` answers the case that map cannot see: the shipped chart
     runs two front-door replicas, so the second POST may arrive at a different process
     entirely, and both would otherwise be admitted and interleave their messages into one
-    conversation thread. Both answer 409. The durable half is present only under
-    `session_store="postgres"` — with the in-memory store there is no shared history for two
-    processes to corrupt.
+    conversation thread. The durable half is present only under `session_store="postgres"` — with
+    the in-memory store there is no shared history for two processes to corrupt.
+
+    **Neither answers 409 any more; a busy session is a line**
+    (`D-2026-10-01-a-queued-message-waits-in-its-senders-request`). Several people share a session
+    now, and a second person's question is not a double-submit. A message that finds the session
+    busy takes a ticket (`agent/session_queue`), and *this request* waits in the line: its stream
+    reports `queued` with the ticket and its place, and when the ticket reaches the head it takes
+    both claims exactly as an uncontended turn does — then runs with this request's principal, so
+    it is the sender's turn and nobody else's. The order is the database's admission order of the
+    tickets, and a message never overtakes one already waiting. What is still refused, with 409, is
+    a line that is full or a sender who already has a message in it.
     """
     front = state(request)
     active_turns: dict[str, TurnLease] = front.active_turns
@@ -235,17 +252,41 @@ async def post_message(
             detail="too many concurrent turns for this user; wait for one to finish",
             headers={"Retry-After": _retry_after_hint()},
         )
+    # **A busy session is a line, not a refusal**
+    # (`D-2026-10-01-a-queued-message-waits-in-its-senders-request`). A message that finds another
+    # turn running — here, on another replica, or already somebody waiting — joins the session's
+    # line and this request waits in it; its stream reports the place, and when the ticket reaches
+    # the head and the claims come free the turn runs as *this* principal. So the two claims below
+    # stay the only thing that decides who runs, and a queued message takes them exactly as an
+    # uncontended one does, only later.
+    #
+    # **A message never jumps a line that already exists.** The fast path is taken only when nobody
+    # is waiting; otherwise the message joins behind them even if the claim happens to be free at
+    # this instant, because the head may be one poll away from taking it.
+    queue = front.turn_queue
+    signal = front.queue_signal
+    busy: str | None = "queue" if await queue.waiting(session_id) else None
     # Nothing may sit between this claim and the `try` below — no `await`, and nothing that can
     # raise — because the reservation it takes does not expire until `_start_turn_lease` starts its
     # clock, and until then only that `try`'s `finally` gives it back.
-    slot = _claim_turn_slot(active_turns, session_id, actor=principal.oid)
-    if slot is None:
-        METRICS.increment("chemclaw_turns_conflict_total", labels={"scope": "process"})
-        raise HTTPException(status_code=409, detail="a turn is already running for this session")
-    # The durable claim's identity, for the reason `api/state.claim_holder` gives: keyed by the
-    # *turn*, not by the process, so a teardown arriving after its own lease has lapsed cannot
-    # revoke the successor's claim.
-    holder = claim_holder(slot)
+    slot = None if busy else _claim_turn_slot(active_turns, session_id, actor=principal.oid)
+    if busy is None and slot is None:
+        busy = "process"
+    # Whether this turn holds the durable claim, and under which identity (`api/state.claim_holder`:
+    # keyed by the *turn*, not by the process, so a teardown arriving after its own lease has
+    # lapsed cannot revoke the successor's claim). Set when the claim is taken — here on the fast
+    # path, at dispatch for a message that waited.
+    holder: str | None = None
+    # This message's place in the line, while it has one.
+    ticket: int | None = None
+    # The live session the turn runs on. A message that waited re-resolves it at dispatch: the
+    # handle this request resolved may have been evicted and rehydrated while it waited, and two
+    # handles over one thread diverge (`api/deps._rehydrate_session`).
+    current = live
+    # The turn object, registered as the session's running turn when it starts rather than when it
+    # is created — a waiting message is not the running turn, and registering it early would hand
+    # the stop route and every watcher the wrong one.
+    started: DetachableTurn | None = None
 
     # **The id the header, the audit trail and `turn_costs` are all keyed on.** Read once, here,
     # rather than in the generator: the observability middleware minted it for this request and
@@ -273,16 +314,98 @@ async def post_message(
             permit = False
             semaphore.release()
 
-    async def _turn_events() -> AsyncIterator[dict[str, str]]:
-        # Release the session's turn slot, its durable claim and — unless the detach hook already
-        # did — the admission permit when the *turn* ends: normal completion, error, timeout, or
-        # a stop. Since the pump, that is the turn's true end rather than the reader's, so this is
-        # what keeps the session 409-locked for exactly as long as work is in flight.
-        heartbeat = (
-            None
-            if claims is None
-            else asyncio.create_task(_hold_turn_claim(claims, session_id, lease, holder))
+    def _withdrawn(message: str) -> dict[str, str]:
+        """The frame a waiting message ends on when it will never run."""
+        METRICS.increment("chemclaw_turn_queue_withdrawn_total")
+        return sse_frame(
+            ErrorEvent(
+                message=message,
+                code="queue_cancelled",
+                retryable=False,
+                correlation_id=correlation_id,
+            )
         )
+
+    async def _take_the_turn() -> bool:
+        """At the head of the line: take both claims for this message, or report the turn busy.
+
+        The same two claims the fast path takes, in the same order and under the same rules — the
+        in-process slot first (no `await` between its test and its write), then the durable row —
+        so a queued message cannot run beside a live turn any more than a double-submit could.
+        """
+        nonlocal slot, holder, ticket, started
+        taken = _claim_turn_slot(active_turns, session_id, actor=principal.oid)
+        if taken is None:
+            return False
+        try:
+            if claims is not None and not await claims.claim(
+                session_id, claim_holder(taken), lease
+            ):
+                _release_turn_slot(active_turns, session_id, taken)
+                return False
+        except BaseException:
+            _release_turn_slot(active_turns, session_id, taken)
+            raise
+        slot = taken
+        holder = claim_holder(taken) if claims is not None else None
+        _start_turn_lease(active_turns, session_id, slot)
+        # Out of the line the moment the turn is ours, so the next message becomes the head and
+        # starts asking the claim instead of the queue.
+        if ticket is not None:
+            await _leave_line(queue, session_id, ticket)
+            ticket = None
+        signal.notify()
+        if started is not None:
+            front.running_turns.register(session_id, started)
+        return True
+
+    async def _wait_in_line() -> AsyncIterator[dict[str, str]]:
+        """Wait for this message's turn, reporting its place whenever the place changes.
+
+        Ends in one of two ways: the turn is taken (`slot` is set), or the message is withdrawn —
+        its ticket vanished (its sender or the owner withdrew it, its sender was erased, the
+        session was deleted) or its sender is no longer a participant — and a `queue_cancelled`
+        frame is the last thing yielded.
+
+        **Membership is read again at the head**, because the principal was authorized when the
+        message was *sent* and the turn runs later: an owner who removes a member while their
+        message waits must not have it run anyway. `_resolve_session` is the gate every request
+        passes, re-asked here, and it is also what hands back a live handle current *now*.
+        """
+        nonlocal current, ticket
+        shown: int | None = None
+        while ticket is not None:
+            place = await queue.position(session_id, ticket, lease)
+            if place is None:
+                ticket = None
+                yield _withdrawn("Your message was withdrawn before it ran.")
+                return
+            if place == 0:
+                try:
+                    current = await _resolve_session(request, session_id, principal)
+                except HTTPException:
+                    await _leave_line(queue, session_id, ticket)
+                    ticket = None
+                    signal.notify()
+                    yield _withdrawn(
+                        "Your message did not run: you are no longer a participant in this "
+                        "conversation."
+                    )
+                    return
+                if await _take_the_turn():
+                    return
+            if place != shown:
+                shown = place
+                yield sse_frame(QueuedEvent(ticket=ticket, position=place))
+            await signal.wait(settings.service_turn_queue_poll_seconds)
+
+    async def _turn_events() -> AsyncIterator[dict[str, str]]:
+        # Release the session's turn slot, its durable claim, this message's place in the line and
+        # — unless the detach hook already did — the admission permit when the *turn* ends: normal
+        # completion, error, timeout, or a stop. Since the pump, that is the turn's true end rather
+        # than the reader's, so this is what keeps the session claimed for exactly as long as work
+        # is in flight.
+        heartbeat: asyncio.Task[None] | None = None
         nonlocal permit
         # **The turn, not its error events** (M7). This used to be one increment per `error` event
         # inside the loop below, and `runner.py` can yield *two* for one turn: the loop cap and the
@@ -294,6 +417,12 @@ async def post_message(
         # all-timeout deployment showed a **zero** failure ratio (M8).
         turn_failed = False
         try:
+            async for frame in _wait_in_line():
+                yield frame
+            if slot is None:
+                return  # withdrawn while it waited; `_wait_in_line` said so
+            if holder is not None and claims is not None:
+                heartbeat = asyncio.create_task(_hold_turn_claim(claims, session_id, lease, holder))
             # Admission, inside the stream (D-166). `locked()` is the whole reason the common
             # case costs nothing: it is false exactly when `acquire()` will return without
             # suspending, and there is no await between the test and the acquire for another
@@ -381,8 +510,11 @@ async def post_message(
                 # has no surface left to occur on.
                 async with asyncio.timeout(settings.service_turn_timeout_seconds) as deadline:
                     async for event in run_turn(
-                        live.session,
+                        current.session,
                         body.message,
+                        # **The sender, always** (`D-2026-09-27-in-a-shared-session-the-sender-
+                        # governs`) — and for a message that waited in line, still the principal
+                        # *its own* request authenticated, never whoever's turn ran before it.
                         actor=principal.oid,
                         roles=principal.roles,
                         budget=front.budget,
@@ -391,9 +523,9 @@ async def post_message(
                         # chemist talks to and the connectors that graph gets. Selecting one
                         # without the other would advertise a narrowed toolset over the full
                         # connector set.
-                        connectors=front.connector_factory(live.profile),
+                        connectors=front.connector_factory(current.profile),
                         history=front.history,
-                        profile=live.profile,
+                        profile=current.profile,
                         graph_factory=front.graph_factory,
                         # The reading this scope will fire at, so the turn's own cost row can say
                         # `timed_out` rather than `abandoned`. The cancellation is indistinguishable
@@ -442,6 +574,8 @@ async def post_message(
             # So the invariant `events.py` states — a stream ends with an answer or an error — is
             # the *stream's*, not only `run_turn`'s. `failure_event` is the same classifier the
             # runner uses, so a client cannot get two different accounts of one kind of failure.
+            # A failure while *waiting* (the queue's store unreachable) lands here too, and is the
+            # same account: the message did not run.
             turn_failed = True
             logger.exception("turn stream failed for session %s", session_id)
             failed = failure_event(exc, session_id, correlation_id or uuid.uuid4().hex)
@@ -453,20 +587,26 @@ async def post_message(
                 heartbeat.cancel()
             # A no-op when the reader already went and the detach hook gave it back.
             _release_permit()
-            _release_turn_slot(active_turns, session_id, slot)
-            if claims is not None:
-                await _release_turn_claim(claims, session_id, holder)
+            if ticket is not None:
+                # Stopped, failed or cancelled while still waiting: give the place up now rather
+                # than leave the message behind it waiting one lease for a waiter that is gone.
+                await _leave_line(queue, session_id, ticket)
+            if slot is not None:
+                _release_turn_slot(active_turns, session_id, slot)
+                if holder is not None and claims is not None:
+                    await _release_turn_claim(claims, session_id, holder)
+            # Whatever ended — a turn, or a place in line — the next message may now be up.
+            signal.notify()
 
-    claimed = False
     handed_off = False
     try:
         # Name the session after the message that opened it, so `GET /sessions` can render a
         # conversation list rather than a column of ids. Here rather than in the history provider
         # because here the message is still a plain string — the provider stores an opaque payload
-        # it is not allowed to interpret. After the turn claim, so a rejected double-submit does
-        # not write; before the stream, so a turn that fails mid-answer still leaves the
-        # conversation named. `set_title_if_absent` is a no-op once there is a title, which is
-        # every turn after the first.
+        # it is not allowed to interpret. Before the stream, so a turn that fails mid-answer still
+        # leaves the conversation named. `set_title_if_absent` is a no-op once there is a title,
+        # which is every turn after the first — and every message that waits, since a line only
+        # forms behind a turn that has already named the session.
         #
         # **Inside this `try`, which is where it belongs and is now load-bearing.** It is a store
         # round trip: it can raise (a failed checkout is shed 503) and it can be cancelled, and
@@ -484,20 +624,48 @@ async def post_message(
         except BudgetExceeded as exc:
             METRICS.increment(refused_metric(exc))
             raise HTTPException(status_code=429, detail=str(exc)) from exc
-        # Claimed here rather than inside the stream because it is a *refusal*, not a wait:
-        # a turn already running elsewhere must be told 409 by a status code, which only
-        # exists before the response is handed off. A failed checkout raises `ConnectionError`
-        # and is shed as a 503 by `_database_unavailable` — the guard fails closed, retryably.
-        if claims is not None and not await claims.claim(session_id, holder, lease):
-            METRICS.increment("chemclaw_turns_conflict_total", labels={"scope": "durable"})
-            raise HTTPException(
-                status_code=409, detail="a turn is already running for this session"
-            )
-        claimed = claims is not None
-        # The lease clock starts *here*, not at the claim: from the next statement on, the
-        # `finally` below no longer owns the cleanup and the slot needs an expiry of its own
-        # (see `_start_turn_lease`).
-        _start_turn_lease(active_turns, session_id, slot)
+        # The durable claim, on the fast path. A failed checkout raises `ConnectionError` and is
+        # shed as a 503 by `_database_unavailable` — the guard fails closed, retryably. A turn
+        # already running on another replica is not a refusal any more: this message joins the
+        # line below, behind it.
+        if slot is not None and claims is not None:
+            if await claims.claim(session_id, claim_holder(slot), lease):
+                holder = claim_holder(slot)
+            else:
+                _release_turn_slot(active_turns, session_id, slot)
+                slot = None
+                busy = "durable"
+        if slot is None:
+            METRICS.increment("chemclaw_turns_conflict_total", labels={"scope": busy or "queue"})
+            # **Refused only when the line itself cannot take it** — a status code, because this
+            # is still before the response exists. The two limits say different things: the line
+            # is full (wait for it to move), or this sender already has a message in it (one each,
+            # so a member cannot crowd the others out and a retried POST queues one duplicate,
+            # not a stream of them).
+            try:
+                ticket = await queue.enqueue(
+                    session_id,
+                    principal.oid or "",
+                    capacity=settings.service_turn_queue_max,
+                    lease_seconds=lease,
+                )
+            except QueueRefused as exc:
+                METRICS.increment("chemclaw_turn_queue_refused_total")
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "you already have a message waiting in this session; withdraw it or wait "
+                        "for it to run"
+                        if exc.reason == "waiting"
+                        else "a turn is already running for this session and "
+                        f"{settings.service_turn_queue_max} message(s) are already waiting"
+                    ),
+                ) from exc
+        else:
+            # The lease clock starts *here*, not at the claim: from the next statement on, the
+            # `finally` below no longer owns the cleanup and the slot needs an expiry of its own
+            # (see `_start_turn_lease`).
+            _start_turn_lease(active_turns, session_id, slot)
         # The turn runs on a pump task of its own from this moment
         # (`D-2026-08-27-a-disconnect-is-a-detach-not-a-stop`): the SSE response is a *view* of
         # it, so a client disconnect detaches the view and the turn runs to completion — its
@@ -505,14 +673,18 @@ async def post_message(
         # turn's true end. The **permit** goes back earlier, at the detach itself, because it is
         # the one thing here that belongs to the replica rather than to the session; see
         # `_release_permit`. Stopping is the explicit route below, which cancels the pump and
-        # delivers the same `CancelledError` a disconnect used to.
+        # delivers the same `CancelledError` a disconnect used to. A message still waiting in
+        # line waits on the same pump, so a detach does not lose its place either.
         turn = DetachableTurn(
             _turn_events(),
             session_id=session_id,
             survive_disconnect=settings.service_turn_survives_disconnect,
             on_detach=_release_permit,
         )
-        front.running_turns.register(session_id, turn)
+        if slot is not None:
+            front.running_turns.register(session_id, turn)
+        else:
+            started = turn
         response = _TurnStream(
             turn.events(),
             session_id=session_id,
@@ -527,11 +699,38 @@ async def post_message(
         # 409-bricking the session until restart. Until the streaming response is handed
         # off, this owns the cleanup; afterwards the generator's own finally does — except
         # for the one window neither covers (handed off, never advanced), which the lease
-        # in `_claim_turn_slot` bounds instead.
+        # in `_claim_turn_slot` bounds instead, and the queue's own lease bounds for a ticket.
         if not handed_off:
-            _release_turn_slot(active_turns, session_id, slot)
-            if claimed and claims is not None:
+            if slot is not None:
+                _release_turn_slot(active_turns, session_id, slot)
+            if holder is not None and claims is not None:
                 await _release_turn_claim(claims, session_id, holder)
+            if ticket is not None:
+                await _leave_line(queue, session_id, ticket)
+
+
+async def _leave_line(queue: TurnQueue, session_id: str, ticket: int) -> None:
+    """Give a place in the line back, surviving the cancellation that usually causes it.
+
+    Shielded for `api/state._release_turn_claim`'s reason: the callers are `finally` blocks that run
+    *because* their task was cancelled, and a bare `await` there raises at its first suspension. A
+    leave that never lands costs the message behind it one lease — the ticket stops counting as
+    ahead of anybody once it lapses — which is why the failure is logged rather than raised.
+    """
+
+    async def _leave() -> None:
+        """The delete itself, owning its own failure so the shielded task cannot raise unseen."""
+        try:
+            await queue.leave(session_id, ticket)
+        except Exception:
+            logger.warning(
+                "could not take ticket %s out of session %s's line; it lapses on its own",
+                ticket,
+                session_id,
+                exc_info=True,
+            )
+
+    await asyncio.shield(_leave())
 
 
 async def stop_turn(
@@ -572,6 +771,109 @@ async def stop_turn(
     return {"stopped": True}
 
 
+async def session_queue(
+    request: Request,
+    session_id: str,
+    principal: CurrentUser,
+    live: CurrentSession,
+) -> SessionQueueOut:
+    """The session's line — who is waiting for the running turn to end, first in line first.
+
+    Any participant may read it, as any participant may read the transcript: the line names senders
+    and places and nothing they said (`D-2026-10-01-a-queued-message-waits-in-its-senders-request`).
+    """
+    front = state(request)
+    waiting = await front.turn_queue.waiting(session_id)
+    return SessionQueueOut(
+        running=front.running_turns.get(session_id) is not None,
+        waiting=[
+            QueuedMessageOut(
+                ticket=entry.ticket,
+                sender=entry.sender,
+                enqueued_at=entry.enqueued_at,
+                position=place,
+                mine=entry.sender == principal.oid,
+            )
+            for place, entry in enumerate(waiting)
+        ],
+    )
+
+
+async def withdraw_queued(
+    request: Request,
+    session_id: str,
+    ticket: int,
+    principal: CurrentUser,
+    live: CurrentSession,
+) -> Response:
+    """Withdraw a waiting message before it runs — its sender's, or the owner's for any.
+
+    The same rule the stop route applies to a running turn, one step earlier: a message is its
+    sender's, a member may not remove somebody else's, and the owner keeps the standing to clear the
+    line of a conversation they own. 404 for a ticket this session's line does not hold, which is
+    also what a ticket from another session gets — the lookup is by session, so a participant of one
+    session cannot reach into another's line by guessing a number.
+
+    The waiting request notices on its next look at its place — at once on this replica, within
+    `service_turn_queue_poll_seconds` on another — and ends its stream with `queue_cancelled`.
+    """
+    front = state(request)
+    entry = next(
+        (item for item in await front.turn_queue.waiting(session_id) if item.ticket == ticket),
+        None,
+    )
+    if entry is None:
+        raise HTTPException(status_code=404, detail="no such message is waiting in this session")
+    if entry.sender != principal.oid:
+        require_owner(live, principal, session_id, "withdraw somebody else's message")
+    await front.turn_queue.leave(session_id, ticket)
+    front.queue_signal.notify()
+    logger.info("a waiting message in session %s was withdrawn by request", session_id)
+    return Response(status_code=204)
+
+
+async def watch_turn(
+    request: Request,
+    session_id: str,
+    principal: CurrentUser,
+    live: CurrentSession,
+) -> EventSourceResponse:
+    """Follow the session's running turn live — any participant, from this moment on.
+
+    **Fan-out** (`D-2026-10-01-a-queued-message-waits-in-its-senders-request`): the sender's own
+    `POST` stream is one view of a turn; this is another, with a buffer of its own, so a watcher who
+    stops reading is cut off (`stream_lagged`) without slowing the turn or anybody else's view. The
+    turn is resolved from *this* session's entry in the registry after the session gate has admitted
+    the caller, so a participant of one conversation can never be handed another's.
+
+    404 when no turn is running here — including one running on another replica, whose pump this
+    process cannot reach (the stop route's scope, for the same reason). A late joiner sees events
+    from the moment it attaches; what came earlier is in the transcript once the answer lands.
+    429 when the turn already has `service_turn_max_watchers` watchers.
+    """
+    turn = state(request).running_turns.get(session_id)
+    if turn is None:
+        raise HTTPException(status_code=404, detail="no turn is running for this session")
+    if turn.watchers >= settings.service_turn_max_watchers:
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                "this turn already has as many watchers as it accepts; read the answer in the "
+                "conversation once it lands"
+            ),
+            headers={"Retry-After": _retry_after_hint()},
+        )
+    view = turn.watch()
+    if view is None:
+        raise HTTPException(status_code=404, detail="no turn is running for this session")
+    return _TurnStream(
+        view,
+        session_id=session_id,
+        ping=settings.service_sse_ping_seconds,
+        send_timeout=settings.service_sse_send_timeout_seconds,
+    )
+
+
 def register(app: FastAPI) -> None:
     """Attach this module's route to `app` — called once, by `create_app` only.
 
@@ -599,3 +901,14 @@ def register(app: FastAPI) -> None:
         },
     )(post_message)
     app.post("/sessions/{session_id}/turn/stop")(stop_turn)
+    app.get(
+        "/sessions/{session_id}/turn/stream",
+        responses={
+            200: {
+                "description": "One SSE frame per turn event, from the moment of attaching.",
+                "content": {"text/event-stream": {"schema": {"$ref": TURN_EVENT_REF}}},
+            }
+        },
+    )(watch_turn)
+    app.get("/sessions/{session_id}/queue")(session_queue)
+    app.delete("/sessions/{session_id}/queue/{ticket}", status_code=204)(withdraw_queued)

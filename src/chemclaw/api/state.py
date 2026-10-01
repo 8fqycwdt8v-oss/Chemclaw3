@@ -28,6 +28,7 @@ from typing import Any, Protocol
 from fastapi import FastAPI, Request
 
 from chemclaw.agent.plan_approval_store import ApprovalStore
+from chemclaw.agent.session_queue import InMemoryTurnQueue, SessionTurnQueue, TurnQueue
 from chemclaw.api.budget import BudgetTracker
 from chemclaw.api.detach import RunningTurns
 from chemclaw.connectors.health import ConnectorHealth
@@ -504,6 +505,58 @@ async def _release_turn_claim(claims: SessionTurns, session_id: str, holder: str
     await asyncio.shield(_release())
 
 
+class QueueSignal:
+    """Wakes this process's waiting messages the moment the turn ahead of them may have moved.
+
+    A waiting message asks the queue for its place every `service_turn_queue_poll_seconds`, which is
+    what a waiter on another replica pays. On *this* replica the turn that ends, the message that
+    leaves the line and the one that is withdrawn all happen here, so they wake every local waiter
+    at once instead of leaving it to the clock. A wake is only a hint to ask again — the queue and
+    the claims are the truth — so a spurious one costs one query and a missed one costs one poll.
+
+    **The event is made per loop, lazily**, never at construction: an `asyncio` primitive binds to
+    the first loop that waits on it, and this object lives on `app.state`, which a test process can
+    drive from more than one loop (`tasks/lessons.md` rule 131). `notify` drops the event it set, so
+    the next waiter starts a fresh one rather than finding it already set.
+    """
+
+    def __init__(self) -> None:
+        """No waiter yet, so no event yet."""
+        self._event: asyncio.Event | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+
+    def notify(self) -> None:
+        """Wake every waiter currently parked in `wait`."""
+        if self._event is not None:
+            self._event.set()
+            self._event = None
+
+    async def wait(self, timeout: float) -> None:
+        """Park until the next `notify` or for `timeout` seconds, whichever is first."""
+        loop = asyncio.get_running_loop()
+        if self._event is None or self._loop is not loop:
+            self._event = asyncio.Event()
+            self._loop = loop
+        event = self._event
+        try:
+            await asyncio.wait_for(event.wait(), timeout)
+        except TimeoutError:
+            return
+
+
+def _default_turn_queue() -> TurnQueue:
+    """Each session's line of waiting messages, durable exactly where the turn claim is.
+
+    Durable under `session_store="postgres"`, because that is the condition under which two
+    replicas share one session and so must share one order; in-process otherwise, where the session
+    is the process. Unlike the claim this is never `None`: under the in-memory store a second
+    message still has to wait for the first, only nobody outside this process can be in the line.
+    """
+    if settings.session_store != "postgres":
+        return InMemoryTurnQueue()
+    return SessionTurnQueue()
+
+
 def _default_owner_store() -> SessionOwners | None:
     """The durable session-ownership store, but only when durable sessions are on (else None).
 
@@ -618,6 +671,18 @@ class FrontDoorState:
         """The durable cross-process turn claim, or None under the in-memory session store."""
         claims: SessionTurns | None = self._app.state.turn_claims
         return claims
+
+    @property
+    def turn_queue(self) -> TurnQueue:
+        """Each session's line of messages waiting for its running turn to end."""
+        queue: TurnQueue = self._app.state.turn_queue
+        return queue
+
+    @property
+    def queue_signal(self) -> QueueSignal:
+        """What wakes this process's waiting messages when the line may have moved."""
+        signal: QueueSignal = self._app.state.queue_signal
+        return signal
 
     @property
     def running_turns(self) -> "RunningTurns":

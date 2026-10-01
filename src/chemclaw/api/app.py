@@ -82,10 +82,12 @@ from chemclaw.api.routes import (
 from chemclaw.api.schemas import _TRANSCRIPT_ARG_CHARS, _transcript
 from chemclaw.api.state import (
     LiveSession,
+    QueueSignal,
     SessionOwners,
     SessionTurns,
     _default_owner_store,
     _default_turn_claims,
+    _default_turn_queue,
     _LiveSessions,
 )
 from chemclaw.api.tool_results import fetchable_refs, load_tool_result
@@ -498,6 +500,11 @@ def create_app(
     # both processes can see; None under the in-memory session store, where two processes share no
     # history to corrupt.
     app.state.turn_claims = turn_claims if turn_claims is not None else _default_turn_claims()
+    # Each session's line of messages waiting for its running turn to end
+    # (`D-2026-10-01-a-queued-message-waits-in-its-senders-request`), and what wakes this process's
+    # waiters when a turn here ends. The line is durable exactly where the claim above is.
+    app.state.turn_queue = _default_turn_queue()
+    app.state.queue_signal = QueueSignal()
     # Per-user count of open push-back event streams. The turn semaphore only guards POSTed
     # turns; each event stream polls the database for its whole lifetime, so without a cap one
     # user's scripted (or abandoned-tab) streams could pile up unbounded DB load. Entries are

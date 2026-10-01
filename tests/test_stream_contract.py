@@ -258,7 +258,7 @@ class _SlowOwnerStore:
 async def test_a_turn_still_setting_up_holds_the_session_against_a_second_one(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A second POST during the first turn's store round trips is a 409, not a second turn.
+    """A second POST during the first turn's store round trips waits in line, not beside it.
 
     `_claim_turn_slot` justifies ignoring an expired entry with "the deadline is the widest wall
     clock a *live* turn can hold the slot ... so an expired entry provably belongs to no running
@@ -271,6 +271,11 @@ async def test_a_turn_still_setting_up_holds_the_session_against_a_second_one(
     conversation, which is the corruption the guard exists to prevent — and under
     `session_store="memory"` (the code default and what the dev lanes run) there is no second guard
     behind it.
+
+    Since `D-2026-10-01-a-queued-message-waits-in-its-senders-request` the second message is not
+    refused: it joins the session's line. The property is unchanged — it must not *run* while the
+    first holds the slot — and the discriminator is that the fake agent answers at once, so a
+    second turn admitted beside the first would be finished long before the first is let go.
     """
     monkeypatch.setattr(settings, "service_turn_timeout_seconds", 0.05)
     monkeypatch.setattr(settings, "service_turn_admission_timeout_seconds", 0.05)
@@ -286,15 +291,22 @@ async def test_a_turn_still_setting_up_holds_the_session_against_a_second_one(
             await store.inside.wait()
         # Past the lease the claim was stamped with, with the first turn not yet begun.
         await asyncio.sleep(0.2)
-        second = await client.post(f"/sessions/{session_id}/messages", json={"message": "two"})
+        second = asyncio.create_task(
+            client.post(f"/sessions/{session_id}/messages", json={"message": "two"})
+        )
+        await asyncio.sleep(0.2)
+        ran_beside = second.done()
         # Released before the assertion, so a failure reports rather than hanging on the
         # first turn's parked round trip.
         store.release.set()
         admitted = await first
-        assert second.status_code == 409, (
-            "a second turn was admitted while the first was still being set up"
-        )
+        waited = await second
+        assert not ran_beside, "a second turn ran while the first was still being set up"
         assert admitted.status_code == 200
+        assert waited.status_code == 200
+        assert '"type":"queued"' in waited.text and '"ticket"' in waited.text, (
+            "the second message did not report its place in the session's line"
+        )
 
 
 class _BrokenTitleStore(_SlowOwnerStore):
@@ -662,7 +674,7 @@ def test_an_expired_lease_does_not_hold_an_actors_slot() -> None:
 
 
 def test_a_turns_own_session_is_not_counted_against_its_actor() -> None:
-    """`besides=` is what keeps a double-submit answering 409 rather than 429.
+    """`besides=` is what keeps a double-submit joining its session's line rather than a 429.
 
     Without it the status code for one unchanged user action — posting twice to a session that is
     already running — would depend on how many *other* sessions that chemist had open.
