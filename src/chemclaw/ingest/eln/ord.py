@@ -23,6 +23,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from chemclaw.core.chem import standard_smiles
+from chemclaw.core.errors import ChemclawError
 
 
 class Role(StrEnum):
@@ -72,10 +73,14 @@ class RoleSpecies(BaseModel):
         return frozenset(getattr(self, role.value))
 
 
-class Component(BaseModel):
-    """One chemical species in a reaction: its structure, role, and optional amount."""
+class _Charged(BaseModel):
+    """What a record says about one species apart from its identity: role, amounts, attributes.
 
-    smiles: str = Field(min_length=1)
+    Shared by `Component` (a species with a structure) and `UnstructuredComponent` (a species the
+    source names without one), because the two differ in exactly one thing — whether a structure
+    was given — and everything else a source records about a charge is the same fact either way.
+    """
+
     role: Role
     # Amounts are optional (an ELN may omit them), and kept in milligrams when known.
     #
@@ -101,6 +106,58 @@ class Component(BaseModel):
     # equivalents figure, an assay. See `OrdReaction.attributes` for why this is a bag of strings
     # and not a set of fields.
     attributes: dict[str, str] = Field(default_factory=dict)
+
+
+class Component(_Charged):
+    """One chemical species in a reaction: its structure, role, and optional amount."""
+
+    smiles: str = Field(min_length=1)
+
+
+class UnstructuredComponent(_Charged):
+    """A species the source **names** and gives no structure for — carried as named, never drawn.
+
+    The real case is the Perera flow-Suzuki screen (*Science* 2018, 359, 429), whose source
+    spreadsheet publishes the second coupling partner only as the paper's own shorthand
+    (`2a, Boronic Acid`) and the product only as a phrase. `ord_adapter` tries every exact route to
+    a structure first (SMILES, InChI, a known reagent name); this is what is left when none
+    resolves and the source still said *something* about the species.
+
+    `name` is the source's text verbatim. It is not a structure, it is not resolved later, and no
+    code path may turn it into one: a guessed structure would propagate into a fingerprint index, a
+    similarity hit and a note citing it, which is exactly what refusing these records used to
+    protect. A reaction carrying one is `RecordTier.CITATION_ONLY`
+    (`D-2026-09-27-a-reaction-without-a-structure-is-citable-not-searchable`).
+    """
+
+    name: str = Field(min_length=1)
+
+
+class RecordTier(StrEnum):
+    """Which evidence tier a transcribed reaction belongs to.
+
+    `STRUCTURED` — every species has a structure: the reaction is fingerprinted, labelled and
+    reachable by structure and similarity search, as every record was before this tier existed.
+
+    `CITATION_ONLY` — at least one species is named without a structure
+    (`UnstructuredComponent`). The record is stored and citable for what it *does* state — a yield,
+    a base, a ligand, a temperature — and is excluded from every structure and similarity search,
+    because any fingerprint of it would describe a reaction nobody ran: the one with the unnamed
+    species left out.
+    """
+
+    STRUCTURED = "structured"
+    CITATION_ONLY = "citation-only"
+
+
+class StructureNotGiven(ChemclawError):
+    """A structure was asked of a reaction whose source gave none for one of its species.
+
+    Raised by `OrdReaction.reaction_smiles`/`transformation_smiles` on a citation-only record. A
+    ChemclawError, so a path that reaches it by mistake rejects one entry rather than aborting a
+    batch — and rejects it *loudly*, where returning the structured subset would have fingerprinted
+    a different reaction with nothing saying so.
+    """
 
 
 class StepKind(StrEnum):
@@ -234,11 +291,21 @@ class OrdReaction(BaseModel):
     Inputs carry every non-product species (reactant/reagent/solvent/catalyst); outcomes
     are the products. Conditions are the few an ELN reliably records; richer setup is out
     of this subset until a consumer needs it.
+
+    `inputs` and `outcomes` hold only species with a structure; a species the source named without
+    one is in `unstructured`, whatever its role. The split is what keeps every structural reader
+    honest without each of them having to know about the tier: a loop over `inputs` still meets
+    only structures, and the one place a structure is *assembled* from the lists —
+    `reaction_smiles`/`transformation_smiles` — refuses a citation-only record outright instead of
+    returning the reaction with a species silently missing.
     """
 
     reaction_id: str = Field(min_length=1)
-    inputs: list[Component] = Field(min_length=1)
-    outcomes: list[Component] = Field(min_length=1)
+    inputs: list[Component] = Field(default_factory=list)
+    outcomes: list[Component] = Field(default_factory=list)
+    # Species the source named and gave no structure for, in any role (`UnstructuredComponent`).
+    # Non-empty makes this record `RecordTier.CITATION_ONLY`.
+    unstructured: list[UnstructuredComponent] = Field(default_factory=list)
     temperature_c: float | None = None
     time_h: float | None = Field(default=None, ge=0.0)
     yield_percent: float | None = Field(default=None, ge=0.0, le=100.0)
@@ -343,6 +410,45 @@ class OrdReaction(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _has_inputs_and_a_product(self) -> "OrdReaction":
+        """A reaction needs at least one input and one product, in either tier.
+
+        This was `min_length=1` on `inputs` and `outcomes`, which is the same rule while every
+        species has a structure. With `unstructured` beside them it has to count across both: the
+        flow-Suzuki records name their product without a structure, so `outcomes` is empty there
+        and the reaction still has a product — the source said what it was.
+        """
+        if not self.inputs and all(c.role is Role.PRODUCT for c in self.unstructured):
+            raise ValueError("a reaction needs at least one input component")
+        if not self.outcomes and not any(c.role is Role.PRODUCT for c in self.unstructured):
+            raise ValueError("a reaction needs at least one product")
+        return self
+
+    @property
+    def tier(self) -> RecordTier:
+        """`CITATION_ONLY` when any species was named without a structure, else `STRUCTURED`."""
+        return RecordTier.CITATION_ONLY if self.unstructured else RecordTier.STRUCTURED
+
+    def product_count(self) -> int:
+        """How many products the source recorded, with or without a structure.
+
+        `len(outcomes)` stopped being that number when an unstructured product became possible,
+        and "exactly one product" is a question two readers ask (`record._principal_product`, the
+        headline yield) — a record with one drawn product and one named one has two.
+        """
+        return len(self.outcomes) + sum(1 for c in self.unstructured if c.role is Role.PRODUCT)
+
+    def _require_structure(self) -> None:
+        """Refuse to assemble a structure for a citation-only record (`StructureNotGiven`)."""
+        if self.unstructured:
+            names = ", ".join(repr(c.name) for c in self.unstructured)
+            raise StructureNotGiven(
+                f"reaction {self.reaction_id!r} is citation-only: the source gives no structure "
+                f"for {names}, so no reaction SMILES exists for it and none may be assembled from "
+                "the species that do have one"
+            )
+
+    @model_validator(mode="after")
     def _steps_are_ordered(self) -> "OrdReaction":
         """Step indices must be the contiguous sequence 1..n (a well-formed ordering, G4)."""
         if [s.index for s in self.steps] != list(range(1, len(self.steps) + 1)):
@@ -415,7 +521,11 @@ class OrdReaction(BaseModel):
         produce byte-identical bits — moving the solvent here changed the notation and nothing
         else. What the fingerprints index is `transformation_smiles`; see it for what the agent
         slot now actually does.
+
+        Raises `StructureNotGiven` on a citation-only record rather than leaving the unnamed species
+        out: a partial string here reads exactly like a whole reaction to every caller.
         """
+        self._require_structure()
         agents = ".".join(c.smiles for c in self.inputs if c.role in _AGENT_ROLES)
         left = ".".join(c.smiles for c in self.inputs if c.role not in _AGENT_ROLES)
         right = ".".join(c.smiles for c in self.outcomes)
@@ -444,12 +554,19 @@ class OrdReaction(BaseModel):
         a claim the reaction rows did not honour while this built the string from raw `smiles`. The
         lenient helper, not the strict one: an ELN drop with one odd label must not abort ingestion
         (a genuinely unparseable reaction is caught downstream by `drfp_bitstring`).
+
+        Raises `StructureNotGiven` on a citation-only record — this is the fingerprint input, and a
+        fingerprint of the structured subset would index a reaction nobody ran.
         """
+        self._require_structure()
         reactants = (c for c in self.inputs if c.role not in _AGENT_ROLES)
         left = ".".join(standard_smiles(c.smiles) for c in reactants)
         right = ".".join(standard_smiles(c.smiles) for c in self.outcomes)
         return f"{left}>>{right}"
 
     def compounds(self) -> list[Component]:
-        """Every distinct component (inputs + outcomes), for per-compound indexing."""
+        """Every structured component (inputs + outcomes), for per-compound indexing.
+
+        `unstructured` is deliberately not here: this list is read as structures.
+        """
         return [*self.inputs, *self.outcomes]

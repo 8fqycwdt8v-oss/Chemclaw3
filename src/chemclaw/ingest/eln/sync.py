@@ -22,6 +22,7 @@ from chemclaw.core.logging import log_event
 from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.ingest.eln.adapter import ElnAdapter, RawEntry, entry_window
 from chemclaw.ingest.eln.ingest import ingest_reaction
+from chemclaw.ingest.eln.ord import RecordTier
 from chemclaw.ingest.eln.record import record_from_ord_reaction
 from chemclaw.ingest.eln.records import ReactionRecordStore
 from chemclaw.ingest.eln.warehouse.expr import pattern_budget
@@ -87,6 +88,11 @@ class IngestSummary(BaseModel):
     """
 
     ingested: list[str]
+    # The subset of `ingested` that landed citation-only: stored and citable, and in no structure
+    # index, because the source named a species without its structure
+    # (`D-2026-09-27-a-reaction-without-a-structure-is-citable-not-searchable`). A subset rather
+    # than a fourth outcome, because the entry *was* ingested — the tier is what it was ingested as.
+    citation_only: list[str] = Field(default_factory=list)
     skipped_existing: list[str] = Field(default_factory=list)
     rejected: list[RejectedEntry]
     next_cursor: datetime
@@ -133,6 +139,7 @@ async def sync_entries(
     floor = _fetch_floor(since) if apply_overlap else since
     entries = await adapter.fetch_new_entries(floor)
     ingested: list[str] = []
+    citation_only: list[str] = []
     skipped_existing: list[str] = []
     rejected: list[RejectedEntry] = []
     stored: dict[str, str] | None = None
@@ -257,6 +264,8 @@ async def sync_entries(
                 )
                 continue
             ingested.append(raw.entry_id)
+            if reaction.tier is RecordTier.CITATION_ONLY:
+                citation_only.append(raw.entry_id)
     # The summary is a return value the scheduler stores; also log the outcome so an admin
     # running this under a Temporal Schedule sees it without opening the workflow result, and
     # gets a WARNING trail of exactly which entries were rejected and why.
@@ -272,6 +281,7 @@ async def sync_entries(
     _record_pass(
         source,
         ingested=len(ingested),
+        citation_only=len(citation_only),
         rejected=len(rejected),
         skipped_existing=len(skipped_existing),
         fetched=len(entries),
@@ -293,6 +303,7 @@ async def sync_entries(
         )
     return IngestSummary(
         ingested=ingested,
+        citation_only=citation_only,
         skipped_existing=skipped_existing,
         rejected=rejected,
         next_cursor=cursor,
@@ -303,6 +314,7 @@ def _record_pass(
     source: str,
     *,
     ingested: int,
+    citation_only: int,
     rejected: int,
     skipped_existing: int,
     fetched: int,
@@ -318,7 +330,9 @@ def _record_pass(
 
     The outcomes partition what the fetch returned: `ingested` wrote a record, `rejected` is
     deterministic bad data the cursor advances past, `skipped` is an overlap replay whose stored
-    body is byte-identical, so there was nothing to write.
+    body is byte-identical, so there was nothing to write. `citation_only` is not a fourth outcome
+    but the part of `ingested` that landed in the citation-only tier, counted on its own series so
+    the two tiers can be read apart without changing what the outcome series partitions.
     """
     for outcome, count in (
         ("ingested", ingested),
@@ -326,19 +340,27 @@ def _record_pass(
         ("skipped", skipped_existing),
     ):
         _count_records(source, outcome, count)
+    if citation_only:
+        record_metric(
+            lambda m: m.increment(
+                "chemclaw_ingest_citation_only_total", citation_only, {"source": source}
+            )
+        )
     log_event(
         logger,
         "ingest.finished",
-        "%s: fetched=%d ingested=%d rejected=%d skipped_existing=%d in %.3fs",
+        "%s: fetched=%d ingested=%d rejected=%d skipped_existing=%d citation_only=%d in %.3fs",
         source,
         fetched,
         ingested,
         rejected,
         skipped_existing,
+        citation_only,
         duration_s,
         source=source,
         fetched=fetched,
         ingested=ingested,
+        citation_only=citation_only,
         rejected=rejected,
         skipped_existing=skipped_existing,
         next_cursor=next_cursor.isoformat(),

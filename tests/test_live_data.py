@@ -11,8 +11,8 @@ already got wrong once while being written:
   and 720 no-base rows in one screen — and has to compare equal to the seeded record's *absent*
   input rather than to an empty string. The first version raised `KeyError` and could not read a
   fifth of that dataset at all.
-- A dataset declared unreachable that starts being accepted is the failure that matters most,
-  because the only way to accept it is to have invented a structure the source never published.
+- A citation-only dataset whose records start arriving *structured* is the failure that matters
+  most, because the only way there is to have invented a structure the source never published.
   A check that only looked for regressions in one direction would call that green.
 """
 
@@ -35,11 +35,18 @@ from chemclaw.cli.live_data import (
     _published_key,
     _seeded_yield,
     check_adapter_matches_its_declaration,
+    check_named_species_arrive_verbatim,
     check_prose_yields_its_numbers,
     check_seeding_is_faithful,
     report,
 )
-from chemclaw.ingest.eln.ord import Component, OrdReaction, Role
+from chemclaw.ingest.eln.ord import (
+    Component,
+    OrdReaction,
+    RecordTier,
+    Role,
+    UnstructuredComponent,
+)
 
 
 def _payload(**inputs: str | None) -> dict[str, Any]:
@@ -65,8 +72,9 @@ def test_the_binding_names_a_dataset_id_for_every_published_row() -> None:
         assert dataset.factors
         if dataset.partition_column is not None:
             assert dataset.partitions
-        if not dataset.reachable:
-            assert dataset.refusal, "an unreachable dataset must say why in one line"
+        if dataset.tier is not RecordTier.STRUCTURED:
+            assert dataset.tier_reason, "a citation-only dataset must say why in one line"
+            assert dataset.named_only, "and name the species it expects to arrive as names"
 
 
 def test_a_zero_yield_reads_as_zero_and_not_as_missing() -> None:
@@ -131,30 +139,42 @@ def test_a_swapped_yield_fails_faithfulness_even_though_the_count_is_right(tmp_p
         module._DATASETS = original
 
 
-def test_a_dataset_declared_unreachable_that_starts_mapping_is_a_failure() -> None:
-    """The direction that matters most: accepting a refused record means inventing a structure."""
-    refused_dataset = Dataset(
+def _reaction(*, named: str | None) -> OrdReaction:
+    """A record whose coupling partner is drawn, or — with `named` — only named."""
+    partner = [] if named else [Component(smiles="OB(O)c1ccccc1", role=Role.REACTANT)]
+    return OrdReaction(
+        reaction_id="r",
+        inputs=[Component(smiles="CCO", role=Role.REACTANT), *partner],
+        outcomes=[Component(smiles="CCC", role=Role.PRODUCT)],
+        unstructured=[UnstructuredComponent(name=named, role=Role.REACTANT)] if named else [],
+        provenance="test",
+    )
+
+
+def test_a_citation_only_dataset_whose_records_arrive_structured_is_a_failure() -> None:
+    """The direction that matters most: a structured record there means an invented structure."""
+    citation_only = Dataset(
         csv_name="x.csv",
         dataset_id="d",
         factors=(("base", "base_smiles"),),
         yield_column="y",
-        reachable=False,
-        refusal="no published structure for one component",
+        tier=RecordTier.CITATION_ONLY,
+        named_only=(("partner", "partner_name"),),
+        tier_reason="no published structure for one component",
     )
     original = _DATASETS
     try:
         import chemclaw.cli.live_data as module
 
-        module._DATASETS = (refused_dataset,)
-        assert check_adapter_matches_its_declaration({}, {"d": 5})[0].passed
-        invented = OrdReaction(
-            reaction_id="r",
-            inputs=[Component(smiles="CCO", role=Role.REACTANT)],
-            outcomes=[Component(smiles="CCC", role=Role.PRODUCT)],
-            provenance="a structure nobody published",
-        )
-        assert not check_adapter_matches_its_declaration({"d": [invented]}, {"d": 5})[0].passed
-        # And a reachable dataset that stops mapping is the ordinary regression.
+        module._DATASETS = (citation_only,)
+        cited = _reaction(named="2a, Boronic Acid")
+        assert check_adapter_matches_its_declaration({"d": [cited]}, {})[0].passed
+        invented = _reaction(named=None)
+        assert not check_adapter_matches_its_declaration({"d": [invented]}, {})[0].passed
+        # A refusal is no longer the declared outcome for any dataset: it is a regression too.
+        assert not check_adapter_matches_its_declaration({"d": [cited]}, {"d": 1})[0].passed
+        assert not check_adapter_matches_its_declaration({}, {"d": 5})[0].passed
+        # And a structured dataset whose records drop to citation-only is the ordinary regression.
         module._DATASETS = (
             Dataset(
                 csv_name="x.csv",
@@ -163,7 +183,38 @@ def test_a_dataset_declared_unreachable_that_starts_mapping_is_a_failure() -> No
                 yield_column="y",
             ),
         )
-        assert not check_adapter_matches_its_declaration({}, {"d": 5})[0].passed
+        assert check_adapter_matches_its_declaration({"d": [invented]}, {})[0].passed
+        assert not check_adapter_matches_its_declaration({"d": [cited]}, {})[0].passed
+    finally:
+        module._DATASETS = original
+
+
+def test_a_named_species_must_arrive_as_the_exact_published_name(tmp_path: Any) -> None:
+    """Multiset equality against the published column, so a swapped or normalised name is red."""
+    (tmp_path / "x.csv").write_text(
+        'base_smiles,partner_name,y\nCCO,"2a, Boronic Acid",1\nCCO,"2b, Boronic Ester",2\n',
+        encoding="utf-8",
+    )
+    dataset = Dataset(
+        csv_name="x.csv",
+        dataset_id="d",
+        factors=(("base", "base_smiles"),),
+        yield_column="y",
+        tier=RecordTier.CITATION_ONLY,
+        named_only=(("partner", "partner_name"),),
+        tier_reason="named only",
+    )
+    original = _DATASETS
+    try:
+        import chemclaw.cli.live_data as module
+
+        module._DATASETS = (dataset,)
+        faithful = [_reaction(named="2a, Boronic Acid"), _reaction(named="2b, Boronic Ester")]
+        assert check_named_species_arrive_verbatim(tmp_path, {"d": faithful})[0].passed
+        normalised = [_reaction(named="2a boronic acid"), _reaction(named="2b, Boronic Ester")]
+        assert not check_named_species_arrive_verbatim(tmp_path, {"d": normalised})[0].passed
+        one_lost = [_reaction(named="2a, Boronic Acid"), _reaction(named=None)]
+        assert not check_named_species_arrive_verbatim(tmp_path, {"d": one_lost})[0].passed
     finally:
         module._DATASETS = original
 

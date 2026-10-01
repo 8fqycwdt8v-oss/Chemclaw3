@@ -96,6 +96,13 @@ class EntraSettings(BaseSettings):
     # long instead of on the first token that uses it. That is bounded and configurable, and the
     # 300 s `lifespan` of the key cache already admits staleness of its own.
     entra_jwks_refresh_cooldown_seconds: float = Field(default=60.0, ge=0)
+    # How long a failed JWKS fetch is remembered before the tenant is asked again. A key set is
+    # cached only when it parses, so without this every request arriving while the IdP is down —
+    # or answering 200 with something that is not a key set — paid its own outbound fetch,
+    # unauthenticated callers included (measured: 20 requests, 20 fetches, every one a 503). With
+    # it the fault costs one fetch per window per process, and the price is that a recovered IdP is
+    # noticed up to this long late. 0 turns the memory off.
+    entra_jwks_failure_backoff_seconds: float = Field(default=5.0, ge=0)
     # Read the token's `groups` claim and fold it into the same role set every gate already
     # matches on (D-2026-08-06-a-share-is-mounted-not-called). An AD security group is an
     # entitlement, and this system has exactly one entitlement vocabulary; a second one (a

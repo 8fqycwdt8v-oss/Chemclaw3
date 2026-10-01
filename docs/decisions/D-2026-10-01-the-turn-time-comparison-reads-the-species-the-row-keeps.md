@@ -44,7 +44,7 @@ real changes a campaign carries, and the cost of ending that is ~200 bytes a row
 
 ## Decision
 
-**(a): `reaction_records.species`** (`infra/sql/111_reaction_record_species.sql`), `JSONB`, holding
+**(a): `reaction_records.species`** (`infra/sql/112_reaction_record_species.sql`), `JSONB`, holding
 `ingest.eln.ord.RoleSpecies` — the canonical SMILES of each compared role (reactant, reagent,
 solvent, catalyst), no amounts, no order.
 
@@ -55,7 +55,7 @@ solvent, catalyst), no amounts, no order.
 - `record_from_ord_reaction` stores the projection; `PostgresReactionRecordStore` writes and reads
   it; `condense_protocols` resolves a `reaction-<id>` citation with it on `Protocol.species`.
 - `_changes` diffs the roles when **both** protocols carry a projection. `None` — a note, a share
-  document, a row ingested before 111 — is skipped, never read as four empty roles; an empty role
+  document, a row ingested before 112 — is skipped, never read as four empty roles; an empty role
   *on* a projection is the record saying the run used nothing there and is diffed
   (`tasks/lessons.md` rule 77). When the sets were compared, the prose solvent is not compared a
   second time: the structured one is exact.
@@ -72,10 +72,11 @@ projection must grow or (b) reopens.
 
 ## Consequences
 
-- Rows ingested before migration 111 carry `species = NULL` and compare as before until their next
+- Rows ingested before migration 112 carry `species = NULL` and compare as before until their next
   sync rewrites them (the upsert refreshes every field); nothing is backfilled in SQL, because the
   projection needs RDKit canonicalisation.
-- `infra/sql/README.md`'s `reaction_records` row names 111. #482 (citation-only ORD tier, open
-  at the time of writing) also alters this table, in a file numbered 110 that `main` has since
-  taken (`110_shared_sessions.sql`), so it renumbers past this one; its name-only species carry no
-  structure, and `OrdReaction.species` is where they would have to be left out of the projection.
+- `infra/sql/README.md`'s `reaction_records` row names 112. #482 (the citation-only ORD tier)
+  altered this table first, as 111 `tier`. Its name-only species carry no structure, so a
+  citation-only record stores no projection (`species = NULL`) rather than one that would drop
+  them and report them removed: `ingest/eln/record.py` writes the projection for a `STRUCTURED`
+  record only.

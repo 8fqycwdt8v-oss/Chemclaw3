@@ -33,7 +33,9 @@ from chemclaw.ingest.eln.ord import (
     OrdReaction,
     OutcomeClass,
     ReactionStep,
+    RecordTier,
     Role,
+    UnstructuredComponent,
 )
 from chemclaw.ingest.eln.records import ReactionRecord
 from chemclaw.kg.note import ProcessConditions
@@ -81,10 +83,11 @@ def _without_wikilinks(body: str) -> str:
 def record_from_ord_reaction(reaction: OrdReaction) -> ReactionRecord:
     """Map an `OrdReaction` to the transcription record the corpus stores (idempotent id)."""
     body = _without_wikilinks(
-        f"Reaction `{reaction.reaction_smiles()}` from ELN entry {reaction.reaction_id}.\n\n"
+        f"{_lead(reaction)}"
         f"{_hypothesis_block(reaction)}"
         f"{_conditions_block(reaction)}"
         f"{_charge_block(reaction)}"
+        f"{_species_block(reaction)}"
         f"{_impurity_block(reaction)}"
         f"{_procedure_block(reaction)}"
         f"{_attribute_block(reaction)}"
@@ -117,9 +120,35 @@ def record_from_ord_reaction(reaction: OrdReaction) -> ReactionRecord:
         # Each compared role's structures, so the turn-time comparison diffs the same sets the
         # mined campaign note does (`memory.progression.changes_between`) instead of only what a
         # model can read back out of `body`. A projection, not the charge sheet: `RoleSpecies`
-        # says why amounts and order stay in the body alone.
-        species=reaction.role_species(),
+        # says why amounts and order stay in the body alone. None on a citation-only record: its
+        # named-only species have no structure to project, so a projection would drop them and
+        # the comparison would report them removed — "no projection" is skipped instead.
+        species=reaction.role_species() if reaction.tier is RecordTier.STRUCTURED else None,
+        tier=reaction.tier,
+        # Last, and it matters to one reader: pydantic truncates a long `input_value` repr in the
+        # middle, and an unstorable byte in the body is reported from its tail
+        # (`tests/test_ingest_rejections.py` pins that the refusal quotes it).
         body=body,
+    )
+
+
+def _lead(reaction: OrdReaction) -> str:
+    """The body's first line: the reaction SMILES, or why a citation-only record has none.
+
+    **The tier is stated in the body, not only in a column**, because the body is what every
+    reader gets — `expand_note`, a protocol comparison, a chemist reading the row — and a record
+    that silently omitted its reaction SMILES would read as a transcription that lost it. The
+    sentence says what the source did (named species without giving their structure) and what that
+    costs (no structure search), and nothing about what the missing structure might be.
+    """
+    if reaction.tier is RecordTier.STRUCTURED:
+        return f"Reaction `{reaction.reaction_smiles()}` from ELN entry {reaction.reaction_id}.\n\n"
+    count = len(reaction.unstructured)
+    return (
+        f"Reaction from ELN entry {reaction.reaction_id}. Structure not given by the source for "
+        f"{count} species ({'it is' if count == 1 else 'they are'} named under Species exactly as "
+        "the source gave them), so this record is citation-only: cite it for what it states, and "
+        "expect no structure or similarity search to find it.\n\n"
     )
 
 
@@ -204,7 +233,7 @@ def _principal_product(reaction: OrdReaction) -> str | None:
     mean. A wrong `compound_smiles` is worse than none: it is what a by-compound search would
     return, and it would look right.
     """
-    if len(reaction.outcomes) != 1:
+    if reaction.product_count() != 1 or not reaction.outcomes:
         return None
     return reaction.outcomes[0].smiles
 
@@ -307,7 +336,8 @@ def _scale(reaction: OrdReaction) -> str | None:
     tag means inventing bands ("bench", "kilo") that no chemist agreed to and no other note class
     uses; the per-input detail below is what a machine reads, this line is what a skim reads.
     """
-    reactants = [c for c in reaction.inputs if c.role is Role.REACTANT]
+    # A named-only reactant was charged too, and its amount counts toward the scale the same way.
+    reactants = [c for c in (*reaction.inputs, *reaction.unstructured) if c.role is Role.REACTANT]
     masses = [c.mass_mg for c in reactants if c.mass_mg is not None]
     # Only those with no mass, so a reactant carrying both is counted once, on the preferred form.
     amounts = [c.amount_mmol for c in reactants if c.mass_mg is None and c.amount_mmol is not None]
@@ -352,7 +382,12 @@ def _charge_block(reaction: OrdReaction) -> str:
 
     Every input is listed once the section exists, including those with no recorded amount: that a
     species was charged is itself information, and omitting its row would read as "not charged".
+
+    Empty for a citation-only record, whose `## Species` block lists every species with whatever
+    amount was recorded — a second list of the structured half here would read as the whole charge.
     """
+    if reaction.tier is RecordTier.CITATION_ONLY:
+        return ""
     # **Or an attribute**, because the gate decided whether a per-species fact reaches the note at
     # all and read only the three quantities: a record whose ELN charged by `unmeasured` (an ORD
     # statement, carried as `amount_unmeasured`) or logged a lot number without a mass lost every
@@ -372,6 +407,54 @@ def _charge_block(reaction: OrdReaction) -> str:
 
 def _charge_line(component: Component) -> str:
     """One charged species: its structure, its role, and whatever amount was recorded."""
+    amounts = _amounts(component)
+    detail = ", ".join(amounts) if amounts else "amount not recorded"
+    line = f"`{component.smiles}` ({component.role.value}): {detail}"
+    # Whatever else the source recorded about this species, on the row it belongs to rather than in
+    # the reaction-level block: a lot number is a fact about *this* charge, and hoisting it would
+    # lose which species it described the moment a record charges two lots of the same reagent.
+    if component.attributes:
+        line += " — " + _attribute_text(component.attributes)
+    return line
+
+
+def _species_block(reaction: OrdReaction) -> str:
+    """Every species of a citation-only record, drawn or named — what its missing SMILES would say.
+
+    Empty for a structured record, whose reaction SMILES and charge sheet already say it. For a
+    citation-only one this is the only place its species appear at all, so it lists every one,
+    inputs before products: a structure as its SMILES, a named-only species as the source's name
+    followed by "structure not given by the source", which is the tier made visible per species.
+    """
+    if reaction.tier is RecordTier.STRUCTURED:
+        return ""
+    named = reaction.unstructured
+    species: list[Component | UnstructuredComponent] = [
+        *reaction.inputs,
+        *(c for c in named if c.role is not Role.PRODUCT),
+        *reaction.outcomes,
+        *(c for c in named if c.role is Role.PRODUCT),
+    ]
+    lines = "".join(f"- {_species_line(c)}\n" for c in species)
+    return f"\n## Species\n\n{lines}"
+
+
+def _species_line(species: Component | UnstructuredComponent) -> str:
+    """One species of a citation-only record: its identity, its role, and any recorded amount."""
+    if isinstance(species, Component):
+        identity = f"`{species.smiles}`"
+    else:
+        identity = f"{species.name} — structure not given by the source"
+    line = f"{identity} ({species.role.value})"
+    if amounts := _amounts(species):
+        line += f": {', '.join(amounts)}"
+    if species.attributes:
+        line += " — " + _attribute_text(species.attributes)
+    return line
+
+
+def _amounts(component: Component | UnstructuredComponent) -> list[str]:
+    """The amounts the source recorded for one species, each unit-labelled."""
     amounts = []
     if component.mass_mg is not None:
         amounts.append(f"{_measured(component.mass_mg)} mg")
@@ -382,14 +465,7 @@ def _charge_line(component: Component) -> str:
     # the ELN was silent where the ELN was not (`Component.volume_ml`).
     if component.volume_ml is not None:
         amounts.append(f"{_measured(component.volume_ml)} mL")
-    detail = ", ".join(amounts) if amounts else "amount not recorded"
-    line = f"`{component.smiles}` ({component.role.value}): {detail}"
-    # Whatever else the source recorded about this species, on the row it belongs to rather than in
-    # the reaction-level block: a lot number is a fact about *this* charge, and hoisting it would
-    # lose which species it described the moment a record charges two lots of the same reagent.
-    if component.attributes:
-        line += " — " + _attribute_text(component.attributes)
-    return line
+    return amounts
 
 
 def _attribute_text(attributes: dict[str, str]) -> str:
