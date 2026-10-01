@@ -43,6 +43,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
+from chemclaw.ingest.eln.ord import RecordTier
 from chemclaw.kg.note import ProcessConditions, require_note_slug
 
 logger = logging.getLogger(__name__)
@@ -158,13 +159,14 @@ def _one_of(reaction_id: str, found: Sequence[tuple[str, "ReactionRecord"]]) -> 
 
 # The columns an ingest writes, which is also everything a read selects.
 _COLUMNS = (
-    "reaction_id, body, compound_smiles, project, performed_at, conditions, source, retracted_at"
+    "reaction_id, body, compound_smiles, project, performed_at, conditions, source, retracted_at, "
+    "tier"
 )
 
 _UPSERT = f"""
 INSERT INTO reaction_records (ingest_source, {_COLUMNS})
 VALUES (%(ingest_source)s, %(reaction_id)s, %(body)s, %(compound_smiles)s, %(project)s,
-        %(performed_at)s, %(conditions)s, %(source)s, %(retracted_at)s)
+        %(performed_at)s, %(conditions)s, %(source)s, %(retracted_at)s, %(tier)s)
 ON CONFLICT (ingest_source, reaction_id) DO UPDATE SET
     -- Every field is refreshed, because an ELN amends an entry *in place*: a yield corrected after
     -- assay, an impurity added, a retraction. The old note path compared bodies to notice that and
@@ -181,6 +183,8 @@ ON CONFLICT (ingest_source, reaction_id) DO UPDATE SET
     -- would make a retraction permanent on a tier whose whole rule is that the row is what the
     -- source last said.
     retracted_at = EXCLUDED.retracted_at,
+    -- The tier follows the body: an amendment that adds or removes a structure moves the row.
+    tier = EXCLUDED.tier,
     last_seen = now()
 """
 
@@ -203,6 +207,15 @@ _SELECT_KNOWN = "SELECT reaction_id FROM reaction_records WHERE reaction_id = AN
 _SELECT_RETRACTED = (
     "SELECT ingest_source, reaction_id FROM reaction_records "
     "WHERE reaction_id = ANY(%s) AND retracted_at IS NOT NULL"
+)
+
+# Which of a page of candidate ids no structure search may serve: withdrawn by the source, or
+# citation-only (`110`). The second can only carry a fingerprint row if an entry was ingested
+# structured and later amended to name a species without its structure — the app role cannot
+# DELETE from `reaction_fingerprints`, so the stale row stays and this is what keeps it unserved.
+_SELECT_WITHHELD = (
+    "SELECT ingest_source, reaction_id FROM reaction_records "
+    "WHERE reaction_id = ANY(%s) AND (retracted_at IS NOT NULL OR tier <> 'structured')"
 )
 
 _SELECT_BODIES = (
@@ -236,6 +249,10 @@ class ReactionRecord(BaseModel):
     # Set from `RawEntry.retracted_at`, never inferred from absence
     # (`D-2026-09-13-a-withdrawal-is-a-fact-a-source-reports`, and `infra/sql/066`).
     retracted_at: datetime | None = None
+    # `CITATION_ONLY` when the source named a species without its structure (`infra/sql/110`):
+    # the row is citable and no structure search may serve it. Defaulted to `STRUCTURED` because
+    # that is what every record was before the tier existed, and what the migration says of them.
+    tier: RecordTier = RecordTier.STRUCTURED
 
     @field_validator("reaction_id")
     @classmethod
@@ -392,6 +409,22 @@ class ReactionRecordStore(Protocol):
         """
         ...
 
+    async def structurally_withheld(self, refs: Sequence[tuple[str, str]]) -> set[tuple[str, str]]:
+        """Which of `refs` no structure search may serve: withdrawn, or citation-only.
+
+        The question every structural reader asks of a page of hits, and a superset of `retracted`
+        by one clause. A citation-only record never *gets* a fingerprint row
+        (`ingest.eln.ingest.ingest_reaction`), so the second clause answers for one case only: an
+        entry ingested structured and amended to name a species without its structure, whose old
+        fingerprint row the app role cannot delete. Without this, "a structure search never returns
+        a citation-only record" would hold for every record except the ones that changed tier.
+
+        `retracted` stays its own method, because `sync` asks it a different question — whether a
+        replayed entry's withdrawal state changed — where a citation-only row is not withdrawn.
+        Same source rule as `retracted`: an empty source matches any.
+        """
+        ...
+
     async def known(self, reaction_ids: Sequence[str]) -> set[str]:
         """Which of `reaction_ids` the corpus holds at all — the citation-existence check.
 
@@ -460,16 +493,18 @@ class InMemoryReactionRecordStore:
     async def retracted(self, refs: Sequence[tuple[str, str]]) -> set[tuple[str, str]]:
         """Which of `refs` this store holds a withdrawal for; an empty source matches any."""
         withdrawn = {
-            (stored_source, stored_id)
-            for (stored_source, stored_id), record in self._records.items()
-            if record.retracted_at is not None
+            key for key, record in self._records.items() if record.retracted_at is not None
         }
-        return {
-            (source, reaction_id)
-            for source, reaction_id in refs
-            if (source, reaction_id) in withdrawn
-            or (not source and any(stored == reaction_id for _, stored in withdrawn))
+        return _pair_off(refs, withdrawn)
+
+    async def structurally_withheld(self, refs: Sequence[tuple[str, str]]) -> set[tuple[str, str]]:
+        """Which of `refs` are withdrawn or citation-only; an empty source matches any."""
+        withheld = {
+            key
+            for key, record in self._records.items()
+            if record.retracted_at is not None or record.tier is not RecordTier.STRUCTURED
         }
+        return _pair_off(refs, withheld)
 
     async def known(self, reaction_ids: Sequence[str]) -> set[str]:
         """Which of `reaction_ids` this store holds at all, under any source."""
@@ -515,6 +550,7 @@ class PostgresReactionRecordStore:
                             else None,
                             "source": item.source,
                             "retracted_at": item.retracted_at,
+                            "tier": item.tier.value,
                         }
                         for item in records
                     ],
@@ -611,13 +647,22 @@ class PostgresReactionRecordStore:
             async with conn.cursor() as cur:
                 await cur.execute(_SELECT_RETRACTED, ([reaction_id for _, reaction_id in refs],))
                 rows = await cur.fetchall()
-        withdrawn = {(row[0], row[1]) for row in rows}
-        return {
-            (source, reaction_id)
-            for source, reaction_id in refs
-            if (source, reaction_id) in withdrawn
-            or (not source and any(stored == reaction_id for _, stored in withdrawn))
-        }
+        return _pair_off(refs, {(row[0], row[1]) for row in rows})
+
+    async def structurally_withheld(self, refs: Sequence[tuple[str, str]]) -> set[tuple[str, str]]:
+        """Which of `refs` are withdrawn or citation-only; an empty source matches any.
+
+        One statement over the page of ids, paired off in Python for the reason `retracted` gives.
+        Both conditions are rare over a page of structural hits — a citation-only row reaches one
+        only through an amendment — so what comes back is a handful of rows.
+        """
+        if not refs:
+            return set()
+        async with self._connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(_SELECT_WITHHELD, ([reaction_id for _, reaction_id in refs],))
+                rows = await cur.fetchall()
+        return _pair_off(refs, {(row[0], row[1]) for row in rows})
 
     async def known(self, reaction_ids: Sequence[str]) -> set[str]:
         """Which of `reaction_ids` the corpus holds at all."""
@@ -683,6 +728,20 @@ def _stored_conditions(reaction_id: str, stored: Any) -> ProcessConditions | Non
     return ProcessConditions(**known)
 
 
+def _pair_off(refs: Sequence[tuple[str, str]], found: set[tuple[str, str]]) -> set[tuple[str, str]]:
+    """The `refs` that `found` holds, where a ref with an empty source matches any source.
+
+    One rule for every "which of these hits" question the stores answer, so the in-memory oracle
+    and the SQL store cannot disagree on what a bare citation matches.
+    """
+    return {
+        (source, reaction_id)
+        for source, reaction_id in refs
+        if (source, reaction_id) in found
+        or (not source and any(stored == reaction_id for _, stored in found))
+    }
+
+
 def _record(row: tuple[Any, ...]) -> ReactionRecord:
     """Build a `ReactionRecord` from a `_COLUMNS` row, validated through the model."""
     return ReactionRecord(
@@ -694,6 +753,7 @@ def _record(row: tuple[Any, ...]) -> ReactionRecord:
         conditions=_stored_conditions(row[0], row[5]),
         source=row[6],
         retracted_at=row[7],
+        tier=RecordTier(row[8]),
     )
 
 

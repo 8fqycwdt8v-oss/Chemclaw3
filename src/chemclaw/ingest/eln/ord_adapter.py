@@ -39,7 +39,14 @@ from chemclaw.ingest.eln.adapter import (
     refuse_colliding_ids,
     warn_late_arrivals,
 )
-from chemclaw.ingest.eln.ord import Component, OrdReaction, ReactionStep, Role, StepKind
+from chemclaw.ingest.eln.ord import (
+    Component,
+    OrdReaction,
+    ReactionStep,
+    Role,
+    StepKind,
+    UnstructuredComponent,
+)
 from chemclaw.ingest.rejections import record_refusals
 
 logger = logging.getLogger(__name__)
@@ -90,6 +97,14 @@ _TO_ML: dict[str, float] = {"LITER": 1e3, "MILLILITER": 1.0, "MICROLITER": 1e-3,
 # plus the flag that qualifies a volume, and every one of them is read — an amount this adapter can
 # *see* and cannot read is refused by name below rather than becoming no amount at all.
 _AMOUNT_KINDS = frozenset({"mass", "moles", "volume", "unmeasured", "volume_includes_solutes"})
+
+
+# A species as this adapter maps it: a structure, or the name the source gave in place of one.
+Species = Component | UnstructuredComponent
+
+# The identifier kinds that are a *name* — resolved through the reagent table when it knows the
+# spelling, and otherwise carried verbatim as an `UnstructuredComponent`.
+_NAME_KINDS = frozenset({"NAME", "IUPAC_NAME"})
 
 
 class OrdFormatError(ElnMappingError):
@@ -267,10 +282,14 @@ def _build(raw: RawEntry) -> OrdReaction:
         raise OrdFormatError("ORD reaction has no input components")
     outcomes, yield_percent, purity_percent = _outcomes(payload)
     temperature_c = _temperature(_get(_conditions(payload), "temperature") or {})
+    species = [*inputs, *outcomes]
     return OrdReaction(
         reaction_id=raw.entry_id,
-        inputs=inputs,
-        outcomes=outcomes,
+        inputs=[c for c in inputs if isinstance(c, Component)],
+        outcomes=[c for c in outcomes if isinstance(c, Component)],
+        # A species named without a structure goes here whatever its role, which is what makes the
+        # record citation-only — see `UnstructuredComponent` for why nothing resolves it further.
+        unstructured=[c for c in species if isinstance(c, UnstructuredComponent)],
         temperature_c=temperature_c,
         yield_percent=yield_percent,
         purity_percent=purity_percent,
@@ -289,20 +308,22 @@ def _build(raw: RawEntry) -> OrdReaction:
 
 
 def _steps(
-    reaction_inputs: list[tuple[dict[str, Any], list[Component]]],
+    reaction_inputs: list[tuple[dict[str, Any], list[Species]]],
     temperature_c: float | None,
     payload: dict[str, Any],
 ) -> list[ReactionStep]:
     """Build the ordered recipe: additions (by ORD order), the setpoint, then the workups."""
     steps: list[ReactionStep] = []
     for raw_input, components in sorted(reaction_inputs, key=_addition_order):
-        names = ", ".join(c.smiles for c in components)
+        names = ", ".join(_label(c) for c in components)
         steps.append(
             ReactionStep(
                 index=len(steps) + 1,
                 kind=StepKind.ADDITION,
                 text=f"Add {names}",
-                components=components,
+                # A step links the species it can name *as a structure*; a named-only one is in the
+                # step's text as the source gave it and in `OrdReaction.unstructured`.
+                components=[c for c in components if isinstance(c, Component)],
                 duration_h=_duration(_get(raw_input, "addition_time", "additionTime")),
             )
         )
@@ -326,7 +347,15 @@ def _workup_step(workup: dict[str, Any], index: int) -> ReactionStep:
         raise OrdFormatError(f"workup is not an object: {workup!r}")
     kind_name = str(workup.get("type", "")).upper()
     details = str(workup.get("details", "")) or kind_name.title() or "Workup"
-    components = _components(_get(workup, "input") or {})
+    components: list[Component] = []
+    for species in _components(_get(workup, "input") or {}):
+        if not isinstance(species, Component):
+            # A workup reagent is not a reaction species and carries no tier, so a named-only one
+            # stays the refusal it always was rather than widening what a step may hold.
+            raise OrdFormatError(
+                f"workup species {species.name!r} has no resolvable structure identifier"
+            )
+        components.append(species)
     return ReactionStep(
         index=index,
         kind=_WORKUP_KINDS.get(kind_name, StepKind.WORKUP),
@@ -337,7 +366,7 @@ def _workup_step(workup: dict[str, Any], index: int) -> ReactionStep:
     )
 
 
-def _inputs(payload: dict[str, Any]) -> list[tuple[dict[str, Any], list[Component]]]:
+def _inputs(payload: dict[str, Any]) -> list[tuple[dict[str, Any], list[Species]]]:
     """Parse the `inputs` map into (raw ReactionInput, its components) pairs.
 
     The pair is kept so `_steps` can read each input's `addition_order`/`addition_time`
@@ -346,7 +375,7 @@ def _inputs(payload: dict[str, Any]) -> list[tuple[dict[str, Any], list[Componen
     raw_inputs = payload.get("inputs")
     if not isinstance(raw_inputs, dict) or not raw_inputs:
         raise OrdFormatError("ORD reaction missing non-empty 'inputs'")
-    pairs: list[tuple[dict[str, Any], list[Component]]] = []
+    pairs: list[tuple[dict[str, Any], list[Species]]] = []
     for value in raw_inputs.values():
         if not isinstance(value, dict):
             raise OrdFormatError(f"ReactionInput is not an object: {value!r}")
@@ -354,38 +383,53 @@ def _inputs(payload: dict[str, Any]) -> list[tuple[dict[str, Any], list[Componen
     return pairs
 
 
-def _components(
-    reaction_input: dict[str, Any], default_role: Role = Role.REAGENT
-) -> list[Component]:
-    """Map an ORD `ReactionInput`'s `components` to canonical `Component`s (empty if none)."""
+def _components(reaction_input: dict[str, Any], default_role: Role = Role.REAGENT) -> list[Species]:
+    """Map an ORD `ReactionInput`'s `components` to canonical species (empty if none)."""
     if not isinstance(reaction_input, dict):
         return []
-    components: list[Component] = []
+    components: list[Species] = []
     for compound in _as_list(reaction_input.get("components")):
         if not isinstance(compound, dict):
             raise OrdFormatError(f"component is not an object: {compound!r}")
-        charged = _amount(_get(compound, "amount") or {})
-        components.append(
-            Component(
-                smiles=_smiles(compound),
-                role=_role(compound, default_role),
-                mass_mg=charged.mass_mg,
-                amount_mmol=charged.amount_mmol,
-                volume_ml=charged.volume_ml,
-                # Not under the key `amount`: no amount was recorded, and the charge row already
-                # says so. What this adds is the source's reason — "the amount was deliberately not
-                # measured, and here is how it was charged instead".
-                attributes=(
-                    {"amount_unmeasured": charged.unmeasured} if charged.unmeasured else {}
-                ),
-            )
-        )
+        components.append(_species(compound, _role(compound, default_role)))
     return components
 
 
-def _outcomes(payload: dict[str, Any]) -> tuple[list[Component], float | None, float | None]:
-    """Map ORD `outcomes[].products[]` to components + the headline product's YIELD and PURITY."""
-    products: list[Component] = []
+def _species(compound: dict[str, Any], role: Role, *, charged: bool = True) -> Species:
+    """One ORD `Compound` as a structured `Component`, or as the name the source gave it.
+
+    A structure when any identifier resolves to one (`_smiles`); otherwise an
+    `UnstructuredComponent` carrying the source's own `NAME` verbatim, which makes the reaction
+    citation-only (`D-2026-09-27-a-reaction-without-a-structure-is-citable-not-searchable`). Only a
+    compound with neither — nothing this record could show a reader — is still refused.
+
+    `charged=False` for a product: ORD's `ProductCompound` records measurements, not a charge, and
+    this adapter has never read an amount off one.
+    """
+    common: dict[str, Any] = {"role": role}
+    if charged:
+        amount = _amount(_get(compound, "amount") or {})
+        common.update(
+            mass_mg=amount.mass_mg,
+            amount_mmol=amount.amount_mmol,
+            volume_ml=amount.volume_ml,
+            # Not under the key `amount`: no amount was recorded, and the charge row already says
+            # so. What this adds is the source's reason — "the amount was deliberately not
+            # measured, and here is how it was charged instead".
+            attributes=({"amount_unmeasured": amount.unmeasured} if amount.unmeasured else {}),
+        )
+    smiles = _smiles(compound)
+    if smiles is not None:
+        return Component(smiles=smiles, **common)
+    name = _given_name(compound)
+    if name is None:
+        raise OrdFormatError(f"compound has no resolvable structure identifier: {compound!r}")
+    return UnstructuredComponent(name=name, **common)
+
+
+def _outcomes(payload: dict[str, Any]) -> tuple[list[Species], float | None, float | None]:
+    """Map ORD `outcomes[].products[]` to species + the headline product's YIELD and PURITY."""
+    products: list[Species] = []
     raw: list[dict[str, Any]] = []
     for outcome in _optional_list(payload, "outcomes"):
         if not isinstance(outcome, dict):
@@ -393,7 +437,7 @@ def _outcomes(payload: dict[str, Any]) -> tuple[list[Component], float | None, f
         for product in _as_list(outcome.get("products")):
             if not isinstance(product, dict):
                 raise OrdFormatError(f"product is not an object: {product!r}")
-            products.append(Component(smiles=_smiles(product), role=Role.PRODUCT))
+            products.append(_species(product, Role.PRODUCT, charged=False))
             raw.append(product)
     if not products:
         raise OrdFormatError("ORD reaction has no products")
@@ -473,8 +517,8 @@ def _identifiers(compound: dict[str, Any]) -> list[tuple[str, str]]:
     return pairs
 
 
-def _smiles(compound: dict[str, Any]) -> str:
-    """Resolve a compound to SMILES from any identifier ORD allows, or raise.
+def _smiles(compound: dict[str, Any]) -> str | None:
+    """Resolve a compound to SMILES from any identifier ORD allows, or `None` when none resolves.
 
     ORD's `CompoundIdentifier` is a union — a real submission may carry `INCHI` or only a `NAME`,
     and requiring `SMILES` discarded whole reactions over one component. Measured against the
@@ -492,9 +536,12 @@ def _smiles(compound: dict[str, Any]) -> str:
        `resolve_compound` serves the agent from. It returns `None` on an unknown spelling rather
        than guessing, which is what keeps this a lookup and not an inference.
 
-    Still raises when nothing resolves. Refusing to invent a structure is the point (a fabricated
-    one propagates silently into a fingerprint index, a similarity hit and eventually a note
-    citing it); what changes is that refusal now follows an actual attempt.
+    `None` when nothing resolves, and `_species` decides what that means. Refusing to invent a
+    structure is still the point (a fabricated one propagates silently into a fingerprint index, a
+    similarity hit and eventually a note citing it); what changed is what happens to the *record*.
+    That refusal cost the whole reaction — 5,760 of 10,011 seeded records, yields and conditions
+    included — and since `D-2026-09-27-a-reaction-without-a-structure-is-citable-not-searchable` a
+    compound the source only names is carried as that name and the reaction lands citation-only.
     """
     identifiers = _identifiers(compound)
     for wanted in ("SMILES",):
@@ -509,12 +556,21 @@ def _smiles(compound: dict[str, Any]) -> str:
                 return str(Chem.MolToSmiles(mol))
 
     for kind, value in identifiers:
-        if kind in {"NAME", "IUPAC_NAME"}:
+        if kind in _NAME_KINDS:
             resolved = resolve_compound_name(value)
             if resolved is not None:
                 return resolved.smiles
+    return None
 
-    raise OrdFormatError(f"compound has no resolvable structure identifier: {compound!r}")
+
+def _given_name(compound: dict[str, Any]) -> str | None:
+    """The first name the source gave the compound, verbatim, or `None` when it gave none."""
+    return next((value for kind, value in _identifiers(compound) if kind in _NAME_KINDS), None)
+
+
+def _label(species: Species) -> str:
+    """How a species is written in a procedure line: its SMILES, or the name the source gave it."""
+    return species.smiles if isinstance(species, Component) else species.name
 
 
 def _role(compound: dict[str, Any], default: Role) -> Role:
@@ -700,16 +756,16 @@ def _created_at(payload: dict[str, Any]) -> datetime:
         raise OrdFormatError(f"bad record_created time {value!r}: {exc}") from exc
 
 
-def _addition_order(pair: tuple[dict[str, Any], list[Component]]) -> tuple[int, str]:
-    """Sort key for input additions: ORD `addition_order` first, then component SMILES.
+def _addition_order(pair: tuple[dict[str, Any], list[Species]]) -> tuple[int, str]:
+    """Sort key for input additions: ORD `addition_order` first, then component SMILES (or name).
 
     An input without an explicit order sorts last (a large sentinel) but stays deterministic
     via the SMILES tiebreak, so charge order is stable run to run.
     """
     raw_input, components = pair
     order = _get(raw_input, "addition_order", "additionOrder")
-    smiles = components[0].smiles if components else ""
-    return (int(order) if isinstance(order, int) else 1_000_000, smiles)
+    label = _label(components[0]) if components else ""
+    return (int(order) if isinstance(order, int) else 1_000_000, label)
 
 
 def _get(mapping: dict[str, Any], *names: str) -> Any:

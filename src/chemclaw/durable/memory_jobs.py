@@ -27,7 +27,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.durable.registry import durable_activity, durable_workflow
     from chemclaw.ingest.eln.adapter import entry_window, fetch_was_truncated
     from chemclaw.ingest.eln.compound import compound_dependencies
-    from chemclaw.ingest.eln.ord import OrdReaction
+    from chemclaw.ingest.eln.ord import OrdReaction, RecordTier
     from chemclaw.ingest.eln.warehouse.expr import pattern_budget
     from chemclaw.ingest.sources.registry import active_ingest_sources
     from chemclaw.kg.git_writer import default_writer
@@ -107,6 +107,7 @@ async def read_corpus() -> CorpusRead:
     """
     reactions: list[OrdReaction] = []
     skipped = 0
+    citation_only = 0
     unfinished: list[str] = []
     # One regex budget for this whole activity, not per page: a drop directory returns its entire
     # corpus as one page and a warehouse source returns many, so a per-page budget would bound
@@ -142,7 +143,7 @@ async def read_corpus() -> CorpusRead:
                         capped = True
                         break
                     try:
-                        reactions.append(adapter.map_to_ord(raw))
+                        reaction = adapter.map_to_ord(raw)
                     except ChemclawError as exc:
                         # A malformed entry is the sync's problem to report, not this job's — skip
                         # it and move on. Catch only ChemclawError (the bad-data contract), so an
@@ -151,6 +152,17 @@ async def read_corpus() -> CorpusRead:
                         logger.info("memory job skipped an unmappable ELN entry: %s", exc)
                         skipped += 1
                         continue
+                    if reaction.tier is RecordTier.CITATION_ONLY:
+                        # **Not part of the memory corpus, and not a gap in it either.** Every miner
+                        # reading this list works on structure — DRFP clusters, product-to-reactant
+                        # chains, similarity-grouped campaigns — and a citation-only record has no
+                        # reaction SMILES to give them (`OrdReaction.reaction_smiles` refuses). So
+                        # it is left out and counted, and `complete` is untouched: the read saw the
+                        # whole structural corpus, which is what `complete` is a claim about
+                        # (`D-2026-09-27-a-reaction-without-a-structure-is-citable-not-searchable`).
+                        citation_only += 1
+                        continue
+                    reactions.append(reaction)
                 if capped:
                     # Stop here and say so. Raising would lose the pass entirely; continuing would
                     # exchange a partial note for a killed worker, which is the trade
@@ -163,6 +175,12 @@ async def read_corpus() -> CorpusRead:
                 )
             if capped:
                 break
+        if citation_only:
+            logger.info(
+                "memory corpus read left out %d citation-only reaction(s): each names a species "
+                "without its structure, and every memory miner works on structure",
+                citation_only,
+            )
         if skipped:
             logger.warning(
                 "memory corpus read is incomplete: %d entr(y/ies) could not be mapped, so "

@@ -30,12 +30,14 @@ readable the moment it is ingested, so the lane asks Postgres for the record its
 stopping short of a human's merge — which is a stronger check than the proposal count it replaces,
 not a weaker one.
 
-A stage that drops rows is not automatically a failure — one dataset is refused *deliberately*,
-and the refusal is correct (see `_DATASETS`). It is a failure when reality disagrees with the
-declaration, **in either direction**: a dataset that starts being refused has regressed, and a
-dataset declared unreachable that suddenly ingests means somebody taught the adapter to invent a
-structure it cannot know. Both are red here, which is what makes this a regression detector rather
-than a number to admire.
+Every dataset declares the tier its records must arrive in, and one of them is declared
+*citation-only* deliberately (see `_DATASETS`): the source names a coupling partner without giving
+its structure, so those records arrive citable and outside every structure index
+(`D-2026-09-27-a-reaction-without-a-structure-is-citable-not-searchable`). It is a failure when
+reality disagrees with the declaration, **in either direction**: a record that is refused, or that
+lands in a lower tier than declared, has regressed, and a citation-only dataset whose records
+suddenly arrive *structured* means somebody taught the adapter to invent a structure it cannot know.
+Both are red here, which is what makes this a regression detector rather than a number to admire.
 
 ## Why no model is involved
 
@@ -68,7 +70,7 @@ from chemclaw.core.db import connection as db_connection
 from chemclaw.core.logging import configure_logging
 from chemclaw.core.markdown import render_table
 from chemclaw.ingest.eln.json_adapter import JsonExportAdapter
-from chemclaw.ingest.eln.ord import OrdReaction
+from chemclaw.ingest.eln.ord import OrdReaction, RecordTier, Role
 from chemclaw.ingest.eln.ord_adapter import OrdJsonAdapter
 from chemclaw.ingest.eln.record import record_from_ord_reaction
 from chemclaw.ingest.eln.warehouse.expr import PatternBudgetError, pattern_budget
@@ -95,9 +97,13 @@ class Dataset:
     declared here rather than inferred. Inferring them is how a check ends up asserting that a
     corpus agrees with itself.
 
-    `reachable` is the declaration this lane is really built around. `False` says the adapter is
-    *expected* to refuse every record — and the check fails if it stops refusing them, because the
-    only way to accept them is to invent the structure the source never published.
+    `tier` is the declaration this lane is really built around. `CITATION_ONLY` says every record
+    is *expected* to arrive naming a species without its structure — and the check fails if one
+    arrives structured, because the only way to get there is to invent the structure the source
+    never published. It was `reachable=False` while such a record was refused outright, and the
+    same dataset is the one that changed: the refusal cost 5,760 records their yields and
+    conditions, and the owner decision recorded in
+    `D-2026-09-27-a-reaction-without-a-structure-is-citable-not-searchable` keeps them as evidence.
     """
 
     csv_name: str
@@ -114,10 +120,13 @@ class Dataset:
     # the check strict — a stage that truncated further, or that seeded the mass-ion column
     # instead, still fails — where a loosened global tolerance would have hidden both.
     yield_places: int = _YIELD_PLACES
-    reachable: bool = True
-    # Why a dataset is refused, in one line, so a red run explains itself without a git archaeology
-    # session. Empty for reachable datasets.
-    refusal: str = ""
+    tier: RecordTier = RecordTier.STRUCTURED
+    # (ORD input key, CSV column) for each species the source *names* without a structure. Checked
+    # as names, verbatim: the published cell must arrive as an `UnstructuredComponent.name`.
+    named_only: tuple[tuple[str, str], ...] = ()
+    # Why a dataset is citation-only, in one line, so a red run explains itself without a git
+    # archaeology session. Empty for structured datasets.
+    tier_reason: str = ""
 
     def dataset_ids(self) -> tuple[str, ...]:
         """Every ORD `datasetId` this CSV was seeded into."""
@@ -156,13 +165,13 @@ _DATASETS: tuple[Dataset, ...] = (
         ),
         yield_column="yield_pct_uv",
         yield_places=2,
-        reachable=False,
-        refusal=(
+        tier=RecordTier.CITATION_ONLY,
+        named_only=(("second coupling partner", "r2_name"),),
+        tier_reason=(
             "the source spreadsheet (Perera, Science 2018, 359, 429) publishes the second "
             "coupling partner only as its own shorthand (`2a, Boronic Acid`), so no structure "
-            "exists to map. "
-            "`ord_adapter._smiles` refuses it rather than inventing one, and "
-            "`test_ord_compound_with_no_resolvable_identifier_is_still_refused` pins that refusal"
+            "exists to map; the name is carried verbatim and the record stays out of every "
+            "structure index"
         ),
     ),
     Dataset(
@@ -215,13 +224,15 @@ class Check:
 
 @dataclass
 class Reach:
-    """How far one dataset's published rows actually got down the pipeline."""
+    """How far one dataset's published rows actually got down the pipeline, and in which tier."""
 
     dataset: str
     published: int
     seeded: int
     mapped: int
     refused: int
+    # The part of `mapped` that arrived citation-only — the tier column of the reach table.
+    citation_only: int = 0
     proposed: int | None = None
 
 
@@ -419,25 +430,24 @@ def check_zero_yields_survive(real_data: Path, seeded: dict[str, list[dict[str, 
 def check_adapter_matches_its_declaration(
     mapped: dict[str, list[OrdReaction]], refused: dict[str, int]
 ) -> list[Check]:
-    """Each dataset is accepted, or refused, exactly as `_DATASETS` declares — no drift either way.
+    """Each dataset maps, whole, into exactly the tier `_DATASETS` declares — no drift either way.
 
-    The asymmetry matters. A reachable dataset that starts being refused is a plain regression. A
-    dataset declared unreachable that starts being *accepted* is worse than a regression: the only
-    way to accept it is to have invented a structure the source never published, which propagates
-    into a fingerprint index and eventually into a proposed note.
+    The asymmetry matters. A refused record, or one landing citation-only in a structured dataset,
+    is a plain regression. A record of a citation-only dataset that arrives *structured* is worse
+    than a regression: the only way to get there is to have invented a structure the source never
+    published, which would propagate into a fingerprint index and a similarity hit.
     """
     checks: list[Check] = []
     for dataset in _DATASETS:
-        accepted = sum(len(mapped.get(name, ())) for name in dataset.dataset_ids())
+        reactions = [r for name in dataset.dataset_ids() for r in mapped.get(name, ())]
         rejected = sum(refused.get(name, 0) for name in dataset.dataset_ids())
-        if dataset.reachable:
-            passed = accepted > 0 and rejected == 0
-            observed = f"{accepted} mapped, {rejected} refused"
-        else:
-            passed = accepted == 0 and rejected > 0
-            observed = (
-                f"{accepted} mapped, {rejected} refused (declared unreachable: {dataset.refusal})"
-            )
+        tiers = Counter(reaction.tier for reaction in reactions)
+        passed = bool(reactions) and rejected == 0 and set(tiers) == {dataset.tier}
+        observed = f"{len(reactions)} mapped, {rejected} refused, " + ", ".join(
+            f"{count} {tier.value}" for tier, count in sorted(tiers.items())
+        )
+        if dataset.tier_reason:
+            observed += f" (declared {dataset.tier.value}: {dataset.tier_reason})"
         checks.append(
             Check(
                 name=f"adapter matches declaration · {dataset.csv_name}",
@@ -459,8 +469,6 @@ def check_adapter_preserves_values(
     """
     checks: list[Check] = []
     for dataset in _DATASETS:
-        if not dataset.reachable:
-            continue
         want = Counter(_published_key(dataset, row) for row in _published_rows(real_data, dataset))
         # Rebuild each mapped reaction's key from the OrdReaction itself: the factor SMILES must
         # appear among its inputs, and the yield must be the published one.
@@ -505,6 +513,43 @@ def check_adapter_preserves_values(
                 ),
             )
         )
+    return checks
+
+
+def check_named_species_arrive_verbatim(
+    real_data: Path, mapped: dict[str, list[OrdReaction]]
+) -> list[Check]:
+    """Every species the source only *names* arrives as that name, character for character.
+
+    The citation-only tier's half of "the number in the answer is the number in the paper": what
+    stands in for a structure the paper never gave is the paper's own text, and a stage that
+    normalised, resolved or dropped it would be changing what the source said. Multiset equality
+    against the published column, for the reason `check_seeding_is_faithful` gives — a count would
+    pass a corpus that swapped two partners. Products are left out: the published tables name none,
+    so a product's name is the mock's text rather than the paper's.
+    """
+    checks: list[Check] = []
+    for dataset in _DATASETS:
+        for _, column in dataset.named_only:
+            want = Counter(row[column] for row in _published_rows(real_data, dataset))
+            got = Counter(
+                component.name
+                for name in dataset.dataset_ids()
+                for reaction in mapped.get(name, ())
+                for component in reaction.unstructured
+                if component.role is not Role.PRODUCT
+            )
+            checks.append(
+                Check(
+                    name=f"named species arrive verbatim · {dataset.csv_name} · {column}",
+                    passed=bool(want) and want == got,
+                    observed=(
+                        f"{sum(want.values())} published names, {sum(got.values())} carried, "
+                        f"{sum((want - got).values())} missing, {sum((got - want).values())} "
+                        "not published"
+                    ),
+                )
+            )
     return checks
 
 
@@ -656,23 +701,82 @@ async def check_corpus_is_reachable(mapped: dict[str, list[OrdReaction]]) -> Che
     Since `D-2026-08-25-an-eln-transcription-is-data-not-a-claim` the hop being checked is the
     stored record rather than a PR-gate proposal, and the id is the ELN's own `reaction_id` — the
     `reaction-` citation prefix is not stored, so a lookup never has to strip it.
+
+    **Counted per tier**, because a record stored in the wrong one is not reachable in the sense
+    that matters: a citation-only record stored `structured` would be served by structure search,
+    and a structured one stored `citation-only` would be withheld from it.
     """
-    expected = [reaction.reaction_id for reactions in mapped.values() for reaction in reactions]
+    expected = Counter(
+        (reaction.reaction_id, reaction.tier.value)
+        for reactions in mapped.values()
+        for reaction in reactions
+    )
     if not expected:
         return Check(
             name="corpus is reachable", passed=False, observed="nothing mapped to look for"
         )
     async with db_connection(settings.postgres_dsn) as connection:
         cursor = await connection.execute(
-            "SELECT count(*) FROM reaction_records WHERE reaction_id = ANY(%s)",
-            (expected,),
+            "SELECT reaction_id, tier FROM reaction_records WHERE reaction_id = ANY(%s)",
+            ([reaction_id for reaction_id, _ in expected],),
         )
-        row = await cursor.fetchone()
-    found = 0 if row is None else int(row[0])
+        rows = await cursor.fetchall()
+    found = Counter((str(row[0]), str(row[1])) for row in rows)
+    matched = expected & found
+    by_tier = Counter(tier for _, tier in matched.elements())
     return Check(
         name="corpus is reachable",
-        passed=found == len(expected),
-        observed=f"{found}/{len(expected)} mapped ORD records are stored as reaction records",
+        passed=matched == expected,
+        observed=(
+            f"{sum(matched.values())}/{sum(expected.values())} mapped ORD records are stored as "
+            "reaction records in their declared tier ("
+            + ", ".join(f"{count} {tier}" for tier, count in sorted(by_tier.items()))
+            + ")"
+        ),
+    )
+
+
+async def check_citation_only_is_not_structure_searchable(
+    mapped: dict[str, list[OrdReaction]],
+) -> Check:
+    """No citation-only record has a row in any index a structure search reads.
+
+    Asked of the tables rather than of a search, because a search can only fail to find something
+    for a reason it cannot state, while a row count of zero is the claim itself: with no
+    `reaction_fingerprints` row a similarity search has nothing to return, and with no
+    `reaction_labels` row the facet tools have nothing to count. (A row that predates an amendment
+    to citation-only is the one case this cannot see, and it is not a case the seeded corpus holds;
+    `ReactionRecordStore.structurally_withheld` is what keeps such a row unserved.)
+    """
+    ids = [
+        reaction.reaction_id
+        for reactions in mapped.values()
+        for reaction in reactions
+        if reaction.tier is RecordTier.CITATION_ONLY
+    ]
+    if not ids:
+        return Check(
+            name="citation-only is not structure-searchable",
+            passed=False,
+            observed="no citation-only record mapped, so nothing was checked",
+        )
+    async with db_connection(settings.postgres_dsn) as connection:
+        counts = []
+        for statement in (
+            "SELECT count(*) FROM reaction_fingerprints WHERE id = ANY(%s)",
+            "SELECT count(*) FROM reaction_labels WHERE reaction_id = ANY(%s)",
+        ):
+            cursor = await connection.execute(statement, (ids,))
+            row = await cursor.fetchone()
+            counts.append(0 if row is None else int(row[0]))
+    fingerprints, labels = counts
+    return Check(
+        name="citation-only is not structure-searchable",
+        passed=fingerprints == 0 and labels == 0,
+        observed=(
+            f"{len(ids)} citation-only records: {fingerprints} reaction-fingerprint rows, "
+            f"{labels} label rows"
+        ),
     )
 
 
@@ -773,8 +877,8 @@ async def backfill(timeout_seconds: float) -> str:
         # **A drain still running is a state, not an error.** The drain is long: ~1.8 s/record
         # measured against this corpus when each record still cost a PR-gate git branch and commit
         # (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge` has since removed that cost and
-        # nobody has re-measured), so the mock's 4,251 ingestible records took a little over two
-        # hours and the timeout is set for that order rather than for a re-measured one. Failing
+        # nobody has re-measured), so the mock's 4,251 then-ingestible records took a little over
+        # two hours and the timeout is set for that order rather than for a re-measured one. Failing
         # here would make the lane red for
         # a reason that is not a defect; the reachability check below reports how far it got, which
         # is the honest number and the one that converges on its own.
@@ -783,7 +887,7 @@ async def backfill(timeout_seconds: float) -> str:
             "running on the broker, so re-running this lane later reads the finished corpus"
         )
     return (
-        f"{workflow_id}: ingested {summary.ingested}, "
+        f"{workflow_id}: ingested {summary.ingested} ({summary.citation_only} citation-only), "
         f"skipped {summary.skipped_existing}, rejected {summary.rejected}"
     )
 
@@ -854,10 +958,12 @@ async def run_data_checks(
     run.checks.append(check_zero_yields_survive(real_data, seeded))
     run.checks.extend(check_adapter_matches_its_declaration(mapped, refused))
     run.checks.extend(check_adapter_preserves_values(real_data, mapped, seeded))
+    run.checks.extend(check_named_species_arrive_verbatim(real_data, mapped))
     run.checks.append(check_note_carries_the_number(mapped))
     run.checks.append(await check_prose_yields_its_numbers(Path(settings.eln_export_dir)))
     if with_database:
         run.checks.append(await check_corpus_is_reachable(mapped))
+        run.checks.append(await check_citation_only_is_not_structure_searchable(mapped))
         run.checks.append(await check_the_corpus_is_findable(mapped))
 
     for dataset in _DATASETS:
@@ -870,6 +976,12 @@ async def run_data_checks(
                 seeded=sum(len(seeded.get(name, ())) for name in ids),
                 mapped=sum(len(mapped.get(name, ())) for name in ids),
                 refused=sum(refused.get(name, 0) for name in ids),
+                citation_only=sum(
+                    1
+                    for name in ids
+                    for reaction in mapped.get(name, ())
+                    if reaction.tier is RecordTier.CITATION_ONLY
+                ),
             )
         )
     run.seconds = time.monotonic() - started
@@ -892,18 +1004,19 @@ def report(run: DataRun) -> str:
         return "\n".join(lines)
     lines.append(
         render_table(
-            ["dataset", "published", "seeded", "mapped", "refused"],
+            ["dataset", "published", "seeded", "mapped", "citation-only", "refused"],
             [
                 [
                     reach.dataset,
                     str(reach.published),
                     str(reach.seeded),
                     str(reach.mapped),
+                    str(reach.citation_only),
                     str(reach.refused),
                 ]
                 for reach in run.reach
             ],
-            align="lrrrr",
+            align="lrrrrr",
         )
     )
     lines += [

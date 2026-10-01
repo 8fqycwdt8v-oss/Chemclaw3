@@ -328,17 +328,20 @@ def test_ord_adapter_tolerates_camelcase_field_names() -> None:
 
 
 def test_ord_unresolvable_identifier_is_a_mapping_error() -> None:
-    """A compound no identifier can resolve is an OrdFormatError, not a crash (G4).
+    """A compound no identifier can resolve *and* no name describes is an OrdFormatError (G4).
 
-    The name here is a paper's internal shorthand, which is the real case: the Perera flow-Suzuki
-    corpus publishes its second coupling partner only as `2a, Boronic Acid`. Widening `_smiles`
-    to accept InChI and known names must not turn an honest refusal into a guessed structure, so
-    the failing case is pinned with a name the reagent table cannot resolve rather than with
-    `ethanol`, which it now correctly can.
+    A name the reagent table cannot resolve — the Perera flow-Suzuki corpus's `2a, Boronic Acid` —
+    is no longer this case: it is carried verbatim and the reaction is citation-only
+    (`tests/test_ord_citation_tier.py`). What is left to refuse is a compound that offers neither a
+    structure nor anything a reader could be shown in place of one.
     """
     payload = {
         "inputs": {
-            "a": {"components": [{"identifiers": [{"type": "NAME", "value": "2a, Boronic Acid"}]}]}
+            "a": {
+                "components": [
+                    {"identifiers": [{"type": "INCHI", "value": "InChI=1S/not-a-structure"}]}
+                ]
+            }
         },
         "outcomes": [{"products": [{"identifiers": [{"type": "SMILES", "value": "CCO"}]}]}],
     }

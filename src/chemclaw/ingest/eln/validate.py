@@ -76,6 +76,12 @@ def validate_ord(reaction: OrdReaction) -> list[str]:
         problems.append(f"unparseable SMILES: {smiles!r}")
     if bad_inputs or bad_outputs:
         return problems  # cannot check balance without valid structures
+    if reaction.unstructured:
+        # A citation-only record: the structures it *does* give are checked above, and the balance
+        # is not checkable at all — a named-only input may supply any element, and a named-only
+        # product contains elements nobody can list. Comparing the structured subsets would report
+        # a false violation for the first and pass vacuously for the second, so neither is run.
+        return problems
 
     for element in sorted(output_elements):
         if element not in input_elements:

@@ -525,8 +525,12 @@ class ReactionMetadata(Protocol):
         """Which of `reaction_ids` pass `filters` and are current."""
         ...
 
-    async def retracted(self, refs: Sequence[tuple[str, str]]) -> set[tuple[str, str]]:
-        """Which of `refs` — `(ingest_source, reaction_id)` — the source has reported withdrawn."""
+    async def structurally_withheld(self, refs: Sequence[tuple[str, str]]) -> set[tuple[str, str]]:
+        """Which of `refs` — `(ingest_source, reaction_id)` — no structure search may serve.
+
+        Withdrawn by the source, or citation-only: a record naming a species without its structure
+        (`D-2026-09-27-a-reaction-without-a-structure-is-citable-not-searchable`).
+        """
         ...
 
 
@@ -580,10 +584,12 @@ class FingerprintReactionRetriever:
         question rather than the same one.** `_eligible` drops a match whose record is missing,
         deliberately, because a record nobody can read cannot be shown to satisfy a narrowing — and
         an unfiltered sweep must still surface every structural hit the index holds, so it cannot go
-        through that gate. `retracted` is the positive form: it asks only what a withdrawal is, over
-        this page of ids, against `066`'s partial index. Measured before this, with the producer in
-        place and the readers absent: `is_current` False, `eligible()` empty, and the retracted
-        reaction still returned by the ordinary `gather_evidence` sweep, which is unfiltered.
+        through that gate. `structurally_withheld` is the positive form: it asks only what makes a
+        hit unservable, over this page of ids. Measured before the withdrawal half existed, with the
+        producer in place and the readers absent: `is_current` False, `eligible()` empty, and the
+        retracted reaction still returned by the ordinary `gather_evidence` sweep, which is
+        unfiltered. The same question also drops a citation-only record, which can hold a stale
+        fingerprint row only through an amendment that took a structure away.
         """
         wanted = {key: filters[key] for key in _NOTE_FILTERS if filters.get(key) is not None}
         page = settings.fingerprint_top_k
@@ -601,10 +607,12 @@ class FingerprintReactionRetriever:
             return []
         if wanted:
             matches = await self._eligible(matches, wanted, page)
-        else:
-            asked = [(match.source, match.id) for match in matches]
-            withdrawn = await self._records.retracted(asked)
-            matches = [match for match in matches if (match.source, match.id) not in withdrawn]
+        # On both paths, because `eligible` answers a filter and this answers whether a hit may be
+        # served at all: a withdrawn run, and a citation-only record whose fingerprint row predates
+        # an amendment that took a structure away (`ReactionRecordStore.structurally_withheld`).
+        asked = [(match.source, match.id) for match in matches]
+        withheld = await self._records.structurally_withheld(asked)
+        matches = [match for match in matches if (match.source, match.id) not in withheld]
         return [
             EvidenceChunk(
                 content=f"Similar reaction {match.label} (Tanimoto {match.similarity:.2f})",
