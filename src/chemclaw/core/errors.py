@@ -22,6 +22,8 @@ and because the one middleware that shows either of them to the model
 into a subsystem's own module.
 """
 
+from typing import ClassVar
+
 
 class ChemclawError(ValueError):
     """Base for all domain errors meaning "this input/data is invalid".
@@ -61,3 +63,27 @@ class SubsystemUnavailableError(Exception):
     class's absence from that list on purpose, so a future completeness sweep cannot quietly add
     it.
     """
+
+
+class AtCapacityError(SubsystemUnavailableError):
+    """A backend was reached, ran nothing, and refused because every slot it has was already held.
+
+    The third bucket beside bad data and an outage, and the one worth asking again about *soon*:
+    the identical call succeeds the moment admitted work finishes. A subclass of
+    `SubsystemUnavailableError` so every retry contract that already holds for an outage holds for
+    it (it is asserted absent from `durable/publish.py::_BAD_DATA_TYPES`), and a class of its own so
+    the one place that turns a connector tool's exception into wire text can say *full* rather than
+    *broken*: `connectors/server.py::_sanitize_tool_errors` puts `marker` at the head of the
+    message,
+    which is the fleet's one at-capacity format (`core/mcp_session.at_capacity`). Without that, a
+    busy backend behind one of this repository's own bundles reached the caller as "an internal
+    error occurred" and nothing downstream could queue it.
+    """
+
+    #: The server whose slots were full — the `<server>` in `[<server>-at-capacity]`.
+    server: ClassVar[str] = ""
+
+    @property
+    def marker(self) -> str:
+        """This refusal's at-capacity token, in the fleet's one format."""
+        return f"[{self.server}-at-capacity]"

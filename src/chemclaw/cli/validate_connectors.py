@@ -382,6 +382,25 @@ def _job_problems(manifest: ConnectorManifest) -> list[str]:
     return problems
 
 
+def _queued_problems(manifest: ConnectorManifest) -> list[str]:
+    """Check a queued endpoint's inline wait against the deployment's turn timeout.
+
+    The same arithmetic `_job_problems` does for a job's `inline_wait_seconds`, for the same
+    reason: the wait is spent inside a turn, so one at or beyond the turn timeout can never hand
+    back the answer — the turn dies first and every queued call reads as a timeout.
+    """
+    endpoint = manifest.endpoint
+    queued = getattr(endpoint, "queued", None)
+    if queued is None or queued.inline_wait_seconds < settings.service_turn_timeout_seconds:
+        return []
+    return [
+        f"connector {manifest.name!r}: `queued.inline_wait_seconds` is "
+        f"{queued.inline_wait_seconds}s, which is not below the "
+        f"{settings.service_turn_timeout_seconds}s turn timeout — a queued call could never "
+        "answer inside the turn"
+    ]
+
+
 def _connector_urls_problems(discovered_names: set[str]) -> list[str]:
     """Check that every key in `connector_urls` names a discovered bundle (rule 6).
 
@@ -416,6 +435,7 @@ def validate_connectors() -> list[str]:
         problems.extend(_tool_surface_problems(manifest))
         problems.extend(_served_tool_problems(manifest))
         problems.extend(_job_problems(manifest))
+        problems.extend(_queued_problems(manifest))
     # Check that connector_urls configuration is valid (rule 6).
     problems.extend(_connector_urls_problems(discovered_names))
     try:
