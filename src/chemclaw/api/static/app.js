@@ -110,6 +110,15 @@ function applyEvent(evt, answerEl) {
     case "job_started":
       add("trace", `⏳ ${evt.kind || "job"} started (${evt.job_id})`);
       return answerEl;
+    case "tool_queued":
+      // A queued tool call waiting for a compute slot, then picked up (`connectors/queued.py`).
+      add(
+        "trace",
+        evt.state === "running"
+          ? `▶ ${evt.tool} got a slot`
+          : `⏸ ${evt.tool} queued` + (evt.waiting == null ? "" : ` (${evt.waiting} waiting)`),
+      );
+      return answerEl;
     case "job_completed":
       // Arrives on the push-back stream, outside any turn — see `openEventStream`.
       add("trace", `✓ job ${evt.job_id} completed ${JSON.stringify(evt.summary || {})}`);

@@ -1,3 +1,24 @@
+# Queued compute, round 2 — the open points
+
+- [ ] **Chemclaw3**: `tool_queued` event (state `queued` with an approximate position from the
+      task queue's backlog, then `running`), emitted by `connectors/queued.py` while the turn waits.
+- [ ] **Chemclaw3**: `queued:` for `chem` (the seven admission-gated tools) and `kinetics`
+      (`semibatch_accumulation_profile`); chart `interactive:` for chem/kinetics and the pyexec
+      example; ADR row unchanged (same decision, wider application).
+- [ ] **Chemclaw3-mcp**: `queued:` in `manifests/{chem,kinetics,pyexec,rxnpredict}`; the stand-in
+      `HttpEndpoint` learns `queued`; a fleet test holds *queued == admission-gated* per server.
+- [ ] **Chemclaw3_ui**: mirror `tool_queued` in `shared/events.ts`; attach it to the open tool-call
+      row; render "queued · N ahead" / "running…"; contract fixtures and tests.
+- [ ] Fresh-subagent review of all three diffs; fix findings.
+- [ ] PRs in dependency order — Chemclaw3, then Chemclaw3-mcp (its consumer-agreement lane reads
+      Chemclaw3 `main`), then the UI (its backend-contract test reads Chemclaw3 `main`) — merge on green.
+
+Measured before starting: a queued call costs ~80 ms over a direct one (median 198 ms vs 116 ms for
+a 50 ms tool, 20 sequential calls each, `make up`'s Temporal) — cheap enough to queue every gated
+tool, including chem's depictions.
+
+---
+
 # Queued, autoscaled compute — near-real-time for many concurrent chemists
 
 **Goal.** Every compute-heavy tool call waits in a global queue instead of being refused, the chemist

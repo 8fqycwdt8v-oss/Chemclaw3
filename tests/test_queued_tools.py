@@ -291,9 +291,12 @@ class _Backend:
     policy, the memo it passes — is the production wiring and only the network is replaced.
     """
 
-    def __init__(self, *, full_for: int = 0, gate: threading.Event | None = None) -> None:
+    def __init__(
+        self, *, full_for: int = 0, gate: threading.Event | None = None, hold: float = 0.0
+    ) -> None:
         self.full_for = full_for
         self.gate = gate
+        self.hold = hold
         self.calls = 0
 
     def activity(self) -> Any:
@@ -307,6 +310,7 @@ class _Backend:
             if self.gate is not None:
                 while not self.gate.is_set():
                     await asyncio.sleep(0.05)
+            await asyncio.sleep(self.hold)
             text = f"{call.tool}:{call.arguments} for {actor}"
             return CallToolResult(content=[TextContent(type="text", text=text)]).model_dump(
                 mode="json", by_alias=True, exclude_none=True
@@ -327,7 +331,9 @@ def _bind_turn(monkeypatch: pytest.MonkeyPatch, client: Any) -> None:
     monkeypatch.setattr("chemclaw.core.config.settings.queued_tool_retry_max_seconds", 0.2)
 
 
-async def _run_with_workers(backend: _Backend, body: Any, notified: list[Any]) -> Any:
+async def _run_with_workers(
+    backend: _Backend, body: Any, notified: list[Any], *, concurrency: int | None = None
+) -> Any:
     """Run `body(client)` with the interactive worker and a push-back sink running."""
     env = await start_local_env_or_skip()
     async with env:
@@ -345,6 +351,7 @@ async def _run_with_workers(backend: _Backend, body: Any, notified: list[Any]) -
                 task_queue=interactive_queue(_CONNECTOR),
                 workflows=[QueuedToolWorkflow],
                 activities=[backend.activity()],
+                max_concurrent_activities=concurrency,
             ),
             Worker(client, task_queue=settings.background_task_queue, activities=[_record]),
         ):
@@ -435,3 +442,59 @@ def test_a_call_that_outlasts_the_wait_becomes_a_job_and_is_delivered(
     assert started == [(workflow_id, "heavy")]
     assert [(s, k) for s, k, _ in notified] == [("session-a", "job_completed")]
     assert notified[0][2]["job_id"] == workflow_id
+
+
+def test_a_waiting_call_says_it_is_queued_and_then_that_it_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The card must not read "running" while the call sits in the queue.
+
+    One slot, held by a first call; a second call waits behind it. Its turn reports `queued` (with
+    the broker's waiting count, or `None` where the broker cannot say) and then `running` once the
+    slot frees, and the answer still comes back as the tool's own result.
+    """
+    gate = threading.Event()
+    # Each call holds its slot a second past the gate, so the waiting call is seen running.
+    backend = _Backend(gate=gate, hold=1.0)
+    reported: list[tuple[str, str, str, int | None]] = []
+    monkeypatch.setattr(
+        "chemclaw.connectors.queued.record_tool_queued",
+        lambda tool, job_id, state, waiting: reported.append((tool, job_id, state, waiting)),
+    )
+    monkeypatch.setattr("chemclaw.core.config.settings.queued_tool_progress_seconds", 0.3)
+
+    async def body(client: Any) -> CallToolResult:
+        _bind_turn(monkeypatch, client)
+        first = asyncio.create_task(
+            dispatch_queued(_CONNECTOR, "heavy", {"smiles": "C"}, inline_wait=30, call_timeout=10)
+        )
+        await asyncio.sleep(0.5)
+        second = asyncio.create_task(
+            dispatch_queued(_CONNECTOR, "heavy", {"smiles": "N"}, inline_wait=30, call_timeout=10)
+        )
+        await asyncio.sleep(2.0)
+        gate.set()
+        await first
+        return await second
+
+    result = asyncio.run(_run_with_workers(backend, body, [], concurrency=1))
+    waiting_id = queued_workflow_id(_CONNECTOR, "heavy", {"smiles": "N"})
+    states = [state for _tool, job_id, state, _n in reported if job_id == waiting_id]
+    assert not result.isError
+    assert states[:1] == ["queued"], reported
+    assert states[-1] == "running", reported
+    counts = [n for _t, job_id, state, n in reported if job_id == waiting_id and state == "queued"]
+    assert all(n is None or n >= 0 for n in counts)
+
+
+def test_a_queued_signal_becomes_a_tool_queued_event() -> None:
+    """The signal and the event carry the same four fields — one mapping, no second opinion."""
+    from chemclaw.api.events import ToolQueuedEvent
+    from chemclaw.api.graph_stream import _signal_event
+    from chemclaw.core.turn_signals import ToolQueuedSignal
+
+    event = _signal_event(
+        ToolQueuedSignal(tool="predict_pka", job_id="q-1", state="queued", waiting=3)
+    )
+    assert event == ToolQueuedEvent(tool="predict_pka", job_id="q-1", state="queued", waiting=3)
+    assert event.model_dump()["type"] == "tool_queued"

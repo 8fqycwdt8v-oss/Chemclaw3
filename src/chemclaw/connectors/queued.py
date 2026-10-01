@@ -16,7 +16,7 @@ the session mailbox as `job_completed` — the path every durable job already ta
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Any, Literal
 
 from langchain_mcp_adapters.interceptors import (
     MCPToolCallRequest,
@@ -24,7 +24,10 @@ from langchain_mcp_adapters.interceptors import (
     ToolCallInterceptor,
 )
 from mcp.types import CallToolResult, TextContent
-from temporalio.client import WorkflowFailureError, WorkflowHandle
+from temporalio.api.enums.v1 import PendingActivityState, TaskQueueType
+from temporalio.api.taskqueue.v1 import TaskQueue
+from temporalio.api.workflowservice.v1 import DescribeTaskQueueRequest
+from temporalio.client import Client, WorkflowFailureError, WorkflowHandle
 from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 from temporalio.service import RPCError, RPCStatusCode
 
@@ -40,7 +43,7 @@ from chemclaw.core.ids import stable_hash
 from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.core.session_context import get_current_session_id
 from chemclaw.core.temporal_client import connect
-from chemclaw.core.turn_signals import record_job_started
+from chemclaw.core.turn_signals import record_job_started, record_tool_queued
 from chemclaw.durable.connector_job import ConnectorJobResult, envelope_from_result, failure_reason
 
 logger = logging.getLogger(__name__)
@@ -139,7 +142,7 @@ async def dispatch_queued(
         raise QueueUnavailable(f"{connector}.{tool} could not be queued") from exc
     record_metric(lambda m: m.increment("chemclaw_queued_tool_calls_total", labels={"tool": tool}))
     try:
-        finished = await asyncio.wait_for(handle.result(), inline_wait)
+        finished = await _wait_reporting(client, handle, connector, tool, inline_wait)
     except TimeoutError:
         if await _detach(handle, session_id):
             record_job_started(handle.id, tool)
@@ -157,6 +160,81 @@ async def dispatch_queued(
         )
     raw = envelope_from_result(handle.id, finished).data.get(RESULT_KEY)
     return CallToolResult.model_validate(raw)
+
+
+async def _wait_reporting(
+    client: Client,
+    handle: WorkflowHandle[QueuedToolWorkflow, ConnectorJobResult],
+    connector: str,
+    tool: str,
+    budget: float,
+) -> ConnectorJobResult:
+    """The run's result within `budget` seconds, saying meanwhile whether it waits or runs.
+
+    Without this the tool-call card reads "running" for the whole wait, which is false while the
+    call sits in the queue — and on a busy deployment that wait is the part a chemist is watching.
+    So every `queued_tool_progress_seconds` the run is asked where it is, and a `tool_queued` event
+    goes out only when the answer changes. The asking is best-effort (`_progress`): a broker that
+    will not answer costs the card its annotation, never the call its result.
+
+    Raises:
+        TimeoutError: `budget` ran out first; the run itself is untouched and keeps going.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + budget
+    result = asyncio.ensure_future(handle.result())
+    reported: tuple[str, int | None] | None = None
+    try:
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise TimeoutError
+            done, _ = await asyncio.wait(
+                {result}, timeout=min(settings.queued_tool_progress_seconds, remaining)
+            )
+            if done:
+                return result.result()
+            progress = await _progress(client, handle, connector)
+            if progress is not None and progress != reported:
+                reported = progress
+                record_tool_queued(tool, handle.id, progress[0], progress[1])
+    finally:
+        # Cancels the *waiter* only; the run carries on, which is what makes detaching safe.
+        result.cancel()
+
+
+async def _progress(
+    client: Client,
+    handle: WorkflowHandle[QueuedToolWorkflow, ConnectorJobResult],
+    connector: str,
+) -> tuple[Literal["queued", "running"], int | None] | None:
+    """Whether the run's call is still waiting for a slot, and how many calls wait with it.
+
+    `running` once a worker has started the activity; `queued` before that — including between
+    retries after a full server, when the activity is scheduled again. The count is the broker's
+    approximate backlog on the connector's interactive queue, read only while queued. `None` when
+    the broker could not be asked: the annotation is a courtesy, and this must never fail the call.
+    """
+    try:
+        description = await handle.describe()
+        pending = description.raw_description.pending_activities
+        if any(a.state == PendingActivityState.PENDING_ACTIVITY_STATE_STARTED for a in pending):
+            return "running", None
+        queue = await client.workflow_service.describe_task_queue(
+            DescribeTaskQueueRequest(
+                namespace=client.namespace,
+                task_queue=TaskQueue(name=interactive_queue(connector)),
+                task_queue_type=TaskQueueType.TASK_QUEUE_TYPE_ACTIVITY,
+                report_stats=True,
+            )
+        )
+    except Exception:
+        # Best-effort by contract (the docstring): an RPC fault, a server too old to report stats,
+        # a describe racing completion — all of them mean "no annotation this tick", nothing more.
+        logger.debug("could not read queue progress for %s", handle.id, exc_info=True)
+        return None
+    waiting = queue.stats.approximate_backlog_count if queue.HasField("stats") else None
+    return "queued", int(waiting) if waiting is not None else None
 
 
 async def _detach(

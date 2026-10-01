@@ -55,6 +55,7 @@ from chemclaw.api.events import (
     QuestionEvent,
     TokenEvent,
     ToolFailedEvent,
+    ToolQueuedEvent,
 )
 from chemclaw.api.runner_trace import ToolCallTrace
 from chemclaw.api.runner_usage import graph_usage_tokens
@@ -67,6 +68,7 @@ from chemclaw.core.turn_signals import (
     Signal,
     SkillLoadedSignal,
     ToolFailureSignal,
+    ToolQueuedSignal,
 )
 
 logger = logging.getLogger(__name__)
@@ -587,6 +589,10 @@ def _signal_event(signal: Signal) -> Event | None:
     """
     if isinstance(signal, JobSignal):
         return JobStartedEvent(job_id=signal.job_id, kind=signal.kind, plan_step=signal.plan_step)
+    if isinstance(signal, ToolQueuedSignal):
+        return ToolQueuedEvent(
+            tool=signal.tool, job_id=signal.job_id, state=signal.state, waiting=signal.waiting
+        )
     if isinstance(signal, QuestionSignal):
         return QuestionEvent(question=signal.question, options=signal.options)
     if isinstance(signal, HandoffSignal):
