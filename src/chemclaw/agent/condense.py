@@ -56,12 +56,15 @@ from chemclaw.core.config import settings
 from chemclaw.core.markdown import MISSING, render_table
 from chemclaw.core.metrics_bridge import degraded, record_metric
 from chemclaw.core.model_prose import ModelProse
+from chemclaw.ingest.eln.ord import RoleSpecies
 from chemclaw.kg.note import ProcessConditions
 from chemclaw.memory.comparison import cell, date_cell, drop_empty_columns
 from chemclaw.memory.progression import (
+    DIFFED_ROLES,
     ConditionChange,
     both_recorded,
     number_change,
+    species_change,
     text_change,
 )
 
@@ -93,6 +96,10 @@ class Protocol(BaseModel):
     # *timeline* rather than a listing, and therefore what decides whether "changed vs previous"
     # may be read as "what was tried next" at all.
     performed_at: date | None = None
+    # Each compared role's canonical structures, when the protocol is a stored ELN run
+    # (`reaction_records.species`). Absent for a note or a share document, which have no component
+    # list — and absent is "nothing to compare", never "this run used nothing".
+    species: RoleSpecies | None = None
     # The procedure as prose. May be empty — a note can record conditions and no recipe.
     text: str = ""
 
@@ -526,12 +533,22 @@ def _changes(
     what a chemist reads for is which variable moved.
 
     Three sources, and the split is the one this whole module is built on. Temperature and time
-    come from the record, exactly. The solvent comes from the *prose*, because a solvent is not a
-    field on a note — which is also why it is compared as text: a name read out of a procedure
-    cannot be canonicalised the way `progression._species` canonicalises a structure. Reagent sets
-    are deliberately absent: they need the full input list, and diffing free-text reagent lines
-    would report a change every time one procedure happened to name a loading and its neighbour
-    did not, which is the noise `changes_between` excludes amounts to avoid.
+    come from the record, exactly. **Each role's species set comes from the record too, when both
+    protocols are stored ELN runs** — `reaction_records.species`, the same canonical sets
+    `progression.changes_between` diffs for the mined campaign note, through the same
+    `species_change`, so the two artifacts cannot disagree about what moved
+    (`D-2026-10-01-the-turn-time-comparison-reads-the-species-the-row-keeps`). Measured on the
+    seeded corpus before this, 4,150 of 4,175 adjacent campaign pairs moved a species and no
+    setpoint, so this column rendered `—` or "unchanged" over nearly every real change. The solvent
+    otherwise comes from the *prose* and is compared as text; it is skipped when the structured
+    sets were compared, because the solvent role already answered it, exactly. Free-text reagent
+    lines are still never diffed: one procedure naming a loading and its neighbour not would read
+    as a change, which is the noise `changes_between` excludes amounts to avoid.
+
+    **A protocol with no projection is skipped, not read as empty.** `None` is a note, a share
+    document or a row stored before the column existed; an empty role on a projection is the record
+    saying the run used nothing there, which is a real change and is diffed
+    (`progression.species_change` says why `both_recorded` does not apply to a set).
 
     **A field is compared only when both sides recorded it**, and getting that wrong is what this
     function shipped doing. Measured before the guard: three runs with *identical* conditions and
@@ -560,6 +577,14 @@ def _changes(
     after_c = after_p.conditions or ProcessConditions()
     comparable = 0
     changes: list[ConditionChange] = []
+    # Setpoints first and species after, the order `changes_between` writes the campaign note in.
+    species: list[ConditionChange | None] = []
+    if before_p.species is not None and after_p.species is not None:
+        species = [
+            species_change(role, before_p.species.of(role), after_p.species.of(role))
+            for role in DIFFED_ROLES
+        ]
+    structured = bool(species)
     for change, both in (
         (
             number_change("temperature", before_c.temperature_c, after_c.temperature_c, "°C"),
@@ -571,7 +596,7 @@ def _changes(
         ),
         (
             text_change("solvent", before_r.solvent, after_r.solvent),
-            both_recorded(before_r.solvent, after_r.solvent),
+            not structured and both_recorded(before_r.solvent, after_r.solvent),
         ),
     ):
         if not both:
@@ -579,6 +604,8 @@ def _changes(
         comparable += 1
         if change is not None:
             changes.append(change)
+    comparable += len(species)
+    changes.extend(change for change in species if change is not None)
     if changes:
         return "; ".join(change.describe() for change in changes)
     # Nothing was comparable at all, so there is nothing to say — and "unchanged" would be a claim

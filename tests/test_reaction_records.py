@@ -36,7 +36,7 @@ from chemclaw.core.errors import ChemclawError
 from chemclaw.ingest.eln.adapter import RawEntry
 from chemclaw.ingest.eln.ingest import ingest_reaction
 from chemclaw.ingest.eln.json_adapter import JsonExportAdapter
-from chemclaw.ingest.eln.ord import OrdReaction
+from chemclaw.ingest.eln.ord import OrdReaction, Role, RoleSpecies
 from chemclaw.ingest.eln.record import record_from_ord_reaction
 from chemclaw.ingest.eln.records import (
     _SELECT_BODIES,
@@ -349,6 +349,10 @@ def test_condense_protocols_resolves_a_reaction_reference(monkeypatch: pytest.Mo
     )
     assert protocol.conditions is not None and protocol.conditions.yield_percent == 85.0
     assert "Ethanol and acetic acid" in protocol.text
+    # The structured species ride along too, so the comparison diffs them exactly (#490).
+    assert protocol.species is not None
+    assert protocol.species.of(Role.REACTANT) == {"CCO", "CC(=O)O"}
+    assert protocol.species.of(Role.REAGENT) == frozenset()
 
 
 def test_condense_protocols_leaves_a_non_reaction_reference_alone() -> None:
@@ -437,6 +441,16 @@ async def test_the_postgres_store_and_the_in_memory_one_answer_alike() -> None:
     ]
     for store in (durable, memory):
         await store.record(records, "pg-eln")
+    # The species projection round-trips, and "none stored" stays `None` rather than four empty
+    # roles — the distinction `agent.condense._changes` skips on (#490).
+    projected = records[0].model_copy(
+        update={"species": RoleSpecies(reactant=["CCO"], solvent=[], catalyst=["Cl[Pd]Cl"])}
+    )
+    await durable.record([projected], "pg-eln")
+    back = await durable.read("pg-alpha")
+    assert back is not None and back.species == projected.species
+    undated = await durable.read("pg-undated")
+    assert undated is not None and undated.species is None
 
     ids = ["pg-alpha", "pg-undated", "pg-absent"]
     cases: list[dict[str, object]] = [

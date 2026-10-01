@@ -43,7 +43,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
-from chemclaw.ingest.eln.ord import RecordTier
+from chemclaw.ingest.eln.ord import RecordTier, RoleSpecies
 from chemclaw.kg.note import ProcessConditions, require_note_slug
 
 logger = logging.getLogger(__name__)
@@ -160,13 +160,13 @@ def _one_of(reaction_id: str, found: Sequence[tuple[str, "ReactionRecord"]]) -> 
 # The columns an ingest writes, which is also everything a read selects.
 _COLUMNS = (
     "reaction_id, body, compound_smiles, project, performed_at, conditions, source, retracted_at, "
-    "tier"
+    "tier, species"
 )
 
 _UPSERT = f"""
 INSERT INTO reaction_records (ingest_source, {_COLUMNS})
 VALUES (%(ingest_source)s, %(reaction_id)s, %(body)s, %(compound_smiles)s, %(project)s,
-        %(performed_at)s, %(conditions)s, %(source)s, %(retracted_at)s, %(tier)s)
+        %(performed_at)s, %(conditions)s, %(source)s, %(retracted_at)s, %(tier)s, %(species)s)
 ON CONFLICT (ingest_source, reaction_id) DO UPDATE SET
     -- Every field is refreshed, because an ELN amends an entry *in place*: a yield corrected after
     -- assay, an impurity added, a retraction. The old note path compared bodies to notice that and
@@ -185,6 +185,7 @@ ON CONFLICT (ingest_source, reaction_id) DO UPDATE SET
     retracted_at = EXCLUDED.retracted_at,
     -- The tier follows the body: an amendment that adds or removes a structure moves the row.
     tier = EXCLUDED.tier,
+    species = EXCLUDED.species,
     last_seen = now()
 """
 
@@ -249,10 +250,16 @@ class ReactionRecord(BaseModel):
     # Set from `RawEntry.retracted_at`, never inferred from absence
     # (`D-2026-09-13-a-withdrawal-is-a-fact-a-source-reports`, and `infra/sql/066`).
     retracted_at: datetime | None = None
-    # `CITATION_ONLY` when the source named a species without its structure (`infra/sql/110`):
+    # `CITATION_ONLY` when the source named a species without its structure (`infra/sql/111`):
     # the row is citable and no structure search may serve it. Defaulted to `STRUCTURED` because
     # that is what every record was before the tier existed, and what the migration says of them.
     tier: RecordTier = RecordTier.STRUCTURED
+    # Each compared role's canonical structures (`ingest.eln.ord.RoleSpecies`), so the turn-time
+    # comparison can diff what the source gave structured without the component list it rendered
+    # into `body` (`D-2026-10-01-the-turn-time-comparison-reads-the-species-the-row-keeps`).
+    # `None` is "no projection stored" — a row written before `infra/sql/112`, or a citation-only
+    # one — and is skipped by every comparison; it is never the same claim as four empty roles.
+    species: RoleSpecies | None = None
 
     @field_validator("reaction_id")
     @classmethod
@@ -551,6 +558,9 @@ class PostgresReactionRecordStore:
                             "source": item.source,
                             "retracted_at": item.retracted_at,
                             "tier": item.tier.value,
+                            "species": Jsonb(item.species.model_dump())
+                            if item.species is not None
+                            else None,
                         }
                         for item in records
                     ],
@@ -754,6 +764,10 @@ def _record(row: tuple[Any, ...]) -> ReactionRecord:
         source=row[6],
         retracted_at=row[7],
         tier=RecordTier(row[8]),
+        # Validated rather than trusted, and unknown keys dropped by `RoleSpecies`' default rather
+        # than refused — the rolling-upgrade argument `_stored_conditions` makes, for a role a
+        # newer build may add.
+        species=RoleSpecies.model_validate(row[9]) if row[9] is not None else None,
     )
 
 

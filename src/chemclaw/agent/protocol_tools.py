@@ -74,6 +74,7 @@ async def _from_record(ref: str) -> Protocol | None:
         title=RECORD_TYPE,
         conditions=record.conditions,
         performed_at=record.performed_at,
+        species=record.species,
         text=record.body,
     )
 

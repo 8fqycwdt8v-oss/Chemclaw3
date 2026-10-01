@@ -279,6 +279,23 @@ def test_the_record_states_the_tier_and_names_each_species_as_the_source_gave_it
     assert record.conditions is not None and record.conditions.yield_percent == 4.76
 
 
+def test_a_citation_only_record_stores_no_species_projection() -> None:
+    """A projection reads structures only, so on this tier it would drop the named-only species.
+
+    A neighbouring run's comparison would then report them removed. `None` is the one value every
+    comparison skips; the drawn control arm still carries its projection.
+    """
+    named = record_from_ord_reaction(_map(_flow_suzuki("suzuki-1")))
+    drawn = record_from_ord_reaction(
+        _map(
+            _flow_suzuki("suzuki-2", partner_smiles=_PARTNER_SMILES, product_smiles=_PRODUCT_SMILES)
+        )
+    )
+
+    assert named.tier is RecordTier.CITATION_ONLY and named.species is None
+    assert drawn.tier is RecordTier.STRUCTURED and drawn.species is not None
+
+
 def test_a_named_product_beside_a_drawn_one_is_two_products() -> None:
     """`compound_smiles` names the one product only when the source recorded exactly one."""
     reaction = OrdReaction(
