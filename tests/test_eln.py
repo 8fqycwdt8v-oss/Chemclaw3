@@ -32,6 +32,7 @@ from chemclaw.ingest.eln.ord import (
     OrdReaction,
     OutcomeClass,
     ReactionStep,
+    RecordTier,
     Role,
     StepKind,
 )
@@ -1850,15 +1851,25 @@ def test_ord_compound_resolves_from_a_known_reagent_name(tmp_path: Path) -> None
     assert [c.smiles for c in reaction.inputs] == ["CC#N"]
 
 
-def test_ord_compound_with_no_resolvable_identifier_is_still_refused(tmp_path: Path) -> None:
+def test_ord_compound_known_only_by_a_shorthand_is_carried_as_that_name(tmp_path: Path) -> None:
     """A paper's internal shorthand is not a structure, and inventing one would be worse.
 
     This is the real Perera flow-Suzuki case: the source spreadsheet publishes the second
-    coupling partner only as `2a, Boronic Acid`. Widening the identifier union must not turn an
-    honest refusal into a fabricated structure.
+    coupling partner only as `2a, Boronic Acid`. It used to refuse the whole reaction; since
+    `D-2026-09-27-a-reaction-without-a-structure-is-citable-not-searchable` the name is carried
+    verbatim, with no structure, and the reaction is citation-only. What must not change is the
+    other half: no structure appears for it.
     """
+    reaction = _map_ord(tmp_path, [{"type": "NAME", "value": "2a, Boronic Acid"}])
+    assert reaction.inputs == []
+    assert [c.name for c in reaction.unstructured] == ["2a, Boronic Acid"]
+    assert reaction.tier is RecordTier.CITATION_ONLY
+
+
+def test_ord_compound_with_no_identifier_at_all_is_still_refused(tmp_path: Path) -> None:
+    """Neither a structure nor a name: nothing a record could show, so still a refusal."""
     with pytest.raises(OrdFormatError, match="no resolvable structure identifier"):
-        _map_ord(tmp_path, [{"type": "NAME", "value": "2a, Boronic Acid"}])
+        _map_ord(tmp_path, [{"type": "INCHI", "value": "InChI=1S/garbage"}])
 
 
 # --- ORD malformed-shape robustness (Ingest-1) ----------------------------------------

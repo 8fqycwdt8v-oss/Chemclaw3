@@ -194,3 +194,46 @@ probes:
       classification against precedent the answer should point at reaction-fingerprint similarity
       over this organisation's own records, which compares against what was really run rather than
       against a rule table.
+
+  # Second phrasings for the two single-model predictors, which rested on one probe each
+  # (issue #487).
+
+  - id: pr-07
+    section: 6
+    persona: lab_technician
+    bucket: A
+    question: >-
+      I suspect one model is pulling the forward prediction for O=C(O)c1ccccc1.OCC around. Run just
+      one of the served forward predictors by itself on that and show me its ranked products —
+      which ones can I pick from?
+    expects_tools: [predict_forward_single_model]
+    forbids_claims:
+      - "a single model's ranked output presented as a consensus"
+      - "an agreement or confidence claim built from one model's ranking"
+      - "a predictor named as served that the deployment did not list"
+    direction: >-
+      A question about one model, asked without naming it, so a good answer either lists the
+      served predictors or picks one and says which, then reports that model's ranked products as
+      one model's opinion. The esterification product is likely at the top and that does not make
+      it a consensus; a single model's output carries none of the agreement the ensemble is for.
+      If no single-model predictor is served, the refusal the server gives is the answer.
+
+  - id: pr-08
+    section: 6
+    persona: lab_leader
+    bucket: A
+    question: >-
+      For the Suzuki coupling Brc1ccccc1.OB(O)c1ccccc1>>c1ccc(cc1)-c1ccccc1, show me what a single
+      condition model proposes on its own, before the vote, so I can judge whether it is worth
+      keeping in the ensemble.
+    expects_tools: [predict_conditions_single_model]
+    forbids_claims:
+      - "one predictor's condition set presented as the ensemble's consensus"
+      - "a predicted yield for the suggested conditions"
+      - "a judgement of the model's worth drawn from this one call"
+    direction: >-
+      The condition-side single-model call, asked to judge a model. A good answer returns that
+      predictor's ranked condition sets, in Celsius, labelled as one model's output, and says the
+      second half of the ask cannot be settled by one call on one reaction: whether a model earns
+      its place is a comparison against the ensemble and against outcomes over many reactions. A
+      silent fallback to a different predictor, if the chosen one is not served, is the failure.

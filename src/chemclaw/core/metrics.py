@@ -984,6 +984,11 @@ _COUNTERS: dict[str, str] = {
     "chemclaw_ingest_records_total": (
         "Records seen by an ingest pass, by source and outcome (ingested / rejected / skipped)."
     ),
+    "chemclaw_ingest_citation_only_total": (
+        "Records an ingest pass stored in the citation-only tier, by source: a subset of "
+        "`outcome=ingested` whose source named a species without its structure, so the record is "
+        "citable and in no structure index."
+    ),
     "chemclaw_evidence_source_kept_total": (
         "Chunks from each source that survived merge and the evidence budget. Read against "
         "`chemclaw_evidence_source_chunks_total`, which counts what a leg *handed over* before "
@@ -1353,6 +1358,7 @@ _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
     "chemclaw_queued_tool_calls_total": ("tool",),
     "chemclaw_queued_tool_calls_direct_total": ("tool",),
     "chemclaw_ingest_records_total": ("source", "outcome"),
+    "chemclaw_ingest_citation_only_total": ("source",),
     "chemclaw_evidence_source_kept_total": ("source",),
     "chemclaw_embedding_calls_total": ("outcome",),
     "chemclaw_db_query_failures_total": ("kind",),

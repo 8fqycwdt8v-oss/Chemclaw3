@@ -28,6 +28,7 @@ from chemclaw.core.errors import ChemclawError
 from chemclaw.core.tool_registry import tool
 from chemclaw.core.turn_signals import record_note_written
 from chemclaw.ingest.eln.compound import compound_dependencies, compound_note
+from chemclaw.ingest.eln.ord import RecordTier
 from chemclaw.ingest.eln.records import RECORD_TYPE, default_record_store
 from chemclaw.kg.analytics import GraphGaps, analyze
 from chemclaw.kg.git_writer import default_writer
@@ -523,6 +524,18 @@ async def _expand_record(note_id: str) -> NoteView:
     if record is None:
         raise ChemclawError(f"no reaction record with id {note_id!r}")
     body = frame_untrusted(record.body, note_id=note_id)
+    if record.tier is RecordTier.CITATION_ONLY:
+        # The tier as *system* text, beside the withdrawal notice and for the same reason: the
+        # body says it too, but the body is the ELN's framed text, and a chemist must be able to
+        # tell what this system is saying about the record from what the source said in it.
+        notice = (
+            "Citation-only record: the source gives no structure for at least one species in this "
+            "ELN entry (named in the record as the source gave them). Cite it for what it states "
+            "— yields, conditions, the species named — and infer no structure for a named species. "
+            "It is excluded from structure and similarity search, so its absence from a structural "
+            f"answer says nothing about it. {SYSTEM_SPEECH_MARK}"
+        )
+        body = f"{notice}\n\n{body}"
     if record.retracted_at is not None:
         notice = (
             f"The source withdrew this ELN entry on {record.retracted_at:%Y-%m-%d}. It is no "

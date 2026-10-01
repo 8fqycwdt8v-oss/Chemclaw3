@@ -1246,6 +1246,14 @@ def test_the_topic_cursor_is_not_ahead_of_the_record() -> None:
 # different claim — "this guarantee is enforced right now, here" — which is why it is checked here
 # and there rather than exempted with the paths.
 _RETIRED_TEST_CITATIONS: dict[str, str] = {
+    # Renamed because the refusal it pinned was reversed by an owner decision: a shorthand the
+    # reagent table cannot resolve is now carried as a name and the reaction lands citation-only
+    # (`D-2026-09-27-a-reaction-without-a-structure-is-citable-not-searchable`).
+    "test_ord_compound_with_no_resolvable_identifier_is_still_refused": (
+        "split into `test_ord_compound_known_only_by_a_shorthand_is_carried_as_that_name` (the "
+        "shorthand arrives verbatim with no structure) and "
+        "`test_ord_compound_with_no_identifier_at_all_is_still_refused` (tests/test_eln.py)"
+    ),
     # Renamed because it stopped being true, which is the good direction. It was written as a pin
     # on a defect `D-2026-09-22-a-version-bump-costs-the-same-whenever-it-is-taken` recorded and
     # deliberately did not fix — urea hydrogen peroxide taking urea's `compound_id` — with a

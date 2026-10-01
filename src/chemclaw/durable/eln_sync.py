@@ -74,6 +74,9 @@ class ElnSyncOutcome(BaseModel):
     """
 
     ingested: int = 0
+    # The part of `ingested` stored citation-only — citable, and in no structure index
+    # (`IngestSummary.citation_only`).
+    citation_only: int = 0
     skipped_existing: int = 0
     # Reported separately because a run that ingests thousands and rejects thousands is a broken
     # source reporting healthy progress, and one total cannot say so.
@@ -98,7 +101,7 @@ class ElnSyncPlan(BaseModel):
 class ElnSyncState(BaseModel):
     """A run's position, carried across `continue_as_new` so a huge backfill drains over many runs.
 
-    Every field is bounded: source names, one cursor, one flag and four numbers. That is the whole
+    Every field is bounded: source names, one cursor, one flag and five numbers. That is the whole
     reason the counters above exist.
     """
 
@@ -115,6 +118,7 @@ class ElnSyncState(BaseModel):
     # quadratic over a backlog.
     apply_overlap: bool = True
     ingested: int = 0
+    citation_only: int = 0
     skipped_existing: int = 0
     rejected: int = 0
     # Sources abandoned mid-run because they could not be reached; carried so a continued run
@@ -126,6 +130,7 @@ class ElnSyncState(BaseModel):
 def _absorb(state: ElnSyncState, summary: IngestSummary) -> None:
     """Fold one chunk's summary into the drain's carried counters (max cursor, summed counts)."""
     state.ingested += len(summary.ingested)
+    state.citation_only += len(summary.citation_only)
     state.skipped_existing += len(summary.skipped_existing)
     state.rejected += len(summary.rejected)
     state.next_cursor = (
@@ -499,13 +504,14 @@ class ElnSyncWorkflow:
                 state.apply_overlap = True
             if state.remaining and iterations >= state.max_iterations:
                 # The carried state is bounded by construction — source names, one cursor, one
-                # flag, four counters — so unlike the document drain there is nothing to compact.
+                # flag, five counters — so unlike the document drain there is nothing to compact.
                 workflow.continue_as_new(args=[since, state])
         # `state.since` rather than the parameter: a continued run is handed both, and the state
         # is the one that is true for the whole chain by construction.
         floor = state.since if state.since is not None else datetime.min.replace(tzinfo=UTC)
         return ElnSyncOutcome(
             ingested=state.ingested,
+            citation_only=state.citation_only,
             skipped_existing=state.skipped_existing,
             rejected=state.rejected,
             failed_sources=state.failed_sources,

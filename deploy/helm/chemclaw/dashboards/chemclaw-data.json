@@ -646,6 +646,11 @@
           "refId": "A"
         },
         {
+          "expr": "sum by (source) (rate(chemclaw_ingest_citation_only_total[30m]))",
+          "legendFormat": "{{source}} ingested citation-only",
+          "refId": "F"
+        },
+        {
           "expr": "sum by (outcome) (rate(chemclaw_embedding_calls_total[30m]))",
           "legendFormat": "embedding {{outcome}}",
           "refId": "B"

@@ -15,8 +15,10 @@ the session mailbox as `job_completed` — the path every durable job already ta
 
 import asyncio
 import logging
+import time
 from collections.abc import Awaitable, Callable
-from typing import Any
+from datetime import timedelta
+from typing import Any, Literal
 
 from langchain_mcp_adapters.interceptors import (
     MCPToolCallRequest,
@@ -24,7 +26,10 @@ from langchain_mcp_adapters.interceptors import (
     ToolCallInterceptor,
 )
 from mcp.types import CallToolResult, TextContent
-from temporalio.client import WorkflowFailureError, WorkflowHandle
+from temporalio.api.enums.v1 import PendingActivityState, TaskQueueType
+from temporalio.api.taskqueue.v1 import TaskQueue
+from temporalio.api.workflowservice.v1 import DescribeTaskQueueRequest
+from temporalio.client import Client, WorkflowFailureError, WorkflowHandle
 from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 from temporalio.service import RPCError, RPCStatusCode
 
@@ -40,12 +45,21 @@ from chemclaw.core.ids import stable_hash
 from chemclaw.core.metrics_bridge import record_metric
 from chemclaw.core.session_context import get_current_session_id
 from chemclaw.core.temporal_client import connect
-from chemclaw.core.turn_signals import record_job_started
+from chemclaw.core.turn_signals import record_job_started, record_tool_queued
 from chemclaw.durable.connector_job import ConnectorJobResult, envelope_from_result, failure_reason
 
 logger = logging.getLogger(__name__)
 
 Handler = Callable[[MCPToolCallRequest], Awaitable[MCPToolCallResult]]
+
+#: The last backlog read per interactive queue, as `(monotonic time, count)`. Every turn waiting on
+#: one connector would otherwise ask the broker the same question each tick; one read per queue per
+#: tick answers all of them (`_backlog`).
+_BACKLOG: dict[str, tuple[float, int | None]] = {}
+#: Set once the broker has answered a stats request without stats — a server too old to report
+#: them (Temporal 1.25.2, measured). Not asked again in this process: the answer will not change,
+#: and the round trip would be paid every tick for nothing.
+_STATS_UNSUPPORTED = False
 
 
 class QueueUnavailable(Exception):
@@ -139,7 +153,7 @@ async def dispatch_queued(
         raise QueueUnavailable(f"{connector}.{tool} could not be queued") from exc
     record_metric(lambda m: m.increment("chemclaw_queued_tool_calls_total", labels={"tool": tool}))
     try:
-        finished = await asyncio.wait_for(handle.result(), inline_wait)
+        finished = await _wait_reporting(client, handle, connector, tool, inline_wait)
     except TimeoutError:
         if await _detach(handle, session_id):
             record_job_started(handle.id, tool)
@@ -150,13 +164,130 @@ async def dispatch_queued(
                 f"get_durable_job_status({handle.id!r}) collects it."
             )
         # It finished between the wait running out and the signal: the answer is already there.
-        finished = await handle.result()
+        try:
+            finished = await handle.result()
+        except WorkflowFailureError as exc:
+            return _failed(tool, exc)
     except WorkflowFailureError as exc:
-        return _text(
-            f"{tool} could not be run: {failure_reason(exc.__cause__ or exc)}", is_error=True
-        )
+        return _failed(tool, exc)
     raw = envelope_from_result(handle.id, finished).data.get(RESULT_KEY)
     return CallToolResult.model_validate(raw)
+
+
+def _failed(tool: str, exc: WorkflowFailureError) -> CallToolResult:
+    """A failed run as the tool's refusal, so the agent reads why rather than a traceback."""
+    return _text(f"{tool} could not be run: {failure_reason(exc.__cause__ or exc)}", is_error=True)
+
+
+async def _wait_reporting(
+    client: Client,
+    handle: WorkflowHandle[QueuedToolWorkflow, ConnectorJobResult],
+    connector: str,
+    tool: str,
+    budget: float,
+) -> ConnectorJobResult:
+    """The run's result within `budget` seconds, saying meanwhile whether it waits or runs.
+
+    Without this the tool-call card reads "running" for the whole wait, which is false while the
+    call sits in the queue — and on a busy deployment that wait is the part a chemist is watching.
+    So every `queued_tool_progress_seconds` the run is asked where it is, and a `tool_queued` event
+    goes out only when the answer changes. The asking is best-effort (`_progress`): a broker that
+    will not answer costs the card its annotation, never the call its result.
+
+    Raises:
+        TimeoutError: `budget` ran out first; the run itself is untouched and keeps going.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + budget
+    result = asyncio.ensure_future(handle.result())
+    reported: tuple[str, int | None] | None = None
+    try:
+        while True:
+            # The result first: a run that finished while the last progress read was out is an
+            # answer, not a timeout.
+            if result.done():
+                return result.result()
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise TimeoutError
+            tick = min(settings.queued_tool_progress_seconds, remaining)
+            done, _ = await asyncio.wait({result}, timeout=tick)
+            if done:
+                return result.result()
+            # Bounded by the tick, so a slow broker delays the next look at the result by one tick
+            # at most and never stretches the inline wait past its budget.
+            progress = await _progress(
+                client, handle, connector, max(0.1, min(tick, deadline - loop.time()))
+            )
+            if progress is not None and progress != reported:
+                reported = progress
+                record_tool_queued(tool, handle.id, progress[0], progress[1])
+    finally:
+        # Cancels the *waiter* only; the run carries on, which is what makes detaching safe.
+        result.cancel()
+
+
+async def _progress(
+    client: Client,
+    handle: WorkflowHandle[QueuedToolWorkflow, ConnectorJobResult],
+    connector: str,
+    rpc_timeout: float,
+) -> tuple[Literal["queued", "running"], int | None] | None:
+    """Whether the run's call is still waiting for a slot, and how many calls wait with it.
+
+    `running` once a worker has started the activity; `queued` while it is scheduled and not
+    started — including between retries after a full server. With no pending activity at all the
+    run is either about to schedule it or has just finished it, and the two cannot be told apart
+    here, so that tick says nothing rather than flip a running call back to "queued". The count is
+    the broker's approximate backlog on the connector's interactive queue — this call included —
+    read only while queued. `None` when the broker could not be asked: the annotation is a
+    courtesy, and this must never fail the call.
+    """
+    try:
+        description = await handle.describe(rpc_timeout=timedelta(seconds=rpc_timeout))
+        pending = description.raw_description.pending_activities
+        if not pending:
+            return None
+        if any(a.state == PendingActivityState.PENDING_ACTIVITY_STATE_STARTED for a in pending):
+            return "running", None
+        return "queued", await _backlog(client, connector, rpc_timeout)
+    except Exception:
+        # Best-effort by contract (the docstring): an RPC fault or a describe racing completion
+        # means "no annotation this tick", nothing more.
+        logger.debug("could not read queue progress for %s", handle.id, exc_info=True)
+        return None
+
+
+async def _backlog(client: Client, connector: str, rpc_timeout: float) -> int | None:
+    """The approximate backlog on `connector`'s interactive queue, read at most once a tick.
+
+    `None` from a server that does not report task-queue stats; after the first such answer the
+    process stops asking (`_STATS_UNSUPPORTED`). A failed read raises to `_progress`, which drops
+    the tick's annotation.
+    """
+    global _STATS_UNSUPPORTED
+    if _STATS_UNSUPPORTED:
+        return None
+    queue_name = interactive_queue(connector)
+    now = time.monotonic()
+    cached = _BACKLOG.get(queue_name)
+    if cached is not None and now - cached[0] < settings.queued_tool_progress_seconds:
+        return cached[1]
+    answer = await client.workflow_service.describe_task_queue(
+        DescribeTaskQueueRequest(
+            namespace=client.namespace,
+            task_queue=TaskQueue(name=queue_name),
+            task_queue_type=TaskQueueType.TASK_QUEUE_TYPE_ACTIVITY,
+            report_stats=True,
+        ),
+        timeout=timedelta(seconds=rpc_timeout),
+    )
+    if not answer.HasField("stats"):
+        _STATS_UNSUPPORTED = True
+        return None
+    count = int(answer.stats.approximate_backlog_count)
+    _BACKLOG[queue_name] = (now, count)
+    return count
 
 
 async def _detach(

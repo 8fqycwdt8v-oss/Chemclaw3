@@ -48,7 +48,7 @@ from chemclaw.science.labels.vocabulary import SpeciesRole
 server = FastMCP("mcp-rxnfp")
 _store: FingerprintStore = default_reaction_store()
 # The transcription store, for the one question the fingerprint index cannot answer: whether the
-# source has withdrawn the run a hit stands for.
+# run a hit stands for may be served at all — withdrawn by its source, or citation-only.
 _records: ReactionRecordStore = default_record_store()
 _labels: LabelIndex = default_label_index()
 _molecules = CorpusMolecules()
@@ -76,10 +76,15 @@ async def similar_reactions(
     # **The index knows bits and a label; whether the run still stands is the record store's.**
     # This tool asked the store nothing, so a reaction the source had withdrawn was served as a
     # precedent with `verdict` saying nothing about it — the same hole the retrieval sweep had, in
-    # the tool a chemist reaches directly. `retracted` is a positive question over this page of
-    # ids, so a hit whose record is missing is still served: an unindexed record is not a
-    # withdrawal (`D-2026-09-13-a-withdrawal-is-a-fact-a-source-reports`).
-    withdrawn = await _records.retracted([(match.source, match.id) for match in search.hits])
+    # the tool a chemist reaches directly. `structurally_withheld` is a positive question over this
+    # page of ids, so a hit whose record is missing is still served: an unindexed record is not a
+    # withdrawal (`D-2026-09-13-a-withdrawal-is-a-fact-a-source-reports`). The same question drops
+    # a citation-only record, which reaches the index only as a stale row from before an amendment
+    # took a structure away
+    # (`D-2026-09-27-a-reaction-without-a-structure-is-citable-not-searchable`).
+    withdrawn = await _records.structurally_withheld(
+        [(match.source, match.id) for match in search.hits]
+    )
     return search.model_copy(
         update={
             # The id a hit is cited by names the source it was found in, because

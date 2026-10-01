@@ -4,7 +4,9 @@ The glue that makes an ELN entry both *findable by fingerprint* and *readable on
 canonical reaction it: (1) validates structure + mass balance and refuses to ingest an invalid
 record; (2) indexes the reaction (DRFP) and each distinct molecule it names — its compounds *and*
 its identified impurities (ECFP4) — into the fingerprint stores; (3) writes the transcription to
-the reaction record store, which is what a structure hit expands into.
+the reaction record store, which is what a structure hit expands into. Step (2) runs only for a
+structured record: a citation-only one, which names a species without its structure, is stored and
+citable and is indexed nowhere a structure search looks (`ingest_reaction` says why).
 
 **All three are deterministic serving indexes, and none of them is PR-gated** (D-2026-08-25). That
 used to be true of the first two only, while the third was proposed as a `created_by: agent` note
@@ -24,7 +26,7 @@ from datetime import datetime
 
 from chemclaw.core.chem import standard_smiles
 from chemclaw.core.errors import ChemclawError
-from chemclaw.ingest.eln.ord import OrdReaction
+from chemclaw.ingest.eln.ord import OrdReaction, RecordTier
 from chemclaw.ingest.eln.record import record_from_ord_reaction
 from chemclaw.ingest.eln.records import ReactionRecord, ReactionRecordStore
 from chemclaw.ingest.eln.validate import validate_ord
@@ -86,6 +88,39 @@ async def ingest_reaction(
     if problems:
         raise IngestError(f"reaction {reaction.reaction_id!r} invalid: {'; '.join(problems)}")
 
+    if reaction.tier is RecordTier.STRUCTURED:
+        await _index_structure(reaction, reaction_store, molecule_store, label_index, source)
+    # **A citation-only record writes nothing to any structural index — no DRFP row, no molecule
+    # row, no label row — only the record**, per
+    # `D-2026-09-27-a-reaction-without-a-structure-is-citable-not-searchable`. A reaction
+    # fingerprint of the structured subset would describe a reaction nobody ran, and a similarity
+    # hit on it would cite a record whose defining species has no structure. The molecule rows are
+    # skipped too, although each named structure is real, so that "a citation-only record
+    # contributes no row to any fingerprint store" is one rule a test can hold rather than a
+    # per-store judgement; and the label row is skipped because the labeller derives an atom
+    # mapping and a named reaction from `record_smiles`, which a partial reaction would make into
+    # an inference about a structure nobody gave.
+
+    # The withdrawal is stamped here rather than inside `record_from_ord_reaction`, because that
+    # function maps an `OrdReaction` and a retraction is not in the reaction — it is something the
+    # *source* said about the entry, and `RawEntry` is where the source speaks. Keeping the mapping
+    # pure is also what keeps it the deterministic transcription
+    # `D-2026-08-25-an-eln-transcription-is-data-not-a-claim` argues it is.
+    record = record_from_ord_reaction(reaction)
+    if retracted_at is not None:
+        record = record.model_copy(update={"retracted_at": retracted_at})
+    await record_store.record([record], source)
+    return record
+
+
+async def _index_structure(
+    reaction: OrdReaction,
+    reaction_store: FingerprintStore,
+    molecule_store: FingerprintStore,
+    label_index: LabelIndex,
+    source: str,
+) -> None:
+    """Write a structured reaction's three structural index rows: DRFP, ECFP4 and its label."""
     # `transformation_smiles`, never `reaction_smiles`: the row is a fingerprint, and the agent
     # slot only changes the bits by being *left out* (DRFP folds it back onto the reactants).
     #
@@ -105,17 +140,6 @@ async def ingest_reaction(
     # while this holds the facets a hit is *found* by, and neither can be reconstructed from the
     # other.
     await label_index.record(record_phase(reaction, source))
-
-    # The withdrawal is stamped here rather than inside `record_from_ord_reaction`, because that
-    # function maps an `OrdReaction` and a retraction is not in the reaction — it is something the
-    # *source* said about the entry, and `RawEntry` is where the source speaks. Keeping the mapping
-    # pure is also what keeps it the deterministic transcription
-    # `D-2026-08-25-an-eln-transcription-is-data-not-a-claim` argues it is.
-    record = record_from_ord_reaction(reaction)
-    if retracted_at is not None:
-        record = record.model_copy(update={"retracted_at": retracted_at})
-    await record_store.record([record], source)
-    return record
 
 
 async def _index_impurities(reaction: OrdReaction, molecule_store: FingerprintStore) -> None:

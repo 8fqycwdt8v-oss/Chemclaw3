@@ -64,6 +64,12 @@ endpoint:
     - batch_time_to_reach
     - continuous_reactor_conversion
     - semibatch_accumulation_profile
+  # The one integration `servers/kinetics` gates (a stiff dose is up to seconds of pure-Python
+  # CPU), queued rather than refused when the pod is full (`connectors/queued.py`).
+  queued:
+    tools:
+      - semibatch_accumulation_profile
+    inline_wait_seconds: 45
 
 skills:
   - kinetics-and-reactor-choice
