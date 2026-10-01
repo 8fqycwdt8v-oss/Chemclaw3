@@ -253,6 +253,10 @@ _BAD_DATA_TYPES = [
     # a `SubsystemUnavailableError`, the one fault a retry actually fixes, and conflating the two
     # is what would burn `activity_max_attempts` on a refusal that never changes.
     "CalcToolError",
+    # Its time-budget subclass (`connectors/calc/remote.py`): the server's inline clock stopped the
+    # calculation, and a retry runs the same work against the same clock — so it fails fast like
+    # its parent. Named because Temporal matches by name; the hierarchy alone would not reach it.
+    "CalcTimeBudgetError",
     # A turn asked a tool the identical question once too often (`chemclaw.agent.repeat_guard`).
     # It never crosses an activity boundary today — the guard is a chat-side middleware — but it is
     # a `ChemclawError`, and the rule this list encodes is that every one of them fails fast: an

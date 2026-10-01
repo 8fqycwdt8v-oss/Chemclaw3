@@ -112,21 +112,6 @@ topic).
 
 ## 2 — Answers that are wrong without saying so
 
-- [ ] **The calc server's inline time budget refuses as bad data, so a load-dependent stop reads
-      as a property of the molecule** — [S], opened 2026-09-27 by the review of
-      `D-2026-09-27-a-screen-answers-per-item-a-distribution-refuses-by-name`. `servers/calc`'s
-      `engine/budget.py` raises a plain `ValueError` when a Hessian or relaxation exceeds
-      `CHEMCLAW_XTB_INLINE_TIMEOUT_SECONDS`; the kit passes it through, and here it becomes
-      `McpRequestRefused` → `CalcToolError`, the non-retryable bad-data class. Wall clock depends
-      on contention, so the same item can pass on an idle pod and be refused on a busy one. Before
-      the per-item ADR that failed the whole job; now it is one entry in a screen's `failed`, with
-      the server's own sentence as its reason. That is visible but not *classified*: nothing can
-      tell a timeout from a malformed input without reading prose. The fix is a server-side marker
-      at the message head, as `[calc-at-capacity]` already is (`core/mcp_session.server_marked`),
-      and a client class chosen for it — which is a cross-repository contract change, so it needs
-      its own decision about whether a budget stop is retried. Anchors:
-      `Chemclaw3-mcp/servers/calc/src/chemclaw_mcp_calc/engine/budget.py`,
-      `connectors/calc/remote.py::_call`, `connectors/calc/compose.py::_attempt`.
 - [ ] **`standardize` is not idempotent on ferrocenyl palladacycles, so `compound_id(raw)` is not
       the id of `compound_note(raw)`** (issue #485) — [M], opened 2026-09-27 by the seeded-corpus measurement of
       `D-2026-09-27-a-compound-id-a-bump-moves-is-superseded-not-orphaned`. Three of the 129
@@ -219,6 +204,17 @@ topic).
 
 ## 3 — Work that is lost, dropped or invisible
 
+- [ ] **A failed JWKS fetch is not cached, so every request during an IdP fault pays an outbound
+      fetch** — [S], opened 2026-10-01 by the post-merge audit of PR #494. `api/auth.py`'s
+      `_HttpxJwkClient` caches only a key set that parsed, so while the tenant is unreachable — or,
+      since PyJWT 2.15, answers 200 with a body that is not a key set (`JWKSetCache.put` now raises
+      before storing; 2.13 cached the raw dict for the cache lifespan) — every request carrying any
+      `kid`, an unauthenticated one included, triggers a fetch. Measured: 20 requests, 20 fetches,
+      every one a 503. `_forced_refresh_allowed` bounds only the *unknown-kid* path, and it is an
+      unlocked check-then-set; the cache-expiry fetch in `get_signing_keys` is outside any lock too.
+      The candidates are a short negative cache on a failed fetch, and one lock around both refresh
+      paths. Anchors: `api/auth.py::_HttpxJwkClient.fetch_data`, `api/auth.py::_signing_key`,
+      `api/auth.py::_forced_refresh_allowed`.
 - [ ] **The helper file budget is charged to siblings that wrote nothing** (issue #463, #489) — [M],
   opened by `D-2026-09-18-a-pre-batch-snapshot-cannot-see-its-own-superstep`; its other half, the
   two write verbs nothing bounded, is closed by

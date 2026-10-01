@@ -37,7 +37,7 @@ from typing import Any, Literal, NamedTuple, Protocol, TypeVar
 import numpy as np
 from rdkit import Chem
 
-from chemclaw.connectors.calc.remote import cached_remote, remote_call
+from chemclaw.connectors.calc.remote import CalcTimeBudgetError, cached_remote, remote_call
 from chemclaw.core.chem import require_canonical_smiles, require_molecule, torsion_handle
 from chemclaw.core.config import settings
 from chemclaw.core.config.calculators import PkaCalibration
@@ -65,6 +65,7 @@ from chemclaw.science.calc.models import (
     EnsembleSearch,
     FailedBond,
     FailedMedium,
+    FailureCause,
     HessianPayload,
     InteractionResult,
     MicrostatePka,
@@ -1390,16 +1391,35 @@ async def _attempt(awaitable: Awaitable[_Result]) -> _Result | ValueError:
     activity is retried rather than a pod restart being reported as N chemistry failures.
     Cancellation is a `BaseException` and propagates too.
 
-    **What the class carries is wider than bad input, and that is the server's taxonomy, not this
-    boundary's.** The calc server's inline time budget refuses with a plain `ValueError`, so a stop
-    that depends on load lands here as one item's failure (a `BACKLOG.md` row); a refused
-    credential and a contract skew arrive as `CalcToolError` too, but those fail every item alike
-    and reach the caller as the all-failed refusal.
+    **What the class carries is wider than bad input.** The calc server's inline time budget stops
+    a calculation by load rather than by input; it arrives as `CalcTimeBudgetError`, still a
+    refusal, and `_cause` records it as a `time_budget` stop rather than a refused item
+    (`D-2026-10-01-a-stop-by-the-clock-is-named-not-retried`). A refused credential and a contract
+    skew arrive as `CalcToolError` too, but those fail every item alike and reach the caller as the
+    all-failed refusal.
     """
     try:
         return await awaitable
     except ValueError as refusal:
         return refusal
+
+
+def _cause(refusal: ValueError) -> FailureCause:
+    """Whether one item's refusal was about the item, or the server's clock stopping it."""
+    return "time_budget" if isinstance(refusal, CalcTimeBudgetError) else "refused"
+
+
+def _refusal(causes: Sequence[FailureCause]) -> type[ValueError]:
+    """The class a screen refuses with when nothing it was asked for could be answered.
+
+    `CalcTimeBudgetError` when every failed item was stopped by the server's clock, so a caller —
+    a species screen reading one medium's ranking, or a chemist reading a job — sees a stop rather
+    than a refused input; a plain `ValueError` as soon as one input was refused, because then no
+    amount of waiting completes the set. Both are non-retryable.
+    """
+    if causes and all(cause == "time_budget" for cause in causes):
+        return CalcTimeBudgetError
+    return ValueError
 
 
 def _named(failures: Sequence[tuple[str, str]]) -> str:
@@ -1526,13 +1546,13 @@ async def solvent_comparison(
     # below sorts from a list whose order does not depend on which branch finished first.
     outcomes = await asyncio.gather(*(one(solvent) for solvent in media))
     failed = [
-        FailedMedium(solvent=solvent, reason=str(outcome))
+        FailedMedium(solvent=solvent, reason=str(outcome), cause=_cause(outcome))
         for solvent, outcome in zip(media, outcomes, strict=True)
         if isinstance(outcome, ValueError)
     ]
     results = [outcome for outcome in outcomes if not isinstance(outcome, ValueError)]
     if not results:
-        raise ValueError(
+        raise _refusal([entry.cause for entry in failed])(
             "no medium of this solvent screen could be computed: "
             + _named([(_medium(entry.solvent), entry.reason) for entry in failed])
         )
@@ -1927,6 +1947,7 @@ async def species_ranking(
     stated = dict(symmetry_numbers or {})
     energies: list[SpeciesEnergy] = []
     refused: list[tuple[str, str]] = []
+    causes: list[FailureCause] = []
     for index, (smiles, _) in enumerate(considered, start=1):
         progress(f"species {index}/{len(considered)}: {smiles}")
         # **`stated.get(smiles)`, not a literal 1.** Passing 1 marked the number *stated*, so the
@@ -1942,6 +1963,7 @@ async def species_ranking(
         if isinstance(outcome, ValueError):
             # By SMILES rather than label: it is the string the caller removes and passes back.
             refused.append((smiles, str(outcome)))
+            causes.append(_cause(outcome))
         else:
             energies.append(outcome)
     if refused:
@@ -1951,7 +1973,9 @@ async def species_ranking(
         # the enumeration. Trying the rest first is what makes the refusal useful: it names every
         # form that cannot be computed, not only the first, and each one that could is now cached
         # (D-011), so the rerun without the offenders pays for none of them again.
-        raise ValueError(
+        # `_refusal`'s rule: a stop on every failed form is named as one, so a species screen
+        # records the medium as stopped by the clock rather than refused.
+        raise _refusal(causes)(
             f"{len(refused)} of {len(considered)} species could not be computed, and a "
             "distribution over the rest would re-share their population among the forms that "
             "were: " + _named(refused) + ". Each reason says what that form needs — a form "
@@ -2120,13 +2144,13 @@ async def species_solvent_comparison(
     # every `standings` list is in the order the caller can read against `media`.
     outcomes = await asyncio.gather(*(one(solvent) for solvent in media))
     failed = [
-        FailedMedium(solvent=solvent, reason=str(outcome))
+        FailedMedium(solvent=solvent, reason=str(outcome), cause=_cause(outcome))
         for solvent, outcome in zip(media, outcomes, strict=True)
         if isinstance(outcome, ValueError)
     ]
     distributions = [outcome for outcome in outcomes if not isinstance(outcome, ValueError)]
     if not distributions:
-        raise ValueError(
+        raise _refusal([entry.cause for entry in failed])(
             "no medium of this species screen could be ranked: "
             + _named([(_medium(entry.solvent), entry.reason) for entry in failed])
         )
@@ -2296,7 +2320,11 @@ async def bond_dissociation_survey(
             progress(f"bond {index}/{len(cleavages)} ({bond}) could not be computed: {outcome}")
             failed.append(
                 FailedBond(
-                    atoms=list(atoms), bond=bond, fragments=list(fragments), reason=str(outcome)
+                    atoms=list(atoms),
+                    bond=bond,
+                    fragments=list(fragments),
+                    reason=str(outcome),
+                    cause=_cause(outcome),
                 )
             )
             continue
@@ -2318,7 +2346,7 @@ async def bond_dissociation_survey(
     # A bond is named with its atoms: "C-H" alone is ambiguous in any molecule with two of them.
     names = [f"{entry.bond} {entry.atoms}" for entry in failed]
     if not results:
-        raise ValueError(
+        raise _refusal([entry.cause for entry in failed])(
             f"no bond of {smiles} could be computed: "
             + _named([(name, entry.reason) for name, entry in zip(names, failed, strict=True)])
         )
