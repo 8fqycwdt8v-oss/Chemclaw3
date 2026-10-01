@@ -64,7 +64,7 @@ never guessed into a structure.** The shape built is between the row's two:
    parse-checks the structures given and skips the mass balance, which is uncheckable either way (a
    named input may supply any element; a named product contains elements nobody can list).
 
-5. **The tier is a column, and the structural readers ask it.** `infra/sql/110_reaction_record_tier.sql`
+5. **The tier is a column, and the structural readers ask it.** `infra/sql/111_reaction_record_tier.sql`
    adds `reaction_records.tier` (`structured` | `citation-only`, default `structured` — true of every
    existing row, since the only ingest path refused such a record, and true of what the previous
    image writes during a rollout). `ReactionRecord.tier` carries it and the upsert refreshes it, so an
