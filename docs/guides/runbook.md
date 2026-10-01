@@ -765,6 +765,19 @@ until you **re-index** them (re-run the ELN sync / re-add molecules). If search 
 empty after a config change, that is the tell: the index predates the new definition and needs
 rebuilding.
 
+## (vi-a) After an upgrade that bumps `STANDARDIZATION_VERSION`
+
+A bump changes the fingerprint definitions (the version is a token in both), so every row indexed
+under the old one falls out of similarity search — and when it changes what a structure
+standardizes to, it moves that compound to a new `compound_id`, leaving the old compound note
+current beside the new one. **Run `make rekey-compounds` once after upgrading past a bump**: it
+previews the per-kind counts; `make rekey-compounds APPLY=1` writes them. It supersedes each moved
+compound note by the note under its new id (the old one is retired, never deleted, and its id keeps
+resolving through `expand_note`), and re-fingerprints the shelved rows of both indexes from what
+each row stores, so the full ELN re-sync below is no longer needed for a bump. It is idempotent: a
+second run reports nothing left to write. Run it where the note writer runs — it commits through
+the same dedicated checkout (`D-2026-09-27-a-compound-id-a-bump-moves-is-superseded-not-orphaned`).
+
 ## (vi-b) After an upgrade that changes what a note's indexed text is
 
 `note_index` rows are keyed on a **stat** fingerprint (mtime + size), which detects a changed
@@ -1347,6 +1360,20 @@ tier asking for capacity, and it is the **only** signal that asks.
 This alert is deliberately **not** on `chemclaw_degraded_total`. A busy backend and a dark backend
 need different responses, and folding them into one series is how the signal an operator trusts for
 "the backend is down" stops meaning that.
+
+#### ChemclawQueuedToolsGoingDirect
+`warning`. A tool a manifest lists under `queued:` could not start its `QueuedToolWorkflow`, so the
+front door called the server directly (`connectors/queued.py`,
+`D-2026-09-30-a-heavy-tool-call-waits-in-a-queue-rather-than-being-refused`). The fallback is what
+keeps the capability up through a broker outage; while it lasts, a burst is refused pod by pod
+again, exactly as before queues existed.
+
+1. **Check the broker from the front door.** `chemclaw_queued_tool_calls_direct_total` rising
+   together with the durable job tools failing is the Temporal frontend being unreachable or its
+   mTLS material unreadable — the same fault every durable tool reports.
+2. **If the broker is fine, check the interactive workers exist.** A run that *starts* but is never
+   picked up does not trip this alert; it waits, and the turn hands back a job id. Look for
+   `<release>-interactive-worker-<connector>` Deployments with ready pods.
 
 #### ChemclawFrontDoorAtItsPermitCeiling
 `warning`, and the leading indicator for both of the above. `sum(chemclaw_turns_in_flight) /

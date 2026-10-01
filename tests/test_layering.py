@@ -338,6 +338,10 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
     ("chemclaw.cli", "chemclaw.evals"),
     ("chemclaw.cli", "chemclaw.ingest"),
     ("chemclaw.cli", "chemclaw.kg"),
+    # `cli/rekey_compounds.py` is the terminal half of `memory.compound_rekey`, which supersedes a
+    # compound note a `STANDARDIZATION_VERSION` bump moved — with `memory.supersede.retire_note`,
+    # the one spelling of "how a note is retired" (D-2026-09-27). The shim holds no logic itself.
+    ("chemclaw.cli", "chemclaw.memory"),
     # `cli/propose_profile.py` mines `audit_events.tool`, the same model-written column
     # `operations.activity.safe_tool_name` bounds for its own readers — and a bound applied to one
     # reader of a column is not a bound, which that function's docstring argues.

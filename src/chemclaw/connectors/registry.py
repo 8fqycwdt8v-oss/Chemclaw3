@@ -547,6 +547,8 @@ def _mcp_connection(manifest: ConnectorManifest, endpoint: Endpoint) -> Connecto
                 session_kwargs=_session_kwargs(endpoint),
             ),
             allowed_tools=tuple(endpoint.tools),
+            queued=endpoint.queued,
+            request_timeout=request_timeout_seconds(endpoint),
         )
     if isinstance(endpoint, StdioEndpoint):
         # **Refused unless the deployment asked for it**, because this is the one endpoint field
@@ -606,6 +608,25 @@ def mcp_connections() -> list[ConnectorSpec]:
         for manifest in enabled()
         if manifest.endpoint is not None
     ]
+
+
+def connector_spec(name: str) -> ConnectorSpec:
+    """How to reach one enabled connector by name — for a process that is not running a turn.
+
+    The interactive worker (`connectors/interactive_worker.py`) calls a connector's tools on a
+    chemist's behalf without holding that chemist's turn, so it cannot be handed the turn's spec;
+    it builds the same one here, through `_mcp_connection`, so its client carries the identical
+    credential, redirect refusal and timeouts a turn's does.
+
+    Raises:
+        ConnectorError: `name` is not an enabled connector with an endpoint in this deployment.
+    """
+    for manifest in enabled():
+        if manifest.name == name and manifest.endpoint is not None:
+            return _mcp_connection(manifest, manifest.endpoint)
+    raise ConnectorError(
+        f"connector {name!r} is not enabled in this deployment, or declares no endpoint to call"
+    )
 
 
 def _count_unreachable(connector: str, metrics: Metrics) -> None:

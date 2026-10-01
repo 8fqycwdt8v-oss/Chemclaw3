@@ -103,7 +103,7 @@ SHELL := bash
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install lint type test cov check ci chat db-migrate db-grants schedules-apply kg-validate synthesize eval eval-strict eval-baseline eval-baseline-check eln-validate skill-validate connector-validate datasource-validate sink-validate channel-validate sink-schema template-validate connectors prose-validate helm-validate explain user-erase reindex reindex-full up down phoenix-up phoenix-down phoenix-publish deps-audit live-infra live-infra-down live-up live-down live-status live-jobs live-probes live-turn-cost live-benchmark live-template-args live-verifier-margin trajectory-census distill propose-profile live-data live-plan-gate live-degradation live-storm live-soak live-soak-report leak-probe mutants mutant-results mutant-stats upstream-check share-estimate share-sync live-ab live-delegation hypothesis-recovery live-e2e-full-stack live-e2e-full-stack-down live-e2e-full-stack-status
+.PHONY: help install lint type test cov check ci chat db-migrate db-grants schedules-apply kg-validate synthesize eval eval-strict eval-baseline eval-baseline-check eln-validate skill-validate connector-validate datasource-validate sink-validate channel-validate sink-schema template-validate connectors prose-validate helm-validate explain user-erase rekey-compounds reindex reindex-full up down phoenix-up phoenix-down phoenix-publish deps-audit live-infra live-infra-down live-up live-down live-status live-jobs live-probes live-turn-cost live-benchmark live-template-args live-verifier-margin trajectory-census distill propose-profile live-data live-plan-gate live-degradation live-storm live-soak live-soak-report leak-probe mutants mutant-results mutant-stats upstream-check share-estimate share-sync live-ab live-delegation hypothesis-recovery live-e2e-full-stack live-e2e-full-stack-down live-e2e-full-stack-status
 
 help:  ## List every target with its one-line description (the default).
 	@# Reads the `## ` comments beside each target, so a new target documents itself the day it is
@@ -293,7 +293,7 @@ helm-validate:  ## Render the Helm chart and validate it against the Kubernetes 
 	@# refuses. That refusal landing here first is the union arm working — it is the only thing in
 	@# the tree that had ever set that switch.
 	@set -e; \
-	  for flags in "" "--set mcpFace.enabled=true --set mcpFace.route.enabled=true --set-json mcpFace.ingressNamespaces=[{\"network.openshift.io/policy-group\":\"ingress\"}] --set documentShare.enabled=true --set monitoring.temporalSdkMetrics.enabled=true --set secrets.create=true --set monitoring.alertmanager.enabled=true --set-json monitoring.alertmanager.receivers=[{\"name\":\"chemclaw-oncall\"}] --set monitoring.alertmanager.defaultReceiver=chemclaw-oncall"; do \
+	  for flags in "" "--set mcpFace.enabled=true --set mcpFace.route.enabled=true --set-json mcpFace.ingressNamespaces=[{\"network.openshift.io/policy-group\":\"ingress\"}] --set documentShare.enabled=true --set monitoring.temporalSdkMetrics.enabled=true --set secrets.create=true --set monitoring.alertmanager.enabled=true --set-json monitoring.alertmanager.receivers=[{\"name\":\"chemclaw-oncall\"}] --set monitoring.alertmanager.defaultReceiver=chemclaw-oncall --set keda.enabled=true"; do \
 	    helm template chemclaw deploy/helm/chemclaw \
 	      --set networkPolicy.allowAnyDestination=true \
 	      --set retention.unboundedGrowthAccepted=true \
@@ -440,6 +440,14 @@ user-erase:  ## Offboard a person's conversational data: ACTOR=<oid> [APPLY=1]. 
 	  *) echo "user-erase: APPLY=$(APPLY) is not 1 — running as a dry run. Use APPLY=1 to commit." ;; \
 	esac
 	uv run python -m chemclaw.cli.erase_actor $(ACTOR) $(if $(filter 1,$(APPLY)),--apply,)
+
+rekey-compounds:  ## Carry compound notes and fingerprint rows across a standardization bump [APPLY=1]. Preview by default.
+	@# The same `APPLY` rule as `user-erase`: only the literal `1` writes, so `APPLY=0` previews.
+	@case "$(APPLY)" in \
+	  ""|1) ;; \
+	  *) echo "rekey-compounds: APPLY=$(APPLY) is not 1 — previewing. Use APPLY=1 to write." ;; \
+	esac
+	uv run python -m chemclaw.cli.rekey_compounds $(if $(filter 1,$(APPLY)),--apply,)
 
 reindex:  ## Incrementally rebuild the derived note index — only notes changed since last run.
 	uv run python -m chemclaw.retrieval.vector_index

@@ -949,6 +949,18 @@ _COUNTERS: dict[str, str] = {
         "Calculation-backend calls refused because every slot was busy, by tool. Retried with "
         "backoff rather than failed; a sustained rate means the backend is under-provisioned."
     ),
+    # How many tool calls went through a connector's interactive queue rather than straight to the
+    # server (`connectors/queued.py`). By tool — bounded by the manifests' `queued:` lists — so a
+    # dashboard beside the queue's own backlog can say which capability the waiting is for.
+    "chemclaw_queued_tool_calls_total": (
+        "Tool calls a turn sent through a connector's interactive queue, by tool."
+    ),
+    # The fallback's own count: a queued tool called directly because its run could not be started
+    # (the broker unreachable). Non-zero means the queue is not doing its job and every burst is
+    # being met by refusals again.
+    "chemclaw_queued_tool_calls_direct_total": (
+        "Queued tool calls sent straight to the server because the queue was unreachable, by tool."
+    ),
     # --- ingest and retrieval ------------------------------------------------------------------
     "chemclaw_ingest_records_total": (
         "Records seen by an ingest pass, by source and outcome (ingested / rejected / skipped)."
@@ -1324,6 +1336,8 @@ _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
     "chemclaw_connectors_unreachable_total": ("connector",),
     "chemclaw_calc_cache_total": ("outcome",),
     "chemclaw_calc_backend_at_capacity_total": ("tool",),
+    "chemclaw_queued_tool_calls_total": ("tool",),
+    "chemclaw_queued_tool_calls_direct_total": ("tool",),
     "chemclaw_ingest_records_total": ("source", "outcome"),
     "chemclaw_ingest_citation_only_total": ("source",),
     "chemclaw_evidence_source_kept_total": ("source",),
@@ -1343,12 +1357,15 @@ _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
 # templates plus `<unmatched>`, with no route producing more than three status classes — a worst
 # case of 63 against a cap of 64. That is not a cardinality problem, it is a *sizing* one: the label
 # domain is the route table, enumerable from `app.routes`, and it grows by one whenever somebody
-# adds a route. 128 is sized against that table with room for it to double.
+# adds a route. 128 was sized against that table with room for it to double, and the table did:
+# the shared-session routes (`D-2026-09-27-in-a-shared-session-the-sender-governs`) took it past
+# the three-per-route worst case, which `tests/test_api_observability.py` reports rather than this
+# comment. 256 is the same sizing taken again — the table with room to double.
 #
 # Still generous for every other counter here: `profile` is a handful of names, so a *different*
 # metric reaching this means something is generating values it should not — which is the case this
 # cap exists for, and the reason it is raised rather than removed.
-_MAX_SERIES_PER_COUNTER = 128
+_MAX_SERIES_PER_COUNTER = 256
 
 _GAUGES: dict[str, str] = {
     "chemclaw_turns_in_flight": "Turns currently streaming.",

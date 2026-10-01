@@ -97,6 +97,37 @@ class SessionSummary(BaseModel):
     title: str | None = None
 
 
+class SessionMemberOut(BaseModel):
+    """One person the owner has let into a session, and since when."""
+
+    actor: str
+    added_at: datetime
+
+
+class SessionMembersOut(BaseModel):
+    """Who may reach a session: its owner, and the members that owner admitted.
+
+    `owner` is `None` for a session with no recorded owner, which can have no members — nobody holds
+    the standing to have admitted them (`agent/session_members.participant_permits`).
+    """
+
+    owner: str | None
+    members: list[SessionMemberOut]
+
+
+class SharedSessionSummary(BaseModel):
+    """A session somebody else owns that the caller has been let into — `GET /sessions/shared`.
+
+    `owner` and `title` are `None` under the in-process session store, which keeps memberships and
+    no conversation list.
+    """
+
+    session_id: str
+    owner: str | None = None
+    title: str | None = None
+    added_at: datetime
+
+
 class TranscriptToolCall(BaseModel):
     """One tool the agent invoked during a turn, as the transcript remembers it.
 
@@ -380,6 +411,10 @@ class PlanStatusOut(BaseModel):
     mode: str
     approved: bool
     decided_by: str | None = None
+    # Whose turn last wrote this plan — the one person who may decide on it
+    # (`D-2026-09-27-in-a-shared-session-the-sender-governs`). `None` when no author is recorded, in
+    # which case the session's owner decides, as before authorship existed.
+    author: str | None = None
 
 
 class PendingPlan(BaseModel):

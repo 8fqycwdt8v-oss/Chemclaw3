@@ -108,6 +108,30 @@ class BearerAuth(BaseModel):
 ConnectorAuth = NoAuth | BearerAuth
 
 
+class QueuedDispatch(BaseModel):
+    """Which of an endpoint's tools reach their server through a durable queue, not a direct call.
+
+    A tool named here is still bound, authorized, audited and plan-gated exactly as any other — the
+    agent cannot tell the difference and neither can the middleware chain. What changes is the last
+    hop: instead of calling the server on the turn's own session, the call becomes a
+    `QueuedToolWorkflow` on this connector's interactive queue
+    (`chemclaw.connectors.queues.interactive_queue`), and a worker sized to the server's slots takes
+    it when one is free. So a burst waits in one global, first-come queue rather than being refused
+    pod by pod, the turn waits `inline_wait_seconds` for the answer, and a call that outlasts that
+    returns a job id and delivers its result through the session mailbox like any durable job
+    (`D-2026-09-30-a-heavy-tool-call-waits-in-a-queue-rather-than-being-refused`).
+
+    **Only a tool whose answer is a function of its arguments belongs here.** Identical concurrent
+    calls rejoin one run — the cross-process single-flight `cached_compute` lacks — which is right
+    for a calculation and wrong for anything that reads or writes per-caller state.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    tools: list[str] = Field(min_length=1)
+    inline_wait_seconds: float = Field(gt=0)
+
+
 class HttpEndpoint(BaseModel):
     """A connector reached over MCP streamable-HTTP — the normal case (its own FastAPI server).
 
@@ -132,12 +156,34 @@ class HttpEndpoint(BaseModel):
     state_changing: list[str] = Field(default_factory=list)
     read_only: list[str] = Field(default_factory=list)
     knowledge_read: list[str] = Field(default_factory=list)
+    queued: QueuedDispatch | None = None
 
     @model_validator(mode="after")
     def _every_tool_is_classified(self) -> Self:
         """Reject an endpoint that does not classify each of its tools exactly once."""
         _check_classification(self.tools, self.state_changing, self.read_only)
         _check_knowledge_reads(self.knowledge_read, self.read_only)
+        return self
+
+    @model_validator(mode="after")
+    def _queues_only_tools_it_serves(self) -> Self:
+        """Reject a queued tool the endpoint does not serve.
+
+        Such a name would queue nothing while reading, in review, as if it did.
+
+        Deliberately *not* tied to `read_only`/`state_changing`: that split is about side effects,
+        and cost is a different axis — `rxnpredict`'s predictions are reads and cost seconds of CPU.
+        """
+        if self.queued is None:
+            return self
+        names = self.queued.tools
+        if len(names) != len(set(names)):
+            raise ValueError(f"`queued.tools` lists a tool more than once: {sorted(names)}")
+        unserved = sorted(set(names) - set(self.tools))
+        if unserved:
+            raise ValueError(
+                f"`queued.tools` names tool(s) {unserved} this endpoint does not serve"
+            )
         return self
 
     @model_validator(mode="after")

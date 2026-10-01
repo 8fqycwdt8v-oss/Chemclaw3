@@ -24,8 +24,10 @@ forgotten.
 The second half of this module (R3.2) is the resource-level gates the routes in
 `chemclaw/api/routes/` resolve before touching anything: session ownership (`CurrentSession`,
 which also rehydrates a durable session after a restart) and the reviewer check. Both session
-paths share one refusal — `_refuse_unless_owner`, the "same 404 for unknown and not-yours" rule —
-because they authorize the same way (`_owner_authorizes` against a stored owner).
+paths share one refusal — `_refuse_unless_participant`, the "same 404 for unknown and not-yours"
+rule — because they authorize the same way: the stored owner, or a member that owner let in
+(`agent/session_members.participant_permits`). The acts only an owner may perform are
+`OwnedSession`'s.
 
 There used to be a third gate here, proposal visibility, and it was the interesting one: a reviewer
 could see *any* proposal, a privilege a session has no analogue for. It went with the PR-gate
@@ -39,6 +41,7 @@ from typing import Annotated
 from fastapi import Depends, HTTPException, Request
 
 from chemclaw.agent.session import TurnSession
+from chemclaw.agent.session_members import participant_permits
 from chemclaw.agent.session_store import owner_permits
 from chemclaw.api.auth import Principal, require_principal
 from chemclaw.api.middleware import bind_request_session, clip_for_log
@@ -154,19 +157,37 @@ def _owner_authorizes(owner: str | None, principal: Principal) -> bool:
     return owner_permits(owner, principal.oid)
 
 
-def _refuse_unless_owner(
-    owner: str | None, principal: Principal, detail: str, target: str = ""
+async def _refuse_unless_participant(
+    session_id: str, owner: str | None, principal: Principal, detail: str
 ) -> None:
-    """404 unless the stored owner authorizes `principal` — the shared no-existence-leak gate (S3).
+    """404 unless `principal` owns the session or is a member — the no-existence-leak gate (S3).
 
-    One helper for the two session-resolution paths, whose rule is identical (`_owner_authorizes`
-    over a stored owner): the live entry and the rehydrated durable row. An unknown row and someone
-    else's row are indistinguishable from outside, which is the entire point — a 403 would
-    confirm the id exists. `detail` stays the resource's own wording so the split changed no
-    response body.
+    One helper for the two session-resolution paths, whose rule is identical: the live entry and the
+    rehydrated durable row. An unknown row and somebody else's are indistinguishable from outside,
+    which is the entire point — a 403 would confirm the id exists. A **member** passes
+    (`agent/session_members.participant_permits`, `D-2026-09-27-in-a-shared-session-the-sender-
+    governs`): the owner let them in, so the session's existence is no secret from them, and what
+    they may *do* there is decided per act — every turn they send runs as them, a plan only its
+    author decides, and the owner's own acts go through `require_owner`.
+
+    Membership is asked on every non-owner request rather than cached on the live entry, so a
+    member the owner removes is refused on their very next request.
     """
-    if not _owner_authorizes(owner, principal):
-        raise _refuse(_SESSION, "not the owner", principal, target, detail)
+    if not await participant_permits(session_id, owner, principal.oid):
+        raise _refuse(_SESSION, "not the owner or a member", principal, session_id, detail)
+
+
+def require_owner(live: LiveSession, principal: Principal, session_id: str, act: str) -> None:
+    """403 unless `principal` is the session's owner — for the acts a member may not perform.
+
+    A 403 rather than the gate's 404, because the caller has already passed `resolve_session`: a
+    member knows the session exists, so the refusal hides nothing and saying *why* is the useful
+    answer. The acts are the owner's by the decision this module cites — deleting or forking the
+    session, and admitting or removing somebody else — and the refusal is recorded like every other.
+    """
+    if not owner_permits(live.owner, principal.oid):
+        record_refusal(_SESSION, "a member, not the owner", principal, session_id, status=403)
+        raise HTTPException(status_code=403, detail=f"only the session's owner may {act}")
 
 
 def _is_reviewer(principal: Principal) -> bool:
@@ -201,7 +222,7 @@ async def _resolve_session(request: Request, session_id: str, principal: Princip
     """
     entry = state(request).live_sessions.get(session_id)
     if entry is not None:
-        _refuse_unless_owner(entry.owner, principal, "unknown session", session_id)
+        await _refuse_unless_participant(session_id, entry.owner, principal, "unknown session")
         return entry
     return await _rehydrate_session(request, session_id, principal)
 
@@ -219,7 +240,7 @@ async def _rehydrate_session(
     found, owner, profile = await owners.lookup(session_id)
     if not found:
         raise _refuse(_SESSION, "no such session", principal, session_id, "unknown session")
-    _refuse_unless_owner(owner, principal, "unknown session", session_id)
+    await _refuse_unless_participant(session_id, owner, principal, "unknown session")
     # Re-check the cache after the awaited lookup: two racing requests would otherwise each
     # mint a live handle over the same durable thread, and the loser's handle would keep
     # writing outside the cache. The first rehydrator's handle wins; both callers share it.
@@ -262,3 +283,20 @@ async def resolve_session(request: Request, session_id: str, principal: CurrentU
 # The caller's own live session for a `{session_id}` route — resolved (and rehydrated if durable
 # ownership allows) before the handler runs, 404ing a non-owner with no existence leak.
 CurrentSession = Annotated[LiveSession, Depends(resolve_session)]
+
+
+async def resolve_owned_session(
+    request: Request, session_id: str, principal: CurrentUser
+) -> LiveSession:
+    """`resolve_session`, then `require_owner` — for a route that only the session's owner may call.
+
+    Deleting and forking a session are the owner's (`D-2026-09-27-in-a-shared-session-the-sender-
+    governs`): a fork hands the whole shared transcript — every member's words — to a new session
+    the forker alone owns, beyond the reach of the owner's later decision to remove anybody.
+    """
+    live = await resolve_session(request, session_id, principal)
+    require_owner(live, principal, session_id, "do this")
+    return live
+
+
+OwnedSession = Annotated[LiveSession, Depends(resolve_owned_session)]

@@ -160,6 +160,23 @@ class ConnectorSettings(BaseSettings):
     # (`_the_template_run_ceiling_covers_one_step`).
     connector_job_timeout_seconds: float = Field(default=25_200.0, gt=0)
 
+    # **How long a queued tool call may wait for a slot and run, in all** — the `schedule_to_close`
+    # of its one activity (`connectors/queued_workflow.py`). A queued call is seconds-class work
+    # that a burst made wait, not a durable job, so its patience is an hour rather than
+    # `connector_job_timeout_seconds`' seven: a call still queued after that is load this
+    # deployment is not sized for, and failing it tells the chemist so instead of answering
+    # tomorrow. The in-turn part of the wait is each endpoint's own `queued.inline_wait_seconds`.
+    queued_tool_timeout_seconds: float = Field(default=3_600.0, gt=0)
+    # The ceiling on the pause between two asks of a full server. Seconds, not the minutes
+    # `calculation_retry` spaces a durable job by: the worker that dispatches a queued call is sized
+    # to the server's slots, so a refusal means a slot is freeing within one call's duration, and
+    # the chemist is usually still watching.
+    queued_tool_retry_max_seconds: float = Field(default=10.0, gt=0)
+    # How many times a queued call is re-sent after a fault that is *not* a full server — a
+    # connector that did not answer, a transport error. A few, because a rolling pod is the common
+    # cause; not unbounded, because an outage is news the chemist should get now.
+    queued_tool_fault_attempts: int = Field(default=3, ge=1)
+
     # Hard ceiling on a connector's request body, refused with 413 before anything reads it
     # (`connectors.server.connector_app`, `core.asgi.BodySizeLimit`). A connector's own setting
     # rather than reusing `service_max_request_bytes`: that one is sized for the front door's

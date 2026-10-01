@@ -502,6 +502,13 @@ _NOT_PRUNED: dict[str, str] = {
     "session_turns": "a lease, released at turn end; the lease a crashed worker never released is "
     "swept with its session's ownership row by `_prune_session_owners`, never on a clock of its "
     "own — a live lease is what says a turn is running",
+    "session_members": "bounded by the sessions it belongs to: at most the people one owner "
+    "admitted per session, cascading from the session's ownership row "
+    "(`infra/sql/110_shared_sessions.sql`), so `_prune_session_owners` takes it with the session "
+    "— never on a clock of its own, because a membership is what lets a person back into a live "
+    "conversation",
+    "plan_authors": "one row per distinct plan a session's turns wrote, cascading from the "
+    "session's ownership row as `session_members` does and for the same reason",
     "audit_anchors": "retired with the audit hash chain; nothing writes it and the table is empty",
     "store_vectors": "not created in this deployment — the memory store is built without an "
     "`index_config`, so `AsyncPostgresStore.setup()` never makes it",

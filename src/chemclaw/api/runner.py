@@ -50,6 +50,7 @@ from chemclaw.agent.plan_gate import (
     approval_stands,
     consume_turn_approval,
     gate_applies,
+    plan_author,
     plan_identity,
     spend_approval_after_teardown,
 )
@@ -92,6 +93,7 @@ from chemclaw.connectors.registry import open_connector_specs
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.core.identity_context import (
+    get_current_actor,
     get_current_correlation_id,
     reset_current_correlation_id,
     reset_current_identity,
@@ -1916,6 +1918,13 @@ async def _pending_plan_approval(session_id: str) -> ApprovalRequestEvent | None
         if plan_hash is None:
             return None
         if await approval_stands(session_id, plan_hash):
+            return None
+        # A plan another participant's turn wrote is theirs to decide, not this sender's
+        # (`D-2026-09-27-in-a-shared-session-the-sender-governs`) — a card the route would answer
+        # 403 is a card with nothing behind it. An unrecorded author is left to the route's owner
+        # fallback, which a card cannot pre-empt without the owner in hand.
+        author = await plan_author(session_id, plan_hash)
+        if author and author != get_current_actor():
             return None
         return ApprovalRequestEvent(prompt=PLAN_APPROVAL_PROMPT, approval_id="")
     except Exception:

@@ -112,53 +112,19 @@ topic).
 
 ## 2 — Answers that are wrong without saying so
 
-- [ ] **A salt written neutral and the same salt written ionic get two `compound_id`s, for the
-      counterions RDKit's catalogue omits** — [M], opened 2026-09-22 by the review of
-      `D-2026-09-22-the-parent-is-the-fragment-this-module-calls-organic`. That decision discards a
-      *neutral* spectator only when RDKit's fragment catalogue knows it, so the two spellings of one
-      salt diverge whenever the catalogue does not carry the counterion: driven,
-      `CCN.OCl(=O)(=O)=O` keeps its perchloric acid while `CC[NH3+].[O-]Cl(=O)(=O)=O` strips the
-      perchlorate. One substance, two ids — which is `D-2026-07-31-two-spellings-of-one-molecule`,
-      the defect `core/chem.py` exists to prevent.
-
-      **Measured, the set is small and enumerable**: the neutral spectators the catalogue omits that
-      can also ionise — perchloric, tetrafluoroboric, sulfamic, thiocyanic, carbonic,
-      hypophosphorous and boric acid. Everything it carries (HCl, HBr, HF, HI, H2SO4, H3PO4, HNO3,
-      the group-1/2 metals) agrees from both spellings, and an adduct that cannot ionise (H2O2, BH3,
-      I2, CO2) is correctly kept from both.
-
-      **`Reionizer` does not close it** — driven, `Cleanup` normalises perchloric acid to a
-      charge-separated but net-neutral form and reionizing does not move the proton to the amine, so
-      the charge clause cannot see it. The candidates are a pKa-shaped predicate (the same one
-      `D-2026-09-09-a-map-number-is-not-a-molecule` declines for the alkali/alkoxide case) or an
-      explicit list of ionisable neutrals, which is the table this module opens by refusing. Weigh
-      both against how rare the neutral spelling of a perchlorate salt is; the trade was taken
-      knowingly, against four wrong identities that shipped. Anchors:
-      `core/chem.py::standardize`, `tests/test_compound_identity.py::_STANDARDIZATION_AT_THIS_VERSION`.
-
-- [ ] **A `STANDARDIZATION_VERSION` bump retires the fingerprint rows and re-keys nothing, so the
-      graph keeps a note per superseded spelling forever** — [L],
-      `src/chemclaw/core/chem.py::compound_id`, `src/chemclaw/ingest/eln/compound.py:85-92`.
-      Driven against the live Postgres at `std7` -> `std8`: the fingerprint half works exactly as
-      designed — `CC[NH3+].[Br-]` keys to `compound-b3ba1c117ed7` under `ecfp:…:std7` and
-      `compound-bb572bdd9031` under `…:std8`, and a std8 similarity search returns only the
-      corrected row. `compound_id` carries no version, so the std7-era `compound_note` keeps its own
-      id in the knowledge graph with no cleanup path, which is the **first** consequence the fix
-      commit named ("two `compound_id`s and two `compound_note`s for one substance") and the half a
-      definition bump does not reach.
-
-      Secondary and driven: `compound_dependencies` re-derives `compound_id(note.compound_smiles)`
-      and returns `[]` when it no longer matches the note's own wikilink — so a std7-era note
-      re-submitted under std8 silently loses its compound dependency rather than failing.
-
-      Not fixed here because the two candidate fixes are both decisions rather than defect fixes:
-      folding the version into `compound_id` invalidates every stored id at every future bump and
-      breaks every citation to one, and rewriting the notes is a migration over layer 4 that
-      `kg/record.py` — append and supersede, never rewrite — has no verb for. The recovery that
-      *does* exist is `docs/guides/runbook.md:2015`: delete the corpus's `corpus_cursors` row and
-      re-run the ELN sync. Weigh it against `src/chemclaw/durable/retention.py:516`, which records
-      that a bump is "a permanent doubling" of `molecule_fingerprints`/`reaction_fingerprints`
-      because the runtime role holds no `DELETE`.
+- [ ] **`standardize` is not idempotent on ferrocenyl palladacycles, so `compound_id(raw)` is not
+      the id of `compound_note(raw)`** (issue #485) — [M], opened 2026-09-27 by the seeded-corpus measurement of
+      `D-2026-09-27-a-compound-id-a-bump-moves-is-superseded-not-orphaned`. Three of the 129
+      molecules in `Chemclaw3_mock`'s ORD seed — the dtbpf-, dppf- and Josiphos-type Pd G3
+      precatalysts — standardize to a kekulé Cp anion from the raw string and to the aromatic one
+      from that standard form, so `standard_smiles(standard_smiles(x)) != standard_smiles(x)`.
+      Driven: `compound_id(raw)` is `compound-bd1143cc135d` while `compound_note(raw).id` and every
+      `similar_molecules` hit cite `compound-626ec3b8d0ae` — so `compound_dependencies` on a note
+      carrying the raw string links an id no note is written under. It is also why a molecule-row
+      re-key moves those three keys although the bump did not touch them. The candidates are
+      iterating `standardize` to a fixed point (a bump, and the cost of a second pass on every
+      structure) or finding which `Cleanup`/tautomer step re-aromatizes and pinning it. Anchors:
+      `core/chem.py::standardize`, `core/chem.py::compound_id`, `ingest/eln/compound.py`.
 
 - [ ] **`plan_gate.py` is paired with one of the five test files that cover it** — [S], opened
       2026-09-23 by the review of the wave that added it to the mutation backstop.
@@ -238,7 +204,18 @@ topic).
 
 ## 3 — Work that is lost, dropped or invisible
 
-- [ ] **The helper file budget is charged to siblings that wrote nothing** (issue #463) — [M],
+- [ ] **A failed JWKS fetch is not cached, so every request during an IdP fault pays an outbound
+      fetch** — [S], opened 2026-10-01 by the post-merge audit of PR #494. `api/auth.py`'s
+      `_HttpxJwkClient` caches only a key set that parsed, so while the tenant is unreachable — or,
+      since PyJWT 2.15, answers 200 with a body that is not a key set (`JWKSetCache.put` now raises
+      before storing; 2.13 cached the raw dict for the cache lifespan) — every request carrying any
+      `kid`, an unauthenticated one included, triggers a fetch. Measured: 20 requests, 20 fetches,
+      every one a 503. `_forced_refresh_allowed` bounds only the *unknown-kid* path, and it is an
+      unlocked check-then-set; the cache-expiry fetch in `get_signing_keys` is outside any lock too.
+      The candidates are a short negative cache on a failed fetch, and one lock around both refresh
+      paths. Anchors: `api/auth.py::_HttpxJwkClient.fetch_data`, `api/auth.py::_signing_key`,
+      `api/auth.py::_forced_refresh_allowed`.
+- [ ] **The helper file budget is charged to siblings that wrote nothing** (issue #463, #489) — [M],
   opened by `D-2026-09-18-a-pre-batch-snapshot-cannot-see-its-own-superstep`; its other half, the
   two write verbs nothing bounded, is closed by
   `D-2026-09-26-a-helpers-unbounded-write-verbs-take-the-scratch-cap`.
@@ -281,6 +258,36 @@ topic).
 
 ---
 
+- [ ] **The 2026-09-27 live-run fixes have not been re-verified against a real model** — [S]. Three
+  defects a real-model run found (DeepSeek V4 Pro via OpenRouter) are fixed and pass against
+  scripted models only: gas-phase energies over charged species are refused
+  (`connectors/calc/compose.py::require_solvent_for_ions`), a capped turn still answers
+  (`agent/loop_cap.py`), and the verifier's revision note no longer leaks into answers
+  (`api/runner.py::_REVISION_NOTE`, measured 10/18 → 0/18 in isolation). Re-run pc-03, a delegation
+  probe that caps, and a revised answer through the four-repo lane against the gateway; about $15 of
+  the run's $25 budget is unspent.
+
+- [ ] **The connectors dev server stalled for 52 s under probe load, and nothing explains it** —
+  [S]. During `make live-probes` on 2026-09-27 the connectors process (`cli/connectors_dev.py`,
+  :8810) logged nothing from 23:26:57 to 23:27:49 and then released every queued request at once;
+  the front door recorded 12 MCP handshake timeouts and 33 turns that lost the bo, calc, molfp and
+  rxnfp tools. No tool call preceded it, and the host was heavily loaded, so host overload and a
+  blocking call on the server's event loop are both open. Reproduce on an idle host before fixing
+  anything.
+
+- [ ] **Three live-lane papercuts cost evidence during the 2026-09-27 run** — [S].
+  `cli/live_storm.py` accepts `--families DH` but rejects the obvious `--families D,H`;
+  `infra/live/processes.sh restart api` truncates the front door's log, losing the evidence of the
+  run before it; and the lane leaves `CHEMCLAW_FRAMING_ENVELOPE_SECRET` unset (`.env.example`), so
+  the prompt-injection framing tag uses a per-process random nonce and two processes frame
+  differently.
+
+- [ ] **`test_two_processes_send_the_same_prefix_but_for_the_envelope_nonce` hit its 180 s timeout
+  under load** — [S]. Seen once in the gate container at load 143–270
+  (`tests/test_context_floor.py::test_two_processes_send_the_same_prefix_but_for_the_envelope_nonce`);
+  the full suite passed in CI on the same head. Not yet shown to be a flake on a normal runner —
+  measure its wall time on an idle host before loosening anything.
+
 ## 5 — Where the field moved past us
 
 Filed by the 2026-08-25 field benchmark — see
@@ -318,7 +325,7 @@ only holds defects can only ever restore the system to what it already intended 
       argument contract still reaches the right tool is a `make live-ab` question, not a reading
       question.
 
-- [ ] **About a third of tools still rest on one probe, and they are the compute and job tail**
+- [ ] **About a third of tools still rest on one probe, and they are the compute and job tail** (issue #487)
       — [S], narrowed 2026-09-24. Derived from `tests/test_probe_coverage.py::_probes` and
       `::_expected_tools` with `load_profiles()` called first (two earlier measurements disagreed
       on exactly that): 47 of 124 tools had one probe. The seven whose effect persists past the turn
@@ -330,7 +337,7 @@ only holds defects can only ever restore the system to what it already intended 
       bounding risk. Choose the next second questions by what a deployment calls —
       `audit_events` per tool name — once one exists to read.
 
-- [ ] **`deep-research` has no index behind it** — [M]. `agent/research_tools.py::gather_evidence`
+- [ ] **`deep-research` has no index behind it** (issue #486) — [M]. `agent/research_tools.py::gather_evidence`
       sweeps the knowledge graph, the ELN, the mounted document share and the fingerprint store —
       every one internal. `skills/deep-research/SKILL.md` describes a capability whose corpus is
       whatever notes exist (41 on this checkout, 2026-09-22). `Chemclaw3-mcp/MODULES.md` files `litsearch`
@@ -343,25 +350,21 @@ only holds defects can only ever restore the system to what it already intended 
       said 39 and then 40 for one count three sentences apart, which is why the number now appears
       once, with the date it was measured.
 
-- [ ] **Several humans in one session is five pieces, and the policy one has to be settled first**
-      — [L], scoped in `docs/archive/PLAN-2026-09-14-multiplayer-and-the-open-delegation-questions.md`.
-      Not the owner gate relaxed: a message now names who wrote it (`session_messages.actor`/`agent`,
-      `D-2026-09-27-an-author-is-a-person-and-an-agent`), and a message's `actor` is its sender for
-      the sender-governs decision (owner, 2026-09-26) to read; ownership is checked in 46 places under
-      `src/chemclaw/api/`; `api/detach.py` holds one queue and one `_attached` flag, so a second
-      reader *steals* events rather than seeing a copy; and two writers on one thread fork the DAG
-      silently (Wave 2's measurement), which is what `SessionTurnClaims` prevents by refusing.
-
-      The serialisation is already correct and only its *answer* is wrong — one turn at a time is
-      the right semantic for a shared thread, so the 409 becomes a bounded queue rather than the
-      claim being relaxed. Order: participants, queued turn, reader fan-out — attribution's schema half is the authorship
-      pair above, and what is left of it is the owner gate and the erasure's claim coverage for a
-      session somebody else owns. **Settle
-      the authority questions before the schema**: whose roles govern a tool call, whether B may
-      approve a plan A's message produced, and whose `/memories/` load (they are namespaced per
-      actor digest, so a shared session loads none, the sender's, or a session tier that does not
-      exist). Cheap to decide now, a migration to decide later. A chat-room connector is separate
-      work on top and wants 1–4 finished first.
+- [ ] **A shared session serialises by refusing and streams to one reader** (issue #488) — [M]. What is left of
+      the multi-human-session work after `D-2026-09-27-in-a-shared-session-the-sender-governs`
+      settled the authority questions and shipped membership (`session_members`, the sender
+      governing each turn, a plan decided only by its author). Three pieces, in dependency order:
+      **a queued turn** — a member's message while another participant's turn runs is refused 409 by
+      `SessionTurnClaims`, which is the right serialisation and the wrong answer; it becomes a
+      bounded wait with a position, and the lease already handles a dead holder. **Reader fan-out** —
+      `api/detach.DetachableTurn` holds one queue and one `_attached` flag, so a second participant
+      reattaching *steals* events rather than seeing a copy; it needs N readers with per-reader
+      backpressure so one stalled browser cannot hold the turn (the bound
+      `service_sse_send_timeout_seconds` sets for one reader). **The plan inbox for members** —
+      `GET /plans/pending` pages the caller's *owned* sessions, so a plan a member's turn wrote in
+      somebody else's session reaches that member only through the in-turn card; it wants the
+      sessions `GET /sessions/shared` lists as well. A chat-room connector is separate work on top
+      and wants all three finished first.
 
 - [ ] **A routing corpus where the right profile is not inferable from the question's surface**
       — [M]. Seven profiles ship and genuinely narrow (`evidence` reaches zero side-effecting tools,
@@ -488,7 +491,7 @@ re-proposal a future session can settle in an afternoon and a fabricated number 
 
 ## The turn-time comparison cannot diff what the ELN gives structured
 
-- [ ] **The turn-time comparison cannot diff what the ELN gives structured** — [M].
+- [ ] **The turn-time comparison cannot diff what the ELN gives structured** (issue #490) — [M].
       On a prose-only ELN the *mined* `optimization-campaign` note produces excellent condition deltas —
       `solvent DMF → 2-MeTHF`, `reagent cesium carbonate → potassium carbonate` — because
       `memory.progression.changes_between` reads the species set of each role off `OrdReaction.inputs`.
@@ -510,6 +513,21 @@ re-proposal a future session can settle in an afternoon and a fabricated number 
       Wants its own ADR and a measurement of what the extra column costs on a real corpus.
 
 ## Everything else
+
+- [ ] **PR #321's review findings never landed, and the PR is too stale to rebase** — [M].
+  `claude/tool-integration-storage-review-3zupm4` (108 files, +6,840, opened 2026-09-05) is
+  superseded in part — migration numbers 082–084 are taken and the calculation-epoch work landed
+  another way — but its decision files and `result_composites` never reached
+  `docs/decisions/README.md` or the tree. Extract what is still open from its review document into
+  rows here, then close #321.
+
+- [ ] **Dependency bumps held back from Dependabot need hand-made PRs** — [S]. Dependabot group #431
+  was closed because it broke three things at once: mutmut 3.8 removed `Config.ensure_loaded`
+  (`pyproject.toml` `[tool.mutmut]`), deepagents' `task` schema grows to 929 tokens against the
+  900-token bound `tests/test_context_floor.py` holds, and rdkit 2026.3.6 moves torsion-handle
+  literals that this repository and Chemclaw3-mcp both assert (`tests/test_calc_rotation.py`) — that
+  one must land as a coordinated pair with the fleet. Bump the safe members in a hand-made group and
+  the rest one at a time.
 
 The long-form findings live in [`docs/archive/findings-2026-08.md`](../archive/findings-2026-08.md),
 grouped by the review that found them, with their full measurements. **That file is a record and

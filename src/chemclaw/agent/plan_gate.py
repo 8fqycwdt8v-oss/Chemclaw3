@@ -48,8 +48,10 @@ from chemclaw.agent.plan_scope import step_declaration
 from chemclaw.agent.plan_state import session_plan
 from chemclaw.agent.profiles import AgentProfile
 from chemclaw.agent.refusal_route import routed
+from chemclaw.agent.session_store import owner_permits
 from chemclaw.core.config import settings
 from chemclaw.core.config.agent import HarnessAutonomy
+from chemclaw.core.identity_context import get_current_actor
 from chemclaw.core.ids import stable_hash
 from chemclaw.core.metrics_bridge import degraded
 from chemclaw.core.session_context import get_current_session_id
@@ -143,7 +145,54 @@ async def approved_scope(session_id: str, plan_hash: str | None) -> frozenset[st
     decision = await plan_approval_store().decision(session_id, plan_hash)
     if decision is None or not decision.approved:
         return None
+    if not approval_binds(decision.actor, get_current_actor()):
+        return None
     return decision.scope
+
+
+async def plan_author(session_id: str, plan_hash: str) -> str | None:
+    """Whose turn last wrote this plan, or `None` when nobody is recorded.
+
+    Through this module's store handle, so the card (`api/runner._pending_plan_approval`) and the
+    gate ask the same store about the same session.
+    """
+    return await plan_approval_store().author(session_id, plan_hash)
+
+
+def approval_binds(approver: str, actor: str | None) -> bool:
+    """Whether an approval `approver` gave authorizes a turn `actor` is running.
+
+    **An approval is its approver's consent to their own next turn, not the session's**
+    (`D-2026-09-27-in-a-shared-session-the-sender-governs`). With one person per session the two
+    readings never differ; with several they do, and the session reading lets a member's turn act
+    under the owner's yes — the one thing that decision forbids. So a turn is authorized only by an
+    approval its own sender gave.
+
+    With no authenticated actor on the turn, the answer is the dev/enforced split every gate here
+    uses: open when identity is not enforced (the CLI, a test, a dev front door without one), closed
+    when it is — an enforced deployment never runs a turn without an actor, so meeting one is not a
+    case to authorize. An approver recorded blank (a dev-mode decision) binds nobody once identity
+    is enforced, for `session_store.owner_permits`' reason about a blank owner.
+    """
+    if not actor or not approver:
+        return not settings.entra_required
+    return approver == actor
+
+
+def may_decide(author: str | None, owner: str | None, actor: str | None) -> bool:
+    """Whether `actor` may decide on a plan `author`'s turn last wrote, in `owner`'s session.
+
+    **Only the plan's author** (`D-2026-09-27-in-a-shared-session-the-sender-governs`). The author
+    is whoever's turn last wrote the plan (the `plan_authors` table, stamped by
+    `enforce_plan_approval` when `write_todos` runs). Where none is recorded — a plan written before
+    authorship existed, or a write whose stamp could not be stored — the rule is the one this route
+    has always applied: the session's owner, through `owner_permits`. That fallback can never hand a
+    member the owner's authority, because an approval binds only its own approver's turns
+    (`approval_binds`).
+    """
+    if author:
+        return bool(actor) and actor == author
+    return owner_permits(owner, actor)
 
 
 async def approval_stands(session_id: str, plan_hash: str | None) -> bool:
@@ -548,6 +597,39 @@ async def _plan_behind(request: Any, session_id: str) -> list[dict[str, Any]] | 
     return await session_plan(session_id)
 
 
+async def _record_plan_author(request: Any) -> None:
+    """Stamp this turn's sender as the author of the plan this `write_todos` call wrote.
+
+    Keyed by `plan_identity` over the call's own arguments — the same identity the decision route
+    and this gate compute — so "who wrote this plan" is asked of exactly the plan a person is shown.
+    A batch whose rewrite is unanswerable (two rewrites, unparseable items) stamps nothing: there is
+    no one plan to name an author of.
+
+    Never raises, for `consume_turn_approval`'s reason: a stamp that cannot be stored must not fail
+    the turn. Its cost is the fallback `may_decide` states — the owner decides on that plan — which
+    authorizes no member, because an approval binds only its own approver's turns.
+    """
+    session_id = get_current_session_id()
+    actor = get_current_actor()
+    if not session_id or not actor:
+        return
+    steps = plan_after_batch(request)
+    if steps is None or steps is _UNANSWERABLE:
+        return
+    plan_hash = plan_identity(steps)
+    if plan_hash is None:
+        return
+    try:
+        await plan_approval_store().record_author(session_id, plan_hash, actor)
+    except Exception:
+        degraded(
+            logger,
+            "plan_approval",
+            "could not record who wrote session %s's plan; its owner decides on it instead",
+            session_id,
+        )
+
+
 @wrap_tool_call
 async def enforce_plan_approval(request: Any, handler: Callable[[Any], Any]) -> Any:
     """Refuse a state-changing tool whose session has no approval for its current plan.
@@ -616,6 +698,12 @@ async def enforce_plan_approval(request: Any, handler: Callable[[Any], Any]) -> 
             different remedies.
     """
     name = request.tool_call["name"]
+    if name == _PLAN_WRITE_TOOL:
+        # Not gated — writing the plan is how a turn asks for approval — but *stamped*: the turn
+        # that last wrote a plan is its author, and only its author may decide on it (`may_decide`).
+        result = await handler(request)
+        await _record_plan_author(request)
+        return result
     # The *call* rather than the tool, for the reason `authz.side_effecting_call` gives:
     # `write_file` is durable under `/memories/` and turn-local under `/scratch/`, and refusing
     # both would deny an unapproved turn the scratchpad it needs in order to produce a plan worth

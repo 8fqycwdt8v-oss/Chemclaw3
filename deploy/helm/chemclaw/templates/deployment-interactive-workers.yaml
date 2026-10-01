@@ -1,0 +1,72 @@
+{{- /* Each connector's interactive worker: it makes the tool calls a turn queued for that
+       connector's `queued:` tools (`connectors/interactive_worker.py`). Its own Deployment rather
+       than a mode of the bundle worker in `deployment-connectors.yaml`, because an hour-long job
+       must never hold the slot a seconds-long answer is waiting for, and the two scale on
+       different signals. Rendered for a connector hosted elsewhere too (`url` set): the worker is
+       this release's, the server is not.
+
+       `maxConcurrentActivities` is the backpressure. Set it to the server's admission slots
+       divided by this Deployment's replicas, so what is in flight matches what the server admits
+       and the rest waits in the queue, first come first served, instead of being refused. */ -}}
+{{- range $name, $cfg := .Values.connectors }}
+{{- if and $cfg.enabled $cfg.interactive }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "chemclaw.name" $ }}-interactive-worker-{{ $name }}
+  labels:
+    {{- include "chemclaw.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: interactive-worker-{{ $name }}
+spec:
+  {{- /* Omitted while KEDA owns the count, as the front door omits it under its HPA: a rendered
+         `replicas` would reset the autoscaler's choice on every upgrade. */}}
+  {{- if not $.Values.keda.enabled }}
+  replicas: {{ $cfg.interactive.replicas | required (printf "connectors.%s.interactive.replicas is required" $name) }}
+  {{- end }}
+  {{- include "chemclaw.rolloutStrategy" $ | nindent 2 }}
+  selector:
+    matchLabels:
+      {{- include "chemclaw.selectorLabels" $ | nindent 6 }}
+      app.kubernetes.io/component: interactive-worker-{{ $name }}
+  template:
+    metadata:
+      annotations:
+        {{- include "chemclaw.configChecksum" $ | nindent 8 }}
+      labels:
+        {{- include "chemclaw.selectorLabels" $ | nindent 8 }}
+        app.kubernetes.io/component: interactive-worker-{{ $name }}
+    spec:
+      serviceAccountName: {{ $.Values.serviceAccount.name }}
+      {{- include "chemclaw.imagePullSecrets" $ | nindent 6 }}
+      {{- include "chemclaw.workerGracePeriod" $ | nindent 6 }}
+      securityContext:
+        {{- include "chemclaw.podSecurityContext" $ | nindent 8 }}
+      containers:
+        - name: interactive-worker-{{ $name }}
+          image: "{{ include "chemclaw.image" $ }}"
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          securityContext:
+            {{- include "chemclaw.containerSecurityContext" $ | nindent 12 }}
+          env:
+            - name: CHEMCLAW_COMPONENT
+              value: "interactive-worker-{{ $name }}"
+            {{- include "chemclaw.otelResourceEnv" (dict "component" (printf "interactive-worker-%s" $name)) | nindent 12 }}
+            - name: CHEMCLAW_WORKER_MAX_CONCURRENT_ACTIVITIES
+              value: {{ $cfg.interactive.maxConcurrentActivities | required (printf "connectors.%s.interactive.maxConcurrentActivities is required: it is the backpressure" $name) | quote }}
+            {{- include "chemclaw.workerMetricsEnv" $ | nindent 12 }}
+            {{- include "chemclaw.env" $ | nindent 12 }}
+          envFrom:
+            {{- include "chemclaw.envFrom" $ | nindent 12 }}
+          {{- include "chemclaw.workerProbes" $ | nindent 10 }}
+          resources:
+            {{- toYaml (default $.Values.resources.worker $cfg.interactive.resources) | nindent 12 }}
+          {{- if or $.Values.secrets.temporalTls.enabled $.Values.extraConnectors.bundles }}
+          volumeMounts:
+            {{- include "chemclaw.tlsMount" $ | nindent 12 }}
+            {{- include "chemclaw.extraConnectorMounts" $ | nindent 12 }}
+          {{- end }}
+      volumes:
+        {{- include "chemclaw.volumes" $ | nindent 8 }}
+---
+{{- end }}
+{{- end }}

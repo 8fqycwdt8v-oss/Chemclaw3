@@ -209,6 +209,14 @@ BEGIN
     -- group is still spelled out on its own line rather than folded into the full-DML list below.
     EXECUTE format('GRANT INSERT, UPDATE, DELETE ON session_owners TO %I', app_role);
 
+    -- A shared session's two tables (`110_shared_sessions.sql`). `session_members` takes INSERT and
+    -- DELETE and no UPDATE: the owner admits and removes somebody, and a membership has nothing to
+    -- revise. `plan_authors` takes all three: the author is an upsert (last writer wins), and an
+    -- erasure removes a departing person's authorship from sessions somebody else owns. Both also
+    -- go by cascade behind their session's ownership row, which needs no grant of its own.
+    EXECUTE format('GRANT INSERT, DELETE ON session_members TO %I', app_role);
+    EXECUTE format('GRANT INSERT, UPDATE, DELETE ON plan_authors TO %I', app_role);
+
     -- `budget_usage` holds all three for three distinct writes, and none of them is a retention
     -- sweep. INSERT and UPDATE are the two arms of one upsert (`api/budget_store.py::_BOOK`): a
     -- principal's first turn in a window inserts the row, every later one updates it in place,

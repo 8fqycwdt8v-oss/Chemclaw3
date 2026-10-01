@@ -27,9 +27,18 @@ recognised name when `chemclaw.core.reagents` knows one, and the synonyms that r
 predicted properties — those live in the calculation cache and would go stale here.
 """
 
+import logging
+import re
+
 from chemclaw.core.chem import compound_id, require_standard_smiles
 from chemclaw.core.reagents import display_name, synonyms_of
 from chemclaw.kg.note import Note
+
+log = logging.getLogger(__name__)
+
+#: `compound_id`'s shape: the prefix and a 12-hex-digit structure hash. A slug-named seed note
+#: (`compound-thf`) never matches, and neither does anything a person would type as a name.
+STRUCTURAL_COMPOUND_ID = re.compile(r"compound-[0-9a-f]{12}")
 
 
 def compound_note(smiles: str) -> Note:
@@ -76,9 +85,19 @@ def compound_dependencies(note: Note) -> list[Note]:
     instead of the note avoiding the link because the target might not exist yet (the removed DFT
     bundle's note builder documented exactly that avoidance).
 
-    Returns an empty list for a note with no `compound_smiles` or one that does not link its
-    compound. Re-writing a compound note already in the graph is a no-op: it renders
-    byte-identically, so the write produces no diff for it.
+    Returns an empty list for a note with no `compound_smiles` or one that links no compound id at
+    all. Re-writing a compound note already in the graph is a no-op: it renders byte-identically,
+    so the write produces no diff for it.
+
+    **A note that links its compound under a pre-bump id still gets its compound.** `compound_id`
+    carries no version, so a note written before a `STANDARDIZATION_VERSION` bump links the id its
+    structure hashed to then; re-derived now, the id differs, and this used to return `[]` — the
+    note re-recorded without its compound and nothing said so. A structure-derived id the note
+    links in place of the current one is taken as that stale spelling: the current compound note is
+    returned, the old link resolves through the `supersedes` link `memory.compound_rekey` writes,
+    and the mismatch is logged. The narrowness, stated: a note carrying one compound's structure
+    while linking only *other* compounds by hash reads the same way, and gets its own compound's
+    note as well — a note about that compound, which is the lesser error than a silent drop.
     """
     if not note.compound_smiles:
         return []
@@ -88,6 +107,16 @@ def compound_dependencies(note: Note) -> list[Note]:
         # An unparseable SMILES is the note's own problem to report; it is not this function's
         # place to fail a submission over a field it only reads opportunistically.
         return []
-    if wanted not in note.outgoing_links():
-        return []
+    links = note.outgoing_links()
+    if wanted not in links:
+        stale = [link for link in links if STRUCTURAL_COMPOUND_ID.fullmatch(link)]
+        if not stale:
+            return []
+        log.warning(
+            "note %s links %s but its structure's current compound id is %s — recording that "
+            "compound as its dependency; `make rekey-compounds` links the old id to it",
+            note.id,
+            ", ".join(stale),
+            wanted,
+        )
     return [compound_note(note.compound_smiles)]

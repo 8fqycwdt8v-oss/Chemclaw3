@@ -101,6 +101,23 @@ _CONSUME_ALL = (
 )
 
 
+# Whose turn last wrote a plan, keyed by the plan's identity (`infra/sql/110_shared_sessions.sql`,
+# `D-2026-09-27-in-a-shared-session-the-sender-governs`). **Last writer wins**: the turn that last
+# wrote a plan is the one standing behind it, and a member whose turn re-affirms a plan another
+# person's turn proposed may then decide on it — while a first-writer rule would leave them unable
+# ever to approve that text. Guarded on the ownership row rather than left to the foreign key: a
+# session with no `session_owners` row (a test's, a template step's) records no author, and the
+# decision route then falls back to the owner rule it has always applied, instead of the insert
+# failing a turn.
+_AUTHOR_UPSERT = (
+    "INSERT INTO plan_authors (session_id, plan_hash, actor) "
+    "SELECT o.session_id, %s, %s FROM session_owners o WHERE o.session_id = %s "
+    "ON CONFLICT (session_id, plan_hash) DO UPDATE "
+    "SET actor = EXCLUDED.actor, recorded_at = now()"
+)
+_AUTHOR = "SELECT actor FROM plan_authors WHERE session_id = %s AND plan_hash = %s"
+
+
 class Decision(NamedTuple):
     """One decision as the store answers it: the verdict, who took it, and what it permits.
 
@@ -137,6 +154,14 @@ class ApprovalStore(Protocol):
 
     async def consume_all(self, session_id: str) -> None:
         """Spend every live approval this session holds, so the next turn needs its own."""
+        ...
+
+    async def record_author(self, session_id: str, plan_hash: str, actor: str) -> None:
+        """Record that `actor`'s turn is the last to have written this plan."""
+        ...
+
+    async def author(self, session_id: str, plan_hash: str) -> str | None:
+        """Whose turn last wrote this plan, or `None` when nobody is recorded."""
         ...
 
     async def decision(self, session_id: str, plan_hash: str) -> Decision | None:
@@ -187,6 +212,21 @@ class PlanApprovalStore:
             async with conn.cursor() as cur:
                 await cur.execute(_CONSUME_ALL, (session_id,))
             await conn.commit()
+
+    async def record_author(self, session_id: str, plan_hash: str, actor: str) -> None:
+        """Stamp `actor` as the author of this plan (`_AUTHOR_UPSERT`: last writer wins)."""
+        async with self._connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(_AUTHOR_UPSERT, (plan_hash, actor, session_id))
+            await conn.commit()
+
+    async def author(self, session_id: str, plan_hash: str) -> str | None:
+        """Whose turn last wrote this plan, or `None` when no author is recorded."""
+        async with self._connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(_AUTHOR, (session_id, plan_hash))
+                row = await cur.fetchone()
+        return None if row is None else str(row[0])
 
     async def decision(self, session_id: str, plan_hash: str) -> Decision | None:
         """The latest *effective* decision, or None if nobody has decided.
@@ -256,6 +296,7 @@ class InMemoryPlanApprovalStore:
     def __init__(self) -> None:
         """Start with no decisions recorded."""
         self._decisions: list[_Decision] = []
+        self._authors: dict[tuple[str, str], str] = {}
 
     def _latest(self, session_id: str, plan_hash: str) -> _Decision | None:
         """The most recent decision for this plan, mirroring `_LATEST`'s ordering."""
@@ -284,6 +325,14 @@ class InMemoryPlanApprovalStore:
                 and decision.consumed_at is None
             ):
                 decision.consumed_at = datetime.now(UTC)
+
+    async def record_author(self, session_id: str, plan_hash: str, actor: str) -> None:
+        """Stamp `actor` as the author of this plan; last writer wins, as `_AUTHOR_UPSERT` does."""
+        self._authors[(session_id, plan_hash)] = actor
+
+    async def author(self, session_id: str, plan_hash: str) -> str | None:
+        """Whose turn last wrote this plan, or `None` when no author is recorded."""
+        return self._authors.get((session_id, plan_hash))
 
     async def decision(self, session_id: str, plan_hash: str) -> Decision | None:
         """The latest *effective* decision, or None if nobody has decided."""
