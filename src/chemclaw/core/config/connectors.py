@@ -176,6 +176,13 @@ class ConnectorSettings(BaseSettings):
     # connector that did not answer, a transport error. A few, because a rolling pod is the common
     # cause; not unbounded, because an outage is news the chemist should get now.
     queued_tool_fault_attempts: int = Field(default=3, ge=1)
+    # How often a waiting turn asks where its queued call is, to tell the chemist "queued" or
+    # "running" (`connectors/queued.py::_wait_reporting`). One describe per tick per waiting turn,
+    # plus one backlog read per tick per connector shared by every turn waiting on it, so seconds
+    # rather than sub-second; the answer only changes when a slot frees. The backlog count needs a
+    # server that reports task-queue stats; on one that does not (1.25.2, measured) the card says
+    # "queued" without a count and the process stops asking.
+    queued_tool_progress_seconds: float = Field(default=2.0, gt=0)
 
     # Hard ceiling on a connector's request body, refused with 413 before anything reads it
     # (`connectors.server.connector_app`, `core.asgi.BodySizeLimit`). A connector's own setting

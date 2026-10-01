@@ -97,6 +97,12 @@
       "reason": "Optional[Literal['dry_run', 'undeclared_write', 'plan_gate', 'repeat', 'authz']]",
       "tool": "str"
     },
+    "tool_queued": {
+      "job_id": "str",
+      "state": "Literal['queued', 'running']",
+      "tool": "str",
+      "waiting": "int | None"
+    },
     "tool_result": {
       "agent": "str",
       "note_ids": "list[str]",

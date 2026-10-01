@@ -94,3 +94,18 @@ endpoint:
     # front of the question rather than in front of the cost. `calc`'s profile_rotation is the one
     # that spends, and that one is state_changing.
     - enumerate_torsions
+  # The seven calls `servers/chem` gates behind its admission ceiling — the ones that cost up to
+  # seconds of RDKit on a legal molecule — wait for a slot in the queue instead of being refused by
+  # a full pod (`connectors/queued.py`). Exactly the gated set, held so on the serving side by
+  # `Chemclaw3-mcp`'s `tests/test_fleet.py`; the lookups stay direct. Measured, the queue costs
+  # ~80 ms a call, which is why the cheap ones are not in it.
+  queued:
+    tools:
+      - render_structure
+      - describe_topology
+      - enumerate_tautomers
+      - enumerate_protonation_states
+      - enumerate_stereoisomers
+      - enumerate_degradants
+      - enumerate_substitutions
+    inline_wait_seconds: 45

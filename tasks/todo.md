@@ -1,3 +1,37 @@
+# Queued compute, round 2 — the open points
+
+- [x] **Chemclaw3**: `tool_queued` event (state `queued` with an approximate position from the
+      task queue's backlog, then `running`), emitted by `connectors/queued.py` while the turn waits.
+- [x] **Chemclaw3**: `queued:` for `chem` (the seven admission-gated tools) and `kinetics`
+      (`semibatch_accumulation_profile`); chart `interactive:` for chem/kinetics and the pyexec
+      example; ADR row unchanged (same decision, wider application).
+- [x] **Chemclaw3-mcp**: `queued:` in `manifests/{chem,kinetics,pyexec,rxnpredict}`; the stand-in
+      `HttpEndpoint` learns `queued`; a fleet test holds *queued == admission-gated* per server.
+- [x] **Chemclaw3_ui**: mirror `tool_queued` in `shared/events.ts`; attach it to the open tool-call
+      row; render "queued · N in queue" / "running…"; contract fixtures and tests.
+- [x] Fresh-subagent review of all three diffs; fix findings.
+- [ ] PRs in dependency order — Chemclaw3, then Chemclaw3-mcp (its consumer-agreement lane reads
+      Chemclaw3 `main`), then the UI (its backend-contract test reads Chemclaw3 `main`) — merge on green.
+
+## Review (round 2)
+
+Three fresh reviewers, one per repo; every finding below was fixed unless it says otherwise.
+
+- Chemclaw3: the `waiting` count never arrives on Temporal 1.25.2, because the server sends no stats. The process now stops asking after the first stats-less answer, and the test requires a count from a server that reports one.
+- Chemclaw3: a running call could flip back to "queued" just before its result. With no pending activity the tick now reports nothing.
+- Chemclaw3: progress reads are now bounded by the tick (`rpc_timeout`), the result is checked before a timeout, and a failed run on the fallback path is the tool's refusal, not an exception.
+- Chemclaw3: the backlog is read once per connector per tick, and every waiting turn shares that read.
+- Chemclaw3 (not fixed): `call_id` on `tool_queued`. The UI pairs by `job_id`, which already tells apart two calls to one tool with different arguments; identical arguments share one run.
+- Chemclaw3-mcp: the stand-in now refuses a duplicate queued name. The consumer-agreement table has six `queued:` probes. The queued-equals-gated test runs over every agent-facing server, and a separate test fails if the gate reader goes blind.
+- Chemclaw3_ui: annotations pair by `job_id`. The wait has its own activity kind, so a screen reader hears it. A zero count reads "queued…" and the badge says "N in queue". Ended rows drop the annotation.
+
+
+Measured before starting: a queued call costs ~80 ms over a direct one (median 198 ms vs 116 ms for
+a 50 ms tool, 20 sequential calls each, `make up`'s Temporal) — cheap enough to queue every gated
+tool, including chem's depictions.
+
+---
+
 # Queued, autoscaled compute — near-real-time for many concurrent chemists
 
 **Goal.** Every compute-heavy tool call waits in a global queue instead of being refused, the chemist

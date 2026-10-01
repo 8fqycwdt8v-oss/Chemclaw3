@@ -151,6 +151,24 @@ class JobStartedEvent(BaseModel):
     plan_step: str = ""
 
 
+class ToolQueuedEvent(BaseModel):
+    """A queued tool call is waiting for a compute slot (`queued`), or has just got one (`running`).
+
+    Emitted while the turn waits on a tool the connector's manifest queues
+    (`connectors/queued.py`): once when the call is still waiting after the first poll, again when
+    the waiting count moves, and once when a worker picks it up. The card for the open `tool_call`
+    of the same `tool` is what it annotates. `waiting` is the broker's approximate backlog on that
+    connector's queue — how many calls are waiting, not a strict place in line — and `None` where
+    the broker could not say.
+    """
+
+    type: Literal["tool_queued"] = "tool_queued"
+    tool: str
+    job_id: str
+    state: Literal["queued", "running"]
+    waiting: int | None = None
+
+
 class JobCompletedEvent(BaseModel):
     """An async job finished and pushed its result back to the session (F3-T3, no polling)."""
 
@@ -677,6 +695,7 @@ Event = (
     | ToolCallEvent
     | TokenEvent
     | JobStartedEvent
+    | ToolQueuedEvent
     | JobCompletedEvent
     | JobFailedEvent
     | AwaitingAnswerEvent

@@ -56,6 +56,22 @@ class JobSignal(BaseModel):
     plan_step: str = ""
 
 
+class ToolQueuedSignal(BaseModel):
+    """A queued tool call is waiting for a slot, or has just got one (`connectors/queued.py`).
+
+    The tool-call card otherwise says "running" for the whole wait, which is false while the call
+    sits in the queue and is the one thing a chemist watching a busy deployment wants to know.
+    """
+
+    tool: str
+    job_id: str
+    state: Literal["queued", "running"]
+    # Calls waiting on the connector's interactive queue when this was read — the broker's
+    # approximate backlog, so "about this many ahead or beside you", never a strict rank. `None`
+    # where the broker could not say.
+    waiting: int | None = None
+
+
 class QuestionSignal(BaseModel):
     """A disambiguation the agent asked for during this turn."""
 
@@ -193,6 +209,7 @@ class HandoffSignal(BaseModel):
 
 Signal = (
     JobSignal
+    | ToolQueuedSignal
     | NoteRecordedSignal
     | QuestionSignal
     | SkillLoadedSignal
@@ -269,6 +286,13 @@ def record_job_started(job_id: str, kind: str) -> None:
     """
     plan_step, _ = get_current_plan_link()
     _emit(JobSignal(job_id=job_id, kind=kind, plan_step=plan_step))
+
+
+def record_tool_queued(
+    tool: str, job_id: str, state: Literal["queued", "running"], waiting: int | None
+) -> None:
+    """Note that a queued `tool` call is waiting (`queued`) or has a slot (`running`)."""
+    _emit(ToolQueuedSignal(tool=tool, job_id=job_id, state=state, waiting=waiting))
 
 
 def record_note_written(note_id: str, reference: str) -> None:

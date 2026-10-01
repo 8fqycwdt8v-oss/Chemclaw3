@@ -381,6 +381,12 @@ connectors:
     # bearer on `/mcp` itself, so a missing credential is a refused call rather than an open one.
     server: true
     url: http://chemclaw-mcp-chem:8858/mcp
+    # Its seven gated depictions and enumerations are queued (`connector.yaml` `queued:`). 2 x 4 in
+    # flight is the server's floor (2 pods x 4 heavy-call slots); `maxReplicas` follows its HPA.
+    interactive:
+      replicas: 2
+      maxReplicas: 6
+      maxConcurrentActivities: 4
   rxnpredict:
     # Reaction and condition prediction by ensemble (`Chemclaw3-mcp`'s `servers/rxnpredict`, port
     # 8857). The same shape as `chem` and `safety` above, for the same reason and with the same two
@@ -498,6 +504,12 @@ connectors:
     enabled: false
     server: true
     url: http://chemclaw-mcp-kinetics:8852/mcp
+    # `semibatch_accumulation_profile` is queued; 2 x 3 is the server's floor (2 pods x 3 slots).
+    # Rendered only once the bundle is enabled.
+    interactive:
+      replicas: 2
+      maxReplicas: 4
+      maxConcurrentActivities: 3
   unitops:
     # Scale-up and unit-operation sizing (`Chemclaw3-mcp`'s `servers/unitops`, port 8853).
     enabled: false
@@ -539,6 +551,17 @@ connectorPort: 8080
 #         configMap: chemclaw-connector-props
 #       - name: pyexec
 #         configMap: chemclaw-connector-pyexec
+#
+# **A bundle from here can queue its heavy tools too** — `pyexec`'s manifest queues `run_python` —
+# and its interactive worker is configured on the same `connectors:` entry that gives it its
+# address, exactly as for a shipped bundle:
+#
+#   connectors:
+#     pyexec:
+#       enabled: true
+#       server: true
+#       url: http://chemclaw-mcp-pyexec:8899/mcp
+#       interactive: {replicas: 2, maxReplicas: 6, maxConcurrentActivities: 2}
 #
 # Three things stay the operator's, exactly as they are for `connectors.chem` / `safety` /
 # `rxnpredict` — the entry under `connectors:` above that gives the bundle its `url:` and turns it
