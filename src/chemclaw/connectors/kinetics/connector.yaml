@@ -67,9 +67,9 @@ endpoint:
   # The one integration `servers/kinetics` gates (a stiff dose is up to seconds of pure-Python
   # CPU), queued rather than refused when the pod is full (`connectors/queued.py`).
   queued:
-    inline_wait_seconds: 45
     tools:
       - semibatch_accumulation_profile
+    inline_wait_seconds: 45
 
 skills:
   - kinetics-and-reactor-choice

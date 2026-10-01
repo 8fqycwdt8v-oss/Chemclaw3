@@ -100,7 +100,6 @@ endpoint:
   # `Chemclaw3-mcp`'s `tests/test_fleet.py`; the lookups stay direct. Measured, the queue costs
   # ~80 ms a call, which is why the cheap ones are not in it.
   queued:
-    inline_wait_seconds: 45
     tools:
       - render_structure
       - describe_topology
@@ -109,3 +108,4 @@ endpoint:
       - enumerate_stereoisomers
       - enumerate_degradants
       - enumerate_substitutions
+    inline_wait_seconds: 45
