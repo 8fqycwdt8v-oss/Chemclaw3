@@ -125,6 +125,18 @@ SERVER_INTERNAL_ERROR = "an internal error occurred"
 # fails whoever changes one side, not whoever changes the other.
 SERVER_AT_CAPACITY = "[calc-at-capacity]"
 
+# What `servers/calc` says when its inline wall clock stopped a calculation
+# (`engine/budget.TIME_BUDGET_MARKER`) — the same channel and placement as the capacity marker.
+#
+# **It is the one refusal that is about the pod's load rather than the input.** The budget is wall
+# clock, so the same calculation finishes on an idle pod and is stopped on a busy one. Read as an
+# ordinary refusal it was reported as a property of the molecule — and a screen that answers per
+# item (`connectors/calc/compose._attempt`) listed it beside a structure that would not embed. It
+# stays a refusal (retrying re-burns the same budget, `D-2026-10-01-a-stop-by-the-clock-is-named-
+# not-retried`); what the marker buys is the name. Transcribed, not imported, and pinned on each
+# side, for the reason the capacity literal above gives.
+SERVER_TIME_BUDGET = "[calc-time-budget]"
+
 # The one wrapper the transport puts in front of a tool's own message: `Tool.run` raises
 # `ToolError(f"Error executing tool {self.name}: {e}")` and `_make_error_result` puts `str(e)` on
 # the wire unchanged, so a marker the server wrote at the head of its message arrives either bare
@@ -132,6 +144,33 @@ SERVER_AT_CAPACITY = "[calc-at-capacity]"
 # served tool name carries no colon, and the *unserved* name path (`Unknown tool: …`, the one place
 # a caller's string opens the message) does not match this at all.
 _TOOL_ERROR_PREFIX = re.compile(r"^Error executing tool .*?: ")
+
+
+# **Every gated server in the family opens a full-pod refusal the same way**:
+# `[<server>-at-capacity]`
+# (`Chemclaw3-mcp` `mcp_server_kit.limits.at_capacity_marker`, and this repository's own bundles
+# through `core/errors.AtCapacityError`). `SERVER_AT_CAPACITY` above is calc's instance of it.
+# Matched as a *format* rather than a list of names because the servers are addressed by
+# configuration: a list here would have to grow with every deployment's connector set, and a server
+# it missed would have its full pods read as bad input — which is what happened to five of six.
+_AT_CAPACITY = re.compile(r"\[[a-z0-9][a-z0-9_-]*-at-capacity\]")
+
+
+def at_capacity(message: str) -> bool:
+    """Whether the *server* refused this call because it was full, in the fleet's one format.
+
+    The head-of-message rule `server_marked` enforces, applied to the format rather than to one
+    literal: a marker a caller's own argument echoed into the middle of a domain refusal does not
+    count, so a free-form argument still cannot manufacture a retry.
+
+    Args:
+        message: The text of a `CallToolResult` carrying `isError=True`.
+
+    Returns:
+        True when the message opens with `[<server>-at-capacity]`, allowing for the transport's
+        own prefix.
+    """
+    return _AT_CAPACITY.match(_TOOL_ERROR_PREFIX.sub("", message.lstrip(), count=1)) is not None
 
 
 def server_marked(message: str, marker: str) -> bool:
@@ -199,6 +238,15 @@ class McpAtCapacity(McpRequestRefused):
     (`connectors/calc/remote.py` and `ingest/labels/labeller.py`) and only the first has any use for
     the distinction, so a sibling would have silently escaped the second's `except` clauses. Under
     this hierarchy a caller that does nothing keeps the behaviour it had.
+    """
+
+
+class McpTimeBudget(McpRequestRefused):
+    """The server ran the call and its own wall clock stopped it before an answer.
+
+    A refusal subclass, like `McpAtCapacity` and for the same reason: every handler that does
+    nothing with the distinction keeps treating it as the refusal it already was. Unlike that one it
+    is not backpressure — the work was done and spent — so nothing here makes it retryable.
     """
 
 
@@ -507,7 +555,9 @@ async def invoke(session: ClientSession, tool: str, arguments: dict[str, Any]) -
     `McpRequestRefused` carries the server's own message, because that message is the whole content
     of the refusal. `McpServerFault` means nobody answered, or the server answered that it broke.
     `McpAtCapacity` — a subclass of the first — means the server answered that it is full, which is
-    the one refusal that is worth asking again about.
+    the one refusal that is worth asking again about. `McpTimeBudget` — the other subclass — means
+    the server's own wall clock stopped the work: still a refusal, but one about the pod's load
+    rather than the input.
 
     This is the only place that can classify a failure of the *call*, because it is the only place
     that knows a call was in flight — `open_session`'s guard deliberately stops at the connection.
@@ -526,8 +576,10 @@ async def invoke(session: ClientSession, tool: str, arguments: dict[str, Any]) -
         # arguments back, so an unanchored match let a tool argument mint either classification.
         if server_marked(message, SERVER_INTERNAL_ERROR):
             raise McpServerFault(tool, internal=True)
-        if server_marked(message, SERVER_AT_CAPACITY):
+        if at_capacity(message):
             raise McpAtCapacity(f"{tool} was refused: {message}")
+        if server_marked(message, SERVER_TIME_BUDGET):
+            raise McpTimeBudget(f"{tool} was stopped: {message}")
         raise McpRequestRefused(f"{tool} failed: {message}")
     text = text_of(result.content)
     try:

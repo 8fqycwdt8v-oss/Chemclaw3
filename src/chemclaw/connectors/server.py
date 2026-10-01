@@ -48,6 +48,7 @@ from chemclaw.core.call_identity import (
     HEADER_SESSION,
 )
 from chemclaw.core.config import settings
+from chemclaw.core.errors import AtCapacityError
 from chemclaw.core.metrics import CONTENT_TYPE, METRICS
 from chemclaw.core.tracing import continue_trace
 
@@ -460,6 +461,14 @@ def _sanitize_tool_errors(server: FastMCP, *, name: str) -> None:
                 tool_name, arguments, context=context, convert_result=convert_result
             )
         except ToolError as exc:
+            if isinstance(exc.__cause__, AtCapacityError):
+                # A full backend is not a fault, and replacing its sentence with "an internal
+                # error occurred" is what made it one: the caller could not tell "ask again in a
+                # moment" from "broken". The marker goes first, where the fleet's matcher reads
+                # it (`core/mcp_session.at_capacity`); the sentence is the chemist-facing one the
+                # error was written with, which carries no hostname by that class's contract.
+                busy = exc.__cause__
+                raise ToolError(f"Error executing tool {tool_name}: {busy.marker} {busy}") from busy
             if isinstance(exc.__cause__, ValueError):
                 raise  # a deliberately-worded domain message (or a validation error) — safe as-is
             logger.exception(

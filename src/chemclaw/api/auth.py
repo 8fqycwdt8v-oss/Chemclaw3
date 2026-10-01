@@ -217,7 +217,16 @@ def _client_for(endpoint: str) -> PyJWKClient:
     client = _jwks_clients.get(endpoint)
     if client is None:
         client = _jwks_clients.setdefault(
-            endpoint, _HttpxJwkClient(endpoint, timeout=settings.entra_http_timeout_seconds)
+            endpoint,
+            # **`cooldown_duration=0`: the refresh cooldown is ours, and one is the policy.**
+            # PyJWT 2.14 added its own — 30 s by default, restarted by every successful fetch —
+            # inside `get_signing_key`, which is the call `_signing_key` makes only after
+            # `_forced_refresh_allowed` has already granted a refresh. Two cooldowns compose to
+            # the longer one, so `entra_jwks_refresh_cooldown_seconds` stopped being the rotation
+            # latency it is configured as: measured, a rotated key was still refused with ours at 0.
+            _HttpxJwkClient(
+                endpoint, timeout=settings.entra_http_timeout_seconds, cooldown_duration=0
+            ),
         )
     return client
 
@@ -296,10 +305,12 @@ def _signing_key(token: str) -> Any:
         # the point: the other half — an intercepting proxy's HTML error page, where PyJWT let
         # `json.load`'s `ValueError` escape `PyJWKClientError` — is now decoded and refused inside
         # `_HttpxJwkClient.fetch_data`, because that is where the decode happens.
-        # `PyJWKSet.from_dict` runs in `get_jwk_set` on data that was fetched perfectly well, so
-        # moving the fetch did nothing for it and the class still escapes; measured on PyJWT 2.13.0,
-        # `PyJWKSet.from_dict({"error": "tenant not found"})` raises `PyJWKSetError`. `ValueError`
-        # is kept beside it for the same fail-into-503 reason rather than for a named shape.
+        # A key-set *parse* failure is the other half, and where it raises moved with PyJWT: on
+        # 2.13.0 `PyJWKSet.from_dict` ran in `get_jwk_set`, while from 2.15 `JWKSetCache.put`
+        # parses inside `fetch_data` — measured on 2.15.1, `{"error": "tenant not found"}` raises
+        # `PyJWKSetError` there, before anything is cached. Either way it is a `PyJWTError` reaching
+        # this arm, and the 503 is unchanged. `ValueError` is kept beside it for the same
+        # fail-into-503 reason rather than for a named shape.
         #
         # `IdentityProviderUnavailable`, not `AuthError`, for the reason that class exists: we
         # could not reach a usable tenant to decide, so it is our outage and a 503 — answering 401

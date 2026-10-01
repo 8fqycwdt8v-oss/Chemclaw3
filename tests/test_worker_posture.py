@@ -191,4 +191,8 @@ def test_every_worker_entrypoint_refuses_before_it_connects() -> None:
                 f"{path.relative_to(_REPO_ROOT)}::{node.name} checks the posture after connecting"
             )
     # The universe must be the one the chart runs, or the loop above asserted nothing.
-    assert {name for _path, name in builders} == {"main", "run_bundle_worker"}, builders
+    assert {name for _path, name in builders} == {
+        "main",
+        "run_bundle_worker",
+        "run_interactive_worker",
+    }, builders

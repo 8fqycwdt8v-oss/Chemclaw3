@@ -40,7 +40,7 @@ from pydantic import BaseModel, ConfigDict
 
 from chemclaw.core.call_identity import turn_identity_hook
 from chemclaw.core.config import settings
-from chemclaw.core.errors import ChemclawError, SubsystemUnavailableError
+from chemclaw.core.errors import AtCapacityError, ChemclawError, SubsystemUnavailableError
 from chemclaw.core.ids import stable_hash
 from chemclaw.core.mcp_session import (
     McpAtCapacity,
@@ -48,6 +48,7 @@ from chemclaw.core.mcp_session import (
     McpCredentialRefused,
     McpRequestRefused,
     McpServerFault,
+    McpTimeBudget,
     invoke,
     open_session,
 )
@@ -117,7 +118,21 @@ class CalcToolError(ChemclawError):
     """
 
 
-class CalcBusyError(SubsystemUnavailableError):
+class CalcTimeBudgetError(CalcToolError):
+    """The calculation server's inline wall clock stopped this calculation before it answered.
+
+    **Still a refusal, and still non-retryable** — registered in `durable/publish.py`'s
+    `_BAD_DATA_TYPES` under its own name, because Temporal matches by name and a subclass inherits
+    nothing there. The budget is spent work, not an empty slot: a retry re-runs the same calculation
+    against the same clock, and pays for it again, which is the opposite of `CalcBusyError` below.
+    What the class buys is the *name*: wall clock depends on load, so this is the one refusal that
+    is not a property of the input, and a screen that answers per item records it as a time-budget
+    stop rather than beside a structure that would not embed
+    (`D-2026-10-01-a-stop-by-the-clock-is-named-not-retried`).
+    """
+
+
+class CalcBusyError(AtCapacityError):
     """The calculation server was reached, ran nothing, and refused because every slot was busy.
 
     **The taxonomy above has two buckets and saturation is a third one it did not have.** A
@@ -141,6 +156,8 @@ class CalcBusyError(SubsystemUnavailableError):
     the retry is automatic, and on the in-process tool surface, where it is not
     (`agent/tool_authz.py` returns it to the model as an ordinary domain error).
     """
+
+    server = "calc"
 
 
 # The transport, the timeout ordering, the credential-rejection walk and the internal-error
@@ -298,6 +315,9 @@ async def _call(session: ClientSession, tool: str, arguments: dict[str, Any]) ->
             "was asked, and the same request succeeds once a calculation finishes: a durable job "
             "waits and asks again on its own, and a direct call has to be made again."
         ) from exc
+    except McpTimeBudget as exc:
+        # Before `McpRequestRefused`, of which this is a subclass: order is the whole behaviour.
+        raise CalcTimeBudgetError(str(exc)) from exc
     except McpRequestRefused as exc:
         raise CalcToolError(str(exc)) from exc
     except McpServerFault as exc:

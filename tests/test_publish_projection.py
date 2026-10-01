@@ -24,13 +24,17 @@ from chemclaw.publish.properties import REGISTRY, UNIT_CONVERSIONS
 from chemclaw.publish.record import Conditions
 from chemclaw.science.calc.models import (
     AtomCharge,
+    BondDissociationSurvey,
     BondOrder,
     Conformer,
     ConformerEnsemble,
     DescriptorProfile,
+    DissociatedBond,
     ElectronicProperties,
     EnsembleMember,
     EnsemblePayload,
+    FailedBond,
+    FailedMedium,
     FukuiSite,
     GlobalDescriptors,
     InteractionResult,
@@ -368,6 +372,36 @@ def _cases() -> list[tuple[str, str, Any, dict[str, Any]]]:
                 dominance_changes=False,
                 largest_swing_kcal=0.4,
                 uncertainty_kcal=3.0,
+            ),
+        ),
+        (
+            "BondDissociationSurvey",
+            "calc.survey_bond_strengths",
+            BondDissociationSurvey(
+                smiles="CCc1ccccc1",
+                method="GFN2-xTB",
+                solvent=None,
+                temperature_k=298.15,
+                mode="homolytic",
+                bonds=[
+                    DissociatedBond(
+                        atoms=[1, 2],
+                        bond="C-C",
+                        fragments=["[CH2]C", "[c]1ccccc1"],
+                        dissociation_energy_kcal=101.0,
+                        is_weakest=True,
+                    )
+                ],
+                considered=2,
+                uncertainty_kcal=5.0,
+                failed=[
+                    FailedBond(
+                        atoms=[0, 1],
+                        bond="C-C",
+                        fragments=["[CH2]c1ccccc1", "[CH3]"],
+                        reason="the optimisation did not converge",
+                    )
+                ],
             ),
         ),
         (
@@ -1083,6 +1117,7 @@ _DELIBERATELY_UNREAD: dict[str, dict[str, str]] = {
             "fact twice"
         )
     },
+    "BondDissociationSurvey": {},
     "SpeciesSolventComparison": {
         "responses": (
             "the transpose of `distributions`, each of which publishes as its own record — "
@@ -1359,3 +1394,107 @@ def test_an_unpairable_spectrum_publishes_the_reason_beside_the_missing_intensit
     _, _, _, paired = projection.PAYLOAD_PROJECTORS["ThermochemistryResult"](payload)
     assert paired["flags"] == [], "and nothing is flagged when the spectrum is there"
     assert "ir_intensity" in {point.property for point in paired["points"]}
+
+
+# --- a screen that could not compute every item -----------------------------------------------
+
+
+def _screen(**update: Any) -> dict[str, Any]:
+    """A two-medium solvent screen in its wire shape, with `update` applied to the model first."""
+    effects = [
+        SolventEffect(solvent=None, delta_e_kcal=-1.0, delta_h_kcal=None, delta_g_kcal=-1.0),
+        SolventEffect(solvent="thf", delta_e_kcal=-2.0, delta_h_kcal=None, delta_g_kcal=-2.0),
+    ]
+    screen = SolventComparisonResult(
+        reactants=["C=C"],
+        products=["CO"],
+        method="GFN2-xTB",
+        temperature_k=298.15,
+        level="standard",
+        effects=effects,
+        best_solvent="thf",
+        spread_kcal=1.0,
+        uncertainty_kcal=3.0,
+    ).model_copy(update=update)
+    # `exclude_none`, because that is what the job wire does (`connectors/calc/workflows.py`):
+    # a failed gas phase arrives with no `solvent` key at all.
+    return screen.model_dump(mode="json", exclude_none=True)
+
+
+def test_each_medium_a_screen_could_not_compute_is_a_flag_with_its_reason_in_detail() -> None:
+    """Which screens are partial is a query over `medium_not_computed`, not a text search.
+
+    The reason rides in `detail`, which is JSONB, because `message` is `VARCHAR(2000)` at the sink:
+    a reason there could fail the whole record and dead-letter the media that *were* computed.
+    """
+    reason = "the optimisation did not converge " * 200
+    payload = _screen(failed=[FailedMedium(solvent=None, reason=reason)])
+
+    _, _, _, extra = projection.PAYLOAD_PROJECTORS["SolventComparisonResult"](payload)
+
+    (flag,) = [f for f in extra["flags"] if f.flag == "medium_not_computed"]
+    assert flag.message == "gas phase could not be computed", "named even with `solvent` dropped"
+    assert flag.detail["reason"] == reason
+    assert len(flag.message) < 2000
+
+
+def test_a_screen_that_compared_one_medium_publishes_no_spread_and_no_winner() -> None:
+    """A spread over one row is zero by construction, and "no solvent effect" is a query."""
+    payload = _screen(
+        effects=[
+            SolventEffect(solvent="thf", delta_e_kcal=-2.0, delta_h_kcal=None, delta_g_kcal=-2.0)
+        ],
+        spread_kcal=0.0,
+        failed=[FailedMedium(solvent=None, reason="refused")],
+    )
+
+    _, _, _, extra = projection.PAYLOAD_PROJECTORS["SolventComparisonResult"](payload)
+
+    published = {fact.property for fact in extra["properties"]}
+    assert not published & {"solvent_spread", "best_solvent"}
+
+
+def test_a_partial_bond_survey_publishes_its_bonds_but_no_weakest_bond() -> None:
+    """The weakest computed bond is not the molecule's weakest, and a query reads the fact bare."""
+    survey = BondDissociationSurvey(
+        smiles="CCc1ccccc1",
+        method="GFN2-xTB",
+        solvent=None,
+        temperature_k=298.15,
+        mode="homolytic",
+        bonds=[
+            DissociatedBond(
+                atoms=[1, 2],
+                bond="C-C",
+                fragments=["[CH2]C", "[c]1ccccc1"],
+                dissociation_energy_kcal=101.0,
+                is_weakest=True,
+            )
+        ],
+        considered=2,
+        uncertainty_kcal=5.0,
+        failed=[FailedBond(atoms=[0, 1], bond="C-C", fragments=["a", "b"], reason="refused")],
+    )
+
+    _, _, _, extra = projection.PAYLOAD_PROJECTORS["BondDissociationSurvey"](
+        survey.model_dump(mode="json", exclude_none=True)
+    )
+
+    published = {fact.property for fact in extra["properties"]}
+    assert not published & {"weakest_bond", "weakest_bond_dissociation_energy"}
+    assert len(extra["sites"]) == 1, "the computed bond is still published"
+    (flag,) = [f for f in extra["flags"] if f.flag == "bond_not_computed"]
+    assert flag.message == "C-C [0, 1] could not be computed"
+
+
+def test_a_medium_the_clock_stopped_is_published_as_a_stop_not_a_failure_of_the_item() -> None:
+    """The one cause a reader must not take as a property of the item says so in the flag itself."""
+    payload = _screen(
+        failed=[FailedMedium(solvent="toluene", reason="inline budget", cause="time_budget")]
+    )
+
+    _, _, _, extra = projection.PAYLOAD_PROJECTORS["SolventComparisonResult"](payload)
+
+    (flag,) = [f for f in extra["flags"] if f.flag == "medium_not_computed"]
+    assert flag.message == "toluene was stopped by the calculation service's time budget"
+    assert flag.detail["cause"] == "time_budget"

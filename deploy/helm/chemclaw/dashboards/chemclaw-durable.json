@@ -702,6 +702,62 @@
           "refId": "A"
         }
       ]
+    },
+    {
+      "id": 17,
+      "type": "graph",
+      "title": "Queued tool calls, and those that went direct",
+      "description": "Calls to a manifest's `queued:` tools, by tool, through the connector's interactive queue \u2014 and the ones that went straight to the server because the queue could not be reached (`ChemclawQueuedToolsGoingDirect`). Read beside `chemclaw_calc_backend_at_capacity_total`: a queue doing its job holds refusals near zero while this line carries the load.",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 52
+      },
+      "span": 6,
+      "fill": 0,
+      "stack": false,
+      "linewidth": 2,
+      "nullPointMode": "null",
+      "legend": {
+        "show": true,
+        "current": true,
+        "max": true,
+        "values": true
+      },
+      "tooltip": {
+        "shared": true,
+        "sort": 2,
+        "value_type": "individual"
+      },
+      "yaxes": [
+        {
+          "format": "short",
+          "show": true,
+          "min": 0
+        },
+        {
+          "format": "short",
+          "show": false
+        }
+      ],
+      "xaxis": {
+        "mode": "time",
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "sum by (tool) (rate(chemclaw_queued_tool_calls_total[5m]))",
+          "legendFormat": "queued {{tool}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (tool) (rate(chemclaw_queued_tool_calls_direct_total[5m]))",
+          "legendFormat": "direct {{tool}}",
+          "refId": "B"
+        }
+      ]
     }
   ],
   "refresh": "30s",

@@ -434,6 +434,22 @@ spec:
               ones. This is deliberately not on `chemclaw_degraded_total`, so it never fires the
               backend-is-dark alert.
 
+        - alert: ChemclawQueuedToolsGoingDirect
+          expr: >-
+            sum(rate(chemclaw_queued_tool_calls_direct_total[10m])) > 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawqueuedtoolsgoingdirect
+            summary: Queued tool calls are bypassing the queue because it cannot be reached
+            description: >-
+              A tool a manifest lists under `queued:` could not start its run on the connector's
+              interactive queue, so it was sent straight to the server instead — which keeps the
+              capability up and puts every burst back to being refused pod by pod. The usual cause
+              is the Temporal frontend being unreachable from the front door; nothing is lost, but
+              the queue is not doing its job until this clears.
+
         {{- /* The leading indicator, and the one the HPA is supposed to act on. This is the pair
                `chemclaw_turns_in_flight` / `chemclaw_turn_capacity` was exported for and that
                nothing read for a year (gap DEP-4). It fires *before* the shed alerts, which is the

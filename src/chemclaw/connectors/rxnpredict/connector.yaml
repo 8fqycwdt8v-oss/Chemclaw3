@@ -79,3 +79,14 @@ endpoint:
     - predict_conditions_single_model
     - list_available_models
     - classify_reaction
+  # The four predictions are inference — an ensemble runs every enabled model at once and the pod
+  # admits two — so a burst waits for a slot in arrival order rather than being refused
+  # (`connectors/queued.py`). Reads by the classification above and queued anyway: side effects
+  # and cost are different axes. The model list and the classifier are cheap and stay direct.
+  queued:
+    inline_wait_seconds: 45
+    tools:
+      - predict_forward_reaction
+      - predict_reaction_conditions
+      - predict_forward_single_model
+      - predict_conditions_single_model

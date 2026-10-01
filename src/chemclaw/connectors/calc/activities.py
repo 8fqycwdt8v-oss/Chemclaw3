@@ -232,12 +232,17 @@ async def _dispatch(spec: XtbJobSpec) -> XtbJobResult:
             run=_beating,
         )
         best = comparison.best_solvent or "gas phase"
-        return XtbJobResult(
-            kind=spec.kind,
-            summary=(
+        finding = (
+            f"only {best} could be computed, so nothing was compared"
+            if compose.lost_the_comparison(comparison.failed, len(comparison.effects))
+            else (
                 f"most favourable of {len(comparison.effects)}: {best} "
                 f"(spread {comparison.spread_kcal:.1f} kcal/mol)"
-            ),
+            )
+        )
+        return XtbJobResult(
+            kind=spec.kind,
+            summary=finding + _not_computed(len(comparison.failed), "media"),
             solvents=comparison,
         )
     if isinstance(spec, ScanJobSpec):
@@ -449,12 +454,19 @@ async def _dispatch(spec: XtbJobSpec) -> XtbJobResult:
             if screen.dominance_changes
             else f"{screen.distributions[0].dominant.label or 'the same form'} dominates in all"
         )
-        return XtbJobResult(
-            kind=spec.kind,
-            summary=(
+        only = screen.distributions[0]
+        finding = (
+            f"{spec.ranking} of {len(spec.species)}: only "
+            f"{only.solvent or 'the gas phase'} could be ranked, so nothing was compared"
+            if compose.lost_the_comparison(screen.failed, len(screen.distributions))
+            else (
                 f"{spec.ranking} of {len(spec.species)} across {len(screen.distributions)} "
                 f"media: {verdict}, largest swing {screen.largest_swing_kcal:.1f} kcal/mol"
-            ),
+            )
+        )
+        return XtbJobResult(
+            kind=spec.kind,
+            summary=finding + _not_computed(len(screen.failed), "media"),
             species_solvents=screen,
         )
     if isinstance(spec, BondSurveyJobSpec):
@@ -475,12 +487,23 @@ async def _dispatch(spec: XtbJobSpec) -> XtbJobResult:
         return XtbJobResult(
             kind=spec.kind,
             summary=(
-                f"{spec.smiles}: weakest of {survey.considered} bonds is {weakest.bond} at "
+                f"{spec.smiles}: weakest of {len(survey.bonds)} bonds is {weakest.bond} at "
                 f"{weakest.dissociation_energy_kcal:.0f} ± {survey.uncertainty_kcal:.0f} kcal/mol"
+                + _not_computed(len(survey.failed), "bonds")
             ),
             bonds=survey,
         )
     raise ValueError(f"unsupported xTB job kind: {spec!r}")
+
+
+def _not_computed(count: int, what: str) -> str:
+    """The clause a screen's summary carries when some of its items could not be computed.
+
+    The summary is the one line a completion push-back and a job listing show, so a screen that
+    lost items must say so there: "weakest of 5 bonds" over a survey asked for 7 is the silent drop
+    the per-item outcome exists to prevent, moved from the payload into the sentence people read.
+    """
+    return f"; {count} of the {what} could not be computed (see failed)" if count else ""
 
 
 def _rotation_summary(rotation: RotationProfile) -> str:

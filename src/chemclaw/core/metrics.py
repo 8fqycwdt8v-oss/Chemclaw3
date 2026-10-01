@@ -949,6 +949,18 @@ _COUNTERS: dict[str, str] = {
         "Calculation-backend calls refused because every slot was busy, by tool. Retried with "
         "backoff rather than failed; a sustained rate means the backend is under-provisioned."
     ),
+    # How many tool calls went through a connector's interactive queue rather than straight to the
+    # server (`connectors/queued.py`). By tool — bounded by the manifests' `queued:` lists — so a
+    # dashboard beside the queue's own backlog can say which capability the waiting is for.
+    "chemclaw_queued_tool_calls_total": (
+        "Tool calls a turn sent through a connector's interactive queue, by tool."
+    ),
+    # The fallback's own count: a queued tool called directly because its run could not be started
+    # (the broker unreachable). Non-zero means the queue is not doing its job and every burst is
+    # being met by refusals again.
+    "chemclaw_queued_tool_calls_direct_total": (
+        "Queued tool calls sent straight to the server because the queue was unreachable, by tool."
+    ),
     # --- ingest and retrieval ------------------------------------------------------------------
     "chemclaw_ingest_records_total": (
         "Records seen by an ingest pass, by source and outcome (ingested / rejected / skipped)."
@@ -1319,6 +1331,8 @@ _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
     "chemclaw_connectors_unreachable_total": ("connector",),
     "chemclaw_calc_cache_total": ("outcome",),
     "chemclaw_calc_backend_at_capacity_total": ("tool",),
+    "chemclaw_queued_tool_calls_total": ("tool",),
+    "chemclaw_queued_tool_calls_direct_total": ("tool",),
     "chemclaw_ingest_records_total": ("source", "outcome"),
     "chemclaw_evidence_source_kept_total": ("source",),
     "chemclaw_embedding_calls_total": ("outcome",),

@@ -51,10 +51,13 @@ from dataclasses import dataclass
 from types import TracebackType
 
 from langchain_core.tools import BaseTool
+from langchain_mcp_adapters.interceptors import ToolCallInterceptor
 from langchain_mcp_adapters.sessions import Connection, create_session
 from langchain_mcp_adapters.tools import load_mcp_tools
 from mcp.shared.exceptions import McpError
 
+from chemclaw.connectors.manifest import QueuedDispatch
+from chemclaw.connectors.queued import queued_interceptor
 from chemclaw.connectors.reachability import recently_unreachable, record_reachability
 from chemclaw.core.config import settings
 from chemclaw.core.mcp_session import cancel_on_timeout
@@ -197,6 +200,11 @@ class ConnectorSpec:
     name: str
     connection: Connection
     allowed_tools: tuple[str, ...]
+    #: The endpoint's queued tools, if it declares any (`manifest.QueuedDispatch`); those calls go
+    #: through `connectors.queued.queued_interceptor` instead of this session.
+    queued: QueuedDispatch | None = None
+    #: How long one call may run once it has a slot — the queued call's `start_to_close`.
+    request_timeout: float = 60.0
 
 
 class HeldConnectorSession:
@@ -369,7 +377,10 @@ class HeldConnectorSession:
                 # with nobody holding the answer (`core.mcp_session.cancel_on_timeout`).
                 cancel_on_timeout(session)
                 self._tools = _stamped(
-                    _allowed(await load_mcp_tools(session), self._spec.allowed_tools),
+                    _allowed(
+                        await load_mcp_tools(session, tool_interceptors=_interceptors(self._spec)),
+                        self._spec.allowed_tools,
+                    ),
                     connector=self._spec.name,
                     revision=handshake.serverInfo.version,
                 )
@@ -380,6 +391,18 @@ class HeldConnectorSession:
             self._tools = []
         finally:
             self._opened.set()
+
+
+def _interceptors(spec: ConnectorSpec) -> list[ToolCallInterceptor] | None:
+    """The adapter's call interceptors for this connector: the queue, where it declares one.
+
+    The adapter's own seam rather than a replaced tool, so what the agent binds — name, schema,
+    description, the `SERVED_BY` stamp, the content conversion — is the object it always was, and
+    only the last hop of a queued call changes.
+    """
+    if spec.queued is None:
+        return None
+    return [queued_interceptor(spec.name, spec.queued, spec.request_timeout)]
 
 
 def _allowed(tools: list[BaseTool], allowed: tuple[str, ...]) -> list[BaseTool]:

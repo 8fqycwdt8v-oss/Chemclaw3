@@ -58,6 +58,15 @@ endpoint:
     - resume_campaign
     - generate_screening_design
     - campaign_progress
+  # `predict_outcome` fits and interrogates a surrogate — seconds of CPU on this pod, plus xTB
+  # featurization on the calculation backend — and is a function of its arguments, so it waits for
+  # a slot in the queue (`connectors/queued.py`). `suggest_next_experiment` costs the same and is
+  # deliberately *not* queued: it writes `bo_campaigns`/`bo_suggestions` for the chemist who asked,
+  # and identical queued calls join one run, which would record one chemist's suggestion for two.
+  queued:
+    inline_wait_seconds: 45
+    tools:
+      - predict_outcome
 
 jobs:
   - name: start_optimization_campaign

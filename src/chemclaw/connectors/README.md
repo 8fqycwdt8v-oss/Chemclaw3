@@ -18,6 +18,15 @@ directory; it is not editing core.
 The queue is deliberately absent from the manifest: it is `connector-<name>`, derived at dispatch,
 because a bundle's worker serves only what the bundle's own modules registered (D-150).
 
+**A heavy tool may wait for a slot instead of being refused.** An endpoint's `queued:` names tools
+whose calls go through `connector-<name>-interactive` rather than the turn's own session: the
+adapter's tool interceptor (`queued.py`) starts a `QueuedToolWorkflow` (`queued_workflow.py`), the
+connector's interactive worker (`interactive_worker.py`, sized to the server's slots) makes the call
+(`queued_call.py`), and the turn waits `inline_wait_seconds` for it before handing back a job id. It
+needs no file in the bundle — one manifest block and one chart entry
+(`connectors.<name>.interactive`) — and it applies to a server somebody else runs as well
+(`D-2026-09-30-a-heavy-tool-call-waits-in-a-queue-rather-than-being-refused`).
+
 **The variance is information.** `calc` has workflows, activities and a worker; `molfp` has only a
 server. That says which capabilities own long-running work, so do not flatten it into a uniform
 template. (`chem` used to be the second half of that sentence and is now the *next* paragraph's

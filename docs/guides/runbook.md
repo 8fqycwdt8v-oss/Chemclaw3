@@ -1361,6 +1361,20 @@ This alert is deliberately **not** on `chemclaw_degraded_total`. A busy backend 
 need different responses, and folding them into one series is how the signal an operator trusts for
 "the backend is down" stops meaning that.
 
+#### ChemclawQueuedToolsGoingDirect
+`warning`. A tool a manifest lists under `queued:` could not start its `QueuedToolWorkflow`, so the
+front door called the server directly (`connectors/queued.py`,
+`D-2026-09-30-a-heavy-tool-call-waits-in-a-queue-rather-than-being-refused`). The fallback is what
+keeps the capability up through a broker outage; while it lasts, a burst is refused pod by pod
+again, exactly as before queues existed.
+
+1. **Check the broker from the front door.** `chemclaw_queued_tool_calls_direct_total` rising
+   together with the durable job tools failing is the Temporal frontend being unreachable or its
+   mTLS material unreadable — the same fault every durable tool reports.
+2. **If the broker is fine, check the interactive workers exist.** A run that *starts* but is never
+   picked up does not trip this alert; it waits, and the turn hands back a job id. Look for
+   `<release>-interactive-worker-<connector>` Deployments with ready pods.
+
 #### ChemclawFrontDoorAtItsPermitCeiling
 `warning`, and the leading indicator for both of the above. `sum(chemclaw_turns_in_flight) /
 sum(chemclaw_turn_capacity)` has been over 0.9 for fifteen minutes: the next turn is about to be

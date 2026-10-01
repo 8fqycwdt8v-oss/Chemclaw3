@@ -784,7 +784,13 @@ def test_a_comment_never_swallows_the_line_after_it() -> None:
 # rendered a `PrometheusRule` reported `29 resources found — Valid: 28, Skipped: 1`: exactly one
 # kind in the whole chart lacks a schema, so both Prometheus-operator CRDs were being validated all
 # along. The exemption had never been checked against what kubeconform actually did.
-_CATALOG_VALIDATED_KINDS = frozenset({"ServiceMonitor", "PodMonitor", "PrometheusRule"})
+#
+# `ScaledObject` and `TriggerAuthentication` (KEDA, `templates/keda-interactive.yaml`) joined it
+# checked rather than assumed: the catalog serves `keda.sh/scaledobject_v1alpha1.json` and
+# `triggerauthentication_v1alpha1.json`, both fetched with a 200 before they were listed here.
+_CATALOG_VALIDATED_KINDS = frozenset(
+    {"ServiceMonitor", "PodMonitor", "PrometheusRule", "ScaledObject", "TriggerAuthentication"}
+)
 
 # The kinds kubeconform genuinely has no schema for, so `make helm-validate` runs with
 # `-ignore-missing-schemas` and *skips* them rather than failing. Keeping the set explicit is what
@@ -1484,6 +1490,8 @@ def _fleet_pools(values: dict[str, Any]) -> int:
         # still pods here even though its server does not.
         if bundle.get("worker"):
             total += bundle.get("workerReplicas", bundle.get("replicas"))
+        # No term for the interactive worker: it opens no pool (the helper says why, and
+        # `tests/test_queued_tools.py::test_a_queued_call_touches_no_database` holds it).
     return int(total)
 
 
@@ -4684,6 +4692,9 @@ def test_every_pool_holding_deployment_surges_by_the_number_the_budget_counts() 
             for name in _values()["connectors"]
             for half in ("", "worker-")
         ),
+        # Counted at zero rather than omitted: it reads the config and opens no pool, which the
+        # helper argues and `test_queued_tools.py::test_a_queued_call_touches_no_database` holds.
+        *(f"chemclaw-interactive-worker-{name}" for name in _values()["connectors"]),
     }
     assert pooled <= counted, (
         f"{sorted(pooled - counted)} read this release's config — so each pod opens a Postgres "
