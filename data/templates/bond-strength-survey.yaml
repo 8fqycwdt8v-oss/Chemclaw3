@@ -61,5 +61,7 @@ steps:
       an autoxidation and HAT liability, a weak C-N or C-O is a thermal or hydrolytic one. Report
       the ordering as the finding and say explicitly that the magnitudes are not quotable as bond
       dissociation energies. Ring bonds were not surveyed, so say so rather than letting their
-      absence read as strength. Close with the forced-degradation conditions this ranking argues
+      absence read as strength. Bonds the calculation could not compute are listed under `failed`
+      with a reason each: name them, and say the weakest bond above is the weakest of the rest.
+      Close with the forced-degradation conditions this ranking argues
       for, framed as a study to run rather than a prediction of what it will find.

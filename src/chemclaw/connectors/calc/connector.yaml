@@ -103,6 +103,25 @@ endpoint:
     # produced; neither starts one.
     - list_artifacts
     - fetch_artifact
+  # The calculations reach the backend through a queue rather than a direct call, so a burst of
+  # chemists waits for a free slot in arrival order instead of being refused by whichever pod
+  # answered (`connectors/queued.py`). Not `predict_solubility` or
+  # `predict_developability_profile` — milliseconds of RDKit, nothing to wait for — and never
+  # `report_measurement`, which writes a chemist's own record. 45 s inline: seconds-class work
+  # answers inside the turn at the target load (p95 <= 30 s), and a longer optimisation hands back
+  # a job id and arrives in the mailbox.
+  queued:
+    inline_wait_seconds: 45
+    tools:
+      - compute_xtb_energy
+      - compute_electronic_properties
+      - predict_site_reactivity
+      - compute_atomic_descriptors
+      - compute_surface_potential
+      - optimize_geometry
+      - compute_thermochemistry
+      - predict_pka
+      - predict_logd
 
 skills:
   - calculation-selection
@@ -176,6 +195,7 @@ jobs:
       SMILES, 1 for no rotational symmetry, 2 for H2/N2/O2/CO2/water, 3 for ammonia, 6 for ethane,
       12 for benzene. Omit it and no reaction reports a ΔG, so the screen falls back to ranking by
       electronic energy — which ignores solvation entropy, the part a solvent screen is about.
+      Media it could not compute are under `failed`; name them.
     params_model: chemclaw.connectors.calc.specs:SolventScreenJobSpec
     precondition: chemclaw.science.calc.solvents:require_supported_solvents
 
@@ -383,7 +403,7 @@ jobs:
 
       `level="quick"` ranks by electronic energy and says so in a warning; `standard` adds a Hessian
       per species for a free energy; `thorough` adds a conformer search per species and is the
-      expensive case.
+      expensive case. A form that cannot be computed fails the job, naming each such form.
     params_model: chemclaw.connectors.calc.specs:SpeciesRankingJobSpec
     precondition: chemclaw.science.calc.solvents:require_supported_solvents
     expensive: true
@@ -409,7 +429,8 @@ jobs:
 
       **Enumerate first; this does not** — use `chem`'s enumerate_tautomers,
       enumerate_protonation_states or enumerate_stereoisomers. A form not in `species` was not
-      ranked in any medium. Cost is species x media, checked before the first calculation.
+      ranked in any medium. Cost is species x media, checked before the first calculation. Media
+      it could not rank are under `failed`.
     params_model: chemclaw.connectors.calc.specs:SpeciesSolventScreenJobSpec
     precondition: chemclaw.science.calc.solvents:require_supported_solvents
     expensive: true
@@ -433,7 +454,8 @@ jobs:
       energies carry several kcal/mol of error — enough that a number should never be quoted as a
       BDE, and little enough that the ranking within one molecule is informative. Defaults to
       `level="quick"` for that reason: a Hessian per fragment per bond triples the cost for a
-      magnitude the method does not deliver.
+      magnitude the method does not deliver. Bonds it could not compute are under `failed`; name
+      them, since one may be weaker.
     params_model: chemclaw.connectors.calc.specs:BondSurveyJobSpec
     precondition: chemclaw.science.calc.solvents:require_supported_solvents
     expensive: true

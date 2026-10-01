@@ -1,0 +1,65 @@
+{{- /* Autoscaling for the interactive workers on what they are for: the backlog of queued tool
+       calls on their Temporal task queue. Off by default (`keda.enabled`), because it needs KEDA —
+       OpenShift's Custom Metrics Autoscaler operator, at a version with the `temporal` scaler — and
+       a ScaledObject on a cluster without KEDA is a resource the API server rejects.
+
+       `targetBacklogPerReplica` is how many waiting calls one replica should absorb before another
+       is added. Scaling the worker adds *dispatch* capacity; what a call waits for is the server's
+       slots, so pair this with the server's own occupancy scaling
+       (`Chemclaw3-mcp` `servers/<name>/deploy/keda/`) — the worker's ceiling on in-flight calls
+       is what turns a backlog here into occupancy there. */ -}}
+{{- if .Values.keda.enabled }}
+{{- range $name, $cfg := .Values.connectors }}
+{{- if and $cfg.enabled $cfg.interactive }}
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ include "chemclaw.name" $ }}-interactive-worker-{{ $name }}
+  labels:
+    {{- include "chemclaw.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: interactive-worker-{{ $name }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "chemclaw.name" $ }}-interactive-worker-{{ $name }}
+  minReplicaCount: {{ $cfg.interactive.replicas }}
+  maxReplicaCount: {{ $cfg.interactive.maxReplicas | required (printf "connectors.%s.interactive.maxReplicas is required when keda.enabled" $name) }}
+  pollingInterval: {{ $.Values.keda.pollingInterval }}
+  cooldownPeriod: {{ $.Values.keda.cooldownPeriod }}
+  triggers:
+    - type: temporal
+      metadata:
+        endpoint: {{ $.Values.config.CHEMCLAW_TEMPORAL_ADDRESS | quote }}
+        namespace: {{ $.Values.temporal.namespace | required "temporal.namespace is required" | quote }}
+        taskQueue: "connector-{{ $name }}-interactive"
+        queueTypes: activity
+        targetQueueSize: {{ $cfg.interactive.targetBacklogPerReplica | default 4 | quote }}
+      {{- if $.Values.secrets.temporalTls.enabled }}
+      authenticationRef:
+        name: {{ include "chemclaw.name" $ }}-temporal-keda
+      {{- end }}
+---
+{{- end }}
+{{- end }}
+{{- if .Values.secrets.temporalTls.enabled }}
+{{- /* The broker speaks mTLS, so KEDA presents the same client certificate the workers do. */}}
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: {{ include "chemclaw.name" . }}-temporal-keda
+  labels:
+    {{- include "chemclaw.labels" . | nindent 4 }}
+spec:
+  secretTargetRef:
+    - parameter: ca
+      name: {{ .Values.secrets.temporalTls.secretName }}
+      key: ca.crt
+    - parameter: cert
+      name: {{ .Values.secrets.temporalTls.secretName }}
+      key: tls.crt
+    - parameter: key
+      name: {{ .Values.secrets.temporalTls.secretName }}
+      key: tls.key
+{{- end }}
+{{- end }}

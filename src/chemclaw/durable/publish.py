@@ -253,6 +253,10 @@ _BAD_DATA_TYPES = [
     # a `SubsystemUnavailableError`, the one fault a retry actually fixes, and conflating the two
     # is what would burn `activity_max_attempts` on a refusal that never changes.
     "CalcToolError",
+    # Its time-budget subclass (`connectors/calc/remote.py`): the server's inline clock stopped the
+    # calculation, and a retry runs the same work against the same clock — so it fails fast like
+    # its parent. Named because Temporal matches by name; the hierarchy alone would not reach it.
+    "CalcTimeBudgetError",
     # A turn asked a tool the identical question once too often (`chemclaw.agent.repeat_guard`).
     # It never crosses an activity boundary today — the guard is a chat-side middleware — but it is
     # a `ChemclawError`, and the rule this list encodes is that every one of them fails fast: an
@@ -651,6 +655,28 @@ def calculation_retry() -> RetryPolicy:
         initial_interval=timedelta(seconds=first),
         backoff_coefficient=2.0,
         maximum_interval=timedelta(seconds=cap),
+    )
+
+
+def queued_tool_retry() -> RetryPolicy:
+    """The retry discipline for a queued tool call: ask a full server again within seconds.
+
+    `calculation_retry` spaces a durable job's asks by minutes because its worker has no idea how
+    full the server is. A queued call's worker does — it is sized to the server's slots — so a
+    refusal there is a race with a slot about to free, and the chemist is usually still watching.
+    Unlimited attempts, bounded by the call's own `schedule_to_close`; the one non-retryable type is
+    a fault that already spent `queued_tool_fault_attempts` (`connectors/queued_call.py`).
+    """
+    cap = settings.queued_tool_retry_max_seconds
+    return RetryPolicy(
+        # Never above the cap: the server refuses a policy whose first interval exceeds its
+        # maximum, and says so as a bad *schedule* — a deployment that tightened the cap below a
+        # second would have failed every queued call with a message naming neither.
+        initial_interval=timedelta(seconds=min(1.0, cap)),
+        backoff_coefficient=1.5,
+        maximum_interval=timedelta(seconds=cap),
+        maximum_attempts=0,
+        non_retryable_error_types=["QueuedToolFault"],
     )
 
 

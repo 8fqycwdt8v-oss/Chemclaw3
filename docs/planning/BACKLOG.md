@@ -199,7 +199,18 @@ topic).
 
 ## 3 — Work that is lost, dropped or invisible
 
-- [ ] **The helper file budget is charged to siblings that wrote nothing** (issue #463) — [M],
+- [ ] **A failed JWKS fetch is not cached, so every request during an IdP fault pays an outbound
+      fetch** — [S], opened 2026-10-01 by the post-merge audit of PR #494. `api/auth.py`'s
+      `_HttpxJwkClient` caches only a key set that parsed, so while the tenant is unreachable — or,
+      since PyJWT 2.15, answers 200 with a body that is not a key set (`JWKSetCache.put` now raises
+      before storing; 2.13 cached the raw dict for the cache lifespan) — every request carrying any
+      `kid`, an unauthenticated one included, triggers a fetch. Measured: 20 requests, 20 fetches,
+      every one a 503. `_forced_refresh_allowed` bounds only the *unknown-kid* path, and it is an
+      unlocked check-then-set; the cache-expiry fetch in `get_signing_keys` is outside any lock too.
+      The candidates are a short negative cache on a failed fetch, and one lock around both refresh
+      paths. Anchors: `api/auth.py::_HttpxJwkClient.fetch_data`, `api/auth.py::_signing_key`,
+      `api/auth.py::_forced_refresh_allowed`.
+- [ ] **The helper file budget is charged to siblings that wrote nothing** (issue #463, #489) — [M],
   opened by `D-2026-09-18-a-pre-batch-snapshot-cannot-see-its-own-superstep`; its other half, the
   two write verbs nothing bounded, is closed by
   `D-2026-09-26-a-helpers-unbounded-write-verbs-take-the-scratch-cap`.
@@ -242,6 +253,36 @@ topic).
 
 ---
 
+- [ ] **The 2026-09-27 live-run fixes have not been re-verified against a real model** — [S]. Three
+  defects a real-model run found (DeepSeek V4 Pro via OpenRouter) are fixed and pass against
+  scripted models only: gas-phase energies over charged species are refused
+  (`connectors/calc/compose.py::require_solvent_for_ions`), a capped turn still answers
+  (`agent/loop_cap.py`), and the verifier's revision note no longer leaks into answers
+  (`api/runner.py::_REVISION_NOTE`, measured 10/18 → 0/18 in isolation). Re-run pc-03, a delegation
+  probe that caps, and a revised answer through the four-repo lane against the gateway; about $15 of
+  the run's $25 budget is unspent.
+
+- [ ] **The connectors dev server stalled for 52 s under probe load, and nothing explains it** —
+  [S]. During `make live-probes` on 2026-09-27 the connectors process (`cli/connectors_dev.py`,
+  :8810) logged nothing from 23:26:57 to 23:27:49 and then released every queued request at once;
+  the front door recorded 12 MCP handshake timeouts and 33 turns that lost the bo, calc, molfp and
+  rxnfp tools. No tool call preceded it, and the host was heavily loaded, so host overload and a
+  blocking call on the server's event loop are both open. Reproduce on an idle host before fixing
+  anything.
+
+- [ ] **Three live-lane papercuts cost evidence during the 2026-09-27 run** — [S].
+  `cli/live_storm.py` accepts `--families DH` but rejects the obvious `--families D,H`;
+  `infra/live/processes.sh restart api` truncates the front door's log, losing the evidence of the
+  run before it; and the lane leaves `CHEMCLAW_FRAMING_ENVELOPE_SECRET` unset (`.env.example`), so
+  the prompt-injection framing tag uses a per-process random nonce and two processes frame
+  differently.
+
+- [ ] **`test_two_processes_send_the_same_prefix_but_for_the_envelope_nonce` hit its 180 s timeout
+  under load** — [S]. Seen once in the gate container at load 143–270
+  (`tests/test_context_floor.py::test_two_processes_send_the_same_prefix_but_for_the_envelope_nonce`);
+  the full suite passed in CI on the same head. Not yet shown to be a flake on a normal runner —
+  measure its wall time on an idle host before loosening anything.
+
 ## 5 — Where the field moved past us
 
 Filed by the 2026-08-25 field benchmark — see
@@ -279,8 +320,8 @@ only holds defects can only ever restore the system to what it already intended 
       argument contract still reaches the right tool is a `make live-ab` question, not a reading
       question.
 
-- [ ] **About a third of tools still rest on one probe, and they are the compute and job tail**
-      (issue #487) — [S], narrowed 2026-09-24. Derived from `tests/test_probe_coverage.py::_probes` and
+- [ ] **About a third of tools still rest on one probe, and they are the compute and job tail** (issue #487)
+      — [S], narrowed 2026-09-24. Derived from `tests/test_probe_coverage.py::_probes` and
       `::_expected_tools` with `load_profiles()` called first (two earlier measurements disagreed
       on exactly that): 47 of 124 tools had one probe. The seven whose effect persists past the turn
       — preferences, watches, skill proposals, plate observations, the results store, the knowledge
@@ -291,7 +332,7 @@ only holds defects can only ever restore the system to what it already intended 
       bounding risk. Choose the next second questions by what a deployment calls —
       `audit_events` per tool name — once one exists to read.
 
-- [ ] **A shared session serialises by refusing and streams to one reader** — [M]. What is left of
+- [ ] **A shared session serialises by refusing and streams to one reader** (issue #488) — [M]. What is left of
       the multi-human-session work after `D-2026-09-27-in-a-shared-session-the-sender-governs`
       settled the authority questions and shipped membership (`session_members`, the sender
       governing each turn, a plan decided only by its author). Three pieces, in dependency order:
@@ -432,7 +473,7 @@ re-proposal a future session can settle in an afternoon and a fabricated number 
 
 ## The turn-time comparison cannot diff what the ELN gives structured
 
-- [ ] **The turn-time comparison cannot diff what the ELN gives structured** — [M].
+- [ ] **The turn-time comparison cannot diff what the ELN gives structured** (issue #490) — [M].
       On a prose-only ELN the *mined* `optimization-campaign` note produces excellent condition deltas —
       `solvent DMF → 2-MeTHF`, `reagent cesium carbonate → potassium carbonate` — because
       `memory.progression.changes_between` reads the species set of each role off `OrdReaction.inputs`.
@@ -454,6 +495,21 @@ re-proposal a future session can settle in an afternoon and a fabricated number 
       Wants its own ADR and a measurement of what the extra column costs on a real corpus.
 
 ## Everything else
+
+- [ ] **PR #321's review findings never landed, and the PR is too stale to rebase** — [M].
+  `claude/tool-integration-storage-review-3zupm4` (108 files, +6,840, opened 2026-09-05) is
+  superseded in part — migration numbers 082–084 are taken and the calculation-epoch work landed
+  another way — but its decision files and `result_composites` never reached
+  `docs/decisions/README.md` or the tree. Extract what is still open from its review document into
+  rows here, then close #321.
+
+- [ ] **Dependency bumps held back from Dependabot need hand-made PRs** — [S]. Dependabot group #431
+  was closed because it broke three things at once: mutmut 3.8 removed `Config.ensure_loaded`
+  (`pyproject.toml` `[tool.mutmut]`), deepagents' `task` schema grows to 929 tokens against the
+  900-token bound `tests/test_context_floor.py` holds, and rdkit 2026.3.6 moves torsion-handle
+  literals that this repository and Chemclaw3-mcp both assert (`tests/test_calc_rotation.py`) — that
+  one must land as a coordinated pair with the fleet. Bump the safe members in a hand-made group and
+  the rest one at a time.
 
 The long-form findings live in [`docs/archive/findings-2026-08.md`](../archive/findings-2026-08.md),
 grouped by the review that found them, with their full measurements. **That file is a record and
@@ -502,7 +558,7 @@ those belong in.
 
 ## Recover the flow-Suzuki screen, or decide it stays out
 
-- [ ] **5,760 ORD records — 57% of the seeded corpus — cannot be ingested at all** — [L].
+- [ ] **5,760 ORD records — 57% of the seeded corpus — cannot be ingested at all** (issue #477) — [L].
       `Chemclaw3_mock` seeds 10,011 ORD records and **5,760 of them — 57% — cannot be ingested at all**.
       Every refusal is the Perera flow-Suzuki set (*Science* 2018, 359, 429), whose second coupling
       partner the source spreadsheet publishes only as its own shorthand (`2a, Boronic Acid`).
