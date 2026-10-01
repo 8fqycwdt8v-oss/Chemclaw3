@@ -22,8 +22,11 @@ is what keeps a new one from creeping back.
    belongs to one turn.
 2. **Temporal** — durable execution of long or expensive work: the semiempirical calculations and
    BoFire BO. Queues: `background-jobs` plus one derived `connector-<name>` per bundle that owns
-   durable work. A persisted result is never recomputed (D-011); `cached_compute` single-flights
-   concurrent misses on one key *in one process*, and the cross-process half is a `DEFERRED.md` row.
+   durable work, and a `connector-<name>-interactive` per connector whose manifest queues tools —
+   a heavy tool call waits there for a slot instead of being refused by a full pod
+   (`D-2026-09-30-a-heavy-tool-call-waits-in-a-queue-rather-than-being-refused`). A persisted
+   result is never recomputed (D-011); `cached_compute` single-flights concurrent misses on one key
+   *in one process*, and the cross-process half is a `DEFERRED.md` row.
 3. **Agent Skills** (`SKILL.md`) — judgment, loaded on demand.
 4. **Markdown knowledge graph in Git** — what we know. `kg/record.py` is the one write path, and its
    order is load-bearing: dependencies, then the subject, then the retirements, so a note never
@@ -282,7 +285,9 @@ Four layers, each with a single responsibility. **Never merge their concerns.**
    (xTB/GFN2 single points, CREST conformer and complex searches, scans, rotational profiles) and
    BoFire BO. Queues: `background-jobs` for core's light work (sync, re-index, reports, the
    connector-job wrapper) plus one derived `connector-<name>` queue per bundle that owns durable
-   work (D-118/D-150), so there is no second *core* queue.
+   work (D-118/D-150), so there is no second *core* queue. A connector whose manifest lists
+   `queued:` tools adds `connector-<name>-interactive`, polled by its own interactive worker sized to
+   the server's slots, so a turn's heavy call waits there in arrival order rather than being refused.
    Every result is persisted once via the calculation store, and a *persisted* result is never
    recomputed (D-011). Concurrent misses on one key in one process share one computation
    (`cached_compute` single-flights them; `tests/test_store.py` drives 8 together → 1 compute);

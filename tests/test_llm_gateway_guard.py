@@ -359,6 +359,9 @@ _COMPONENT_MAKES_MODEL_CALLS: dict[str, bool] = {
     # A bundle's own Temporal worker, serving only that bundle's registered activities. Core's
     # `template_activities` is not imported here — that is the whole point of the seam.
     "connector-worker-*": False,
+    # A connector's interactive worker: one activity that makes an MCP call on a chemist's behalf
+    # (`connectors/queued_call.py`) and one workflow. It builds no graph and no chat model.
+    "interactive-worker-*": False,
     # The hook Jobs, which became components in
     # `D-2026-09-12-the-layer-that-binds-grpc-is-libc-not-socket-py` because a chart `command:`
     # replaces the image ENTRYPOINT and so skipped the arming block. None of the three reaches a

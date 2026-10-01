@@ -678,6 +678,7 @@ def test_a_config_change_restarts_the_pods_that_read_it() -> None:
         "deployment-service.yaml": 1,
         "deployment-workers.yaml": 1,
         "deployment-connectors.yaml": 2,
+        "deployment-interactive-workers.yaml": 1,
     }
     for filename, pod_templates in expected.items():
         text = (_CHART / "templates" / filename).read_text(encoding="utf-8")

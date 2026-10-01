@@ -181,6 +181,13 @@ case "${component}" in
     # the *runtime* role, which is why the chart gives it `chemclaw.env` and not the DDL credential.
     exec python -m chemclaw.agent.message_migration
     ;;
+  interactive-worker-*)
+    # A connector's interactive worker: it makes the calls a turn queued for that connector's
+    # `queued:` tools (`src/chemclaw/connectors/interactive_worker.py`). One case for every
+    # connector, like the two below, because the component name carries the connector.
+    name="${component#interactive-worker-}"
+    exec python -m chemclaw.connectors.interactive_worker "${name}"
+    ;;
   connector-worker-*)
     # A connector bundle's own Temporal worker, for a bundle that owns durable work
     # (`src/chemclaw/connectors/<name>/worker.py`). Matched before `connector-*` so the more specific prefix wins.

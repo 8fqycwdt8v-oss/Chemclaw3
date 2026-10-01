@@ -16,7 +16,9 @@ merge — `CLAUDE.md` states it, and `tests/test_layering.py` enforces the parts
    and *only* here, never in the conversation layer's own ad-hoc stores; layer 1's checkpointer
    holds turn state and nothing else, which is the line D-2026-08-10 §3 draws once layer 1 has a
    checkpointer at all. Two kinds of task queue: `background-jobs` (light: sync, re-index, reports)
-   and one per connector bundle that owns durable work, each sized for that work. Once a result is
+   and one per connector bundle that owns durable work, each sized for that work — plus, for a
+   connector that queues tools, `connector-<name>-interactive`, where a turn's heavy call waits for a
+   slot instead of being refused. Once a result is
    persisted it is never recomputed. Concurrent misses on the *same* key in one process share one
    computation — `cached_compute` single-flights them behind an in-flight future, eight together
    measured one compute — while misses in different processes still each compute; that

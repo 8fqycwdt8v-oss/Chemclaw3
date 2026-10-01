@@ -40,7 +40,7 @@ from pydantic import BaseModel, ConfigDict
 
 from chemclaw.core.call_identity import turn_identity_hook
 from chemclaw.core.config import settings
-from chemclaw.core.errors import ChemclawError, SubsystemUnavailableError
+from chemclaw.core.errors import AtCapacityError, ChemclawError, SubsystemUnavailableError
 from chemclaw.core.ids import stable_hash
 from chemclaw.core.mcp_session import (
     McpAtCapacity,
@@ -132,7 +132,7 @@ class CalcTimeBudgetError(CalcToolError):
     """
 
 
-class CalcBusyError(SubsystemUnavailableError):
+class CalcBusyError(AtCapacityError):
     """The calculation server was reached, ran nothing, and refused because every slot was busy.
 
     **The taxonomy above has two buckets and saturation is a third one it did not have.** A
@@ -156,6 +156,8 @@ class CalcBusyError(SubsystemUnavailableError):
     the retry is automatic, and on the in-process tool surface, where it is not
     (`agent/tool_authz.py` returns it to the model as an ordinary domain error).
     """
+
+    server = "calc"
 
 
 # The transport, the timeout ordering, the credential-rejection walk and the internal-error

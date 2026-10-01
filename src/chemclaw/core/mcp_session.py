@@ -146,6 +146,33 @@ SERVER_TIME_BUDGET = "[calc-time-budget]"
 _TOOL_ERROR_PREFIX = re.compile(r"^Error executing tool .*?: ")
 
 
+# **Every gated server in the family opens a full-pod refusal the same way**:
+# `[<server>-at-capacity]`
+# (`Chemclaw3-mcp` `mcp_server_kit.limits.at_capacity_marker`, and this repository's own bundles
+# through `core/errors.AtCapacityError`). `SERVER_AT_CAPACITY` above is calc's instance of it.
+# Matched as a *format* rather than a list of names because the servers are addressed by
+# configuration: a list here would have to grow with every deployment's connector set, and a server
+# it missed would have its full pods read as bad input — which is what happened to five of six.
+_AT_CAPACITY = re.compile(r"\[[a-z0-9][a-z0-9_-]*-at-capacity\]")
+
+
+def at_capacity(message: str) -> bool:
+    """Whether the *server* refused this call because it was full, in the fleet's one format.
+
+    The head-of-message rule `server_marked` enforces, applied to the format rather than to one
+    literal: a marker a caller's own argument echoed into the middle of a domain refusal does not
+    count, so a free-form argument still cannot manufacture a retry.
+
+    Args:
+        message: The text of a `CallToolResult` carrying `isError=True`.
+
+    Returns:
+        True when the message opens with `[<server>-at-capacity]`, allowing for the transport's
+        own prefix.
+    """
+    return _AT_CAPACITY.match(_TOOL_ERROR_PREFIX.sub("", message.lstrip(), count=1)) is not None
+
+
 def server_marked(message: str, marker: str) -> bool:
     """Whether the *server* opened this refusal with `marker`, rather than quoting it back.
 
@@ -549,7 +576,7 @@ async def invoke(session: ClientSession, tool: str, arguments: dict[str, Any]) -
         # arguments back, so an unanchored match let a tool argument mint either classification.
         if server_marked(message, SERVER_INTERNAL_ERROR):
             raise McpServerFault(tool, internal=True)
-        if server_marked(message, SERVER_AT_CAPACITY):
+        if at_capacity(message):
             raise McpAtCapacity(f"{tool} was refused: {message}")
         if server_marked(message, SERVER_TIME_BUDGET):
             raise McpTimeBudget(f"{tool} was stopped: {message}")

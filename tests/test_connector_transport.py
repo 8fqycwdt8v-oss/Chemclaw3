@@ -555,6 +555,46 @@ def test_an_unexpected_tool_exception_reaches_the_caller_sanitized() -> None:
     assert "an internal error occurred" in message
 
 
+def test_a_full_backend_reaches_the_caller_as_full_not_as_broken() -> None:
+    """A busy backend behind one of our own bundles must say *full*, in the fleet's format.
+
+    `CalcBusyError` is not a `ValueError`, so the sanitizer used to replace it with "an internal
+    error occurred" — which reads as broken and gave the queued dispatcher nothing to retry on.
+    Driven
+    over the real transport, like the two tests beside it, because the property is what arrives.
+    """
+    from chemclaw.connectors.calc.remote import CalcBusyError
+    from chemclaw.core.mcp_session import at_capacity
+
+    server = FastMCP("busy-probe")
+
+    @server.tool()
+    async def busy() -> str:
+        """Raise the saturation refusal a composed calc tool raises on a full backend."""
+        raise CalcBusyError("the calculation service is busy")
+
+    app = connector_app(server, name="busy-probe")
+    port = _free_port()
+
+    async def _call() -> str:
+        spec = _mcp_connection(
+            cast(ConnectorManifest, SimpleNamespace(name="busy-probe")),
+            _endpoint(f"http://127.0.0.1:{port}/mcp", "busy"),
+        )
+        async with AsyncExitStack() as stack:
+            tools, unreachable = await open_connector_specs(stack, [spec])
+            assert not unreachable
+            result = await next(t for t in tools if t.name == "busy").ainvoke({})
+            return str(result[0]["text"] if isinstance(result, list) else result)
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    with _Server(app, port):
+        message = asyncio.run(_call())
+    assert at_capacity(message), message
+    assert "the calculation service is busy" in message
+    assert "internal error" not in message
+
+
 def test_the_connector_server_entrypoint_configures_the_process_before_serving(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
