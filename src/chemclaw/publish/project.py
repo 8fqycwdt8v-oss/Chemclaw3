@@ -326,7 +326,13 @@ def _not_computed(
             ordinal=start + index,
             flag=flag,
             severity="warning",
-            message=f"{label(entry)} could not be computed",
+            # A time-budget stop says so in the message too, because it is the one cause a reader
+            # must not take as a property of the item: the same item may pass on an idle pod.
+            message=(
+                f"{label(entry)} was stopped by the calculation service's time budget"
+                if entry.get("cause") == "time_budget"
+                else f"{label(entry)} could not be computed"
+            ),
             detail=dict(entry),
         )
         for index, entry in enumerate(failed)

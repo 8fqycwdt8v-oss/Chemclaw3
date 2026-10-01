@@ -23,8 +23,12 @@ from pydantic import BaseModel
 from rdkit import Chem
 
 from chemclaw.connectors.calc import compose
-from chemclaw.connectors.calc.remote import CalcBusyError, CalcServerError
-from chemclaw.core.mcp_session import SERVER_AT_CAPACITY, SERVER_INTERNAL_ERROR
+from chemclaw.connectors.calc.remote import CalcBusyError, CalcServerError, CalcTimeBudgetError
+from chemclaw.core.mcp_session import (
+    SERVER_AT_CAPACITY,
+    SERVER_INTERNAL_ERROR,
+    SERVER_TIME_BUDGET,
+)
 from chemclaw.science.calc.models import (
     BondDissociationSurvey,
     FailedMedium,
@@ -531,3 +535,80 @@ def test_a_species_screen_left_with_one_medium_makes_no_comparison_claim(
     assert [d.solvent for d in screen.distributions] == [None]
     assert not [w for w in screen.warnings if "does not distinguish" in w]
     assert any("nothing to compare" in w for w in screen.warnings)
+
+
+# --- a stop by the server's clock is named, not mistaken for a refused item ----------------------
+
+_STOPPED = f"{SERVER_TIME_BUDGET} a geometry optimization exceeded this server's inline budget"
+
+
+def test_a_medium_the_clock_stopped_is_recorded_as_a_time_budget_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same medium may pass on an idle pod, so it is not listed as a refused input."""
+    server = install(monkeypatch, FakeCalcServer())
+    _refuse(server, "relax_structure", _relaxing(solvent="toluene"), message=_STOPPED)
+
+    result = _run(
+        compose.solvent_comparison(
+            InMemoryStore(), *_ESTERIFICATION, ["water", "toluene"], symmetry_numbers=_ESTER_SIGMAS
+        )
+    )
+
+    (stopped,) = result.failed
+    assert (stopped.solvent, stopped.cause) == ("toluene", "time_budget")
+
+
+def test_a_bond_the_clock_stopped_is_recorded_as_a_time_budget_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """And a bond refused for its input is still `refused`: the cause is read, not assumed."""
+    server = install(monkeypatch, FakeCalcServer())
+    _refuse(server, "embed_structure", _embedding("[CH3]"), message=_STOPPED)
+
+    survey = _run(compose.bond_dissociation_survey(InMemoryStore(), _ETHYLBENZENE, _CLEAVAGES))
+
+    assert [entry.cause for entry in survey.failed] == ["time_budget"]
+
+
+def test_a_ranking_every_failure_of_which_was_the_clock_is_named_as_a_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Inside a species screen that makes the medium a `time_budget` stop rather than refused."""
+    server = install(monkeypatch, FakeCalcServer())
+    _refuse(server, "relax_structure", _relaxing(smiles=_ENOL, solvent="toluene"), message=_STOPPED)
+
+    with pytest.raises(CalcTimeBudgetError):
+        _run(
+            compose.species_ranking(
+                InMemoryStore(), _TAUTOMERS, kind="tautomers", solvent="toluene"
+            )
+        )
+
+    screen = _run(
+        compose.species_solvent_comparison(
+            InMemoryStore(), _TAUTOMERS, ["water", "toluene"], kind="tautomers"
+        )
+    )
+    (stopped,) = screen.failed
+    assert (stopped.solvent, stopped.cause) == ("toluene", "time_budget")
+
+
+def test_a_ranking_with_any_refused_input_is_a_refusal_whatever_else_was_stopped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One form the server cannot handle means no amount of waiting completes the set."""
+    server = install(monkeypatch, FakeCalcServer())
+    _refuse(server, "embed_structure", _embedding(_KETO))
+    _refuse_also = server.overrides["embed_structure"]
+
+    def both(arguments: dict[str, Any]) -> dict[str, Any]:
+        if arguments["smiles"] == _ENOL:
+            raise ValueError(_STOPPED)
+        return _refuse_also(arguments)
+
+    server.overrides["embed_structure"] = both
+
+    with pytest.raises(ValueError, match="2 of 2 species") as refused:
+        _run(compose.species_ranking(InMemoryStore(), _TAUTOMERS, kind="tautomers"))
+    assert not isinstance(refused.value, CalcTimeBudgetError)

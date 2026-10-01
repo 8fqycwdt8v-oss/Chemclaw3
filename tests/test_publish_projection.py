@@ -1485,3 +1485,16 @@ def test_a_partial_bond_survey_publishes_its_bonds_but_no_weakest_bond() -> None
     assert len(extra["sites"]) == 1, "the computed bond is still published"
     (flag,) = [f for f in extra["flags"] if f.flag == "bond_not_computed"]
     assert flag.message == "C-C [0, 1] could not be computed"
+
+
+def test_a_medium_the_clock_stopped_is_published_as_a_stop_not_a_failure_of_the_item() -> None:
+    """The one cause a reader must not take as a property of the item says so in the flag itself."""
+    payload = _screen(
+        failed=[FailedMedium(solvent="toluene", reason="inline budget", cause="time_budget")]
+    )
+
+    _, _, _, extra = projection.PAYLOAD_PROJECTORS["SolventComparisonResult"](payload)
+
+    (flag,) = [f for f in extra["flags"] if f.flag == "medium_not_computed"]
+    assert flag.message == "toluene was stopped by the calculation service's time budget"
+    assert flag.detail["cause"] == "time_budget"

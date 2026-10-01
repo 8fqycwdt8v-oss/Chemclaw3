@@ -1255,6 +1255,12 @@ class SpeciesDistribution(BaseModel):
         return max(self.species, key=lambda candidate: candidate.population)
 
 
+#: Why one item of a screen has no answer. `refused`: the calculation service refused the input or
+#: could not compute it — a property of the item. `time_budget`: the service's inline wall clock
+#: stopped it — a property of the pod's load at that moment, which the same item may pass when idle.
+FailureCause = Literal["refused", "time_budget"]
+
+
 class FailedMedium(BaseModel):
     """One medium of a solvent screen that could not be computed, and the reason it could not.
 
@@ -1269,6 +1275,7 @@ class FailedMedium(BaseModel):
 
     solvent: str | None = None
     reason: str
+    cause: FailureCause = "refused"
 
 
 class SpeciesStanding(BaseModel):
@@ -1343,6 +1350,7 @@ class FailedBond(BaseModel):
     bond: str
     fragments: list[str]
     reason: str
+    cause: FailureCause = "refused"
 
 
 class DissociatedBond(BaseModel):
