@@ -545,24 +545,42 @@ _STOPPED = f"{SERVER_TIME_BUDGET} a geometry optimization exceeded this server's
 def test_a_medium_the_clock_stopped_is_recorded_as_a_time_budget_stop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The same medium may pass on an idle pod, so it is not listed as a refused input."""
+    """The same medium may pass on an idle pod, so it is not listed as a refused input.
+
+    And a medium refused for its input beside it stays `refused`: the cause is read off each
+    refusal, so neither default can stand in for the other.
+    """
     server = install(monkeypatch, FakeCalcServer())
-    _refuse(server, "relax_structure", _relaxing(solvent="toluene"), message=_STOPPED)
+
+    def stopped_or_refused(arguments: dict[str, Any]) -> dict[str, Any]:
+        if arguments.get("solvent") == "toluene":
+            raise ValueError(_STOPPED)
+        if arguments.get("solvent") == "methanol":
+            raise ValueError(_REFUSAL)
+        result: dict[str, Any] = server._relax_structure(arguments)
+        return result
+
+    server.overrides["relax_structure"] = stopped_or_refused
 
     result = _run(
         compose.solvent_comparison(
-            InMemoryStore(), *_ESTERIFICATION, ["water", "toluene"], symmetry_numbers=_ESTER_SIGMAS
+            InMemoryStore(),
+            *_ESTERIFICATION,
+            ["water", "toluene", "methanol"],
+            symmetry_numbers=_ESTER_SIGMAS,
         )
     )
 
-    (stopped,) = result.failed
-    assert (stopped.solvent, stopped.cause) == ("toluene", "time_budget")
+    assert [(entry.solvent, entry.cause) for entry in result.failed] == [
+        ("toluene", "time_budget"),
+        ("methanol", "refused"),
+    ]
 
 
 def test_a_bond_the_clock_stopped_is_recorded_as_a_time_budget_stop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """And a bond refused for its input is still `refused`: the cause is read, not assumed."""
+    """A survey records the stop per bond, as a screen does per medium."""
     server = install(monkeypatch, FakeCalcServer())
     _refuse(server, "embed_structure", _embedding("[CH3]"), message=_STOPPED)
 
@@ -612,3 +630,18 @@ def test_a_ranking_with_any_refused_input_is_a_refusal_whatever_else_was_stopped
     with pytest.raises(ValueError, match="2 of 2 species") as refused:
         _run(compose.species_ranking(InMemoryStore(), _TAUTOMERS, kind="tautomers"))
     assert not isinstance(refused.value, CalcTimeBudgetError)
+
+
+def test_a_screen_every_item_of_which_the_clock_stopped_is_a_stop_not_a_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nothing answered and no input was refused: the job says the clock stopped it."""
+    server = install(monkeypatch, FakeCalcServer())
+    _refuse(server, "relax_structure", _relaxing(), message=_STOPPED)
+
+    with pytest.raises(CalcTimeBudgetError, match="no medium of this solvent screen"):
+        _run(
+            compose.solvent_comparison(
+                InMemoryStore(), *_ESTERIFICATION, ["water"], symmetry_numbers=_ESTER_SIGMAS
+            )
+        )

@@ -1409,6 +1409,19 @@ def _cause(refusal: ValueError) -> FailureCause:
     return "time_budget" if isinstance(refusal, CalcTimeBudgetError) else "refused"
 
 
+def _refusal(causes: Sequence[FailureCause]) -> type[ValueError]:
+    """The class a screen refuses with when nothing it was asked for could be answered.
+
+    `CalcTimeBudgetError` when every failed item was stopped by the server's clock, so a caller —
+    a species screen reading one medium's ranking, or a chemist reading a job — sees a stop rather
+    than a refused input; a plain `ValueError` as soon as one input was refused, because then no
+    amount of waiting completes the set. Both are non-retryable.
+    """
+    if causes and all(cause == "time_budget" for cause in causes):
+        return CalcTimeBudgetError
+    return ValueError
+
+
 def _named(failures: Sequence[tuple[str, str]]) -> str:
     """`label (reason); label (reason)`: every failed item of a screen, in the order asked."""
     return "; ".join(f"{label} ({reason})" for label, reason in failures)
@@ -1539,7 +1552,7 @@ async def solvent_comparison(
     ]
     results = [outcome for outcome in outcomes if not isinstance(outcome, ValueError)]
     if not results:
-        raise ValueError(
+        raise _refusal([entry.cause for entry in failed])(
             "no medium of this solvent screen could be computed: "
             + _named([(_medium(entry.solvent), entry.reason) for entry in failed])
         )
@@ -1934,7 +1947,7 @@ async def species_ranking(
     stated = dict(symmetry_numbers or {})
     energies: list[SpeciesEnergy] = []
     refused: list[tuple[str, str]] = []
-    stopped = 0
+    causes: list[FailureCause] = []
     for index, (smiles, _) in enumerate(considered, start=1):
         progress(f"species {index}/{len(considered)}: {smiles}")
         # **`stated.get(smiles)`, not a literal 1.** Passing 1 marked the number *stated*, so the
@@ -1950,7 +1963,7 @@ async def species_ranking(
         if isinstance(outcome, ValueError):
             # By SMILES rather than label: it is the string the caller removes and passes back.
             refused.append((smiles, str(outcome)))
-            stopped += _cause(outcome) == "time_budget"
+            causes.append(_cause(outcome))
         else:
             energies.append(outcome)
     if refused:
@@ -1960,11 +1973,9 @@ async def species_ranking(
         # the enumeration. Trying the rest first is what makes the refusal useful: it names every
         # form that cannot be computed, not only the first, and each one that could is now cached
         # (D-011), so the rerun without the offenders pays for none of them again.
-        # A time-budget stop on every failed form is named as one, so a species screen records the
-        # medium as stopped by the clock rather than refused; any refusal of an input makes the
-        # whole refusal one, because then no amount of waiting completes the set.
-        raised = CalcTimeBudgetError if stopped == len(refused) else ValueError
-        raise raised(
+        # `_refusal`'s rule: a stop on every failed form is named as one, so a species screen
+        # records the medium as stopped by the clock rather than refused.
+        raise _refusal(causes)(
             f"{len(refused)} of {len(considered)} species could not be computed, and a "
             "distribution over the rest would re-share their population among the forms that "
             "were: " + _named(refused) + ". Each reason says what that form needs — a form "
@@ -2139,7 +2150,7 @@ async def species_solvent_comparison(
     ]
     distributions = [outcome for outcome in outcomes if not isinstance(outcome, ValueError)]
     if not distributions:
-        raise ValueError(
+        raise _refusal([entry.cause for entry in failed])(
             "no medium of this species screen could be ranked: "
             + _named([(_medium(entry.solvent), entry.reason) for entry in failed])
         )
@@ -2335,7 +2346,7 @@ async def bond_dissociation_survey(
     # A bond is named with its atoms: "C-H" alone is ambiguous in any molecule with two of them.
     names = [f"{entry.bond} {entry.atoms}" for entry in failed]
     if not results:
-        raise ValueError(
+        raise _refusal([entry.cause for entry in failed])(
             f"no bond of {smiles} could be computed: "
             + _named([(name, entry.reason) for name, entry in zip(names, failed, strict=True)])
         )

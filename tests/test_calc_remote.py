@@ -1014,9 +1014,10 @@ async def test_a_time_budget_stop_is_named_and_stays_a_refusal(
     Wall clock depends on load, so this is the one refusal that is not a property of the molecule.
     Named — `CalcTimeBudgetError`, which a screen records as a `time_budget` stop — and still
     non-retryable, because a retry runs the same work against the same clock
-    (`D-2026-10-01-a-stop-by-the-clock-is-named-not-retried`). The text is the literal the calc
-    server writes (`engine/budget.Deadline.check`), transcribed for the reason the capacity test
-    above gives.
+    (`D-2026-10-01-a-stop-by-the-clock-is-named-not-retried`). The marker is the literal the
+    calc server writes at the head (`engine/budget.TIME_BUDGET_MARKER`), transcribed for the reason
+    the capacity test above gives; the sentence after it is *shaped like* `Deadline.check`'s, not
+    copied, because only the head is matched.
     """
 
     class _Stopped(_FakeSession):
@@ -1024,9 +1025,9 @@ async def test_a_time_budget_stop_is_named_and_stays_a_refusal(
             if name == "calculation_key":
                 return _Result({"key": _KEY})
             return _Result(
-                "Error executing tool relax_structure: [calc-time-budget] a geometry optimization "
-                "exceeded this server's inline budget of 900s (spent 901.2s; stopped after 11 of "
-                "200 optimizer cycles).",
+                "Error executing tool predict_pka: [calc-time-budget] a geometry optimization "
+                "exceeded this server's inline budget of 780s (spent 781.2s; stopped after 11 "
+                "gradient evaluations past the input geometry).",
                 is_error=True,
             )
 

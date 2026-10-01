@@ -528,7 +528,9 @@ async def invoke(session: ClientSession, tool: str, arguments: dict[str, Any]) -
     `McpRequestRefused` carries the server's own message, because that message is the whole content
     of the refusal. `McpServerFault` means nobody answered, or the server answered that it broke.
     `McpAtCapacity` — a subclass of the first — means the server answered that it is full, which is
-    the one refusal that is worth asking again about.
+    the one refusal that is worth asking again about. `McpTimeBudget` — the other subclass — means
+    the server's own wall clock stopped the work: still a refusal, but one about the pod's load
+    rather than the input.
 
     This is the only place that can classify a failure of the *call*, because it is the only place
     that knows a call was in flight — `open_session`'s guard deliberately stops at the connection.
