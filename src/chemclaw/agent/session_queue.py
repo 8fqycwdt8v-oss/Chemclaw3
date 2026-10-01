@@ -1,6 +1,6 @@
 """The messages waiting for a session's running turn to end — an ordered, bounded, leased queue.
 
-`D-2026-09-27-a-queued-message-waits-in-its-senders-request`. A message sent while another turn runs
+`D-2026-10-01-a-queued-message-waits-in-its-senders-request`. A message sent while another turn runs
 on the session used to be refused 409 (`SessionTurnClaims`, D-121), which was the right
 serialisation and the wrong answer once a session holds several people: the second chemist's
 question is not a double-submit, it is the next thing somebody said. So it waits.
@@ -147,7 +147,8 @@ class SessionTurnQueue:
                 await cur.execute(_ENQUEUE, (session_id, sender, lease_seconds))
                 row = await cur.fetchone()
             await conn.commit()
-        assert row is not None  # an INSERT … RETURNING that did not raise returned its row
+        if row is None:  # an INSERT … RETURNING that did not raise always returns its row
+            raise RuntimeError("session_turn_queue: the INSERT returned no ticket")
         return int(row[0])
 
     async def position(self, session_id: str, ticket: int, lease_seconds: float) -> int | None:

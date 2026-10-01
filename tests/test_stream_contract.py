@@ -272,7 +272,7 @@ async def test_a_turn_still_setting_up_holds_the_session_against_a_second_one(
     `session_store="memory"` (the code default and what the dev lanes run) there is no second guard
     behind it.
 
-    Since `D-2026-09-27-a-queued-message-waits-in-its-senders-request` the second message is not
+    Since `D-2026-10-01-a-queued-message-waits-in-its-senders-request` the second message is not
     refused: it joins the session's line. The property is unchanged — it must not *run* while the
     first holds the slot — and the discriminator is that the fake agent answers at once, so a
     second turn admitted beside the first would be finished long before the first is let go.

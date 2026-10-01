@@ -735,7 +735,7 @@ class Settings(
         # of each.
         #
         # **A turn is more than one socket once a session is shared**
-        # (`D-2026-09-27-a-queued-message-waits-in-its-senders-request`): besides its sender's own
+        # (`D-2026-10-01-a-queued-message-waits-in-its-senders-request`): besides its sender's own
         # stream, up to `service_turn_max_watchers` participants may follow it and up to
         # `service_turn_queue_max` messages may wait behind it, each on an open stream of its own.
         per_turn = 1 + self.service_turn_max_watchers + self.service_turn_queue_max

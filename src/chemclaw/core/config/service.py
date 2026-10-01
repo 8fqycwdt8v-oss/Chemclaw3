@@ -80,7 +80,7 @@ class ServiceSettings(BaseSettings):
     # crashed worker frees its session in about a minute rather than at the next restart.
     service_turn_claim_lease_seconds: float = Field(default=60.0, gt=0)
     # How many messages may wait in one session for its running turn to end
-    # (`D-2026-09-27-a-queued-message-waits-in-its-senders-request`). A message sent while another
+    # (`D-2026-10-01-a-queued-message-waits-in-its-senders-request`). A message sent while another
     # turn runs joins the session's line instead of being refused, and runs as its own sender's
     # turn when it reaches the head; past this many the next one is refused 409, as every second
     # message used to be. Each sender may hold one place per session whatever this is, so the

@@ -209,7 +209,7 @@ def test_a_double_submit_to_one_session_joins_its_line_not_429(monkeypatch: Any)
     This pins `besides=session_id`. Without it the answer a UI sees for a double-submit would be a
     function of how many other sessions the chemist has open — a place in line below the cap, a 429
     at it — for one unchanged user action. The line itself
-    (`D-2026-09-27-a-queued-message-waits-in-its-senders-request`) is what replaced the 409 this
+    (`D-2026-10-01-a-queued-message-waits-in-its-senders-request`) is what replaced the 409 this
     test used to pin; it holds one place per sender, so the retry is bounded there instead.
     """
     monkeypatch.setattr(settings, "service_max_concurrent_turns_per_actor", 2)

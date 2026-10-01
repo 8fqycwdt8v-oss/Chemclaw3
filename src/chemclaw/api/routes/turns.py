@@ -3,7 +3,7 @@
 `POST /sessions/{id}/messages` runs a turn under five guards that must compose exactly: the
 per-session in-process lease and the durable cross-process claim (a busy session is a *line* — the
 message waits in it and runs as its sender when its turn comes, and only a full line is a 409:
-`D-2026-09-27-a-queued-message-waits-in-its-senders-request`), the per-actor
+`D-2026-10-01-a-queued-message-waits-in-its-senders-request`), the per-actor
 concurrent-turn cap (429, above the claim — `D-2026-09-19-a-pod-wide-cap-is-not-a-fair-one`), the
 admission semaphore (queued/shed on the open stream, D-166), and the budget (429). A sixth is
 spent before this module is reached at all: `api/rate_limit.py`'s token bucket, inside
@@ -155,7 +155,7 @@ async def post_message(
     the in-memory store there is no shared history for two processes to corrupt.
 
     **Neither answers 409 any more; a busy session is a line**
-    (`D-2026-09-27-a-queued-message-waits-in-its-senders-request`). Several people share a session
+    (`D-2026-10-01-a-queued-message-waits-in-its-senders-request`). Several people share a session
     now, and a second person's question is not a double-submit. A message that finds the session
     busy takes a ticket (`agent/session_queue`), and *this request* waits in the line: its stream
     reports `queued` with the ticket and its place, and when the ticket reaches the head it takes
@@ -253,7 +253,7 @@ async def post_message(
             headers={"Retry-After": _retry_after_hint()},
         )
     # **A busy session is a line, not a refusal**
-    # (`D-2026-09-27-a-queued-message-waits-in-its-senders-request`). A message that finds another
+    # (`D-2026-10-01-a-queued-message-waits-in-its-senders-request`). A message that finds another
     # turn running — here, on another replica, or already somebody waiting — joins the session's
     # line and this request waits in it; its stream reports the place, and when the ticket reaches
     # the head and the claims come free the turn runs as *this* principal. So the two claims below
@@ -780,7 +780,7 @@ async def session_queue(
     """The session's line — who is waiting for the running turn to end, first in line first.
 
     Any participant may read it, as any participant may read the transcript: the line names senders
-    and places and nothing they said (`D-2026-09-27-a-queued-message-waits-in-its-senders-request`).
+    and places and nothing they said (`D-2026-10-01-a-queued-message-waits-in-its-senders-request`).
     """
     front = state(request)
     waiting = await front.turn_queue.waiting(session_id)
@@ -840,7 +840,7 @@ async def watch_turn(
 ) -> EventSourceResponse:
     """Follow the session's running turn live — any participant, from this moment on.
 
-    **Fan-out** (`D-2026-09-27-a-queued-message-waits-in-its-senders-request`): the sender's own
+    **Fan-out** (`D-2026-10-01-a-queued-message-waits-in-its-senders-request`): the sender's own
     `POST` stream is one view of a turn; this is another, with a buffer of its own, so a watcher who
     stops reading is cut off (`stream_lagged`) without slowing the turn or anybody else's view. The
     turn is resolved from *this* session's entry in the registry after the session gate has admitted

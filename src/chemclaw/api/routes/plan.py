@@ -206,7 +206,7 @@ async def _owned_sessions(
 async def _shared_sessions(oid: str | None) -> list[_Candidate]:
     """The plan-gated sessions somebody else owns that the caller is a member of.
 
-    `D-2026-09-27-a-queued-message-waits-in-its-senders-request`, the inbox half: a member's turn in
+    `D-2026-10-01-a-queued-message-waits-in-its-senders-request`, the inbox half: a member's turn in
     somebody else's session can write a plan only that member may decide, and until this the only
     place it surfaced was the in-turn card — the inbox paged the caller's *owned* sessions. The list
     comes from the same registry `GET /sessions/shared` reads, so the inbox can never name a session
@@ -314,7 +314,7 @@ async def pending_plans(request: Request, principal: CurrentUser) -> PendingPlan
     session the caller would then be refused — the property `list_sessions` relies on, for the same
     reason. **Membership comes from the one `GET /sessions/shared` reads**, and a member's sessions
     are scanned beside the caller's own, newest activity first across both
-    (`D-2026-09-27-a-queued-message-waits-in-its-senders-request`). In either kind of session a plan
+    (`D-2026-10-01-a-queued-message-waits-in-its-senders-request`). In either kind of session a plan
     is listed only for the person who may decide it — its author, or the owner where no author was
     recorded — because an inbox row whose decision answers 403 is the failure an inbox exists to
     prevent. So a member sees only the plans their own turns wrote.

@@ -1,5 +1,5 @@
 -- The messages waiting for a session's running turn to end
--- (D-2026-09-27-a-queued-message-waits-in-its-senders-request).
+-- (D-2026-10-01-a-queued-message-waits-in-its-senders-request).
 --
 -- **Order, not content.** A row is a place in one session's line: which session, whose message, a
 -- ticket that orders it and a lease that proves its waiter is still alive. The message text and the

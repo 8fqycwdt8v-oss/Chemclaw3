@@ -1385,7 +1385,7 @@ async def test_a_turn_running_on_another_worker_is_waited_for_not_run_beside() -
     see, so seeding it *is* the other worker, faithfully: nothing else about that turn is
     observable from here.
 
-    Since `D-2026-09-27-a-queued-message-waits-in-its-senders-request` the message is not refused:
+    Since `D-2026-10-01-a-queued-message-waits-in-its-senders-request` the message is not refused:
     it waits in the session's line, keeps asking the durable claim, and runs once the other
     worker's turn lets go — never before, and without disturbing that worker's claim meanwhile.
 
@@ -1983,7 +1983,7 @@ async def test_concurrent_turn_on_same_session_waits_in_line() -> None:
     Two concurrent turns would drive `agent.run` against the same TurnSession at once,
     interleaving two turns' messages into one conversation thread — so the second must not run
     beside the first. It used to be shed with 409; since
-    `D-2026-09-27-a-queued-message-waits-in-its-senders-request` it joins the session's line and
+    `D-2026-10-01-a-queued-message-waits-in-its-senders-request` it joins the session's line and
     runs when the first ends. A *third* message from the same sender while the second still waits is
     the one that is refused: one place per sender per session.
     """
@@ -2397,6 +2397,13 @@ def test_every_session_scoped_route_is_ownership_gated() -> None:
         ("/sessions/{session_id}/members", "GET"),
         ("/sessions/{session_id}/members/{actor}", "PUT"),
         ("/sessions/{session_id}/members/{actor}", "DELETE"),
+        # The session's line and the running turn's live view
+        # (`D-2026-10-01-a-queued-message-waits-in-its-senders-request`). A stranger is 404 on all
+        # three, so none of them says whether a turn is running or who is waiting; what a member may
+        # do on them is `tests/test_session_turn_queue.py`'s subject.
+        ("/sessions/{session_id}/queue", "GET"),
+        ("/sessions/{session_id}/queue/{ticket}", "DELETE"),
+        ("/sessions/{session_id}/turn/stream", "GET"),
     }, (
         "new session-scoped route detected — it MUST resolve ownership via _resolve_session, "
         "and this inventory + the non-owner sweep below must cover it"
@@ -2411,10 +2418,10 @@ def test_every_session_scoped_route_is_ownership_gated() -> None:
     app.dependency_overrides[require_principal] = lambda: bob
     for route in session_routes:
         for method in (route.methods or set()) - {"HEAD", "OPTIONS"}:
-            # `ref` and `actor` are supplied for the routes that take them and ignored by the rest;
-            # `str.format` drops the surplus keyword rather than complaining, so one line still
-            # builds a URL for all of them.
-            url = route.path.format(session_id=session_id, ref="0" * 64, actor=bob.oid)
+            # `ref`, `actor` and `ticket` are supplied for the routes that take them and ignored by
+            # the rest; `str.format` drops the surplus keyword rather than complaining, so one line
+            # still builds a URL for all of them.
+            url = route.path.format(session_id=session_id, ref="0" * 64, actor=bob.oid, ticket=1)
             # The upload route takes multipart, the others JSON; send whichever the route expects so
             # a 404 here proves the *ownership* gate rather than a body-parsing rejection.
             if url.endswith("/attachments"):
@@ -2643,7 +2650,7 @@ def test_the_socket_budget_cannot_be_reached_by_the_caps_it_is_meant_to_cover() 
     from chemclaw.core.config import Settings
 
     # A turn is its sender's stream plus the participants following it and the messages waiting
-    # behind it (`D-2026-09-27-a-queued-message-waits-in-its-senders-request`).
+    # behind it (`D-2026-10-01-a-queued-message-waits-in-its-senders-request`).
     per_turn = 1 + settings.service_turn_max_watchers + settings.service_turn_queue_max
     assert (
         settings.service_max_connections

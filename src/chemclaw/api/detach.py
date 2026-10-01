@@ -48,7 +48,7 @@ because `chemclaw_turns_in_flight` counts leases rather than permits, so a repli
 turns than it admitted reads as exactly that.
 
 **Several people can watch one turn, and none of them can hold it**
-(`D-2026-09-27-a-queued-message-waits-in-its-senders-request`). A shared session has more than one
+(`D-2026-10-01-a-queued-message-waits-in-its-senders-request`). A shared session has more than one
 participant, so a turn has more than one reader: the sender's own stream, and any other
 participant's `GET /sessions/{id}/turn/stream`. Each reader has **its own** bounded buffer and the
 pump never waits on any of them — it offers every event to every attached reader and moves on.
@@ -70,7 +70,7 @@ nothing about the turn.
 import asyncio
 import contextlib
 import logging
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from typing import Any
 
 from chemclaw.api.events import ErrorEvent, sse_frame
@@ -287,7 +287,7 @@ class DetachableTurn:
         """The sender's view of the turn. Cancelling it detaches; the turn does not notice."""
         return self._view(self._sender)
 
-    def watch(self) -> AsyncIterator[dict[str, str]] | None:
+    def watch(self) -> AsyncGenerator[dict[str, str], None] | None:
         """Another participant's view, from this moment on; `None` once the turn is over.
 
         Attached here, synchronously, rather than on first iteration, so the view starts at the
@@ -302,7 +302,7 @@ class DetachableTurn:
         self._readers.add(reader)
         return self._view(reader)
 
-    async def _view(self, reader: _Reader) -> AsyncIterator[dict[str, str]]:
+    async def _view(self, reader: _Reader) -> AsyncGenerator[dict[str, str], None]:
         """One reader's stream, to the turn's end, its own cut-off, or its own cancellation.
 
         The `finally` detaches the reader and drains its buffer. For the sender's reader it is also

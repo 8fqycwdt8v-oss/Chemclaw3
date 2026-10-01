@@ -310,7 +310,7 @@ async def test_a_client_gone_before_the_stream_starts_does_not_wedge_the_session
 
         # Within the lease the guard still guards: the entry is indistinguishable from a
         # live turn, so a duplicate submit does not run — it waits in the session's line
-        # (`D-2026-09-27-a-queued-message-waits-in-its-senders-request`).
+        # (`D-2026-10-01-a-queued-message-waits-in-its-senders-request`).
         status, _ = await _request(
             app, "POST", f"/sessions/{session_id}/messages", {"message": "again"}
         )

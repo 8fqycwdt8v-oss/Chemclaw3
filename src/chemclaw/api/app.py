@@ -501,7 +501,7 @@ def create_app(
     # history to corrupt.
     app.state.turn_claims = turn_claims if turn_claims is not None else _default_turn_claims()
     # Each session's line of messages waiting for its running turn to end
-    # (`D-2026-09-27-a-queued-message-waits-in-its-senders-request`), and what wakes this process's
+    # (`D-2026-10-01-a-queued-message-waits-in-its-senders-request`), and what wakes this process's
     # waiters when a turn here ends. The line is durable exactly where the claim above is.
     app.state.turn_queue = _default_turn_queue()
     app.state.queue_signal = QueueSignal()

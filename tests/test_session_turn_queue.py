@@ -1,6 +1,6 @@
 """A busy shared session is a line, every participant can watch a turn, and the inbox finds members.
 
-`D-2026-09-27-a-queued-message-waits-in-its-senders-request`. Three properties, each driven at the
+`D-2026-10-01-a-queued-message-waits-in-its-senders-request`. Three properties, each driven at the
 outermost thing production calls (`tasks/lessons.md` rule 55):
 
 - **The line.** A message sent while another turn runs waits in the session's line, in order, and

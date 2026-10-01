@@ -132,7 +132,7 @@ class QueuedMessageOut(BaseModel):
     """One message waiting in a session's line — `GET /sessions/{id}/queue`.
 
     No text: the line holds the order and never the message
-    (`D-2026-09-27-a-queued-message-waits-in-its-senders-request`), which lives in the sender's own
+    (`D-2026-10-01-a-queued-message-waits-in-its-senders-request`), which lives in the sender's own
     waiting request until it runs. `position` is how many are ahead (0 = next); `mine` is whether
     the caller sent it — the one they may withdraw with `DELETE /sessions/{id}/queue/{ticket}`,
     beside the owner, who may withdraw any.

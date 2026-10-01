@@ -345,7 +345,7 @@ _ERASE: tuple[tuple[str, str], ...] = (
         "DELETE FROM plan_authors "
         f"WHERE actor = ANY(%(actors)s) OR session_id IN ({_SESSION_SCOPED})",
     ),
-    # A place in a session's line (`D-2026-09-27-a-queued-message-waits-in-its-senders-request`):
+    # A place in a session's line (`D-2026-10-01-a-queued-message-waits-in-its-senders-request`):
     # the row names only the sender, but it is theirs, and a leaver's waiting message must not run
     # after they are gone. The waiter holding it reads the vanished ticket as a withdrawal.
     (

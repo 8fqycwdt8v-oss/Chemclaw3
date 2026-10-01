@@ -221,8 +221,23 @@
         },
         {
           "expr": "sum(rate(chemclaw_turns_conflict_total[5m]))",
-          "legendFormat": "conflict (409)",
+          "legendFormat": "session busy (joined its line)",
           "refId": "E"
+        },
+        {
+          "expr": "sum(rate(chemclaw_turn_queue_refused_total[5m]))",
+          "legendFormat": "refused (line full, 409)",
+          "refId": "G"
+        },
+        {
+          "expr": "sum(rate(chemclaw_turn_queue_withdrawn_total[5m]))",
+          "legendFormat": "waited, never ran (withdrawn)",
+          "refId": "H"
+        },
+        {
+          "expr": "sum(rate(chemclaw_turn_readers_lagged_total[5m]))",
+          "legendFormat": "view cut off (reader lagged)",
+          "refId": "I"
         },
         {
           "expr": "sum(rate(chemclaw_turns_refused_thread_size_total[5m]))",

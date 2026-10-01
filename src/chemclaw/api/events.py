@@ -25,7 +25,7 @@ class QueuedEvent(BaseModel):
     takes its permit without blocking and never emits it.
 
     **It also reports the other wait a turn can have: its place in the session's line**
-    (`D-2026-09-27-a-queued-message-waits-in-its-senders-request`). A message sent while another
+    (`D-2026-10-01-a-queued-message-waits-in-its-senders-request`). A message sent while another
     participant's turn runs no longer answers 409; it waits for that turn to end, and this event
     says so each time its place changes. The two waits are told apart by `ticket`:
 
@@ -564,7 +564,7 @@ ErrorCode = Literal[
     "context_length",
     # A message that waited in the session's line and never ran: its sender withdrew it, the owner
     # did, the sender was removed from the session while it waited, or the session was deleted
-    # (`D-2026-09-27-a-queued-message-waits-in-its-senders-request`). Its own code because nothing
+    # (`D-2026-10-01-a-queued-message-waits-in-its-senders-request`). Its own code because nothing
     # failed and nothing was spent — the stream ends having done nothing, which is the one thing a
     # surface must not render as an error in the turn.
     "queue_cancelled",

@@ -225,7 +225,7 @@ _COUNTERS: dict[str, str] = {
     "chemclaw_budget_warnings_total": (
         "Times a session or user crossed `budget_warn_fraction` of a turn or token cap."
     ),
-    # **No longer a refusal** (`D-2026-09-27-a-queued-message-waits-in-its-senders-request`): a
+    # **No longer a refusal** (`D-2026-10-01-a-queued-message-waits-in-its-senders-request`): a
     # message that finds its session busy joins the session's line and waits its turn. `scope` says
     # what it found busy — this process's slot, another replica's durable claim, or a line already
     # holding somebody — so the population is unchanged (a turn that could not start at once) and
