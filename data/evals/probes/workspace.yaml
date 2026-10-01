@@ -549,3 +549,46 @@ probes:
       what each step "found" in the same turn is inventing it. If no such workflow is saved for this
       chemist it says so and offers to compose one, rather than doing the steps ad hoc and
       presenting that as the saved run.
+
+  # Second phrasings for two job tools that rested on one probe each (issue #487).
+
+  - id: ws-25
+    section: 8
+    persona: lab_leader
+    bucket: A
+    question: >-
+      We are choosing a co-former for OC(=O)c1ccccc1O. Between nicotinamide, NC(=O)c1cccnc1, and
+      urea, NC(N)=O, which one should associate more strongly with it? Rank the two by a
+      calculation, not by hydrogen-bond counting.
+    expects_tools: [compute_interaction_energy]
+    forbids_claims:
+      - "a co-crystal predicted to form or not to form"
+      - "a measured or literature binding constant"
+      - "an absolute binding free energy"
+    direction: >-
+      Two pairwise interaction energies, compared, is the right shape — and the tool's own framing
+      is a ranking between candidate partners, which is exactly the question. A good answer runs
+      both complexes in the same medium, reports which pairs more strongly, and says what the
+      numbers are: semiempirical pairwise association in a continuum, not a lattice energy and not
+      a co-crystal prediction. Whether a co-crystal forms is decided by packing, which nothing here
+      computes; a screen at the bench is what settles it.
+
+  - id: ws-26
+    section: 7
+    persona: lab_technician
+    bucket: A
+    question: >-
+      The quick conformer search on CC(C)(C)OC(=O)N1CCC[C@H]1C(=O)O gave populations I need to put
+      in a notebook. Re-run them at a level that would stand up, and tell me when they are ready.
+    expects_tools: [run_conformer_refinement, sample_conformers]
+    expects_job: true
+    forbids_claims:
+      - "a refined population presented before the refinement has returned"
+      - "that the quick-search populations were wrong rather than lower-confidence"
+    direction: >-
+      A refinement request with the molecule named this time, so the work is to launch the
+      refinement — reusing the earlier search if one is on file, a fresh one if not, and saying
+      which — and report it as a durable job with its id rather than quoting numbers it has not
+      got. The Boc carbamate's cis/trans rotamers are the populations most likely to move and an
+      answer that says what to expect to change is helpful; presenting refined values in the same
+      turn as the launch is the failure.

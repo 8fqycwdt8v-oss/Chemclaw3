@@ -12,6 +12,7 @@ Both wanted the same thing: a structure-derived identity, which is what these pi
 """
 
 import asyncio
+import csv
 
 import pytest
 from rdkit import Chem
@@ -38,6 +39,7 @@ from chemclaw.science.fingerprints.molfp.search import (
 )
 from chemclaw.science.fingerprints.rxnfp.fingerprint import reaction_definition
 from chemclaw.science.fingerprints.store import FingerprintRecord, InMemoryFingerprintStore
+from tests.siblings import SIBLING_SKIP, sibling_root
 
 
 def test_the_same_molecule_gets_one_id_however_it_is_written() -> None:
@@ -725,6 +727,26 @@ def test_standardization_is_recorded_in_the_fingerprint_definition() -> None:
     assert STANDARDIZATION_VERSION in reaction_definition()
 
 
+#: The three ferrocenyl Pd G3 precatalysts of `Chemclaw3_mock`'s ORD seed, verbatim — the species
+#: `standardize` was not a fixed point on — beside what the dppf one standardizes to.
+_DTBPF_PD_G3 = (
+    "CS(O[Pd]1([P](C(C)(C)C)(C(C)(C)C)C2=CC=CC2[Fe]C3C(P(C(C)(C)C)C(C)(C)C)=CC=C3)"
+    "C4=CC=CC=C4C5=C([NH2]1)C=CC=C5)(=O)=O"
+)
+_DPPF_PD_G3 = (
+    "CS(O[Pd]1([P](C2=CC=CC=C2)(C3=CC=CC=C3)C4=CC=CC4[Fe]C5C(P(C6=CC=CC=C6)C7=CC=CC=C7)=CC=C5)"
+    "C8=CC=CC=C8C9=C([NH2]1)C=CC=C9)(=O)=O"
+)
+_JOSIPHOS_PD_G3 = (
+    "CC(P(C(C)(C)C)C(C)(C)C)C1=C(C([Fe]C2C=CC=C2)C=C1)[P]([Pd]3(OS(C)(=O)=O)"
+    "C4=CC=CC=C4C5=C([NH2]3)C=CC=C5)(C6CCCCC6)C7CCCCC7"
+)
+_DPPF_PD_G3_STANDARD = (
+    "CS(=O)(=O)[O-].Nc1ccccc1-c1cccc[c]1[Pd+].[Fe+2]"
+    ".c1ccc(P(c2ccccc2)c2ccc[cH-]2)cc1.c1ccc(P(c2ccccc2)c2ccc[cH-]2)cc1"
+)
+
+
 #: What `standardize` does at `STANDARDIZATION_VERSION`, measured, one row per decision the
 #: pipeline takes. Every value here is an output of this build rather than a hand-written
 #: expectation, so a row that changes is a change in the notion of sameness and nothing else.
@@ -801,6 +823,14 @@ _STANDARDIZATION_AT_THIS_VERSION = (
     ("O=C(O)c1ccccc1.OC(=O)O", "O=C(O)O.O=C(O)c1ccccc1"),
     ("O=[N+]([O-])c1ccccc1.OCl(=O)(=O)=O", "O=[N+]([O-])c1ccccc1.[O-][Cl+3]([O-])([O-])O"),
     ("CCN.O=C=O", "CCN.O=C=O"),
+    # `std12` also re-perceives a cyclopentadienyl ring after a step moves its charge (`_cleaned`,
+    # `_uncharged`). Before, ferrocene came out as neutral cyclopentadiene beside a Cp *dianion* —
+    # `Reionize` moved a proton between fragments of a kekulé Cp⁻ — and a bare Cp⁻ as `c1cccc1`,
+    # which does not parse. The precatalyst rows are `Chemclaw3_mock`'s ORD seed, verbatim.
+    ("C1(C=CC=C1)[Fe]C1C=CC=C1", "[Fe+2].c1cc[cH-]c1.c1cc[cH-]c1"),
+    ("[CH-]1C=CC=C1", "C1=CCC=C1"),
+    ("CC(C)(C)P(C(C)(C)C)[C-]1C=CC=C1", "CC(C)(C)P(C1C=CC=C1)C(C)(C)C"),
+    (_DPPF_PD_G3, _DPPF_PD_G3_STANDARD),
 )
 
 
@@ -1281,3 +1311,80 @@ def test_oversized_smiles_is_refused_not_crashed() -> None:
     assert standard_smiles(huge) == huge
     # a real reagent well under the cap still parses
     assert require_molecule("CC(=O)Oc1ccccc1C(=O)O").GetNumAtoms() == 13
+
+
+# --- a fixed point ------------------------------------------------------------------------------
+#
+# `compound_note(raw)` hashes `standard_smiles(standard_smiles(raw))` and `compound_id(raw)` hashes
+# `standard_smiles(raw)`, and `compound_id_of_standard` hashes a stored standard form with no pass
+# at all. All three are one id only if `standardize` is a fixed point on its own output.
+
+
+def _not_a_fixed_point(written: str) -> str | None:
+    """Why `written` breaks the fixed point, or None — every way the three ids can disagree."""
+    standard = standard_smiles(written)
+    if Chem.MolFromSmiles(standard) is None:
+        return f"{written!r} standardizes to {standard!r}, which does not parse"
+    again = standard_smiles(standard)
+    if again != standard:
+        return f"{written!r} -> {standard!r} -> {again!r}"
+    if compound_note(written).id != compound_id(written):
+        return f"{written!r}: compound_note id is not compound_id"
+    return None
+
+
+@pytest.mark.parametrize(
+    "written",
+    [
+        _DTBPF_PD_G3,
+        _DPPF_PD_G3,
+        _JOSIPHOS_PD_G3,
+        "C1(C=CC=C1)[Fe]C1C=CC=C1",
+        "Cl[Zr](Cl)(C1C=CC=C1)C1C=CC=C1",
+        "CC1=C(C)C(C)([Rh](Cl)Cl)C(C)=C1C",
+        "[CH-]1C=CC=C1",
+        "[cH-]1cccc1.[Na+]",
+        "CC(C)(C)P(C(C)(C)C)[C-]1C=CC=C1",
+        "c1ccc(P(c2ccccc2)[c-]2cccc2)cc1",
+        *(written for written, _ in _STANDARDIZATION_AT_THIS_VERSION),
+    ],
+)
+def test_standardize_is_a_fixed_point_on_its_own_output(written: str) -> None:
+    """Standardizing a standard form returns it, so `compound_id(raw)` is `compound_note(raw).id`.
+
+    The first three rows are the ferrocenyl precatalysts it failed on: the Cp ring came back
+    kekulé from the raw string and aromatic from its own standard form, and for the Josiphos-type
+    one `Reionize` flipped a vinyl anion between two positions on every pass, so no number of
+    passes converged. The Cp⁻ rows are the per-token spellings `rxnfp` hands over, which used to
+    standardize to a string that does not parse. The rest is every decision the version table pins,
+    because a fixed point is a property of the whole pipeline and not of the metal branch.
+    """
+    assert _not_a_fixed_point(written) is None, _not_a_fixed_point(written)
+
+
+def test_standardize_is_a_fixed_point_on_every_molecule_of_the_mock_seed() -> None:
+    """The same property over every structure `Chemclaw3_mock` seeds, whole and per component.
+
+    Per component as well as whole because `rxnfp` standardizes a reaction one `.`-separated token
+    at a time, which is how a phosphinocyclopentadienide reached this module on its own. Read from
+    the sibling's CSVs rather than copied here, so a molecule the seed gains is covered without an
+    edit; the parametrized test above holds the ones that failed, so a missing checkout loses
+    breadth rather than the regression.
+    """
+    checkout, reason = sibling_root("CHEMCLAW_MOCK_REPO", "Chemclaw3_mock")
+    if checkout is None:
+        pytest.skip(f"{SIBLING_SKIP} {reason}; the mock seed's molecules are NOT checked")
+    tables = sorted((checkout / "app" / "eln" / "real_data").glob("*.csv"))
+    assert tables, f"{checkout} holds no app/eln/real_data/*.csv to read the seed from"
+    written: set[str] = set()
+    for table in tables:
+        with table.open(newline="") as handle:
+            for row in csv.DictReader(handle):
+                for column, cell in row.items():
+                    if column and "smiles" in column and cell:
+                        written.add(cell)
+                        written.update(cell.split("."))
+    parsed = sorted(s for s in written if Chem.MolFromSmiles(s) is not None)
+    assert any("[Fe]" in s for s in parsed), "the seed no longer carries a ferrocene to test"
+    failures = [why for s in parsed if (why := _not_a_fixed_point(s))]
+    assert not failures, "\n".join(failures)

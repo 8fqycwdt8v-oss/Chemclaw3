@@ -18,10 +18,13 @@ answers about a molecule the chemist thinks it has already seen.
 `standardize` is the missing step. The pipeline is deliberately the conventional one, in the
 conventional order, because a bespoke normalization is a bespoke notion of sameness:
 
-1. `Cleanup` — sanitize, disconnect metals, normalize functional-group spellings (nitro, N-oxide).
+1. `Cleanup` — sanitize, disconnect metals, normalize functional-group spellings (nitro, N-oxide),
+   with the disconnection taken first and re-perceived so a cyclopentadienide is aromatic before
+   anything reads it (`_cleaned`).
 2. Keep the one fragment `_is_organic` names, plus any spectator that is neither charged nor on
    RDKit's fragment list — which strips counterions and solvents while keeping adducts.
-3. `Uncharger` — neutralize what can be neutralized, so a carboxylate meets its acid.
+3. `Uncharger` — neutralize what can be neutralized, so a carboxylate meets its acid, and
+   re-perceive the result (`_uncharged`).
 4. `TautomerEnumerator.Canonicalize` — one representative per tautomer set.
 
 Steps 2 and 3 say **"the counterion is not part of the identity"**, and that claim holds for an
@@ -210,6 +213,14 @@ from chemclaw.core.ids import stable_hash
 # `supersedes` link from each compound note's new id to its old one and re-fingerprints the shelved
 # rows, so a citation to a pre-bump id still resolves and the graph does not keep a note per
 # spelling.
+#
+# **`std12` also carries the cyclopentadienyl fix** (`_cleaned`, `_uncharged`), folded in rather
+# than bumped because `std12` had reached `main` the same day and no release carried it. Before it,
+# `standardize` was not idempotent on a ferrocene — the three ferrocenyl Pd G3 precatalysts in
+# `Chemclaw3_mock`'s ORD seed standardized one way from the raw string and another from their own
+# standard form — and a bare phosphinocyclopentadienide standardized to `c1cccc1`, which does not
+# parse. Measured over that seed and every parseable SMILES literal in this tree, every standard
+# form that moved holds a Cp ring; `tests/test_compound_identity.py` pins them and the fixed point.
 STANDARDIZATION_VERSION = "std12"
 
 # The d- and f-block by atomic number — Sc→Zn, Y→Cd, La→Hg (lanthanides included) and Ac onward.
@@ -544,6 +555,56 @@ def _neutralization_is_protonation(before: Chem.Mol, after: Chem.Mol) -> bool:
     return _hydrogen_count(after) >= _hydrogen_count(before)
 
 
+#: The disconnector `Cleanup` runs, run ahead of it instead — see `_cleaned`.
+_METAL_DISCONNECTOR = rdMolStandardize.MetalDisconnector()
+
+
+def _cleaned(mol: Chem.Mol) -> Chem.Mol:
+    """`Cleanup`, with the metal disconnection taken before it rather than inside it.
+
+    **This is what made `standardize` not idempotent on a ferrocene**, and the three ferrocenyl
+    Pd G3 precatalysts in `Chemclaw3_mock`'s ORD seed are the measured case. `Cleanup` is
+    RemoveHs → MetalDisconnector → Normalize → Reionize, and an RDKit step that moves a charge
+    does not re-perceive aromaticity. Cyclopentadienyl is the common ring whose aromaticity turns
+    on its charge, so breaking an η1-drawn Cp–Fe bond left a cyclopentadienide still flagged
+    kekulé, and `Reionize` — which ranks acidic sites by SMARTS that tell an aromatic carbanion
+    from an aliphatic one — read it as aliphatic and moved a proton, across fragments: ferrocene
+    came out as neutral cyclopentadiene beside a Cp *dianion*. Standardizing that output again
+    parsed the rings aromatic and took a different path; for the Josiphos-type precatalyst
+    `Reionize` then flipped a vinyl anion between two positions on every call, so iterating to a
+    fixed point would never have reached one.
+
+    Disconnecting first is the whole fix because `Cleanup`'s first step, `RemoveHs`, sanitizes:
+    the ring is re-perceived aromatic before `Reionize` reads it, and `Cleanup`'s own disconnector
+    finds nothing left to do. Ferrocene is now `[Fe+2]` and two cyclopentadienides, the textbook
+    ionic picture, from either spelling.
+
+    The narrowness, stated: `Reionize` still oscillates on a vinyl anion *written as one*
+    (`[C-]1=CCC=C1`); the pipeline no longer produces that spelling, and no corpus this tree
+    reads contains it.
+    """
+    return rdMolStandardize.Cleanup(_METAL_DISCONNECTOR.Disconnect(mol))
+
+
+def _uncharged(mol: Chem.Mol) -> Chem.Mol:
+    """`Uncharger`'s neutral form of `mol`, with its aromaticity re-perceived.
+
+    The same RDKit behaviour as `_cleaned`, one step later and with no sanitizing step after it:
+    `Uncharger` protonates an aromatic cyclopentadienide and leaves all five atoms flagged
+    aromatic, so the "standard" form of a phosphinocyclopentadienide — the per-token spelling of
+    dppf and dtbpf that `rxnfp` hands this module — was `c1cccc1`, a string that does not parse.
+    Sanitizing perceives the neutral diene. A copy is sanitized and the unsanitized result kept if
+    that fails, because a half-sanitized molecule is worse than the one the pipeline used to carry.
+    """
+    uncharged = rdMolStandardize.Uncharger().uncharge(mol)
+    copy = Chem.Mol(uncharged)
+    try:
+        Chem.SanitizeMol(copy)
+    except Chem.MolSanitizeException:  # pragma: no cover - no measured case
+        return uncharged
+    return copy
+
+
 def standardize(mol: Chem.Mol) -> Chem.Mol:
     """Apply the standardization pipeline to a parsed molecule (see the module docstring).
 
@@ -583,7 +644,7 @@ def standardize(mol: Chem.Mol) -> Chem.Mol:
     hydrogen — sodium triacetoxyborohydride is the measured case, and the species is then kept with
     its charge, which is what `[BH4-].[Na+]` already gets one branch up for the same reason.
     """
-    cleaned = rdMolStandardize.Cleanup(mol)
+    cleaned = _cleaned(mol)
     # Atom maps go first and unconditionally, before any branch: they are a reaction's bookkeeping
     # rather than a property of the compound, and every exit below returns a molecule that becomes a
     # `compound_id` and a fingerprint row. Cleared on `cleaned` rather than on the argument because
@@ -658,7 +719,7 @@ def standardize(mol: Chem.Mol) -> Chem.Mol:
             if len(kept) == 1
             else Chem.MolFromSmiles(".".join(Chem.MolToSmiles(f) for f in kept))
         )
-    uncharged = rdMolStandardize.Uncharger().uncharge(cleaned)
+    uncharged = _uncharged(cleaned)
     if not _neutralization_is_protonation(cleaned, uncharged):
         return _TAUTOMERS.Canonicalize(cleaned)  # not a conjugate acid; keep the anion as written
     return _TAUTOMERS.Canonicalize(uncharged)
