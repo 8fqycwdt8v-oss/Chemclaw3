@@ -112,19 +112,14 @@ topic).
 
 ## 2 — Answers that are wrong without saying so
 
-- [ ] **`standardize` is not idempotent on ferrocenyl palladacycles, so `compound_id(raw)` is not
-      the id of `compound_note(raw)`** (issue #485) — [M], opened 2026-09-27 by the seeded-corpus measurement of
-      `D-2026-09-27-a-compound-id-a-bump-moves-is-superseded-not-orphaned`. Three of the 129
-      molecules in `Chemclaw3_mock`'s ORD seed — the dtbpf-, dppf- and Josiphos-type Pd G3
-      precatalysts — standardize to a kekulé Cp anion from the raw string and to the aromatic one
-      from that standard form, so `standard_smiles(standard_smiles(x)) != standard_smiles(x)`.
-      Driven: `compound_id(raw)` is `compound-bd1143cc135d` while `compound_note(raw).id` and every
-      `similar_molecules` hit cite `compound-626ec3b8d0ae` — so `compound_dependencies` on a note
-      carrying the raw string links an id no note is written under. It is also why a molecule-row
-      re-key moves those three keys although the bump did not touch them. The candidates are
-      iterating `standardize` to a fixed point (a bump, and the cost of a second pass on every
-      structure) or finding which `Cleanup`/tautomer step re-aromatizes and pinning it. Anchors:
-      `core/chem.py::standardize`, `core/chem.py::compound_id`, `ingest/eln/compound.py`.
+- [ ] **A metal hydride standardizes to its metal without the hydride** — [S], opened 2026-09-27
+      while fixing the cyclopentadienyl fixed point. Measured on this build and on `main` alike:
+      `standard_smiles("[PdH]Cl")` is `[Cl-].[Pd+]` and `[RuH2](C#[O+])Cl` is
+      `[C-]#[O+].[Cl-].[Ru+]` — the hydrogen on the metal is gone, so a hydride and the bare
+      metal salt would share a `compound_id`. The same class `D-2026-08-01` rescued NaBH4 from,
+      arriving through `Cleanup`'s metal disconnection rather than through `Uncharger`; not yet
+      traced to the step that drops it. Anchors: `core/chem.py::_cleaned`,
+      `core/chem.py::standardize`.
 
 - [ ] **`plan_gate.py` is paired with one of the five test files that cover it** — [S], opened
       2026-09-23 by the review of the wave that added it to the mutation backstop.
@@ -325,30 +320,18 @@ only holds defects can only ever restore the system to what it already intended 
       argument contract still reaches the right tool is a `make live-ab` question, not a reading
       question.
 
-- [ ] **About a third of tools still rest on one probe, and they are the compute and job tail** (issue #487)
-      — [S], narrowed 2026-09-24. Derived from `tests/test_probe_coverage.py::_probes` and
-      `::_expected_tools` with `load_profiles()` called first (two earlier measurements disagreed
-      on exactly that): 47 of 124 tools had one probe. The seven whose effect persists past the turn
-      — preferences, watches, skill proposals, plate observations, the results store, the knowledge
-      graph, a saved workflow — now have a second phrasing (ws-21..24, pt-08, du-11, du-12). What
-      remains is the semiempirical and prediction surface (`run_*`, `compute_*`, `enumerate_*`,
-      `predict_*`), where a missed call costs a re-run rather than a state change. It is **not** a
-      ratchet on the count, for the reason it never was: that taxes adding a tool rather than
-      bounding risk. Choose the next second questions by what a deployment calls —
-      `audit_events` per tool name — once one exists to read.
-
-- [ ] **`deep-research` has no index behind it** (issue #486) — [M]. `agent/research_tools.py::gather_evidence`
-      sweeps the knowledge graph, the ELN, the mounted document share and the fingerprint store —
-      every one internal. `skills/deep-research/SKILL.md` describes a capability whose corpus is
-      whatever notes exist (41 on this checkout, 2026-09-22). `Chemclaw3-mcp/MODULES.md` files `litsearch`
-      (Europe PMC / OpenAlex / Crossref bulk, built at image time, no egress) as *proposed*, and says
-      in as many words that it "gives Chemclaw3's existing `deep-research` skill a real index".
-      ChemRAG measured **+17.4% average relative gain** from a chemistry corpus and — the design input
-      that matters — that corpus choice is task-dependent: reaction prediction wants literature,
-      nomenclature wants structured databases. A process chemist asking "has anyone run this coupling
-      on a deactivated aryl chloride" currently gets whatever that corpus happens to say — this row
-      said 39 and then 40 for one count three sentences apart, which is why the number now appears
-      once, with the date it was measured.
+- [ ] **The enumeration and scan tail still rests on one probe per tool** — [S], narrowed
+      2026-10-01. Counted from every probe's `expects_tools` in `data/evals/probes/`: 26 tool names
+      have exactly one probe. The seven whose effect persists past the turn have a second phrasing
+      (ws-21..24, pt-08, du-11, du-12), and so does every `run_*`, `compute_*` and `predict_*` tool
+      that had one (ms-22..29, ws-25..26, an-38..40, gr-37, pr-07..08, op-35). What remains is the
+      `enumerate_*` family, the scans (`scan_coordinate`, `profile_rotation`), `optimize_geometry`,
+      `rank_species_across_solvents`, and a scatter of single tools elsewhere, where a missed
+      call costs a re-run rather than a state change. It is **not** a ratchet on the count, for
+      the reason it never was: that taxes adding a tool rather than bounding risk. Choose the next
+      second questions by what a deployment calls — `audit_events` per tool name — once one exists
+      to read; none does yet, which is why the last batch covered a whole prefix family rather
+      than a ranked few.
 
 - [ ] **A shared session serialises by refusing and streams to one reader** (issue #488) — [M]. What is left of
       the multi-human-session work after `D-2026-09-27-in-a-shared-session-the-sender-governs`

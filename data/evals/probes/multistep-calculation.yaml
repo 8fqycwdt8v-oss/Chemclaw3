@@ -577,3 +577,187 @@ probes:
       order of finished isomers, not a regioselectivity — which isomer a methylation or any
       electrophilic aromatic substitution actually delivers is decided kinetically at the sigma
       complex, and nothing here computed a transition state.
+
+  # Second phrasings for the protocol launchers that rested on one probe each (issue #487). No
+  # deployment's `audit_events` exist to say which tools are called most, so every `run_*` here
+  # gets one more question rather than a ranked few; each asks the same capability from a
+  # different starting point, so a pass is not one sentence's routing.
+
+  - id: ms-22
+    section: 6
+    persona: lab_leader
+    bucket: A
+    question: >-
+      Before we fit any more models on Oc1ccccn1 I want to know which form we are actually
+      modelling in toluene — the hydroxypyridine or the pyridone. Work it out properly rather than
+      from the drawing.
+    expects_tools: [run_tautomer_resolution, rank_species]
+    expects_job: true
+    forbids_claims:
+      - "a tautomer ratio the calculation did not return"
+      - "a tautomer that was never enumerated"
+      - "a solvent dependence asserted for a medium that was not computed"
+    direction: >-
+      The classic case where the drawing and the compound disagree by medium, so the question is
+      real and the answer must come from an enumerated, ranked set rather than from textbook
+      recall — the named protocol, or enumeration followed by a ranking. A good answer reports the
+      mixture in toluene, names the level it ranked at, and says that a gap inside a few kcal/mol of
+      semiempirical error does not choose a form. Water was not asked for; if the answer volunteers
+      the well-known shift in polar solvent it labels that as recollection, or offers to compute it,
+      rather than presenting it as part of this result.
+
+  - id: ms-23
+    section: 6
+    persona: lab_technician
+    bucket: A
+    question: >-
+      I am setting the pH for an extraction of NCCc1ccc(O)c(O)c1 and I need to know which species
+      is actually in the aqueous phase at pH 9 — neutral, zwitterion, cation or anion. A single
+      pKa will not settle it, it has three ionisable groups.
+    expects_tools: [run_microspecies_profile, rank_species]
+    expects_job: true
+    forbids_claims:
+      - "a microstate population the calculation did not return"
+      - "a partition coefficient or extraction efficiency, which was not computed"
+      - "a single predicted pKa presented as the speciation answer"
+    direction: >-
+      Same capability as the amphoteric-acid probe, asked from the extraction side: the asker
+      wants the dominant charge state at one pH and has already said a single pKa is the wrong
+      instrument. A good answer enumerates the protonation microstates, ranks them in water at
+      the stated pH, and names the dominant form as a structure, saying whether the zwitterion was
+      in the enumerated set. What it must not do is turn the speciation into an extraction
+      recommendation as though a partition coefficient had been computed — the useful close is
+      which species dominates and that the partitioning itself is a measurement or a separate
+      calculation.
+
+  - id: ms-24
+    section: 6
+    persona: lab_technician
+    bucket: A
+    question: >-
+      Our methylation gives two diastereomers of CC1CC(CCC1=O)C(C)(C)C and the ratio shifts if we
+      let the mixture sit with base. Which one is the equilibrium product, and by how much?
+    expects_tools: [run_stereoisomer_ranking, rank_species]
+    expects_job: true
+    forbids_claims:
+      - "a diastereomer ratio the calculation did not return"
+      - "the kinetic ratio of the methylation predicted from the ranking"
+      - "a distinction drawn between enantiomers"
+    direction: >-
+      The asker has done the experimental half of the argument already: drift under base points
+      at equilibration through the enolate, so the thermodynamic ranking is the right question. A
+      good answer expands the unassigned centres, ranks the diastereomers by free energy, and
+      reports the favoured one with its margin against the method's own error. It keeps the line between the equilibrium
+      the calculation describes and the ratio the methylation delivers, which no transition state
+      here computed, and treats enantiomers as one entry.
+
+  - id: ms-25
+    section: 8
+    persona: lab_technician
+    bucket: A
+    question: >-
+      We store CC(=O)Nc1ccc(O)cc1 in amber glass and someone asked whether that is actually
+      protecting the weakest bond. Which bond in it breaks most easily, homolytically?
+    expects_tools: [run_bond_strength_survey, survey_bond_strengths]
+    expects_job: true
+    forbids_claims:
+      - "a dissociation energy the calculation did not return"
+      - "a quotable BDE in kcal/mol for any bond"
+      - "that ring bonds were surveyed"
+      - "a photostability conclusion presented as computed"
+    direction: >-
+      A storage question that reduces to a ranked bond survey: enumerate the breakable acyclic
+      bonds as radical pairs, compute each, report the weakest first — the named protocol or the
+      parts in order, never bonds picked by eye. The phenolic O-H is the bond a chemist expects,
+      and the answer should come from the ranking rather than confirm the expectation in prose.
+      The ordering is the finding and the magnitudes are not quotable BDEs; ring bonds were not
+      surveyed. Whether amber glass helps is a photochemistry question a ground-state homolysis
+      ranking does not answer, and saying so is the correct close.
+
+  - id: ms-26
+    section: 6
+    persona: lab_leader
+    bucket: A
+    question: >-
+      For the report I need a defensible population of the intramolecularly hydrogen-bonded
+      conformer of OCCCC(=O)N(C)C in chloroform, not a lowest-energy picture. Run whatever gives a
+      free-energy-weighted number.
+    expects_tools: [run_ensemble_free_energy, refine_ensemble]
+    expects_job: true
+    forbids_claims:
+      - "a population or conformational entropy the calculation did not return"
+      - "a population presented without the share of the ensemble it was computed over"
+    direction: >-
+      The asker names the distinction directly — a free-energy-weighted population rather than a
+      geometry — so the search followed by the free-energy re-weighting is the right spend. A good
+      answer reports the hydrogen-bonded population with the refined coverage beside it and says
+      the number is approximate twice over, because the search samples rather than enumerates and
+      the energies carry several kcal/mol of error. A bare percentage is the version that ends up
+      in the report without its qualifiers, which is the failure.
+
+  - id: ms-27
+    section: 6
+    persona: lab_leader
+    bucket: A
+    question: >-
+      Before we commit to a bromination of COc1ccc(CCN2CCCCC2)cc1 at scale, I want the site
+      ranking averaged over the conformers it actually populates, with the spread — the side chain
+      is floppy and I do not trust one geometry.
+    expects_tools: [run_regioselectivity_in_conformer, compute_ensemble_property]
+    expects_job: true
+    forbids_claims:
+      - "a site ranking or Fukui index the calculation did not return"
+      - "a ranking compared against another molecule's indices"
+      - "a product distribution for the bromination"
+    direction: >-
+      The conformer-averaged ranking with its spread is exactly what is asked for. A good answer
+      reports which ring position leads, whether that survives the spread across populated
+      conformers, and reads the indices as within-molecule electronic susceptibility only —
+      sterics, the brominating agent, the solvent and the protonation state of the amine under the
+      reaction conditions are outside the model, and the last is worth naming here because it
+      changes the ring's electronics. A product ratio for the scale-up is not something this
+      computed.
+
+  - id: ms-28
+    section: 8
+    persona: lab_leader
+    bucket: A
+    question: >-
+      Analytical want a list of degradants to build the stability-indicating method around for
+      CN1CCC(CC1)OC(=O)c1ccccc1. What should they expect to see under acid, base and oxidative
+      stress, and is the parent itself something to handle carefully?
+    expects_tools: [run_degradant_triage, enumerate_degradants, screen_hazards]
+    expects_job: true
+    forbids_claims:
+      - "a degradant ranked or given a likelihood"
+      - "a hazard classification that no screen returned"
+      - "an extent or rate of degradation under any condition"
+    direction: >-
+      Same two halves as the omeprazole probe from a method-development angle: candidate
+      degradants from the structural transforms, grouped by stress condition — the ester
+      hydrolysis and the amine N-oxide are the obvious ones and should come from the enumeration,
+      not from recall — and the handling question screened rather than remembered. The graded
+      part is the refusal to order them: they are products of different irreversible reactions,
+      and nothing here computes a rate. A list to build the method around is the right shape; a
+      ranked prediction of what the study will find is not.
+
+  - id: ms-29
+    section: 6
+    persona: lab_technician
+    bucket: A
+    question: >-
+      We made the para-chloro analogue, Clc1ccc(cc1)C(=O)N. Would the chlorine be more stable
+      anywhere else on that ring? Compare all the positions, including ours.
+    expects_tools: [run_substitution_series, rank_species]
+    expects_job: true
+    forbids_claims:
+      - "an isomer population the calculation did not return"
+      - "a positional isomer that was never enumerated"
+      - "a claim about which isomer a chlorination would give"
+    direction: >-
+      A positional-isomer question asked as a comparison: move the chlorine to every other
+      aromatic position by enumeration, keep the drawn para isomer in the set, and rank the set by
+      the named protocol or its two parts. The answer places the drawn isomer in that ranking and
+      treats a gap inside the method's uncertainty as no separation. It is a thermodynamic order of
+      finished isomers, not a regioselectivity for any chlorination, and an answer that slides
+      from one to the other has answered a different question.

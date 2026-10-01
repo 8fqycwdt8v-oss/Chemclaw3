@@ -990,3 +990,69 @@ probes:
       whether a linear model suits this attribute are all outside what a single regression can
       settle. Answering "12 months" because that is where the last pull sits is wrong for a subtle
       reason worth catching: the bound is already at the limit before then.
+
+  # Second phrasings for three calculations that rested on one probe each (issue #487).
+
+  - id: an-38
+    section: 8
+    persona: lab_technician
+    bucket: A
+    question: >-
+      Which atom in Brc1ccc(cc1)C(=O)Cl is the most polarisable, and how do the atoms compare on
+      that? I want per-atom numbers, not a description.
+    expects_tools: [describe_sites, compute_atomic_descriptors]
+    forbids_claims:
+      - "a per-atom value the calculation did not return"
+      - "a partial charge offered as the polarisability"
+      - "a reactivity order inferred from polarisability alone"
+    direction: >-
+      A direct per-atom question, so the atomic descriptor panel is the instrument and partial
+      charges are the wrong one. A good answer finds the most polarisable atom from the computed
+      values — the bromine is the expectation, and the panel is what confirms it — names atoms by
+      position rather than by index, and notes that these values are not normalised per molecule,
+      so they compare across analogues. Reading a
+      reactivity order off the polarisabilities is a step the panel does not support — the acyl
+      chloride's reactivity is a different question.
+
+  - id: an-39
+    section: 8
+    persona: lab_leader
+    bucket: B
+    question: >-
+      Is there a sigma-hole on the bromine of Brc1ncccc1, and is it bigger or smaller than on the
+      iodine of Ic1ncccc1? We are deciding which halogen to carry into a crystal-engineering series.
+    expects_tools: [compute_surface_potential]
+    forbids_claims:
+      - "a halogen-bond strength or interaction energy"
+      - "a co-crystal or packing outcome predicted from the surface maxima"
+      - "a sigma-hole magnitude the calculation did not return"
+    direction: >-
+      The electrostatic surface potential on each halogen is the evidence for a sigma-hole, and two
+      calculations compared on the same footing answer the comparison. A good answer reports the
+      surface maximum on each halogen and which is larger, and expects iodine's to be larger only
+      if the numbers say so. It stops at the descriptor: a larger positive maximum is consistent
+      with a stronger halogen-bond donor, it is not a packing prediction, and which halogen the
+      series should carry is still a crystallisation experiment. Bucket B because the decision is
+      partly outside what is computed.
+
+  - id: an-40
+    section: 7
+    persona: lab_leader
+    bucket: A
+    question: >-
+      For NC(=O)c1ccc(cc1)S(N)(=O)=O we need to know where the first deprotonation happens before
+      choosing a base for the alkylation. There are two N-H types and I do not trust a rule-based
+      answer. Which site goes first?
+    expects_tools: [predict_pka_ensemble, predict_pka]
+    expects_job: true
+    forbids_claims:
+      - "a site named without a computed ranking behind it"
+      - "the two sites' microscopic pKa values given as computed numbers"
+      - "a base recommendation presented as validated"
+    direction: >-
+      The *site* is the question — a sulfonamide N-H against an amide N-H, a proton a structural
+      rule may not offer — which is what the ensemble pKa exists for. A good answer names the
+      sulfonamide as the first proton off from the computed ranking, reports how many microstates
+      lie within RT, and carries the ~1.3-unit uncertainty. Choosing the base is the chemist's
+      call informed by that; the macroscopic value is the meaningful one where several microstates
+      are populated.
