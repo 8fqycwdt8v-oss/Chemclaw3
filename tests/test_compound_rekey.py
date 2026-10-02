@@ -8,8 +8,8 @@ entry point, `rekey_standardization`, writing through `kg.record.record_note` on
 """
 
 import asyncio
-from collections.abc import Iterator
-from contextlib import contextmanager
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from datetime import date
 from pathlib import Path
 
@@ -41,6 +41,7 @@ from chemclaw.retrieval.retrievers import GraphRetriever
 from chemclaw.science.fingerprints.molfp.fingerprint import ecfp_bitstring, molecule_definition
 from chemclaw.science.fingerprints.molfp.search import find_similar_molecules
 from chemclaw.science.fingerprints.rekey import (
+    FingerprintRekeyCounts,
     rebuild_molecule,
     rebuild_reaction,
     rekey_fingerprints,
@@ -332,6 +333,94 @@ def test_the_command_previews_unless_told_to_apply(
     assert "        3  successors" in printed[0]
     assert rekey_compounds.main(["--apply"]) == 0
     assert _tree(tmp_path) != untouched
+
+
+# --- the superseded generation (#526) ------------------------------------------------------------
+
+
+def test_the_disposal_is_refused_without_apply() -> None:
+    """A preview rebuilds nothing, so it may not delete what it would have rebuilt."""
+    with pytest.raises(SystemExit) as refused:
+        rekey_compounds.main(["--dispose-superseded"])
+    assert refused.value.code == 2
+    with pytest.raises(ValueError, match="preview"):
+        preview = StandardizationRekeyReport(
+            applied=False,
+            notes={},
+            molecules=FingerprintRekeyCounts(),
+            reactions=FingerprintRekeyCounts(),
+        )
+        asyncio.run(rekey_compounds.settle_indexes(preview))
+
+
+def test_the_command_disposes_only_when_asked_and_only_after_the_apply(
+    tmp_path: Path, corpus: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--apply` alone keeps the shelf; `--dispose-superseded` settles each index after the re-key.
+
+    The disposal is recorded rather than run because what this pins is the command's wiring — which
+    tables, which definitions, after which step. That the guard keeps an incomplete rebuild's shelf
+    and that the statement deletes exactly the superseded rows is driven against a real table in
+    `tests/test_live_index.py`, which runs the same `settle_index`.
+    """
+    monkeypatch.setattr(rekey_compounds, "default_molecule_store", InMemoryFingerprintStore)
+    monkeypatch.setattr(rekey_compounds, "default_reaction_store", InMemoryFingerprintStore)
+    monkeypatch.setattr(rekey_compounds, "default_writer", lambda: _DiskWriter(tmp_path))
+    disposed: list[tuple[str, str]] = []
+
+    async def record(table: str, definition: str) -> int:
+        disposed.append((table, definition))
+        return 4
+
+    monkeypatch.setattr(rekey_compounds, "dispose_superseded", record)
+    printed: list[str] = []
+    monkeypatch.setattr("builtins.print", printed.append)
+
+    assert rekey_compounds.main(["--apply"]) == 0
+    assert disposed == [], "an apply without --dispose-superseded deleted a generation"
+
+    assert rekey_compounds.main(["--apply", "--dispose-superseded"]) == 0
+    assert disposed == [
+        ("reaction_fingerprints", reaction_definition()),
+        ("molecule_fingerprints", molecule_definition()),
+    ]
+    assert printed[-1].splitlines()[1:] == [
+        "superseded generations:",
+        "  reaction fingerprints: 0 re-fingerprinted, 0 already current, "
+        "4 superseded row(s) disposed of",
+        "  molecule fingerprints: 0 re-fingerprinted, 0 already current, "
+        "4 superseded row(s) disposed of",
+    ]
+
+
+def test_the_disposal_connects_as_the_schema_owner(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`094` names an operator statement under the owning principal, never the runtime role.
+
+    On a split-principal deployment the runtime credential has no `DELETE` on either table
+    (`tests/test_database_privileges.py` holds the grant to that), so a disposal through it would
+    fail `permission denied` — and a grant that let it succeed is the boundary this exists to keep.
+    """
+    seen: list[str] = []
+
+    class _Cursor:
+        rowcount = 3
+
+    class _Conn:
+        async def execute(self, statement: str, params: dict[str, str]) -> _Cursor:
+            assert statement.startswith("DELETE FROM molecule_fingerprints WHERE definition <>")
+            return _Cursor()
+
+    @asynccontextmanager
+    async def connection(dsn: str, *, operation: str) -> AsyncIterator[_Conn]:
+        seen.append(dsn)
+        yield _Conn()
+
+    monkeypatch.setattr(settings, "postgres_dsn", "postgresql://runtime@db/chemclaw")
+    monkeypatch.setattr(settings, "postgres_migration_dsn", "postgresql://owner@db/chemclaw")
+    monkeypatch.setattr(rekey_compounds, "db_connection", connection)
+    removed = asyncio.run(rekey_compounds.dispose_superseded("molecule_fingerprints", "ecfp:x"))
+    assert removed == 3
+    assert seen == ["postgresql://owner@db/chemclaw"]
 
 
 # --- the fingerprint half ------------------------------------------------------------------------

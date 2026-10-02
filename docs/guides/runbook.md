@@ -778,6 +778,21 @@ each row stores, so the full ELN re-sync below is no longer needed for a bump. I
 second run reports nothing left to write. Run it where the note writer runs — it commits through
 the same dedicated checkout (`D-2026-09-27-a-compound-id-a-bump-moves-is-superseded-not-orphaned`).
 
+**The re-key adds the rebuilt generation and keeps the old one**, so on its own it leaves every
+similarity search reporting `index_partial: true`: since `infra/sql/094` the definition is part of
+a fingerprint row's key, `index_partial` reads the oldest and newest definitions in the table, and
+the runtime role holds no `DELETE` there. **Dispose of the superseded generation with
+`make rekey-compounds APPLY=1 DISPOSE=1`** (`--dispose-superseded`), once every pod runs the new
+image — a pod still on the old one keeps writing rows under the definition this deletes. Per index,
+it deletes the rows stored under any other definition **only when that index's rebuild was
+complete**: a shelved row whose label no longer parses has no current twin, so the shelf is kept,
+the line says how many rows could not be rebuilt, and searches go on saying PARTIAL until those
+entries are re-synced from source. It is the operator statement `094`'s header names, so it runs as
+the schema owner — `CHEMCLAW_POSTGRES_MIGRATION_DSN` when the principal is split (see "Splitting the
+database principal"), the one credential otherwise — and refuses without `APPLY=1`. Idempotent: a
+second run finds nothing superseded. Afterwards `similar_reactions` and `similar_molecules` answer
+with `index_partial: false`.
+
 ## (vi-b) After an upgrade that changes what a note's indexed text is
 
 `note_index` rows are keyed on a **stat** fingerprint (mtime + size), which detects a changed
