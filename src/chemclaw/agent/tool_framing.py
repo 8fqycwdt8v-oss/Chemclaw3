@@ -133,6 +133,7 @@ from chemclaw.agent.tool_result_size import (
     was_cut,
 )
 from chemclaw.connectors.transport import SERVED_BY
+from chemclaw.core.config import settings
 
 #: What `defanged_payload` preserves: a payload comes back as the type it went in as.
 _Payload = TypeVar("_Payload")
@@ -277,6 +278,50 @@ def served_by(request: Any) -> str:
         return ""
     connector = str(served.get("connector") or "connector")
     return f"{connector}:{request.tool_call['name']}"
+
+
+def stand_in_notice(request: Any) -> str:
+    """This system's warning that the connector answering `request` is a stand-in, else `""`.
+
+    **A test double has to say so in the result the model reads, or the model reads a prediction.**
+    The live lane serves `rxnpredict` from `Chemclaw3-mcp`'s deterministic doubles, which return
+    the same fixed products for every input; measured on 2026-10-02, a real model read that fixed
+    acetanilide as a forward prediction and told the chemist "the forward reaction prediction
+    confirms this as the top-ranked product". The result named the predictor (`[fake_a]`) and
+    nothing said what that meant, so a model had no way to tell a double from a model.
+
+    Which connectors are stand-ins is the deployment's statement (`connector_stand_ins`), not
+    something inferred from a predictor's name: the server is in another repository, and a name
+    is a spelling, where the deployment knows what it started. The sentence ends in the live
+    `SYSTEM_SPEECH_MARK` because it is placed **outside** the data envelope — it is this system
+    speaking about the call, which is what the mark tells the model, not part of what the
+    connector returned.
+    """
+    metadata = getattr(getattr(request, "tool", None), "metadata", None) or {}
+    served = metadata.get(SERVED_BY)
+    if not isinstance(served, dict):
+        return ""
+    connector = str(served.get("connector") or "")
+    if not connector or connector not in settings.connector_stand_ins_list:
+        return ""
+    return (
+        f"STAND-IN RESULT: on this deployment the {connector!r} connector is a deterministic test "
+        "double, not the scientific capability it describes — it returns the same fixed output "
+        "whatever the input, so the result below carries no chemical information. Do not use it "
+        "as evidence for anything, and if you mention it, tell the chemist plainly that it came "
+        f"from a stand-in rather than a model. {SYSTEM_SPEECH_MARK}\n"
+    )
+
+
+def _with_notice(content: Any, notice: str) -> Any:
+    """`content` with `notice` in front of it, as its own span outside any envelope."""
+    if not notice:
+        return content
+    if isinstance(content, str):
+        return notice + content
+    if isinstance(content, list):
+        return [{"type": "text", "text": notice}, *content]
+    return content
 
 
 def _rewritten(content: Any, rewrite: Callable[[str], str]) -> Any:
@@ -530,6 +575,7 @@ async def frame_connector_results(request: Any, handler: Callable[[Any], Any]) -
 
     origin = served_by(request)
     if origin:
+        notice = stand_in_notice(request)
 
         def _framed(message: ToolMessage) -> ToolMessage:
             if message.status == "error":
@@ -576,7 +622,9 @@ async def frame_connector_results(request: Any, handler: Callable[[Any], Any]) -
             # anything appended afterwards breaks it — the mark has to be the escaped one *while*
             # the notice is being sized.
             in_hand = text_chars(message.content)
-            framed = _framed_content(message.content, origin)
+            # The stand-in notice goes in front of the envelope, before the bound, so the ceiling
+            # charges it and the head-and-tail cut keeps it (`stand_in_notice`).
+            framed = _with_notice(_framed_content(message.content, origin), notice)
             # See `_defanged` above for `charged_total`/`expanded_from`/`count`: this branch
             # re-bounds the *framed* string, so the same double-pass arithmetic applies to it —
             # including the fallback for a result the inner pass never cut, which is where the

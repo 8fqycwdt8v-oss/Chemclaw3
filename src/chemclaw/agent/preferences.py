@@ -16,14 +16,17 @@ so dev and tests need no infrastructure and a preference is never a hard depende
 """
 
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from typing import Any
 
 import psycopg
+from langchain.agents.middleware import AgentMiddleware, ModelRequest
+from langchain_core.messages import SystemMessage
 from psycopg.rows import TupleRow
 from pydantic import BaseModel
 
-from chemclaw.agent.authz import require_actor
+from chemclaw.agent.authz import AuthorizationError, require_actor
 from chemclaw.agent.framing import defang
 from chemclaw.core import db
 from chemclaw.core.config import settings
@@ -154,9 +157,10 @@ class PreferenceStore:
         **Bounded, and the bound is about the prompt rather than the table.** This read had no
         `LIMIT`, so every preference a chemist had ever set re-entered the model's context on every
         recall, in every later session, for the life of the row — unbounded prompt spend behind a
-        tool the model is told to call "early in a substantive answer". The row cap in `remember`
-        is the storage half; this is the context half, and a deployment that lowers the row cap
-        still holds the rows it already wrote.
+        tool the model was told to call "early in a substantive answer". The bound matters more
+        since `StandingPreferences` appends this list to *every* model call's instructions. The row
+        cap in `remember` is the storage half; this is the context half, and a deployment that
+        lowers the row cap still holds the rows it already wrote.
 
         Key-sorted for the model — a stable order is what keeps one turn's reading comparable with
         the next — but selected by recency, so the limit keeps what is current rather than what
@@ -241,8 +245,8 @@ async def remember_preference(key: str, value: str) -> str:
 
     Use this for durable *working* preferences the chemist states — their current project, a
     preferred solvent system or base, the units they think in, a constraint they always apply
-    ("no chlorinated solvents on scale"). Recall them with `recall_preferences` at the start of a
-    substantive answer so advice fits how they actually work.
+    ("no chlorinated solvents on scale"). Every one is then listed in your instructions on each
+    later call, in this session and the next, and binds what you recommend.
 
     Do **not** use this for chemistry knowledge: a distilled rule, a protocol, or a result belongs
     in the knowledge graph via `record_knowledge_note`, where everyone can read it. This store is
@@ -272,9 +276,9 @@ async def remember_preference(key: str, value: str) -> str:
 async def recall_preferences() -> list[Preference]:
     """Recall how this chemist likes to work (their project, solvents, units, constraints).
 
-    Call this early in a substantive answer so recommendations fit their actual practice rather
-    than generic defaults. An empty list simply means nothing has been recorded yet — never invent
-    a preference, and never assume one from a single past message.
+    The same list is already at the end of your instructions; call this to re-read it. An empty
+    list simply means nothing has been recorded yet — never invent a preference, and never assume
+    one from a single past message.
 
     Returns:
         This chemist's most recently set preferences, key-sorted. Bounded — a chemist with more
@@ -316,3 +320,102 @@ async def forget_preference(key: str) -> str:
         "preference will come back in the chemist's next session. Tell them it is not yet "
         "permanently removed; this is the direction of failure they most need to know about."
     )
+
+
+#: The sentence that makes a listed preference bind what the model *recommends*, not only what it
+#: retrieves. Measured on the 2026-10-02 lane: with `forbidden_solvent_dmf` recalled into the
+#: thread, a deep-research answer still gave "a solvent like DMF or DMSO" as representative
+#: conditions — labelled as background knowledge, which the model read as outside a preference.
+STANDING_PREFERENCES_RULE = (
+    "They bind everything you recommend — reagents, solvents, conditions and protocols, including "
+    "any you offer from your own background knowledge or the literature rather than from this "
+    "programme's record. Never propose something a preference prohibits or excludes; where the "
+    "usual method relies on it, say that it is excluded here and give an alternative that "
+    "respects the preference."
+)
+
+
+def standing_preferences_section(preferences: list[Preference]) -> str:
+    """The system-prompt section listing `preferences`, or `""` when there are none.
+
+    Keys and values are defanged for the reason `recall_preferences` gives: each is free text the
+    model wrote, possibly out of framed third-party content, and here it re-enters on every call.
+    """
+    if not preferences:
+        return ""
+    lines = "\n".join(f"- {defang(p.key)}: {defang(p.value)}" for p in preferences)
+    return (
+        "This chemist's standing preferences, as they asked you to remember them "
+        f"(their words, recorded with remember_preference):\n{lines}\n{STANDING_PREFERENCES_RULE}"
+    )
+
+
+def _appended(system: SystemMessage | None, text: str) -> SystemMessage:
+    """`system` with `text` as one more paragraph at its end, whichever content shape it has."""
+    if system is None:
+        return SystemMessage(text)
+    content = system.content
+    if isinstance(content, str):
+        return SystemMessage(f"{content}\n\n{text}" if content else text)
+    return SystemMessage([*content, {"type": "text", "text": f"\n\n{text}"}])
+
+
+class StandingPreferences(AgentMiddleware[Any, Any, Any]):
+    """Put this chemist's preferences in front of the model on every call, not only when asked.
+
+    **Pulled, they were optional, and a constraint that is optional is a suggestion.** The only
+    route from `user_preferences` to the model was `recall_preferences`, which a prompt sentence
+    asked the model to call "at the start of a conversation". Measured on the 2026-10-02 live
+    lane: a deep-research turn never called it and recommended DMF, which the chemist's
+    `forbidden_solvent_dmf` prohibits; an earlier run did call it, read the prohibition, and still
+    listed DMF among "typical conditions" offered from background knowledge. One failure was the
+    pull, the other was what the preference was understood to govern — so the section this
+    appends carries the preferences *and* `STANDING_PREFERENCES_RULE`, which says they bind
+    background-knowledge recommendations too
+    (`D-2026-10-02-standing-preferences-are-pushed-not-pulled`).
+
+    **Appended to the system message, per request, never written to the thread.** The thread is
+    checkpointed and windowed: a note placed in it would be cut by the conversation window in
+    exactly the long turns where it matters, and a stale copy would outlive a `forget_preference`.
+    Read fresh on every call, so a preference set or dropped mid-turn is in force on the next
+    call. It sits outside the compaction group so `MeasureRequestPrefix` charges it as prefix.
+
+    **Async only in effect.** The store is async (Postgres), so the synchronous hook passes the
+    request through unchanged; it exists because `create_agent` puts a middleware declaring either
+    hook into both chains (`spend_cap.MeterTurnSpend` gives the reason). Every turn this system
+    serves takes the async path.
+
+    **Never fails a turn.** No actor (enforcement on, nobody authenticated) or an unreadable store
+    means no section, recorded as a degradation — the same direction `recall_preferences` takes,
+    except that here nothing can raise into the model call.
+    """
+
+    def wrap_model_call(
+        self, request: ModelRequest[Any], handler: Callable[[ModelRequest[Any]], Any]
+    ) -> Any:
+        """Pass through: the store cannot be read synchronously (see the class docstring)."""
+        return handler(request)
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest[Any],
+        handler: Callable[[ModelRequest[Any]], Awaitable[Any]],
+    ) -> Any:
+        """The request with the chemist's standing preferences appended to its instructions."""
+        section = await _standing_section()
+        if not section:
+            return await handler(request)
+        return await handler(
+            request.override(system_message=_appended(request.system_message, section))
+        )
+
+
+async def _standing_section() -> str:
+    """The section for the turn's actor, or `""` when there is none or it cannot be read."""
+    try:
+        return standing_preferences_section(await _STORE.recall(require_actor()))
+    except AuthorizationError:
+        return ""
+    except Exception:
+        degraded(logger, "preferences", "could not read standing preferences for this turn")
+        return ""

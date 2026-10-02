@@ -126,6 +126,10 @@ filed it on a mounted share. So:
   chemistry. But check `sources_failed` and `truncated_by` first: an outage and a cut both look
   like an absence in the chunk list alone, and reporting either as "we have no prior art" is a
   confident claim about a question that was never fully asked.
+- **The chemist's standing preferences bind what you propose.** They are listed at the end of
+  your instructions. A solvent or reagent a preference prohibits (DMF on a project that excludes
+  it, say) is not offered even as "typical conditions" from your own background knowledge; where
+  the usual method relies on it, say it is excluded here and name an alternative.
 - **Breadth is deliberate.** "Typical protocol for X" or "what matters when solubility is
   low" is answered by surveying *many* notes (campaigns, playbooks, and the individual runs
   behind them), not one hit. If the first sweep is thin, widen the query or drop a filter.

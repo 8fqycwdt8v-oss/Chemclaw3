@@ -282,6 +282,50 @@ def test_a_plain_string_connector_result_is_framed_too(probe: int) -> None:
     assert _unwrapped(_text_spans(message.content)[0]) == "toluene, 80 C"
 
 
+def test_a_stand_in_connector_s_result_says_it_is_a_stand_in(
+    probe: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A test double has to say so in the result the model reads, or the model reads a prediction.
+
+    The live lane serves `rxnpredict` from fixed-output doubles, and on 2026-10-02 a real model
+    told the chemist "the forward reaction prediction confirms" a product the double returns for
+    every input. With the connector named in `connector_stand_ins`, the result opens with this
+    system's own notice — carrying the live system mark, and *outside* the envelope, so it reads as
+    a statement about the call rather than as data — and the connector's payload is unchanged
+    inside its envelope after it.
+    """
+    from chemclaw.agent.framing import SYSTEM_SPEECH_MARK
+
+    monkeypatch.setattr(settings, "connector_stand_ins", "probe")
+    message = _connector_turn(probe, "echo", {"text": "CC(=O)Nc1ccccc1"})
+    # Joined, because the provider renders a block list in sequence and the notice may be its
+    # own block in front of the envelope's.
+    text = "".join(_text_spans(message.content))
+    assert text.startswith("STAND-IN RESULT"), text
+    assert "'probe'" in text and "no chemical information" in text
+    notice, mark, framed = text.partition(f"{SYSTEM_SPEECH_MARK}\n")
+    assert mark and ENVELOPE_TAG not in notice, text
+    assert _unwrapped(framed) == "CC(=O)Nc1ccccc1"
+
+
+def test_a_real_connector_and_a_stand_in_s_failure_carry_no_notice(
+    probe: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The notice is the deployment's statement about one connector, so it goes nowhere else.
+
+    Not on a connector the setting does not name — production names none, and a warning on every
+    result would teach the model to ignore it — and not on a failure, which is a statement about
+    the call that the double did not answer at all.
+    """
+    monkeypatch.setattr(settings, "connector_stand_ins", "some-other-connector")
+    message = _connector_turn(probe, "echo", {"text": "toluene"})
+    assert _unwrapped(_text_spans(message.content)[0]) == "toluene"
+
+    monkeypatch.setattr(settings, "connector_stand_ins", "probe")
+    failed = _connector_turn(probe, "refuse", {"artifact_ref": "k#gone"})
+    assert "STAND-IN" not in "".join(_text_spans(failed.content))
+
+
 async def probe_sweep() -> EvidenceSweep:
     """Return a sweep whose chunk content is already framed by `gather_evidence`'s own rule.
 

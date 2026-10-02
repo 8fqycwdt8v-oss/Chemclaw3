@@ -371,7 +371,10 @@ def test_a_queued_call_answers_inside_the_turn(monkeypatch: pytest.MonkeyPatch) 
 
     result = asyncio.run(_run_with_workers(backend, body, []))
     assert not result.isError
-    assert result.content[0].text == "heavy:{'smiles': 'CCO'} for oid-chemist"
+    # Exactly the server's answer: a call that never waited carries no word about a queue.
+    assert [cast(TextContent, block).text for block in result.content] == [
+        "heavy:{'smiles': 'CCO'} for oid-chemist"
+    ]
 
 
 def test_a_full_server_is_asked_again_until_it_admits(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -466,7 +469,7 @@ def test_a_waiting_call_says_it_is_queued_and_then_that_it_runs(
     monkeypatch.setattr("chemclaw.connectors.queued._STATS_UNSUPPORTED", False)
     monkeypatch.setattr("chemclaw.connectors.queued._BACKLOG", {})
 
-    async def body(client: Any) -> CallToolResult:
+    async def body(client: Any) -> tuple[CallToolResult, CallToolResult]:
         _bind_turn(monkeypatch, client)
         first = asyncio.create_task(
             dispatch_queued(_CONNECTOR, "heavy", {"smiles": "C"}, inline_wait=30, call_timeout=10)
@@ -477,13 +480,20 @@ def test_a_waiting_call_says_it_is_queued_and_then_that_it_runs(
         )
         await asyncio.sleep(2.0)
         gate.set()
-        await first
-        return await second
+        return await first, await second
 
-    result = asyncio.run(_run_with_workers(backend, body, [], concurrency=1))
+    ran, result = asyncio.run(_run_with_workers(backend, body, [], concurrency=1))
     waiting_id = queued_workflow_id(_CONNECTOR, "heavy", {"smiles": "N"})
     states = [state for _tool, job_id, state, _n in reported if job_id == waiting_id]
     assert not result.isError
+    # **The model reads the wait too, not only the card.** `tool_queued` goes to the chemist's
+    # stream alone, and on the 2026-10-02 lane the model answered "No call waited, queued, or was
+    # refused" about two calls that had waited 8 and 14 s. The waiting call's result now says so,
+    # after the server's own block, which stays exactly what the server returned.
+    texts = [cast(TextContent, block).text for block in result.content]
+    assert texts[0] == "heavy:{'smiles': 'N'} for oid-chemist", texts
+    assert len(texts) == 2 and "waited about" in texts[1] and repr(_CONNECTOR) in texts[1], texts
+    assert not ran.isError
     assert states[:1] == ["queued"], reported
     assert states[-1] == "running", reported
     counts = [n for _t, job_id, state, n in reported if job_id == waiting_id and state == "queued"]
