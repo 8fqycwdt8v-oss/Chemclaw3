@@ -3900,7 +3900,7 @@ def test_a_retention_window_naming_no_setting_refuses_to_render() -> None:
     # Derived, so the chart's list cannot fall behind `Settings`: a retention field added next year
     # is refused by the chart the day it exists, and this arm is what says so.
     settable = sorted(_retention_env_names() - {"CHEMCLAW_RETENTION_ENABLED"})
-    assert len(settable) == 9, f"the retention field set moved: {settable}"
+    assert len(settable) == 10, f"the retention field set moved: {settable}"
     stated = _render_windows(*settable)
     assert stated.returncode == 0, stated.stderr
     for key in settable:
