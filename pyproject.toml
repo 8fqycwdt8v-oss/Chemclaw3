@@ -10,6 +10,11 @@ dependencies = [
     # unconditionally (bofire.data_models.features.feature -> mordred); without it a
     # clean install fails to import bofire at all. optimization brings the BoTorch strategies.
     "bofire[optimization,cheminfo]>=0.4.1",
+    # Declared only so that `[tool.uv.sources]` can route it: uv applies a source to direct
+    # dependencies only, and torch reaches this tree transitively through bofire[optimization]
+    # (botorch). No version of its own. bofire/botorch decide the version, and this line decides
+    # only *which build* Linux installs: the CPU one. See `[tool.uv.sources]` below.
+    "torch",
     # The cap was `<0.7` until 0.7's protocol had been read, because the `removal="0.7.0"` markers
     # meant an unpinned upgrade walked into a release that announces it removes API — and what this
     # repo reaches for there is the skills backend, which is where role-gated skill *visibility* is
@@ -276,6 +281,33 @@ dev = [
 [project.scripts]
 # Terminal front door for testing the agent (see src/chemclaw/cli/chat.py). `uv run chemclaw --admin`.
 chemclaw = "chemclaw.cli.chat:main"
+
+# **torch comes from the PyTorch CPU index on Linux, because the image runs on CPUs only.** It is a
+# real runtime dependency (bofire[optimization] -> botorch/gpytorch/linear-operator -> torch, the
+# BO strategies), but nothing here runs on a GPU. On linux/x86_64, PyPI's default `torch` wheel is
+# the CUDA build, and it pulls `nvidia-*` (2.9 GB), `triton` (0.7 GB) and a 1.1 GB CUDA libtorch
+# into the venv. That was ~4.7 GB of a 12.5 GB unpacked `deploy/Containerfile` image, and it is
+# what made the image take ~30 min to export and to `kind load`. The `+cpu` wheel is the same
+# torch version and API without the CUDA runtime.
+#
+# Linux only (the marker): macOS has no CUDA build to avoid, and the CPU index's macOS coverage is
+# not something a dev box should depend on, so macOS keeps PyPI's wheel. `explicit = true` means
+# this index serves torch and nothing else, so it can never shadow another package's PyPI release.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+
+# The other GPU runtime in the closure, with the same answer. xgboost (pulled in only by drfp)
+# depends on `nvidia-nccl-cu12` on Linux, ~400 MB of multi-GPU collectives. xgboost only loads
+# NCCL for distributed GPU training, and nothing here trains on a GPU. A marker that no platform
+# satisfies is uv's documented way to remove a transitive requirement. xgboost's CPU path, which
+# imports and fits without it, is asserted in tests/test_packaging.py.
+[tool.uv]
+override-dependencies = ["nvidia-nccl-cu12 ; sys_platform == 'never'"]
 
 [build-system]
 requires = ["hatchling"]
