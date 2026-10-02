@@ -138,7 +138,7 @@ def test_the_overlay_renders_nothing_a_vanilla_cluster_cannot_serve() -> None:
 
 @requires_helm
 def test_every_pod_runs_the_core_image_the_lane_loads() -> None:
-    """`imagePullPolicy: Never` and the image `up.sh` loads, or a pod waits on a registry forever."""
+    """`imagePullPolicy: Never` and the image `up.sh` loads, or a pod waits on a registry."""
     for doc in _rendered():
         if doc["kind"] not in {"Deployment", "Job"}:
             continue
