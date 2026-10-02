@@ -513,6 +513,19 @@ def health_url(manifest: ConnectorManifest) -> str | None:
     return effective.removesuffix(endpoint_tail) + health_tail
 
 
+def queues_tools(manifest: ConnectorManifest) -> bool:
+    """Whether this bundle routes tool calls through its interactive queue, and so needs a worker.
+
+    One answer for the two readers that must agree on it: the reachability sweep, which asks
+    whether anything polls `connector-<name>-interactive`, and the live lane, which starts one
+    `interactive_worker` per bundle this is true of — exactly the set the chart renders
+    `deployment-interactive-workers.yaml` for when a release sizes them. A bundle the lane forgot
+    is a queue every heavy call waits on forever, which is how the lane ran until this existed.
+    """
+    endpoint = manifest.endpoint
+    return isinstance(endpoint, HttpEndpoint) and endpoint.queued is not None
+
+
 def _mcp_connection(manifest: ConnectorManifest, endpoint: Endpoint) -> ConnectorSpec:
     """Describe one connector endpoint for the LangGraph engine (M7).
 

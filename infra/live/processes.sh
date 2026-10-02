@@ -51,6 +51,13 @@ die() { printf '\033[31m[live] %s\033[0m\n' "$*" >&2; exit 1; }
 #
 # Caller wins, so an operator can still override any one of them for one invocation, and a line
 # that is not an export is ignored rather than executed.
+#
+# **The model gateway is never read back**, whatever the file holds. Which gateway a process dials
+# — and the credential that pays for it — is the invoking shell's decision, every time: a lane
+# persisted `CHEMCLAW_LLM_BASE_URL`, `_MODEL` and `_API_KEY` here, so a restart meant to bring the
+# front door back on the mock came back on the paid gateway (billing as it did), and the key sat in
+# a file on disk. `e2e-full-stack/up.sh` no longer writes them; this skip is what keeps a file an
+# older one wrote from doing the same. Name the gateway in the restarting shell to keep it.
 source_unset_only() {
   local file="$1" line name
   [ -r "$file" ] || return 0
@@ -58,6 +65,7 @@ source_unset_only() {
     case "$line" in export\ [A-Za-z_]*=*) ;; *) continue ;; esac
     name="${line#export }"
     name="${name%%=*}"
+    case "$name" in CHEMCLAW_LLM_*) continue ;; esac
     [ -n "${!name+x}" ] || eval "$line"
   done <"$file"
 }
@@ -90,7 +98,7 @@ export CHEMCLAW_LLM_ALLOW_LOOPBACK_GATEWAY="${CHEMCLAW_LLM_ALLOW_LOOPBACK_GATEWA
 # there. This lane is where measurements run, so this is where the two directories meet.
 export CHEMCLAW_PROFILES_DIR="${CHEMCLAW_PROFILES_DIR:-data/profiles:data/evals/profiles}"
 export CHEMCLAW_ENTRA_REQUIRED="${CHEMCLAW_ENTRA_REQUIRED:-false}"
-# The lane's four Temporal workers bind no request surface, so the loopback bind above is not
+# The lane's Temporal workers bind no request surface, so the loopback bind above is not
 # their exemption: with sign-in off a worker refuses to boot unless the posture is *stated*
 # (`durable/serve.refuse_unauthenticated_worker`). Stated here, once, for every worker this lane
 # starts — and inert when the lane runs `CHEMCLAW_ENTRA_REQUIRED=true`, because the guard only
@@ -498,6 +506,117 @@ should be starting it twice. Stop the other server, or run \`make live-e2e-full-
   wait_for calc "http://127.0.0.1:$port/healthz"
 }
 
+# ------------------------------------------------------------------ the interactive workers
+#
+# One per enabled bundle whose manifest lists `queued:` tools, which is where every call to such a
+# tool waits for a slot (`D-2026-09-30-a-heavy-tool-call-waits-in-a-queue-rather-than-being-refused`).
+# The chart renders one Deployment for each (`templates/deployment-interactive-workers.yaml`) and
+# runs `python -m chemclaw.connectors.interactive_worker <name>` in it (`deploy/entrypoint.sh`,
+# `interactive-worker-*`); this lane starts the same module under the same name.
+#
+# **This lane used to start none of them**, and nothing said so: every `predict_pka`,
+# `compute_xtb_energy`, `run_python` and prediction call waited out its inline wait on a queue with
+# no poller, became a durable job nothing would ever run, and read `running` until it timed out —
+# while the front door's sweep, which asked only about the jobs queues, called each bundle healthy.
+#
+# **Derived, never listed** — the set is `registry.queues_tools` over `registry.enabled()`, the
+# question the front door's own sweep asks, so a bundle that starts queueing a tool (or a fleet
+# manifest the four-repo lane binds, such as `pyexec`) gets its worker the day it does.
+interactive_worker_names() {
+  "$1" -c 'from chemclaw.connectors.registry import enabled, queues_tools
+print("\n".join(m.name for m in enabled() if queues_tools(m)))'
+}
+
+# The first probe port the interactive workers take, one each upwards. Clear of the bundle workers'
+# 9000-9004; `.live/run/<name>.port` is the authority for which one a worker holds.
+readonly INTERACTIVE_PORT_BASE=9010
+
+# Wait until Temporal reports a poller on each named worker's queue, or die naming the ones that
+# never polled.
+#
+# **A worker's `/readyz` is not this.** It says the process built its `Worker` and is running it;
+# the broker only lists a poller once the first long-poll arrives, and the front door's startup
+# sweep (`connectors/health.py::check_connectors_at_startup`) asks the broker. On a cold start
+# `worker-bo` (torch on the import path) lost that race and the front door died with
+# `ConnectorsUnavailable: ... bo (unpolled)` — the first `up` failing and the second succeeding,
+# every time the page cache was cold. So the front door starts only after this passes.
+#
+# The queue each worker serves follows from its name, the one convention this script already
+# names them by: `worker-background` polls `background_task_queue`, `worker-<bundle>` polls
+# `bundle_queue(<bundle>)`, `interactive-worker-<bundle>` polls `interactive_queue(<bundle>)`. A
+# poller of either task type counts, because a worker registering only activities is polling too.
+# A worker whose pid is gone is reported at once rather than waited out, as `wait_for` does.
+wait_for_pollers() {
+  local python="$1"; shift
+  "$python" - "$RUN_DIR" "$READY_ATTEMPTS" "$@" <<'PY' || die "a worker never polled its queue — see the line above and $LIVE_DIR/<worker>.log"
+import asyncio
+import os
+import sys
+from datetime import timedelta
+from pathlib import Path
+
+from temporalio.api.enums.v1 import TaskQueueType
+from temporalio.api.taskqueue.v1 import TaskQueue
+from temporalio.api.workflowservice.v1 import DescribeTaskQueueRequest
+
+from chemclaw.connectors.queues import bundle_queue, interactive_queue
+from chemclaw.core.config import settings
+from chemclaw.core.temporal_client import connect
+
+run_dir, attempts, workers = Path(sys.argv[1]), int(sys.argv[2]), sys.argv[3:]
+
+
+def queue_of(worker: str) -> str:
+    if worker == "worker-background":
+        return settings.background_task_queue
+    if worker.startswith("interactive-worker-"):
+        return interactive_queue(worker.removeprefix("interactive-worker-"))
+    return bundle_queue(worker.removeprefix("worker-"))
+
+
+def alive(worker: str) -> bool:
+    try:
+        os.kill(int((run_dir / f"{worker}.pid").read_text()), 0)
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+async def polled(client, queue: str) -> bool:
+    for kind in (TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW, TaskQueueType.TASK_QUEUE_TYPE_ACTIVITY):
+        answer = await client.workflow_service.describe_task_queue(
+            DescribeTaskQueueRequest(
+                namespace=client.namespace, task_queue=TaskQueue(name=queue), task_queue_type=kind
+            ),
+            timeout=timedelta(seconds=5),
+        )
+        if answer.pollers:
+            return True
+    return False
+
+
+async def main() -> int:
+    client = await connect()
+    waiting = {worker: queue_of(worker) for worker in workers}
+    for _ in range(attempts):
+        for worker, queue in list(waiting.items()):
+            if not alive(worker):
+                print(f"[live] {worker} exited before polling {queue}", file=sys.stderr)
+                return 1
+            if await polled(client, queue):
+                print(f"\033[36m[live]\033[0m {worker} polling {queue}")
+                del waiting[worker]
+        if not waiting:
+            return 0
+        await asyncio.sleep(1)
+    unpolled = ", ".join(f"{w} ({q})" for w, q in waiting.items())
+    print(f"[live] no poller registered for: {unpolled}", file=sys.stderr)
+    return 1
+
+
+sys.exit(asyncio.run(main()))
+PY
+}
 
 up() {
   mkdir -p "$RUN_DIR"
@@ -616,6 +735,18 @@ up() {
   # `CHEMCLAW_RESULT_SINKS` names a sink, which is a reason it went unnoticed rather than a
   # reason to leave it out.
   start_worker worker-results 9004 "$python" -m chemclaw.connectors.results.worker
+  # The interactive workers — see `interactive_worker_names`. Assigned before iterating, for the
+  # reason `start_fleet_bundles` gives: a failed derivation must stop the lane, not start a subset.
+  local interactive name port=$INTERACTIVE_PORT_BASE
+  local -a workers=(worker-background worker-calc worker-bo worker-results)
+  interactive="$(interactive_worker_names "$python")" \
+    || die "could not derive which bundles queue tool calls — see the error above"
+  for name in $interactive; do
+    start_worker "interactive-worker-$name" "$port" \
+      "$python" -m chemclaw.connectors.interactive_worker "$name"
+    workers+=("interactive-worker-$name")
+    port=$((port + 1))
+  done
 
   # The mock model, when the lane is pointed at it. Started before the front door because the front
   # door builds a chat client at startup and would come up pointed at nothing.
@@ -647,6 +778,14 @@ up() {
     wait_for mock-llm "${mock_base_url%/v1}/__mock/stats"
   fi
 
+  # Every worker up *and polling* before the front door, because its startup sweep asks the broker
+  # about pollers and refuses to boot on a queue with none (`wait_for_pollers`). The front door
+  # used to start first, and the readiness loop below it ran afterwards.
+  for worker in "${workers[@]}"; do
+    wait_for "$worker" "http://127.0.0.1:$(cat "$RUN_DIR/$worker.port")/readyz"
+  done
+  wait_for_pollers "$python" "${workers[@]}"
+
   # **The front door always starts now, and the `llm_configured` gate that used to guard it is
   # gone.** It asked whether `ANTHROPIC_API_KEY` was set, because building the agent built a chat
   # client and that client's constructor raised on a missing key — so with no credential the front
@@ -661,10 +800,6 @@ up() {
   # does not care about.
   start api "$python" -m uvicorn chemclaw.api.app:create_app --factory \
     --host 127.0.0.1 --port "$API_PORT"
-
-  for worker in worker-background worker-calc worker-bo worker-results; do
-    wait_for "$worker" "http://127.0.0.1:$(cat "$RUN_DIR/$worker.port")/readyz"
-  done
   wait_for api "http://127.0.0.1:$API_PORT/readyz"
   log "live stack up. front door: http://127.0.0.1:$API_PORT · logs: $LIVE_DIR"
   log "  model gateway: $llm_base_url"

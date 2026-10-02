@@ -31,6 +31,15 @@ an `elif`: their queues — 13 of this fleet's 14 declared jobs — were never a
 worker fleet at zero replicas read as `healthy` behind a live MCP pod. The two halves fail
 independently and name different deployments, which is why both reasons survive into the detail.
 
+**A bundle that queues tool calls is asked a third question**: whether anything polls
+`connector-<name>-interactive`, where every call to a `queued:` tool waits
+(`D-2026-09-30-a-heavy-tool-call-waits-in-a-queue-rather-than-being-refused`). It is the same
+question as the durable half, asked of a second queue, and its answer means the same thing: with no
+interactive worker each queued call waits out `inline_wait_seconds`, becomes a job nothing runs, and
+the chemist is told it is waiting for a slot that will never come. A live lane ran exactly that way
+— no interactive worker started, every pKa, xtb and prediction call hung — while this sweep asked
+only about the jobs queue and called the bundle healthy.
+
 **A probe that could not run says so instead of guessing.** A broker outage is not the same fact as
 a queue with no poller, and reporting one as the other would turn every Temporal restart into a boot
 failure (`D-2026-08-08-an-outage-is-not-a-missing-job`). So only a *successful* `DescribeTaskQueue`
@@ -61,9 +70,9 @@ from temporalio.api.taskqueue.v1 import TaskQueue
 from temporalio.api.workflowservice.v1 import DescribeTaskQueueRequest
 from temporalio.client import Client
 
-from chemclaw.connectors.queues import bundle_queue
+from chemclaw.connectors.queues import bundle_queue, interactive_queue
 from chemclaw.connectors.reachability import record_reachability
-from chemclaw.connectors.registry import enabled, health_url
+from chemclaw.connectors.registry import enabled, health_url, queues_tools
 from chemclaw.core.config import settings
 from chemclaw.core.errors import SubsystemUnavailableError
 from chemclaw.core.temporal_client import connect
@@ -189,7 +198,26 @@ async def _probe(client: httpx.AsyncClient, name: str, url: str, budget: float) 
     )
 
 
-async def _probe_queue(client: Client, name: str, queue: str, budget: float) -> ConnectorHealth:
+#: What an operator scales when a queue has no poller, by which kind of queue it is. The two are
+#: different Deployments in the chart (`deployment-connectors.yaml`'s bundle worker,
+#: `deployment-interactive-workers.yaml`'s interactive one), so naming the wrong one sends the
+#: reader to a fleet that is fine.
+_JOBS_REMEDY = (
+    "this bundle's jobs would be accepted and never run — check the connector-worker deployment's "
+    "replicas"
+)
+_INTERACTIVE_REMEDY = (
+    "this bundle's queued tool calls would wait and never run — check its interactive-worker "
+    "deployment (`connectors.<name>.interactive` in the chart)"
+)
+
+#: A probe target: the bundle, the queue to ask about, and what to tell an operator if nobody polls.
+QueueTarget = tuple[str, str, str]
+
+
+async def _probe_queue(
+    client: Client, name: str, queue: str, budget: float, remedy: str = _JOBS_REMEDY
+) -> ConnectorHealth:
     """Ask Temporal whether anything is polling this bundle's queue.
 
     `TASK_QUEUE_TYPE_WORKFLOW` rather than the activity queue: every bundle that declares a job
@@ -228,10 +256,7 @@ async def _probe_queue(client: Client, name: str, queue: str, budget: float) -> 
     return ConnectorHealth(
         name=name,
         state="unpolled",
-        detail=(
-            f"no worker is polling {queue!r}, so this bundle's jobs would be accepted and never "
-            "run — check the connector-worker deployment's replicas"
-        ),
+        detail=f"no worker is polling {queue!r}, so {remedy}",
     )
 
 
@@ -251,7 +276,7 @@ async def _probe_endpoints(targets: list[tuple[str, str]], budget: float) -> lis
         )
 
 
-async def _describe_queues(targets: list[tuple[str, str]], budget: float) -> list[ConnectorHealth]:
+async def _describe_queues(targets: list[QueueTarget], budget: float) -> list[ConnectorHealth]:
     """Connect once, then ask every queue concurrently.
 
     One client for the whole sweep, from the same process-wide `connect()` every durable caller
@@ -259,10 +284,12 @@ async def _describe_queues(targets: list[tuple[str, str]], budget: float) -> lis
     front door that does not gets one channel rather than one per bundle.
     """
     client = await connect()
-    return list(await asyncio.gather(*(_probe_queue(client, n, q, budget) for n, q in targets)))
+    return list(
+        await asyncio.gather(*(_probe_queue(client, n, q, budget, r) for n, q, r in targets))
+    )
 
 
-async def _probe_queues(targets: list[tuple[str, str]], budget: float) -> list[ConnectorHealth]:
+async def _probe_queues(targets: list[QueueTarget], budget: float) -> list[ConnectorHealth]:
     """Probe every durable bundle's queue, or report them all `unknown` if the broker is not there.
 
     **`budget` is the bound for this half, not for each step in it.**
@@ -308,7 +335,7 @@ async def _probe_queues(targets: list[tuple[str, str]], budget: float) -> list[C
                     f"{type(exc).__name__}: {exc}"
                 ),
             )
-            for name, queue in targets
+            for name, queue, _ in targets
         ]
 
 
@@ -367,11 +394,14 @@ async def probe_connectors(budget: float | None = None) -> list[ConnectorHealth]
     at 0, and `connectors_required` started a service whose CREST searches would sit in a queue
     until the job ceiling expired. That is verbatim the failure the queue probe was built for
     (`D-2026-08-27-a-queue-with-no-poller-is-unreachable`, which names this gap as its own
-    follow-up). A bundle with neither has nothing to ask and stays `unprobed`.
+    follow-up). A manifest that lists `queued:` tools adds a third question of the same kind —
+    does anything poll `connector-<name>-interactive` — because its interactive worker is a
+    separate Deployment that can be missing while both of the others are fine. A bundle with
+    none of the three has nothing to ask and stays `unprobed`.
     """
     bound = settings.connector_health_timeout_seconds if budget is None else budget
     endpoints: list[tuple[str, str]] = []
-    queues: list[tuple[str, str]] = []
+    queues: list[QueueTarget] = []
     unprobed: list[ConnectorHealth] = []
     for manifest in enabled():
         # Through the registry, never off the manifest: the deployment's `connector_urls` override
@@ -383,10 +413,15 @@ async def probe_connectors(budget: float | None = None) -> list[ConnectorHealth]
         if manifest.jobs:
             # Durable work of its own: ask the queue that work runs on, whether or not it also
             # serves an endpoint.
-            queues.append((manifest.name, bundle_queue(manifest.name)))
-        if not probe_url and not manifest.jobs:
+            queues.append((manifest.name, bundle_queue(manifest.name), _JOBS_REMEDY))
+        if queues_tools(manifest):
+            # Its queued tool calls wait on a queue of their own, polled by a different worker
+            # (`connectors/interactive_worker.py`); that worker can be missing while the endpoint
+            # and the jobs worker are both fine, so it is asked separately.
+            queues.append((manifest.name, interactive_queue(manifest.name), _INTERACTIVE_REMEDY))
+        if not probe_url and not manifest.jobs and not queues_tools(manifest):
             # Nothing to ask: no endpoint and no durable work, stdio (spawned per turn), or an
-            # HTTP endpoint that declares no health route.
+            # HTTP endpoint that declares no health route and queues nothing.
             unprobed.append(ConnectorHealth(name=manifest.name, state="unprobed"))
     probed, polled = await asyncio.gather(
         _probe_endpoints(endpoints, bound), _probe_queues(queues, bound)

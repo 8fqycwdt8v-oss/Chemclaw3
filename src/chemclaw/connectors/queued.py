@@ -217,8 +217,16 @@ async def _wait_reporting(
             # Bounded by the tick, so a slow broker delays the next look at the result by one tick
             # at most and never stretches the inline wait past its budget.
             progress = await _progress(
-                client, handle, connector, max(0.1, min(tick, deadline - loop.time()))
+                client,
+                handle,
+                connector,
+                max(0.1, min(tick, deadline - loop.time())),
+                started=reported is not None and reported[0] == "running",
             )
+            # A run that finished while the read was out is an answer; announcing it as waiting
+            # one event before its result would be the false card this loop exists to prevent.
+            if result.done():
+                return result.result()
             if progress is not None and progress != reported:
                 reported = progress
                 record_tool_queued(tool, handle.id, progress[0], progress[1])
@@ -232,22 +240,31 @@ async def _progress(
     handle: WorkflowHandle[QueuedToolWorkflow, ConnectorJobResult],
     connector: str,
     rpc_timeout: float,
+    *,
+    started: bool = False,
 ) -> tuple[Literal["queued", "running"], int | None] | None:
     """Whether the run's call is still waiting for a slot, and how many calls wait with it.
 
     `running` once a worker has started the activity; `queued` while it is scheduled and not
-    started — including between retries after a full server. With no pending activity at all the
-    run is either about to schedule it or has just finished it, and the two cannot be told apart
-    here, so that tick says nothing rather than flip a running call back to "queued". The count is
-    the broker's approximate backlog on the connector's interactive queue — this call included —
-    read only while queued. `None` when the broker could not be asked: the annotation is a
-    courtesy, and this must never fail the call.
+    started — including between retries after a full server. The count is the broker's
+    approximate backlog on the connector's interactive queue — this call included — read only
+    while the activity is scheduled. `None` when the broker could not be asked: the annotation is
+    a courtesy, and this must never fail the call.
+
+    **With no pending activity, `started` decides.** Once this call has been seen running, an
+    empty list means it has just finished or is between attempts, and that tick says nothing
+    rather than flip a running call back to "queued". Before that, an empty list means no worker
+    has picked the run up yet — the activity is not even scheduled — and that *is* queued: it is
+    the state of every call on a queue nothing polls. This used to answer `None` there too, so a
+    lane with no interactive worker showed a card reading "running" for the whole wait and never
+    emitted one `tool_queued`. The count is unknown in that state (the run is not in the activity
+    backlog yet), so it is `None` rather than a number that would leave this call out.
     """
     try:
         description = await handle.describe(rpc_timeout=timedelta(seconds=rpc_timeout))
         pending = description.raw_description.pending_activities
         if not pending:
-            return None
+            return None if started else ("queued", None)
         if any(a.state == PendingActivityState.PENDING_ACTIVITY_STATE_STARTED for a in pending):
             return "running", None
         return "queued", await _backlog(client, connector, rpc_timeout)

@@ -40,12 +40,15 @@ an error, and all three go through it.
 
 import asyncio
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
 from langchain.tools import ToolRuntime
 from pydantic import BaseModel, ConfigDict, Field
-from temporalio.client import WorkflowExecutionStatus
+from temporalio.api.enums.v1 import PendingActivityState, TaskQueueType
+from temporalio.api.taskqueue.v1 import TaskQueue
+from temporalio.api.workflowservice.v1 import DescribeTaskQueueRequest
+from temporalio.client import Client, WorkflowExecutionDescription, WorkflowExecutionStatus
 from temporalio.common import WorkflowIDReusePolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
@@ -55,6 +58,7 @@ from chemclaw.agent.authz import authorize_trigger, require_actor
 from chemclaw.agent.framing import frame_untrusted
 from chemclaw.agent.tool_framing import defanged_payload
 from chemclaw.connectors.jobs import failed_job_reason
+from chemclaw.connectors.queued_workflow import QueuedToolWorkflow
 from chemclaw.core.config import settings
 from chemclaw.core.errors import SubsystemUnavailableError
 from chemclaw.core.identity_context import get_current_correlation_id, get_current_roles
@@ -374,8 +378,8 @@ async def get_durable_job_status(job_id: str) -> DurableJobStatus:
     This is the follow-up for **every** job id this system hands out — a connector job such as
     `compute_reaction_energy`, `sample_conformers` or `start_optimization_campaign`, a development
     report, or a calculation deferred because it was too slow to answer inside the turn. Poll it
-    until the status is no longer `running`; a completed connector job carries its result with it,
-    so there is no second call to make.
+    until the status is neither `queued` nor `running`; a completed connector job carries its
+    result with it, so there is no second call to make. `queued` means no worker has it yet.
 
     It answers for **finished** jobs indefinitely, not only while Temporal remembers them: a
     finished run's result is also stored durably (D-157), so an id from months ago — found with
@@ -392,7 +396,7 @@ async def get_durable_job_status(job_id: str) -> DurableJobStatus:
         job_id: The id returned by any durable launcher.
 
     Returns:
-        The status (running, completed, failed, cancelled, terminated, timed_out) and, once
+        The status (queued, running, completed, failed, cancelled, terminated, timed_out) and, once
         completed, the one-line `summary`, the structured `result`, and `calc_refs` — the
         calculation keys the run rested on, which `record_knowledge_note` takes so a conclusion
         drawn from this job stays traceable to what computed it. A job still running reports the
@@ -416,7 +420,9 @@ async def get_durable_job_status(job_id: str) -> DurableJobStatus:
     # durable job this system hands an id for returns the envelope. That tier is gone entirely now
     # (`D-2026-08-26-semiempirical-is-the-whole-tier`), which is the sharper reason this paragraph
     # does not belong in the model's context: it was describing a system the model cannot reach.
-    status = await job_status(job_id, wait_seconds=settings.job_status_wait_seconds)
+    status = await job_status(
+        job_id, wait_seconds=settings.job_status_wait_seconds, report_queued=True
+    )
     # Framed **here**, in the `@tool`, and not in `job_status` below — which is the same mistake in
     # the same shape as the one this fixes. `job_status` is also the whole body of the front door's
     # `GET /jobs/{id}`, so framing inside it put envelope markup into an HTTP response that
@@ -453,7 +459,9 @@ async def get_durable_job_status(job_id: str) -> DurableJobStatus:
     )
 
 
-async def job_status(job_id: str, *, wait_seconds: float = 0.0) -> DurableJobStatus:
+async def job_status(
+    job_id: str, *, wait_seconds: float = 0.0, report_queued: bool = False
+) -> DurableJobStatus:
     """One durable job's status, from Temporal while it remembers and the record afterwards.
 
     The tool above and the front door's `GET /jobs/{id}` are the same question asked by different
@@ -467,6 +475,17 @@ async def job_status(job_id: str, *, wait_seconds: float = 0.0) -> DurableJobSta
     passes `job_status_wait_seconds`; the HTTP route passes nothing, because a browser's poll is
     cheap and holding its request open is not. The wait is Temporal's own long-poll
     (`handle.result()`), not a sleep loop.
+
+    `report_queued` is the second such difference, and it is a wire-compatibility one rather than
+    a disagreement about the run. Temporal calls a workflow RUNNING from the moment it is accepted,
+    so a run on a queue nothing polls — every queued tool call on a lane with no interactive
+    worker — read `running` here for as long as it existed, and the model told the chemist "the
+    job is still running" about work no process had touched. With it set, a RUNNING run that no
+    worker has started reads `queued`, with the reason as its summary (`_not_started_reason`). The
+    tool sets it. The front door's `GET /jobs/{id}` does not yet, because `Chemclaw3_ui`'s
+    `jobReconcile.terminalEventFrom` treats every status other than `running` as an ending and
+    would close a waiting job's card as failed; the UI has to learn the word before the route says
+    it.
     """
     client = await connect()
     handle = client.get_workflow_handle(job_id)
@@ -494,7 +513,7 @@ async def job_status(job_id: str, *, wait_seconds: float = 0.0) -> DurableJobSta
         try:
             result = await asyncio.wait_for(handle.result(), wait_seconds)
         except TimeoutError:
-            return DurableJobStatus(job_id=job_id, status="running")
+            return await _still_open(client, job_id, report_queued)
         except Exception:
             # The run reached a terminal state that is not success while we waited (failed,
             # cancelled, timed out) — `handle.result()` raises for those. Re-describe once and
@@ -512,6 +531,8 @@ async def job_status(job_id: str, *, wait_seconds: float = 0.0) -> DurableJobSta
         # blocked for over 15 s on a running workflow and would have blocked for the life of the
         # job. `job_status_wait_seconds` is `ge=0`, so a deployment that set it to 0 hung the agent
         # tool the same way.
+        if report_queued:
+            return _open_status(job_id, await _not_started_reason(client, description))
         return DurableJobStatus(job_id=job_id, status="running")
     if status != "completed":
         # A status word alone was everything the model got for a failed run — measured,
@@ -525,6 +546,71 @@ async def job_status(job_id: str, *, wait_seconds: float = 0.0) -> DurableJobSta
             job_id=job_id, status=status, summary=await failed_job_reason(handle) or None
         )
     return completed_job_status(job_id, await handle.result())
+
+
+async def _still_open(client: Client, job_id: str, report_queued: bool) -> DurableJobStatus:
+    """A run the wait did not see finish, described afresh: the first description is stale now."""
+    if not report_queued:
+        return DurableJobStatus(job_id=job_id, status="running")
+    try:
+        description = await client.get_workflow_handle(job_id).describe()
+    except RPCError:
+        return DurableJobStatus(job_id=job_id, status="running")
+    return _open_status(job_id, await _not_started_reason(client, description))
+
+
+def _open_status(job_id: str, waiting: str | None) -> DurableJobStatus:
+    """`queued` with its reason when nothing has started the run, `running` otherwise."""
+    if waiting is None:
+        return DurableJobStatus(job_id=job_id, status="running")
+    return DurableJobStatus(job_id=job_id, status="queued", summary=waiting)
+
+
+async def _not_started_reason(
+    client: Client, description: WorkflowExecutionDescription
+) -> str | None:
+    """Why an open run is not running yet, or None when something has it (or it cannot be told).
+
+    **A started activity is running, whatever else is true** — it may be on another queue than the
+    workflow's, so the workflow's own pollers say nothing about it. Short of that, two states are
+    waiting rather than running:
+
+    * a queued tool call whose activity is scheduled and not started is waiting for a slot — the
+      same reading `connectors/queued.py::_progress` gives the turn's card, so the card and this
+      answer cannot disagree;
+    * a run whose own task queue has no poller has not been, and cannot be, advanced by anything.
+      A live lane ran exactly so: `connector-calc-interactive` had no poller, and every
+      `predict_pka` waiting on it read `running` until it timed out.
+
+    A queue that could not be asked keeps `running`: the status this tool always gave, and not a
+    claim about the run that a failed RPC is evidence for.
+    """
+    pending = description.raw_description.pending_activities
+    started = PendingActivityState.PENDING_ACTIVITY_STATE_STARTED
+    if any(activity.state == started for activity in pending):
+        return None
+    if pending and description.workflow_type == QueuedToolWorkflow.__name__:
+        return "waiting for a free slot on its connector; it starts when one opens"
+    queue = description.task_queue
+    try:
+        answer = await client.workflow_service.describe_task_queue(
+            DescribeTaskQueueRequest(
+                namespace=client.namespace,
+                task_queue=TaskQueue(name=queue),
+                task_queue_type=TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW,
+            ),
+            timeout=timedelta(seconds=settings.connector_health_timeout_seconds),
+        )
+    except Exception:
+        # Broad by contract (the docstring): every failure here means "could not tell".
+        logger.debug("could not ask whether %r is polled", queue, exc_info=True)
+        return None
+    if answer.pollers:
+        return None
+    return (
+        f"no worker is polling {queue!r}, so nothing has started this job; it runs when a worker "
+        "for that queue is up"
+    )
 
 
 async def _recorded_status(job_id: str) -> DurableJobStatus | None:

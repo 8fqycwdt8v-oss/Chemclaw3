@@ -21,6 +21,9 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from temporalio.api.enums.v1 import PendingActivityState
+from temporalio.api.taskqueue.v1 import PollerInfo
+from temporalio.api.workflowservice.v1 import DescribeTaskQueueResponse
 from temporalio.client import WorkflowExecutionStatus
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
@@ -31,8 +34,20 @@ from chemclaw.core.config import settings
 
 
 class _Description:
-    def __init__(self, status: WorkflowExecutionStatus) -> None:
+    """The fields `job_status` reads off a description: status, pending activities, type, queue."""
+
+    def __init__(
+        self,
+        status: WorkflowExecutionStatus,
+        pending: tuple[int, ...] = (),
+        workflow_type: str = "ConnectorJobWorkflow",
+    ) -> None:
         self.status = status
+        self.raw_description = SimpleNamespace(
+            pending_activities=[SimpleNamespace(state=state) for state in pending]
+        )
+        self.workflow_type = workflow_type
+        self.task_queue = "connector-calc-interactive"
 
 
 class _Handle:
@@ -44,12 +59,20 @@ class _Handle:
     testing what it claims to.
     """
 
-    def __init__(self, status: WorkflowExecutionStatus, result: Any) -> None:
+    def __init__(
+        self,
+        status: WorkflowExecutionStatus,
+        result: Any,
+        pending: tuple[int, ...] = (),
+        workflow_type: str = "ConnectorJobWorkflow",
+    ) -> None:
         self._status = status
         self._result = result
+        self._pending = pending
+        self._workflow_type = workflow_type
 
     async def describe(self) -> _Description:
-        return _Description(self._status)
+        return _Description(self._status, self._pending, self._workflow_type)
 
     async def result(self) -> Any:
         if self._status == WorkflowExecutionStatus.RUNNING:
@@ -58,8 +81,23 @@ class _Handle:
 
 
 class _Client:
-    def __init__(self, handle: _Handle) -> None:
+    """A broker stand-in: one scripted handle, and a task queue with `pollers` pollers."""
+
+    namespace = "default"
+
+    def __init__(self, handle: _Handle, pollers: int = 1, error: Exception | None = None) -> None:
         self._handle = handle
+        self.asked: list[str] = []
+
+        async def _describe_task_queue(request: Any, timeout: Any = None) -> Any:
+            self.asked.append(request.task_queue.name)
+            if error is not None:
+                raise error
+            return DescribeTaskQueueResponse(
+                pollers=[PollerInfo(identity=f"w{i}") for i in range(pollers)]
+            )
+
+        self.workflow_service = SimpleNamespace(describe_task_queue=_describe_task_queue)
 
     def get_workflow_handle(self, job_id: str) -> _Handle:
         return self._handle
@@ -132,6 +170,88 @@ def test_a_running_job_reports_the_status_alone(monkeypatch: pytest.MonkeyPatch)
     status = asyncio.run(get_durable_job_status("calc-sample_conformers-abc"))
     assert status.status == "running"
     assert status.summary is None and status.result == {}
+
+
+def _running(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    pollers: int,
+    pending: tuple[int, ...] = (),
+    workflow_type: str = "ConnectorJobWorkflow",
+    error: Exception | None = None,
+) -> _Client:
+    """Point the tool at one RUNNING run on a queue with `pollers` pollers."""
+    client = _Client(
+        _Handle(WorkflowExecutionStatus.RUNNING, None, pending, workflow_type), pollers, error
+    )
+
+    async def _connect() -> _Client:
+        return client
+
+    monkeypatch.setattr(durable_tools, "connect", _connect)
+    monkeypatch.setattr(settings, "job_status_wait_seconds", 0.05)
+    return client
+
+
+def test_a_run_nothing_polls_reads_queued_not_running(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A live lane with no interactive worker: every queued call's job read `running` forever.
+
+    Temporal calls a run RUNNING from acceptance, so the model told the chemist "still running"
+    about work no process had touched. The reason names the queue an operator has to look at.
+    """
+    client = _running(monkeypatch, pollers=0)
+    status = asyncio.run(get_durable_job_status("queued-calc-predict_pka-abc"))
+    assert status.status == "queued"
+    assert status.summary is not None and "connector-calc-interactive" in status.summary
+    assert client.asked == ["connector-calc-interactive"]
+
+
+def test_a_queued_call_waiting_for_a_slot_reads_queued(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Scheduled and not started, on a polled queue: the same reading the turn's card gives."""
+    scheduled = PendingActivityState.PENDING_ACTIVITY_STATE_SCHEDULED
+    _running(monkeypatch, pollers=2, pending=(scheduled,), workflow_type="QueuedToolWorkflow")
+    status = asyncio.run(get_durable_job_status("queued-calc-predict_pka-abc"))
+    assert status.status == "queued"
+    assert status.summary is not None and "slot" in status.summary
+
+
+@pytest.mark.parametrize(
+    ("pollers", "pending", "error"),
+    [
+        # A started activity is running, even with the workflow's own queue unpolled: the
+        # activity may live on another queue.
+        (0, (PendingActivityState.PENDING_ACTIVITY_STATE_STARTED,), None),
+        # Polled, nothing scheduled: an ordinary run between steps.
+        (1, (), None),
+        # The queue could not be asked: no evidence for "queued", so the old word stands.
+        (0, (), RuntimeError("broker down")),
+    ],
+)
+def test_a_run_something_has_or_that_cannot_be_told_stays_running(
+    monkeypatch: pytest.MonkeyPatch,
+    pollers: int,
+    pending: tuple[int, ...],
+    error: Exception | None,
+) -> None:
+    """The other side, so `queued` is about the missing worker and not about RUNNING."""
+    _running(monkeypatch, pollers=pollers, pending=pending, error=error)
+    status = asyncio.run(get_durable_job_status("calc-sample_conformers-abc"))
+    assert status.status == "running"
+
+
+def test_the_front_door_route_keeps_running_until_the_ui_knows_queued(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`GET /jobs/{id}` is `job_status` with no flag, and the UI closes any non-`running` card.
+
+    `Chemclaw3_ui`'s `terminalEventFrom` turns every other word into `job_failed`, so the route
+    saying `queued` would end a waiting job's card as failed. Pinned so the switch is deliberate.
+    """
+    from chemclaw.agent.durable_tools import job_status
+
+    client = _running(monkeypatch, pollers=0)
+    assert asyncio.run(job_status("queued-calc-predict_pka-abc")).status == "running"
+    assert client.asked == [], "the route must not pay for a question it does not report"
 
 
 def test_a_poll_moments_before_completion_returns_the_result(
