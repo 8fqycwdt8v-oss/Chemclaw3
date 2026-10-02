@@ -1,3 +1,38 @@
+# Artefacts, phase 0 — measure, then decide
+
+Concept: the "Exhibits" concept doc (UI label "Artefacts"; code name `exhibit` because `artifact` is
+the calc by-product store). Decided by the user 2026-10-02: label "Artefacts", on by default with a
+kill switch, session members may revise, `chart` in phase 1.
+
+- [x] **0.1 Answers.** Over the recorded live transcripts (`tasks/live-test*/transcripts*`): how
+      many answers carry a Markdown table (any / >= 4 data rows), what share of answer tokens the
+      tables are, what share of table figures are verbatim tool values (`verified_numbers` — a
+      figure absent there is *unchecked*, never "wrong", per `evals/live.py::_verified_numbers`),
+      how many answers list >= 3 structures as SMILES, and how often `render_structure` ran.
+      Instrument: `chemclaw.evals.answer_shape`; raw output in `tasks/artefacts-phase-0/results.md`.
+- [x] **0.2 Prefix.** Draft the three tool signatures (`create_exhibit`, `revise_exhibit`,
+      `read_exhibit`) with real docstrings and a compact spec schema; measure them with the exact
+      basis `tests/test_context_floor.py` uses (`convert_to_openai_tool` +
+      `count_tokens_approximately`); compare to `MAX_SINGLE_TOOL_TOKENS` and the ceiling headroom.
+- [x] **0.3 ADR** `D-2026-10-02-an-artefact-is-part-of-the-answer-not-an-effect` + ledger row:
+      server-owned versioned exhibits vs client-only; not plan-gated but subtracted from helpers;
+      bind-don't-retype (with 0.1's numbers); HTML/JS artefacts declined with `Revisit when:`;
+      prefix budget from 0.2.
+- [x] Verify: `make lint type test` (Postgres up; report skips), decision-log tests.
+- [ ] PR, merge on green.
+
+## Review (phase 0)
+
+- 0.1 refuted the concept's token argument for bindings (tables are 2.7% of answer tokens), so
+  bindings and result handles are deferred with a trigger; documents (15.3% of answers) are the
+  core kind.
+- 0.2 chose the untyped server-validated spec: 961 prefix tokens vs 1,989 typed (whose create tool
+  alone breaks `MAX_SINGLE_TOOL_TOKENS`). Headroom at base is 404, so phase 1 raises the ceiling.
+- Full serial suite with Postgres/Temporal up: 11,415 passed, one failure (evals importing RDKit
+  directly) fixed by going through `core.chem`; skips were helm (92) and the sibling fleet (8).
+
+---
+
 # Queued compute, round 2 — the open points
 
 - [x] **Chemclaw3**: `tool_queued` event (state `queued` with an approximate position from the
