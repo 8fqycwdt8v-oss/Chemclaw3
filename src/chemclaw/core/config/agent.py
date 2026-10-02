@@ -337,7 +337,7 @@ class AgentSettings(BaseSettings):
     # `tests/test_compaction.py` asserts the equality — so a ceiling raise moves it in the same
     # commit as the two defaults it is the basis of.
     # D-2026-10-02-a-prefix-beyond-the-derivation-basis-is-paid-in-spend-not-thread.
-    agent_context_prefix_basis: int = Field(default=83_850, ge=0)
+    agent_context_prefix_basis: int = Field(default=86_050, ge=0)
     # **What the two numbers above are denominated in, which used to be left unsaid and was wrong.**
     # Both are counted with `count_tokens_approximately` — chars/4 — and that estimator is content
     # dependent in one direction. Re-measured 2026-09-06 against real BPE encodings, on the observed
@@ -422,16 +422,28 @@ class AgentSettings(BaseSettings):
     # call — which is nearly every call — still gets the whole number, so the common case is
     # unchanged and only a fan-out shares.
     #
-    # 60,000 rather than a new opinion: it is the number this repository already chose for
-    # `gather_evidence_max_chars`, its largest deliberate evidence payload. A result over it is cut
-    # head-and-tail with a notice naming the tool and the characters removed — never silently, and
-    # never in the middle of a sentence a chemist might quote. 0 disables the cap, which restores
-    # the unbounded behaviour and is a decision a deployment has to make on purpose.
+    # The same number as `gather_evidence_max_chars` rather than a new opinion: it is the number
+    # this repository already chose for `gather_evidence_max_chars`, its largest deliberate evidence
+    # payload. A result over it is cut head-and-tail with a notice naming the tool and the
+    # characters removed — never silently, and never in the middle of a sentence a chemist might
+    # quote. 0 disables the cap, which restores the unbounded behaviour and is a decision a
+    # deployment has to make on purpose.
     #
     # It does not replace a per-tool ceiling (`document_read_max_chars`,
     # `calc_find_max_result_chars` and the rest); it is the floor under all of them, applied at the
     # one place every tool result passes.
-    agent_max_tool_result_chars: int = Field(default=60_000, ge=0)
+    #
+    # **52,000 since 2026-10-02, and the window is what set it.** Neither edit may reclaim the
+    # newest batch, so a pod calibrated on evidence traffic has to leave the window edit more thread
+    # than one maximal batch occupies, or every evidence turn is over the budget and unreducible —
+    # `test_the_shipped_budget_leaves_the_thread_what_its_derivation_claims` in
+    # `tests/test_compaction.py` asserts it. Raising
+    # `tests/test_context_floor.SERVED_ELSEWHERE_ALLOWANCE` for the sibling fleet's grown `chem`
+    # took that thread to ~13,300 estimated tokens against the ~15,000 a 60,000-character batch is;
+    # the budget is pinned by the smallest target window, so this was the knob that could give (an
+    # owner decision). `gather_evidence_max_chars` moved with it, because a sweep over this cap
+    # would be cut head-and-tail through the middle of its ranking.
+    agent_max_tool_result_chars: int = Field(default=52_000, ge=0)
     # Durable working memory for the agent's scratchpad (`agent/scratchpad.py`), and the switch the
     # whole personal/organisation skills stack rides on.
     #

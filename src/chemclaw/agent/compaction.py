@@ -52,7 +52,7 @@ offload writes is read back through `read_file`, which `tool_framing.py` routes 
 the offloaded body *is* defanged on the way back in
 (`D-2026-09-04-a-helpers-file-crosses-back-and-stays`). Every producer of a `HumanMessage` here is
 bounded below the threshold: the front door at `service_max_message_chars` (100,000, a 422),
-template steps at `agent_max_tool_result_chars` (60,000, via `bounded_prompt`), and `cli/chat.py`
+template steps at `agent_max_tool_result_chars` (via `bounded_prompt`), and `cli/chat.py`
 unbounded — an operator's own paste, not a deployment surface. **That inequality holds by the
 coincidence of three separate settings and nothing asserted it**, so
 `tests/test_compaction.py::test_no_shipped_producer_of_a_human_message_reaches_the_offload_threshold`
@@ -356,15 +356,15 @@ class ClearOlderToolResultsEdit(ContextEdit):
         tokens = count_tokens(messages)
         if tokens <= budget:
             return
-        # **Read the citations before upstream deletes the bodies that carry them.**
-        # The clearing is oldest-first, and the oldest result in a research turn is the
-        # `gather_evidence` sweep — the largest payload in the thread by design
-        # (`gather_evidence_max_chars` is 60,000) and therefore both the first candidate and the
-        # most attractive one. Measured: three tool results at the per-result ceiling, or one sweep
-        # and eight `expand_note` calls, and the sweep is gone before the model writes the answer
-        # it is supposed to cite. The chunk *bodies* are correctly reclaimable; the note ids are
-        # ~60 tokens that decide whether the answer can cite anything at all, and clearing them
-        # with the bodies is what turned a context saving into a grounding failure.
+        # **Read the citations before upstream deletes the bodies that carry them.** The clearing is
+        # oldest-first, and the oldest result in a research turn is the `gather_evidence` sweep —
+        # the largest payload in the thread by design (`gather_evidence_max_chars` is the
+        # tool-result cap) and therefore both the first candidate and the most attractive one.
+        # Measured: three tool results at the per-result ceiling, or one sweep and eight
+        # `expand_note` calls, and the sweep is gone before the model writes the answer it is
+        # supposed to cite. The chunk *bodies* are correctly reclaimable; the note ids are ~60
+        # tokens that decide whether the answer can cite anything at all, and clearing them with the
+        # bodies is what turned a context saving into a grounding failure.
         #
         # This is not the "coupling the context policy to the shape of every tool's result" this
         # class declines one docstring up. It reads one field of one first-party model, and one

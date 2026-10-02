@@ -433,7 +433,7 @@ def bounded_content(
         # contract: at a limit of 1 the result is `[`, which is a silent cut wearing a bracket.
         # What it costs is bounded and unreachable in practice — the brief form is short enough
         # that the batch only exceeds the ceiling above width `ceiling // len(brief)`, which at the
-        # shipped 60,000 is over a thousand tool calls in one assistant message. Below that the
+        # shipped ceiling is over a thousand tool calls in one assistant message. Below that the
         # total falls rather than rises, because the brief form is far under the share it replaces.
         # The figure is not written here: it used to say 19 characters and 3,158 calls, and the
         # mark `_notice` gained made both stale in the same commit
