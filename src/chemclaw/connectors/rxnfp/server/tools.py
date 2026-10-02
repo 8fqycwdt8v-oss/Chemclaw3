@@ -12,6 +12,14 @@ a Deployment, a Service, a token, a chart entry, a port and a runbook paragraph 
 more than fingerprints, which is written down here and in
 `D-2026-08-25-a-label-is-derived-not-recorded` rather than left for a reader to notice.
 
+**Every one of them also says what it did not search.** A citation-only ELN record has no
+fingerprint and no label row, by the tier's decision
+(`D-2026-09-27-a-reaction-without-a-structure-is-citable-not-searchable`), so each result carries
+`ReactionRecordStore.citation_only` — how many such records exist and which list the queried
+structure as drawn — and its verdict says so. A "COMPLETE" coverage over the label index was read
+as a search of the ELN, and a chemist was told there was no in-house data on a substrate the ELN
+holds.
+
 **Every one of them answers over the labelled corpus and says so.** The version searched is the one
 the index is currently labelled at (`current_version`), asked of the index rather than of the
 labelling server — the question "what is this corpus labelled at" is about our data, and a remote
@@ -33,6 +41,7 @@ from chemclaw.science.fingerprints.store import (
 from chemclaw.science.labels.facets import FrequencyReport
 from chemclaw.science.labels.molecules import CorpusMolecules, corpus_fingerprints
 from chemclaw.science.labels.reactions import corpus_reactions
+from chemclaw.science.labels.records import CorpusCoverage
 from chemclaw.science.labels.search import (
     PrecedentSearch,
     agent_frequency,
@@ -87,6 +96,7 @@ async def similar_reactions(
     )
     return search.model_copy(
         update={
+            "unsearched": await _records.citation_only(reaction_smiles),
             # The id a hit is cited by names the source it was found in, because
             # `reaction_fingerprints` is keyed by `(source, id)` and a bare citation to an id two
             # sites hold resolves to neither (`records._one_of` refuses rather than guessing).
@@ -94,12 +104,27 @@ async def similar_reactions(
                 match.model_copy(update={"id": note_id_for_reaction(match.id, match.source)})
                 for match in search.hits
                 if (match.source, match.id) not in withdrawn
-            ]
+            ],
         }
     )
 
 
-async def _unlabelled(question: str) -> PrecedentSearch:
+async def _disclosed(coverage: CorpusCoverage, query: str | None) -> CorpusCoverage:
+    """`coverage` with the citation-only records outside the label index stated beside it.
+
+    On the coverage rather than on each result type, because `CorpusCoverage.verdict` is the one
+    sentence every facet answer quotes for its denominator — `PrecedentSearch` and
+    `FrequencyReport` alike — and "COMPLETE" is the word that was read as the whole ELN.
+    """
+    return coverage.model_copy(update={"unsearched": await _records.citation_only(query)})
+
+
+async def _precedents(search: PrecedentSearch, query: str | None) -> PrecedentSearch:
+    """`search` with its coverage `_disclosed` for `query`."""
+    return search.model_copy(update={"coverage": await _disclosed(search.coverage, query)})
+
+
+async def _unlabelled(question: str, query: str | None) -> PrecedentSearch:
     """The answer when nothing in the index has been labelled yet.
 
     Every facet tool routes through this rather than inventing its own way to say it, and the one
@@ -108,7 +133,8 @@ async def _unlabelled(question: str) -> PrecedentSearch:
     corpus size and `labelled` is zero: the sentence then says the corpus holds N reactions and
     none of them can answer yet, which is the true state.
     """
-    return PrecedentSearch(question=question, coverage=await _labels.coverage("never-labelled"))
+    coverage = await _labels.coverage("never-labelled")
+    return PrecedentSearch(question=question, coverage=await _disclosed(coverage, query))
 
 
 def _roles(names: list[str] | None) -> frozenset[SpeciesRole]:
@@ -141,10 +167,11 @@ async def substrate_precedent(
     """
     version = await _labels.current_version()
     if version is None:
-        return await _unlabelled(f"reactions using {smiles}")
-    return await substrate_precedents(
+        return await _unlabelled(f"reactions using {smiles}", smiles)
+    search = await substrate_precedents(
         _labels, version, smiles, role=SpeciesRole(role) if role else None, limit=top_k
     )
+    return await _precedents(search, smiles)
 
 
 @server.tool()
@@ -162,10 +189,13 @@ async def conditions_for_similar_product(
     """
     version = await _labels.current_version()
     if version is None:
-        return await _unlabelled(f"conditions for products similar to {product_smiles}")
-    return await conditions_for_similar_products(
+        return await _unlabelled(
+            f"conditions for products similar to {product_smiles}", product_smiles
+        )
+    search = await conditions_for_similar_products(
         _labels, corpus_fingerprints(), version, product_smiles, threshold=threshold, limit=top_k
     )
+    return await _precedents(search, product_smiles)
 
 
 @server.tool()
@@ -198,10 +228,13 @@ async def conditions_for_similar_reaction(
     """
     version = await _labels.current_version()
     if version is None:
-        return await _unlabelled(f"conditions for reactions similar to {reaction_smiles}")
-    return await conditions_for_similar_reactions(
+        return await _unlabelled(
+            f"conditions for reactions similar to {reaction_smiles}", reaction_smiles
+        )
+    search = await conditions_for_similar_reactions(
         _labels, corpus_reactions(), version, reaction_smiles, threshold=threshold, limit=top_k
     )
+    return await _precedents(search, reaction_smiles)
 
 
 @server.tool()
@@ -227,8 +260,12 @@ async def reagent_frequency(
     """
     version = await _labels.current_version()
     if version is None:
-        return FrequencyReport(coverage=await _labels.coverage("never-labelled"))
-    return await agent_frequency(
+        return FrequencyReport(
+            coverage=await _disclosed(await _labels.coverage("never-labelled"), None)
+        )
+    # No structure in the question, so the count alone: a frequency over the label index cannot
+    # name a record outside it, only say how many there are.
+    report = await agent_frequency(
         _labels,
         version,
         named_reaction=named_reaction,
@@ -237,6 +274,7 @@ async def reagent_frequency(
         roles=_roles(roles),
         limit=top_k,
     )
+    return report.model_copy(update={"coverage": await _disclosed(report.coverage, None)})
 
 
 @server.tool()
@@ -252,10 +290,11 @@ async def reactions_making_substructure(
     """
     version = await _labels.current_version()
     if version is None:
-        return await _unlabelled(f"reactions making a product matching {smarts}")
-    return await reactions_with_product_substructure(
+        return await _unlabelled(f"reactions making a product matching {smarts}", smarts)
+    search = await reactions_with_product_substructure(
         _labels, _molecules, version, smarts, named_reaction=named_reaction, limit=top_k
     )
+    return await _precedents(search, smarts)
 
 
 @server.tool()
@@ -269,8 +308,11 @@ async def workup_precedent(reagent_smiles: str, top_k: int | None = None) -> Pre
     """
     version = await _labels.current_version()
     if version is None:
-        return await _unlabelled(f"workups recorded for reactions using {reagent_smiles}")
-    return await workup_precedents(_labels, version, reagent_smiles, limit=top_k)
+        return await _unlabelled(
+            f"workups recorded for reactions using {reagent_smiles}", reagent_smiles
+        )
+    search = await workup_precedents(_labels, version, reagent_smiles, limit=top_k)
+    return await _precedents(search, reagent_smiles)
 
 
 async def report_index_size() -> None:

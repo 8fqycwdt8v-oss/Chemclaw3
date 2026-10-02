@@ -527,9 +527,12 @@ those belong in.
       and nothing else, and every path that *finds* a reaction record starts from structure
       (`retrieval/retrievers.py::FingerprintReactionRetriever`, the `rxnfp` facet tools over
       `reaction_labels`). So the mock's 5,760 flow-Suzuki records are reachable by
-      `reaction-<source>.<id>` citation (`agent/graph_tools.py::_expand_record`, `kg/validate.py`)
-      and by no question — "which base wins on 6-chloroquinoline" is what they answer and cannot
-      reach them. The candidate is a label row whose record phase carries the structured species
+      `reaction-<source>.<id>` citation (`agent/graph_tools.py::_expand_record`, `kg/validate.py`),
+      and a structural question only *points* at them: every `rxnfp`/`molfp` verdict counts them
+      and names up to `CITATION_ONLY_NAMED_MAX` that list the queried structure as drawn, by a text
+      check of the spellings tried (`ingest/eln/records.py::drawn_species_patterns`, issue #527).
+      A facet question — "which base wins on 6-chloroquinoline" — still cannot count them, and a
+      record spelling the structure differently is not found. The candidate is a label row whose record phase carries the structured species
       and marks the named ones, with the labeller deriving nothing for it; that changes
       `science/labels/records.py`'s row and wants its own measurement of what a partially
       structured row does to the facet counts. See

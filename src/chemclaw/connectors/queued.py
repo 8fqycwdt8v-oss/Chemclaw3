@@ -189,11 +189,17 @@ def _with_wait(result: CallToolResult, connector: str, waited: float | None) -> 
 
     A separate block after the server's own, so the server's payload stays byte-for-byte what it
     returned and every reader that takes the first block for it still does.
+
+    **The block carries its own separator**, the convention `chemclaw_agent._INSTRUCTION_BLOCKS`
+    states for the prompt: every reader that flattens a result joins its text blocks with `""`
+    (`tool_result_size.full_text`, and the provider adapters do the same), so without it the model
+    read `…}(Queue: this call waited …)` — the note glued onto the server's JSON, which a reader
+    could take for part of the payload or for a malformed one.
     """
     if waited is None:
         return result
     note = (
-        f"(Queue: this call waited about {max(1, round(waited))} s for a free slot on "
+        f"\n\n(Queue: this call waited about {max(1, round(waited))} s for a free slot on "
         f"{connector!r} before it ran.)"
     )
     return result.model_copy(

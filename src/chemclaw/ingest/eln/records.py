@@ -41,10 +41,12 @@ from psycopg.types.json import Jsonb
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from chemclaw.core import db
+from chemclaw.core.chem import canonical_smiles, standard_smiles
 from chemclaw.core.config import settings
 from chemclaw.core.errors import ChemclawError
 from chemclaw.ingest.eln.ord import RecordTier, RoleSpecies
-from chemclaw.kg.note import ProcessConditions, require_note_slug
+from chemclaw.kg.note import ProcessConditions, note_id_for_reaction, require_note_slug
+from chemclaw.science.fingerprints.store import CITATION_ONLY_NAMED_MAX, CitationOnlyRecords
 
 logger = logging.getLogger(__name__)
 
@@ -223,6 +225,66 @@ _SELECT_BODIES = (
     "SELECT reaction_id, body FROM reaction_records "
     "WHERE ingest_source = %s AND reaction_id = ANY(%s)"
 )
+
+# The records no structure index holds, counted, and which of them list one of `patterns` as a
+# drawn species (`ReactionRecordStore.citation_only`). `114`'s partial index is exactly this
+# `WHERE`, so the read touches only the tier's own rows, never the rest of the corpus.
+# `strpos` rather than `LIKE`: a SMILES ring bond `%10` is a LIKE wildcard, and escaping one
+# grammar inside another is how a match silently widens. An empty `patterns` array makes `hit`
+# false without reading a body.
+_SELECT_CITATION_ONLY = """
+SELECT count(*),
+       count(*) FILTER (WHERE hit),
+       (array_agg(ingest_source ORDER BY ingest_source, reaction_id) FILTER (WHERE hit))[1:%(cap)s],
+       (array_agg(reaction_id ORDER BY ingest_source, reaction_id) FILTER (WHERE hit))[1:%(cap)s]
+FROM (
+    SELECT ingest_source, reaction_id,
+           EXISTS (SELECT 1 FROM unnest(%(patterns)s::text[]) AS p WHERE strpos(body, p) > 0) AS hit
+    FROM reaction_records
+    WHERE tier = 'citation-only' AND retracted_at IS NULL
+) AS outside
+"""
+
+
+def drawn_species_patterns(query: str | None) -> list[str]:
+    """The body text a citation-only record carries for a drawn species spelled like `query`.
+
+    `ingest/eln/record.py::_species_line` renders each drawn species of a citation-only record as
+    ``- `<smiles>` (<role>)``, the SMILES as the source gave it. So the check is textual and its
+    reach is the spellings tried: the query as given, RDKit-canonical and standardized, which
+    covers a source that wrote the canonical form and a chemist who did not. A reaction query is
+    split into its molecules (agents included), because the tier lists species one at a time and
+    what a reaction query asks of it is "does any of these runs involve one of these". A SMARTS or
+    a string RDKit cannot read is tried as given only — the lenient helpers return it unchanged.
+    `None` or blank asks for no check at all.
+    """
+    if not query or not query.strip():
+        return []
+    spellings: list[str] = []
+    for side in query.strip().split(">"):
+        for piece in side.split("."):
+            piece = piece.strip()
+            if not piece:
+                continue
+            for spelling in (piece, canonical_smiles(piece), standard_smiles(piece)):
+                if spelling not in spellings:
+                    spellings.append(spelling)
+    return [f"- `{spelling}` (" for spelling in spellings]
+
+
+def _citation_only(
+    outside: int, found: Sequence[tuple[str, str]], total: int, checked: bool
+) -> CitationOnlyRecords:
+    """The disclosure from the counts and the first `found` `(source, id)` pairs, ids cited."""
+    return CitationOnlyRecords(
+        outside_index=outside,
+        query_checked=checked,
+        giving_query=total,
+        examples=[
+            note_id_for_reaction(reaction_id, source)
+            for source, reaction_id in found[:CITATION_ONLY_NAMED_MAX]
+        ],
+    )
 
 
 class ReactionRecord(BaseModel):
@@ -432,6 +494,19 @@ class ReactionRecordStore(Protocol):
         """
         ...
 
+    async def citation_only(self, query: str | None = None) -> CitationOnlyRecords:
+        """The records no structure index holds, and which of them list `query` as drawn.
+
+        Asked by every structural tool, so its verdict states its denominator: a citation-only
+        record contributes no fingerprint, molecule or label row
+        (`D-2026-09-27-a-reaction-without-a-structure-is-citable-not-searchable`), and a search
+        that reports "complete" without saying so reads as a search of the ELN. Withdrawn records
+        are not counted — nobody may be sent to cite one. `query` is matched as text against each
+        record's drawn species (`drawn_species_patterns`), never through an index, so the tier
+        stays outside every structure search as decided; `None` asks for the count alone.
+        """
+        ...
+
     async def known(self, reaction_ids: Sequence[str]) -> set[str]:
         """Which of `reaction_ids` the corpus holds at all — the citation-existence check.
 
@@ -512,6 +587,21 @@ class InMemoryReactionRecordStore:
             if record.retracted_at is not None or record.tier is not RecordTier.STRUCTURED
         }
         return _pair_off(refs, withheld)
+
+    async def citation_only(self, query: str | None = None) -> CitationOnlyRecords:
+        """The non-withdrawn citation-only records, and which list a spelling of `query`."""
+        patterns = drawn_species_patterns(query)
+        outside = sorted(
+            key
+            for key, record in self._records.items()
+            if record.tier is RecordTier.CITATION_ONLY and record.retracted_at is None
+        )
+        found = [
+            key
+            for key in outside
+            if any(pattern in self._records[key].body for pattern in patterns)
+        ]
+        return _citation_only(len(outside), found, len(found), bool(patterns))
 
     async def known(self, reaction_ids: Sequence[str]) -> set[str]:
         """Which of `reaction_ids` this store holds at all, under any source."""
@@ -673,6 +763,20 @@ class PostgresReactionRecordStore:
                 await cur.execute(_SELECT_WITHHELD, ([reaction_id for _, reaction_id in refs],))
                 rows = await cur.fetchall()
         return _pair_off(refs, {(row[0], row[1]) for row in rows})
+
+    async def citation_only(self, query: str | None = None) -> CitationOnlyRecords:
+        """One statement over `114`'s partial index: the count, the matches, the first few ids."""
+        patterns = drawn_species_patterns(query)
+        async with self._connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    _SELECT_CITATION_ONLY, {"patterns": patterns, "cap": CITATION_ONLY_NAMED_MAX}
+                )
+                row = await cur.fetchone()
+        # An aggregate without GROUP BY returns exactly one row; the fallback is for the type.
+        outside, total, sources, ids = row if row is not None else (0, 0, None, None)
+        found = list(zip(sources or [], ids or [], strict=True))
+        return _citation_only(outside, found, total, bool(patterns))
 
     async def known(self, reaction_ids: Sequence[str]) -> set[str]:
         """Which of `reaction_ids` the corpus holds at all."""

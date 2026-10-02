@@ -625,6 +625,11 @@ class AgentSettings(BaseSettings):
     # rendered `key: value` line (and is refused at write time in `remember_preference`);
     # `preferences_section_max_chars` caps the whole appended section. A real working preference
     # measured ~44 characters, so 300 is several sentences and 4,000 is about a thousand tokens.
+    # The bound is on the *rendered* line (`- key: value`, defanged), at write and at render
+    # alike. Kept at 300 against the one long real entry measured: the lane's model-written
+    # `forbidden_solvent_dmf` renders at 312 and was cut inside its last clause ("… optimisation
+    # c[ampaign for this chemist]"), losing no constraint. A value that long is now refused at
+    # write time with a request to shorten it, which is cheaper than paying it on every call.
     # The section floor leaves room for its fixed framing (~0.9 kB) plus at least one entry.
     preferences_entry_max_chars: int = Field(default=300, ge=40)
     preferences_section_max_chars: int = Field(default=4_000, ge=1_500)

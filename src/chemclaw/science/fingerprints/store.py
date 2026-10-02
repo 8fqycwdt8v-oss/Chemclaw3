@@ -16,7 +16,7 @@ from typing import Generic, Literal, Protocol, TypeVar, runtime_checkable
 
 import psycopg
 from psycopg.rows import TupleRow
-from pydantic import BaseModel, Field, computed_field
+from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 from chemclaw.core import db
 from chemclaw.core.config import settings
@@ -140,6 +140,89 @@ class Match(BaseModel):
 
 HitT = TypeVar("HitT", bound=BaseModel)
 
+#: How many citation-only records a verdict names by id. A pointer to read, not a result page: the
+#: model is sent to `expand_note` for each, so a handful is what a turn can act on, and the count
+#: beside it says how many more there are.
+CITATION_ONLY_NAMED_MAX = 5
+
+
+class CitationOnlyRecords(BaseModel):
+    """The ELN records no structure index holds, and which of them give the queried structure.
+
+    **Why every structural answer carries this.** A citation-only record — the source named at
+    least one species without its structure — contributes no fingerprint, molecule or label row,
+    not even for the species it *does* draw
+    (`D-2026-09-27-a-reaction-without-a-structure-is-citable-not-searchable`, step 4). That is the
+    decided tier and it is unchanged here. What was wrong is that no verdict said so: once the
+    indexes were complete, "COMPLETE: all 4282 …" and "a genuine negative result" told the model
+    the *corpus* had been searched, and it reported "no in-house data" for 6-iodoquinoline while
+    `reaction-suzuki-flow-hte-01243` (6-iodoquinoline drawn, its boronic-acid partner only named,
+    67.76 %) sat outside the denominator. So the denominator is now stated as what it is.
+
+    `giving_query` is a **text check, not a structure search**: it counts citation-only records
+    whose body lists one of the query's spellings (as given, RDKit-canonical, standardized) as a
+    drawn species. That keeps the tier out of every index, as decided, and points the model to the
+    one route the tier has — citation through `expand_note`. Its blind side is said in the verdict:
+    a source that spelled the structure differently, or a substructure, is not found by it.
+
+    `outside_index` and `giving_query` count records that are not withdrawn by their source, since
+    those are the only ones a chemist could be told to cite.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    outside_index: int = Field(
+        ge=0,
+        description="Citation-only records on file (not withdrawn) that no structure index holds.",
+    )
+    query_checked: bool = Field(
+        default=False,
+        description="Whether the query's spellings were looked for among their drawn species.",
+    )
+    giving_query: int = Field(
+        default=0, ge=0, description="How many of them list a spelling of the query as drawn."
+    )
+    examples: list[str] = Field(
+        default_factory=list,
+        description=f"Note ids of up to {CITATION_ONLY_NAMED_MAX} of those, for `expand_note`.",
+    )
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def verdict(self) -> str:
+        """The clause a structural verdict appends; `""` when no record sits outside the index.
+
+        A `computed_field` for the reason `FingerprintSearch.verdict` gives at length.
+        """
+        if self.outside_index == 0:
+            return ""
+        outside = (
+            f"NOT SEARCHED: {self.outside_index} citation-only ELN record(s) are outside this "
+            "search — the source named at least one of their species without a structure, so none "
+            "of them is fingerprinted or labelled, and no structure or similarity search reaches "
+            "them, not even through the species they do draw. This answer says nothing about them."
+        )
+        if not self.query_checked:
+            return outside
+        if self.giving_query:
+            named = ", ".join(self.examples)
+            more = (
+                f" (and {self.giving_query - len(self.examples)} more)"
+                if self.giving_query > len(self.examples)
+                else ""
+            )
+            return (
+                f"{outside} {self.giving_query} of them list the queried structure as a drawn "
+                f"species: {named}{more}. They are in-house evidence for this question: read them "
+                "with expand_note and cite them for what they state (yields, conditions, the "
+                "species they name). Do NOT report that no in-house precedent exists."
+            )
+        return (
+            f"{outside} None of them lists the queried structure under the spellings checked (as "
+            "given, canonical and standardized) — a text check, so a record spelling it "
+            "differently, or containing it only as a substructure, is not ruled out."
+        )
+
 
 class FingerprintSearch(BaseModel, Generic[HitT]):
     """One search over a fingerprint index: the hits, **and whether the index could answer**.
@@ -201,11 +284,33 @@ class FingerprintSearch(BaseModel, Generic[HitT]):
     # read as a total for exactly as long as this comment said the omission was correct.
     scan_truncated: bool = False
     hits_truncated: bool = False
+    # The ELN records no fingerprint index holds — citation-only, so outside this search by the
+    # tier's decision — and which of them list the queried structure (`CitationOnlyRecords`).
+    # `None` means the caller did not ask: the in-process retrieval sweep and a result built by
+    # hand. Every MCP tool that serves this model asks, because a search that reports its
+    # denominator as the corpus is the defect this field exists for.
+    unsearched: CitationOnlyRecords | None = None
 
     @computed_field  # type: ignore[prop-decorator]
     @property
     def verdict(self) -> str:
-        """The one sentence the model must read before it writes an answer.
+        """`_indexed_verdict`, with what the index cannot hold said beside it.
+
+        **Order is the point.** When a citation-only record lists the queried structure, its clause
+        comes *first*: the indexed half of the sentence still says "a genuine negative result", and
+        a model that stops reading there writes "no in-house precedent" about a run on file.
+        Otherwise the count follows the indexed answer, as the qualification it is.
+        """
+        indexed = self._indexed_verdict()
+        outside = self.unsearched.verdict if self.unsearched is not None else ""
+        if not outside:
+            return indexed
+        if self.unsearched is not None and self.unsearched.giving_query:
+            return f"{outside} {indexed}"
+        return f"{indexed} {outside}"
+
+    def _indexed_verdict(self) -> str:
+        """The one sentence the model must read about what the index itself answered.
 
         `computed_field`, not a bare `property`, and that is the whole point of this method. A
         plain property is *not serialized*: `model_dump()` would return `{"subject": …, "hits": [],
@@ -252,7 +357,7 @@ class FingerprintSearch(BaseModel, Generic[HitT]):
                 return (
                     f"No indexed {self.subject} matched this query. The {self.subject} fingerprint "
                     "index holds records and was searched exactly — every stored record was "
-                    "compared — so this is a genuine negative result."
+                    "compared — so this is a genuine negative result over the indexed records."
                 )
             return " ".join(
                 [
