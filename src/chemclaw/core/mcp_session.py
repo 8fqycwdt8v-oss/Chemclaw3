@@ -561,6 +561,13 @@ async def invoke(session: ClientSession, tool: str, arguments: dict[str, Any]) -
 
     This is the only place that can classify a failure of the *call*, because it is the only place
     that knows a call was in flight — `open_session`'s guard deliberately stops at the connection.
+
+    **`None` means the tool succeeded and returned no content** — what a FastMCP tool returning
+    `None` sends (zero content blocks). It used to raise `McpRequestRefused("… returned no JSON")`,
+    calling a server's silence a refusal of the caller, while the agent path told the model the
+    same result was a plain success (`agent/tool_result_shape.returned_nothing`). Both now say what
+    happened; a caller that needs an object refuses a `None` in its own words, as it already does
+    for any other non-object payload.
     """
     try:
         result = await session.call_tool(tool, arguments)
@@ -582,6 +589,8 @@ async def invoke(session: ClientSession, tool: str, arguments: dict[str, Any]) -
             raise McpTimeBudget(f"{tool} was stopped: {message}")
         raise McpRequestRefused(f"{tool} failed: {message}")
     text = text_of(result.content)
+    if not text.strip():
+        return None
     try:
         return json.loads(text)
     except ValueError as exc:

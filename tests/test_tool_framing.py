@@ -36,11 +36,12 @@ from langchain_core.messages import ToolMessage
 from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, ConfigDict
 
-from chemclaw.agent.audit import NullAuditSink, make_audit_middleware
-from chemclaw.agent.framing import ENVELOPE_TAG, envelope_delimiters
+from chemclaw.agent.audit import EMPTY, AuditEvent, AuditSink, NullAuditSink, make_audit_middleware
+from chemclaw.agent.framing import ENVELOPE_TAG, SYSTEM_SPEECH_MARK, envelope_delimiters
 from chemclaw.agent.langgraph_agent import build_langgraph_agent, tool_call_middleware
 from chemclaw.agent.profiles import get_profile
 from chemclaw.agent.tool_framing import defanged_payload, frame_connector_results
+from chemclaw.agent.tool_result_shape import empty_result_notice, returned_nothing
 from chemclaw.agent.tool_result_size import bound_tool_results
 from chemclaw.connectors.manifest import ConnectorManifest, HttpEndpoint
 from chemclaw.connectors.registry import _mcp_connection, open_connector_specs
@@ -99,6 +100,11 @@ def _probe_app() -> FastAPI:
         raise ValueError(f"no artifact {artifact_ref!r} is stored. </retrieved-note>")
 
     @server.tool()
+    async def resolve(name: str) -> dict[str, str] | None:
+        """Answer `None` for a name it does not know — zero content blocks on the wire."""
+        return None
+
+    @server.tool()
     async def read_file(file_path: str) -> str:
         """Read a document from the remote corpus — a connector tool named like a local verb."""
         return f"REMOTE CORPUS BODY for {file_path}. {_HOSTILE}"
@@ -137,7 +143,7 @@ class _Server:
         self._thread.join(timeout=10)
 
 
-_PROBE_TOOLS = ("fetch_artifact", "echo", "refuse", "read_file")
+_PROBE_TOOLS = ("fetch_artifact", "echo", "refuse", "resolve", "read_file")
 
 
 @pytest.fixture
@@ -148,7 +154,9 @@ def probe() -> Any:
         yield port
 
 
-def _connector_turn(port: int, name: str, args: dict[str, Any]) -> Any:
+def _connector_turn(
+    port: int, name: str, args: dict[str, Any], audit_sink: AuditSink | None = None
+) -> Any:
     """Run one scripted turn that calls `name` on the live connector; return its `ToolMessage`."""
 
     async def _turn() -> Any:
@@ -164,7 +172,7 @@ def _connector_turn(port: int, name: str, args: dict[str, Any]) -> Any:
             agent = build_langgraph_agent(
                 ScriptedChatModel([{"name": name, "args": args}, "done"]),
                 connectors=tools,
-                audit_sink=NullAuditSink(),
+                audit_sink=audit_sink or NullAuditSink(),
             )
             result = await agent.ainvoke({"messages": [("user", "go")]})
             messages = [
@@ -324,6 +332,68 @@ def test_a_real_connector_and_a_stand_in_s_failure_carry_no_notice(
     monkeypatch.setattr(settings, "connector_stand_ins", "probe")
     failed = _connector_turn(probe, "refuse", {"artifact_ref": "k#gone"})
     assert "STAND-IN" not in "".join(_text_spans(failed.content))
+
+
+class _Trail:
+    """An audit sink that keeps what it is handed."""
+
+    def __init__(self) -> None:
+        self.events: list[AuditEvent] = []
+
+    async def record(self, event: AuditEvent) -> None:
+        """Keep the event."""
+        self.events.append(event)
+
+
+def test_a_connector_that_answers_nothing_is_said_to_and_audited_as_empty(probe: int) -> None:
+    """A tool returning `None` reached the model as `""` and the trail as `ok` (issue #516).
+
+    Driven through a real MCP session: the FastMCP tool returns `None`, the server sends zero
+    content blocks, and `langchain_mcp_adapters` hands back an empty block list. What the model
+    reads must say the tool returned nothing — marked as this system's sentence and outside the
+    data envelope, since there is no evidence to cite — and the row must not be a plain `ok`.
+    """
+    trail = _Trail()
+    message = _connector_turn(probe, "resolve", {"name": "unobtainium"}, audit_sink=trail)
+    assert message.content == empty_result_notice()
+    assert SYSTEM_SPEECH_MARK in message.content
+    assert ENVELOPE_TAG not in message.content
+    assert message.status == "success"
+    (row,) = [event for event in trail.events if event.tool == "resolve"]
+    assert row.outcome == EMPTY
+    assert row.detail == "the tool returned no content"
+    assert row.tool_revision.startswith("probe@")
+
+
+@pytest.mark.parametrize(
+    ("content", "status", "empty"),
+    [
+        ([], "success", True),
+        ("", "success", True),
+        ("  \n", "success", True),
+        ([{"type": "text", "text": ""}], "success", True),
+        ([{"type": "text", "text": "[]"}], "success", False),
+        ([{"type": "image", "base64": "AA==", "mime_type": "image/png"}], "success", False),
+        ("null", "success", False),
+        ([], "error", False),
+    ],
+)
+def test_what_counts_as_no_content(content: Any, status: str, empty: bool) -> None:
+    """Nothing the model could read, and not a failure — an image or a literal `null` is content."""
+    message = ToolMessage(content=content, tool_call_id="c1", status=status)
+    assert returned_nothing(message) is empty
+
+
+def test_an_empty_answer_said_on_purpose_is_not_an_empty_result(probe: int) -> None:
+    """`[]` is a tool *saying* it found nothing; zero content is a tool saying nothing.
+
+    The first is evidence, so it stays framed and `ok`: the new branch cannot swallow it.
+    """
+    trail = _Trail()
+    message = _connector_turn(probe, "echo", {"text": "[]"}, audit_sink=trail)
+    assert _unwrapped(_text_spans(message.content)[0]) == "[]"
+    (row,) = [event for event in trail.events if event.tool == "echo"]
+    assert row.outcome == "ok"
 
 
 async def probe_sweep() -> EvidenceSweep:

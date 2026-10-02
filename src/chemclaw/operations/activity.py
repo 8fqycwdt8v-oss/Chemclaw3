@@ -52,7 +52,7 @@ from chemclaw.operations.window import Window
 #: than imported from `chemclaw.agent.audit`: `operations` is below `agent` in the layering, and
 #: the trail holds rows written by every revision that ever ran — including outcomes a current
 #: producer no longer mints. A reader of history must therefore not be bounded by today's producer.
-OUTCOMES: tuple[str, ...] = ("ok", "refused", "error", "cancelled")
+OUTCOMES: tuple[str, ...] = ("ok", "refused", "error", "cancelled", "empty")
 
 
 def _connect() -> AbstractAsyncContextManager[psycopg.AsyncConnection[TupleRow]]:
@@ -111,6 +111,8 @@ class ToolUse(BaseModel):
     refused: int = 0
     error: int = 0
     cancelled: int = 0
+    #: Connector calls that succeeded and returned no content (`chemclaw.agent.audit.EMPTY`).
+    empty: int = 0
     #: Calls whose outcome is not one of `OUTCOMES` — an older revision's vocabulary, or a newer
     #: one this reader has not learned yet.
     other: int = 0

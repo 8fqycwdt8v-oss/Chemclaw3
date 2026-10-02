@@ -121,7 +121,9 @@ from chemclaw.agent.framing import (
 )
 from chemclaw.agent.tool_result_shape import (
     cut_short_report,
+    empty_result_notice,
     helper_stopped_by,
+    returned_nothing,
     rewritten_tool_messages,
 )
 from chemclaw.agent.tool_result_size import (
@@ -580,6 +582,10 @@ async def frame_connector_results(request: Any, handler: Callable[[Any], Any]) -
         def _framed(message: ToolMessage) -> ToolMessage:
             if message.status == "error":
                 return _defanged(message)
+            if returned_nothing(message):
+                # Said, not framed: an envelope around nothing is a citation to nothing, and a
+                # bare `""` reads as "nothing found" (`tool_result_shape.returned_nothing`).
+                return message.model_copy(update={"content": empty_result_notice()})
             # **Re-bounded for the same reason `_defanged` is, and it was missing here.** The
             # sibling branch three lines up has carried that argument since it shipped; this one
             # wrapped and returned. `_framed_content` defangs before it wraps, so it runs the same
