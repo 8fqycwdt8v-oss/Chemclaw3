@@ -27,7 +27,10 @@ from collections.abc import AsyncIterator, Iterator
 from typing import Any
 
 import httpx
+import jwt
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import Request
 
 from chemclaw.agent import plan_approval_store as store_module
@@ -35,8 +38,10 @@ from chemclaw.agent import session_members as members_module
 from chemclaw.agent.plan_gate import plan_identity
 from chemclaw.agent.session_members import session_member_store
 from chemclaw.agent.session_queue import InMemoryTurnQueue, QueueRefused, TurnQueue
+from chemclaw.api import auth
 from chemclaw.api.auth import Principal, require_principal
 from chemclaw.api.detach import _QUEUE_SIZE, DetachableTurn
+from chemclaw.api.routes import turns as turns_module
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import get_current_actor, get_current_roles
 from tests.fakes_turn import Piece, ScriptedTurn
@@ -49,6 +54,21 @@ _BEN = Principal(oid="ben-line", upn="ben@corp", roles=frozenset({"analyst"}))
 _CAT = Principal(oid="cat-line", upn="cat@corp", roles=frozenset({"qa-reviewer"}))
 _DAN = Principal(oid="dan-line", upn="dan@corp", roles=frozenset({"process-chemist"}))
 _PEOPLE = {person.oid: person for person in (_ANA, _BEN, _CAT, _DAN)}
+_AUDIENCE = "api://chemclaw-line"
+_ISSUER = "https://issuer.test/line/v2.0"
+
+
+async def _reauthorize_by_header(request: Request, principal: Principal) -> Principal:
+    """The head-of-line re-check, re-resolving the sender the way `_by_header` first did.
+
+    These cases authenticate by a test header rather than a token, so the production re-check —
+    which re-validates the bearer token — would refuse every waiting message. The one case that
+    *is* about the token puts the real `auth.reauthorize` back and signs real ones
+    (`test_a_message_whose_token_expires_while_it_waits_does_not_run`).
+    """
+    fresh = _by_header(request)
+    assert fresh.oid == principal.oid
+    return fresh
 
 
 @pytest.fixture(autouse=True)
@@ -57,6 +77,7 @@ def _stores(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setattr(settings, "session_store", "memory")
     monkeypatch.setattr(settings, "entra_required", True)
     monkeypatch.setattr(settings, "service_turn_queue_poll_seconds", 0.05)
+    monkeypatch.setattr(turns_module, "reauthorize", _reauthorize_by_header)
     members_module.session_member_store.cache_clear()
     store_module.plan_approval_store.cache_clear()
     yield
@@ -422,7 +443,7 @@ def test_a_stalled_watcher_is_cut_off_without_holding_the_turn_or_the_sender() -
         async for _event in turn.events():
             seen += 1
         finished = not turn.running
-        tail = [event async for event in stalled]
+        tail = [event async for event in stalled.events]
         return seen, tail, finished
 
     seen, tail, finished = asyncio.run(_run())
@@ -438,8 +459,9 @@ def test_a_watcher_leaving_never_stops_the_turn_even_under_the_old_posture() -> 
     async def _run() -> tuple[bool, bool]:
         gate = asyncio.Event()
         turn = DetachableTurn(_burst(5, gate), session_id="s-leave", survive_disconnect=False)
-        watcher = turn.watch()
-        assert watcher is not None
+        watch = turn.watch()
+        assert watch is not None
+        watcher = watch.events
         reader = asyncio.ensure_future(anext(watcher))
         await asyncio.sleep(0.01)
         reader.cancel()
@@ -453,6 +475,313 @@ def test_a_watcher_leaving_never_stops_the_turn_even_under_the_old_posture() -> 
     still_running, finished = asyncio.run(_run())
     assert still_running, "a watcher closing their view stopped the sender's turn"
     assert finished
+
+
+# --- re-authorized at the head, and bounded (issue #503) -----------------------------------------
+# `D-2026-10-02-a-queued-message-is-re-authorized-at-the-head-of-the-line`.
+
+
+def _sign(key: Any, person: Principal, lifetime: float) -> str:
+    """A real RS256 token for `person`, expiring `lifetime` seconds from now."""
+    claims = {
+        "aud": _AUDIENCE,
+        "iss": _ISSUER,
+        "exp": int(time.time() + lifetime),
+        "oid": person.oid,
+        "preferred_username": person.upn,
+        "roles": sorted(person.roles),
+    }
+    pem = key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    )
+    return jwt.encode(claims, pem, algorithm="RS256")
+
+
+def test_a_message_whose_token_expires_while_it_waits_does_not_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Real tokens, nothing patched in the seam: an expired sender is refused at the head.
+
+    Ben's POST is admitted on a token valid for two more seconds; Ana's turn holds the session past
+    that. The message must end `queue_cancelled`, saying why, and must never reach the model — the
+    review's P2 (#503), where only membership used to be read again.
+    """
+    monkeypatch.setattr(turns_module, "reauthorize", auth.reauthorize)
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    monkeypatch.setattr(settings, "entra_audience", _AUDIENCE)
+    monkeypatch.setattr(settings, "entra_issuer", _ISSUER)
+    monkeypatch.setattr(auth, "_signing_key", lambda _token: key.public_key())
+    agent = _Ledger()
+
+    def _bearer(person: Principal, lifetime: float) -> dict[str, str]:
+        return {"Authorization": f"Bearer {_sign(key, person, lifetime)}"}
+
+    async def _run() -> list[dict[str, Any]]:
+        with _Served(_app(agent, owner_store=_FakeOwnerStore())) as served:
+            async with httpx.AsyncClient(base_url=served.base, timeout=30) as client:
+                ana = _bearer(_ANA, 600)
+                created = await client.post("/sessions", headers=ana)
+                assert created.status_code == 200, created.text
+                session_id = str(created.json()["session_id"])
+                admitted = await client.put(
+                    f"/sessions/{session_id}/members/{_BEN.oid}", headers=ana
+                )
+                assert admitted.status_code == 204, admitted.text
+
+                async def _send(headers: dict[str, str], message: str) -> list[dict[str, Any]]:
+                    events: list[dict[str, Any]] = []
+                    async with client.stream(
+                        "POST",
+                        f"/sessions/{session_id}/messages",
+                        json={"message": message},
+                        headers=headers,
+                    ) as response:
+                        assert response.status_code == 200, await response.aread()
+                        async for line in response.aiter_lines():
+                            if line.startswith("data:"):
+                                events.append(json.loads(line.removeprefix("data:")))
+                    return events
+
+                held = asyncio.create_task(_send(ana, "hold ana"))
+                await _until(lambda: _started(agent, 1))
+                ben = asyncio.create_task(_send(_bearer(_BEN, 2), "ben asks"))
+                events = await asyncio.wait_for(ben, 15)
+                _ran(agent, served, session_id)
+                await held
+                return events
+
+    events = asyncio.run(_run())
+    assert events[-1]["type"] == "error" and events[-1]["code"] == "queue_cancelled", events
+    assert "sign-in expired" in events[-1]["message"], events[-1]
+    assert [message for message, _actor, _roles in agent.ran] == ["hold ana"], (
+        "a message ran on a token that had expired while it waited"
+    )
+
+
+class _TwoGates(_Ledger):
+    """`_Ledger` plus a second hold — `park` — released by its own event, not `gate`."""
+
+    def __init__(self) -> None:
+        """Both gates closed."""
+        super().__init__()
+        self.park = threading.Event()
+
+    async def stream(self, message: str) -> AsyncIterator[Piece]:
+        """Park a `park` message on its own gate; otherwise behave as `_Ledger`."""
+        if not message.startswith("park"):
+            async for piece in super().stream(message):
+                yield piece
+            return
+        self.ran.append((message, get_current_actor(), frozenset(get_current_roles())))
+        yield "parked "
+        while not self.park.is_set():
+            await asyncio.sleep(0.01)
+        yield f"done {message}"
+
+
+def test_a_sender_at_their_cap_when_their_turn_comes_is_refused_at_the_head(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The per-actor cap is counted again at the head: what held at sending need not hold now.
+
+    The cap is off while Ben's message joins Ana's line and while he starts a turn of his own
+    elsewhere; it is on by the time his message reaches the head, which is the shape a burst of
+    concurrent POSTs takes past the check each of them passed alone.
+    """
+    agent = _TwoGates()
+
+    async def _run() -> list[dict[str, Any]]:
+        with _served(agent) as served:
+            async with httpx.AsyncClient(base_url=served.base, timeout=30) as client:
+                session_id = await _shared_session(client, _BEN)
+                bens = str((await client.post("/sessions", headers=_as(_BEN))).json()["session_id"])
+                ana = asyncio.create_task(_post(client, _ANA, session_id, "hold ana"))
+                await _until(lambda: _started(agent, 1))
+                ben = asyncio.create_task(_post(client, _BEN, session_id, "ben asks"))
+                await _until(lambda: _waiting(client, session_id, 1))
+                own = asyncio.create_task(_post(client, _BEN, bens, "park ben"))
+                await _until(lambda: _started(agent, 2))
+                monkeypatch.setattr(settings, "service_max_concurrent_turns_per_actor", 1)
+                _ran(agent, served, session_id)
+                await ana
+                status, events = await ben
+                assert status == 200
+                agent.park.set()
+                await own
+                return events
+
+    events = asyncio.run(_run())
+    assert events[-1]["type"] == "error", (events, agent.ran)
+    assert events[-1]["code"] == "queue_cancelled", events
+    assert "as many turns running" in events[-1]["message"], events[-1]
+    assert [message for message, _actor, _roles in agent.ran] == ["hold ana", "park ben"]
+
+
+def test_a_waiting_message_counts_against_its_senders_cap_elsewhere(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ben waiting in Ana's session is a turn he will run: with a cap of one, his next is 429.
+
+    Before #503 the cap read running turns only, so a chemist could park a message in every
+    shared session and have them all start, past the cap, the moment the lines moved.
+    """
+    monkeypatch.setattr(settings, "service_max_concurrent_turns_per_actor", 1)
+    agent = _Ledger()
+
+    async def _run() -> int:
+        with _served(agent) as served:
+            async with httpx.AsyncClient(base_url=served.base, timeout=30) as client:
+                session_id = await _shared_session(client, _BEN)
+                bens = str((await client.post("/sessions", headers=_as(_BEN))).json()["session_id"])
+                ana = asyncio.create_task(_post(client, _ANA, session_id, "hold ana"))
+                await _until(lambda: _started(agent, 1))
+                ben = asyncio.create_task(_post(client, _BEN, session_id, "ben asks"))
+                await _until(lambda: _waiting(client, session_id, 1))
+                status, _events = await _post(client, _BEN, bens, "and another")
+                _ran(agent, served, session_id)
+                await ana
+                await ben
+                return status
+
+    assert asyncio.run(_run()) == 429
+    assert [message for message, _actor, _roles in agent.ran] == ["hold ana", "ben asks"]
+
+
+def test_a_process_holding_its_most_waiters_refuses_the_next_429(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Waiters per process are bounded by what the socket budget charges for them.
+
+    `service_max_concurrent_turns` × `service_turn_queue_max` is 1 here, so Cat is refused by the
+    process before the session's own line is asked — a 429 with `Retry-After`, not the line's 409.
+    """
+    monkeypatch.setattr(settings, "service_max_concurrent_turns", 1)
+    monkeypatch.setattr(settings, "service_turn_queue_max", 1)
+    agent = _Ledger()
+
+    async def _run() -> tuple[int, str | None, dict[tuple[str, str], int]]:
+        with _served(agent) as served:
+            async with httpx.AsyncClient(base_url=served.base, timeout=30) as client:
+                session_id = await _shared_session(client, _BEN, _CAT)
+                ana = asyncio.create_task(_post(client, _ANA, session_id, "hold ana"))
+                await _until(lambda: _started(agent, 1))
+                ben = asyncio.create_task(_post(client, _BEN, session_id, "ben asks"))
+                await _until(lambda: _waiting(client, session_id, 1))
+                refused = await client.post(
+                    f"/sessions/{session_id}/messages",
+                    json={"message": "cat asks"},
+                    headers=_as(_CAT),
+                )
+                _ran(agent, served, session_id)
+                await ana
+                await ben
+                await _until(lambda: _quiet(served))
+                return (
+                    refused.status_code,
+                    refused.headers.get("Retry-After"),
+                    dict(served.app.state.queue_waiters),
+                )
+
+    status, retry_after, left = asyncio.run(_run())
+    assert status == 429 and retry_after, (status, retry_after)
+    assert left == {}, f"a waiter's place outlived its message: {left}"
+
+
+async def _quiet(served: _Served) -> bool:
+    """Whether the process holds no waiter and no turn any more."""
+    return not served.app.state.queue_waiters and not served.app.state.active_turns
+
+
+def test_a_cut_off_watcher_still_counts_until_its_stream_closes() -> None:
+    """Being cut off ends delivery, not the socket — so the cap counts the view until it closes.
+
+    Before #503 a lagged reader left the count the moment the pump dropped it, so a participant
+    could stall a view, have it cut off and open another, past `service_turn_max_watchers`.
+    """
+
+    async def _run() -> tuple[int, int, int]:
+        turn = DetachableTurn(_burst(_QUEUE_SIZE + 50), session_id="s-cap")
+        stalled = turn.watch()
+        assert stalled is not None
+        async for _event in turn.events():
+            pass
+        after_cut_off = turn.watchers
+        stalled.close()
+        after_close = turn.watchers
+        stalled.close()  # idempotent
+        return after_cut_off, after_close, turn.watchers
+
+    after_cut_off, after_close, twice = asyncio.run(_run())
+    assert after_cut_off == 1, "a cut-off view stopped counting while its stream was still open"
+    assert (after_close, twice) == (0, 0)
+
+
+def test_a_watch_takes_one_of_the_watchers_stream_slots_and_gives_it_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With one stream per user, Ben's watch is his one: a second is 429; it returns at the end."""
+    monkeypatch.setattr(settings, "service_max_event_streams_per_user", 1)
+    agent = _Ledger()
+
+    async def _run() -> tuple[int, dict[str, int], dict[str, int]]:
+        with _served(agent) as served:
+            async with httpx.AsyncClient(base_url=served.base, timeout=30) as client:
+                session_id = await _shared_session(client, _BEN)
+                ana = asyncio.create_task(_post(client, _ANA, session_id, "hold ana"))
+                await _until(lambda: _started(agent, 1))
+                attached = asyncio.Event()
+                ben = asyncio.create_task(_watch(client, _BEN, session_id, attached))
+                await asyncio.wait_for(attached.wait(), 10)
+                held = dict(served.app.state.event_streams)
+                second = await client.get(f"/sessions/{session_id}/turn/stream", headers=_as(_BEN))
+                _ran(agent, served, session_id)
+                await ana
+                await ben
+                await _until(lambda: _no_streams(served))
+                return second.status_code, held, dict(served.app.state.event_streams)
+
+    status, held, after = asyncio.run(_run())
+    assert held == {_BEN.oid: 1}, held
+    assert status == 429
+    assert after == {}
+
+
+async def _no_streams(served: _Served) -> bool:
+    """Whether every long-lived stream slot on the process has been returned."""
+    return not served.app.state.event_streams
+
+
+def test_a_member_removed_mid_turn_stops_receiving_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ben watches Ana's turn; Ana removes him; the answer reaches Ana and not Ben."""
+    monkeypatch.setattr(settings, "service_turn_watch_recheck_seconds", 0.01)
+    agent = _Ledger()
+
+    async def _run() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        with _served(agent) as served:
+            async with httpx.AsyncClient(base_url=served.base, timeout=30) as client:
+                session_id = await _shared_session(client, _BEN)
+                ana = asyncio.create_task(_post(client, _ANA, session_id, "hold ana"))
+                await _until(lambda: _started(agent, 1))
+                attached = asyncio.Event()
+                ben = asyncio.create_task(_watch(client, _BEN, session_id, attached))
+                await asyncio.wait_for(attached.wait(), 10)
+                removed = await client.delete(
+                    f"/sessions/{session_id}/members/{_BEN.oid}", headers=_as(_ANA)
+                )
+                assert removed.status_code == 204
+                await asyncio.sleep(0.05)
+                _ran(agent, served, session_id)
+                status, sender = await ana
+                assert status == 200
+                return sender, await asyncio.wait_for(ben, 10)
+
+    sender, watched = asyncio.run(_run())
+    assert sender[-1]["type"] == "answer"
+    assert not any(event["type"] == "answer" for event in watched), (
+        "a member removed mid-turn was still sent its answer"
+    )
 
 
 # --- the line's store, both backends --------------------------------------------------------------

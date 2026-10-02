@@ -47,7 +47,14 @@ logger = logging.getLogger(__name__)
 # owns, and the manifests and refusal messages that teach an operator how to write a group-gated
 # entitlement have to name the same string. Imported under its own name so `auth.GROUP_ROLE_PREFIX`
 # keeps resolving for anything that already reads it from this module.
-__all__ = ["GROUP_ROLE_PREFIX", "AuthError", "Principal", "require_principal", "validate_token"]
+__all__ = [
+    "GROUP_ROLE_PREFIX",
+    "AuthError",
+    "Principal",
+    "reauthorize",
+    "require_principal",
+    "validate_token",
+]
 
 # The dev stand-in used only when `entra_required` is False (local, no tenant). Never reached in a
 # real deployment, where every request is a validated Entra token.
@@ -525,6 +532,44 @@ async def require_principal(request: Request) -> Principal:
         logger.info("token validation failed: %s", exc)
         raise HTTPException(status_code=401, detail="invalid or expired token") from exc
     return _bind(request, _within_budget(principal))
+
+
+async def reauthorize(request: Request, principal: Principal) -> Principal:
+    """What this request's credential establishes *now* — `AuthError` once it no longer does.
+
+    **For work that starts long after its request was authenticated** — today one thing: a message
+    that waited in a shared session's line
+    (`D-2026-10-02-a-queued-message-is-re-authorized-at-the-head-of-the-line`). Its POST was checked
+    at arrival and the turn runs at the head of the line, which can be about
+    `service_turn_queue_max` × `service_turn_timeout_seconds` later; a turn must not run on a token
+    that has expired in between.
+
+    **The same validation the request passed, run again on the same credential** — signature,
+    audience, issuer and `exp` — so an expired token is refused exactly as it would be on a fresh
+    request. Roles here come only from the token (`_principal_from_claims`; no Graph call, D-089),
+    so what is current about them is what the token still vouches for, and an expired token is the
+    one way that changes. A token that now names somebody else is refused too: the line's place
+    belongs to the sender who took it.
+
+    Deliberately *not* `require_principal`: that is the request funnel, and it also spends the
+    caller's rate budget and binds ambients — re-entering it would charge a waiting message for
+    waiting, and could cancel it for a rate the sender never exceeded.
+
+    Under `entra_required=False` there is no credential to re-check and the dev principal stands.
+
+    Raises:
+        AuthError: the credential no longer validates, or names a different principal.
+        IdentityProviderUnavailable: the tenant's key set could not be reached to decide.
+    """
+    if not settings.entra_required:
+        return principal
+    header = request.headers.get("Authorization", "")
+    if not header.startswith("Bearer "):
+        raise AuthError("the request carries no bearer token to re-check")
+    fresh = await asyncio.to_thread(validate_token, header[len("Bearer ") :])
+    if fresh.oid != principal.oid:
+        raise AuthError("the request's token now names a different principal")
+    return fresh
 
 
 def _shed_if_the_database_is_known_down(request: Request) -> None:

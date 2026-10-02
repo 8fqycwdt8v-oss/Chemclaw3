@@ -234,11 +234,17 @@ _COUNTERS: dict[str, str] = {
         "Turns that found their session busy and joined its line (previously refused 409)."
     ),
     "chemclaw_turn_queue_refused_total": (
-        "Messages refused with 409 because the session's line was full or the sender already "
-        "had a message waiting in it."
+        "Messages refused a place in a line: 409 because the session's line was full or the sender "
+        "already had a message waiting in it, 429 because this process held its most waiters."
     ),
     "chemclaw_turn_queue_withdrawn_total": (
-        "Waiting messages that never ran: withdrawn, their sender removed, or the session deleted."
+        "Waiting messages that never ran: withdrawn, their sender removed or no longer signed in "
+        "or at their concurrent-turn cap when it was their turn, or the session deleted."
+    ),
+    # A shared session's membership is read per request, and a watch is one request lasting a turn,
+    # so it is read again while watching; this counts the views that check closed.
+    "chemclaw_turn_watchers_removed_total": (
+        "Views of a running turn closed because their watcher was removed from the session."
     ),
     # Fan-out's one failure mode, counted so a rising rate is visible: a participant's view of a
     # running turn filled its own buffer and was cut off rather than allowed to slow anybody else.

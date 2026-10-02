@@ -2649,13 +2649,17 @@ def test_the_socket_budget_cannot_be_reached_by_the_caps_it_is_meant_to_cover() 
     """
     from chemclaw.core.config import Settings
 
-    # A turn is its sender's stream plus the participants following it and the messages waiting
-    # behind it (`D-2026-10-01-a-queued-message-waits-in-its-senders-request`).
-    per_turn = 1 + settings.service_turn_max_watchers + settings.service_turn_queue_max
+    # A turn is its sender's stream plus the participants following it
+    # (`D-2026-10-01-a-queued-message-waits-in-its-senders-request`); waiting messages are charged
+    # per process, wherever the turn ahead of them runs, at the bound the turn route enforces
+    # (`D-2026-10-02-a-queued-message-is-re-authorized-at-the-head-of-the-line`).
+    per_turn = 1 + settings.service_turn_max_watchers
+    waiters = settings.service_max_concurrent_turns * settings.service_turn_queue_max
     assert (
         settings.service_max_connections
         >= settings.service_max_event_streams_total
         + settings.service_max_concurrent_turns * per_turn
+        + waiters
         + settings.service_connection_headroom
     )
     with pytest.raises(ValueError) as excinfo:
@@ -2668,3 +2672,23 @@ def test_the_socket_budget_cannot_be_reached_by_the_caps_it_is_meant_to_cover() 
     message = str(excinfo.value)
     assert "service_max_connections" in message and "service_max_event_streams_total" in message
     assert "/healthz" in message
+
+
+def test_a_line_whose_poll_outlasts_its_lease_is_refused_at_startup() -> None:
+    """A waiter refreshes its place each time it asks, so a poll at or above the lease is refused.
+
+    Asked less often than the lease, every place lapses between asks and every queued message
+    reads as withdrawn without anybody withdrawing it (#503).
+    """
+    from chemclaw.core.config import Settings
+
+    assert settings.service_turn_queue_poll_seconds < settings.service_turn_claim_lease_seconds
+    with pytest.raises(ValueError) as excinfo:
+        Settings(  # type: ignore[call-arg]
+            _env_file=None,
+            service_turn_queue_poll_seconds=60.0,
+            service_turn_claim_lease_seconds=60.0,
+        )
+    message = str(excinfo.value)
+    assert "service_turn_queue_poll_seconds" in message
+    assert "service_turn_claim_lease_seconds" in message
