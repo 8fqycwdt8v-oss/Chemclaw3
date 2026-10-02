@@ -278,8 +278,10 @@ BEGIN
     -- source inside the same transaction that writes a new one
     -- (D-2026-08-27-a-refused-record-is-a-question-somebody-will-ask). A corpus with one
     -- systematically broken field would otherwise write a row per record per run, and no sweep
-    -- runs often enough to be the answer to that. The eviction is the only DELETE any code issues
-    -- against it.
+    -- runs often enough to be the answer to that. The eviction is one of two DELETEs any code
+    -- issues against it; the other withdraws a refusal once its record is stored
+    -- (`ingest/rejections.forget_refusals`), because a row naming a record the corpus now holds is
+    -- a false answer to "why is there no such record".
     EXECUTE format(
         'GRANT INSERT, UPDATE, DELETE ON '
         'session_messages, session_events, session_turns, subscriptions, user_preferences, '

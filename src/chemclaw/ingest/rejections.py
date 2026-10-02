@@ -21,7 +21,9 @@ per source; a write evicts the least recently refused in the same transaction. T
 otherwise write millions of rows is a corpus with one systematically broken field, and it is
 exactly the case where the newest refusals are the informative ones — an aged-out row is a defect
 nothing has re-offered since. `infra/sql/065_ingest_rejections.sql` states the same bound beside
-the table, and the runtime role's DELETE grant exists for this eviction alone.
+the table, and the runtime role's DELETE grant exists for this eviction and for one other: a refusal
+is withdrawn when a later run stores the same entry (`forget_refusals`), because the ledger is about
+records that are absent.
 
 **A ledger write never fails an ingest.** Recording that a record was refused is a side record
 about the run; a database that cannot take it must not also cost the corpus the entries that
@@ -44,7 +46,7 @@ and it is what keeps a ledger write from outlasting the sync activity that is ma
 
 import logging
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import Literal
 
@@ -117,13 +119,41 @@ WHERE source = %(source)s
 RETURNING entry_id
 """
 
+# A refusal is withdrawn by the record arriving. Run in the drain's own activity, after the chunk
+# has stored what it ingested — see `forget_refusals`.
+_FORGET = """
+DELETE FROM ingest_rejections
+WHERE source = %(source)s AND entry_id = ANY(%(entry_ids)s)
+"""
+
 # `count(*) OVER ()` rather than a second statement: it is the same scan, so the rows and the total
 # are one snapshot, and this runs inside a tool result on a live turn.
+#
+# **A refusal the record has since outlived is not served**, and this predicate is the half of that
+# rule `forget_refusals` cannot reach. A row written before the writer forgot anything stays until
+# its source re-offers the entry, and an ORD drop whose cursor is past the file never will: the live
+# lane kept 1,000 `suzuki-flow-*` refusals for records #482 had since stored as citation-only, and
+# `gather_evidence` told the model each was refused. A data migration deleting them is not available
+# — the schema only goes forward, and `tests/test_migrations_are_additive.py` refuses `DELETE FROM`
+# with no exemptions (D-2026-08-04-the-schema-only-goes-forward). So the reader asks the record.
+#
+# **Stored *at or after* the refusal, not merely stored.** An amendment the source sends broken is
+# refused while the earlier transcription stays in `reaction_records`, and that refusal is the
+# answer to "why does this record not show the corrected yield" — so a record older than the
+# refusal does not supersede it. Same source and same id, because the transcription's key is the
+# pair (`056`): two ELNs may use one entry id, and one site's record says nothing about the other's.
 _SELECT_MATCHING = """
-SELECT source, entry_id, reason, first_seen, last_seen, occurrences, count(*) OVER () AS matching
-FROM ingest_rejections
-WHERE lower(entry_id || ' ' || reason) LIKE ANY(%(patterns)s)
-ORDER BY last_seen DESC
+SELECT r.source, r.entry_id, r.reason, r.first_seen, r.last_seen, r.occurrences,
+       count(*) OVER () AS matching
+FROM ingest_rejections r
+WHERE lower(r.entry_id || ' ' || r.reason) LIKE ANY(%(patterns)s)
+  AND NOT EXISTS (
+      SELECT 1 FROM reaction_records x
+      WHERE x.ingest_source = r.source
+        AND x.reaction_id = r.entry_id
+        AND x.last_seen >= r.last_seen
+  )
+ORDER BY r.last_seen DESC
 LIMIT %(limit)s
 """
 
@@ -234,6 +264,40 @@ async def record_refusals(source: str, refusals: Mapping[str, str]) -> None:
             exc,
         )
     await _write_one_at_a_time(source, rows)
+
+
+async def forget_refusals(source: str, entry_ids: Sequence[str]) -> None:
+    """Withdraw the ledger rows of entries `source` has now ingested.
+
+    **A refusal is a statement about a record that is absent, and these records are not.** Nothing
+    removed a row when a later run took the same entry, so a source whose refusal rule changed —
+    #482 began storing name-only ORD species as citation-only records — kept a refusal per record it
+    now holds, and `gather_evidence` reported each as refused while `expand_note` served it. The
+    ledger is keyed on the record rather than on a run, so the record arriving is what ends the row.
+
+    Never raises, on the rule `record_refusals` states: this is a side record about the run, and a
+    database that cannot take it must not cost the chunk the entries it already stored. A row this
+    misses is still not served — `refusals_matching` reads a record stored at or after its refusal
+    as superseding it — so what a failure here costs is a stale row in the table, not a false
+    answer.
+    """
+    if not entry_ids:
+        return
+    params = {"source": source, "entry_ids": [_storable(entry_id) for entry_id in entry_ids]}
+    try:
+        async with db.connection(
+            settings.postgres_dsn, operation="ingest_rejections.forget"
+        ) as conn:
+            await conn.execute(_FORGET, params)
+            await conn.commit()
+    except Exception as exc:
+        logger.warning(
+            "could not withdraw the ingest rejections of %d entr(y/ies) source %r has now "
+            "ingested (%s); the reader still treats them as superseded",
+            len(entry_ids),
+            source,
+            exc,
+        )
 
 
 async def _evict(cursor: psycopg.AsyncCursor[TupleRow], source: str) -> int:

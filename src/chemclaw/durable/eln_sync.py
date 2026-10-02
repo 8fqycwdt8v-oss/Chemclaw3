@@ -43,7 +43,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.ingest.eln.ord import OrdReaction
     from chemclaw.ingest.eln.records import default_record_store
     from chemclaw.ingest.eln.sync import IngestSummary, sync_entries
-    from chemclaw.ingest.rejections import record_refusals
+    from chemclaw.ingest.rejections import forget_refusals, record_refusals
     from chemclaw.ingest.sources.base import IngestHalf
     from chemclaw.ingest.sources.registry import active_ingest_source_names, make_data_source
     from chemclaw.science.fingerprints.store import default_molecule_store, default_reaction_store
@@ -339,6 +339,11 @@ async def sync_eln_entries(source: str, since: datetime, apply_overlap: bool = T
     # end that property. The ledger is a side record about the run, so the durable layer that owns
     # the run's I/O writes it.
     await record_refusals(source, {entry.entry_id: entry.reason for entry in summary.rejected})
+    # The other half of the same ledger: an entry this chunk *stored* is no longer refused, however
+    # it was refused before — a source amended into shape, or a rule that changed under it (#482's
+    # citation-only tier took in records an earlier run had refused). Here for the reason the line
+    # above is: this is where the chunk's outcome is known, and `sync_entries` stays I/O-free.
+    await forget_refusals(source, summary.ingested)
     return SyncChunk(summary=summary, has_more=bounded.truncated)
 
 

@@ -166,6 +166,82 @@ def test_the_token_stream_carries_prose_and_never_a_tool_call_fragment() -> None
     assert "ask_clarifying_question" not in tokens
 
 
+def test_a_model_call_inside_a_tool_is_metered_and_never_streamed_as_the_answer() -> None:
+    """A tool's own model call is the tool's working: billed to the turn, withheld from the chemist.
+
+    The live defect (re-verification 2026-10-02, D3): `condense_protocols` reads each protocol with
+    a structured model call from inside the tool body. That call inherits the graph's callbacks, so
+    upstream's `messages` handler streamed it under the same empty namespace as the agent's reply —
+    the chemist watched raw JSON arrive while the tool was still running, and the persisted answer
+    opened with two digests. Driven through a real `create_agent` graph with a tool that really
+    calls a streaming model, because the namespace and node metadata are the engine's to produce
+    and a hand-built `(chunk, metadata)` pair would only assert what the test author believed.
+
+    **Both halves are asserted, and the second is why the fix is in the stream rather than at the
+    call site.** Tagging the call `nostream` would pass the first and drop the call's usage from the
+    ledger `agent/spend_cap.py` reads, which is the ledger tool bodies are metered through.
+    """
+    from langchain.agents import create_agent
+    from langchain_core.language_models import GenericFakeChatModel
+    from langchain_core.messages import AIMessageChunk
+    from langchain_core.outputs import ChatGenerationChunk
+    from langchain_core.tools import tool
+
+    from chemclaw.agent.turn_usage import TurnUsage
+
+    class _Digest(GenericFakeChatModel):
+        """The condenser's shape: one streamed JSON object carrying its own usage."""
+
+        def __init__(self, **kwargs: Any) -> None:
+            super().__init__(messages=iter([]), **kwargs)
+
+        def _stream(self, messages: Any, stop: Any = None, run_manager: Any = None, **kw: Any):  # type: ignore[no-untyped-def]
+            for piece in ('{"reagents": ', '"K2CO3"}'):
+                chunk = ChatGenerationChunk(message=AIMessageChunk(content=piece))
+                if run_manager is not None:
+                    run_manager.on_llm_new_token(piece, chunk=chunk)
+                yield chunk
+            yield ChatGenerationChunk(
+                message=AIMessageChunk(
+                    content="",
+                    usage_metadata={"input_tokens": 700, "output_tokens": 11, "total_tokens": 711},
+                )
+            )
+
+    @tool
+    async def condense(ref: str) -> str:
+        """Condense one protocol."""
+        reply = await _Digest().ainvoke(f"read {ref}")
+        return f"digest of {ref}: {reply.content}"
+
+    graph = create_agent(
+        model=ScriptedChatModel([{"name": "condense", "args": {"ref": "p-1"}}, "the answer"]),
+        tools=[condense],
+    )
+    usage = TurnUsage()
+
+    async def _run() -> list[Any]:
+        return [
+            event
+            async for event in graph_events(
+                graph,
+                "compare them",
+                config={"configurable": {"thread_id": "t-1"}},
+                trace=ToolCallTrace(),
+                on_signal=lambda _signal: None,
+                usage=usage,
+            )
+        ]
+
+    events = asyncio.run(_run())
+    tokens = "".join(event.text for event in events if event.type == "token")
+    assert tokens == "the answer", f"a tool's own model call reached the answer stream: {tokens!r}"
+    # The tool still got its digest — the call ran, only its stream was withheld.
+    results = [event for event in events if isinstance(event, ToolResultEvent)]
+    assert results and "K2CO3" in results[0].preview
+    assert usage.input >= 700, "the tool's model call must stay on the turn's bill"
+
+
 def test_an_unrouted_turn_attributes_nothing() -> None:
     """Empty-at-the-root is what makes `agent` additive, and it is asserted on a real turn.
 

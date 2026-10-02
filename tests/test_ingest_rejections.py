@@ -1048,3 +1048,75 @@ async def test_evicting_a_source_s_oldest_refusals_is_recorded_rather_than_silen
     assert "evicted 3 ingest rejection(s)" in evicted[1]
     assert all(source in message for message in evicted)
     await _clear(source)
+
+
+async def test_a_record_that_later_ingests_withdraws_its_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ledger names records that are absent, so the record arriving ends its row.
+
+    Live re-verification 2026-10-02 (D4): 1,000 ORD refusals stayed after #482 began storing the
+    same entries as citation-only records, and `gather_evidence` told the model each was refused.
+    Driven as the source would drive it — the entry refused, then corrected in place and re-offered
+    — through the real activity, because the activity is where the chunk's outcome is known.
+    """
+    await migrated_db_or_skip()
+    await _clear(LEDGER_SOURCE)
+    drop = _ord_source(monkeypatch, tmp_path)
+    _write(drop, _WELL_ID, 119.43)
+    _write(drop, "well-still-broken", 150.0)
+    await _drain()
+    assert [row[0] for row in await _rows(LEDGER_SOURCE)] == [_WELL_ID, "well-still-broken"]
+
+    _write(drop, _WELL_ID, 94.3)
+    summary = await _drain()
+
+    assert _WELL_ID in summary.ingested
+    # The other refusal stays: forgetting is per entry, never per source or per run.
+    assert [row[0] for row in await _rows(LEDGER_SOURCE)] == ["well-still-broken"]
+    await _clear(LEDGER_SOURCE)
+
+
+async def _store_record(source: str, reaction_id: str) -> None:
+    """Write one transcription row stamped now, as `ingest_reaction` would leave it."""
+    async with db.connection(settings.postgres_dsn) as conn:
+        await conn.execute(
+            "INSERT INTO reaction_records (ingest_source, reaction_id, body, source) "
+            "VALUES (%s, %s, 'body', %s) "
+            "ON CONFLICT (ingest_source, reaction_id) DO UPDATE SET last_seen = now()",
+            (source, reaction_id, source),
+        )
+        await conn.commit()
+
+
+async def test_a_refusal_the_record_has_since_outlived_is_not_served() -> None:
+    """The rows written before the writer forgot anything, which no migration may delete.
+
+    The live lane's stale refusals are already in deployed tables, their entries behind every
+    cursor, so no later run re-offers them; `DELETE FROM` in a migration is refused outright
+    (`tests/test_migrations_are_additive.py`). So the reader reads a record stored at or after a
+    refusal as superseding it — and only that: a refusal *newer* than the stored record is a broken
+    amendment, and it is the answer to why the record still shows the old transcription.
+    """
+    await migrated_db_or_skip()
+    source = "test-superseded-source"
+    await _clear(source)
+    await _forget_records(source)
+    stale, amended = "superseded-well-Y36", "amended-well-Y37"
+    await _store_record(source, amended)  # the earlier transcription of the amended entry
+    await record_refusals(
+        source,
+        {stale: "plate supersession: yield 119.43", amended: "plate supersession: yield 119.43"},
+    )
+    await _store_record(source, stale)  # stored after its refusal, as #482's backfill did
+    # Another source's record under the same id says nothing about this source's refusal.
+    await _store_record("test-superseded-other", amended)
+
+    # A word only this test's reasons carry, so rows other tests leave cannot join the count.
+    served = await refusals_matching("supersession")
+
+    assert [(r.source, r.entry_id) for r in served.rejections] == [(source, amended)]
+    assert served.total_matching == 1, "a superseded refusal must not be counted as matching"
+    await _clear(source)
+    await _forget_records(source)
+    await _forget_records("test-superseded-other")

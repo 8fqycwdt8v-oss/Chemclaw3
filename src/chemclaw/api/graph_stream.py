@@ -85,6 +85,16 @@ logger = logging.getLogger(__name__)
 # the thread), because the payload holds the channels' own objects rather than copies of them.
 _MODES = ["messages", "updates", "custom", "values"]
 
+# The node `create_agent` runs tools in. A model call made from inside a tool body — the condenser's
+# per-protocol digest (`agent/condense.py`), any future helper call — inherits the graph's
+# callbacks through LangChain's ambient config, so upstream's `messages` handler streams it like
+# the agent's own reply, under the *same* empty namespace: a tool's checkpoint namespace is
+# `tools:<task>`, and the handler drops its last frame. So the namespace cannot tell it apart from
+# the answer, and the node it ran in can. `tests/test_langgraph_stream.py` drives a real tool that
+# calls a model, so an upstream rename of this node turns that test red rather than reopening the
+# leak silently.
+_TOOL_NODE = "tools"
+
 
 def root_depth(graph: Any) -> int:
     """How many namespace frames a turn's *own* agent sits behind on this graph.
@@ -190,8 +200,19 @@ async def graph_events(
         {**turn_input(message), **(carry or {})}, config, stream_mode=_MODES, subgraphs=True
     ):
         if mode == "messages":
-            chunk, _metadata = payload
+            chunk, metadata = payload
             usage.add(graph_usage_tokens(chunk))
+            # **A model call a tool makes is the tool's working, never the answer.** It is metered
+            # above like any other call — `agent/spend_cap.py` reads this ledger precisely because
+            # tool bodies make calls `wrap_model_call` never sees — but its text is not a token:
+            # the runner concatenates unattributed tokens into the turn's answer, so the
+            # condenser's raw JSON digest streamed to the chemist while the tool was still running
+            # and then opened the persisted answer (live re-verification 2026-10-02, defect D3).
+            # Withheld here rather than by tagging the call `nostream` at its site, because that
+            # tag drops the run from this stream entirely — usage included — and because every
+            # tool-internal call has the property, not just the one that was caught.
+            if (metadata or {}).get("langgraph_node") == _TOOL_NODE:
+                continue
             text = _text_of(chunk)
             # **Only the root's tokens are the answer, and the attribution is what says so.**
             # The runner concatenates unattributed `TokenEvent`s into the turn's final answer, so

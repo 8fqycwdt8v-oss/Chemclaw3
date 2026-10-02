@@ -235,6 +235,41 @@ def test_an_oversize_request_is_a_context_length_failure_not_an_internal_one(mes
     assert "too long" in event.message
 
 
+def test_a_provider_stall_is_worded_as_one_and_not_as_an_internal_error() -> None:
+    """A gateway that goes quiet mid-stream is the provider's fault, and the sentence says so.
+
+    Live re-verification 2026-10-02 (D9): `langchain_openai` raised `StreamChunkTimeoutError` after
+    120 s without a chunk, `_classify` already called it `llm_timeout` and retryable, and the
+    chemist read "could not be completed due to an internal error" beside both. Driven with the
+    exception the lane's traceback ended on, because that is what `_classify` is really handed.
+    """
+    from langchain_openai.chat_models._client_utils import StreamChunkTimeoutError
+
+    from chemclaw.api.runner import failure_event
+
+    stall = StreamChunkTimeoutError(120.0, model_name="deepseek/deepseek-v4-pro")
+    event = failure_event(stall, "s-1", "c-1")
+    assert (event.code, event.retryable) == ("llm_timeout", True)
+    assert "internal error" not in event.message
+    assert "model provider" in event.message
+
+
+def test_only_an_unclassified_failure_is_called_an_internal_error() -> None:
+    """A code that knows its cause has a sentence naming it; `internal` alone admits it does not."""
+    from chemclaw.api.runner import failure_event
+
+    worded = {
+        type(exc).__name__: failure_event(exc, "s-1", "c-1")
+        for exc in (ConnectionError("db down"), ChemclawError("bad SMILES"), RuntimeError("odd"))
+    }
+    assert "internal error" in worded["RuntimeError"].message
+    assert all(
+        "internal error" not in event.message
+        for name, event in worded.items()
+        if name != "RuntimeError"
+    )
+
+
 def test_a_streamed_overflow_the_client_library_recognised_is_context_length_too() -> None:
     """`OpenAIAPIContextOverflowError` is an `APIError` and **not** a `BadRequestError`.
 
