@@ -179,6 +179,16 @@ jobs:
           path: .sibling/Chemclaw3-mcp
           persist-credentials: false
 
+      # The mock's seed, read as files only (its CSVs), so no environment is built for it: the
+      # fixed-point sweep over every molecule it seeds carries the same sibling marker, and
+      # `CHEMCLAW_SIBLINGS_REQUIRED` would otherwise fail it here for want of the checkout.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: 8fqycwdt8v-oss/Chemclaw3_mock
+          ref: main
+          path: .sibling/Chemclaw3_mock
+          persist-credentials: false
+
       - name: Install uv
         uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
@@ -269,6 +279,7 @@ jobs:
         run: make cov
         env:
           CHEMCLAW_MCP_REPO: ${{ github.workspace }}/.sibling/Chemclaw3-mcp
+          CHEMCLAW_MOCK_REPO: ${{ github.workspace }}/.sibling/Chemclaw3_mock
           CHEMCLAW_SIBLINGS_REQUIRED: "1"
 
       - name: Validate knowledge graph
