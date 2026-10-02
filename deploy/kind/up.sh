@@ -363,8 +363,11 @@ apply_app_secret() {
     printf 'CHEMCLAW_POSTGRES_MIGRATION_DSN=postgresql://chemclaw:%s@postgres:5432/chemclaw%s\n' "$owner_pw" "$tls"
     printf 'CHEMCLAW_LLM_API_KEY=%s\n' "$LLM_KEY"
     printf 'CHEMCLAW_KNOWLEDGE_REPO_TOKEN=\n'
+    # The core bundles' own bearers, and the prompt-injection envelope's tag: without a shared one
+    # every replica and every restart frames retrieved content under its own random nonce (the
+    # front door warns as much at start).
     for var in CHEMCLAW_BO_MCP_TOKEN CHEMCLAW_CALC_MCP_TOKEN CHEMCLAW_MOLFP_MCP_TOKEN \
-      CHEMCLAW_RXNFP_MCP_TOKEN; do
+      CHEMCLAW_RXNFP_MCP_TOKEN CHEMCLAW_FRAMING_ENVELOPE_SECRET; do
       printf '%s=%s\n' "$var" "$(existing_or_new chemclaw-secrets "$var")"
     done
     for name in "${FLEET[@]}"; do

@@ -62,7 +62,7 @@ connectors:
     interactive: {replicas: 1, maxReplicas: 1, maxConcurrentActivities: 1}
     # Production's own bo sizing (values.yaml: measured 864 MiB peak at start), request trimmed.
     serverResources:
-      requests: {cpu: 25m, memory: 768Mi}
+      requests: {cpu: 25m, memory: 512Mi}
       limits: {cpu: "2", memory: 1536Mi}
   results: {replicas: 1}
   props: {enabled: true}
@@ -105,14 +105,15 @@ documentShare:
   claimName: chemclaw-eln-exports
   mountPath: /mnt/eln
 
-# 3 · Requests sized so the whole system schedules on one 8-CPU / 12.5 GB node; limits unchanged
-# from production. Measured idle footprints are in ../README.md.
+# 3 · Requests sized so the whole system schedules on one 8-CPU / 12.5 GB node — *twice*, because
+# a rollout (maxSurge 1) holds the old and the new pod's requests at once, and the first sizing ran
+# the node to 99 % of allocatable memory mid-rollout with pods Pending. Limits are production's.
 resources:
   service:
-    requests: {cpu: 100m, memory: 512Mi}
+    requests: {cpu: 100m, memory: 384Mi}
     limits: {cpu: "2", memory: 1536Mi}
   worker:
-    requests: {cpu: 50m, memory: 256Mi}
+    requests: {cpu: 50m, memory: 192Mi}
     limits: {cpu: "2", memory: 4Gi}
   connector:
     requests: {cpu: 25m, memory: 160Mi}

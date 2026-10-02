@@ -46,8 +46,8 @@ fi
 # mapper, calc runs xtb. Everything else is a small stateless server.
 memory_request() {
   case "$1" in
-    rxnpredict) echo 1536Mi ;;
-    rxnlabel) echo 512Mi ;;
+    rxnpredict) echo 768Mi ;;
+    rxnlabel) echo 256Mi ;;
     calc) echo 256Mi ;;
     *) echo 128Mi ;;
   esac
