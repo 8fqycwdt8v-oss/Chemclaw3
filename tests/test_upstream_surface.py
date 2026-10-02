@@ -1444,6 +1444,57 @@ def test_astream_with_a_mode_list_and_subgraphs_still_yields_three_tuples() -> N
     )
 
 
+def test_a_streamed_message_still_names_the_node_it_ran_in_and_tools_run_in_tools() -> None:
+    """A token's metadata names its node, and `create_agent` still calls the tool node `tools`.
+
+    `api/graph_stream._TOOL_NODE` withholds every `messages` chunk whose `langgraph_node` is
+    `"tools"`: a model call made inside a tool body streams under the same empty namespace as the
+    agent's reply, so the node is the only thing that tells the tool's working from the answer.
+    Both halves are upstream names — the metadata key and the node's — and a rename of either puts
+    the condenser's raw JSON back into the chemist's answer. The behaviour is asserted where it is
+    used (`tests/test_langgraph_stream.py`); this names the two strings.
+    """
+    from langchain.agents import create_agent
+    from langchain_core.messages import AIMessage
+
+    from chemclaw.api.graph_stream import _TOOL_NODE
+    from tests.fakes import ScriptedModel
+
+    # `Any`: the overloads of `astream` select on a `version` literal this call does not pass.
+    graph: Any = create_agent(
+        model=ScriptedModel(messages=iter([AIMessage(content="ok")])), tools=[]
+    )
+    assert _TOOL_NODE == "tools"
+
+    async def _drive() -> list[dict[str, Any]]:
+        return [
+            payload[1]
+            async for _ns, mode, payload in graph.astream(
+                {"messages": [("user", "hi")]}, stream_mode=["messages"], subgraphs=True
+            )
+            if mode == "messages"
+        ]
+
+    metadata = asyncio.run(_drive())
+    assert metadata and all("langgraph_node" in item for item in metadata), (
+        "a `messages` chunk no longer carries `langgraph_node`; api/graph_stream.py reads it to "
+        "keep a tool's own model call out of the answer"
+    )
+
+    from langchain_core.tools import tool
+
+    @tool
+    def noop() -> str:
+        """Do nothing."""
+        return ""
+
+    with_tools = create_agent(model=ScriptedModel(messages=iter([])), tools=[noop])
+    assert _TOOL_NODE in with_tools.get_graph().nodes, (
+        f"create_agent no longer names its tool node {_TOOL_NODE!r}; api/graph_stream.py withholds "
+        "a tool's own model calls by that name"
+    )
+
+
 def test_the_after_model_call_cap_is_still_the_one_upstream_shape_this_repo_declines() -> None:
     """The runaway cap is first-party, and `CLAUDE.md` must not say otherwise.
 

@@ -1937,6 +1937,35 @@ async def _pending_plan_approval(session_id: str) -> ApprovalRequestEvent | None
         return None
 
 
+_INTERNAL_REASON = "The turn could not be completed due to an internal error"
+
+# What the chemist reads for each code `_classify` can return, so the sentence says what the code
+# already knows. Only `context_length` had its own sentence, and every other code read "internal
+# error" — including `llm_timeout`, whose cause is the model provider going quiet: live
+# re-verification 2026-10-02 (D9) had a `StreamChunkTimeoutError` after 120 s of silence from the
+# gateway reach the chemist as an internal fault of this system, beside `retryable=true`. A code
+# absent here is one whose cause is not known, and only that one says "internal".
+_FAILURE_REASONS: dict[ErrorCode, str] = {
+    # The one remedy that is the chemist's rather than an operator's, so it says what to do.
+    "context_length": (
+        "The conversation has grown too long for the model to read in one request; start a new "
+        "session or ask a narrower question"
+    ),
+    "llm_timeout": (
+        "The model provider stopped responding before the turn finished; this is usually "
+        "temporary, so try again in a moment"
+    ),
+    "storage_unavailable": (
+        "The turn could not be completed because its database was unavailable; try again in a "
+        "moment"
+    ),
+    "bad_tool_arguments": (
+        "The turn could not be completed because a tool was given input it cannot use; rephrasing "
+        "the request may help"
+    ),
+}
+
+
 def failure_event(exc: Exception, session_id: str, correlation_id: str) -> ErrorEvent:
     """One failed turn as one user-safe, classified event — never a leaked trace.
 
@@ -1953,14 +1982,7 @@ def failure_event(exc: Exception, session_id: str, correlation_id: str) -> Error
     keyed on, so a bug report is findable without leaking internals.
     """
     code, retryable = _classify(exc)
-    # The one code whose remedy is the chemist's rather than an operator's, so it says what to do
-    # instead of calling a full context window an internal error.
-    reason = (
-        "The conversation has grown too long for the model to read in one request; start a new "
-        "session or ask a narrower question"
-        if code == "context_length"
-        else "The turn could not be completed due to an internal error"
-    )
+    reason = _FAILURE_REASONS.get(code, _INTERNAL_REASON)
     return ErrorEvent(
         message=f"{reason} (session {session_id}).",
         code=code,
