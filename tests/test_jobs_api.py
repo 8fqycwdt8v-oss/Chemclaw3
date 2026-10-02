@@ -266,7 +266,7 @@ def _gateway_error(status: int) -> Any:
     return kind(f"Error code: {status}", response=response, body=body)
 
 
-def _provider_failures() -> list[BaseException]:
+def _provider_failures() -> list[Exception]:
     """Every shape a provider-side failure reaches `_classify` in, raw and as LangChain re-raises.
 
     `OpenAIAPIError` is the one the kind cluster's turn ended on (the mock answering HTTP 500): it
