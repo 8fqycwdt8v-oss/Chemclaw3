@@ -128,6 +128,12 @@ class MemorySettings(BaseSettings):
     retention_timeout_seconds: float = Field(default=600.0, gt=0)
     retention_session_events_days: int = Field(default=0, ge=0)
     retention_session_messages_days: int = Field(default=0, ge=0)
+    # Artefacts (`session_exhibits`, revisions cascading), dated by their last revision. A window
+    # of its own rather than the conversation's, because an artefact is the part of a session a
+    # chemist is most likely to want kept longer than the chat around it. 0 disables it, like every
+    # window here — and while it is 0, a session holding one is never forgotten by the ownership
+    # sweep either (`durable/retention._OWNERSHIP_DEPENDENCIES`).
+    retention_session_exhibits_days: int = Field(default=0, ge=0)
     # Stored tool results (`api/tool_results.py`, migration 042) — the highest-volume table this
     # sweep touches, at up to one row per tool call.
     #

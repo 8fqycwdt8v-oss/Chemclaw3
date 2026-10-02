@@ -418,6 +418,15 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
     # and a measurement in one model.
     ("chemclaw.protocols", "chemclaw.core"),
     ("chemclaw.protocols", "chemclaw.science"),
+    # Artefacts (`D-2026-10-02-an-artefact-is-part-of-the-answer-not-an-effect`). A leaf on the
+    # kernel like `protocols`, with one edge into it: the revision diff's `FieldChange` shape and
+    # the CSV formula-injection guard are `protocols`' and are reused rather than copied, so one UI
+    # component renders both diffs and one trigger list guards every CSV this system serves. The
+    # agent's three tools and the routes reach it the way they reach `protocols`.
+    ("chemclaw.exhibits", "chemclaw.core"),
+    ("chemclaw.exhibits", "chemclaw.protocols"),
+    ("chemclaw.agent", "chemclaw.exhibits"),
+    ("chemclaw.api", "chemclaw.exhibits"),
     # The narrowest package in the tree, and deliberately: `analytical` reads `core.units` and
     # nothing else. It imports no `science` — there is no chemistry in "is this number under that
     # number" — and no `kg` or `ingest`, for the same reason `protocols` does not: a specification

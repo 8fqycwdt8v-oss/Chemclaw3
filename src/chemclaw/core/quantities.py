@@ -230,21 +230,59 @@ def is_rounding_of(numeral: str, values: Iterable[float]) -> bool:
     Signed, not absolute. This function's answer is quoted to a consumer as "that figure is
     verbatim tool output", and a value whose sign the answer flipped is not that.
     """
+    stated = _stated(numeral)
+    if stated is None:
+        return False
+    figure, step = stated
+    return any(_quantized(value, step) == figure for value in values)
+
+
+def ungrounded(numerals: Iterable[str], values: Iterable[float]) -> list[str]:
+    """The numerals that no value is a rounding of — `is_rounding_of` over many figures at once.
+
+    The same rule, decided by the same two helpers, so the batch and the single answer cannot
+    disagree; what differs is the cost. `is_rounding_of` per figure is figures x values `Decimal`
+    quantizations, which an artefact table of a thousand cells against a session's thousand
+    returned values makes a million. Here every value is quantized once per *precision* the
+    figures were written at — a handful — and each figure is a set lookup.
+
+    Returns:
+        The ungrounded numerals, in the order given.
+    """
+    pool = list(values)
+    by_step: dict[Decimal, set[Decimal]] = {}
+    left: list[str] = []
+    for numeral in numerals:
+        stated = _stated(numeral)
+        if stated is None:
+            left.append(numeral)
+            continue
+        figure, step = stated
+        if step not in by_step:
+            by_step[step] = {q for value in pool if (q := _quantized(value, step)) is not None}
+        if figure not in by_step[step]:
+            left.append(numeral)
+    return left
+
+
+def _stated(numeral: str) -> tuple[Decimal, Decimal] | None:
+    """A written figure as its exact value and the step its precision fixes, or `None`."""
     try:
         stated = Decimal(numeral.replace(",", ""))
     except InvalidOperation:  # pragma: no cover - `_NUMBER` cannot produce one
-        return False
+        return None
     exponent = stated.as_tuple().exponent
     if not isinstance(exponent, int):  # a NaN or an infinity, which no literal here can be
-        return False
-    step = Decimal(1).scaleb(exponent)
-    for value in values:
-        try:
-            if Decimal(repr(value)).quantize(step, rounding=ROUND_HALF_UP) == stated:
-                return True
-        except InvalidOperation:
-            continue  # the value needs more digits than the context allows; it is not this figure
-    return False
+        return None
+    return stated, Decimal(1).scaleb(exponent)
+
+
+def _quantized(value: float, step: Decimal) -> Decimal | None:
+    """`value` rounded half-up to `step`, or `None` when it needs more digits than the context."""
+    try:
+        return Decimal(repr(value)).quantize(step, rounding=ROUND_HALF_UP)
+    except InvalidOperation:
+        return None  # the value needs more digits than the context allows; it is not this figure
 
 
 def _as_float(match: re.Match[str]) -> float | None:

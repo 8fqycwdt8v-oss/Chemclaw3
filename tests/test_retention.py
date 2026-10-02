@@ -91,6 +91,9 @@ def test_only_spent_operational_rows_are_prunable() -> None:
         "tool_result_blobs",
         "result_publications",
         "checkpoints",
+        # An artefact beside the chat is conversation, dated by its last revision
+        # (`D-2026-10-02-an-artefact-is-part-of-the-answer-not-an-effect`).
+        "session_exhibits",
         "session_owners",
     }
 

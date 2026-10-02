@@ -1,0 +1,260 @@
+"""What changed between two revisions of an artefact, in the shape a protocol diff already has.
+
+**One output shape for two documents** (`protocols.diff.FieldChange`): `Chemclaw3_ui`'s
+`RevisionDiff` renders a design's diff, and an artefact's revision is the same kind of object — an
+edit somebody made to somebody else's draft — so it renders through the same component rather than
+a second one that drifts.
+
+The *paths* are per kind, because what a reader can point at differs:
+
+- a `document` diffs by **line hunks** (`"lines 12-14"`), since a prose edit is a span of text and
+  a per-character diff of Markdown is unreadable;
+- a `table` diffs per **cell** (`"rows[3].yield"`), plus `"columns"` when the header changed;
+- a `structures` panel per **item field** (`"items[2].smiles"`, `"items[2].props.pka"`);
+- a `chart` per **point** (`"series[0].y[4]"`), plus the axis and series names;
+- anything else — a pinned result, a link, or a revision that changed kind — as one `"spec"` row.
+
+Positional rather than keyed, unlike the protocol diff's arms: rows, items and points have no
+identifier of their own, and a chemist's edit is overwhelmingly a value in place.
+"""
+
+from __future__ import annotations
+
+import difflib
+import json
+from typing import Any
+
+from chemclaw.exhibits.models import (
+    ChartSpec,
+    DocumentSpec,
+    ExhibitDiff,
+    Spec,
+    Structure,
+    StructuresSpec,
+    TableSpec,
+    spec_json,
+)
+from chemclaw.protocols.diff import ChangeKind, FieldChange
+
+
+def diff_specs(before: Spec, after: Spec, *, from_revision: int, to_revision: int) -> ExhibitDiff:
+    """Every change between two specs, in reading order.
+
+    Args:
+        before: The older revision's spec.
+        after: The newer revision's spec.
+        from_revision: The older revision's number, carried onto the diff.
+        to_revision: The newer revision's number.
+
+    Returns:
+        The changes, empty when the two specs are identical.
+    """
+    if isinstance(before, DocumentSpec) and isinstance(after, DocumentSpec):
+        changes = _document(before.markdown, after.markdown)
+    elif isinstance(before, TableSpec) and isinstance(after, TableSpec):
+        changes = _table(before, after)
+    elif isinstance(before, StructuresSpec) and isinstance(after, StructuresSpec):
+        changes = _indexed(
+            "items",
+            [item.model_dump(mode="json") for item in before.items],
+            [item.model_dump(mode="json") for item in after.items],
+            list(Structure.model_fields),
+        )
+    elif isinstance(before, ChartSpec) and isinstance(after, ChartSpec):
+        changes = _chart(before, after)
+    else:
+        changes = _whole(spec_json(before), spec_json(after))
+    return ExhibitDiff(from_revision=from_revision, to_revision=to_revision, changes=changes)
+
+
+def _document(before: str, after: str) -> list[FieldChange]:
+    """One change per differing line hunk, numbered by the *new* document's lines (1-based)."""
+    old, new = before.splitlines(), after.splitlines()
+    changes: list[FieldChange] = []
+    matcher = difflib.SequenceMatcher(a=old, b=new, autojunk=False)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        kind: ChangeKind = (
+            "added" if tag == "insert" else "removed" if tag == "delete" else "changed"
+        )
+        # A deletion has no lines in the new document, so it is located where it would have been.
+        first, last = (j1 + 1, j2) if j2 > j1 else (j1, j1)
+        where = f"line {first}" if first == last else f"lines {first}-{last}"
+        changes.append(
+            FieldChange(
+                path=where,
+                kind=kind,
+                before="\n".join(old[i1:i2]),
+                after="\n".join(new[j1:j2]),
+            )
+        )
+    return changes
+
+
+def _table(before: TableSpec, after: TableSpec) -> list[FieldChange]:
+    """The header as one change, then every cell that differs, row by row."""
+    changes: list[FieldChange] = []
+    old_columns = [column.model_dump(mode="json") for column in before.columns]
+    new_columns = [column.model_dump(mode="json") for column in after.columns]
+    if old_columns != new_columns:
+        changes.append(
+            FieldChange(
+                path="columns", kind="changed", before=_text(old_columns), after=_text(new_columns)
+            )
+        )
+    changes.extend(
+        _indexed(
+            "rows",
+            [dict(row) for row in before.rows],
+            [dict(row) for row in after.rows],
+            [column.key for column in after.columns],
+        )
+    )
+    return changes
+
+
+def _chart(before: ChartSpec, after: ChartSpec) -> list[FieldChange]:
+    """The chart's own fields, then each series' name and points."""
+    changes = [
+        FieldChange(path=name, kind="changed", before=_text(old), after=_text(new))
+        for name, old, new in (
+            ("chart", before.chart, after.chart),
+            ("x_label", before.x_label, after.x_label),
+            ("y_label", before.y_label, after.y_label),
+        )
+        if old != new
+    ]
+    for index in range(max(len(before.series), len(after.series))):
+        path = f"series[{index}]"
+        if index >= len(after.series):
+            changes.append(_absent(path, before.series[index].model_dump(mode="json"), "removed"))
+            continue
+        if index >= len(before.series):
+            changes.append(_absent(path, after.series[index].model_dump(mode="json"), "added"))
+            continue
+        old, new = before.series[index], after.series[index]
+        if old.name != new.name:
+            changes.append(
+                FieldChange(path=f"{path}.name", kind="changed", before=old.name, after=new.name)
+            )
+        changes.extend(_values(f"{path}.x", list(old.x), list(new.x)))
+        changes.extend(_values(f"{path}.y", list(old.y), list(new.y)))
+    return changes
+
+
+def _indexed(
+    name: str,
+    before: list[dict[str, Any]],
+    after: list[dict[str, Any]],
+    order: list[str] | None = None,
+) -> list[FieldChange]:
+    """Members compared by position, field by field; a member present on one side is one change.
+
+    `order` is the reading order of a member's keys — a table's column order. Without it the keys
+    are read in sorted order, never in the order a dict happens to hold them: `jsonb` stores an
+    object's keys by length and then bytes, so the stored order is the database's, and a diff that
+    followed it would list one edit's changes differently on the two backends.
+    """
+    changes: list[FieldChange] = []
+    for index in range(max(len(before), len(after))):
+        path = f"{name}[{index}]"
+        if index >= len(after):
+            changes.append(_absent(path, before[index], "removed"))
+        elif index >= len(before):
+            changes.append(_absent(path, after[index], "added"))
+        else:
+            changes.extend(_fields(path, before[index], after[index], order))
+    return changes
+
+
+def _fields(
+    path: str, before: dict[str, Any], after: dict[str, Any], order: list[str] | None = None
+) -> list[FieldChange]:
+    """Every key of two objects that differs, a nested object descended one level (`props`)."""
+    changes: list[FieldChange] = []
+    present = set(before) | set(after)
+    keys = [key for key in order or [] if key in present]
+    keys += sorted(present - set(keys))
+    for key in keys:
+        old, new = before.get(key), after.get(key)
+        if old == new:
+            continue
+        if isinstance(old, dict) and isinstance(new, dict):
+            changes.extend(_fields(f"{path}.{key}", old, new, None))
+            continue
+        kind: ChangeKind = (
+            "added" if key not in before else "removed" if key not in after else "changed"
+        )
+        changes.append(
+            FieldChange(path=f"{path}.{key}", kind=kind, before=_text(old), after=_text(new))
+        )
+    return changes
+
+
+def _values(path: str, before: list[Any], after: list[Any]) -> list[FieldChange]:
+    """Each position of two value lists that differs."""
+    changes: list[FieldChange] = []
+    for index in range(max(len(before), len(after))):
+        old = before[index] if index < len(before) else None
+        new = after[index] if index < len(after) else None
+        if old == new and index < len(before) and index < len(after):
+            continue
+        kind: ChangeKind = (
+            "added" if index >= len(before) else "removed" if index >= len(after) else "changed"
+        )
+        changes.append(
+            FieldChange(path=f"{path}[{index}]", kind=kind, before=_text(old), after=_text(new))
+        )
+    return changes
+
+
+def _whole(before: dict[str, Any], after: dict[str, Any]) -> list[FieldChange]:
+    """The whole spec as one change, or none when it did not move."""
+    if before == after:
+        return []
+    return [FieldChange(path="spec", kind="changed", before=_text(before), after=_text(after))]
+
+
+def _absent(path: str, value: Any, kind: ChangeKind) -> FieldChange:
+    """A member that exists on one side only."""
+    text = _text(value)
+    return FieldChange(
+        path=path,
+        kind=kind,
+        before=text if kind == "removed" else "",
+        after=text if kind == "added" else "",
+    )
+
+
+def _text(value: Any) -> str:
+    """One value as the string a diff shows: empty for absent, JSON for a structure."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+
+def capped(diff: ExhibitDiff, *, max_changes: int, max_chars: int) -> tuple[ExhibitDiff, int]:
+    """`diff` cut to what a model is shown: the first changes, each value bounded.
+
+    Returns:
+        The bounded diff and how many changes it left out, so the caller can say so.
+    """
+    kept = [
+        change.model_copy(
+            update={
+                "before": _clip(change.before, max_chars),
+                "after": _clip(change.after, max_chars),
+            }
+        )
+        for change in diff.changes[:max_changes]
+    ]
+    return diff.model_copy(update={"changes": kept}), len(diff.changes) - len(kept)
+
+
+def _clip(text: str, limit: int) -> str:
+    """`text` cut to `limit` characters with a visible marker."""
+    marker = " …[cut]"
+    return text if len(text) <= limit else text[: max(limit - len(marker), 0)] + marker

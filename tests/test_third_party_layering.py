@@ -336,6 +336,10 @@ _ALLOWED_MODULE_STACKS: dict[Edge, str] = {
     ("chemclaw.protocols", "postgres"): (
         "a design and its append-only revision history are two tables (migration 073)"
     ),
+    ("chemclaw.exhibits", "postgres"): (
+        "an artefact and its append-only revision history are two tables (migration 115), and the "
+        "unchecked-figure scan reads the session's stored tool results"
+    ),
     ("chemclaw.ingest", "share"): (
         "the mounted share reader is the one place that decides what a path on a share is and "
         "what encoding its bytes are in — `crawl.py` and `binding.py` for the exclusion patterns, "

@@ -217,6 +217,13 @@ _BAD_DATA_TYPES = [
     # The latest values for one outcome in more than one unit. The stored rows decide it, so a
     # retry reads the same rows and refuses identically.
     "MixedUnits",
+    # An artefact write the store refuses (`chemclaw.exhibits.store`): a spec that does not fit its
+    # kind, a base revision somebody else moved, an id the session does not hold, a session at its
+    # cap. Each is decided by the stored rows and the request, so a retry is refused identically.
+    "InvalidExhibit",
+    "StaleRevision",
+    "UnknownExhibit",
+    "ExhibitLimit",
     "TemplateError",
     # A composed workflow that names a write, a job, or a step that does not resolve. Bad data in
     # exactly this list's sense: the document is what is wrong, so every attempt fails identically.

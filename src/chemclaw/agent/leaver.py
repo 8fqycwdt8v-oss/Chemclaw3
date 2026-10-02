@@ -277,6 +277,15 @@ _ERASE: tuple[tuple[str, str], ...] = (
         "DELETE FROM session_messages "
         f"WHERE session_id IN ({_SESSION_SCOPED}) OR actor = ANY(%(actors)s)",
     ),
+    # **Artefacts follow `session_messages`**: they are the conversation's working documents, not
+    # a record of what anybody did to the science (a draft promoted to a protocol or a note is
+    # retained *there*). The header is deleted and its revisions cascade, because the revision
+    # table is INSERT-only by grant. By session only — a member's revisions of an artefact in a
+    # session somebody else owns are the owner's document history, and `_BEYOND_REACH` says so.
+    (
+        "session_exhibits",
+        f"DELETE FROM session_exhibits WHERE session_id IN ({_SESSION_SCOPED})",
+    ),
     *_CHECKPOINT_ERASE,
     *_MEMORY_ERASE,
     # **Two kinds of session id reach this table, and the join only ever found one of them.**
@@ -540,6 +549,14 @@ _BEYOND_REACH: dict[str, str] = {
     # there are erased from the transcript by author (`session_messages`' second arm), but the
     # checkpointer holds the whole thread as the owner's turn state, keyed by the session, and a
     # message cannot be cut out of it without rewriting the owner's conversation under them.
+    "session_exhibit_revisions": "an artefact's revisions go with their header, which the erase "
+    "tier deletes for every session this person owns (`session_exhibits`). What is left is a "
+    "member's revision of an artefact in a session somebody *else* owns: a revision cannot be cut "
+    "out of the middle of an append-only history without rewriting the owner's document under "
+    "them, and the runtime role holds no DELETE on the table by design. It goes when the owner "
+    "deletes the session or leaves. Find those before erasing with `SELECT DISTINCT e.session_id "
+    "FROM session_exhibit_revisions r JOIN session_exhibits e USING (exhibit_id) WHERE r.author = "
+    "'<id>'`",
     "a shared session's graph state (checkpoints of sessions this person was a member of)": "a "
     "member's words are erased from the transcript by author, but the owner's checkpointed thread "
     "still carries them — it is the owner's conversation state and is removed when the owner "

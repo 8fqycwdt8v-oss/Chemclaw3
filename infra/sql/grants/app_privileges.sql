@@ -193,9 +193,14 @@ BEGIN
     -- make two disagreeing assays look like one agreeing measurement, which is precisely the
     -- evidence the append-only shape exists to keep; one that could DELETE could make a failed
     -- plate disappear from the record that says which designs were ever run.
+    -- `session_exhibit_revisions` is the protocol revisions' argument about an artefact: a chemist's
+    -- edit to what the agent drafted is a new row, and a credential that could UPDATE one could
+    -- rewrite the correction it exists to record. It disappears only behind its header, by cascade,
+    -- which runs with the referencing table's owner privileges — the `tool_result_links` shape.
     EXECUTE format(
         'GRANT INSERT ON bo_suggestions, structures, experiment_protocol_revisions, '
-        'experiment_protocol_status_events, pending_request_answers, experiment_arm_results TO %I',
+        'experiment_protocol_status_events, pending_request_answers, experiment_arm_results, '
+        'session_exhibit_revisions TO %I',
         app_role
     );
 
@@ -208,6 +213,11 @@ BEGIN
     -- — SQL has no column-level "only while null" — which is the usual shape and the reason this
     -- group is still spelled out on its own line rather than folded into the full-DML list below.
     EXECUTE format('GRANT INSERT, UPDATE, DELETE ON session_owners TO %I', app_role);
+    -- An artefact's header (`115_session_exhibits.sql`): INSERT on create, UPDATE because the head
+    -- revision, the title and the agent's read mark move with each revision, and DELETE because an
+    -- artefact is conversation — a session delete, an erasure and the retention sweep remove it
+    -- with the transcript, and its revisions follow by cascade.
+    EXECUTE format('GRANT INSERT, UPDATE, DELETE ON session_exhibits TO %I', app_role);
 
     -- A shared session's two tables (`110_shared_sessions.sql`). `session_members` takes INSERT and
     -- DELETE and no UPDATE: the owner admits and removes somebody, and a membership has nothing to

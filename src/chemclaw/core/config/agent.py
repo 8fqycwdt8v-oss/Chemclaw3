@@ -1018,6 +1018,45 @@ class AgentSettings(BaseSettings):
     # entirely.
     max_identical_tool_calls: int = Field(default=2, ge=1)
 
+    # **Artefacts** (`src/chemclaw/exhibits/`, `agent/exhibit_tools.py`): versioned working
+    # documents beside the chat — `D-2026-10-02-an-artefact-is-part-of-the-answer-not-an-effect`.
+    # On by default; off unbinds `create_exhibit`/`revise_exhibit`/`read_exhibit` from every turn,
+    # which is what pays their schemas back out of the prefix, and `GET /sessions/{id}/exhibits`
+    # then answers `enabled: false` so a surface hides the pane.
+    agent_exhibits_enabled: bool = True
+    # The size caps one spec is validated against on every write, agent or human. Bytes are the
+    # spec's compact JSON; rows, structures and points bound the three list-shaped kinds, so a
+    # table cannot reach the byte cap by being a list nobody can scroll.
+    exhibit_max_spec_bytes: int = Field(default=200_000, ge=1)
+    exhibit_max_rows: int = Field(default=2_000, ge=1)
+    exhibit_max_structures: int = Field(default=200, ge=1)
+    exhibit_max_points: int = Field(default=5_000, ge=1)
+    # Artefacts one session may hold; the next create is refused (409 `exhibit_limit` over REST, a
+    # worded refusal to the model) rather than evicting one somebody may still be reading.
+    exhibit_max_per_session: int = Field(default=100, ge=1)
+    # The tab title and the one-line change note, in characters.
+    exhibit_max_title_chars: int = Field(default=200, ge=1)
+    exhibit_max_note_chars: int = Field(default=1_000, ge=1)
+    # How much of a revision diff the model is shown — in `read_exhibit` and in the turn note that
+    # announces a chemist's edit. Changes past the count are summarised as a number; a value past
+    # the length is cut with a marker. The full diff is always `GET …/diff`.
+    exhibit_diff_max_changes: int = Field(default=20, ge=1)
+    exhibit_diff_max_value_chars: int = Field(default=300, ge=1)
+    # The whole per-turn artefact note (the list, the chemists' edits and any referenced
+    # artefacts), in characters. It is appended to the turn's own message, so it is bounded the way
+    # the job push-back beside it is.
+    exhibit_note_max_chars: int = Field(default=12_000, ge=1)
+    # How many artefacts the per-turn note lists, newest first; the rest are counted.
+    exhibit_note_max_listed: int = Field(default=20, ge=1)
+    # How many artefacts one chemist message may reference (`MessageIn.exhibit_refs`); each is
+    # copied into that turn's note, so this and the note's character bound together bound it.
+    exhibit_max_refs: int = Field(default=5, ge=0)
+    # The most headers one `GET /exhibits` page serves across a caller's sessions, whatever it asks.
+    exhibit_max_listing: int = Field(default=200, ge=1)
+    # How many unchecked figures one revision records. A table of a thousand transcribed numbers
+    # is flagged by its first few; the count past this is not what a chemist acts on.
+    exhibit_max_unverified_figures: int = Field(default=50, ge=1)
+
     # Where profiles are discovered (`agents.profile_discovery`): one or more directories,
     # OS-path-separator delimited like `PATH` and like `skills_dir`. A profile selects *across*
     # capabilities, so a shared tree is its common home; a profile genuinely about one
