@@ -4772,6 +4772,34 @@ def _pod_specs(rendered: str) -> list[tuple[str, dict[str, Any]]]:
 
 
 @pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+def test_a_connector_server_that_declares_its_own_sizing_gets_it_and_no_other_does() -> None:
+    """`connectors.<name>.serverResources` reaches that bundle's server pod and only that one.
+
+    The shared `resources.connector` budget OOM-killed the `bo` server on every start (measured
+    864 MiB peak against a 512Mi limit), so `bo` declares its own sizing — and a knob that rendered
+    nothing would leave the crash loop in place while the values file read as fixed.
+    """
+    result = _render()
+    assert result.returncode == 0, result.stderr
+    values = _values()
+    sized = {
+        f"chemclaw-connector-{name}": entry["serverResources"]
+        for name, entry in values["connectors"].items()
+        if entry.get("enabled") and entry.get("server") and entry.get("serverResources")
+    }
+    assert "chemclaw-connector-bo" in sized, "bo no longer declares its own server sizing"
+    servers = [
+        (name, spec)
+        for name, spec in _pod_specs(result.stdout)
+        if name.startswith("chemclaw-connector-") and "worker" not in name
+    ]
+    assert servers, "the render has no connector server pods"
+    for name, spec in servers:
+        expected = sized.get(name, values["resources"]["connector"])
+        assert spec["containers"][0]["resources"] == expected, name
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
 @pytest.mark.parametrize("overrides", _OFF_BY_DEFAULT_RENDERS.values(), ids=_OFF_BY_DEFAULT_RENDERS)
 def test_no_pod_is_handed_its_own_front_door_s_address_as_a_setting(
     overrides: tuple[str, ...],

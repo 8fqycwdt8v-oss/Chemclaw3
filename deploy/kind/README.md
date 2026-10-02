@@ -74,6 +74,23 @@ mock tenant. When those exist the mode sets: `CHEMCLAW_ENTRA_REQUIRED=true`,
 `http://mock-eln:8090/entra/mock-tenant/`, `CHEMCLAW_ENTRA_PRIVILEGED_ROLES=process-chemist` (the
 role the mock's test users hold), and `MOCK_ENTRA_ENABLED=true` with a matching issuer on the mock.
 
+## What running it found in the chart and core
+
+Fixed in core, with tests, because each one breaks any Kubernetes install and not only this one:
+
+- **Service links.** The chart's front-door Service is `chemclaw-service`, so Kubernetes handed every
+  pod (re)started after install `CHEMCLAW_SERVICE_PORT=tcp://<ip>:8080`, which `Settings` reads as
+  `service_port`: every component died at import. Every chart pod now sets
+  `enableServiceLinks: false` (`tests/test_deploy_chart.py`).
+- **`421 Misdirected Request` from every connector's `/mcp`.** `FastMCP(name)` enables MCP's
+  DNS-rebinding guard with a loopback-only `Host` list, so a caller dialling a connector by Service
+  name was refused while `/healthz` stayed green. Core's `connector_app` now admits loopback plus the
+  connector's own `connector_urls` address. The fleet servers in `Chemclaw3-mcp` have the same
+  default and need the same change there.
+- **The `bo` server is OOM-killed by the shared 512Mi connector limit** (measured 864 MiB at start).
+  Connector servers can now declare `connectors.<name>.serverResources`, and `bo` does.
+- **`python -m chemclaw.cli.mock_llm --host`**, so the mock can serve other pods.
+
 ## Things worth knowing
 
 - **The front door is reached through a relay, not a NodePort on its Service.** The chart's
@@ -91,7 +108,10 @@ role the mock's test users hold), and `MOCK_ENTRA_ENABLED=true` with a matching 
   share source is enabled, so nothing crawls it as documents; `CHEMCLAW_ELN_EXPORT_DIR` reads it.
 - **Requests are sized to a workstation** (the whole system on 8 CPU / 12.5 GB); limits are
   production's. Replicas are one per role and the HPA is off (it scales on a Prometheus metric this
-  cluster has no adapter for).
+  cluster has no adapter for). The startup probes get twice production's budget: a fresh `up`
+  starts some two dozen Python processes at once and the node sits at 800–1000 % CPU for minutes.
+- **A re-run converges.** `helm upgrade` runs with `--force-conflicts`, so a field changed by hand
+  while debugging does not block the next `up`.
 
 ## CI
 

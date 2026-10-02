@@ -60,6 +60,10 @@ connectors:
   bo:
     replicas: 1
     interactive: {replicas: 1, maxReplicas: 1, maxConcurrentActivities: 1}
+    # Production's own bo sizing (values.yaml: measured 864 MiB peak at start), request trimmed.
+    serverResources:
+      requests: {cpu: 25m, memory: 768Mi}
+      limits: {cpu: "2", memory: 1536Mi}
   results: {replicas: 1}
   props: {enabled: true}
   thermalsafety: {enabled: true}
@@ -113,6 +117,19 @@ resources:
   connector:
     requests: {cpu: 25m, memory: 160Mi}
     limits: {cpu: "2", memory: 512Mi}
+
+# Twice production's startup budget (30 × 10 s → 60 × 10 s), and only the startup probe. A fresh
+# `up` starts some two dozen Python processes on one 8-CPU node at once, each importing RDKit and
+# PyTorch; measured, the node sat at 800–1000 % CPU for several minutes and connector servers that
+# start in under a minute on their own failed a five-minute startup probe and were restarted into
+# the same storm. Readiness and liveness are production's.
+probes:
+  connector:
+    startup: {failureThreshold: 60}
+  service:
+    startup: {failureThreshold: 60}
+  worker:
+    startup: {failureThreshold: 60}
 
 # Below `max_connections=400` in `manifests/postgres.yaml`, which also has to hold Temporal's pools.
 postgres:

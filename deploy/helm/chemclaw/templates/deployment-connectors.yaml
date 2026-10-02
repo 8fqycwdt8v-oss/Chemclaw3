@@ -145,7 +145,10 @@ spec:
               exec:
                 command: ["sleep", {{ $.Values.connectorDrainSeconds | quote }}]
           resources:
-            {{- toYaml $.Values.resources.connector | nindent 12 }}
+            {{- /* The bundle's own server sizing when it declares one (`serverResources`), else
+                   the shared connector budget — the same shape `resources` has for its worker
+                   below, for the same reason. */}}
+            {{- toYaml (default $.Values.resources.connector $cfg.serverResources) | nindent 12 }}
           {{- /* This pod declared no volume at all until 2026-09-07, which is why the key and the
                  list are both conditional: `volumeMounts:` with an empty body renders `null`, a
                  different manifest from one without the key. It needs the mounted bundles for the

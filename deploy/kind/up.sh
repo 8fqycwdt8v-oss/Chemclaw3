@@ -309,13 +309,16 @@ disable_missing_connectors() {
   fi
 }
 
+# `--force-conflicts`: Helm 4 applies server-side, so a field someone changed by hand while
+# debugging (`kubectl set resources`, `kubectl scale`) makes the next `up` fail on a field-manager
+# conflict instead of converging. On this cluster the release is the source of truth.
 install_chart() {
   disable_missing_connectors
   log "helm upgrade --install $RELEASE (core image chemclaw/core:$CORE_TAG) — runs the migrate hook first"
   helm --kube-context "$CTX" upgrade --install "$RELEASE" "$REPO_ROOT/deploy/helm/chemclaw" \
     --namespace "$NS" -f "$KIND_DIR/values-kind.yaml" \
     --set-string "image.tag=$CORE_TAG" ${LLM_SET[@]+"${LLM_SET[@]}"} ${CHART_SET[@]+"${CHART_SET[@]}"} \
-    --wait --wait-for-jobs --timeout 20m \
+    --wait --wait-for-jobs --timeout 20m --force-conflicts \
     || die "helm upgrade --install failed. Hook Jobs are deleted only on success, so a failed one is
   still there to read:
     kubectl --context $CTX -n $NS get jobs,pods
