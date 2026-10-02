@@ -1,0 +1,31 @@
+# The kind cluster `deploy/kind/up.sh` creates: one node, and three host ports on loopback only.
+#
+# One node because this is a workstation lane, not an availability test: every pod lands on it, which
+# is also what lets the mock's ELN export volume (a ReadWriteOnce local-path claim) be shared between
+# the mock that writes it and the background worker that ingests it.
+#
+# **Loopback only, and off the ports the compose lanes already hold.** `listenAddress: 127.0.0.1`
+# keeps an unauthenticated dev deployment (devauth mode) off the LAN; the host ports are chosen
+# away from 5432 / 8000 / 5173 / 8091, which the cc3 compose project and the cc3-live container keep.
+# The container ports are the fixed NodePorts `manifests/` declares — change one, change both.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: chemclaw
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      # Front door (chemclaw-service, via the kind-only `front-door` proxy — see manifests/front-door.yaml)
+      - containerPort: 30080
+        hostPort: 18000
+        listenAddress: 127.0.0.1
+        protocol: TCP
+      # UI (the BFF serving the SPA)
+      - containerPort: 30173
+        hostPort: 15173
+        listenAddress: 127.0.0.1
+        protocol: TCP
+      # Temporal UI
+      - containerPort: 30233
+        hostPort: 18091
+        listenAddress: 127.0.0.1
+        protocol: TCP

@@ -361,6 +361,16 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # `kind-validate` renders the fleet the kind lane deploys from the fleet's own manifests
+      # (`deploy/kind/render-fleet.sh`), so it needs the sibling checked out where the Makefile
+      # looks for it — the same path and ref the `check` job uses.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: 8fqycwdt8v-oss/Chemclaw3-mcp
+          ref: main
+          path: .sibling/Chemclaw3-mcp
+          persist-credentials: false
+
       # uv, because `make helm-validate` no longer runs only binaries: it unwraps the render to
       # feed `promtool` and that unwrapping is Python. This step used to be absent with a comment
       # saying so, whose real content was the trap — installing uv and never calling `uv sync`
@@ -411,3 +421,9 @@ jobs:
 
       - name: Render + validate the Helm chart
         run: make helm-validate
+
+      # The kind overlay and everything the kind lane applies beside the chart, schema-checked
+      # offline (`deploy/kind/README.md`, "CI"). `kubectl` (for `kubectl kustomize`) is on the
+      # runner image.
+      - name: Render + validate the kind deployment
+        run: make kind-validate

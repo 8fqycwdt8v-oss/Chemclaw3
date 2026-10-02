@@ -1,0 +1,197 @@
+# Values for the production chart (`deploy/helm/chemclaw`) on a local kind cluster.
+#
+# **An overlay, never a fork.** `helm upgrade --install -f values-kind.yaml` deep-merges this file
+# over `values.yaml`, so every key not named here is the production default — the probes, the
+# security contexts, the hook Jobs (migrate → grants pre-install; convert and schedules
+# post-install), the NetworkPolicies, the derived connection and grace-period arithmetic. Nothing in
+# this file changes what an OpenShift release renders; `tests/test_kind_deploy.py` holds that.
+#
+# What it does change falls into four groups, each said once here and argued beside its key:
+#   1. OpenShift- and cluster-operator-only surface turned off (Route, monitoring CRDs, HPA).
+#   2. Addresses pointed at the in-cluster dependencies `manifests/` deploys.
+#   3. Requests sized to a workstation (8 CPU / 12.5 GB for the whole system); limits stay as
+#      production's, because a limit is what a real workload is tested against.
+#   4. The postures the chart refuses to guess, stated for a local cluster: egress, retention, and
+#      identity (`devauth` here; `values-kind-oidc-mock.yaml` is the other auth mode).
+#
+# Secrets are never in this file. `up.sh` generates `chemclaw-secrets` (DSNs, connector bearers, the
+# LLM key) into the cluster; in the real-model run the key comes from the host's Keychain.
+
+image:
+  repository: chemclaw/core
+  # `up.sh` passes `--set image.tag=$CHEMCLAW_KIND_CORE_TAG` (default `kind`), so a branch can be
+  # brought up on its own build without editing this file.
+  tag: kind
+  # Loaded into the node with `kind load docker-image`; there is no registry to pull from, and
+  # `Never` turns a missing load into an `ErrImageNeverPull` that names the image instead of a
+  # pull back-off against Docker Hub.
+  pullPolicy: Never
+
+# 1 · Off: the Route is `route.openshift.io/v1`, which a vanilla API server rejects; the host reaches
+# the front door through the kind-only `front-door` NodePort in `manifests/front-door.yaml`.
+route:
+  enabled: false
+
+service:
+  replicas: 1
+  # The HPA scales on `chemclaw_turns_in_flight`, which needs a Prometheus adapter this cluster
+  # does not run. Off, `service.replicas` is what `CHEMCLAW_SERVICE_FLEET_REPLICAS` derives from.
+  autoscaling:
+    enabled: false
+
+# ServiceMonitor / PodMonitor / PrometheusRule / dashboards are prometheus-operator and OpenShift
+# console resources; kind has neither.
+monitoring:
+  enabled: false
+
+# 2 · Every bundle the sibling fleet serves is bound, the five opt-in ones included — this is the
+# whole-system lane, the same choice `infra/live/e2e-full-stack/up.sh` makes. Replicas are one per
+# role: availability is not what a workstation cluster tests, and every pod costs memory.
+connectors:
+  molfp: {replicas: 1}
+  rxnfp: {replicas: 1}
+  chem:
+    interactive: {replicas: 1, maxReplicas: 1, maxConcurrentActivities: 2}
+  rxnpredict:
+    interactive: {replicas: 1, maxReplicas: 1, maxConcurrentActivities: 1}
+  calc:
+    replicas: 1
+    interactive: {replicas: 1, maxReplicas: 1, maxConcurrentActivities: 2}
+  bo:
+    replicas: 1
+    interactive: {replicas: 1, maxReplicas: 1, maxConcurrentActivities: 1}
+  results: {replicas: 1}
+  props: {enabled: true}
+  thermalsafety: {enabled: true}
+  kinetics:
+    enabled: true
+    interactive: {replicas: 1, maxReplicas: 1, maxConcurrentActivities: 1}
+  unitops: {enabled: true}
+  suitability: {enabled: true}
+  # The two bundles this image does not ship, attached through the four declarations
+  # deploy/README.md "Attaching a connector bundle this image does not ship" lists: this entry, the
+  # manifest ConfigMap under `extraConnectors`, the egress port, and the bearer slot under `secrets`.
+  pyexec:
+    enabled: true
+    server: true
+    url: http://chemclaw-mcp-pyexec:8899/mcp
+    # Its manifest lists `queued:` tools, so it gets a `connector-pyexec-interactive` queue and
+    # this is the worker that polls it.
+    interactive: {replicas: 1, maxReplicas: 1, maxConcurrentActivities: 2}
+  mock-vendor:
+    enabled: true
+    server: true
+    url: http://mock-vendor:8091/mcp
+
+extraConnectors:
+  # ConfigMaps `up.sh` creates from the sibling checkouts' own files, never copies kept here:
+  # `Chemclaw3-mcp/manifests/pyexec/` and `infra/live/e2e-full-stack/manifests/mock-vendor/`.
+  bundles:
+    - name: pyexec
+      configMap: chemclaw-connector-pyexec
+    - name: mock-vendor
+      configMap: chemclaw-connector-mock-vendor
+
+# The mock's ELN/ORD exports, mounted read-only on the background worker — the one component that
+# ingests them — from the claim the mock writes (`manifests/mock.yaml`). This is the chart's
+# read-only document-share mount reused for a different directory of files; no share source is
+# enabled, so nothing crawls it as documents, and `CHEMCLAW_ELN_EXPORT_DIR` below is what reads it.
+documentShare:
+  enabled: true
+  claimName: chemclaw-eln-exports
+  mountPath: /mnt/eln
+
+# 3 · Requests sized so the whole system schedules on one 8-CPU / 12.5 GB node; limits unchanged
+# from production. Measured idle footprints are in ../README.md.
+resources:
+  service:
+    requests: {cpu: 100m, memory: 512Mi}
+    limits: {cpu: "2", memory: 1536Mi}
+  worker:
+    requests: {cpu: 50m, memory: 256Mi}
+    limits: {cpu: "2", memory: 4Gi}
+  connector:
+    requests: {cpu: 25m, memory: 160Mi}
+    limits: {cpu: "2", memory: 512Mi}
+
+# Below `max_connections=400` in `manifests/postgres.yaml`, which also has to hold Temporal's pools.
+postgres:
+  maxConnections: 256
+
+config:
+  # The scripted mock LLM (`manifests/mock-llm.yaml`) is the default gateway; `up.sh --live-llm`
+  # overrides these three with the host's gateway, model and window.
+  CHEMCLAW_LLM_BASE_URL: "http://mock-llm:8820/v1"
+  CHEMCLAW_LLM_MODEL: "mock"
+  CHEMCLAW_TEMPORAL_ADDRESS: "temporal-frontend:7233"
+  CHEMCLAW_CALC_SERVER_URL: "http://chemclaw-mcp-calc:8860/mcp"
+  CHEMCLAW_RXNLABEL_SERVER_URL: "http://chemclaw-mcp-rxnlabel:8865/mcp"
+  # Every bound bundle must answer before the front door reports ready — the smoke's /readyz check
+  # is only evidence about the fleet with this on.
+  CHEMCLAW_CONNECTORS_REQUIRED: "true"
+  # The mock's ELN (JSON) and ORD exports, beside the knowledge graph the image ships.
+  CHEMCLAW_DATA_SOURCES: "graph,eln-json,eln-ord"
+  CHEMCLAW_ELN_EXPORT_DIR: "/mnt/eln"
+  CHEMCLAW_ORD_EXPORT_DIR: "/mnt/eln/ord"
+  # No collector runs here; on, every pod would retry an exporter at an address that resolves to
+  # nothing.
+  CHEMCLAW_OTEL_ENABLED: "false"
+  # The live lane's setting: a turn that launches a durable job runs it, rather than parking a plan
+  # for an approver the smoke does not have.
+  CHEMCLAW_HARNESS_AUTONOMY: "execute"
+  # 4 · Identity, devauth mode: sign-in off, and each of the two opt-outs the README names as
+  # "local dev only" stated rather than implied. Bound to 127.0.0.1 on the host by kind-config.yaml.
+  CHEMCLAW_ENTRA_REQUIRED: "false"
+  CHEMCLAW_SERVICE_ALLOW_INSECURE: "true"
+  CHEMCLAW_WORKER_ALLOW_UNAUTHENTICATED: "true"
+
+secrets:
+  create: false
+  name: chemclaw-secrets
+  # The bearer slots for the fleet bundles production's defaults leave unbound. Same variable names
+  # each bundle's manifest declares as `auth.token_env`; `up.sh` generates one random value per
+  # server and gives it to both halves (the server that verifies it, the client that sends it).
+  optionalKeys:
+    propsToken: CHEMCLAW_PROPS_TOKEN
+    kineticsToken: CHEMCLAW_KINETICS_TOKEN
+    thermalsafetyToken: CHEMCLAW_THERMALSAFETY_TOKEN
+    unitopsToken: CHEMCLAW_UNITOPS_TOKEN
+    suitabilityToken: CHEMCLAW_SUITABILITY_TOKEN
+    pyexecToken: CHEMCLAW_PYEXEC_TOKEN
+  # Plaintext gRPC to the in-cluster broker — the README's dev-cluster setting.
+  temporalTls:
+    enabled: false
+
+temporal:
+  # Registered by `manifests/temporal.yaml` (auto-setup's DEFAULT_NAMESPACE). The broker is this
+  # cluster's own, so the namespace-per-release hazard the chart guards against cannot arise.
+  namespace: chemclaw
+
+# 4 · Retention, stated: a local cluster keeps a month of history and two weeks of checkpoints and
+# tool results, and bounds the artifact store at 2 GiB. Production states its own.
+retention:
+  windows:
+    CHEMCLAW_RETENTION_CHECKPOINTS_DAYS: 14
+    CHEMCLAW_RETENTION_TOOL_RESULTS_DAYS: 14
+    CHEMCLAW_RETENTION_SESSION_EVENTS_DAYS: 30
+    CHEMCLAW_RETENTION_SESSION_MESSAGES_DAYS: 30
+    CHEMCLAW_RETENTION_RESULT_PUBLICATIONS_DAYS: 30
+  artifactStore:
+    CHEMCLAW_ARTIFACT_STORE_MAX_BYTES: 2147483648
+    CHEMCLAW_ARTIFACT_EVICT_IDLE_DAYS: 30
+
+networkPolicy:
+  # 4 · Egress, stated: any destination on the declared ports. Local only — the cluster is the
+  # workstation's, and the real-model run dials a public gateway on 443.
+  allowAnyDestination: true
+  egressPorts:
+    mockLlm: 8820
+    mockEln: 8090
+    mockVendor: 8091
+    pyexec: 8899
+    rxnlabel: 8865
+  # The front door admits this namespace, which holds the UI's BFF and the kind-only front-door
+  # proxy; the OpenShift ingress and monitoring namespaces it admits in production do not exist here.
+  ingressNamespaces:
+    - kubernetes.io/metadata.name: chemclaw
+  monitoringNamespaces: []

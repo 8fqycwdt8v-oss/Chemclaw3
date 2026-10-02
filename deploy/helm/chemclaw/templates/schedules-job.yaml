@@ -36,6 +36,8 @@ spec:
         azure.workload.identity/use: "true"
     spec:
       serviceAccountName: {{ .Values.serviceAccount.name }}
+      {{- /* No service links: see deployment-service.yaml. */}}
+      enableServiceLinks: false
       {{- include "chemclaw.imagePullSecrets" . | nindent 6 }}
       securityContext:
         {{- include "chemclaw.podSecurityContext" . | nindent 8 }}

@@ -57,6 +57,8 @@ spec:
         app.kubernetes.io/component: connector-{{ $name }}
     spec:
       serviceAccountName: {{ $.Values.serviceAccount.name }}
+      {{- /* No service links: see deployment-service.yaml. */}}
+      enableServiceLinks: false
       {{- include "chemclaw.imagePullSecrets" $ | nindent 6 }}
       {{- /* The default 30 s would SIGKILL through the `preStop` sleep below plus whatever request
              is in flight, which is the same mistake `chemclaw.workerGracePeriod` exists to prevent
@@ -196,6 +198,8 @@ spec:
         app.kubernetes.io/component: connector-worker-{{ $name }}
     spec:
       serviceAccountName: {{ $.Values.serviceAccount.name }}
+      {{- /* No service links: see deployment-service.yaml. */}}
+      enableServiceLinks: false
       {{- include "chemclaw.imagePullSecrets" $ | nindent 6 }}
       {{- include "chemclaw.workerGracePeriod" $ | nindent 6 }}
       securityContext:

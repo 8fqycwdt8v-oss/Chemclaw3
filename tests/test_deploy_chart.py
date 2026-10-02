@@ -4773,6 +4773,29 @@ def _pod_specs(rendered: str) -> list[tuple[str, dict[str, Any]]]:
 
 @pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
 @pytest.mark.parametrize("overrides", _OFF_BY_DEFAULT_RENDERS.values(), ids=_OFF_BY_DEFAULT_RENDERS)
+def test_no_pod_is_handed_its_own_front_door_s_address_as_a_setting(
+    overrides: tuple[str, ...],
+) -> None:
+    """Service links off on every pod, because this chart's Service *is* a setting's name.
+
+    Kubernetes gives every container `<SERVICE>_HOST` and `<SERVICE>_PORT=tcp://<ip>:<port>` for
+    each Service in its namespace, and the front door's Service is `chemclaw-service` — so a pod
+    restarted after the first install read `CHEMCLAW_SERVICE_PORT=tcp://10.96.x.y:8080` as
+    `Settings.service_port` and died at import. Measured on a kind cluster, where every component
+    of a fresh install crash-looped on exactly that `int_parsing` error once its first restart
+    came; on any cluster the first rollout or drain after install does the same. Asserted over every
+    pod spec of every variant, since a new template inherits the defect by omission.
+    """
+    result = _render(*overrides)
+    assert result.returncode == 0, result.stderr
+    specs = _pod_specs(result.stdout)
+    assert specs, "the render has no pod specs — this test would assert nothing"
+    linked = sorted(name for name, spec in specs if spec.get("enableServiceLinks") is not False)
+    assert not linked, f"pods still handed CHEMCLAW_SERVICE_* by service links: {linked}"
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+@pytest.mark.parametrize("overrides", _OFF_BY_DEFAULT_RENDERS.values(), ids=_OFF_BY_DEFAULT_RENDERS)
 def test_every_mounted_volume_is_a_volume_the_pod_declares(overrides: tuple[str, ...]) -> None:
     """A `volumeMounts` entry naming no volume is rejected at apply, and by nothing before it.
 

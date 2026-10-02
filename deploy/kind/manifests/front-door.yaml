@@ -1,0 +1,69 @@
+# The host's way in to the front door — a TCP relay *inside* the namespace, not a NodePort on the
+# chart's Service, and the difference is the production NetworkPolicy.
+#
+# `chemclaw-service-ingress` admits the front door's port only from pods of the release and from the
+# namespaces `networkPolicy.ingressNamespaces` names. A NodePort's traffic arrives from the node
+# (SNAT), which neither selector matches — measured on kindnet, which enforces policies: a NodePort
+# straight onto the service pods timed out from the host while a pod in this namespace was admitted.
+# Rather than widen the policy for a local convenience, the host reaches a pod that the policy
+# already admits (values-kind.yaml admits this namespace, which is also how the UI's BFF gets in),
+# and that pod relays bytes. TCP rather than an HTTP proxy, so the turn stream's SSE passes through
+# with no buffering to configure.
+apiVersion: v1
+kind: Service
+metadata:
+  name: front-door
+  namespace: chemclaw
+  labels:
+    app.kubernetes.io/name: front-door
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: front-door
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      nodePort: 30080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: front-door
+  namespace: chemclaw
+  labels:
+    app.kubernetes.io/name: front-door
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: front-door
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: front-door
+    spec:
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: relay
+          image: alpine/socat:1.8.0.3
+          imagePullPolicy: IfNotPresent
+          args: ["-d", "TCP-LISTEN:8080,fork,reuseaddr", "TCP:chemclaw-service:8080"]
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            tcpSocket: {port: http}
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {cpu: 500m, memory: 64Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}

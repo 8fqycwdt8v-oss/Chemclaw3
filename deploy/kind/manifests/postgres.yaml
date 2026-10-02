@@ -1,0 +1,119 @@
+# Postgres with pgvector — one instance, three principals, mirroring the production split:
+#
+# - `chemclaw` (the image's superuser) owns the schema. It is `CHEMCLAW_POSTGRES_MIGRATION_DSN`, so
+#   the chart's pre-install migrate hook runs DDL as the owner exactly as it does in production.
+# - `chemclaw_app` is the runtime principal (`CHEMCLAW_POSTGRES_DSN`). Created here, granted by the
+#   migrate hook's `chemclaw.core.grants` step from `infra/sql/grants/app_privileges.sql` — so the
+#   split-principal path a fresh production install takes is the path this lane takes too.
+# - `temporal` owns Temporal's two databases, created here rather than by `temporalio/auto-setup`:
+#   its create step connects to a database named after the role, which does not exist, so it fails
+#   and the schema setup after it reports `database "temporal" does not exist`.
+#
+# Passwords come from the `chemclaw-kind-db` Secret `up.sh` generates; none is written in a file.
+# The init script runs only on an empty data directory, which is what the PVC makes idempotent.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-init
+  namespace: chemclaw
+data:
+  10-roles.sh: |
+    #!/bin/bash
+    set -euo pipefail
+    psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" \
+      -v app_pw="$APP_PASSWORD" -v temporal_pw="$TEMPORAL_PASSWORD" <<'SQL'
+    CREATE ROLE chemclaw_app LOGIN PASSWORD :'app_pw';
+    GRANT CONNECT ON DATABASE chemclaw TO chemclaw_app;
+    CREATE ROLE temporal LOGIN PASSWORD :'temporal_pw';
+    CREATE DATABASE temporal OWNER temporal;
+    CREATE DATABASE temporal_visibility OWNER temporal;
+    SQL
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: chemclaw
+  labels:
+    app.kubernetes.io/name: postgres
+spec:
+  selector:
+    app.kubernetes.io/name: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: chemclaw
+  labels:
+    app.kubernetes.io/name: postgres
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: postgres
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: postgres
+          image: pgvector/pgvector:pg16
+          imagePullPolicy: IfNotPresent
+          # Room for the chart's declared fleet ceiling (`postgres.maxConnections` in
+          # values-kind.yaml) plus Temporal's own pools, which the chart's arithmetic does not see.
+          args: ["-c", "max_connections=400", "-c", "shared_buffers=128MB"]
+          env:
+            - name: POSTGRES_USER
+              value: chemclaw
+            - name: POSTGRES_DB
+              value: chemclaw
+            - name: POSTGRES_PASSWORD
+              valueFrom: {secretKeyRef: {name: chemclaw-kind-db, key: POSTGRES_PASSWORD}}
+            - name: APP_PASSWORD
+              valueFrom: {secretKeyRef: {name: chemclaw-kind-db, key: APP_PASSWORD}}
+            - name: TEMPORAL_PASSWORD
+              valueFrom: {secretKeyRef: {name: chemclaw-kind-db, key: TEMPORAL_PASSWORD}}
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - name: postgres
+              containerPort: 5432
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "chemclaw", "-d", "chemclaw"]
+            periodSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "chemclaw", "-d", "chemclaw"]
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          resources:
+            requests: {cpu: 250m, memory: 512Mi}
+            limits: {cpu: "2", memory: 1536Mi}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: init
+              mountPath: /docker-entrypoint-initdb.d
+      volumes:
+        - name: init
+          configMap:
+            name: postgres-init
+            defaultMode: 0755
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10Gi

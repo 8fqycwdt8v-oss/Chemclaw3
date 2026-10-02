@@ -1,0 +1,67 @@
+# The scripted mock LLM — `python -m chemclaw.cli.mock_llm` from the core image — as the default
+# model gateway (`CHEMCLAW_LLM_BASE_URL` in values-kind.yaml). It speaks both OpenAI chat
+# protocols and picks a behaviour by the `[[name]]` marker in the user message, which is how the
+# smoke in `up.sh` asks for a plain turn and for a turn that launches a durable job.
+#
+# `--host 0.0.0.0` because its callers are other pods; the flag's default stays loopback for the
+# live lane. The image is the core image `up.sh` loads, substituted at apply time.
+#
+# The catalogue validates its tool names against the tool surface at startup. It does so against the
+# image's in-tree bundles rather than the release's ConfigMap: that ConfigMap names `pyexec` and
+# `mock-vendor`, whose manifests are mounted only into the chart's pods, and every tool the
+# catalogue calls (`find_notes`, `compute_reaction_energy`, …) is an in-tree one.
+apiVersion: v1
+kind: Service
+metadata:
+  name: mock-llm
+  namespace: chemclaw
+  labels:
+    app.kubernetes.io/name: mock-llm
+spec:
+  selector:
+    app.kubernetes.io/name: mock-llm
+  ports:
+    - name: http
+      port: 8820
+      targetPort: 8820
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mock-llm
+  namespace: chemclaw
+  labels:
+    app.kubernetes.io/name: mock-llm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mock-llm
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mock-llm
+    spec:
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: mock-llm
+          image: chemclaw/core:kind
+          imagePullPolicy: Never
+          command: ["/app/.venv/bin/python", "-m", "chemclaw.cli.mock_llm", "--host", "0.0.0.0"]
+          ports:
+            - name: http
+              containerPort: 8820
+          readinessProbe:
+            tcpSocket: {port: http}
+            periodSeconds: 5
+            failureThreshold: 60
+          resources:
+            requests: {cpu: 25m, memory: 256Mi}
+            limits: {cpu: "1", memory: 1Gi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}

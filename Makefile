@@ -103,7 +103,7 @@ SHELL := bash
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install lint type test cov check ci chat db-migrate db-grants schedules-apply kg-validate synthesize eval eval-strict eval-baseline eval-baseline-check eln-validate skill-validate connector-validate datasource-validate sink-validate channel-validate sink-schema template-validate connectors prose-validate helm-validate explain user-erase rekey-compounds reindex reindex-full up down phoenix-up phoenix-down phoenix-publish deps-audit live-infra live-infra-down live-up live-down live-status live-jobs live-probes live-turn-cost live-benchmark live-template-args live-verifier-margin trajectory-census distill propose-profile live-data live-plan-gate live-degradation live-storm live-soak live-soak-report leak-probe mutants mutant-results mutant-stats upstream-check share-estimate share-sync live-ab live-delegation hypothesis-recovery live-e2e-full-stack live-e2e-full-stack-down live-e2e-full-stack-status
+.PHONY: help install lint type test cov check ci chat db-migrate db-grants schedules-apply kg-validate synthesize eval eval-strict eval-baseline eval-baseline-check eln-validate skill-validate connector-validate datasource-validate sink-validate channel-validate sink-schema template-validate connectors prose-validate helm-validate explain user-erase rekey-compounds reindex reindex-full up down phoenix-up phoenix-down phoenix-publish deps-audit live-infra live-infra-down live-up live-down live-status live-jobs live-probes live-turn-cost live-benchmark live-template-args live-verifier-margin trajectory-census distill propose-profile live-data live-plan-gate live-degradation live-storm live-soak live-soak-report leak-probe mutants mutant-results mutant-stats upstream-check share-estimate share-sync live-ab live-delegation hypothesis-recovery live-e2e-full-stack live-e2e-full-stack-down live-e2e-full-stack-status kind-up kind-down kind-status kind-smoke kind-validate
 
 help:  ## List every target with its one-line description (the default).
 	@# Reads the `## ` comments beside each target, so a new target documents itself the day it is
@@ -158,7 +158,7 @@ check: lint type test  ## The fast inner-loop gate: lint + type + test (no cover
 # alone. Last in the list rather than first: a dependency finding is a real failure but not one
 # that should mask a broken test, and it is the one gate whose fix lives in `uv.lock` rather than
 # in the diff under review.
-ci: lint type cov kg-validate eval-strict eval-baseline-check eln-validate skill-validate connector-validate datasource-validate sink-validate channel-validate template-validate prose-validate helm-validate deps-audit  ## The full pre-push gate: lint + type + coverage + all validators + the dependency audit (what CI runs).
+ci: lint type cov kg-validate eval-strict eval-baseline-check eln-validate skill-validate connector-validate datasource-validate sink-validate channel-validate template-validate prose-validate helm-validate kind-validate deps-audit  ## The full pre-push gate: lint + type + coverage + all validators + the dependency audit (what CI runs).
 
 chat:  ## Chat with the agent from the terminal (admin/testing; needs CHEMCLAW_LLM_BASE_URL up).
 	@# The shipped gateway is `chemclaw.cli.mock_llm` on loopback, and every process that makes model
@@ -517,6 +517,35 @@ live-e2e-full-stack-down:  ## Stop the four-repo pass.
 
 live-e2e-full-stack-status:  ## Show which four-repo-pass processes are running.
 	bash infra/live/e2e-full-stack/up.sh status
+
+kind-up:  ## The whole system on a local kind cluster: production images + chart, then a smoke (deploy/kind/).
+	bash deploy/kind/up.sh up
+
+kind-down:  ## Delete the local kind cluster and everything in it.
+	bash deploy/kind/up.sh down
+
+kind-status:  ## Pods, jobs, the release and the host URLs of the local kind cluster.
+	bash deploy/kind/up.sh status
+
+kind-smoke:  ## Re-run the kind cluster's smoke: /healthz, /readyz, UI, a mock-LLM turn, a durable job.
+	bash deploy/kind/up.sh smoke
+
+kind-validate:  ## Offline: render the chart with deploy/kind/values-kind.yaml + the fleet, schema-check all of it.
+	@# What a kind bring-up applies, checked without a cluster: the chart under the kind overlay, the
+	@# dependency manifests, and the fleet as `render-fleet.sh` derives it from a `Chemclaw3-mcp`
+	@# checkout (`CHEMCLAW_MCP_REPO`, else `.sibling/Chemclaw3-mcp` as CI checks it out). Strict and
+	@# without `-ignore-missing-schemas`: a kind cluster has no CRD the default schemas lack, so an
+	@# OpenShift kind leaking into the overlay fails here rather than at `helm install`.
+	@command -v helm >/dev/null || { echo "helm not installed - see docs/guides/runbook.md"; exit 1; }
+	@command -v kubeconform >/dev/null || { echo "kubeconform not installed - see docs/guides/runbook.md"; exit 1; }
+	@command -v kubectl >/dev/null || { echo "kubectl not installed (render-fleet.sh uses kubectl kustomize)"; exit 1; }
+	helm template chemclaw deploy/helm/chemclaw --namespace chemclaw -f deploy/kind/values-kind.yaml \
+	  | kubeconform -strict -summary -kubernetes-version $(KUBE_VERSION)
+	kubeconform -strict -summary -kubernetes-version $(KUBE_VERSION) deploy/kind/manifests
+	@set -e; mcp="$${CHEMCLAW_MCP_REPO:-.sibling/Chemclaw3-mcp}"; \
+	  [ -d "$$mcp/servers" ] || { echo "kind-validate: no Chemclaw3-mcp checkout at $$mcp — set CHEMCLAW_MCP_REPO"; exit 1; }; \
+	  bash deploy/kind/render-fleet.sh "$$mcp" kind \
+	    | kubeconform -strict -summary -kubernetes-version $(KUBE_VERSION)
 
 live-jobs:  ## Run a real durable job end to end (Temporal + connector worker + Postgres; no LLM).
 	uv run python -m chemclaw.cli.live_jobs
