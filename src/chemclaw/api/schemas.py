@@ -469,6 +469,12 @@ class PendingPlan(BaseModel):
     # for the same reason the card does: it is the half of the plan a person is deciding about
     # that the steps do not say.
     scope: list[str] = []
+    # Whose conversation the plan is in: the session owner's actor id — the caller's own for their
+    # sessions, somebody else's for one they were let into. The inbox lists both kinds, and opening
+    # a shared one has to adopt it as shared, so a surface needs the owner on the row rather than
+    # by matching `session_id` against `GET /sessions/shared` (Chemclaw3 #503). `None` where the
+    # membership store keeps no owner. Defaulted, so it is additive on the wire.
+    owner: str | None = None
 
 
 class PendingPlansOut(BaseModel):

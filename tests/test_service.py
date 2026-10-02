@@ -2004,7 +2004,9 @@ async def test_concurrent_turn_on_same_session_waits_in_line() -> None:
                 await asyncio.sleep(0.01)
         assert not second.done(), "the second message ran beside the first"
         third = await client.post(f"/sessions/{session_id}/messages", json={"message": "third"})
-        assert third.status_code == 409 and "already have a message waiting" in third.text
+        assert third.status_code == 409
+        assert third.json()["detail"]["code"] == "already_waiting"
+        assert "already have a message waiting" in third.json()["detail"]["message"]
         gate.set()
         assert (await first).status_code == 200
         waited = await second

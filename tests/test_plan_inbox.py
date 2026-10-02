@@ -166,6 +166,8 @@ def test_an_undecided_plan_is_listed_with_the_conversation_that_holds_it(
     assert row["plan_hash"] == plan_identity(_steps(plan)), (
         "the row must name the plan the gate would ask about, not a second hashing of it"
     )
+    # Whose conversation it is, on the row (Chemclaw3 #503) — here the caller's own.
+    assert row["owner"] == "alice"
     assert (body["considered"], body["gated"], body["unread"]) == (2, 2, 0)
 
 

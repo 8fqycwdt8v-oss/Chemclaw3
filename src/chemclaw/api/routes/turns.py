@@ -33,7 +33,7 @@ from sse_starlette.sse import EventSourceResponse, SendTimeoutError
 from starlette.responses import Response
 from starlette.types import Receive, Scope, Send
 
-from chemclaw.agent.session_queue import QueueRefused, TurnQueue
+from chemclaw.agent.session_queue import QueueRefused, Refusal, TurnQueue
 from chemclaw.api.auth import (
     DEV_PRINCIPAL_OID,
     AuthError,
@@ -141,6 +141,29 @@ def _retry_after_hint() -> str:
     return str(max(1, math.ceil(base + random.random() * base)))
 
 
+def _queue_refusal(reason: Refusal) -> dict[str, str]:
+    """The 409 detail for a line that cannot take this message: a `code` and the sentence.
+
+    An object rather than the sentence alone, as the protocol routes answer their 409s, because
+    this status means two things on this route and a client has to act differently on each: a
+    full line (`queue_full` — wait for it to move and send again) and a sender who already has a
+    message waiting (`already_waiting` — withdraw that one or wait for it). With the sentence alone
+    `Chemclaw3_ui` could tell them apart only by matching it, and offered "start a fresh session",
+    the remedy for the 409 this route sent before a busy session queued (Chemclaw3 #503).
+    """
+    if reason == "waiting":
+        return {
+            "code": "already_waiting",
+            "message": "you already have a message waiting in this session; withdraw it or "
+            "wait for it to run",
+        }
+    return {
+        "code": "queue_full",
+        "message": "a turn is already running for this session and "
+        f"{settings.service_turn_queue_max} message(s) are already waiting",
+    }
+
+
 async def post_message(
     request: Request,
     session_id: str,
@@ -183,8 +206,9 @@ async def post_message(
     both claims exactly as an uncontended turn does — then runs with this request's principal, so
     it is the sender's turn and nobody else's. The order is the database's admission order of the
     tickets, and a message never overtakes one already waiting. What is still refused, with 409, is
-    a line that is full or a sender who already has a message in it — and, with 429, a process
-    already holding as many waiters as its socket budget charges for.
+    a line that is full or a sender who already has a message in it — each named by its own `code`
+    in the detail (`_queue_refusal`) — and, with 429, a process already holding as many waiters as
+    its socket budget charges for.
 
     **A message that waited is re-authorized at the head**, not trusted from when it was sent
     (`D-2026-10-02-a-queued-message-is-re-authorized-at-the-head-of-the-line`): membership, the
@@ -773,16 +797,7 @@ async def post_message(
             except QueueRefused as exc:
                 _left_line()
                 METRICS.increment("chemclaw_turn_queue_refused_total")
-                raise HTTPException(
-                    status_code=409,
-                    detail=(
-                        "you already have a message waiting in this session; withdraw it or wait "
-                        "for it to run"
-                        if exc.reason == "waiting"
-                        else "a turn is already running for this session and "
-                        f"{settings.service_turn_queue_max} message(s) are already waiting"
-                    ),
-                ) from exc
+                raise HTTPException(status_code=409, detail=_queue_refusal(exc.reason)) from exc
         else:
             # The lease clock starts *here*, not at the claim: from the next statement on, the
             # `finally` below no longer owns the cleanup and the slot needs an expiry of its own
