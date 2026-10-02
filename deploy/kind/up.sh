@@ -162,7 +162,9 @@ apply_env_configmap() {
 }
 
 # The per-mode environment for the UI, the mock and Temporal, one ConfigMap each, so no manifest
-# names a mode.
+# names a mode. The UI's REVIEWER_ROLES is the same role values-kind-oidc-mock.yaml makes
+# privileged (CHEMCLAW_ENTRA_PRIVILEGED_ROLES): the BFF is told it separately, and left empty the UI
+# offers nobody the privileged actions core would accept from them.
 AUTH_CHANGED=""
 apply_auth_config() {
   local ui mock temporal
@@ -178,7 +180,8 @@ ALLOW_INSECURE_AUTH=true"
 ENTRA_TENANT_ID=mock-tenant
 ENTRA_CLIENT_ID=mock-spa-client
 API_SCOPE=api://chemclaw/Chat.Access
-ENTRA_AUTHORITY=$TENANT_URL"
+ENTRA_AUTHORITY=$TENANT_URL
+REVIEWER_ROLES=chemist"
       mock="MOCK_ENTRA_ENABLED=true
 MOCK_ENTRA_ISSUER=$TENANT_URL/v2.0
 MOCK_ENTRA_AUDIENCE=api://chemclaw

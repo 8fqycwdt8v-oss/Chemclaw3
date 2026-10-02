@@ -322,3 +322,5 @@ def test_oidc_mock_is_the_shipped_identity_posture_against_the_mock_tenant() -> 
     }
     assert {"CHEMCLAW_TEMPORAL_TLS_CERT", "CHEMCLAW_TEMPORAL_TLS_CA"} <= env
     assert "sslmode=require" in _UP
+    # The UI is told the privileged role separately; a mismatch hides actions core would accept.
+    assert f"REVIEWER_ROLES={config['CHEMCLAW_ENTRA_PRIVILEGED_ROLES']}" in _UP
