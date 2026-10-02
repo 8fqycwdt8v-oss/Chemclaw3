@@ -533,7 +533,8 @@ kind-smoke:  ## Re-run the kind cluster's smoke: /healthz, /readyz, UI, a mock-L
 kind-validate:  ## Offline: render the chart with deploy/kind/values-kind.yaml + the fleet, schema-check all of it.
 	@# What a kind bring-up applies, checked without a cluster: the chart under the kind overlay, the
 	@# dependency manifests, and the fleet as `render-fleet.sh` derives it from a `Chemclaw3-mcp`
-	@# checkout (`CHEMCLAW_MCP_REPO`, else `.sibling/Chemclaw3-mcp` as CI checks it out). Strict and
+	@# checkout (the live lanes' sibling variable, else `.sibling/Chemclaw3-mcp` as CI checks it
+	@# out). Strict and
 	@# without `-ignore-missing-schemas`: a kind cluster has no CRD the default schemas lack, so an
 	@# OpenShift kind leaking into the overlay fails here rather than at `helm install`.
 	@command -v helm >/dev/null || { echo "helm not installed - see docs/guides/runbook.md"; exit 1; }

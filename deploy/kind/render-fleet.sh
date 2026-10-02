@@ -13,6 +13,9 @@
 # - one replica (the fleet's floor of two is an availability property; this is a workstation);
 # - the server's bearer, from `chemclaw-secrets` under the variable its `app.py` names as
 #   `token_env` — the same key core's pods send from, so the two halves cannot disagree;
+# - `MCP_ALLOWED_HOSTS`, the Service address the server is dialled at. The MCP transport's
+#   DNS-rebinding guard admits only loopback `Host` headers by default, so without it every
+#   in-cluster call is answered `421 Misdirected Request` while `/healthz` stays green;
 # - resource *requests* sized to the node. Limits are the fleet's own.
 #
 # The HPA, PDB, ServiceMonitor and KEDA objects beside them are left out: autoscaling has no
@@ -62,6 +65,10 @@ for name in "${servers[@]}"; do
   # and refuse every call.
   grep -rqs "token_env=\"$token_env\"" "$mcp_repo/servers/$name/src" \
     || die "$name: its app does not declare token_env=\"$token_env\" — check servers/$name/src"
+  # The Service's own port, read from the file the cluster gets, so the allowed `Host` is exactly
+  # the address core dials (`http://chemclaw-mcp-<name>:<port>/mcp`).
+  port="$(awk '$1 == "port:" {print $2; exit}' "$src/service.yaml")"
+  [ -n "$port" ] || die "$name: no port in $src/service.yaml"
   out="$work/$name"
   mkdir -p "$out"
   cp "$src/deployment.yaml" "$src/service.yaml" "$out/"
@@ -96,6 +103,8 @@ patches:
               - name: server
                 imagePullPolicy: Never
                 env:
+                  - name: MCP_ALLOWED_HOSTS
+                    value: "chemclaw-mcp-$name:$port"
                   - name: $token_env
                     valueFrom:
                       secretKeyRef:

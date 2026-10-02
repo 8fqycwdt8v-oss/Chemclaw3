@@ -2835,6 +2835,12 @@ def _makefile_renders() -> list[list[str]]:
     Replaces a pair of `len(...) == 2` assertions. The count was the *point* of those tests — every
     render must pay the escape hatch — and pinning it as a literal meant that adding a third render
     failed them for the one reason that is not a defect. The invariant is "each", not "two".
+
+    **Renders of the shipped defaults only.** A render that passes a values file (`-f`) is
+    rendering *that* file's postures — `kind-validate`'s `deploy/kind/values-kind.yaml` states its
+    egress, retention and namespace in the file — so demanding the `--set` escape hatches of it
+    would demand a second, contradicting statement. What such a file states is
+    `tests/test_kind_deploy.py`'s to check, and it renders the file itself.
     """
     lines = (DEPLOY.parent / "Makefile").read_text().splitlines()
     renders: list[list[str]] = []
@@ -2846,7 +2852,8 @@ def _makefile_renders() -> list[list[str]]:
         while lines[cursor].rstrip().endswith("\\"):
             cursor += 1
             block.append(lines[cursor])
-        renders.append(block)
+        if not any(" -f " in part for part in block):
+            renders.append(block)
     return renders
 
 
