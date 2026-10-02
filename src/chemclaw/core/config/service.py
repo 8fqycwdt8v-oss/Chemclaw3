@@ -85,18 +85,27 @@ class ServiceSettings(BaseSettings):
     # turn when it reaches the head; past this many the next one is refused 409, as every second
     # message used to be. Each sender may hold one place per session whatever this is, so the
     # number bounds the *people* waiting rather than one person's retries. A waiter holds an open
-    # stream for as long as it waits, so this is also a socket bound: the connection backstop in
-    # `core/config/__init__.py` charges it per concurrent turn.
+    # stream for as long as it waits, so this is also a socket bound: a process holds at most
+    # `service_max_concurrent_turns` × this many waiters, wherever the turns ahead of them run (past
+    # it the next is refused 429), and the connection backstop in `core/config/__init__.py` charges
+    # exactly that product.
     service_turn_queue_max: int = Field(default=4, ge=1)
     # How often a waiting message asks whether it is next. The ask also refreshes its lease (the
-    # turn-claim lease above), so this must stay well under that. In-process a finishing turn wakes
-    # its waiters at once; this interval is what a waiter on *another* replica pays, and what a
-    # shift in its position takes to reach the sender's screen.
+    # turn-claim lease above), so it must be shorter than that lease — startup refuses one that is
+    # not, because every ticket would lapse between asks and its message read as withdrawn. In-
+    # process a finishing turn wakes its waiters at once; this interval is what a waiter on
+    # *another* replica pays, and what a shift in its position takes to reach the sender's screen.
     service_turn_queue_poll_seconds: float = Field(default=1.0, gt=0)
     # How many participants besides the sender may follow one running turn's live stream at once
     # (`GET /sessions/{id}/turn/stream`). Each has its own bounded buffer, so a stalled one is cut
     # off without holding the others; this bounds the memory and the sockets one turn can gather.
+    # A watch also takes one of its watcher's `service_max_event_streams_per_user` slots.
     service_turn_max_watchers: int = Field(default=4, ge=0)
+    # How long a watcher's membership is trusted before it is read again, on the next event of the
+    # turn they follow. Membership is read per request and a watch is one request lasting a turn, so
+    # this bounds how long a member removed mid-turn keeps seeing it. One lookup per watcher per
+    # interval at most, and none while the turn is quiet.
+    service_turn_watch_recheck_seconds: float = Field(default=5.0, gt=0)
     # Max characters accepted in one chat message at the front door (SEC-4). Bounds the request
     # body at the trust boundary so an oversized POST is a clean 422, not an unbounded
     # allocation. Generous for a real message (~25k tokens); raise it for a workflow that posts
@@ -289,9 +298,10 @@ class ServiceSettings(BaseSettings):
     # than picked: 256 was 28% above `service_max_event_streams_total` alone, so the app's
     # documented, supported state — a full complement of push-back streams — reached a transport
     # bound that answers 503 to the kubelet. The composed validator refuses a configuration where
-    # `max_connections` is not at least streams + turns + the headroom below, which is the
-    # cross-check that was missing beside the three (fleet turns, fleet Postgres connections,
-    # fleet calc requests) that already exist.
+    # `max_connections` is not at least streams + turns (each with its watchers) + the messages
+    # this process may hold waiting + the headroom below, which is the cross-check that was missing
+    # beside the three (fleet turns, fleet Postgres connections, fleet calc requests) that already
+    # exist.
     service_max_connections: int = Field(default=512, gt=0)
     # Sockets kept *above* what this process's own caps can occupy, in the same spirit as
     # `service_thread_pool_headroom`: the two kubelet probes, the Prometheus scrape, and the

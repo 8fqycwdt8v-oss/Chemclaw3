@@ -20,11 +20,13 @@ participant follow the running turn live.
 """
 
 import asyncio
+import contextlib
 import logging
 import math
 import random
+import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
 
 from fastapi import FastAPI, HTTPException, Request
 from sse_starlette.sse import EventSourceResponse, SendTimeoutError
@@ -32,7 +34,13 @@ from starlette.responses import Response
 from starlette.types import Receive, Scope, Send
 
 from chemclaw.agent.session_queue import QueueRefused, TurnQueue
-from chemclaw.api.auth import DEV_PRINCIPAL_OID
+from chemclaw.api.auth import (
+    DEV_PRINCIPAL_OID,
+    AuthError,
+    IdentityProviderUnavailable,
+    Principal,
+    reauthorize,
+)
 from chemclaw.api.budget import BudgetExceeded, check_thread_size, refused_metric
 from chemclaw.api.deps import CurrentSession, CurrentUser, _resolve_session, require_owner
 from chemclaw.api.detach import DetachableTurn
@@ -49,6 +57,8 @@ from chemclaw.api.state import (
     _release_turn_claim,
     _release_turn_slot,
     _start_turn_lease,
+    _take_event_stream_slot,
+    _waiting_besides,
     claim_holder,
     state,
 )
@@ -87,10 +97,18 @@ class _TurnStream(EventSourceResponse):
         session_id: str,
         ping: int,
         send_timeout: float,
+        release: Callable[[], None] | None = None,
     ) -> None:
-        """Wrap `content`, bounding each send and remembering whose turn this is."""
+        """Wrap `content`, bounding each send and remembering whose turn this is.
+
+        `release`, when given, runs when the response ends — every way it can end, including a
+        client gone before the first byte, where the body generator never starts and runs no
+        `finally` (`routes/streams._SlotBoundEventStream` measured that window). A watcher's place
+        and stream slot are held by the *socket*, so this is the scope they are returned in.
+        """
         super().__init__(content, ping=ping, send_timeout=send_timeout)
         self._session_id = session_id
+        self._release = release
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         """Serve the stream; a client that stopped reading ends it quietly, not as a crash."""
@@ -104,6 +122,9 @@ class _TurnStream(EventSourceResponse):
                 self._session_id,
                 settings.service_sse_send_timeout_seconds,
             )
+        finally:
+            if self._release is not None:
+                self._release()
 
 
 def _retry_after_hint() -> str:
@@ -162,7 +183,12 @@ async def post_message(
     both claims exactly as an uncontended turn does — then runs with this request's principal, so
     it is the sender's turn and nobody else's. The order is the database's admission order of the
     tickets, and a message never overtakes one already waiting. What is still refused, with 409, is
-    a line that is full or a sender who already has a message in it.
+    a line that is full or a sender who already has a message in it — and, with 429, a process
+    already holding as many waiters as its socket budget charges for.
+
+    **A message that waited is re-authorized at the head**, not trusted from when it was sent
+    (`D-2026-10-02-a-queued-message-is-re-authorized-at-the-head-of-the-line`): membership, the
+    token and the per-actor cap are asked again before it takes the turn (`_refusal_at_the_head`).
     """
     front = state(request)
     active_turns: dict[str, TurnLease] = front.active_turns
@@ -220,9 +246,18 @@ async def post_message(
     # exists to prevent, inverted. That configuration is reachable (`service_allow_insecure`), and a
     # deployment fronting the API with one service credential for many humans is the same shape:
     # the honest answer in both is that this guard has nothing to divide.
+    #
+    # **A message waiting in another session's line counts too**
+    # (`D-2026-10-02-a-queued-message-is-re-authorized-at-the-head-of-the-line`): it is a turn this
+    # actor will run the moment its line moves, so leaving it out let one chemist park a message in
+    # every shared session they belong to and run them all at once, past the cap. The same count is
+    # taken again when a waiting message reaches the head (`_refusal_at_the_head`), because what
+    # was true when it was sent need not be true when it starts.
     actor_cap = settings.service_max_concurrent_turns_per_actor
+    front_waiters = front.queue_waiters
     held = (
         _actor_turns_in_flight(active_turns, principal.oid, besides=session_id)
+        + _waiting_besides(front_waiters, principal.oid, besides=session_id)
         if actor_cap and principal.oid != DEV_PRINCIPAL_OID
         else 0
     )
@@ -287,6 +322,13 @@ async def post_message(
     # is created — a waiting message is not the running turn, and registering it early would hand
     # the stop route and every watcher the wrong one.
     started: DetachableTurn | None = None
+    # Who the turn runs as. The request's principal on the fast path; for a message that waited,
+    # what the same credential still establishes at the head of the line (`_refusal_at_the_head`).
+    runner: Principal = principal
+    # Whether this message holds a place in the process's waiter ledger (`front.queue_waiters`) —
+    # reserved before the ticket is taken, so two concurrent POSTs cannot both pass its bound.
+    counted = False
+    waiter_key = (principal.oid, session_id)
 
     # **The id the header, the audit trail and `turn_costs` are all keyed on.** Read once, here,
     # rather than in the generator: the observability middleware minted it for this request and
@@ -314,6 +356,18 @@ async def post_message(
             permit = False
             semaphore.release()
 
+    def _left_line() -> None:
+        """This message no longer waits: drop its ticket and its process-ledger place, once."""
+        nonlocal ticket, counted
+        ticket = None
+        if counted:
+            counted = False
+            remaining = front_waiters.get(waiter_key, 1) - 1
+            if remaining <= 0:
+                front_waiters.pop(waiter_key, None)
+            else:
+                front_waiters[waiter_key] = remaining
+
     def _withdrawn(message: str) -> dict[str, str]:
         """The frame a waiting message ends on when it will never run."""
         METRICS.increment("chemclaw_turn_queue_withdrawn_total")
@@ -333,7 +387,7 @@ async def post_message(
         in-process slot first (no `await` between its test and its write), then the durable row —
         so a queued message cannot run beside a live turn any more than a double-submit could.
         """
-        nonlocal slot, holder, ticket, started
+        nonlocal slot, holder, started
         taken = _claim_turn_slot(active_turns, session_id, actor=principal.oid)
         if taken is None:
             return False
@@ -353,11 +407,66 @@ async def post_message(
         # starts asking the claim instead of the queue.
         if ticket is not None:
             await _leave_line(queue, session_id, ticket)
-            ticket = None
+            _left_line()
         signal.notify()
         if started is not None:
             front.running_turns.register(session_id, started)
         return True
+
+    async def _refusal_at_the_head() -> str | None:
+        """Why this message may no longer run as its sender, or `None` when it still may.
+
+        Everything the POST was admitted on is asked again, because the wait can last about
+        `service_turn_queue_max` × `service_turn_timeout_seconds`
+        (`D-2026-10-02-a-queued-message-is-re-authorized-at-the-head-of-the-line`):
+
+        - **membership** — an owner who removes a member while their message waits must not have
+          it run anyway. `_resolve_session` is the gate every request passes, and it also hands
+          back a live handle current *now*;
+        - **the credential** — `auth.reauthorize` re-validates the same token, so a turn never
+          starts on one that expired in the line, and runs on the roles it still vouches for;
+        - **the per-actor cap** — the turns this sender has running elsewhere *now*, which a burst
+          of concurrent POSTs can have pushed past what each saw on arrival.
+
+        Asked in that order, cheapest refusal first; each is read on every look at the head, so a
+        message held there by a busy claim is re-checked each poll rather than once.
+        """
+        nonlocal current, runner
+        try:
+            current = await _resolve_session(request, session_id, principal)
+        except HTTPException:
+            return "Your message did not run: you are no longer a participant in this conversation."
+        try:
+            runner = await reauthorize(request, principal)
+        except AuthError:
+            logger.info("a waiting message in session %s outlived its sender's token", session_id)
+            return (
+                "Your message did not run: your sign-in expired while it waited. Sign in again "
+                "and resend it."
+            )
+        except IdentityProviderUnavailable:
+            logger.warning(
+                "a waiting message in session %s could not have its sender's token re-checked",
+                session_id,
+            )
+            return (
+                "Your message did not run: your sign-in could not be re-checked when its turn "
+                "came. Resend it."
+            )
+        # Read now rather than taken from the POST's frame: this is the check *at the head*, and
+        # what it compares against is the configuration in force when the turn would start.
+        cap_now = settings.service_max_concurrent_turns_per_actor
+        if (
+            cap_now
+            and principal.oid != DEV_PRINCIPAL_OID
+            and _actor_turns_in_flight(active_turns, principal.oid, besides=session_id) >= cap_now
+        ):
+            METRICS.increment("chemclaw_turns_refused_actor_cap_total")
+            return (
+                "Your message did not run: you already have as many turns running as one person "
+                "may. Resend it when one finishes."
+            )
+        return None
 
     async def _wait_in_line() -> AsyncIterator[dict[str, str]]:
         """Wait for this message's turn, reporting its place whenever the place changes.
@@ -367,30 +476,23 @@ async def post_message(
         session was deleted) or its sender is no longer a participant — and a `queue_cancelled`
         frame is the last thing yielded.
 
-        **Membership is read again at the head**, because the principal was authorized when the
-        message was *sent* and the turn runs later: an owner who removes a member while their
-        message waits must not have it run anyway. `_resolve_session` is the gate every request
-        passes, re-asked here, and it is also what hands back a live handle current *now*.
+        **Authority is read again at the head** (`_refusal_at_the_head`), because the principal was
+        authorized when the message was *sent* and the turn runs later.
         """
-        nonlocal current, ticket
         shown: int | None = None
         while ticket is not None:
             place = await queue.position(session_id, ticket, lease)
             if place is None:
-                ticket = None
+                _left_line()
                 yield _withdrawn("Your message was withdrawn before it ran.")
                 return
             if place == 0:
-                try:
-                    current = await _resolve_session(request, session_id, principal)
-                except HTTPException:
+                refusal = await _refusal_at_the_head()
+                if refusal is not None:
                     await _leave_line(queue, session_id, ticket)
-                    ticket = None
+                    _left_line()
                     signal.notify()
-                    yield _withdrawn(
-                        "Your message did not run: you are no longer a participant in this "
-                        "conversation."
-                    )
+                    yield _withdrawn(refusal)
                     return
                 if await _take_the_turn():
                     return
@@ -515,8 +617,8 @@ async def post_message(
                         # **The sender, always** (`D-2026-09-27-in-a-shared-session-the-sender-
                         # governs`) — and for a message that waited in line, still the principal
                         # *its own* request authenticated, never whoever's turn ran before it.
-                        actor=principal.oid,
-                        roles=principal.roles,
+                        actor=runner.oid,
+                        roles=runner.roles,
                         budget=front.budget,
                         dry_run=body.dry_run,
                         # The session's profile picks both halves of its surface: the graph the
@@ -591,6 +693,7 @@ async def post_message(
                 # Stopped, failed or cancelled while still waiting: give the place up now rather
                 # than leave the message behind it waiting one lease for a waiter that is gone.
                 await _leave_line(queue, session_id, ticket)
+                _left_line()
             if slot is not None:
                 _release_turn_slot(active_turns, session_id, slot)
                 if holder is not None and claims is not None:
@@ -642,6 +745,24 @@ async def post_message(
             # is full (wait for it to move), or this sender already has a message in it (one each,
             # so a member cannot crowd the others out and a retried POST queues one duplicate,
             # not a stream of them).
+            #
+            # **And only while this process can hold another waiter.** A waiting message holds its
+            # sender's stream open *here* whichever replica runs the turn ahead of it, so the
+            # socket budget (`core/config/__init__.py`) cannot charge waiters per local turn; it
+            # charges `service_max_concurrent_turns` × `service_turn_queue_max` waiters per process,
+            # and this is where that number stops being an assumption. Reserved before the
+            # `await`, with nothing between the test and the write, so a burst cannot overshoot.
+            if sum(front_waiters.values()) >= (
+                settings.service_max_concurrent_turns * settings.service_turn_queue_max
+            ):
+                METRICS.increment("chemclaw_turn_queue_refused_total")
+                raise HTTPException(
+                    status_code=429,
+                    detail="this server holds as many waiting messages as it can; retry shortly",
+                    headers={"Retry-After": _retry_after_hint()},
+                )
+            front_waiters[waiter_key] = front_waiters.get(waiter_key, 0) + 1
+            counted = True
             try:
                 ticket = await queue.enqueue(
                     session_id,
@@ -650,6 +771,7 @@ async def post_message(
                     lease_seconds=lease,
                 )
             except QueueRefused as exc:
+                _left_line()
                 METRICS.increment("chemclaw_turn_queue_refused_total")
                 raise HTTPException(
                     status_code=409,
@@ -707,6 +829,7 @@ async def post_message(
                 await _release_turn_claim(claims, session_id, holder)
             if ticket is not None:
                 await _leave_line(queue, session_id, ticket)
+            _left_line()
 
 
 async def _leave_line(queue: TurnQueue, session_id: str, ticket: int) -> None:
@@ -849,9 +972,17 @@ async def watch_turn(
     404 when no turn is running here — including one running on another replica, whose pump this
     process cannot reach (the stop route's scope, for the same reason). A late joiner sees events
     from the moment it attaches; what came earlier is in the transcript once the answer lands.
-    429 when the turn already has `service_turn_max_watchers` watchers.
+    429 when the turn already has `service_turn_max_watchers` watchers, or when the caller already
+    holds `service_max_event_streams_per_user` long-lived streams — a followed turn is held open as
+    long as a push-back stream is, so it is charged to the same ledger
+    (`api/state._take_event_stream_slot`). Both places are held until the *socket* closes, not until
+    the pump stops feeding the view (`api/detach.Watch`).
+
+    **Membership is re-read while watching** (`_while_a_participant`): an owner who removes a
+    member mid-turn stops that member's view rather than leaving it open to the turn's end.
     """
-    turn = state(request).running_turns.get(session_id)
+    front = state(request)
+    turn = front.running_turns.get(session_id)
     if turn is None:
         raise HTTPException(status_code=404, detail="no turn is running for this session")
     if turn.watchers >= settings.service_turn_max_watchers:
@@ -863,15 +994,67 @@ async def watch_turn(
             ),
             headers={"Retry-After": _retry_after_hint()},
         )
-    view = turn.watch()
-    if view is None:
+    release_slot = _take_event_stream_slot(front.event_streams, principal.oid)
+    if release_slot is None:
+        METRICS.increment("chemclaw_event_streams_rejected_total")
+        raise HTTPException(
+            status_code=429,
+            detail="too many concurrent event streams; close one and retry",
+            headers={"Retry-After": "1"},
+        )
+    watch = turn.watch()
+    if watch is None:
+        release_slot()
         raise HTTPException(status_code=404, detail="no turn is running for this session")
+
+    def _release() -> None:
+        """Give back the watcher's place and the caller's stream slot, when the socket is gone."""
+        watch.close()
+        release_slot()
+
     return _TurnStream(
-        view,
+        _while_a_participant(request, session_id, principal, watch.events),
         session_id=session_id,
         ping=settings.service_sse_ping_seconds,
         send_timeout=settings.service_sse_send_timeout_seconds,
+        release=_release,
     )
+
+
+async def _while_a_participant(
+    request: Request,
+    session_id: str,
+    principal: Principal,
+    view: AsyncGenerator[dict[str, str], None],
+) -> AsyncIterator[dict[str, str]]:
+    """Relay a watcher's view for as long as the watcher is still in the conversation.
+
+    Membership is reach (`D-2026-09-27-in-a-shared-session-the-sender-governs`) and it is read per
+    request — but a watch is one request that lasts a whole turn, so it is read again, before the
+    next event goes out, once `service_turn_watch_recheck_seconds` have passed since the last
+    look. Per event rather than on a timer, because a removed member is owed nothing *until* there
+    is something to withhold, and a quiet turn costs no lookups at all.
+
+    A watcher found removed is closed **without a final event**: they are a stranger to this
+    conversation now, and a stranger gets the same nothing a session they never belonged to gives
+    them (`api/deps._resolve_session`'s 404 posture). Their client falls back to the transcript,
+    which answers them 404 — the account of what happened that every other route already gives.
+    """
+    checked = time.monotonic()
+    async with contextlib.aclosing(view):
+        async for frame in view:
+            if time.monotonic() - checked >= settings.service_turn_watch_recheck_seconds:
+                try:
+                    await _resolve_session(request, session_id, principal)
+                except HTTPException:
+                    METRICS.increment("chemclaw_turn_watchers_removed_total")
+                    logger.info(
+                        "a watcher of session %s is no longer a participant; their view was closed",
+                        session_id,
+                    )
+                    return
+                checked = time.monotonic()
+            yield frame
 
 
 def register(app: FastAPI) -> None:

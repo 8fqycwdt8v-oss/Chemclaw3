@@ -697,6 +697,21 @@ class Settings(
                     "service_max_concurrent_turns or the replica ceiling, or raise "
                     "service_fleet_max_concurrent_turns if the LLM endpoint can serve it."
                 )
+        # **A waiting message's ask is also its lease refresh**
+        # (`agent/session_queue`): every `service_turn_queue_poll_seconds` the waiter re-stamps its
+        # ticket, and a ticket not re-stamped within `service_turn_claim_lease_seconds` stops
+        # counting and is swept. A poll at or above the lease therefore lapses every ticket between
+        # two asks, and every queued message ends as "withdrawn" without anybody withdrawing it —
+        # a line that refuses everyone while reading as working. Both are this deployment's own
+        # numbers, so it is refused here rather than discovered by a chemist.
+        if self.service_turn_queue_poll_seconds >= self.service_turn_claim_lease_seconds:
+            raise ValueError(
+                f"service_turn_queue_poll_seconds ({self.service_turn_queue_poll_seconds:g}) must "
+                "be below service_turn_claim_lease_seconds "
+                f"({self.service_turn_claim_lease_seconds:g}): a waiting message refreshes its "
+                "place in line each time it asks, so at or above the lease every place lapses "
+                "between asks and every queued message reads as withdrawn."
+            )
         # **A fairness cap at or above the cap it divides refuses nothing while reading as
         # protection**, and it publishes that reading on `chemclaw_turn_actor_capacity`. The chart's
         # own pair is held apart by `tests/test_deploy_chart.py`, but that test reads `values.yaml`
@@ -736,11 +751,22 @@ class Settings(
         #
         # **A turn is more than one socket once a session is shared**
         # (`D-2026-10-01-a-queued-message-waits-in-its-senders-request`): besides its sender's own
-        # stream, up to `service_turn_max_watchers` participants may follow it and up to
-        # `service_turn_queue_max` messages may wait behind it, each on an open stream of its own.
-        per_turn = 1 + self.service_turn_max_watchers + self.service_turn_queue_max
+        # stream, up to `service_turn_max_watchers` participants may follow it, each on an open
+        # stream of its own.
+        #
+        # **Waiters are charged per process, not per local turn**
+        # (`D-2026-10-02-a-queued-message-is-re-authorized-at-the-head-of-the-line`). A message
+        # waits on the replica its sender reached, whichever replica runs the turn ahead of it, so
+        # "`service_turn_queue_max` behind each of this process's turns" undercounted every waiter
+        # whose turn ran elsewhere. The turn route refuses a waiter past
+        # `service_max_concurrent_turns` × `service_turn_queue_max` on this process, and that
+        # enforced bound is what is charged here.
+        per_turn = 1 + self.service_turn_max_watchers
+        waiters = self.service_max_concurrent_turns * self.service_turn_queue_max
         occupied = (
-            self.service_max_event_streams_total + self.service_max_concurrent_turns * per_turn
+            self.service_max_event_streams_total
+            + self.service_max_concurrent_turns * per_turn
+            + waiters
         )
         if self.service_max_connections < occupied + self.service_connection_headroom:
             raise ValueError(
@@ -748,8 +774,9 @@ class Settings(
                 f"process's own caps can occupy plus its headroom: "
                 f"{self.service_max_event_streams_total} push-back streams "
                 f"(service_max_event_streams_total) + {self.service_max_concurrent_turns} turns "
-                f"(service_max_concurrent_turns) x {per_turn} sockets each (the sender, "
-                "service_turn_max_watchers and service_turn_queue_max) + "
+                f"(service_max_concurrent_turns) x {per_turn} sockets each (the sender and "
+                f"service_turn_max_watchers) + {waiters} waiting messages "
+                "(service_max_concurrent_turns x service_turn_queue_max) + "
                 f"{self.service_connection_headroom} reserved "
                 f"(service_connection_headroom) = "
                 f"{occupied + self.service_connection_headroom}. uvicorn's --limit-concurrency "
