@@ -917,40 +917,14 @@ SERVED_ELSEWHERE = frozenset({"chem", "rxnpredict", "safety"})
 #: is the part of a run that says what the run is not evidence about.
 #:
 #: **13,200 since 2026-10-02, and the test below is what moved it.** Measured against
-#: `Chemclaw3-mcp` at `be55d99`, the three cost **11,848 over 22 tools** (`chem` 7,432 / 13,
-#: `rxnpredict` 2,784 / 6, `safety` 1,632 / 3), 848 over the 11,000 that stood: `chem` had grown
-#: 1,855 since the measurement above, most of it one tool (`enumerate_substitutions`, 939). 13,200
-#: is the same 11.5% over that. Narrowing `chem`'s docstrings was the alternative and was declined
-#: by the owner: those sentences are the units and the "what this is not" the fleet's own rules
-#: require. What the raise costs is stated at the two thread allowances in
-#: `tests/test_compaction.py`, which each fall by the 2,200 — both defaults stayed where they
-#: were, for the reason given there.
+#: `Chemclaw3-mcp` at d25e165 in CI, the three cost **12,020 over 22 tools** (`chem` 7,604 / 13,
+#: `rxnpredict` 2,784 / 6, `safety` 1,632 / 3), 1,020 over the 11,000 that stood; `chem` is all of
+#: it. 13,200 is 9.8% over that — less than the 11.5% this was set with, because the warm floor
+#: in `tests/test_compaction.py` is what bounds it now. Narrowing `chem` was the alternative and
+#: the owner declined it; what pays instead is `agent_max_tool_result_chars`, and both thread
+#: allowances fall by the 2,200. The whole trade, and the tolerance constant it deleted, is
+#: `D-2026-10-02-the-allowance-follows-the-fleet-and-the-result-cap-pays-for-it`.
 SERVED_ELSEWHERE_ALLOWANCE = 13_200
-
-#: **The allowance is breached, the breach is held where it stands, and the fleet closes it.**
-#:
-#: Measured 2026-10-02 against `Chemclaw3-mcp` `main` at d25e165, through this file's own path:
-#: **12,020** (`chem` 7,604 / 13, `rxnpredict` 2,784 / 6, `safety` 1,632 / 3). `chem` is the whole
-#: of it — 5,577 over 12 tools when the allowance was set, then a 939-token
-#: `enumerate_substitutions` and +1,088 of description across six existing tools. Until CI built
-#: the fleet's environment the bound skipped in every run, so nothing here was red.
-#:
-#: **Raising the allowance to cover it was measured and fails**, which is why this is a separate
-#: constant rather than a new value for the one above. `PREFIX_BOUND` would rise with it, and
-#: `agent_context_token_budget` cannot follow — it is pinned from above by
-#: `tests/test_compaction.SMALLEST_TARGET_WINDOW` — so the rise comes out of the thread, and the
-#: warm arm of `test_the_shipped_budget_leaves_the_thread_what_its_derivation_claims` needs the
-#: calibrated thread above one maximal tool batch (15,000). At 11,000 that thread is 15,471; it
-#: falls 1:1 with the allowance, to **14,451 at the bare 12,020**, before any headroom. So the
-#: remedy is a narrower `chem`, filed as Chemclaw3-mcp#152, and meanwhile the excess is what
-#: `D-2026-10-02-a-prefix-beyond-the-derivation-basis-is-paid-in-spend-not-thread` says it is: a
-#: chart deployment's prefix exceeds `agent_context_prefix_basis` by it, pays it in spend rather
-#: than thread, and logs `context.prefix_over_basis` once.
-#:
-#: The test below holds both directions: growth past this figure is red, and so is a total back
-#: inside `SERVED_ELSEWHERE_ALLOWANCE` while this is still set — delete it then, rather than leave
-#: a tolerance nothing needs.
-SERVED_ELSEWHERE_KNOWN_BREACH: int | None = 12_020
 
 #: What the fleet's **whole** published `manifests/` directory costs, as a second and looser bound.
 #:
@@ -1850,27 +1824,14 @@ def test_the_allowance_for_the_bundles_this_ratchet_cannot_serve_is_still_a_boun
     # was.** A partial total is a *lower* bound on the real one, so a partial run can still fail
     # this honestly — and a bundle whose schemas grew past the allowance on its own is exactly the
     # case a sibling problem in a *different* bundle used to hide.
-    bound = SERVED_ELSEWHERE_KNOWN_BREACH or SERVED_ELSEWHERE_ALLOWANCE
-    assert total <= bound, (
+    assert total <= SERVED_ELSEWHERE_ALLOWANCE, (
         f"the bundles this ratchet cannot serve now cost {total} tokens ({breakdown}) against an "
-        f"allowance of {SERVED_ELSEWHERE_ALLOWANCE}"
-        + (
-            f" and a known breach held at {SERVED_ELSEWHERE_KNOWN_BREACH} (Chemclaw3-mcp#152)"
-            if SERVED_ELSEWHERE_KNOWN_BREACH
-            else ""
-        )
-        + f". That allowance is half of PREFIX_BOUND ({PREFIX_BOUND}), which "
-        "`core/config/agent.py` derives `agent_tool_result_clear_trigger` and "
-        "`agent_context_token_budget` from — so raising it is a change to both defaults and to "
-        "what every request may cost, not a bump. Raise all three together, or narrow a schema "
-        "in Chemclaw3-mcp."
+        f"allowance of {SERVED_ELSEWHERE_ALLOWANCE}. That allowance is half of PREFIX_BOUND "
+        f"({PREFIX_BOUND}), which `core/config/agent.py` derives `agent_tool_result_clear_trigger` "
+        "and `agent_context_token_budget` from — so raising it is a change to both defaults and to "
+        "what every request may cost, not a bump. Raise all three together, or narrow a schema in "
+        "Chemclaw3-mcp."
     )
-    if SERVED_ELSEWHERE_KNOWN_BREACH and not unmeasured:
-        assert total > SERVED_ELSEWHERE_ALLOWANCE, (
-            f"the bundles this ratchet cannot serve cost {total} tokens ({breakdown}), back inside "
-            f"SERVED_ELSEWHERE_ALLOWANCE ({SERVED_ELSEWHERE_ALLOWANCE}): the breach "
-            "SERVED_ELSEWHERE_KNOWN_BREACH tolerates is closed, so delete that constant"
-        )
     if unmeasured:
         pytest.skip(
             f"{SIBLING_SKIP} {len(unmeasured)} of the {len(SERVED_ELSEWHERE)} bundles served from "
