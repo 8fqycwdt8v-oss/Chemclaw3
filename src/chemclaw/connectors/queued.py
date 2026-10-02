@@ -10,7 +10,9 @@ a `QueuedToolWorkflow` on the connector's interactive queue, and this waits for 
 it with its own function: the server's answer when the call finished inside
 `queued.inline_wait_seconds`, a refusal as a refusal, and otherwise a short text naming the durable
 job the call became. That last case is announced with `job_started`, and the answer arrives through
-the session mailbox as `job_completed` — the path every durable job already takes.
+the session mailbox as `job_completed` — the path every durable job already takes. An answer that
+had to wait for a slot carries one more block saying so (`_with_wait`), because the `tool_queued`
+events the chemist's card reads never reach the model.
 """
 
 import asyncio
@@ -152,8 +154,9 @@ async def dispatch_queued(
     except (SubsystemUnavailableError, RPCError) as exc:
         raise QueueUnavailable(f"{connector}.{tool} could not be queued") from exc
     record_metric(lambda m: m.increment("chemclaw_queued_tool_calls_total", labels={"tool": tool}))
+    waited: float | None = None
     try:
-        finished = await _wait_reporting(client, handle, connector, tool, inline_wait)
+        finished, waited = await _wait_reporting(client, handle, connector, tool, inline_wait)
     except TimeoutError:
         if await _detach(handle, session_id):
             record_job_started(handle.id, tool)
@@ -171,7 +174,37 @@ async def dispatch_queued(
     except WorkflowFailureError as exc:
         return _failed(tool, exc)
     raw = envelope_from_result(handle.id, finished).data.get(RESULT_KEY)
-    return CallToolResult.model_validate(raw)
+    return _with_wait(CallToolResult.model_validate(raw), connector, waited)
+
+
+def _with_wait(result: CallToolResult, connector: str, waited: float | None) -> CallToolResult:
+    """`result` with one sentence saying the call waited for a slot, when it did.
+
+    **The model has to be able to see the queue, or it answers about it from nothing.** The
+    `tool_queued` events go to the chemist's stream and nowhere else, so on the 2026-10-02 lane two
+    of four parallel `run_python` calls sat queued for about 8 and 14 s and the answer said "No call
+    waited, queued, or was refused" — the only claim about the queue the model could make was a
+    guess. A call that was seen waiting now says so, and roughly for how long, in the result the
+    model reads; a call that never waited is returned exactly as the server answered.
+
+    A separate block after the server's own, so the server's payload stays byte-for-byte what it
+    returned and every reader that takes the first block for it still does.
+
+    **The block carries its own separator**, the convention `chemclaw_agent._INSTRUCTION_BLOCKS`
+    states for the prompt: every reader that flattens a result joins its text blocks with `""`
+    (`tool_result_size.full_text`, and the provider adapters do the same), so without it the model
+    read `…}(Queue: this call waited …)` — the note glued onto the server's JSON, which a reader
+    could take for part of the payload or for a malformed one.
+    """
+    if waited is None:
+        return result
+    note = (
+        f"\n\n(Queue: this call waited about {max(1, round(waited))} s for a free slot on "
+        f"{connector!r} before it ran.)"
+    )
+    return result.model_copy(
+        update={"content": [*result.content, TextContent(type="text", text=note)]}
+    )
 
 
 def _failed(tool: str, exc: WorkflowFailureError) -> CallToolResult:
@@ -185,7 +218,7 @@ async def _wait_reporting(
     connector: str,
     tool: str,
     budget: float,
-) -> ConnectorJobResult:
+) -> tuple[ConnectorJobResult, float | None]:
     """The run's result within `budget` seconds, saying meanwhile whether it waits or runs.
 
     Without this the tool-call card reads "running" for the whole wait, which is false while the
@@ -194,26 +227,40 @@ async def _wait_reporting(
     goes out only when the answer changes. The asking is best-effort (`_progress`): a broker that
     will not answer costs the card its annotation, never the call its result.
 
+    Returns the result and, when the call was ever seen `queued`, how long it waited: from the
+    start of the wait to the tick it was first seen running, or to its answer if no tick saw it
+    run. `None` when no tick saw it queued — which is the honest reading at this resolution, and
+    the one `_with_wait` turns into "nothing to say".
+
     Raises:
         TimeoutError: `budget` ran out first; the run itself is untouched and keeps going.
     """
     loop = asyncio.get_running_loop()
-    deadline = loop.time() + budget
+    began = loop.time()
+    deadline = began + budget
     result = asyncio.ensure_future(handle.result())
     reported: tuple[str, int | None] | None = None
+    queued_until: float | None = None
+    seen_queued = False
+
+    def answered() -> tuple[ConnectorJobResult, float | None]:
+        if not seen_queued:
+            return result.result(), None
+        return result.result(), (queued_until or loop.time()) - began
+
     try:
         while True:
             # The result first: a run that finished while the last progress read was out is an
             # answer, not a timeout.
             if result.done():
-                return result.result()
+                return answered()
             remaining = deadline - loop.time()
             if remaining <= 0:
                 raise TimeoutError
             tick = min(settings.queued_tool_progress_seconds, remaining)
             done, _ = await asyncio.wait({result}, timeout=tick)
             if done:
-                return result.result()
+                return answered()
             # Bounded by the tick, so a slow broker delays the next look at the result by one tick
             # at most and never stretches the inline wait past its budget.
             progress = await _progress(
@@ -226,7 +273,11 @@ async def _wait_reporting(
             # A run that finished while the read was out is an answer; announcing it as waiting
             # one event before its result would be the false card this loop exists to prevent.
             if result.done():
-                return result.result()
+                return answered()
+            if progress is not None and progress[0] == "queued":
+                seen_queued = True
+            elif progress is not None and seen_queued and queued_until is None:
+                queued_until = loop.time()
             if progress is not None and progress != reported:
                 reported = progress
                 record_tool_queued(tool, handle.id, progress[0], progress[1])

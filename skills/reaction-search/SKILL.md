@@ -96,6 +96,12 @@ correctly but uses them well (G6).
   beside its `hits`. When `index_empty` is true, nothing has been indexed and the search never
   ran: report that the fingerprint index has not been populated and that an operator must build
   it. Do not say "we have no precedent for this" — that claim needs a corpus to be false about.
+- **A complete index is not the whole ELN.** A citation-only record (the source named a species
+  without its structure) is in no structure index, even through the species it does draw. Every
+  structural result counts these under `unsearched` (on `coverage` for the precedent tools) and
+  says so in `verdict`. When it names records that list your queried structure, read them with
+  `expand_note` and cite them for what they state — an empty structural answer is then not "no
+  in-house precedent".
 
 ## Reading a frequency roll-up
 

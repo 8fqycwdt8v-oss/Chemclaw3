@@ -505,6 +505,10 @@ def create_app(
     # waiters when a turn here ends. The line is durable exactly where the claim above is.
     app.state.turn_queue = _default_turn_queue()
     app.state.queue_signal = QueueSignal()
+    # This process's waiting messages per `(sender, session)`: what bounds the sockets they hold
+    # (`service_max_concurrent_turns` × `service_turn_queue_max`, wherever their turns run) and what
+    # the per-actor cap counts beside running turns. The queue above is the order; this is the load.
+    app.state.queue_waiters = {}
     # Per-user count of open push-back event streams. The turn semaphore only guards POSTed
     # turns; each event stream polls the database for its whole lifetime, so without a cap one
     # user's scripted (or abandoned-tab) streams could pile up unbounded DB load. Entries are

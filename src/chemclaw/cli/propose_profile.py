@@ -124,9 +124,9 @@ async def _turns() -> list[tuple[str, frozenset[str]]]:
 
     **Only calls that ran, under names this system could serve.** The column holds the model's raw
     string, hallucinated names included, and refused and failed calls beside successful ones — none
-    of which is a working set. `outcome = 'ok'` keeps the calls that ran, and
-    `operations.activity.safe_tool_name` is the bound this column's other readers already apply, so
-    a name that is not identifier-shaped never reaches a proposed profile.
+    of which is a working set. `ok` and `empty` keep the calls that ran — an empty answer is still
+    a tool the turn used — and `operations.activity.safe_tool_name` is the bound this column's other
+    readers already apply, so a name that is not identifier-shaped never reaches a proposed profile.
     """
     from chemclaw.core import db
     from chemclaw.core.config import settings
@@ -135,7 +135,8 @@ async def _turns() -> list[tuple[str, frozenset[str]]]:
     async with db.connection(settings.postgres_dsn) as conn:
         cursor = await conn.execute(
             "SELECT actor, correlation_id, tool FROM audit_events "
-            "WHERE actor <> '' AND correlation_id <> '' AND tool <> '' AND outcome = 'ok'"
+            "WHERE actor <> '' AND correlation_id <> '' AND tool <> '' "
+            "AND outcome IN ('ok', 'empty')"
         )
         for actor, correlation_id, tool in await cursor.fetchall():
             name = safe_tool_name(str(tool))

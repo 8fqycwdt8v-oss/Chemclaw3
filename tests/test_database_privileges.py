@@ -85,7 +85,16 @@ _MIGRATOR_ONLY = {"schema_migrations"}
 # history and "the sequence *is* the history" (031), so an UPDATE the chat service could issue is
 # exactly the boundary this file exists to keep shut. A one-off run by an operator is not a reason
 # to hand a chat turn that privilege for the rest of the deployment's life.
-_ADMIN_ONLY_MODULES = {"cli/rekey_campaigns.py"}
+#
+# `cli/rekey_compounds.py` is the same standing for the fingerprint tables: with
+# `--dispose-superseded`, after a re-key rebuilt every shelved row of an index, it disposes of
+# the superseded generation — the `DELETE` that `infra/sql/094_fingerprint_definition_identity.sql`
+# names as an operator statement under the owning principal, and which the grant file withholds
+# from the runtime role so that nothing a turn reaches can prune an index. It connects through
+# `core.migrate.migration_dsn` (`tests/test_compound_rekey.py` drives that), and a deployment's chat
+# service never runs it. The live lane's `cli/live_index.py` calls that function rather than
+# carrying a copy of the statement, so it issues no SQL of its own and is not listed.
+_ADMIN_ONLY_MODULES = {"cli/rekey_campaigns.py", "cli/rekey_compounds.py"}
 
 # Modules that build a statement around an **interpolated** table name, mapped to every table they
 # can target. `_joined` renders an interpolation as `?`, and every verb pattern below matches
@@ -447,6 +456,27 @@ def test_the_audit_trail_is_append_only_by_grant() -> None:
         f"audit_anchors is granted {sorted(allowed.get('audit_anchors', set()))} and no code "
         "writes it; the retired table should carry no privilege"
     )
+
+
+def test_an_operator_module_exists_and_its_fingerprint_disposal_is_never_the_runtime_roles() -> (
+    None
+):
+    """The exclusion list names real files, and excluding them still grants no `DELETE` (#526).
+
+    A stale path here excludes nothing and reads as a reason; a module that moved would then be
+    scanned under its new name and its operator statement demanded of the runtime role — or, for
+    an interpolated `DELETE` the scan cannot see, silently not. The second half is the property
+    the disposal's placement exists for: whatever the operator's command deletes, the role a chat
+    turn holds may only insert and update a fingerprint index.
+    """
+    missing = sorted(path for path in _ADMIN_ONLY_MODULES if not (_SRC / path).is_file())
+    assert not missing, f"_ADMIN_ONLY_MODULES names files that do not exist: {missing}"
+    allowed = verbs_the_grant_allows()
+    for table in ("molecule_fingerprints", "reaction_fingerprints"):
+        assert "DELETE" not in allowed.get(table, set()), (
+            f"the runtime role may DELETE from {table}; disposing of a superseded generation is an "
+            "operator statement under the schema owner (094), not a privilege a turn holds"
+        )
 
 
 def test_the_migration_ledger_is_never_granted_a_write_verb() -> None:

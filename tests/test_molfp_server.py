@@ -17,6 +17,7 @@ import pytest
 
 from chemclaw.connectors.molfp.server import tools
 from chemclaw.connectors.molfp.server.tools import server
+from chemclaw.ingest.eln.records import InMemoryReactionRecordStore
 from chemclaw.science.fingerprints.molfp.search import record_for
 from chemclaw.science.fingerprints.store import InMemoryFingerprintStore
 
@@ -42,8 +43,14 @@ def _seeded_store() -> InMemoryFingerprintStore:
 
 
 def _call(name: str, args: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-    """Invoke one molfp tool over the seeded store and return the payload MCP sends back."""
+    """Invoke one molfp tool over the seeded store and return the payload MCP sends back.
+
+    The record store is substituted too: every result now asks it how many citation-only records
+    sit outside the index, and the module default is the Postgres one, so leaving it would turn
+    these into database tests silently.
+    """
     monkeypatch.setattr(tools, "_store", _seeded_store())
+    monkeypatch.setattr(tools, "_records", InMemoryReactionRecordStore())
     _content, structured = asyncio.run(server.call_tool(name, args))
     assert isinstance(structured, dict)
     return structured

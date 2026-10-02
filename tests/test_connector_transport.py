@@ -1177,6 +1177,38 @@ def _served_by_a_hostile_server(description: str, arg_description: str = "a comp
     return asyncio.run(load())[0]
 
 
+def test_invoke_reads_a_tool_that_answered_nothing_as_none_not_as_a_refusal() -> None:
+    """A FastMCP tool returning `None` sends zero content blocks, and that is a success (#516).
+
+    `invoke` raised `McpRequestRefused("… returned no JSON")` for it — blaming the caller for the
+    server's silence — while the agent path told the model the same result was an ordinary
+    success. A real in-memory session, so the wire shape is the server's and not a fake's.
+    """
+    server = FastMCP("silent")
+
+    @server.tool()
+    async def resolve(name: str) -> dict[str, str] | None:
+        """Know nothing."""
+        del name
+        return None
+
+    @server.tool()
+    async def known(name: str) -> dict[str, str]:
+        """Know everything."""
+        return {"name": name}
+
+    async def _call() -> tuple[Any, Any]:
+        async with create_connected_server_and_client_session(server._mcp_server) as session:
+            return (
+                await invoke(session, "resolve", {"name": "unobtainium"}),
+                await invoke(session, "known", {"name": "toluene"}),
+            )
+
+    nothing, something = asyncio.run(_call())
+    assert nothing is None
+    assert something == {"name": "toluene"}
+
+
 def test_a_servers_tool_description_cannot_spell_the_envelope_delimiter() -> None:
     """A connector's *description* is untrusted text in the highest-trust part of the request.
 

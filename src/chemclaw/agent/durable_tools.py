@@ -420,9 +420,7 @@ async def get_durable_job_status(job_id: str) -> DurableJobStatus:
     # durable job this system hands an id for returns the envelope. That tier is gone entirely now
     # (`D-2026-08-26-semiempirical-is-the-whole-tier`), which is the sharper reason this paragraph
     # does not belong in the model's context: it was describing a system the model cannot reach.
-    status = await job_status(
-        job_id, wait_seconds=settings.job_status_wait_seconds, report_queued=True
-    )
+    status = await job_status(job_id, wait_seconds=settings.job_status_wait_seconds)
     # Framed **here**, in the `@tool`, and not in `job_status` below — which is the same mistake in
     # the same shape as the one this fixes. `job_status` is also the whole body of the front door's
     # `GET /jobs/{id}`, so framing inside it put envelope markup into an HTTP response that
@@ -459,9 +457,7 @@ async def get_durable_job_status(job_id: str) -> DurableJobStatus:
     )
 
 
-async def job_status(
-    job_id: str, *, wait_seconds: float = 0.0, report_queued: bool = False
-) -> DurableJobStatus:
+async def job_status(job_id: str, *, wait_seconds: float = 0.0) -> DurableJobStatus:
     """One durable job's status, from Temporal while it remembers and the record afterwards.
 
     The tool above and the front door's `GET /jobs/{id}` are the same question asked by different
@@ -476,16 +472,15 @@ async def job_status(
     cheap and holding its request open is not. The wait is Temporal's own long-poll
     (`handle.result()`), not a sleep loop.
 
-    `report_queued` is the second such difference, and it is a wire-compatibility one rather than
-    a disagreement about the run. Temporal calls a workflow RUNNING from the moment it is accepted,
-    so a run on a queue nothing polls — every queued tool call on a lane with no interactive
-    worker — read `running` here for as long as it existed, and the model told the chemist "the
-    job is still running" about work no process had touched. With it set, a RUNNING run that no
-    worker has started reads `queued`, with the reason as its summary (`_not_started_reason`). The
-    tool sets it. The front door's `GET /jobs/{id}` does not yet, because `Chemclaw3_ui`'s
-    `jobReconcile.terminalEventFrom` treats every status other than `running` as an ending and
-    would close a waiting job's card as failed; the UI has to learn the word before the route says
-    it.
+    **A run nothing has started reads `queued`, on both surfaces.** Temporal calls a workflow
+    RUNNING from the moment it is accepted, so a run on a queue nothing polls — every queued tool
+    call on a lane with no interactive worker — read `running` here for as long as it existed, and
+    the model told the chemist "the job is still running" about work no process had touched. A
+    RUNNING run that no worker has started reads `queued`, with the reason as its summary
+    (`_not_started_reason`). This used to be a flag only the tool set, because `Chemclaw3_ui`'s
+    `jobReconcile.terminalEventFrom` treated every status but `running` as an ending and would have
+    closed a waiting job's card as failed; the UI now names the endings instead (Chemclaw3 #514),
+    so the flag was a difference between the two surfaces with no reason left, and it is gone.
     """
     client = await connect()
     handle = client.get_workflow_handle(job_id)
@@ -513,7 +508,7 @@ async def job_status(
         try:
             result = await asyncio.wait_for(handle.result(), wait_seconds)
         except TimeoutError:
-            return await _still_open(client, job_id, report_queued)
+            return await _still_open(client, job_id)
         except Exception:
             # The run reached a terminal state that is not success while we waited (failed,
             # cancelled, timed out) — `handle.result()` raises for those. Re-describe once and
@@ -531,9 +526,7 @@ async def job_status(
         # blocked for over 15 s on a running workflow and would have blocked for the life of the
         # job. `job_status_wait_seconds` is `ge=0`, so a deployment that set it to 0 hung the agent
         # tool the same way.
-        if report_queued:
-            return _open_status(job_id, await _not_started_reason(client, description))
-        return DurableJobStatus(job_id=job_id, status="running")
+        return _open_status(job_id, await _not_started_reason(client, description))
     if status != "completed":
         # A status word alone was everything the model got for a failed run — measured,
         # `summary=None, result={}`. Both of the other two collectors render the cause, and this is
@@ -548,10 +541,8 @@ async def job_status(
     return completed_job_status(job_id, await handle.result())
 
 
-async def _still_open(client: Client, job_id: str, report_queued: bool) -> DurableJobStatus:
+async def _still_open(client: Client, job_id: str) -> DurableJobStatus:
     """A run the wait did not see finish, described afresh: the first description is stale now."""
-    if not report_queued:
-        return DurableJobStatus(job_id=job_id, status="running")
     try:
         description = await client.get_workflow_handle(job_id).describe()
     except RPCError:

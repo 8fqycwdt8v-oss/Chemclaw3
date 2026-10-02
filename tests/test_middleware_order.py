@@ -141,6 +141,9 @@ _EXPECTED_ORDER = (
     # settled by everything above it.
     "enforce_plan_approval",
     "stamp_plan_link",
+    # Above the compaction group, so the preferences it appends to the system message are charged
+    # as prefix by `MeasureRequestPrefix` rather than missed by it (`agent/preferences.py`).
+    "StandingPreferences",
     # Outermost of the compaction group: a `ContextEdit` sees a message list and a counter, never
     # the request, so the prefix it must budget against can only be published by a middleware above
     # the editor (`agent/context_budget.py`).

@@ -121,6 +121,7 @@ from chemclaw.agent.org_skills import ORG_SKILLS_LABEL, ORG_SKILLS_ROOT
 from chemclaw.agent.plan_gate import enforce_plan_approval, gate_applies, harness_enabled_for
 from chemclaw.agent.plan_link import stamp_plan_link
 from chemclaw.agent.plan_scope import ScopedTodoListMiddleware
+from chemclaw.agent.preferences import StandingPreferences
 from chemclaw.agent.profile_discovery import ProfileError, load_profiles
 from chemclaw.agent.profiles import AgentProfile, get_profile, registered_profile_names
 from chemclaw.agent.repeat_guard import refuse_repeated_calls
@@ -699,6 +700,11 @@ def _middleware(
         disabled_summarizer(model, backend),
         _skills_middleware(backend, labelled, profile),
         *tool_call_middleware(audit, profile),
+        # The chemist's standing preferences, appended to the instructions of every model call.
+        # Above the compaction group so `MeasureRequestPrefix` charges the section as prefix, and
+        # on the request rather than the thread so the window can never cut it
+        # (`agent/preferences.py::StandingPreferences`).
+        StandingPreferences(),
         # Unconditional, unlike the harness middleware above it: an unbounded thread is a property
         # of a session, not of the plan/execute mode, and the single-turn agent accumulates one just
         # as fast. Last, so the reduction sees everything the middleware above it added.

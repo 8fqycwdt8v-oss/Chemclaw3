@@ -1,10 +1,11 @@
 """The `molfp` bundle's MCP tool surface (plan step 3.1).
 
-Declaration, not logic: every function here is a one-line delegation to
-`chemclaw.science.fingerprints.molfp`, over the production (Postgres) molecule table. What this file
-adds is the `@server.tool()` decoration — the argument names, defaults and docstrings the agent
-actually sees — which is why it belongs beside `app.py` in the bundle rather than beside the
-engine.
+Declaration, not logic: every function here delegates to `chemclaw.science.fingerprints.molfp`,
+over the production (Postgres) molecule table, and adds the one fact that index cannot hold about
+itself — the citation-only ELN records outside it (`ReactionRecordStore.citation_only`). What this
+file otherwise adds is the `@server.tool()` decoration — the argument names, defaults and
+docstrings the agent actually sees — which is why it belongs beside `app.py` in the bundle rather
+than beside the engine.
 
 `app.py` serves this `server` over HTTP, which is how the connector seam reaches it. The `main()`
 below runs the same tools over stdio, the transport MCP defaults to, and is kept for running one
@@ -16,6 +17,7 @@ Judgment stays out: the tools compute and search; when a similarity counts as pr
 
 from mcp.server.fastmcp import FastMCP
 
+from chemclaw.ingest.eln.records import ReactionRecordStore, default_record_store
 from chemclaw.science.fingerprints.molfp.search import (
     MoleculeHit,
     find_similar_molecules,
@@ -30,6 +32,11 @@ from chemclaw.science.fingerprints.store import (
 
 server = FastMCP("mcp-molfp")
 _store: FingerprintStore = default_molecule_store()
+# The transcription store, for what this index cannot hold: the molecules of a citation-only ELN
+# record are never fingerprinted, not even the ones the source drew
+# (`D-2026-09-27-a-reaction-without-a-structure-is-citable-not-searchable`), so every result says
+# how many such records exist and which of them list the queried structure.
+_records: ReactionRecordStore = default_record_store()
 
 
 @server.tool()
@@ -50,7 +57,8 @@ async def similar_molecules(
     a closer one may exist and the list is not a definitive set of precedents. The two
     are independent: a result can be both, and `verdict` says so when it is.
     """
-    return await find_similar_molecules(_store, smiles, top_k, threshold)
+    search = await find_similar_molecules(_store, smiles, top_k, threshold)
+    return search.model_copy(update={"unsearched": await _records.citation_only(smiles)})
 
 
 @server.tool()
@@ -64,7 +72,8 @@ async def substructure_matches(query: str) -> FingerprintSearch[MoleculeHit]:
     `scan_truncated: true` means only part of the corpus was examined, so an empty result is
     inconclusive; `hits_truncated: true` means the hit count is a lower bound, not a total.
     """
-    return await find_substructure_matches(_store, query)
+    search = await find_substructure_matches(_store, query)
+    return search.model_copy(update={"unsearched": await _records.citation_only(query)})
 
 
 async def report_index_size() -> None:

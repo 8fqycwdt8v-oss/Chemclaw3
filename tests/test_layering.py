@@ -275,11 +275,13 @@ _CYCLE_EDGES: dict[Edge, str] = {
         "connector jobs and identity plumbing authorize against agent's authz/identity context"
     ),
     ("chemclaw.connectors", "chemclaw.ingest"): (
-        "a bundle serving structural hits asks the transcription store whether the source has "
-        "withdrawn the run a hit stands for — the one question a fingerprint index cannot answer "
-        "about its own contents (`connectors/rxnfp/server/tools.py::similar_reactions`, "
-        "D-2026-09-13-a-withdrawal-is-a-fact-a-source-reports). The reverse edge stays undeclared: "
-        "ingestion must not reach into a bundle"
+        "a bundle serving structural hits asks the transcription store two questions no "
+        "fingerprint index can answer about its own contents: whether the source has withdrawn the "
+        "run a hit stands for (`connectors/rxnfp/server/tools.py::similar_reactions`, "
+        "D-2026-09-13-a-withdrawal-is-a-fact-a-source-reports), and how many citation-only records "
+        "sit outside every structure index (`ReactionRecordStore.citation_only`, asked by the "
+        "`rxnfp` and `molfp` bundles). The reverse edge stays undeclared: ingestion must not reach "
+        "into a bundle"
     ),
 }
 

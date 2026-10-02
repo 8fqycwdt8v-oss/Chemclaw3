@@ -543,3 +543,212 @@ async def test_the_durable_store_keeps_the_tier_and_withholds_it_from_structure_
     # An amendment that draws the partner moves the row back, through the same upsert.
     await store.record([cited.model_copy(update={"tier": RecordTier.STRUCTURED})], source)
     assert await store.structurally_withheld(refs) == set()
+
+
+# --- every structural answer says what it did not search -------------------------------------
+#
+# The 2026-10-02 lane (finding N6): with the indexes complete, `substrate_precedent` said
+# "COMPLETE: all 4282 …", `substructure_matches` said "a genuine negative result", and the model
+# told a chemist there was no in-house data on 6-iodoquinoline while
+# `reaction-suzuki-flow-hte-01243` drew it as a reactant and was citation-only because its partner
+# was only named. The exclusion is the decided tier and stays; what changes is that every verdict
+# states it, and names a record that lists the queried structure so the model can cite it.
+
+# A quinoline only the structured control draws, so a query for it is one the tier cannot answer.
+_BROMOQUINOLINE = "Brc1ccc2ncccc2c1"
+
+
+def _drawn_control(reaction_id: str) -> dict[str, Any]:
+    """A fully drawn flow-Suzuki on 6-bromoquinoline: structured, and sharing no substrate."""
+    payload = _flow_suzuki(
+        reaction_id, partner_smiles=_PARTNER_SMILES, product_smiles=_PRODUCT_SMILES
+    )
+    payload["inputs"]["quinoline"]["components"][0]["identifiers"] = _identifiers(
+        _BROMOQUINOLINE, None
+    )
+    return payload
+
+
+def _synced_and_labelled(tmp_path: Path) -> _Stores:
+    """The cited 6-chloroquinoline run beside a drawn 6-bromoquinoline one, every label current.
+
+    Labelled to completion, because the lane's defect was the *complete* index: the degraded
+    states already hedged, and it was "COMPLETE" that was read as the whole ELN.
+    """
+    stores = _Stores()
+
+    async def _run() -> None:
+        await stores.sync(
+            _write(tmp_path, _flow_suzuki("suzuki-cited"), _drawn_control("drawn-br"))
+        )
+        for row in await stores.labels.stale("v-test", 100):
+            await stores.labels.store_labels(row, "v-test")
+
+    asyncio.run(_run())
+    return stores
+
+
+def _tools_over(stores: _Stores, monkeypatch: pytest.MonkeyPatch) -> tuple[Any, Any]:
+    """Both structural bundles' tool modules, reading `stores` in place of the Postgres ones."""
+    from chemclaw.connectors.molfp.server import tools as molfp
+    from chemclaw.connectors.rxnfp.server import tools as rxnfp
+
+    monkeypatch.setattr(rxnfp, "_store", stores.reactions)
+    monkeypatch.setattr(rxnfp, "_records", stores.records)
+    monkeypatch.setattr(rxnfp, "_labels", stores.labels)
+    monkeypatch.setattr(molfp, "_store", stores.molecules)
+    monkeypatch.setattr(molfp, "_records", stores.records)
+    return molfp.server, rxnfp.server
+
+
+def _payload(server: Any, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    """What MCP sends back for one call — the structured payload, `verdict` included."""
+    _content, structured = asyncio.run(server.call_tool(tool, arguments))
+    assert isinstance(structured, dict)
+    return structured
+
+
+def _verdict(payload: dict[str, Any]) -> str:
+    """The sentence a result carries, at whichever level its type keeps it."""
+    return str(payload.get("verdict") or payload["coverage"]["verdict"])
+
+
+def test_a_structural_negative_names_the_citation_only_record_that_draws_the_query(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The N6 repro, through each structural tool's MCP surface: the empty answer cites the run.
+
+    Driven from `server.call_tool`, because the payload MCP sends is the only thing the model reads
+    and a field `model_dump()` drops does not exist for it. The query is spelled in Kekulé form, so
+    the record's aromatic spelling is reached through the canonical spelling and not by luck.
+    """
+    monkeypatch.setattr(settings, "fingerprint_similarity_threshold", 0.0)
+    stores = _synced_and_labelled(tmp_path)
+    molfp, rxnfp = _tools_over(stores, monkeypatch)
+    kekule = "ClC1=CC2=CC=CN=C2C=C1"  # 6-chloroquinoline, which only the cited record draws
+    cited = note_id_for_reaction("suzuki-cited", _SOURCE)
+
+    answers = {
+        "substrate_precedent": _payload(rxnfp, "substrate_precedent", {"smiles": kekule}),
+        "substructure_matches": _payload(molfp, "substructure_matches", {"query": kekule}),
+        "workup_precedent": _payload(rxnfp, "workup_precedent", {"reagent_smiles": kekule}),
+    }
+    for tool, payload in answers.items():
+        assert payload["hits"] == [], f"{tool}: the precondition — nothing indexed draws it"
+        verdict = _verdict(payload)
+        # The citation-only clause leads, so a reader stopping at the first sentence cannot
+        # take the indexed negative for the answer.
+        assert verdict.startswith(("NOT SEARCHED", "NO PRECEDENT IN THE LABELLED CORPUS — BUT")), (
+            tool,
+            verdict,
+        )
+        assert cited in verdict and "expand_note" in verdict, (tool, verdict)
+        assert "Do NOT report that no in-house precedent exists" in verdict, (tool, verdict)
+
+    # The similarity tools find the drawn analog, and still say the run outside the index exists.
+    reaction = f"{kekule}.{_PARTNER_SMILES}>>{_PRODUCT_SMILES}"
+    for server, tool, arguments in (
+        (molfp, "similar_molecules", {"smiles": kekule}),
+        (rxnfp, "similar_reactions", {"reaction_smiles": reaction}),
+    ):
+        payload = _payload(server, tool, arguments)
+        assert payload["unsearched"]["giving_query"] == 1, (tool, payload["unsearched"])
+        assert cited in _verdict(payload), (tool, _verdict(payload))
+
+
+def test_a_complete_coverage_says_it_counts_structured_records_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A "COMPLETE" coverage is scoped to the label index, and the tier's count is said beside it.
+
+    `reagent_frequency` asks about no structure, so it can only count — and must not name a record
+    it never checked.
+    """
+    stores = _synced_and_labelled(tmp_path)
+    _molfp, rxnfp = _tools_over(stores, monkeypatch)
+
+    coverage = _payload(rxnfp, "reagent_frequency", {})["coverage"]
+    assert coverage["labelled"] == coverage["total"] == 1
+    assert coverage["unsearched"] == {
+        "outside_index": 1,
+        "query_checked": False,
+        "giving_query": 0,
+        "examples": [],
+        "verdict": coverage["unsearched"]["verdict"],
+    }
+    assert coverage["verdict"].startswith("COMPLETE: all 1 matching reaction(s) in the label index")
+    assert "structured records" in coverage["verdict"]
+    assert "NOT SEARCHED: 1 citation-only ELN record(s)" in coverage["verdict"]
+    assert "suzuki-cited" not in coverage["verdict"]
+
+
+def test_a_query_no_citation_only_record_draws_is_counted_and_qualified_not_cited(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The control: the count is still said, no record is named, and the check's blind side is."""
+    stores = _synced_and_labelled(tmp_path)
+    molfp, rxnfp = _tools_over(stores, monkeypatch)
+
+    payload = _payload(rxnfp, "substrate_precedent", {"smiles": _BROMOQUINOLINE})
+    assert payload["hits"], "the precondition: the drawn control is a labelled precedent"
+    verdict = _verdict(payload)
+    assert "NOT SEARCHED: 1 citation-only" in verdict
+    assert "None of them lists the queried structure" in verdict and "text check" in verdict
+    assert "suzuki-cited" not in verdict
+
+    empty = _payload(molfp, "substructure_matches", {"query": "c1ccc2[nH]ccc2c1"})  # indole
+    assert empty["hits"] == []
+    # Indexed answer first when no citation-only record is named, now scoped to what it covered.
+    assert empty["verdict"].startswith("No indexed molecule matched this query.")
+    assert "genuine negative result over the indexed records" in empty["verdict"]
+
+
+def test_only_a_citable_citation_only_record_is_counted() -> None:
+    """A withdrawn record is not one to cite, and a structured record is inside the index."""
+    store = InMemoryReactionRecordStore()
+    cited = record_from_ord_reaction(_map(_flow_suzuki("cited")))
+    withdrawn = record_from_ord_reaction(_map(_flow_suzuki("withdrawn"))).model_copy(
+        update={"retracted_at": datetime(2024, 1, 1, tzinfo=UTC)}
+    )
+    drawn = record_from_ord_reaction(_map(_drawn_control("drawn")))
+    asyncio.run(store.record([cited, withdrawn, drawn], _SOURCE))
+
+    found = asyncio.run(store.citation_only(_QUINOLINE))
+    assert (found.outside_index, found.giving_query) == (1, 1)
+    assert found.examples == [note_id_for_reaction("cited", _SOURCE)]
+    # Named-only species are not structures, so their text is never a match.
+    assert asyncio.run(store.citation_only(_PARTNER)).giving_query == 0
+    assert asyncio.run(store.citation_only(None)).query_checked is False
+
+
+async def test_the_durable_store_answers_the_disclosure_as_the_reference_does() -> None:
+    """`114`'s read against Postgres, differential to the in-memory oracle, by delta.
+
+    The session's schema is shared, so other tests' rows are counted too: the assertion is on what
+    this test's rows add. A ring-bond `%10` in a stored SMILES pins `strpos` over `LIKE`, where it
+    would be a wildcard matching any text.
+    """
+    await migrated_db_or_skip()
+    store = PostgresReactionRecordStore()
+    source = "disclosure-test-source"
+    query = "C%10CCC(Cl)CC%10"  # chlorocyclohexane with a two-digit ring bond, spelled as stored
+    payload = _flow_suzuki("disc-cited")
+    payload["inputs"]["quinoline"]["components"][0]["identifiers"] = _identifiers(query, None)
+    cited = record_from_ord_reaction(_map(payload))
+    assert f"- `{query}` (" in cited.body, "the precondition: the source's spelling is rendered"
+    withdrawn = cited.model_copy(
+        update={"reaction_id": "disc-withdrawn", "retracted_at": datetime(2024, 1, 1, tzinfo=UTC)}
+    )
+    drawn = record_from_ord_reaction(_map(_drawn_control("disc-drawn")))
+
+    before = await store.citation_only(query)
+    await store.record([cited, withdrawn, drawn], source)
+    after = await store.citation_only(query)
+
+    assert after.outside_index - before.outside_index == 1
+    assert after.giving_query - before.giving_query == 1
+    assert note_id_for_reaction("disc-cited", source) in after.examples
+    assert after.query_checked is True
+    # `%` as a LIKE wildcard would have matched every record: here it matches only its own text.
+    wildcard = await store.citation_only("C%10")
+    assert note_id_for_reaction("disc-cited", source) not in wildcard.examples

@@ -226,7 +226,7 @@
         },
         {
           "expr": "sum(rate(chemclaw_turn_queue_refused_total[5m]))",
-          "legendFormat": "refused (line full, 409)",
+          "legendFormat": "refused (line or process full, 409/429)",
           "refId": "G"
         },
         {
@@ -238,6 +238,11 @@
           "expr": "sum(rate(chemclaw_turn_readers_lagged_total[5m]))",
           "legendFormat": "view cut off (reader lagged)",
           "refId": "I"
+        },
+        {
+          "expr": "sum(rate(chemclaw_turn_watchers_removed_total[5m]))",
+          "legendFormat": "view closed (watcher removed)",
+          "refId": "J"
         },
         {
           "expr": "sum(rate(chemclaw_turns_refused_thread_size_total[5m]))",

@@ -441,13 +441,14 @@ user-erase:  ## Offboard a person's conversational data: ACTOR=<oid> [APPLY=1]. 
 	esac
 	uv run python -m chemclaw.cli.erase_actor $(ACTOR) $(if $(filter 1,$(APPLY)),--apply,)
 
-rekey-compounds:  ## Carry compound notes and fingerprint rows across a standardization bump [APPLY=1]. Preview by default.
+rekey-compounds:  ## Carry compound notes and fingerprint rows across a standardization bump [APPLY=1 [DISPOSE=1]]. Preview by default.
 	@# The same `APPLY` rule as `user-erase`: only the literal `1` writes, so `APPLY=0` previews.
+	@# `DISPOSE=1` adds the superseded-generation disposal, which the CLI refuses without `--apply`.
 	@case "$(APPLY)" in \
 	  ""|1) ;; \
 	  *) echo "rekey-compounds: APPLY=$(APPLY) is not 1 — previewing. Use APPLY=1 to write." ;; \
 	esac
-	uv run python -m chemclaw.cli.rekey_compounds $(if $(filter 1,$(APPLY)),--apply,)
+	uv run python -m chemclaw.cli.rekey_compounds $(if $(filter 1,$(APPLY)),--apply,) $(if $(filter 1,$(DISPOSE)),--dispose-superseded,)
 
 reindex:  ## Incrementally rebuild the derived note index — only notes changed since last run.
 	uv run python -m chemclaw.retrieval.vector_index

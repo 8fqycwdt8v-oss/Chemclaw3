@@ -25,6 +25,7 @@ from datetime import date, datetime
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field
 
+from chemclaw.science.fingerprints.store import CitationOnlyRecords
 from chemclaw.science.labels.vocabulary import SpeciesRole
 
 
@@ -147,11 +148,25 @@ class CorpusCoverage(BaseModel):
     labelled: int = Field(ge=0, description="Rows in scope carrying the current labeller version.")
     total: int = Field(ge=0, description="Rows in scope at all, labelled or not.")
     sources: list[str] = Field(default_factory=list, description="Which sources the scope spans.")
+    # The ELN records the label index cannot hold, because the tier keeps citation-only records out
+    # of it (`CitationOnlyRecords`). `None` = not asked, which only a hand-built result is.
+    unsearched: CitationOnlyRecords | None = None
 
     @computed_field  # type: ignore[prop-decorator]
     @property
     def verdict(self) -> str:
-        """What the reader must know about this answer's denominator before quoting it."""
+        """What the reader must know about this answer's denominator before quoting it.
+
+        `_labelled_verdict` is about the label index; the clause after it is about what that index
+        is not, because "COMPLETE: all 4282" read as the whole ELN while thousands of
+        citation-only records sat outside the count.
+        """
+        labelled = self._labelled_verdict()
+        outside = self.unsearched.verdict if self.unsearched is not None else ""
+        return f"{labelled} {outside}" if outside else labelled
+
+    def _labelled_verdict(self) -> str:
+        """The sentence about the label index's own denominator."""
         if self.total == 0:
             return (
                 "NO ROWS IN SCOPE: nothing in the reaction-label index matched this facet at all, "
@@ -181,6 +196,7 @@ class CorpusCoverage(BaseModel):
                 "simply live in an unlabelled row."
             )
         return (
-            f"COMPLETE: all {self.total} matching reaction(s) are labelled at the current version, "
-            "so counts over this facet are totals rather than lower bounds."
+            f"COMPLETE: all {self.total} matching reaction(s) in the label index are labelled at "
+            "the current version, so counts over this facet are totals over the structured "
+            "records the index holds rather than lower bounds."
         )

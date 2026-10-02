@@ -247,6 +247,27 @@ async def test_a_refused_call_and_an_unreachable_server_are_different_failures(
     assert not issubclass(CalcServerError, ChemclawError)
 
 
+async def test_a_key_answered_with_no_content_is_a_refusal_not_a_crash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`invoke` returns `None` for a server that answered with zero content blocks (issue #516).
+
+    `remote_key` read `.get` off whatever came back, so that `None` would have been an
+    `AttributeError` — outside every class a durable activity's retry policy reads.
+    """
+
+    class _Silent(_FakeSession):
+        async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+            result = _Result({})
+            result.content = []
+            return result
+
+    _session(monkeypatch, _Silent(_KEY, {}))
+
+    with pytest.raises(CalcToolError, match="calculation_key returned NoneType"):
+        await cached_remote(InMemoryStore(), "predict_pka", {"smiles": "CC(=O)O"})
+
+
 async def test_the_servers_internal_error_is_an_outage_not_bad_data(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -360,6 +360,57 @@ def _actor_turns_in_flight(active_turns: dict[str, TurnLease], actor: str, *, be
     )
 
 
+def _waiting_besides(waiters: dict[tuple[str, str], int], actor: str, *, besides: str) -> int:
+    """How many of `actor`'s messages wait in this process, in lines other than `besides`'s.
+
+    The per-actor cap's second half
+    (`D-2026-10-02-a-queued-message-is-re-authorized-at-the-head-of-the-line`): a waiting message
+    is a turn its sender has asked for and will get, so it counts
+    against `service_max_concurrent_turns_per_actor` beside the turns already running — otherwise
+    one chemist parks a message in every shared session they are in and each starts the moment its
+    line moves, past the cap all at once. `besides` for `_actor_turns_in_flight`'s reason: a second
+    message to the same session is the line's own one-per-sender refusal to answer, not this cap's.
+    """
+    return sum(
+        count
+        for (sender, session_id), count in waiters.items()
+        if sender == actor and session_id != besides
+    )
+
+
+def _take_event_stream_slot(streams: dict[str, int], actor: str) -> Callable[[], None] | None:
+    """Take one of `actor`'s long-lived stream slots, or `None` when a cap is already reached.
+
+    One ledger for every stream a chemist can hold open indefinitely on this process — the
+    push-back channel and, since a watcher can be anybody in a shared session, a followed turn — so
+    `service_max_event_streams_per_user` bounds what one person can open rather than what one route
+    can, and `service_max_event_streams_total` what the pod holds. The test and the take have no
+    `await` between them, so two concurrent opens cannot both pass at the cap.
+
+    Returns the release, idempotent, for the response that holds the stream to call wherever it
+    ends: a slot returned twice would let one person exceed the cap by the number of double ends.
+    """
+    at_user_cap = streams.get(actor, 0) >= settings.service_max_event_streams_per_user
+    if at_user_cap or sum(streams.values()) >= settings.service_max_event_streams_total:
+        return None
+    streams[actor] = streams.get(actor, 0) + 1
+    held = True
+
+    def _release() -> None:
+        """Give the slot back, once; drop the actor's entry with their last stream."""
+        nonlocal held
+        if not held:
+            return
+        held = False
+        remaining = streams.get(actor, 1) - 1
+        if remaining <= 0:
+            streams.pop(actor, None)
+        else:
+            streams[actor] = remaining
+
+    return _release
+
+
 def _start_turn_lease(active_turns: dict[str, TurnLease], session_id: str, token: str) -> None:
     """Start this turn's lease clock, at the moment the request stops owning its cleanup.
 
@@ -689,6 +740,12 @@ class FrontDoorState:
         """The live turns themselves — what the explicit stop route resolves a session against."""
         turns: RunningTurns = self._app.state.running_turns
         return turns
+
+    @property
+    def queue_waiters(self) -> dict[tuple[str, str], int]:
+        """This process's waiting messages, per `(sender, session)` — the line's local ledger."""
+        waiters: dict[tuple[str, str], int] = self._app.state.queue_waiters
+        return waiters
 
     @property
     def event_streams(self) -> dict[str, int]:

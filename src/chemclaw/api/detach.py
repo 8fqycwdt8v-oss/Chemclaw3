@@ -65,13 +65,20 @@ the answer lands — which is exactly what a sender reconnecting after a detach 
 The **sender's** reader keeps the one role no watcher has: its departure is the detach
 (`on_detach`, or a stop under `survive_disconnect=False`). A watcher closing their tab changes
 nothing about the turn.
+
+**A watcher counts against the cap until its socket is gone, not until the pump stops feeding it.**
+Being cut off ends the *delivery*; the connection and whatever it had buffered stay until the
+reader drains or the send timeout closes it. Counting only the readers the pump still feeds let a
+participant stall a view, get it cut off, and open another — past `service_turn_max_watchers` with
+every stalled socket still held. So a watch is released by the response that serves it, exactly
+when that response ends (`Watch.close`), whichever way it ends.
 """
 
 import asyncio
 import contextlib
 import logging
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
-from typing import Any
+from typing import Any, NamedTuple
 
 from chemclaw.api.events import ErrorEvent, sse_frame
 from chemclaw.core.metrics import METRICS
@@ -108,6 +115,16 @@ class _Reader:
         """An empty buffer, attached."""
         self.queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=_QUEUE_SIZE)
         self.lagged = False
+
+
+class Watch(NamedTuple):
+    """One participant's view of a running turn, and the release of its place under the cap."""
+
+    #: The view itself, from the moment `watch()` attached it.
+    events: AsyncGenerator[dict[str, str], None]
+    #: Give the watcher's place back. Idempotent; the response serving `events` calls it when it
+    #: ends, which also covers a view whose generator never started and so runs no `finally`.
+    close: Callable[[], None]
 
 
 class DetachableTurn:
@@ -147,6 +164,8 @@ class DetachableTurn:
         self._on_detach = on_detach
         self._sender = _Reader()
         self._readers: set[_Reader] = {self._sender}
+        # Watchers whose stream is still open — fed or cut off — which is what the cap counts.
+        self._watching: set[_Reader] = set()
         self._sender_attached = True
         self._stopper: asyncio.Task[None] | None = None
         self._task = asyncio.create_task(self._pump(source), name=f"turn:{session_id}")
@@ -167,8 +186,12 @@ class DetachableTurn:
 
     @property
     def watchers(self) -> int:
-        """How many participants besides the sender are following the turn right now."""
-        return len(self._readers - {self._sender})
+        """How many participants besides the sender hold a view of the turn open right now.
+
+        A view the pump has cut off still counts until its stream closes: its socket and buffer are
+        held until then, so it is still a watcher for every purpose the cap exists for.
+        """
+        return len(self._watching)
 
     async def _pump(self, source: AsyncIterator[dict[str, str]]) -> None:
         """Drive the turn to its end, offering each event to every reader still attached.
@@ -287,7 +310,7 @@ class DetachableTurn:
         """The sender's view of the turn. Cancelling it detaches; the turn does not notice."""
         return self._view(self._sender)
 
-    def watch(self) -> AsyncGenerator[dict[str, str], None] | None:
+    def watch(self) -> Watch | None:
         """Another participant's view, from this moment on; `None` once the turn is over.
 
         Attached here, synchronously, rather than on first iteration, so the view starts at the
@@ -300,7 +323,14 @@ class DetachableTurn:
             return None
         reader = _Reader()
         self._readers.add(reader)
-        return self._view(reader)
+        self._watching.add(reader)
+
+        def _close() -> None:
+            """Release the view's place, whether or not its generator ever ran."""
+            self._readers.discard(reader)
+            self._watching.discard(reader)
+
+        return Watch(self._view(reader), _close)
 
     async def _view(self, reader: _Reader) -> AsyncGenerator[dict[str, str], None]:
         """One reader's stream, to the turn's end, its own cut-off, or its own cancellation.
@@ -322,6 +352,7 @@ class DetachableTurn:
                 yield item
         finally:
             self._readers.discard(reader)
+            self._watching.discard(reader)
             if reader is self._sender:
                 self._sender_gone()
             while not reader.queue.empty():

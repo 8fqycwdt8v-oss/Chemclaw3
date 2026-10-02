@@ -20,7 +20,7 @@ per-user slot and a poller on the loop for hours to carry one row; and a digest 
 so streaming it would want a member in the turn contract (`api/events.py`) that no turn ever emits.
 
 Beside the job route stay the two closures that are nested in it on purpose:
-`_release_stream_slot` and `_events` capture this request's principal and admission bookkeeping —
+`_events` captures this request's principal and admission bookkeeping —
 per-request state with exactly one consumer — so hoisting them would thread arguments to move code
 nowhere. The per-user/per-pod stream ledger they mutate is app-wide and is read through
 `chemclaw.api.state.state(request)`, the seam of the R3.2 split.
@@ -51,7 +51,7 @@ from chemclaw.api.events import (
     JobFailedEvent,
     sse_frame,
 )
-from chemclaw.api.state import state
+from chemclaw.api.state import _take_event_stream_slot, state
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import get_current_correlation_id
 from chemclaw.core.metrics import METRICS
@@ -251,10 +251,11 @@ async def session_events(
     # is a *copy* of this one. Reading it at the top makes "the event's id is this request's id" a
     # fact of the code rather than of the runtime, exactly as the turn route's four events do.
     correlation_id = get_current_correlation_id() or ""
-    streams: dict[str, int] = state(request).event_streams
-    at_user_cap = streams.get(principal.oid, 0) >= settings.service_max_event_streams_per_user
-    at_pod_cap = sum(streams.values()) >= settings.service_max_event_streams_total
-    if at_user_cap or at_pod_cap:
+    # The ledger is shared with the turn-watch route (`api/state._take_event_stream_slot`): a
+    # followed turn is a stream a person holds open just as long, so it counts against the same
+    # caps.
+    release_slot = _take_event_stream_slot(state(request).event_streams, principal.oid)
+    if release_slot is None:
         METRICS.increment("chemclaw_event_streams_rejected_total")
         # `Retry-After` for the reason the turn route's per-actor refusal documents at length:
         # `Chemclaw3_ui`'s `errorFromStatus` splits 429 on the header's *presence*, and without one
@@ -268,15 +269,6 @@ async def session_events(
             detail="too many concurrent event streams; close one and retry",
             headers={"Retry-After": "1"},
         )
-    streams[principal.oid] = streams.get(principal.oid, 0) + 1
-
-    def _release_stream_slot() -> None:
-        """Return this stream's per-user slot — exactly once, whoever owns cleanup."""
-        remaining = streams.get(principal.oid, 1) - 1
-        if remaining <= 0:
-            streams.pop(principal.oid, None)
-        else:
-            streams[principal.oid] = remaining
 
     async def _events() -> AsyncIterator[dict[str, str]]:
         # The newest `awaiting_answer` state already sent to this client, per request. See the
@@ -402,7 +394,7 @@ async def session_events(
     try:
         response = _SlotBoundEventStream(
             _events(),
-            release=_release_stream_slot,
+            release=release_slot,
             ping=settings.service_sse_ping_seconds,
             send_timeout=settings.service_sse_send_timeout_seconds,
             session_id=session_id,
@@ -414,7 +406,7 @@ async def session_events(
         # return the slot, or the user's stream budget leaks toward a permanent 429. The two
         # sites are mutually exclusive — once handed off, only the response releases.
         if not handed_off:
-            _release_stream_slot()
+            release_slot()
 
 
 class Digest(BaseModel):

@@ -239,19 +239,24 @@ def test_a_run_something_has_or_that_cannot_be_told_stays_running(
     assert status.status == "running"
 
 
-def test_the_front_door_route_keeps_running_until_the_ui_knows_queued(
+def test_the_front_door_route_reports_queued_too(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`GET /jobs/{id}` is `job_status` with no flag, and the UI closes any non-`running` card.
+    """`GET /jobs/{id}` is `job_status` with no wait, and it says `queued` exactly as the tool does.
 
-    `Chemclaw3_ui`'s `terminalEventFrom` turns every other word into `job_failed`, so the route
-    saying `queued` would end a waiting job's card as failed. Pinned so the switch is deliberate.
+    It used to be pinned to `running`, because `Chemclaw3_ui`'s `terminalEventFrom` turned every
+    other word into `job_failed` and would have closed a waiting job's card as failed. The UI now
+    names the endings (Chemclaw3 #514), so a chemist refreshing the jobs page and one polling in
+    chat get the same answer about a run nothing has started — the property the shared function
+    exists for.
     """
     from chemclaw.agent.durable_tools import job_status
 
     client = _running(monkeypatch, pollers=0)
-    assert asyncio.run(job_status("queued-calc-predict_pka-abc")).status == "running"
-    assert client.asked == [], "the route must not pay for a question it does not report"
+    status = asyncio.run(job_status("queued-calc-predict_pka-abc"))
+    assert status.status == "queued"
+    assert status.summary is not None and "connector-calc-interactive" in status.summary
+    assert client.asked == ["connector-calc-interactive"]
 
 
 def test_a_poll_moments_before_completion_returns_the_result(

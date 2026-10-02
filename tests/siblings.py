@@ -112,11 +112,13 @@ def sibling_root(env_var: str, canonical_name: str) -> tuple[Path | None, str]:
 def sibling_python(env_var: str, canonical_name: str) -> tuple[Path | None, str]:
     """The sibling checkout's own interpreter, or `None` and the reason there is not one.
 
-    Separate from `sibling_root` because the two costs are different and only one of them is
-    plausible in CI. Reading the fleet's manifests and its recorded `calc` surface needs a shallow
-    clone and no install; running its servers to measure their tool schemas needs a built `.venv`
-    with RDKit, torch and a T5 checkpoint's dependencies in it. A check that needs only the first
-    should not be gated on the second.
+    Separate from `sibling_root` because the two costs are different. Reading the fleet's manifests
+    and its recorded `calc` surface needs a shallow clone and no install; running its servers to
+    measure their tool schemas needs a built `.venv`. A check that needs only the first should not
+    be gated on the second. **The second is cheaper than this docstring used to say** — "RDKit,
+    torch and a T5 checkpoint's dependencies" — and that sentence is what kept it out of CI: the
+    model backends are optional extras, so the fleet's default `uv sync --frozen` is RDKit and
+    SciPy, measured at 24-44 s and 708 MB cold. CI's `check` job now builds it.
     """
     root, reason = sibling_root(env_var, canonical_name)
     if root is None:

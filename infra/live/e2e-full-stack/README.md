@@ -19,13 +19,14 @@ Closes the gap `tasks/todo.md` used to name: *"the cross-repo sequence `Chemclaw
 | every fleet bundle this repo declares an endpoint for and the front door binds — `chem`, `safety`, `rxnpredict` (`fake_a`/`fake_c` doubles), and the five opt-in process-development bundles (`props`, `kinetics`, `suitability`, `thermalsafety`, `unitops`), which this lane enables | Chemclaw3-mcp | each from its fleet manifest | `infra/live/processes.sh` |
 | `pyexec` (bounded offline Python analysis sandbox) | Chemclaw3-mcp | 8899 | this script |
 | `calc` (the physics behind this repo's calculator tools — *not* a connector) | Chemclaw3-mcp | 8860 | `infra/live/processes.sh` |
+| `rxnlabel` (the reaction labeller the background worker's label drain dials — *not* a connector; RDKit path, no `models` extra) | Chemclaw3-mcp | 8865 | `infra/live/processes.sh` |
 | `mock-eln` (ELN/ORD data) | Chemclaw3_mock | 8090 | this script |
 | `mock-vendor` (building-block search/pricing MCP tool) | Chemclaw3_mock | 8091 | this script |
 | connectors, the Temporal workers (one per jobs queue, plus an interactive worker per bundle that queues tool calls), front door | this repo | 8810, 8000, workers per `.live/run/<name>.port` | `infra/live/processes.sh` |
 | BFF + SPA | Chemclaw3_ui | 8787, 5173 | this script |
 
-**Every fleet bundle this repository declares an endpoint for, and the `calc` backend, are started
-by `infra/live/processes.sh`, which this script calls.** The set is not listed here:
+**Every fleet bundle this repository declares an endpoint for, and the `calc` and `rxnlabel`
+backends, are started by `infra/live/processes.sh`, which this script calls.** The set is not listed here:
 `processes.sh::fleet_bundle_names` derives it (core's endpoint-declaring bundles that the fleet also
 publishes *and the front door binds*), and every enumeration of it in this lane has gone stale.
 
@@ -50,7 +51,7 @@ four-repo bring-up left two dead pidfiles and `make live-e2e-full-stack-status` 
 directly above `chem up`. This script still *checks* their credential after `processes.sh` returns
 — D-2026-08-17's lesson — because a check is not a start. The set it checks is derived the same way
 (`check_fleet_bundle_credentials`: the bundles in the URL map `processes.sh` persisted that the fleet
-publishes a manifest for), plus `calc`, which is a backend rather than a connector.
+publishes a manifest for), plus `calc` and `rxnlabel`, which are backends rather than connectors.
 
 `rxnpredict` runs with no predictor extras installed and the `fake_a`/`fake_c` deterministic
 doubles requested — a real tool surface with no GPU, no checkpoint download and no model-weight
@@ -91,7 +92,7 @@ make live-e2e-full-stack-down
 Or drive it directly: `infra/live/e2e-full-stack/up.sh [up|down|status|restart <name>]`.
 `restart <name>` (`pyexec`, `mock-eln`, `mock-vendor`, or `ui-bff`) kills and
 restarts one external process in place — the primitive the chaos round uses. Restarting a piece of
-this repo's own stack (a connector, a worker, `calc`, or any fleet bundle `processes.sh` starts —
+this repo's own stack (a connector, a worker, `calc`, `rxnlabel`, or any fleet bundle `processes.sh` starts —
 `props`, `rxnpredict`, `chem`, `safety`, …) is `infra/live/processes.sh restart <name>` instead;
 asking this script for one of those says so rather than reporting an unknown process. A restart
 comes back in this lane's environment — `up` persists what it composed to `.live/run/lane-env.sh`,
@@ -123,6 +124,42 @@ screen) carry a coupling partner the source paper publishes only as a shorthand,
 **citation-only**: stored and citable, the shorthand carried verbatim as a species with no
 structure, and in no fingerprint or label index — never an invented structure. That is declared,
 not discovered — see `D-2026-09-27-a-reaction-without-a-structure-is-citable-not-searchable`.
+
+## The reaction indexes are brought current after the backfill
+
+A deployment keeps two derived indexes current on its own, and until #520 this lane did neither, so
+the structure-search tools answered from a degraded index on every run: `substrate_precedent`,
+`conditions_for_similar_reaction` and `reactions_making_substructure` reported `coverage:
+{"labelled": 0, "total": 4282}` ("NOT ANSWERABLE YET"), and `similar_reactions` reported
+`index_partial: true` ("SEARCH INCOMPLETE … SUPERSEDED fingerprint definition").
+
+So after the backfill, `up` runs `python -m chemclaw.cli.live_index`, which does what a deployment
+does, against the real broker and stores:
+
+- **one label drain** — `ReactionLabelWorkflow`, the job a deployment's `reaction-labels` Schedule
+  fires — on the background worker, against the `rxnlabel` backend `processes.sh` starts. A fixed
+  workflow id, so a second `up` rejoins a drain that is still running. A fleet checkout has no
+  `models` extra, so labels are derived on the RDKit path and stamped `mapper@absent`: coarser, and
+  they go stale (and re-label) the day real weights are installed;
+- **the operator's re-key** — `make rekey-compounds APPLY=1`'s job — re-fingerprinting every row a
+  previous lane's database holds under an older definition;
+- **the disposal of the superseded generation**, only when the re-key rebuilt every shelved row —
+  the statement `infra/sql/094_fingerprint_definition_identity.sql` names. Without it the shelf
+  stays and every search keeps saying PARTIAL, because the runtime role cannot delete it; the lane
+  connects as the owning principal.
+
+The summary lands in the bring-up log and the full output in `.live/e2e-corpus-index.log`. Two
+settings:
+
+| Setting | Default | Effect |
+| --- | --- | --- |
+| `CHEMCLAW_LIVE_SKIP_INDEX` | `false` | `true` skips the step — a quick `up` that does not need precedent or similarity answers |
+| `CHEMCLAW_LIVE_INDEX_TIMEOUT` | `600` | seconds for the whole step; the label drain keeps running on the broker past it |
+
+It is idempotent and non-fatal: re-running `up` rejoins or restarts the drain and finds nothing left
+to re-key, and a failure is logged as a warning rather than tearing the lane down. The lane applies
+no Temporal Schedule (the ELN sync is a one-shot too), so reactions the backfill ingests after the
+drain finishes are labelled by the next `up`.
 
 ## Checking it is really wired up
 

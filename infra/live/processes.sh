@@ -180,6 +180,15 @@ export CHEMCLAW_CONNECTORS_REQUIRED="${CHEMCLAW_CONNECTORS_REQUIRED:-true}"
 # reaches the loop gets them; a lane pointed at real weights overrides both.
 export CHEMCLAW_RXNPREDICT_ENABLED_FORWARD_MODELS="${CHEMCLAW_RXNPREDICT_ENABLED_FORWARD_MODELS:-fake_a}"
 export CHEMCLAW_RXNPREDICT_ENABLED_CONDITIONS_MODELS="${CHEMCLAW_RXNPREDICT_ENABLED_CONDITIONS_MODELS:-fake_c}"
+# **A double has to say it is one, in the result the model reads.** The doubles return the same
+# fixed products for every input, and on 2026-10-02 a real model on this lane told the chemist "the
+# forward reaction prediction confirms" a product `fake_a` returns for anything. Naming the connector
+# in `CHEMCLAW_CONNECTOR_STAND_INS` makes core put its own stand-in notice on every result it
+# returns (`agent/tool_framing.py::stand_in_notice`). Keyed on the doubles actually being selected,
+# so a lane pointed at real weights reads its predictions as predictions.
+case "$CHEMCLAW_RXNPREDICT_ENABLED_FORWARD_MODELS,$CHEMCLAW_RXNPREDICT_ENABLED_CONDITIONS_MODELS" in
+  *fake_*) export CHEMCLAW_CONNECTOR_STAND_INS="${CHEMCLAW_CONNECTOR_STAND_INS:-rxnpredict}" ;;
+esac
 
 # Traces, when something is listening for them. `make phoenix-up` puts an OTLP receiver on 4317;
 # with nothing there the exporter retries in the background and the run is unaffected, which is why
@@ -356,7 +365,7 @@ PY
 # One call, because `fleet_python_bin` runs `uv sync` and because two resolutions are two chances
 # to disagree about which interpreter the fleet's servers run on.
 fleet_checkout_python() {
-  [ -d "$MCP_REPO" ] || die "chem, safety and the calc backend are served by Chemclaw3-mcp, which is not at $MCP_REPO.
+  [ -d "$MCP_REPO" ] || die "chem, safety and the calc and rxnlabel backends are served by Chemclaw3-mcp, which is not at $MCP_REPO.
 Clone it beside this checkout, or set CHEMCLAW_MCP_REPO. Relaxing CHEMCLAW_CONNECTORS_REQUIRED is
 not the fix: it is the posture the chart ships and the one this lane exists to exercise."
   fleet_python_bin || die "could not resolve an interpreter in $MCP_REPO"
@@ -450,60 +459,81 @@ PY
   export CHEMCLAW_CONNECTOR_URLS
 }
 
-# The `calc` backend, which is **not** a connector and must never enter `CHEMCLAW_CONNECTOR_URLS`.
+# The fleet servers core reaches by **configuration**, not by discovery: `calc` and `rxnlabel`.
 #
-# Chemclaw3 keeps its own `calc` bundle and its whole tool surface; what moved to the fleet is the
-# *physics* behind them (D-2026-08-16-the-physics-leaves-the-cache-stays), which
-# `connectors/calc/remote.py::calc_session` dials at `calc_server_url` on a cache miss. So it is
-# invisible to `check_connectors_at_startup`, `/readyz` is green with it down, and the front door
-# boots happily — while every durable calculation job fails at run time with `CalcServerError: the
-# calculation service is not answering`. That is what `make live-jobs` did on this lane for as long
-# as it existed: 0 of 5 checks, on the target the runbook calls the load-bearing one.
+# Neither is a connector and neither may enter `CHEMCLAW_CONNECTOR_URLS` — the fleet keeps both
+# manifests in `manifests-internal/`, which no published export line reaches, so their tools never
+# land in a prompt. Each is addressed by one setting pair instead, `<name>_server_url` and
+# `<name>_server_token_env`, read by one client module. So both are invisible to
+# `check_connectors_at_startup`, `/readyz` is green with either down, and the front door boots
+# happily — while the durable half that dials them fails at run time.
 #
-# It is started here for D-2026-08-27's own reason: the lane that cannot do its work without a
-# server is the lane that owns it. That ADR asked the question of the front door and answered it
-# for `chem` and `safety`; the durable half asks it of `calc` and gets the same answer. See
-# D-2026-08-28-the-durable-half-has-a-backend-too.
+# * `calc` is the *physics* behind core's calculator tools
+#   (D-2026-08-16-the-physics-leaves-the-cache-stays), dialled by
+#   `connectors/calc/remote.py::calc_session` on a cache miss. Down, every durable calculation job
+#   fails with `CalcServerError: the calculation service is not answering` — what `make live-jobs`
+#   did on this lane for as long as it existed: 0 of 5 checks.
+# * `rxnlabel` is the reaction labeller (D-2026-08-25-the-labeller-leaves-the-index-stays), dialled
+#   by `ReactionLabelWorkflow` on the background worker. Down — and this lane never started it — no
+#   reaction is ever labelled past its record phase, so `substrate_precedent`,
+#   `conditions_for_similar_reaction` and `reactions_making_substructure` answered "NOT ANSWERABLE
+#   YET: … NONE of them have been labelled" over the whole seeded corpus on every run (#520). A
+#   fleet checkout carries no `models` extra, so it labels on the RDKit path and its
+#   `labeller_version` says so (`mapper@absent`): coarser, stamped honestly, and re-labelled the day
+#   real weights are installed.
 #
-# The port comes from `calc_server_url` rather than from the fleet's manifest, and the difference
-# is load-bearing: this is the address the *client* dials, so reading it from anywhere else would
-# let the two drift and turn a misconfiguration into a connection refused. (The manifest also lives
-# in `manifests-internal/`, which `fleet_port` above deliberately cannot read.)
-calc_backend_port() {
-  "$1" - <<'PYEOF'
+# Both are started here for D-2026-08-27's reason: the lane that cannot do its work without a
+# server is the lane that owns it (D-2026-08-28-the-durable-half-has-a-backend-too). And both before
+# the workers, because the token export below is what the background worker inherits to send.
+readonly CONFIGURED_BACKENDS=(calc rxnlabel)
+
+# `<port> <token variable>` for one configured backend, read from the settings the *client* reads.
+#
+# The difference is load-bearing: this is the address the client dials, so reading it from anywhere
+# else (the fleet's manifest, a literal here) would let the two drift and turn a misconfiguration
+# into a connection refused. The token variable is the setting's own, so a deployment that renames
+# it is followed rather than contradicted.
+backend_address() {
+  "$1" - "$2" <<'PYEOF'
 import sys
 from urllib.parse import urlsplit
 
 from chemclaw.core.config import settings
 
-port = urlsplit(settings.calc_server_url).port
+name = sys.argv[1]
+url = getattr(settings, f"{name}_server_url")
+port = urlsplit(url).port
 if port is None:
-    sys.exit(f"calc_server_url names no port: {settings.calc_server_url}")
-print(port)
+    sys.exit(f"{name}_server_url names no port: {url}")
+print(port, getattr(settings, f"{name}_server_token_env"))
 PYEOF
 }
 
-start_calc_backend() {
-  local python="$1" fleet_python="$2"
-  local port
-  port="$(calc_backend_port "$python")" || die "could not read a port from calc_server_url"
+start_backend() {
+  local name="$1" python="$2" fleet_python="$3"
+  local address port token_var
+  address="$(backend_address "$python" "$name")" \
+    || die "could not read a port from ${name}_server_url"
+  port="${address% *}"
+  token_var="${address#* }"
 
   # Both halves of the credential, as for `chem` and `safety`: core reads this to send, the server
   # reads the same variable name to verify. Without it the server answers `/healthz` and refuses
   # every `/mcp` call, which reaches the reader as a 401 from a server that looks healthy.
-  export CHEMCLAW_CALC_TOKEN="${CHEMCLAW_CALC_TOKEN:-dev-token}"
+  export "$token_var=${!token_var:-dev-token}"
+  BACKEND_TOKEN_VARS+=("$token_var")
 
   # The same address guard `start_fleet_bundles` uses, for the same reason: a pidfile is a per-lane
   # record of a machine-wide port, so ask the address itself before launching onto it.
-  if ! running calc && curl -fs -o /dev/null --max-time 2 "http://127.0.0.1:$port/healthz"; then
-    die "calc: 127.0.0.1:$port is already served, and not by a process this lane started.
-This lane owns the calc backend; the four-repo lane reaches it by calling this script, so nothing
+  if ! running "$name" && curl -fs -o /dev/null --max-time 2 "http://127.0.0.1:$port/healthz"; then
+    die "$name: 127.0.0.1:$port is already served, and not by a process this lane started.
+This lane owns the $name backend; the four-repo lane reaches it by calling this script, so nothing
 should be starting it twice. Stop the other server, or run \`make live-e2e-full-stack\`."
   fi
 
-  ( cd "$MCP_REPO" && start calc "$fleet_python" -m "uvicorn" "chemclaw_mcp_calc.app:app" \
+  ( cd "$MCP_REPO" && start "$name" "$fleet_python" -m "uvicorn" "chemclaw_mcp_$name.app:app" \
       --host 127.0.0.1 --port "$port" )
-  wait_for calc "http://127.0.0.1:$port/healthz"
+  wait_for "$name" "http://127.0.0.1:$port/healthz"
 }
 
 # ------------------------------------------------------------------ the interactive workers
@@ -682,15 +712,19 @@ up() {
   start_fleet_bundles "$python" "$fleet_python"
   log "connector urls (with the fleet): $CHEMCLAW_CONNECTOR_URLS"
 
-  # The calc backend is not a connector and so is not in that map — and is needed all the same, by
-  # the durable half rather than by the front door. See `start_calc_backend`.
-  start_calc_backend "$python" "$fleet_python"
+  # The configured backends are not connectors and so are not in that map — and are needed all the
+  # same, by the durable half rather than by the front door. See `CONFIGURED_BACKENDS`.
+  local backend
+  BACKEND_TOKEN_VARS=()
+  for backend in "${CONFIGURED_BACKENDS[@]}"; do
+    start_backend "$backend" "$python" "$fleet_python"
+  done
 
   # Now every address and credential is known, so the file a second shell reads can be complete.
   # `connector_env`'s own exports, then the fleet's two tokens and the URL map it rewrote.
-  # Which variables carry a credential is derived (`bearer_token_vars`), plus `CHEMCLAW_CALC_TOKEN`
-  # — named here because the calc backend is deliberately *not* a connector and so is in no
-  # manifest the registry reads (see `start_calc_backend`).
+  # Which variables carry a credential is derived (`bearer_token_vars`), plus each configured
+  # backend's — collected by `start_backend` from its own setting, because those servers are
+  # deliberately *not* connectors and so are in no manifest the registry reads.
   #
   # An unset variable is skipped rather than written empty: an `export X=` in this file would
   # overwrite a credential the reading shell already held, which is the mismatch this file exists
@@ -698,7 +732,7 @@ up() {
   # exactly what went wrong here.
   local token_var
   local -a held=() unheld=()
-  for token_var in $(bearer_token_vars "$python") CHEMCLAW_CALC_TOKEN; do
+  for token_var in $(bearer_token_vars "$python") "${BACKEND_TOKEN_VARS[@]}"; do
     # `connector_env` already emits its own bundles' minted tokens; writing them a second time
     # would say the same thing twice and invite the two copies to disagree.
     case "$connector_exports" in *"export $token_var="*) continue ;; esac
