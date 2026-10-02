@@ -606,3 +606,33 @@ def test_a_queued_signal_becomes_a_tool_queued_event() -> None:
     )
     assert event == ToolQueuedEvent(tool="predict_pka", job_id="q-1", state="queued", waiting=3)
     assert event.model_dump()["type"] == "tool_queued"
+
+
+def test_the_wait_note_is_its_own_paragraph_after_the_servers_json() -> None:
+    """Flattened the way the model receives it, the note no longer glues onto the payload (N9).
+
+    The 2026-10-02 lane showed `…}(Queue: this call waited about 10 s …)`: every reader joins text
+    blocks with `""`, and the note block began with its parenthesis. Converted here by
+    `langchain_mcp_adapters` — the conversion every connector tool result goes through — and joined
+    by `tool_result_size.full_text`, so the assertion is on the text a turn actually holds.
+    """
+    import json
+
+    from langchain_mcp_adapters.tools import _convert_call_tool_result
+
+    from chemclaw.agent.tool_result_size import full_text
+    from chemclaw.connectors.queued import _with_wait
+
+    payload = {"stdout": "42", "ok": True}
+    served = CallToolResult(
+        content=[TextContent(type="text", text=json.dumps(payload))], structuredContent=payload
+    )
+    waited = _with_wait(served, "pyexec", 10.2)
+
+    assert waited.content[0] == served.content[0], "the server's own block is untouched"
+    assert waited.structuredContent == payload
+    blocks, _artifact = _convert_call_tool_result(waited)
+    text = full_text(blocks)
+    body, separator, note = text.partition("\n\n")
+    assert separator and json.loads(body) == payload, text
+    assert note == "(Queue: this call waited about 10 s for a free slot on 'pyexec' before it ran.)"

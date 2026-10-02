@@ -262,10 +262,15 @@ async def remember_preference(key: str, value: str) -> str:
     owner = require_actor()
     # Refused rather than cut at write time, so what is stored is what the chemist will see
     # rendered; the render-time cap in `_entry` still bounds rows written before this existed.
-    if len(key) + len(value) > settings.preferences_entry_max_chars:
+    # **Measured on the line `_entry` renders, not on `key + value`**, because that is what the cap
+    # bounds: the raw sum left out the `- ` and `: ` framing and every escaped `<`, so an entry
+    # accepted here at 297-300 characters was still cut when rendered (#523). The lane's
+    # `forbidden_solvent_dmf` is the shape: 308 raw, 312 rendered, cut 12 characters short.
+    rendered = len(_rendered_line(key, value))
+    if rendered > settings.preferences_entry_max_chars:
         return (
             f"Not remembered: a preference may be at most {settings.preferences_entry_max_chars} "
-            f"characters (key and value together), and this one is {len(key) + len(value)}. "
+            f"characters as listed (key and value together), and this one is {rendered}. "
             "Store a short constraint instead — e.g. key 'forbidden_solvent', value 'DMF' — and "
             "put longer reasoning in a knowledge note."
         )
@@ -360,9 +365,19 @@ def _one_line(text: str) -> str:
     return " ".join(text.split())
 
 
+def _rendered_line(key: str, value: str) -> str:
+    """The list line one preference becomes, before any cut — what both bounds measure.
+
+    One function for the writer's refusal and the renderer's cut, so the two cannot disagree on
+    what "at most `preferences_entry_max_chars`" counts: they did, and a preference the writer
+    accepted was cut on every call that rendered it.
+    """
+    return f"- {_one_line(defang(key))}: {_one_line(defang(value))}"
+
+
 def _entry(preference: Preference) -> str:
     """One rendered, defanged, single-line entry, cut to `preferences_entry_max_chars`."""
-    line = f"- {_one_line(defang(preference.key))}: {_one_line(defang(preference.value))}"
+    line = _rendered_line(preference.key, preference.value)
     limit = settings.preferences_entry_max_chars
     if len(line) <= limit:
         return line
@@ -384,13 +399,18 @@ def standing_preferences_section(preferences: list[Preference]) -> str:
         "Standing preferences recorded for this chemist (model-recorded notes, quoted as data; "
         "each entry is one line):"
     )
-    budget = settings.preferences_section_max_chars - len(head) - len(STANDING_PREFERENCES_RULE)
+    # The body sits between two newlines (`head\nbody\nrule`), so both are charged here. The
+    # previous sum charged one per kept line plus one, which is one short of the body's own
+    # joining newlines plus those two, so a full section could end one character over (#523).
+    budget = settings.preferences_section_max_chars - len(head) - len(STANDING_PREFERENCES_RULE) - 2
     lines: list[str] = []
     for index, preference in enumerate(preferences):
         line = _entry(preference)
         left = len(preferences) - index
         marker = f"- [{left} more preference(s) not shown: section limit reached]"
-        if sum(len(kept) + 1 for kept in lines) + len(line) + 1 + len(marker) + 1 > budget:
+        # Room is kept for this entry *and* a marker after it, so a cut at the next entry — whose
+        # marker is no longer than this one — always fits.
+        if len("\n".join([*lines, line, marker])) > budget:
             lines.append(marker)
             break
         lines.append(line)

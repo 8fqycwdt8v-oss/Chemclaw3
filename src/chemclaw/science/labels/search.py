@@ -91,11 +91,22 @@ class PrecedentSearch(BaseModel):
         six times.
         """
         if not self.hits:
+            unsearched = self.coverage.unsearched
+            if unsearched is not None and unsearched.giving_query:
+                # Said first, for the reason `FingerprintSearch.verdict` orders its clauses: the
+                # sentence below calls an empty labelled answer a genuine negative, and a model that
+                # stops there writes "no in-house precedent" about a run on file.
+                return (
+                    "NO PRECEDENT IN THE LABELLED CORPUS — BUT CITATION-ONLY RECORDS ON FILE LIST "
+                    f"THIS STRUCTURE. {self.coverage.verdict} The empty labelled answer is a "
+                    "negative over the structured records only."
+                )
             return (
                 "NO PRECEDENT FOUND IN THE LABELLED CORPUS. "
-                f"{self.coverage.verdict} Say which of those two this is before concluding "
-                "anything: an unlabelled corpus cannot answer, and an empty answer from a labelled "
-                "one is a genuine negative."
+                f"{self.coverage.verdict} Say which of those this is before concluding anything: "
+                "an unlabelled corpus cannot answer, and an empty answer from a labelled one is a "
+                "genuine negative over the structured records it holds — never over a record the "
+                "verdict says was not searched."
             )
         head = f"{len(self.hits)} precedent(s) found."
         if self.truncated:
