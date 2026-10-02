@@ -228,7 +228,16 @@ class AgentSettings(BaseSettings):
     # number alone. Both halves are asserted in `tests/test_compaction.py`
     # (`BUDGET_THREAD_ALLOWANCE`, `SMALLEST_TARGET_WINDOW`), because the reviewer who found this
     # collapsed the split to 107,000 and got 150 passing tests.
-    agent_context_token_budget: int = Field(default=118_700, ge=1)
+    #
+    # **Raised 600 for the artefact tools, and the floor under the thread is why it moved rather
+    # than the thread** (`D-2026-10-02-the-artefact-prefix-is-paid-from-the-window-margin`). The
+    # thread a pod calibrated on evidence traffic keeps was 271 tokens above one maximal tool batch
+    # after `agent_max_tool_result_chars` came down to 52,000, and the artefact tools at their
+    # measured floor crossed it; below it every evidence turn is unreducible. The cap was the
+    # instrument used last time and cuts evidence on every deployment, artefacts on or off; the
+    # margin under the 128k window is what was spent instead, by exactly the ceiling's raise, so the
+    # thread allowance is held where it was. `tests/test_compaction.py` states the margin.
+    agent_context_token_budget: int = Field(default=119_300, ge=1)
     agent_keep_last_tool_groups: int = Field(default=2, ge=0)
     agent_keep_last_conversation_groups: int = Field(default=0, ge=0)
     # `agent_tool_result_clear_trigger` is the *lossless* edit's own threshold, and splitting it
@@ -337,7 +346,7 @@ class AgentSettings(BaseSettings):
     # `tests/test_compaction.py` asserts the equality — so a ceiling raise moves it in the same
     # commit as the two defaults it is the basis of.
     # D-2026-10-02-a-prefix-beyond-the-derivation-basis-is-paid-in-spend-not-thread.
-    agent_context_prefix_basis: int = Field(default=86_050, ge=0)
+    agent_context_prefix_basis: int = Field(default=86_650, ge=0)
     # **What the two numbers above are denominated in, which used to be left unsaid and was wrong.**
     # Both are counted with `count_tokens_approximately` — chars/4 — and that estimator is content
     # dependent in one direction. Re-measured 2026-09-06 against real BPE encodings, on the observed

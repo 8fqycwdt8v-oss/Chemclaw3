@@ -609,7 +609,27 @@ load_profiles()
 #: The ceiling drops by 250 rather than by the whole branch's 2,500, and the difference is worth
 #: being plain about: the other raises bought capability every deployment can use, this one bought
 #: capability most of them cannot, and only that part is refundable.
-CEILINGS: dict[str, int] = {"__default__": 72_850}
+#: **Raised to 73,450 for the three artefact tools**
+#: (`D-2026-10-02-an-artefact-is-part-of-the-answer-not-an-effect`), by the measured delta and a
+#: rounding. Measured on this commit with this file's own counter: **73,012** with
+#: `agent_exhibits_enabled` on and **72,446** with it off — the off figure is the phase-0 base to
+#: the token, which is the evidence that switching the setting off unbinds the tools rather than
+#: hiding them. The 566 is `create_exhibit` 195, `revise_exhibit` 228, `read_exhibit` 102 and the
+#: `exhibits` skill's listing entry 41 (3,553 -> 3,594; `ToolScopedSkills` drops the entry with
+#: the tools). The ADR's drafts priced the tools at 961.
+#:
+#: **They were trimmed to 566 before the ceiling moved.** The first cut measured 903; the
+#: docstrings now say what a spec is and nothing else (the judgment is `skills/exhibits`), and
+#: `edits` is validated behind the boundary rather than published as a nested schema. The clear
+#: trigger's thread allowance pays the 600 as on every raise above; the budget's does not, because
+#: the warm arm in `tests/test_compaction.py` was 271 tokens above its one-batch floor and 566
+#: crosses it — the budget rose by the raise instead
+#: (`D-2026-10-02-the-artefact-prefix-is-paid-from-the-window-margin`).
+#:
+#: **The shape of `spec` is the other reason this is 566 and not ~2,000**: a typed union over the
+#: six kinds measured 1,989 for the three, and its create tool alone (1,492) would have breached
+#: `MAX_SINGLE_TOOL_TOKENS`.
+CEILINGS: dict[str, int] = {"__default__": 73_450}
 
 #: How much of the floor one tool may be. A schema above this is not expensive, it is *badly
 #: shaped* — the fix is pagination, a narrower argument, or splitting a tool that does two things.
