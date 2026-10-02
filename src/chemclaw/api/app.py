@@ -49,6 +49,7 @@ from chemclaw.agent.session_events import stream_new_events
 from chemclaw.agent.subagents import refuse_an_unknown_roster
 from chemclaw.agent.turn_graph import refuse_an_unknown_peer_roster
 from chemclaw.agent.verifier import require_verifier_capability
+from chemclaw.api.auth import refuse_unusable_entra_ca_bundle
 from chemclaw.api.budget import BudgetTracker, drain_pending
 from chemclaw.api.deps import CurrentUser
 from chemclaw.api.detach import RunningTurns
@@ -380,6 +381,7 @@ def create_app(
     """
     _refuse_unauthenticated_exposure()
     refuse_unconfigured_llm_gateway()
+    refuse_unusable_entra_ca_bundle()
     # `openapi_url=None` keeps FastAPI from registering the schema on a plain `Route`, which is not
     # an `APIRoute` and therefore carries no dependency tree `require_principal` could sit in — the
     # defect D-2026-08-06 §4 closed, where the full route/parameter/model surface was readable by

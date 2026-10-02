@@ -16,8 +16,10 @@ apply here — this is a user-scoped resource access, so it is fully Entra-scope
 
 import asyncio
 import logging
+import ssl
 import threading
 import time
+from functools import cache
 from typing import Annotated, Any
 
 import httpx
@@ -52,6 +54,7 @@ __all__ = [
     "AuthError",
     "Principal",
     "reauthorize",
+    "refuse_unusable_entra_ca_bundle",
     "require_principal",
     "validate_token",
 ]
@@ -120,11 +123,11 @@ class _HttpxJwkClient(PyJWKClient):
     dependency already carries, and this endpoint is the one where following the environment is a
     *trust* decision rather than a routing one.
 
-    `verify=` is the process's one trust store (`core/http.default_ssl_context`) rather than
-    httpx's per-client default, for the reason that function measures: httpx parses the whole
-    certifi bundle into a fresh `SSLContext` per client, and `httpx.get` is a client per fetch.
-    It is also the same trust store every connector call uses, which is what makes "the tenant" and
-    "a bundle" one decision about CAs instead of two.
+    `verify=` is `_tenant_ssl_context`: the process's one trust store
+    (`core/http.default_ssl_context`) unless `entra_ca_bundle` names a private one, and built once
+    either way rather than httpx's per-client default, for the reason `default_ssl_context`
+    measures: httpx parses the whole certifi bundle into a fresh `SSLContext` per client, and
+    `httpx.get` is a client per fetch.
     """
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -223,7 +226,7 @@ class _HttpxJwkClient(PyJWKClient):
                 timeout=self.timeout,
                 # Never inherit an ambient proxy — the whole reason this class exists.
                 trust_env=False,
-                verify=default_ssl_context(),
+                verify=_tenant_ssl_context(settings.entra_ca_bundle),
             )
             if response.is_redirect:
                 raise IdentityProviderUnavailable(
@@ -249,6 +252,61 @@ class _HttpxJwkClient(PyJWKClient):
                 # request. Raised here as the fetch failure it is, so `fetch_data` remembers it.
                 raise IdentityProviderUnavailable(f"tenant JWKS unusable: {exc}") from exc
         return jwk_set
+
+
+@cache
+def _tenant_ssl_context(ca_bundle: str) -> ssl.SSLContext:
+    """The trust store the tenant's key set is fetched under: `ca_bundle`, else certifi.
+
+    **Unset is today's behaviour exactly** — the process's shared certifi context, the same object
+    every connector call uses. Set, the bundle *replaces* certifi rather than joining it, which is
+    what `verify` means to httpx and what `llm_tls_ca_bundle` means to the gateway clients: one
+    source, so the file an operator mounted is the complete answer to "whom is the key set trusted
+    from". `SSL_CERT_FILE`/`SSL_CERT_DIR` are not consulted on either branch, for the reason
+    `default_ssl_context` gives — the environment does not get to widen this trust store.
+
+    There is no branch that turns verification off, and that is the point of the function rather
+    than an omission: the key set is what every bearer token is validated against, so an unverified
+    fetch is a tenant anybody on the path can impersonate.
+
+    Cached per path, so the file is parsed once per process; a rotated bundle is picked up on
+    restart, which is when a mounted Secret's new content is too.
+
+    Raises:
+        OSError: the path does not name a readable file.
+        ssl.SSLError: the file holds no PEM certificate.
+    """
+    if not ca_bundle:
+        return default_ssl_context()
+    return ssl.create_default_context(cafile=ca_bundle)
+
+
+def refuse_unusable_entra_ca_bundle() -> None:
+    """Refuse to boot when `entra_ca_bundle` names a file that is not a usable CA bundle.
+
+    **At boot, not at the first sign-in.** Left to the fetch, a typo in the path is an `OSError`
+    inside `_HttpxJwkClient._fetch` — outside every arm that maps a fetch failure to a 503, so each
+    request would be a 500, and every chemist would find the misconfiguration before the operator
+    did. Building the context here is the same call the fetch makes (`_tenant_ssl_context`, cached),
+    so what is checked is exactly what will be used rather than a second parser's opinion of the
+    file. Checked whether or not `entra_required` is on: a bundle that is configured is meant to be
+    used, and a deployment flipping enforcement on should not learn then that it never parsed.
+
+    Raises:
+        RuntimeError: the path is missing, unreadable, a directory, or holds no PEM certificate.
+    """
+    ca_bundle = settings.entra_ca_bundle
+    if not ca_bundle:
+        return
+    try:
+        _tenant_ssl_context(ca_bundle)
+    except (OSError, ssl.SSLError) as exc:
+        raise RuntimeError(
+            f"CHEMCLAW_ENTRA_CA_BUNDLE={ca_bundle!r} is not a usable CA bundle ({exc}). It must "
+            "name a readable file holding at least one PEM-encoded CA certificate; the tenant's "
+            "JWKS endpoint is verified against it instead of certifi. Unset it to verify against "
+            "certifi — verification itself cannot be turned off."
+        ) from exc
 
 
 # One JWKS client per endpoint, cached: `PyJWKClient` keeps its own key cache, so rebuilding it per

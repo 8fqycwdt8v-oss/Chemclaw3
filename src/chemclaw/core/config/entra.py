@@ -88,6 +88,17 @@ class EntraSettings(BaseSettings):
     # shape one layer up — a deployment declaring a credential path that does not exist — so the
     # three go the way their code went. D-046 still stands as the design for whatever re-adds one.
     entra_http_timeout_seconds: float = Field(default=10.0, gt=0)
+    # A PEM bundle of the CAs the tenant's JWKS endpoint is verified against, **instead of**
+    # certifi. Empty — the default — is certifi, exactly as before this setting existed. Two
+    # deployments need it: a test tenant behind a private or self-signed CA (`Chemclaw3_mock`'s
+    # https OIDC surface, which msal-browser insists on), and an enterprise whose TLS-inspecting
+    # proxy re-signs `login.microsoftonline.com` with its own root. Replacing rather than adding to
+    # certifi is the semantics of `llm_tls_ca_bundle` and of httpx's own `verify`: one source, so
+    # the file is the whole statement of whom the key set is trusted from. There is deliberately no
+    # way to switch verification *off* — the key set is what every bearer token is checked against,
+    # so an unverified fetch is a forgeable tenant. The front door refuses to boot when the path is
+    # missing or holds no PEM certificate (`api/auth.refuse_unusable_entra_ca_bundle`).
+    entra_ca_bundle: str = ""
     # How long the front door waits between JWKS re-fetches forced by a token whose `kid` is not
     # in the cached key set. PyJWT re-fetches on *every* such miss, and the `kid` is chosen by an
     # unauthenticated caller, so without a floor one credential-less request becomes one outbound

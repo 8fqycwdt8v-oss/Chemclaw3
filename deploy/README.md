@@ -111,6 +111,29 @@ moved into the chart and its test: a number written in prose is a number that go
   autoscaling shape outruns its declaration, so that decision cannot reach a cluster by accident.
   `0` disables the check, which is the code default: a CLI or a single-pod dev run has no fleet.
 
+### A non-production cluster that runs the enforced posture
+
+A test cluster (kind, a throwaway namespace, the four-repo browser E2E against `Chemclaw3_mock`'s
+tenant) that sets `CHEMCLAW_ENTRA_REQUIRED=true` is held to **the same boot refusals as
+production**. There is no "test mode" that relaxes them, and this section does not add one. It
+lists what such a cluster has to *state* so that every process boots, and each item is something a
+test cluster can actually provide. Every refusal below names its setting when it fires.
+
+| Refusal (the process exits at boot) | What a test cluster sets |
+|---|---|
+| Entra half-configured (`entra_audience` / tenant-or-issuer / tenant-or-JWKS) | `CHEMCLAW_ENTRA_AUDIENCE`, plus either `CHEMCLAW_ENTRA_TENANT_ID` or **both** `CHEMCLAW_ENTRA_ISSUER` and `CHEMCLAW_ENTRA_JWKS_URL`. For a mock tenant, use the issuer string its tokens carry, byte for byte, and its keys URL. |
+| The tenant's JWKS is served over https by a private or self-signed CA | `CHEMCLAW_ENTRA_CA_BUNDLE=<path to that CA's PEM>` on the front door. The chart has no value that mounts this file today, so the deployment that needs it adds the volume itself, for example as a post-render patch. It *replaces* certifi for this one fetch, and verification cannot be switched off. Unset, the fetch fails its TLS handshake and every request is a 503. A path that is missing, or a file with no PEM certificate in it, stops the front door at boot. |
+| A non-loopback `CHEMCLAW_TEMPORAL_ADDRESS` with no TLS and no API key | Run the Temporal frontend with TLS and set `CHEMCLAW_TEMPORAL_TLS_CA` (server-auth TLS is enough to pass this guard; add `_CERT`/`_KEY` for mTLS). In the chart, that is `secrets.temporalTls.enabled: true` plus the `chemclaw-temporal-tls` Secret described above. `secrets.temporalTls.enabled: false` (the plaintext path) is for a cluster that does **not** set `CHEMCLAW_ENTRA_REQUIRED=true`. |
+| A non-loopback Postgres DSN without `sslmode=require`/`verify-ca`/`verify-full` (checked on `CHEMCLAW_POSTGRES_DSN`, `CHEMCLAW_POSTGRES_MIGRATION_DSN` and `CHEMCLAW_SESSION_STORE_DSN`, each one that is set) | Give the in-cluster Postgres a server certificate and append `sslmode=verify-full&sslrootcert=<ca>`, or at least `sslmode=require`, to every DSN. A DSN that names no host is refused too, so name the host. |
+| `CHEMCLAW_LLM_BASE_URL` on loopback (every process that makes model calls, in every posture) | Point it at the gateway. If the cluster really does serve the model on loopback, as a sidecar or the `chemclaw.cli.mock_llm` mock in the same pod, set `CHEMCLAW_LLM_ALLOW_LOOPBACK_GATEWAY=true` to say so. |
+| `CHEMCLAW_HARNESS_AUTONOMY=plan_only` with `CHEMCLAW_HARNESS_ENABLED=false` | The chart already sets the harness on. Without the chart, set `CHEMCLAW_HARNESS_ENABLED=true`. |
+| An `HTTP(S)_PROXY`/`ALL_PROXY` in the pod environment that is not declared | Unset it, put the proxy host in `CHEMCLAW_EGRESS_ALLOW`, or set `NO_PROXY=*`. |
+| A non-loopback `http://` result sink or delivery channel (refused when the sink or channel is built rather than at import) | Use `https://`, or leave the sink or channel disabled. |
+
+What a test cluster under enforcement does **not** need is `CHEMCLAW_SERVICE_ALLOW_INSECURE` or
+`CHEMCLAW_WORKER_ALLOW_UNAUTHENTICATED`. Both are opt-outs for running with sign-in *off*, and they
+have no effect once it is on.
+
 ### The setting that does *not* block boot, and closes every expensive job
 
 **`CHEMCLAW_ENTRA_PRIVILEGED_ROLES` ships empty, and empty means every expensive job is refused for
