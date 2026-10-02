@@ -265,10 +265,10 @@ _INSTRUCTION_BLOCKS: tuple[PromptBlock, ...] = (
         "out to be right, because the record is what the chemist is entitled to and a fluent "
         "answer is indistinguishable from a grounded one once it is written down. If the sweep "
         "comes back empty, say the record is silent on it, and label whatever you add after that "
-        "as your own background knowledge rather than as this programme's. At the start of a "
-        "conversation call recall_preferences, which carries what this chemist has previously "
-        "asked you to remember across sessions; nothing else in a new conversation carries it "
-        "except what you wrote under /memories/ yourself.\n",
+        "as your own background knowledge rather than as this programme's. What this chemist "
+        "has asked you to remember across sessions is listed at the end of these instructions "
+        "whenever they have set anything (call recall_preferences to re-read it); nothing else "
+        "in a new conversation carries it except what you wrote under /memories/ yourself.\n",
         frozenset({"gather_evidence", "recall_preferences"}),
     ),
     PromptBlock(

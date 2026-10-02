@@ -165,3 +165,49 @@ def test_the_lane_starts_rxnpredict_with_its_deterministic_doubles() -> None:
     forward, conditions = json.loads(done.stdout.strip().splitlines()[-1])
     assert forward == [defaults["CHEMCLAW_RXNPREDICT_ENABLED_FORWARD_MODELS"]]
     assert conditions == [defaults["CHEMCLAW_RXNPREDICT_ENABLED_CONDITIONS_MODELS"]]
+
+
+def _stand_in_export(forward: str, conditions: str) -> str:
+    """What `processes.sh` exports as `CHEMCLAW_CONNECTOR_STAND_INS` under these predictor picks.
+
+    Runs the script's own `case` block under bash rather than re-stating its pattern here, so the
+    assertion is about the shell the lane executes.
+    """
+    text = _PROCESSES.read_text(encoding="utf-8")
+    block = re.search(
+        r'^case "\$CHEMCLAW_RXNPREDICT_ENABLED_FORWARD_MODELS.*?^esac$', text, re.M | re.S
+    )
+    assert block is not None, f"{_PROCESSES} no longer marks the rxnpredict doubles as stand-ins"
+    env = {k: v for k, v in os.environ.items() if not k.startswith("CHEMCLAW_")} | {
+        "CHEMCLAW_RXNPREDICT_ENABLED_FORWARD_MODELS": forward,
+        "CHEMCLAW_RXNPREDICT_ENABLED_CONDITIONS_MODELS": conditions,
+    }
+    done = subprocess.run(
+        ["bash", "-c", f'{block.group(0)}\nprintf %s "${{CHEMCLAW_CONNECTOR_STAND_INS:-}}"'],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=True,
+    )
+    return done.stdout
+
+
+def test_the_lane_says_its_rxnpredict_doubles_are_stand_ins() -> None:
+    """A double the lane starts is named a stand-in, and real weights are not.
+
+    The doubles answer every input with the same products, and a real model on the lane presented
+    one as a forward prediction that "confirms" a product. Core only says so when the deployment
+    names the connector (`agent/tool_framing.py::stand_in_notice`), so the lane has to name it
+    whenever it is what the lane started — and only then.
+    """
+    defaults = _rxnpredict_lane_defaults()
+    assert (
+        _stand_in_export(
+            defaults["CHEMCLAW_RXNPREDICT_ENABLED_FORWARD_MODELS"],
+            defaults["CHEMCLAW_RXNPREDICT_ENABLED_CONDITIONS_MODELS"],
+        )
+        == "rxnpredict"
+    )
+    assert _stand_in_export("rxnfm,chemformer", "fake_c") == "rxnpredict"
+    assert _stand_in_export("rxnfm,chemformer", "reaction_t5") == ""

@@ -44,6 +44,17 @@ class ConnectorSettings(BaseSettings):
     # CHEMCLAW_CONNECTOR_URLS='{"molfp":"http://chemclaw-connector-molfp:8080/mcp"}'.
     connector_urls: dict[str, str] = Field(default_factory=dict)
 
+    # Connectors that are served, on this deployment, by a **stand-in** — a deterministic test
+    # double that answers every input with the same fixed output — rather than by the capability
+    # their manifest describes. Pathsep-delimited names, empty by default (production serves the
+    # real thing). The live lane sets it when it starts `rxnpredict` on its `fake_a`/`fake_c`
+    # doubles (`infra/live/processes.sh`): measured on 2026-10-02, the model read a double's fixed
+    # acetanilide as a forward prediction and told the chemist "the forward reaction prediction
+    # confirms" a product. Nothing in the result said it came from a double, so nothing could stop
+    # it. A name here makes `agent/tool_framing.py` say so, as this system's own sentence, on every
+    # successful result that connector returns. Read through `connector_stand_ins_list`.
+    connector_stand_ins: str = ""
+
     # What an unreachable enabled connector means. Default (`false`) is *degrade loudly*: the
     # service still starts, the failure is logged, reported by `/readyz` and counted by the
     # `chemclaw_connectors_unhealthy` gauge, and that connector's tools are simply not
@@ -309,6 +320,11 @@ class ConnectorSettings(BaseSettings):
     def connectors_dirs(self) -> list[str]:
         """The connector bundle directories, split on the OS path separator (like `PATH`)."""
         return [d for d in self.connectors_dir.split(os.pathsep) if d]
+
+    @property
+    def connector_stand_ins_list(self) -> list[str]:
+        """The connectors this deployment serves from a stand-in rather than the real capability."""
+        return [c.strip() for c in self.connector_stand_ins.split(os.pathsep) if c.strip()]
 
     @property
     def connectors_enabled_list(self) -> list[str]:

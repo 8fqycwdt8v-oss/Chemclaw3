@@ -180,6 +180,15 @@ export CHEMCLAW_CONNECTORS_REQUIRED="${CHEMCLAW_CONNECTORS_REQUIRED:-true}"
 # reaches the loop gets them; a lane pointed at real weights overrides both.
 export CHEMCLAW_RXNPREDICT_ENABLED_FORWARD_MODELS="${CHEMCLAW_RXNPREDICT_ENABLED_FORWARD_MODELS:-fake_a}"
 export CHEMCLAW_RXNPREDICT_ENABLED_CONDITIONS_MODELS="${CHEMCLAW_RXNPREDICT_ENABLED_CONDITIONS_MODELS:-fake_c}"
+# **A double has to say it is one, in the result the model reads.** The doubles return the same
+# fixed products for every input, and on 2026-10-02 a real model on this lane told the chemist "the
+# forward reaction prediction confirms" a product `fake_a` returns for anything. Naming the connector
+# in `CHEMCLAW_CONNECTOR_STAND_INS` makes core put its own stand-in notice on every result it
+# returns (`agent/tool_framing.py::stand_in_notice`). Keyed on the doubles actually being selected,
+# so a lane pointed at real weights reads its predictions as predictions.
+case "$CHEMCLAW_RXNPREDICT_ENABLED_FORWARD_MODELS,$CHEMCLAW_RXNPREDICT_ENABLED_CONDITIONS_MODELS" in
+  *fake_*) export CHEMCLAW_CONNECTOR_STAND_INS="${CHEMCLAW_CONNECTOR_STAND_INS:-rxnpredict}" ;;
+esac
 
 # Traces, when something is listening for them. `make phoenix-up` puts an OTLP receiver on 4317;
 # with nothing there the exporter retries in the background and the run is unaffected, which is why
