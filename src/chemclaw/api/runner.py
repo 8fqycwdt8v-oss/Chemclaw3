@@ -155,6 +155,11 @@ _OUTCOMES = (
 )
 
 
+# `classify_model_failure` labels that mean the model provider failed rather than the request
+# being wrong: retried by the SDK already, and transient as far as the chemist can tell.
+_PROVIDER_FAILURES = frozenset({"timeout", "rate_limited", "transport"})
+
+
 def _classify(error: BaseException) -> tuple[ErrorCode, bool]:
     """Map a turn failure onto a user-facing code and whether retrying could plausibly help.
 
@@ -177,8 +182,20 @@ def _classify(error: BaseException) -> tuple[ErrorCode, bool]:
     the same function keeps the two readings of one failure from disagreeing again. Not retryable:
     the same thread overflows the same window.
     """
-    if classify_model_failure(error) == "context_length":
+    model_failure = classify_model_failure(error)
+    if model_failure == "context_length":
         return "context_length", False
+    # **And the provider's other failures, through the same classifier, for the same reason.**
+    # Measured on the kind cluster (2026-10-03) with the scripted mock answering HTTP 500: the SDK
+    # retried, `model.call_failed … (transport: OpenAIAPIError)` was logged, and the turn reported
+    # `internal`, not retryable — "an internal error" for a gateway that was down, beside a log line
+    # that already said so. `langchain_openai` re-raises a 5xx as `OpenAIAPIError` (an
+    # `InternalServerError`), a dead socket as `OpenAIConnectionError`, a 429 as a `RateLimitError`:
+    # none is a builtin `TimeoutError`, so only the stream-stall arm below ever reached
+    # `llm_timeout`. Every one of them is the same instruction to the chemist — the model provider
+    # failed, it is usually transient, ask again — which is what `llm_timeout` already says.
+    if model_failure in _PROVIDER_FAILURES:
+        return "llm_timeout", True
     if isinstance(error, ConnectionError):
         return "storage_unavailable", True
     if isinstance(error, TimeoutError):
@@ -1969,9 +1986,11 @@ _FAILURE_REASONS: dict[ErrorCode, str] = {
         "The conversation has grown too long for the model to read in one request; start a new "
         "session or ask a narrower question"
     ),
+    # Every provider-side failure: a stall, a timeout, a 429, a 5xx or a refused socket — the
+    # sentence names the provider without claiming which, because the remedy is the same.
     "llm_timeout": (
-        "The model provider stopped responding before the turn finished; this is usually "
-        "temporary, so try again in a moment"
+        "The model provider failed to answer before the turn finished (it stopped responding, was "
+        "overloaded or returned an error); this is usually temporary, so try again in a moment"
     ),
     "storage_unavailable": (
         "The turn could not be completed because its database was unavailable; try again in a "

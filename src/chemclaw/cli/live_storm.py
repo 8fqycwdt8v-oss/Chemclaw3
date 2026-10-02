@@ -506,8 +506,11 @@ async def family_f_adversarial() -> list[Finding]:
         ),
         (
             "f-http-500",
-            "an upstream model outage reaches the asker as an error",
-            lambda r: r.error_code is not None or r.status != 200,
+            # As the *provider's* failure, retryable — not `internal`. Any error code used to
+            # satisfy this, and `internal` is exactly what it was until `_classify` asked
+            # `classify_model_failure` about the transport family too.
+            "an upstream model outage reaches the asker as the model provider's failure",
+            lambda r: r.error_code == "llm_timeout",
         ),
     ]
     findings: list[Finding] = []
