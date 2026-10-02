@@ -717,7 +717,7 @@ def test_a_helpers_report_is_bounded_by_this_repositorys_own_ceiling() -> None:
 
     The band is what makes this more than tidiness. Upstream's `FilesystemMiddleware` evicts a
     result over `tool_token_limit_before_evict` (20,000 tokens x 4 chars = 80,000) to
-    `/large_tool_results/`, and `agent_max_tool_result_chars` is 60,000 — so between the two,
+    `/large_tool_results/`, and `agent_max_tool_result_chars` was 60,000 — so between the two,
     nothing applied. Measured before the fix: a 70,048-character report reached the caller's thread
     whole.
 

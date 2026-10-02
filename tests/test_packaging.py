@@ -105,3 +105,68 @@ def test_the_console_script_points_at_a_module_that_exists() -> None:
     assert re.search(rf"^def {attribute}\b", path.read_text(), re.MULTILINE), (
         f"console script {script!r}: {path.name} defines no `{attribute}`"
     )
+
+
+# What the image must not carry: the CUDA runtime a GPU build drags in. Matched by prefix against
+# the lock's package names.
+_GPU_RUNTIME_PREFIXES = ("nvidia-", "triton", "cuda-")
+# The marker `[tool.uv] override-dependencies` uses to remove a transitive requirement: no platform
+# satisfies it, so the edge is in the lock and never installed.
+_NEVER = "sys_platform == 'never'"
+
+
+def _locked_packages() -> list[dict[str, Any]]:
+    with (_ROOT / "uv.lock").open("rb") as handle:
+        packages: list[dict[str, Any]] = tomllib.load(handle)["package"]
+    return packages
+
+
+def test_linux_installs_the_cpu_build_of_torch() -> None:
+    """The lock gives Linux the CPU torch, not the CUDA build PyPI defaults to there.
+
+    torch is a runtime dependency (bofire[optimization] -> botorch), and on linux/x86_64 PyPI's
+    default wheel is the CUDA build. It put `nvidia-*`, `triton` and a CUDA libtorch, ~4.7 GB, into
+    a CPU-only image. `[tool.uv.sources]` routes torch to the PyTorch CPU index on Linux. This reads
+    the *lock*, because the lock decides what `uv sync --frozen` installs in `deploy/Containerfile`:
+    a source that stopped applying (for example, torch no longer declared directly, the only case
+    uv honours a source for) would show up here as a PyPI torch for Linux.
+    """
+    torches = [pkg for pkg in _locked_packages() if pkg["name"] == "torch"]
+    linux = [
+        pkg
+        for pkg in torches
+        if any("sys_platform == 'linux'" in marker for marker in pkg.get("resolution-markers", []))
+    ]
+    assert linux, f"no torch in uv.lock is resolved for Linux: {[p['version'] for p in torches]}"
+    for pkg in linux:
+        assert pkg["source"].get("registry") == "https://download.pytorch.org/whl/cpu", (
+            f"torch {pkg['version']} for Linux comes from {pkg['source']}, not the CPU index — "
+            "the image gets the CUDA build and its multi-GB runtime back"
+        )
+
+    # `make deps-audit` cannot look a `+cpu` local version up on PyPI and skips it; what keeps
+    # torch audited is that the PyPI torch the other platforms lock is the *same* public version.
+    # Let Linux drift to another release and its torch is never audited at all.
+    audited = {pkg["version"] for pkg in torches if "+" not in pkg["version"]}
+    for pkg in linux:
+        public = pkg["version"].split("+", 1)[0]
+        assert public in audited, (
+            f"Linux torch {pkg['version']} has no PyPI twin in uv.lock ({sorted(audited)}), so "
+            "deps-audit skips it. Relock both platforms to one torch release."
+        )
+
+
+def test_nothing_in_the_lock_installs_a_gpu_runtime() -> None:
+    """No package in the closure pulls a CUDA/NCCL/Triton runtime on any platform that installs it.
+
+    Two edges carried one: torch's (closed by the CPU index above) and xgboost's
+    `nvidia-nccl-cu12` on Linux (~400 MB, closed by `override-dependencies`). A new dependency that
+    brings a third one fails here, not in an image someone has to `kind load`.
+    """
+    edges = [
+        f"{pkg['name']} {pkg['version']} -> {dep['name']} ({dep.get('marker', 'always')})"
+        for pkg in _locked_packages()
+        for dep in pkg.get("dependencies", [])
+        if dep["name"].startswith(_GPU_RUNTIME_PREFIXES) and _NEVER not in dep.get("marker", "")
+    ]
+    assert not edges, "GPU runtime(s) in the locked closure:\n" + "\n".join(edges)
