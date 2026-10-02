@@ -32,6 +32,7 @@ from langchain_core.language_models import GenericFakeChatModel
 from langchain_core.messages import (
     AIMessage,
     AnyMessage,
+    BaseMessage,
     HumanMessage,
     SystemMessage,
     ToolMessage,
@@ -63,6 +64,7 @@ from chemclaw.agent.context_budget import (
 from chemclaw.agent.context_budget import _prefix as _prefix_var
 from chemclaw.agent.framing import SYSTEM_SPEECH_MARK, defang
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
+from chemclaw.agent.loop_cap import WRAP_UP_NOTE, begin_loop_watch, end_loop_watch
 from chemclaw.agent.message_pairing import calls_without_adjacent_results
 from chemclaw.agent.profiles import get_profile
 from chemclaw.core.config import settings
@@ -1462,6 +1464,159 @@ def test_the_shipped_budget_leaves_the_thread_what_its_derivation_claims() -> No
     finally:
         reset_calibration()
         _prefix_var.reset(token)
+
+
+def test_the_prefix_basis_is_the_bound_both_defaults_are_derived_from() -> None:
+    """`agent_context_prefix_basis` is `PREFIX_BOUND`, so it moves in the commit the ceiling does.
+
+    The basis is how much prefix the two budgets are charged before the excess is paid in spend
+    (`context_budget.effective_trigger`). Below the bound it would take thread from every
+    deployment the ratchet admits; above it, it would let a request bill past the budget with no
+    deployment having bound anything extra. Equal is the only value that is a derivation.
+    """
+    from tests.test_context_floor import PREFIX_BOUND
+
+    assert settings.agent_context_prefix_basis == PREFIX_BOUND, (
+        f"agent_context_prefix_basis is {settings.agent_context_prefix_basis} and PREFIX_BOUND is "
+        f"{PREFIX_BOUND}: the basis is the prefix both context defaults are derived from, so a "
+        "ceiling or allowance raise moves all three in one commit"
+    )
+
+
+def test_binding_every_published_bundle_costs_spend_not_thread() -> None:
+    """A deployment that binds more than the chart keeps the chart's thread, cold and warm.
+
+    **The defect this exists for was measured on the four-repo lane, and nothing here could see
+    it.** `infra/live/e2e-full-stack/up.sh` binds every bundle the fleet publishes — a choice any
+    deployment may make — and `tests/test_context_floor.FLEET_PUBLISHED_ALLOWANCE`'s own comment
+    recorded that this puts the lane's prefix over `PREFIX_BOUND` "by roughly their schemas" and
+    left the consequence unasserted. The consequence, live on 2026-10-02 with DeepSeek V4: a
+    109,743-token prefix against the 118,700 budget left the window **8,957** tokens of thread and
+    the lossless edit **1,857**; results were cleared before the model read them, every clearing
+    forgave the repeat guard, and research turns re-expanded the same notes until the loop cap.
+
+    So this drives the lane's bound — the ratchet's bound plus every published bundle, which
+    over-counts the three both repositories declare, the conservative direction — and asserts what
+    a deployment binding it keeps: exactly what a deployment at `PREFIX_BOUND` keeps, on a cold
+    process and on one calibrated on evidence traffic, with the lossless edit still firing first.
+    Before `agent_context_prefix_basis` both triggers floored at 1 here.
+    """
+    from tests.test_context_floor import FLEET_PUBLISHED_ALLOWANCE, PREFIX_BOUND
+
+    budget = settings.agent_context_token_budget
+    clear = settings.agent_tool_result_clear_trigger
+    reset_calibration()
+    try:
+        for warm in (False, True):
+            if warm:
+                _observe_evidence_traffic()
+            at_bound = _prefix_var.set(PREFIX_BOUND)
+            try:
+                chart = (effective_trigger(clear), effective_trigger(budget))
+            finally:
+                _prefix_var.reset(at_bound)
+            lane = _prefix_var.set(PREFIX_BOUND + FLEET_PUBLISHED_ALLOWANCE)
+            try:
+                bound_everything = (effective_trigger(clear), effective_trigger(budget))
+            finally:
+                _prefix_var.reset(lane)
+            arm = "calibrated" if warm else "cold"
+            assert bound_everything == chart, (
+                f"on a {arm} process a deployment binding every published bundle leaves the "
+                f"lossless edit and the window {bound_everything} estimated tokens of thread where "
+                f"one at PREFIX_BOUND keeps {chart}: the bundles it chose to bind are being paid "
+                "for in thread rather than in spend"
+            )
+            if not warm:
+                assert bound_everything[0] >= CLEAR_TRIGGER_THREAD_ALLOWANCE
+                assert bound_everything[1] >= BUDGET_THREAD_ALLOWANCE
+            assert bound_everything[0] < bound_everything[1], (
+                "the lossless edit no longer fires before the window on the lane's surface"
+            )
+    finally:
+        reset_calibration()
+
+
+class _AlwaysOneMoreTool(GenericFakeChatModel):
+    """Calls one more tool every step until it is told it is at the cap, then answers.
+
+    The shape of the capped research turns on the 2026-10-02 lane, minus the model: a thread that
+    grows past the window every step, and a wrap-up call whose request carries the cap's note.
+    """
+
+    calls: int = 0
+    wrap_up_saw: list[BaseMessage] = []
+
+    def bind_tools(self, tools: Any, **kwargs: Any) -> Any:
+        """Stay unbound; the tool calls are scripted below."""
+        return self
+
+    def _generate(
+        self, messages: Any, stop: Any = None, run_manager: Any = None, **kwargs: Any
+    ) -> ChatResult:
+        self.calls += 1
+        if isinstance(messages[-1], HumanMessage) and messages[-1].content == WRAP_UP_NOTE:
+            self.wrap_up_saw[:] = list(messages)
+            return ChatResult(generations=[ChatGeneration(message=AIMessage("answered"))])
+        call = {
+            "name": "write_todos",
+            "args": {"todos": [{"content": "x" * 400, "status": "pending"}]},
+            "id": f"todo-{self.calls}",
+            "type": "tool_call",
+        }
+        return ChatResult(
+            generations=[ChatGeneration(message=AIMessage(content="", tool_calls=[call]))]
+        )
+
+
+def test_the_wrap_up_at_the_cap_still_carries_the_chemists_question(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The window never cuts the latest message the chemist sent, even at the loop cap.
+
+    `loop_cap.AnswerAtTheCap` appends its wrap-up note to the request from *outside* the
+    compaction group, as a human-role message. The window treated it as the newest conversation
+    group and its one guarantee — never cut past the newest group — protected the note and cut the
+    question: on the 2026-10-02 lane a capped research turn's final call carried the system prompt
+    and the note alone, and the chemist was told "No question has been asked yet".
+
+    Driven through the compiled graph, because the defect is in the ordering of two middlewares and
+    no unit of either one contains it. The thread budget is set below what the turn's own tool
+    calls cost, so the window must cut on every call — and the question must survive the cut.
+    """
+    monkeypatch.setattr(settings, "harness_enabled", True)
+    monkeypatch.setattr(settings, "harness_max_loop_iterations", 4)
+    monkeypatch.setattr(settings, "agent_max_turn_billed_tokens", 0)
+    # A basis of 0 makes the budget a pure thread budget, so the cut does not depend on the
+    # measured prefix of this graph.
+    monkeypatch.setattr(settings, "agent_context_prefix_basis", 0)
+    monkeypatch.setattr(settings, "agent_context_token_budget", 120)
+    monkeypatch.setattr(settings, "agent_tool_result_clear_trigger", 120)
+    reset_calibration()
+    question = "Which bases gave the highest yield for the aryl chloride couplings?"
+    earlier = [HumanMessage("An earlier turn, " + "long " * 200), AIMessage("An earlier answer.")]
+    model = _AlwaysOneMoreTool(messages=iter([]))
+    graph = build_langgraph_agent(model=model)
+    token = begin_loop_watch()
+    try:
+        asyncio.run(
+            graph.ainvoke(
+                {"messages": [*earlier, HumanMessage(question)]},
+                {"configurable": {"thread_id": "wrap-up-keeps-the-question"}},
+            )
+        )
+    finally:
+        end_loop_watch(token)
+
+    assert model.wrap_up_saw, "the turn never reached its wrap-up, so this drove nothing"
+    sent = [m for m in model.wrap_up_saw if not isinstance(m, SystemMessage)]
+    assert not any("An earlier turn" in str(m.content) for m in sent), (
+        "the window did not cut at all, so this is not evidence about what it keeps"
+    )
+    assert any(isinstance(m, HumanMessage) and m.content == question for m in sent), (
+        "the wrap-up call at the loop cap was sent without the chemist's question: "
+        f"{[type(m).__name__ + ':' + str(m.content)[:40] for m in sent]}"
+    )
 
 
 #: A word-and-punctuation tokenizer, standing in for a provider's meter.

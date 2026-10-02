@@ -92,8 +92,13 @@ shipped; that ADR's trigger says when the question reopens.
 results and a first-party conversation window, both non-destructive inside `wrap_model_call`, with
 `chemclaw_context_compactions_total` making it checkable. The budgets are **billed**-token budgets,
 converted by a ratio `agent/context_budget.py` measures from the provider's own `input_tokens` and
-clamps so it can only tighten, and they charge the request's own prefix unconditionally — so
-`agent_context_token_budget` bounds **request** spend, not thread spend. Read the arithmetic in
+clamps so it can only tighten, and they charge the request's own prefix unconditionally — up to
+`agent_context_prefix_basis`, which is `PREFIX_BOUND` — so `agent_context_token_budget` bounds
+**request** spend, not thread spend, and a deployment that binds more bundles than the chart pays
+the excess in spend rather than thread
+(`D-2026-10-02-a-prefix-beyond-the-derivation-basis-is-paid-in-spend-not-thread`); a declared
+window is still charged the whole prefix. A request-only note is never a conversation group, so the
+window never cuts the chemist's latest message. Read the arithmetic in
 `core/config/agent.py` — both defaults are *derived* from `tests/test_context_floor.PREFIX_BOUND` plus the thread allowances `tests/test_compaction.py` holds, and the derivation is the thing to
 read, never the result. The prefix floor is `tests/test_context_floor.py`: `CEILINGS["__default__"]` is the live ceiling, `PREFIX_BOUND` adds
 `SERVED_ELSEWHERE_ALLOWANCE` for the bundles this repository does not serve and cannot watch, and the fixture must bind

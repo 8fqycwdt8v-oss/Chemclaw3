@@ -929,10 +929,16 @@ SERVED_ELSEWHERE_ALLOWANCE = 11_000
 #: `CHEMCLAW_CONNECTORS_ENABLED` — it is the full-stack test, and with the list empty it started
 #: five opt-in servers the front door never bound — so it binds the fleet-only `pyexec` *and* the
 #: five `default_enabled: false` process-development bundles, and its prefix is over `PREFIX_BOUND`
-#: by roughly their schemas. That leaves the clear trigger's thread allowance well short of the
-#: 30,000 `core/config/agent.py` derives it to be. It is stated rather than absorbed: raising
-#: `SERVED_ELSEWHERE_ALLOWANCE` to cover it would move both defaults for every deployment on
-#: account of a lane that talks to `chemclaw.cli.mock_llm`.
+#: by roughly their schemas. Raising `SERVED_ELSEWHERE_ALLOWANCE` to cover it would move both
+#: defaults for every deployment on account of one lane, so it is not absorbed there — and **it
+#: is not free either, which this paragraph used to imply by saying only that the clear trigger's
+#: thread fell "well short"**. Both triggers subtracted the whole prefix, so the lane's thread was
+#: what paid: measured 2026-10-02 against a real gateway model, a 109,743-token prefix left the
+#: window 8,957 tokens and the lossless edit 1,857, and research turns looped to the step cap.
+#: `agent_context_prefix_basis` (= `PREFIX_BOUND`) is where the excess is now charged to spend
+#: instead, and
+#: `tests/test_compaction.py::test_binding_every_published_bundle_costs_spend_not_thread` drives
+#: this lane's bound — `PREFIX_BOUND` plus this allowance — against both triggers.
 #:
 #: What this bounds instead is the *growth* of the half nothing else here watches. A bundle the
 #: fleet adds to `manifests/` lands in this total and nowhere else in this repository, which is the

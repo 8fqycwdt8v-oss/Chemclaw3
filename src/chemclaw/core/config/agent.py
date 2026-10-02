@@ -317,6 +317,27 @@ class AgentSettings(BaseSettings):
     # allowance intact. The budget below cannot follow, because it is derived downwards from the
     # model's window — which is why a ceiling raise costs the budget's thread and never this one's.
     agent_tool_result_clear_trigger: int = Field(default=111_600, ge=1)
+    # **The prefix the two numbers above were derived for, and the most of it they are charged.**
+    # Both are a prefix bound plus a thread allowance, and the prefix bound is one connector
+    # surface's — the chart's. A deployment that binds more bundles than that (a choice it may make:
+    # `D-2026-09-20-declaring-a-capability-and-binding-it-are-different-decisions`) sends a larger
+    # prefix against the same two numbers, and subtracting all of it took the difference out of
+    # the *thread*, silently. Measured 2026-10-02 on the four-repo lane, every published bundle
+    # bound: a 109,743-token prefix left the window 8,957 tokens of thread and the lossless edit
+    # 1,857, so results were cleared before the model had read them and research turns looped to
+    # the step cap — and nothing warned, because neither trigger floored.
+    #
+    # So `context_budget.effective_trigger` charges the budget at most this much prefix, and the
+    # excess is paid in spend: the thread keeps exactly what the derivation gives it at the bound,
+    # whatever a deployment binds, and the excess is reported once (`context.prefix_over_basis`). A
+    # declared `llm_context_window_tokens` is still charged the whole prefix, so this never buys
+    # room a model does not have; `agent_max_turn_billed_tokens` still bounds the turn.
+    #
+    # It is `tests/test_context_floor.PREFIX_BOUND` by derivation, and
+    # `tests/test_compaction.py` asserts the equality — so a ceiling raise moves it in the same
+    # commit as the two defaults it is the basis of.
+    # D-2026-10-02-a-prefix-beyond-the-derivation-basis-is-paid-in-spend-not-thread.
+    agent_context_prefix_basis: int = Field(default=83_850, ge=0)
     # **What the two numbers above are denominated in, which used to be left unsaid and was wrong.**
     # Both are counted with `count_tokens_approximately` — chars/4 — and that estimator is content
     # dependent in one direction. Re-measured 2026-09-06 against real BPE encodings, on the observed

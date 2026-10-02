@@ -61,6 +61,7 @@ from typing import Any
 from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse, before_model
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
+from chemclaw.agent.compaction import request_note
 from chemclaw.core.config import settings
 from chemclaw.core.model_prose import ModelProse
 
@@ -314,7 +315,10 @@ class AnswerAtTheCap(AgentMiddleware[Any, Any, Any]):
             return request
         return request.override(
             tool_choice="none" if request.tools else None,
-            messages=[*request.messages, HumanMessage(WRAP_UP_NOTE)],
+            # A `request_note`, not a bare `HumanMessage`: this runs outside the compaction group,
+            # so the conversation window sees the note — and a note read as the newest turn is
+            # what the window protected while it cut the chemist's question away.
+            messages=[*request.messages, request_note(WRAP_UP_NOTE)],
         )
 
     @staticmethod

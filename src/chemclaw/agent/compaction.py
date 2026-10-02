@@ -230,6 +230,38 @@ def _placeholder(extra: str = "") -> str:
 
 TOOL_RESULT_PLACEHOLDER = _placeholder()
 
+# The `response_metadata` key that marks a `HumanMessage` as a note a middleware appended to *this
+# request* rather than a message the thread holds. Nothing reads it but `_opens_a_group`.
+_REQUEST_NOTE = "chemclaw_request_note"
+
+
+def request_note(text: str) -> HumanMessage:
+    """A human-role note for one request, which the conversation window will not treat as a turn.
+
+    **A group is a chemist's message and everything that answers it, and a note is neither.**
+    `loop_cap.AnswerAtTheCap` appends its wrap-up instruction to the request as a `HumanMessage`,
+    from a middleware *outside* this group, so the window edit receives it as the newest message of
+    its role. Read as a group start, it became the newest group — and the window's one guarantee,
+    "never cut past the newest group", protected the note and cut everything before it. Measured on
+    the 2026-10-02 live lane, where the window had 8,942 tokens of thread: the capped turn's
+    wrap-up call carried the system prompt and the note, the chemist's question had been cut, and
+    the answer the chemist received was "No question has been asked yet".
+
+    Marked in `response_metadata` because that field is never serialised into a provider request,
+    so the note reaches the model exactly as it did before; the mark is read only here.
+    """
+    return HumanMessage(text, response_metadata={_REQUEST_NOTE: True})
+
+
+def _opens_a_group(message: AnyMessage) -> bool:
+    """Whether `message` starts a conversation group: a human message the thread holds.
+
+    A `request_note` is human-role and starts nothing, so the newest group is always the one the
+    chemist's own latest message opens — which is what `KeepLastConversationGroupsEdit` clamps to.
+    """
+    return isinstance(message, HumanMessage) and not message.response_metadata.get(_REQUEST_NOTE)
+
+
 # The note ids inside a cleared result, so a citation index survives a clearing that its bodies do
 # not. Reads `EvidenceChunk.source_note_id` out of the result's own repr — this repository's model,
 # not an arbitrary tool's, which is the whole of why this is not the coupling the class docstring
@@ -645,9 +677,10 @@ class KeepLastConversationGroupsEdit(ContextEdit):
         budget = effective_trigger(self.trigger)
         if count_tokens(messages) <= budget:
             return
-        starts = [
-            index for index, message in enumerate(messages) if isinstance(message, HumanMessage)
-        ]
+        # Group starts are the human messages the *thread* holds — a `request_note` appended to
+        # this request is not one, or the clamp below would protect the note and cut the chemist's
+        # question (see `request_note`).
+        starts = [index for index, message in enumerate(messages) if _opens_a_group(message)]
         if not starts:
             # No group boundary to cut on, so no cut this edit can take without stranding a pairing.
             return
@@ -1208,7 +1241,7 @@ def _group_count(messages: Sequence[AnyMessage]) -> int:
     message and everything that answers it, which is why a cut on that boundary can never separate
     a tool call from its result.
     """
-    return sum(1 for message in messages if isinstance(message, HumanMessage))
+    return sum(1 for message in messages if _opens_a_group(message))
 
 
 def _cleared_calls(messages: Sequence[AnyMessage]) -> list[tuple[str, str, Any]]:

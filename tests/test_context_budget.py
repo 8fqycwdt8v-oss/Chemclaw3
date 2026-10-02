@@ -17,6 +17,7 @@ handed, which is where the defects were:
 """
 
 import asyncio
+import itertools
 import logging
 import threading
 import time
@@ -467,6 +468,55 @@ def test_the_floor_report_stops_at_its_own_cap(
         reset_floor_reports()
 
 
+def test_a_prefix_past_the_basis_is_paid_in_spend_and_said_once(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Binding more than the budgets were derived for costs the request, not the thread.
+
+    The 2026-10-02 live lane, in miniature: the budget is a prefix basis plus a thread allowance,
+    the deployment's real prefix is larger than the basis, and the old arithmetic took the whole
+    difference out of the thread — 118,700 against a 109,743-token prefix left 8,957 — with no
+    warning, because the trigger never reached the floor. Driven at the boundary in both
+    directions: a prefix at the basis behaves exactly as before, a prefix past it leaves the thread
+    exactly what the basis left it, and a declared window still charges the whole prefix.
+    """
+    monkeypatch.setattr(settings, "llm_context_window_tokens", 0)
+    monkeypatch.setattr(settings, "agent_context_prefix_basis", 80_000)
+    reset_floor_reports()
+    try:
+        with caplog.at_level(logging.WARNING, logger="chemclaw.agent.context_budget"):
+            for prefix in (80_000, 110_000, 110_000):
+                token = _prefix.set(prefix)
+                try:
+                    assert effective_trigger(120_000) == 40_000, (
+                        f"a {prefix}-token prefix against an 80,000 basis left the thread "
+                        f"{effective_trigger(120_000)}: what a deployment binds past the basis "
+                        "must not come out of the thread"
+                    )
+                finally:
+                    _prefix.reset(token)
+            excess = [
+                r
+                for r in caplog.records
+                if getattr(r, "event", None) == "context.prefix_over_basis"
+            ]
+            assert len(excess) == 1, (
+                "a prefix at the basis was reported, or one past it was reported per call: "
+                f"{[r.message for r in caplog.records]}"
+            )
+            assert getattr(excess[0], "excess_tokens", None) == 30_000
+
+            # The window is the provider's limit, so no basis buys room in it.
+            monkeypatch.setattr(settings, "llm_context_window_tokens", 128_000)
+            token = _prefix.set(110_000)
+            try:
+                assert effective_trigger(120_000) == 128_000 - settings.llm_max_tokens - 110_000
+            finally:
+                _prefix.reset(token)
+    finally:
+        reset_floor_reports()
+
+
 def test_the_ambient_prefix_is_put_back_after_the_call(monkeypatch: pytest.MonkeyPatch) -> None:
     """A contextvar that is set and never reset is one turn's prefix budgeting the next one.
 
@@ -670,6 +720,11 @@ def test_a_clean_overrun_reading_means_the_request_fits_its_budget(
       whole, this sweep is red against the old arithmetic at every point with `ratio > 1` and
       `prefix > 0` — it is the unit-level half of
       `tests/test_compaction.py::test_a_calibrated_process_does_not_bill_past_its_budget`.
+    - **Charged up to `agent_context_prefix_basis`**, so the budget's half reads
+      `(min(prefix, basis) + sent) * ratio <= budget`: a prefix past the basis the defaults were
+      derived for is paid in spend rather than thread
+      (`D-2026-10-02-a-prefix-beyond-the-derivation-basis-is-paid-in-spend-not-thread`). The basis
+      axis below includes one larger than every prefix, which is the arithmetic before it existed.
     - **And where a window is declared**, additionally `prefix + sent + llm_max_tokens <= window`,
       which is D-2026-08-28's property, kept: the window arm still caps the budget at
       `window - llm_max_tokens` before the prefix comes off.
@@ -695,40 +750,46 @@ def test_a_clean_overrun_reading_means_the_request_fits_its_budget(
     `test_the_prefix_reaches_the_edits_with_no_window_declared`'s claim, and is proven through the
     middleware there.
     """
-    unsound: list[tuple[int, int, int, int, float, int, int]] = []
+    unsound: list[tuple[int, int, int, int, float, int, int, int]] = []
     degenerate = 0
     degenerate_undeclared = 0
     undeclared_points = 0
-    for window in (0, 32_000, 64_000, 128_000, 200_000, 1_000_000):
-        for prefix in (0, 5_000, 20_000, 43_175, 120_000, 250_000):
-            for reservation in (1_024, 4_096, 32_000):
-                for budget in (10_000, 30_000, 100_000, 400_000):
-                    for ratio in (1.0, 1.5, 2.2, 4.0):
-                        monkeypatch.setattr(settings, "llm_context_window_tokens", window)
-                        monkeypatch.setattr(settings, "llm_max_tokens", reservation)
-                        reset_calibration()
-                        _observe(ratio)
-                        token = _prefix.set(prefix)
-                        try:
-                            trigger = effective_trigger(budget)
-                        finally:
-                            _prefix.reset(token)
-                        for sent in {0, 1, trigger // 2, trigger - 1, trigger}:
-                            if sent < 0 or sent > trigger:
-                                continue
-                            fits_budget = (prefix + sent) * estimator_ratio() <= budget
-                            fits_window = (not window) or (prefix + sent + reservation <= window)
-                            if not window:
-                                undeclared_points += 1
-                            if fits_budget and fits_window:
-                                continue
-                            if trigger == 1:
-                                degenerate += 1
-                                degenerate_undeclared += 0 if window else 1
-                                continue
-                            unsound.append(
-                                (window, prefix, reservation, budget, ratio, trigger, sent)
-                            )
+    for window, prefix, reservation, budget, ratio, basis in itertools.product(
+        (0, 32_000, 64_000, 128_000, 200_000, 1_000_000),
+        (0, 5_000, 20_000, 43_175, 120_000, 250_000),
+        (1_024, 4_096, 32_000),
+        (10_000, 30_000, 100_000, 400_000),
+        (1.0, 1.5, 2.2, 4.0),
+        # The basis the budget is charged up to: none of the prefix, part of it, and all of it —
+        # the last is the arithmetic before `agent_context_prefix_basis` existed.
+        (0, 43_175, 10**9),
+    ):
+        monkeypatch.setattr(settings, "llm_context_window_tokens", window)
+        monkeypatch.setattr(settings, "llm_max_tokens", reservation)
+        monkeypatch.setattr(settings, "agent_context_prefix_basis", basis)
+        reset_calibration()
+        _observe(ratio)
+        token = _prefix.set(prefix)
+        try:
+            trigger = effective_trigger(budget)
+        finally:
+            _prefix.reset(token)
+        for sent in {0, 1, trigger // 2, trigger - 1, trigger}:
+            if sent < 0 or sent > trigger:
+                continue
+            # The budget is charged the prefix up to the basis; the window, whole.
+            charged = min(prefix, basis)
+            fits_budget = (charged + sent) * estimator_ratio() <= budget
+            fits_window = (not window) or (prefix + sent + reservation <= window)
+            if not window:
+                undeclared_points += 1
+            if fits_budget and fits_window:
+                continue
+            if trigger == 1:
+                degenerate += 1
+                degenerate_undeclared += 0 if window else 1
+                continue
+            unsound.append((window, prefix, reservation, budget, ratio, basis, trigger, sent))
 
     assert not unsound, (
         "a request the overrun indicator reads as clean does not fit the budget it was cut to: "
