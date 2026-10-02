@@ -16,6 +16,12 @@ ground truth is constructed, so it needs no model and no credential and runs in 
 chemistry is an accurate judge. `backtest_shape()` states the corpus backtest that would settle
 that and records that it has never run, for `delegation.py`'s reason.
 
+`answer_shape.py` measures what recorded live answers are made of — tables, document-shaped prose,
+structure lists and `render_structure` calls — over the outcome JSON `live.py` writes. It is the
+measurement behind `D-2026-10-02-an-artefact-is-part-of-the-answer-not-an-effect` and one of that
+decision's `Revisit when:` lines is a re-run of it (`python -m chemclaw.evals.answer_shape
+tasks/live-*`).
+
 ## Code here, cases in `data/evals/`
 
 This package holds no test case. The versioned case-set, the retrieval corpus and the committed
