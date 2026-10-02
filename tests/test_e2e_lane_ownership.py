@@ -211,3 +211,33 @@ def test_the_lane_says_its_rxnpredict_doubles_are_stand_ins() -> None:
     )
     assert _stand_in_export("rxnfm,chemformer", "fake_c") == "rxnpredict"
     assert _stand_in_export("rxnfm,chemformer", "reaction_t5") == ""
+
+
+def test_the_labeller_the_lane_starts_is_ready_on_a_fleet_checkout_without_its_models() -> None:
+    """`rxnlabel` comes up ready from a plain fleet checkout, and says which labeller it is.
+
+    The lane starts it from the fleet's own workspace interpreter, which installs no `models`
+    extra by default — so the question that matters is whether that server passes its own readiness
+    probe (it labels a fixture end to end) rather than refusing traffic, and that the version it
+    stamps rows with names the mapper's state, so a row labelled without one goes stale the day
+    weights arrive.
+    """
+    interpreter, reason = sibling_python("CHEMCLAW_MCP_REPO", "Chemclaw3-mcp")
+    if interpreter is None:
+        pytest.skip(f"{SIBLING_SKIP} the labeller's readiness was NOT checked: {reason}")
+    probe = (
+        "from chemclaw_mcp_rxnlabel.engine import version\n"
+        "from chemclaw_mcp_rxnlabel.engine.readiness import verify_labeller\n"
+        "verify_labeller()\n"
+        "print(version.labeller_version())"
+    )
+    done = subprocess.run(
+        [str(interpreter), "-c", probe],
+        capture_output=True,
+        text=True,
+        timeout=600,
+        check=False,
+    )
+    assert done.returncode == 0, done.stderr[-2000:]
+    stamped = done.stdout.strip().splitlines()[-1]
+    assert stamped.startswith("rxnlabel@") and ":mapper@" in stamped, stamped

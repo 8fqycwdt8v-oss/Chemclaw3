@@ -38,6 +38,24 @@ def render(report: StandardizationRekeyReport, seconds: float) -> str:
     return "\n".join(lines)
 
 
+async def rekey(*, apply: bool) -> StandardizationRekeyReport:
+    """The re-key over this deployment's own notes and indexes — the one binding of its arguments.
+
+    Shared by `main` and by the live lane's index step (`cli/live_index.py`), so the lane runs
+    exactly the job an operator runs rather than a second spelling of it.
+    """
+    return await rekey_standardization(
+        apply=apply,
+        notes_dir=settings.knowledge_path,
+        writer=default_writer,
+        molecule_store=default_molecule_store(),
+        reaction_store=default_reaction_store(),
+        # The last day an old id was current. `valid_to` is inclusive, so closing it today
+        # would leave both notes current — both served, no redirect — until midnight.
+        as_of=date.today() - timedelta(days=1),
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     """Preview or apply the re-key and print the counts; `argv` is a parameter for a test."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
@@ -48,18 +66,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     started = time.perf_counter()
-    report = asyncio.run(
-        rekey_standardization(
-            apply=args.apply,
-            notes_dir=settings.knowledge_path,
-            writer=default_writer,
-            molecule_store=default_molecule_store(),
-            reaction_store=default_reaction_store(),
-            # The last day an old id was current. `valid_to` is inclusive, so closing it today
-            # would leave both notes current — both served, no redirect — until midnight.
-            as_of=date.today() - timedelta(days=1),
-        )
-    )
+    report = asyncio.run(rekey(apply=args.apply))
     print(render(report, time.perf_counter() - started))
     return 0
 

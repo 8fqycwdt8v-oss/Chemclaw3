@@ -624,3 +624,232 @@ def test_bootstrap_adopts_services_that_already_answer_instead_of_provisioning(
     assert done.returncode == 0, done.stdout + done.stderr
     assert not calls.exists(), f"provisioned anyway: {calls.read_text()}"
     assert "adopting" in done.stdout
+
+
+# ------------------------------------------------------------------------ the configured backends
+
+
+def _backend_address(name: str, **env: str) -> str:
+    """`processes.sh::backend_address` for `name`, against this checkout's own settings."""
+    script = f"{_function(_PROCESSES, 'backend_address')}backend_address {sys.executable} {name}\n"
+    return _bash(script, _clean_env(**env), cwd=REPO_ROOT).strip()
+
+
+def test_every_configured_backend_is_addressed_by_the_setting_its_client_reads() -> None:
+    """`rxnlabel` was never started, so no reaction was labelled past its record phase (#520).
+
+    The set is a literal (`CONFIGURED_BACKENDS`) because the fleet keeps both manifests where
+    nothing core reads can find them; what is derived is each one's address, from the
+    `<name>_server_url` / `<name>_server_token_env` pair the client module dials. Asked of the
+    settings independently here, and with a moved URL, so the port is not a transcription.
+    """
+    from chemclaw.core.config import settings
+
+    listed = re.search(r"^readonly CONFIGURED_BACKENDS=\((.*?)\)", _PROCESSES.read_text(), re.M)
+    assert listed is not None, f"{_PROCESSES} declares no CONFIGURED_BACKENDS"
+    backends = listed.group(1).split()
+    assert {"calc", "rxnlabel"} <= set(backends), backends
+    for name in backends:
+        port = re.search(r":(\d+)/", getattr(settings, f"{name}_server_url"))
+        assert port is not None
+        token_var = getattr(settings, f"{name}_server_token_env")
+        assert _backend_address(name) == f"{port.group(1)} {token_var}"
+    moved = _backend_address("rxnlabel", CHEMCLAW_RXNLABEL_SERVER_URL="http://127.0.0.1:18865/mcp")
+    assert moved == "18865 CHEMCLAW_RXNLABEL_TOKEN"
+
+
+def _start_backend(tmp_path: Path, name: str, *, served: bool = False, **env: str) -> Any:
+    """Drive `processes.sh::start_backend` with the launch, the poll and the address stubbed."""
+    fleet = tmp_path / "fleet"
+    fleet.mkdir(exist_ok=True)
+    script = (
+        'die() { echo "DIE $*"; exit 1; }\n'
+        "running() { return 1; }\n"
+        f"curl() {{ return {0 if served else 1}; }}\n"
+        'start() { echo "START $* IN $PWD"; }\n'
+        'wait_for() { echo "WAIT $*"; }\n'
+        f"MCP_REPO={fleet}\n"
+        "BACKEND_TOKEN_VARS=()\n"
+        f"{_function(_PROCESSES, 'backend_address')}{_function(_PROCESSES, 'start_backend')}"
+        f"start_backend {name} {sys.executable} /fleet/python\n"
+        'echo "TOKENS ${BACKEND_TOKEN_VARS[*]} = ${CHEMCLAW_RXNLABEL_TOKEN:-unset}"\n'
+    )
+    return subprocess.run(
+        ["bash", "-c", "set -euo pipefail\n" + script],
+        capture_output=True,
+        text=True,
+        env=_clean_env(**env),
+        cwd=REPO_ROOT,
+        check=False,
+    )
+
+
+def test_the_labeller_starts_from_the_fleet_on_its_configured_port_with_both_token_halves(
+    tmp_path: Path,
+) -> None:
+    """The server the background worker dials comes up where the worker dials it, sharing one token.
+
+    The export is what the background worker inherits to *send*, and the same variable is what the
+    fleet's `app.py` reads to *verify* — so it is defaulted once, here, and a caller's own value
+    wins.
+    """
+    done = _start_backend(tmp_path, "rxnlabel")
+    assert done.returncode == 0, done.stdout + done.stderr
+    lines = done.stdout.splitlines()
+    assert lines[0] == (
+        f"START rxnlabel /fleet/python -m uvicorn chemclaw_mcp_rxnlabel.app:app "
+        f"--host 127.0.0.1 --port 8865 IN {tmp_path / 'fleet'}"
+    )
+    assert lines[1] == "WAIT rxnlabel http://127.0.0.1:8865/healthz"
+    assert lines[2] == "TOKENS CHEMCLAW_RXNLABEL_TOKEN = dev-token"
+
+    own = _start_backend(tmp_path, "rxnlabel", CHEMCLAW_RXNLABEL_TOKEN="mine")
+    assert own.stdout.splitlines()[-1] == "TOKENS CHEMCLAW_RXNLABEL_TOKEN = mine"
+
+
+def test_a_backend_port_another_process_serves_is_refused_by_name(tmp_path: Path) -> None:
+    """The collision guard `calc` had, carried to every configured backend."""
+    done = _start_backend(tmp_path, "rxnlabel", served=True)
+    assert done.returncode != 0
+    assert "DIE rxnlabel: 127.0.0.1:8865 is already served" in done.stdout
+    assert "START" not in done.stdout
+
+
+def test_the_backends_come_up_before_the_workers_that_dial_them_and_their_tokens_persist() -> None:
+    """The background worker inherits the labeller's token only if it starts after the export.
+
+    And a second shell — `processes.sh env`, the devenv's restart — reads the same token back, or
+    it 401s against a labeller that is plainly up.
+    """
+    body = _function(_PROCESSES, "up")
+    backends = body.index('start_backend "$backend" "$python" "$fleet_python"')
+    assert backends < body.index("start_worker worker-background")
+    assert 'for backend in "${CONFIGURED_BACKENDS[@]}"; do' in body
+    assert 'for token_var in $(bearer_token_vars "$python") "${BACKEND_TOKEN_VARS[@]}"; do' in body
+    assert backends < body.index('> "$RUN_DIR/connector-env.sh"')
+
+
+# ------------------------------------------------------------------------ up.sh's index step
+
+
+def _index_corpus(
+    tmp_path: Path, env: dict[str, str] | None = None, uv_exit: int = 0
+) -> tuple[subprocess.CompletedProcess[str], Path]:
+    """Run `up.sh::index_corpus` with `uv` stubbed to record its call and print a report."""
+    stubs, calls = tmp_path / "bin", tmp_path / "uv-calls"
+    stubs.mkdir(exist_ok=True)
+    _stub(
+        stubs,
+        "uv",
+        f'echo "$* | NOTE_REPO=$CHEMCLAW_NOTE_REPO_DIR" >>{calls}\n'
+        'echo "some log line"\n'
+        'echo "Fingerprints: reaction fingerprints: 3 re-fingerprinted"\n'
+        'echo "Labels: reaction-labels-lane-drain: labelled 7 reaction(s)"\n'
+        f"exit {uv_exit}",
+    )
+    live = tmp_path / ".live"
+    live.mkdir(exist_ok=True)
+    script = (
+        'log() { echo "LOG $*"; }\n'
+        'die() { echo "DIE $*"; exit 1; }\n'
+        f"REPO_ROOT={REPO_ROOT} LIVE_DIR={live}\n"
+        f"{_function(_UP, 'index_corpus')}"
+        "index_corpus\n"
+        'echo "RETURNED"\n'
+    )
+    return subprocess.run(
+        ["bash", "-c", "set -euo pipefail\n" + script],
+        capture_output=True,
+        text=True,
+        env=_clean_env(PATH=f"{stubs}:{os.environ['PATH']}", **(env or {})),
+        check=False,
+    ), calls
+
+
+def test_the_bring_up_runs_the_index_step_bounded_and_on_the_lanes_own_note_clone(
+    tmp_path: Path,
+) -> None:
+    """The step a deployment's Schedule and operator do, run once per `up` (#520).
+
+    Bounded by a timeout it passes on, and pointed at `.live/knowledge-repo`: the re-key writes a
+    moved compound's successor through the note writer, and an unset `note_repo_dir` is `.` — this
+    checkout. Its summary lines reach the bring-up log, so the operator sees both indexes' state.
+    """
+    done, calls = _index_corpus(tmp_path)
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert calls.read_text().splitlines() == [
+        "run python -m chemclaw.cli.live_index --timeout 600 "
+        f"| NOTE_REPO={tmp_path / '.live/knowledge-repo'}"
+    ]
+    assert "LOG   Fingerprints: reaction fingerprints: 3 re-fingerprinted" in done.stdout
+    assert "LOG   Labels: reaction-labels-lane-drain: labelled 7 reaction(s)" in done.stdout
+    assert "some log line" not in done.stdout, "the full report belongs in its log file"
+    assert "some log line" in (tmp_path / ".live/e2e-corpus-index.log").read_text()
+
+    bounded, calls = _index_corpus(
+        tmp_path, {"CHEMCLAW_LIVE_INDEX_TIMEOUT": "45", "CHEMCLAW_NOTE_REPO_DIR": "/elsewhere"}
+    )
+    assert bounded.returncode == 0
+    assert calls.read_text().splitlines()[-1] == (
+        "run python -m chemclaw.cli.live_index --timeout 45 | NOTE_REPO=/elsewhere"
+    )
+
+
+def test_a_quick_up_skips_the_index_step(tmp_path: Path) -> None:
+    """`CHEMCLAW_LIVE_SKIP_INDEX=true` keeps a bring-up that needs no precedent answers quick."""
+    done, calls = _index_corpus(tmp_path, {"CHEMCLAW_LIVE_SKIP_INDEX": "true"})
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert not calls.exists(), "the index step ran although it was skipped"
+    assert "index step skipped" in done.stdout and "RETURNED" in done.stdout
+
+
+def test_a_failed_index_step_warns_and_the_bring_up_goes_on(tmp_path: Path) -> None:
+    """Non-fatal, like the backfill: every process is up, and the tools say what state they are in.
+
+    The summary lines are still shown, because a failure in one index says nothing about the other.
+    """
+    done, _ = _index_corpus(tmp_path, uv_exit=1)
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "WARNING: the index step reported a failure (exit 1)" in done.stdout
+    assert "LOG   Labels: reaction-labels-lane-drain: labelled 7 reaction(s)" in done.stdout
+    assert done.stdout.rstrip().endswith("RETURNED")
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "said"),
+    [
+        ("CHEMCLAW_LIVE_INDEX_TIMEOUT", "ten", "must be a positive integer"),
+        ("CHEMCLAW_LIVE_INDEX_TIMEOUT", "0", "must be a positive integer"),
+        ("CHEMCLAW_LIVE_SKIP_INDEX", "maybe", "must be true or false"),
+    ],
+)
+def test_a_malformed_index_setting_is_refused_before_anything_runs(
+    tmp_path: Path, name: str, value: str, said: str
+) -> None:
+    """A typo in either setting is named, never read as "skip" or as an unbounded wait."""
+    done, calls = _index_corpus(tmp_path, {name: value})
+    assert done.returncode != 0
+    assert said in done.stdout
+    assert not calls.exists()
+
+
+def test_the_index_step_runs_after_the_backfill_and_the_labeller_credential_is_checked() -> None:
+    """After the backfill, so the drain sees the rows it started; the credential, like `calc`'s."""
+    body = _function(_UP, "up")
+    assert body.index("backfill_corpus") < body.index("index_corpus") < body.index("full stack up")
+    assert re.search(r"assert_credential_accepted rxnlabel \"http://127\.0\.0\.1:8865/mcp\"", body)
+
+
+def test_restarting_the_labeller_is_sent_to_the_script_that_owns_it(tmp_path: Path) -> None:
+    """`up.sh restart rxnlabel` names `processes.sh` instead of killing a pidfile it never wrote."""
+    script = (
+        'die() { echo "DIE $*"; exit 1; }\n'
+        f"REPO_ROOT={REPO_ROOT} MCP_REPO={tmp_path} RUN_DIR={tmp_path}\n"
+        f"{_function(_UP, 'restart')}"
+        "restart rxnlabel\n"
+    )
+    done = subprocess.run(
+        ["bash", "-c", script], capture_output=True, text=True, env=_clean_env(), check=False
+    )
+    assert done.returncode != 0
+    assert "bash infra/live/processes.sh restart rxnlabel" in done.stdout
