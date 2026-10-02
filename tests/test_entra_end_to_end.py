@@ -563,8 +563,10 @@ def test_rotation_latency_is_the_configured_cooldown_and_no_longer(
     with _client() as client:
         assert client.post("/sessions", headers=_bearer(_sign(_KEY_A, "kid-a"))).status_code == 200
         rotated = _sign(_KEY_B, "kid-b", oid="u-alice")
-        refreshed_at = time.monotonic()
         assert client.post("/sessions", headers=_bearer(rotated)).status_code == 401
+        # Read after the response: the limiter stamps its refresh inside that request, so a stamp
+        # taken before it would let a slow runner wake inside the window and see a 401.
+        refreshed_at = time.monotonic()
         issuer.publish(_jwks(("kid-a", _KEY_A), ("kid-b", _KEY_B)))
         # Inside the window the limiter holds — that is the cost it is configured to charge.
         assert client.post("/sessions", headers=_bearer(rotated)).status_code == 401
