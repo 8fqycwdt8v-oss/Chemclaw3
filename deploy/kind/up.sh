@@ -580,13 +580,33 @@ smoke() {
     || die "smoke: the a-cheap turn did not end with its scripted answer. Stream tail:
 $(tail -n 20 <<<"$stream")"
   grep -q 'find_notes' <<<"$stream" || die "smoke: the a-cheap turn made no find_notes call"
+  # `/readyz` asks each connector's `/healthz`, which is a plain route; a connector whose MCP
+  # transport refuses the front door (the 421 a loopback-only Host allow-list gives) is healthy
+  # there and absent from the turn. The turn's own `capability_degraded` event is what names it.
+  if grep -q '"type":"capability_degraded"' <<<"$stream"; then
+    die "smoke: the turn could not open every bound connector: $(grep -o '"connectors":\[[^]]*\]' <<<"$stream" | head -1)
+  see the front door's log for each one's reason"
+  fi
   log "smoke: mock-LLM turn answered (find_notes called, scripted answer streamed)"
 
   stream="$(turn d-collide)"
   local job_id
   job_id="$(python3 -c 'import re,sys; m=re.findall(r"\"job_id\": ?\"([^\"]+)\"", sys.stdin.read()); print(m[0] if m else "")' <<<"$stream")"
-  [ -n "$job_id" ] || die "smoke: the d-collide turn launched no durable job. Stream tail:
+  if [ -z "$job_id" ]; then
+    # **A persisted result is never recomputed (D-011)**: once one run of this payload completed,
+    # the next turn is answered from the cache and launches nothing. That is the durable layer
+    # working, so the evidence moves to the record of the run that did complete.
+    grep -q '"tool":"compute_reaction_energy"' <<<"$stream" \
+      || die "smoke: the d-collide turn neither launched a job nor called compute_reaction_energy. Stream tail:
 $(tail -n 20 <<<"$stream")"
+    local done_before
+    done_before="$(curl -sf -m 10 "${AUTH_HEADER[@]}" "$FRONT_DOOR/jobs" | python3 -c 'import json,sys
+print(next((j["job_id"] for j in json.load(sys.stdin)
+            if j.get("job") == "compute_reaction_energy" and j.get("state") == "completed"), ""))' || true)"
+    [ -n "$done_before" ] || die "smoke: compute_reaction_energy answered from no completed job"
+    log "smoke: durable result served from the cache of completed job $done_before (D-011)"
+    return
+  fi
   log "smoke: durable job $job_id launched; waiting for it to complete (≤ 10 min)"
   local state="" body
   for _ in $(seq 1 120); do
