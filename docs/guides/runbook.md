@@ -207,7 +207,7 @@ said so in their own headers. See `docs/decisions/D-2026-08-04-a-lane-that-only-
 make live-infra     # Postgres/pgvector + Temporal — uses docker-compose when a daemon is
                     # reachable, otherwise builds and starts them natively (infra/live/)
 make db-migrate     # apply infra/sql
-make live-up        # connectors (:8810), the four Temporal workers, the front door (:8000),
+make live-up        # connectors (:8810), the Temporal workers (incl. interactive), the front door (:8000),
                     # and from the fleet checkout: chem (:8858), safety (:8859) and the calc
                     # backend (:8860) that every durable calculation job dials
 make live-status    # what is running

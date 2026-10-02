@@ -21,7 +21,7 @@ Closes the gap `tasks/todo.md` used to name: *"the cross-repo sequence `Chemclaw
 | `calc` (the physics behind this repo's calculator tools — *not* a connector) | Chemclaw3-mcp | 8860 | `infra/live/processes.sh` |
 | `mock-eln` (ELN/ORD data) | Chemclaw3_mock | 8090 | this script |
 | `mock-vendor` (building-block search/pricing MCP tool) | Chemclaw3_mock | 8091 | this script |
-| connectors, 4 Temporal workers, front door | this repo | 8810, 8000, workers per `.live/run/<name>.port` | `infra/live/processes.sh` |
+| connectors, the Temporal workers (one per jobs queue, plus an interactive worker per bundle that queues tool calls), front door | this repo | 8810, 8000, workers per `.live/run/<name>.port` | `infra/live/processes.sh` |
 | BFF + SPA | Chemclaw3_ui | 8787, 5173 | this script |
 
 **Every fleet bundle this repository declares an endpoint for, and the `calc` backend, are started
@@ -96,7 +96,10 @@ this repo's own stack (a connector, a worker, `calc`, or any fleet bundle `proce
 asking this script for one of those says so rather than reporting an unknown process. A restart
 comes back in this lane's environment — `up` persists what it composed to `.live/run/lane-env.sh`,
 which `processes.sh` reads back with your own shell's values winning — so a restarted front door
-keeps `mock-vendor`, `pyexec`, the ELN/ORD sources and the gateway this lane named.
+keeps `mock-vendor`, `pyexec` and the ELN/ORD sources. **The model gateway is not in that file**,
+and its key never is: a restart runs against whatever gateway the restarting shell names, and
+against the local mock when it names none. To restart onto the real gateway, set
+`CHEMCLAW_LLM_BASE_URL`, `CHEMCLAW_LLM_MODEL` and `CHEMCLAW_LLM_API_KEY` in that shell.
 
 ## The corpus is backfilled on bring-up, and it takes hours
 

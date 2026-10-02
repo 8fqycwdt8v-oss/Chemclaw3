@@ -5,7 +5,7 @@
 #
 # Deliberately does not reimplement readiness polling for pieces that already have it:
 # `infra/live/bootstrap.sh` brings up Postgres/Temporal and the note writer's repo, and
-# `infra/live/processes.sh` brings up this repo's own connectors, four Temporal workers and front
+# `infra/live/processes.sh` brings up this repo's own connectors, Temporal workers and front
 # door. Both are called as subprocesses. This script owns only what those two do not know about —
 # the four external processes from the other three repos, the env that wires everything together,
 # and the UI's BFF+SPA — using the same log/die/wait_for shape `processes.sh` already established.
@@ -280,21 +280,30 @@ start_ui() {
 # `processes.sh restart <name>` is the primitive the storm's chaos family uses and the command the
 # end of `up` tells an operator to run — and it runs in a fresh shell holding none of the exports
 # above. So a restarted front door came back without the fleet and harness manifest directories
-# (no `pyexec`, no `mock-vendor`), without the ELN/ORD sources, and pointed at the mock model even
-# when this lane had named a gateway. `processes.sh` sources this file at start with the caller's
-# own environment winning (`source_unset_only`), and its `down` deletes it with the lane.
+# (no `pyexec`, no `mock-vendor`) and without the ELN/ORD sources. `processes.sh` sources this
+# file at start with the caller's own environment winning (`source_unset_only`), and its `down`
+# deletes it with the lane.
 #
 # The names are the ones `up` exports, in one list; `tests/test_live_lane_scripts.py` fails if
-# `up` exports a `CHEMCLAW_*` variable this list does not carry. An unset one (no gateway named) is
-# skipped rather than written empty, which would override the reader's own. 0600: it can carry
-# `CHEMCLAW_LLM_API_KEY`.
+# `up` exports a `CHEMCLAW_*` variable that is in neither this list nor `LANE_ENV_PER_INVOCATION`.
+# An unset one is skipped rather than written empty, which would override the reader's own. 0600:
+# it carries the connector tokens.
 readonly LANE_ENV_VARS=(
-  CHEMCLAW_LLM_BASE_URL CHEMCLAW_LLM_MODEL CHEMCLAW_LLM_API_KEY
   CHEMCLAW_CONNECTORS_DIR CHEMCLAW_CONNECTORS_ENABLED
   CHEMCLAW_DATA_SOURCES CHEMCLAW_ELN_EXPORT_DIR CHEMCLAW_ORD_EXPORT_DIR
   CHEMCLAW_PROPS_TOKEN CHEMCLAW_RXNPREDICT_TOKEN CHEMCLAW_CHEM_TOKEN CHEMCLAW_SAFETY_TOKEN
   CHEMCLAW_CALC_TOKEN CHEMCLAW_PYEXEC_TOKEN
   CHEMCLAW_MCP_REPO
+)
+# **What is deliberately not persisted: the model gateway, and above all its key.** These were in
+# the list above, so a restart "back to the mock" — `processes.sh restart api` from a shell naming
+# no gateway — came back on the paid one, because the reader filled in what the caller had not
+# set; and `CHEMCLAW_LLM_API_KEY` sat in a file on disk, under a Keychain-only setup that exists so
+# it never does. Which gateway a process dials, and the credential that pays for it, is decided by
+# the shell that starts it, every time: name it in the restarting shell to keep it, name nothing to
+# get the mock. `processes.sh` also refuses to read these names back from an older file.
+readonly LANE_ENV_PER_INVOCATION=(
+  CHEMCLAW_LLM_BASE_URL CHEMCLAW_LLM_MODEL CHEMCLAW_LLM_API_KEY
 )
 persist_lane_env() {
   local file="$LIVE_DIR/run/lane-env.sh" var

@@ -499,7 +499,7 @@ live-infra:  ## Start Postgres/pgvector + Temporal for the live lane (uses Docke
 live-infra-down:  ## Stop the Postgres and Temporal this lane created (never a stack it adopted).
 	bash infra/live/bootstrap.sh down
 
-live-up:  ## Start the live processes: connectors, the four Temporal workers, the front door.
+live-up:  ## Start the live processes: connectors, the Temporal workers, the front door.
 	bash infra/live/processes.sh up
 
 live-down:  ## Stop the live processes.

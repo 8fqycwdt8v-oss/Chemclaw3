@@ -488,8 +488,42 @@ def test_a_waiting_call_says_it_is_queued_and_then_that_it_runs(
     assert states[-1] == "running", reported
     counts = [n for _t, job_id, state, n in reported if job_id == waiting_id and state == "queued"]
     # The test server reports task-queue stats, so a count must arrive: an always-`None` read
-    # would pass a weaker assertion and leave every card without one.
-    assert counts and all(isinstance(n, int) and n >= 0 for n in counts), reported
+    # would pass a weaker assertion and leave every card without one. A `None` is legitimate only
+    # before the worker has scheduled the call's activity (`_progress`'s never-started case).
+    numbered = [n for n in counts if n is not None]
+    assert numbered and all(isinstance(n, int) and n >= 0 for n in numbered), reported
+
+
+def test_a_call_on_a_queue_nothing_polls_says_queued_and_never_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The live lane started no interactive worker, and every such call's card read "running".
+
+    No worker here at all: the run is accepted and never picked up, so there is no pending
+    activity to read. The turn must still say `queued` on its first look — and never `running` —
+    and hand back the job id once the wait is spent.
+    """
+    reported: list[tuple[str, str, str, int | None]] = []
+    monkeypatch.setattr(
+        "chemclaw.connectors.queued.record_tool_queued",
+        lambda tool, job_id, state, waiting: reported.append((tool, job_id, state, waiting)),
+    )
+    monkeypatch.setattr("chemclaw.connectors.queued.record_job_started", lambda *_: None)
+    monkeypatch.setattr("chemclaw.core.config.settings.queued_tool_progress_seconds", 0.3)
+
+    async def body() -> CallToolResult:
+        env = await start_local_env_or_skip()
+        async with env:
+            client = pydantic_client(env)
+            _bind_turn(monkeypatch, client)
+            return await dispatch_queued(
+                _CONNECTOR, "heavy", {"smiles": "O"}, inline_wait=1.5, call_timeout=10
+            )
+
+    result = asyncio.run(body())
+    waiting_id = queued_workflow_id(_CONNECTOR, "heavy", {"smiles": "O"})
+    assert waiting_id in cast(TextContent, result.content[0]).text
+    assert [(job_id, state) for _t, job_id, state, _n in reported] == [(waiting_id, "queued")]
 
 
 class _Description:
@@ -507,7 +541,24 @@ def test_progress_says_nothing_when_no_activity_is_pending(monkeypatch: pytest.M
 
     handle = SimpleNamespace(id="q", describe=AsyncMock(return_value=_Description()))
     client = SimpleNamespace(workflow_service=SimpleNamespace(describe_task_queue=AsyncMock()))
-    assert asyncio.run(queued._progress(client, handle, _CONNECTOR, 1.0)) is None  # type: ignore[arg-type]
+    progress = queued._progress(client, handle, _CONNECTOR, 1.0, started=True)  # type: ignore[arg-type]
+    assert asyncio.run(progress) is None
+    client.workflow_service.describe_task_queue.assert_not_called()
+
+
+def test_progress_reads_queued_before_any_worker_has_picked_the_run_up() -> None:
+    """The other side of the same empty list: never seen running, it is waiting for a worker.
+
+    It answered `None` here too, which on a queue nothing polls meant the card read "running" for
+    the whole wait. The count is `None` — the run is not in the activity backlog yet — rather than a
+    number that would leave this call out.
+    """
+    from chemclaw.connectors import queued
+
+    handle = SimpleNamespace(id="q", describe=AsyncMock(return_value=_Description()))
+    client = SimpleNamespace(workflow_service=SimpleNamespace(describe_task_queue=AsyncMock()))
+    progress = queued._progress(client, handle, _CONNECTOR, 1.0, started=False)  # type: ignore[arg-type]
+    assert asyncio.run(progress) == ("queued", None)
     client.workflow_service.describe_task_queue.assert_not_called()
 
 

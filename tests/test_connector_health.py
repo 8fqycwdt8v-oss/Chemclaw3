@@ -96,9 +96,17 @@ def _bundles(root: Path, monkeypatch: pytest.MonkeyPatch, **manifests: str) -> N
 class _FakeWorkflowService:
     """The one RPC the queue probe makes, scripted, with every request it received recorded."""
 
-    def __init__(self, pollers: int = 0, error: Exception | None = None) -> None:
+    def __init__(
+        self,
+        pollers: int = 0,
+        error: Exception | None = None,
+        polled: dict[str, int] | None = None,
+    ) -> None:
         self.pollers = pollers
         self.error = error
+        # Per-queue poller counts where a test needs two queues to disagree; any queue not named
+        # answers with `pollers`.
+        self.polled = polled or {}
         self.requests: list[DescribeTaskQueueRequest] = []
         # The deadline each call was given, because *which* budget reached the RPC is the thing the
         # startup sweep changes — and a `wait_for` above it would pass a test that only timed it.
@@ -116,16 +124,22 @@ class _FakeWorkflowService:
         self.timeouts.append(timeout)
         if self.error is not None:
             raise self.error
+        count = self.polled.get(req.task_queue.name, self.pollers)
         return DescribeTaskQueueResponse(
-            pollers=[PollerInfo(identity=f"worker@pod-{i}") for i in range(self.pollers)]
+            pollers=[PollerInfo(identity=f"worker@pod-{i}") for i in range(count)]
         )
 
 
 class _FakeClient:
     """A Temporal client stand-in exposing exactly what the probe uses: `workflow_service`."""
 
-    def __init__(self, pollers: int = 0, error: Exception | None = None) -> None:
-        self.workflow_service = _FakeWorkflowService(pollers=pollers, error=error)
+    def __init__(
+        self,
+        pollers: int = 0,
+        error: Exception | None = None,
+        polled: dict[str, int] | None = None,
+    ) -> None:
+        self.workflow_service = _FakeWorkflowService(pollers=pollers, error=error, polled=polled)
 
 
 def _broker(
@@ -134,9 +148,10 @@ def _broker(
     pollers: int = 0,
     rpc_error: Exception | None = None,
     connect_error: Exception | None = None,
+    polled: dict[str, int] | None = None,
 ) -> _FakeClient:
     """Install a broker behind the sweep's `connect()` seam — the one every durable caller uses."""
-    client = _FakeClient(pollers=pollers, error=rpc_error)
+    client = _FakeClient(pollers=pollers, error=rpc_error, polled=polled)
 
     async def _connect() -> _FakeClient:
         if connect_error is not None:
@@ -881,3 +896,117 @@ def test_a_connector_whose_token_is_unset_names_the_variable_rather_than_the_gro
         "an unset credential and a broken pod are different remedies and must not be one sentence: "
         f"{line}"
     )
+
+
+def _http_jobs_and_queued(name: str, port: int) -> str:
+    """`bo`'s shipped shape: an endpoint, durable jobs, and a `queued:` tool on the endpoint."""
+    return (
+        _http_serving(name, port).replace(
+            "  read_only:\n",
+            f"  queued:\n    inline_wait_seconds: 45\n    tools:\n      - {name}_lookup\n"
+            "  read_only:\n",
+        )
+        + "jobs:\n"
+        f"  - name: run_{name}_job\n"
+        "    workflow: FixtureJobWorkflow\n"
+        "    summary: Run the job.\n"
+        "    description: A job whose worker fleet is polled.\n"
+    )
+
+
+def _sweep_queued_bundle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, polled: dict[str, int], *, startup: bool
+) -> tuple[list[ConnectorHealth], _FakeClient]:
+    """Sweep one healthy-endpoint bundle with jobs and a queued tool, against `polled`."""
+
+    async def _measure() -> tuple[list[ConnectorHealth], _FakeClient]:
+        server = await asyncio.start_server(_ok, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        _bundles(tmp_path, monkeypatch, heavy=_http_jobs_and_queued("heavy", port))
+        client = _broker(monkeypatch, polled=polled)
+        try:
+            sweep = check_connectors_at_startup() if startup else probe_connectors()
+            return await sweep, client
+        finally:
+            server.close()
+
+    return asyncio.run(_measure())
+
+
+def test_a_queued_tools_interactive_queue_with_no_poller_is_unpolled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The live lane started no interactive worker, and this sweep called every bundle healthy.
+
+    Every `predict_pka`, `compute_xtb_energy` and prediction call then waited its 45 s, became a
+    job nothing polled, and read `running` forever — with the endpoint answering and the jobs
+    worker polling, which were the only two questions asked. The interactive queue is the third.
+    """
+    result, client = _sweep_queued_bundle(
+        tmp_path,
+        monkeypatch,
+        {"connector-heavy": 1, "connector-heavy-interactive": 0},
+        startup=False,
+    )
+
+    asked = sorted(req.task_queue.name for req in client.workflow_service.requests)
+    assert asked == ["connector-heavy", "connector-heavy-interactive"]
+    (item,) = result
+    assert item.state == "unpolled", "an unpolled interactive queue was hidden by the other halves"
+    assert item.unhealthy
+    assert "connector-heavy-interactive" in item.detail and "interactive-worker" in item.detail
+
+
+def test_an_unpolled_interactive_queue_trips_the_startup_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`connectors_required` refuses on it, as it does on an unpolled jobs queue."""
+    monkeypatch.setattr(settings, "connectors_required", True)
+    with pytest.raises(ConnectorsUnavailable) as raised:
+        _sweep_queued_bundle(
+            tmp_path,
+            monkeypatch,
+            {"connector-heavy": 1, "connector-heavy-interactive": 0},
+            startup=True,
+        )
+    assert "heavy (unpolled)" in str(raised.value)
+
+
+def test_a_polled_interactive_queue_clears_the_startup_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other direction, so the test above is about the poller and not the bundle's shape.
+
+    With every queue polled, the same bundle passes the same gate.
+    """
+    monkeypatch.setattr(settings, "connectors_required", True)
+    result, _ = _sweep_queued_bundle(
+        tmp_path,
+        monkeypatch,
+        {"connector-heavy": 1, "connector-heavy-interactive": 1},
+        startup=True,
+    )
+    assert _states(result) == {"heavy": "healthy"}
+
+
+def test_a_bundle_that_queues_nothing_is_not_asked_about_an_interactive_queue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No `queued:`, no interactive worker in the chart, so no question about one.
+
+    Asked anyway, every such bundle would read `unpolled` against a queue nothing is meant to poll.
+    """
+
+    async def _measure() -> _FakeClient:
+        server = await asyncio.start_server(_ok, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        _bundles(tmp_path, monkeypatch, both=_http_and_jobs("both", port))
+        client = _broker(monkeypatch, pollers=1)
+        try:
+            assert _states(await probe_connectors()) == {"both": "healthy"}
+        finally:
+            server.close()
+        return client
+
+    client = asyncio.run(_measure())
+    assert [req.task_queue.name for req in client.workflow_service.requests] == ["connector-both"]

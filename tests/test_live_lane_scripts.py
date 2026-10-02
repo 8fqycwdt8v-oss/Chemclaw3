@@ -19,6 +19,7 @@ import subprocess
 import sys
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -196,18 +197,234 @@ def test_the_four_repo_lane_enables_every_bundle_it_discovers() -> None:
     )
 
 
+# ------------------------------------------------------------------------ the interactive workers
+
+
+def _interactive_names(**env: str) -> list[str]:
+    """`processes.sh::interactive_worker_names` against this checkout's own registry."""
+    script = (
+        f"{_function(_PROCESSES, 'interactive_worker_names')}"
+        f"interactive_worker_names {sys.executable}\n"
+    )
+    return _bash(script, _clean_env(**env), cwd=REPO_ROOT).split()
+
+
+def _shipped_queueing_bundles(*, opted_in: frozenset[str] = frozenset()) -> list[str]:
+    """Read independently of the registry: shipped bundles whose endpoint lists `queued:`."""
+    import yaml
+
+    names = []
+    for manifest in sorted((REPO_ROOT / "src/chemclaw/connectors").glob("*/connector.yaml")):
+        body = yaml.safe_load(manifest.read_text(encoding="utf-8")) or {}
+        on = body.get("default_enabled", True) or manifest.parent.name in opted_in
+        if on and (body.get("endpoint") or {}).get("queued"):
+            names.append(manifest.parent.name)
+    return names
+
+
+def test_the_lane_starts_an_interactive_worker_for_every_bundle_that_queues_tools() -> None:
+    """The lane started none, so every queued `predict_pka`, xtb and prediction call hung.
+
+    Each waited out its inline wait on `connector-<name>-interactive`, with no poller, and became
+    a job nothing ran. The set is derived from the enabled manifests — checked here against a
+    reading of the YAML that does not go through the registry — and an opt-in bundle the lane
+    enables gets its worker too.
+    """
+    expected = _shipped_queueing_bundles()
+    assert expected, "no shipped bundle queues a tool; this test would pass on an empty loop"
+    assert sorted(_interactive_names()) == expected
+    enabled = ":".join([*_shipped_queueing_bundles(opted_in=frozenset({"kinetics"}))])
+    with_opt_in = sorted(_interactive_names(CHEMCLAW_CONNECTORS_ENABLED=enabled))
+    assert "kinetics" in with_opt_in, "an enabled opt-in bundle's queue was left unpolled"
+
+
+def test_the_lane_runs_the_interactive_worker_the_chart_runs() -> None:
+    """The same module, under the same component name, as `deploy/entrypoint.sh`'s case."""
+    module = "python -m chemclaw.connectors.interactive_worker"
+    entrypoint = (REPO_ROOT / "deploy/entrypoint.sh").read_text(encoding="utf-8")
+    assert "interactive-worker-*)" in entrypoint and module in entrypoint
+    body = _function(_PROCESSES, "up")
+    assert 'start_worker "interactive-worker-$name"' in body
+    assert '-m chemclaw.connectors.interactive_worker "$name"' in body
+
+
+def test_the_front_door_starts_only_after_every_worker_polls() -> None:
+    """Cold start: `worker-bo` had not polled yet and the front door died `bo (unpolled)`.
+
+    The front door used to start before the workers' readiness was even asked. Now each worker is
+    ready-checked and then asked of the broker, and only then is `api` started.
+    """
+    body = _function(_PROCESSES, "up")
+    polled = body.index('wait_for_pollers "$python" "${workers[@]}"')
+    assert polled < body.index("start api ")
+    assert body.index('wait_for "$worker"') < polled
+
+
+def _wait_for_pollers(tmp_path: Path, address: str, *workers: str, attempts: int = 30) -> Any:
+    """Run `processes.sh::wait_for_pollers` against the broker at `address`."""
+    run = tmp_path / "run"
+    run.mkdir(exist_ok=True)
+    for worker in workers:
+        (run / f"{worker}.pid").write_text(str(os.getpid()), encoding="utf-8")
+    script = (
+        'die() { echo "$*" >&2; exit 1; }\n'
+        f"RUN_DIR={run} LIVE_DIR={tmp_path} READY_ATTEMPTS={attempts}\n"
+        f"{_function(_PROCESSES, 'wait_for_pollers')}"
+        f"wait_for_pollers {sys.executable} {' '.join(workers)}\n"
+    )
+    return subprocess.run(
+        ["bash", "-c", script],
+        capture_output=True,
+        text=True,
+        env=_clean_env(CHEMCLAW_TEMPORAL_ADDRESS=address),
+        cwd=REPO_ROOT,
+        check=False,
+    )
+
+
+def test_wait_for_pollers_passes_on_a_polled_queue_and_names_an_unpolled_one(
+    tmp_path: Path,
+) -> None:
+    """Against a real broker: a worker polling its queue passes, a queue nobody polls fails.
+
+    The queue is derived from the worker's name — here `interactive-worker-fixture` →
+    `connector-fixture-interactive` — which is the convention the lane names its workers by.
+    """
+    import asyncio
+
+    from temporalio.worker import Worker
+
+    from chemclaw.connectors.queued_call import call_queued_tool
+    from chemclaw.connectors.queued_workflow import QueuedToolWorkflow
+    from tests.temporal_env import start_local_env_or_skip
+
+    async def _measure() -> tuple[Any, Any]:
+        env = await start_local_env_or_skip()
+        async with env:
+            address = env.client.service_client.config.target_host
+            async with Worker(
+                env.client,
+                task_queue="connector-fixture-interactive",
+                workflows=[QueuedToolWorkflow],
+                activities=[call_queued_tool],
+            ):
+                polled = await asyncio.to_thread(
+                    _wait_for_pollers, tmp_path, address, "interactive-worker-fixture"
+                )
+                unpolled = await asyncio.to_thread(
+                    _wait_for_pollers, tmp_path, address, "worker-ghost", attempts=2
+                )
+            return polled, unpolled
+
+    polled, unpolled = asyncio.run(_measure())
+    assert polled.returncode == 0, polled.stderr
+    assert "connector-fixture-interactive" in polled.stdout
+    assert unpolled.returncode != 0
+    assert "worker-ghost (connector-ghost)" in unpolled.stderr
+
+
+def test_wait_for_pollers_reports_a_dead_worker_at_once(tmp_path: Path) -> None:
+    """A worker whose pid is gone is named, not waited out for the whole budget."""
+    import asyncio
+
+    from tests.temporal_env import start_local_env_or_skip
+
+    async def _measure() -> Any:
+        env = await start_local_env_or_skip()
+        async with env:
+            address = env.client.service_client.config.target_host
+            run = tmp_path / "run"
+            run.mkdir()
+            # A pid no process holds: above every default `pid_max`.
+            (run / "worker-bo.pid").write_text("4194305", encoding="utf-8")
+            script = (
+                'die() { echo "$*" >&2; exit 1; }\n'
+                f"RUN_DIR={run} LIVE_DIR={tmp_path} READY_ATTEMPTS=300\n"
+                f"{_function(_PROCESSES, 'wait_for_pollers')}"
+                f"wait_for_pollers {sys.executable} worker-bo\n"
+            )
+            return await asyncio.to_thread(
+                subprocess.run,
+                ["bash", "-c", script],
+                capture_output=True,
+                text=True,
+                env=_clean_env(CHEMCLAW_TEMPORAL_ADDRESS=address),
+                cwd=REPO_ROOT,
+                check=False,
+                timeout=60,
+            )
+
+    done = asyncio.run(_measure())
+    assert done.returncode != 0
+    assert "worker-bo exited before polling connector-bo" in done.stderr
+
+
 # ------------------------------------------------------------------------ up.sh's persisted env
 
 
+def _listed(name: str) -> set[str]:
+    """The names in `up.sh`'s `readonly <name>=( … )` array."""
+    listed = re.search(rf"^readonly {name}=\((.*?)\)", _UP.read_text(), re.M | re.S)
+    assert listed is not None, f"{_UP} declares no {name}"
+    return set(listed.group(1).split())
+
+
 def test_every_variable_up_exports_is_persisted_for_a_later_restart() -> None:
-    """A variable `up` exports and the file omits is one a restarted process silently lacks."""
+    """A variable `up` exports and the file omits is one a restarted process silently lacks.
+
+    Unless it is one the restarting shell decides — the model gateway — which is listed apart, so
+    leaving it out is a stated choice rather than an omission this test cannot tell from one.
+    """
     body = _function(_UP, "up")
     exported = set(re.findall(r"^\s*export (CHEMCLAW_[A-Z0-9_]+)=", body, re.M))
-    listed = re.search(r"^readonly LANE_ENV_VARS=\((.*?)\)", _UP.read_text(), re.M | re.S)
-    assert listed is not None, f"{_UP} declares no LANE_ENV_VARS"
-    missing = exported - set(listed.group(1).split())
+    persisted, per_invocation = _listed("LANE_ENV_VARS"), _listed("LANE_ENV_PER_INVOCATION")
+    missing = exported - persisted - per_invocation
     assert exported and not missing, f"`up` exports {sorted(missing)} and never persists them"
+    assert not persisted & per_invocation, "a name cannot be both persisted and per-invocation"
     assert "persist_lane_env" in body
+
+
+def test_the_gateway_and_its_key_are_never_persisted() -> None:
+    """`live.sh mode mock` came back on the paid gateway, and the key sat in `lane-env.sh`.
+
+    `up.sh` wrote `CHEMCLAW_LLM_BASE_URL`, `_MODEL` and `_API_KEY` to the file `processes.sh`
+    reloads, so a restart from a shell naming no gateway was filled in from disk: $0.038 billed
+    after the switch "to mock", and a Keychain-only credential stored in plain text.
+    """
+    gateway = {"CHEMCLAW_LLM_BASE_URL", "CHEMCLAW_LLM_MODEL", "CHEMCLAW_LLM_API_KEY"}
+    assert gateway <= _listed("LANE_ENV_PER_INVOCATION")
+    assert not gateway & _listed("LANE_ENV_VARS")
+
+
+def test_a_gateway_an_older_file_persisted_is_not_read_back(prelude: Path, tmp_path: Path) -> None:
+    """A lane started by the old `up.sh` holds the gateway in its file; a restart must ignore it.
+
+    Restarted with nothing named, the front door resolves the mock (`processes.sh` starts it on the
+    default address); restarted with a gateway named, the caller's own value is the one used.
+    """
+    run = tmp_path / ".live/run"
+    run.mkdir(parents=True)
+    (run / "lane-env.sh").write_text(
+        "export CHEMCLAW_LLM_BASE_URL=https://paid.example/api/v1\n"
+        "export CHEMCLAW_LLM_MODEL=paid/model\n"
+        "export CHEMCLAW_LLM_API_KEY=sk-on-disk\n"
+        "export CHEMCLAW_DATA_SOURCES=graph,eln-json\n",
+        encoding="utf-8",
+    )
+    echo = (
+        'printf "%s|%s|%s|%s\\n" "${CHEMCLAW_LLM_BASE_URL-unset}" "${CHEMCLAW_LLM_MODEL-unset}" '
+        '"${CHEMCLAW_LLM_API_KEY-unset}" "$CHEMCLAW_DATA_SOURCES"'
+    )
+    assert _run_prelude(prelude, tmp_path, echo).strip() == "unset|unset|unset|graph,eln-json"
+    named = _run_prelude(
+        prelude,
+        tmp_path,
+        echo,
+        CHEMCLAW_LLM_BASE_URL="https://named.example/v1",
+        CHEMCLAW_LLM_MODEL="named/model",
+        CHEMCLAW_LLM_API_KEY="from-the-shell",
+    )
+    assert named.strip() == "https://named.example/v1|named/model|from-the-shell|graph,eln-json"
 
 
 def test_the_persisted_lane_env_round_trips_through_the_reader(
@@ -226,15 +443,22 @@ def test_the_persisted_lane_env_round_trips_through_the_reader(
     )
     _bash(
         writer,
-        _clean_env(CHEMCLAW_CONNECTORS_DIR="/x:/y z", CHEMCLAW_LLM_API_KEY="k'$(true)"),
+        _clean_env(
+            CHEMCLAW_CONNECTORS_DIR="/x:/y z",
+            CHEMCLAW_PYEXEC_TOKEN="k'$(true)",
+            CHEMCLAW_LLM_API_KEY="sk-must-not-land",
+            CHEMCLAW_LLM_BASE_URL="https://paid.example/api/v1",
+        ),
     )
     written = live / "run/lane-env.sh"
-    assert stat.S_IMODE(written.stat().st_mode) == 0o600, "it can hold the gateway credential"
-    assert "CHEMCLAW_LLM_BASE_URL" not in written.read_text(), "an unset variable was written"
+    assert stat.S_IMODE(written.stat().st_mode) == 0o600, "it holds the connector tokens"
+    assert "CHEMCLAW_CALC_TOKEN" not in written.read_text(), "an unset variable was written"
+    assert "CHEMCLAW_LLM_" not in written.read_text(), "the gateway reached the file"
+    assert "sk-must-not-land" not in written.read_text()
     out = _run_prelude(
         prelude,
         tmp_path,
-        'printf "%s|%s\\n" "$CHEMCLAW_CONNECTORS_DIR" "$CHEMCLAW_LLM_API_KEY"',
+        'printf "%s|%s\\n" "$CHEMCLAW_CONNECTORS_DIR" "$CHEMCLAW_PYEXEC_TOKEN"',
     )
     assert out.strip() == "/x:/y z|k'$(true)"
 
