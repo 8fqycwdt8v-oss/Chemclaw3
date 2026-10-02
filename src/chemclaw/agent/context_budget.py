@@ -79,18 +79,18 @@ middleware can, so `MeasureRequestPrefix` publishes it and the edits read it —
 in flight.
 
 **What that costs, stated rather than discovered.** At a fixed configured budget every deployment's
-thread allowance falls by the prefix, and a configured budget *below* the prefix leaves a trigger of
-1, which means "reduce on every model call". `agent_tool_result_clear_trigger` has twice shipped in
-exactly that state — once against a prefix measured with no connector bound — and that is why
-`_note_floored_trigger` exists — the floor has to be said rather than arrive silently. The same
+thread allowance falls by the prefix — up to `agent_context_prefix_basis`, past which the excess is
+paid in spend (`effective_trigger` says why) — and a configured budget *below* the prefix leaves a
+trigger of 1, which means "reduce on every model call". `agent_tool_result_clear_trigger` has twice
+shipped in exactly that state — once against a prefix measured with no connector bound — and that is
+why `_note_floored_trigger` exists — the floor has to be said rather than arrive silently. The same
 commit that charged the prefix raised the default above the prefix, and it is **derived** from
 `tests/test_context_floor.PREFIX_BOUND` — that file's ratchet ceiling plus the allowance for the
 bundles it cannot serve — plus 30,000 of thread, so it moves whenever either half does, and no
 figure for it is written down here. The shipped configuration is therefore not floored;
-`_note_floored_trigger` serves the deployment that lowers it, which is the case it was written
-for. The live numbers are whatever `tests/test_compaction.py` and
-`tests/test_context_floor.py` measure, not these, for the reason
-`D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` gives.
+`_note_floored_trigger` serves the deployment that lowers it, which is the case it was written for.
+The live numbers are whatever `tests/test_compaction.py` and `tests/test_context_floor.py` measure,
+not these, for the reason `D-2026-09-03-a-number-in-prose-is-a-claim-about-a-commit` gives.
 
 **And the turn's own context record lives here** rather than on the repeat guard's watch, which is
 where `peak_reclaimed` sat because compaction had nowhere else to put it. Two per-turn ambients
@@ -349,10 +349,52 @@ def _note_floored_trigger(configured: int, prefix: int, window: int, ratio: floa
     )
 
 
+#: `(prefix, basis)` pairs already reported as over the basis — once each, for `_REPORTED_FLOORS`'
+#: reason, and under the same lock and cap.
+_REPORTED_EXCESS: set[tuple[int, int]] = set()
+
+
+def _note_prefix_over_basis(prefix: int, basis: int) -> None:
+    """Say, once per surface, that this request's prefix is larger than the budgets were sized for.
+
+    The thread is not what pays for it any more (`effective_trigger`), so nothing a chemist sees
+    degrades — which is exactly why it has to be said: a request may now bill past
+    `agent_context_token_budget` by the excess, and the operator who bound the extra bundles is the
+    one who can decide whether that is the trade they meant. WARNING and once, for the reasons
+    `_note_floored_trigger` gives; the line names the three remedies.
+
+    Args:
+        prefix: This request's measured prefix in estimated tokens.
+        basis: `agent_context_prefix_basis`.
+    """
+    key = (prefix, basis)
+    with _FLOOR_LOCK:
+        if key in _REPORTED_EXCESS or len(_REPORTED_EXCESS) >= _MAX_REPORTED_FLOORS:
+            return
+        _REPORTED_EXCESS.add(key)
+    log_event(
+        logger,
+        "context.prefix_over_basis",
+        "this request's prefix is %d estimated tokens, %d over the %d the context budgets were "
+        "derived for (agent_context_prefix_basis), so the excess is charged to spend rather than "
+        "to the thread and a request may bill past agent_context_token_budget by about that much: "
+        "bind fewer bundles, declare llm_context_window_tokens if the model's window is the "
+        "limit, or raise the basis and both budgets together",
+        prefix,
+        prefix - basis,
+        basis,
+        level=logging.WARNING,
+        prefix_tokens=prefix,
+        basis_tokens=basis,
+        excess_tokens=prefix - basis,
+    )
+
+
 def reset_floor_reports() -> None:
-    """Forget which floors have been reported. Tests only — a process says each of these once."""
+    """Forget which floors and excesses have been reported. Tests only — each is said once."""
     with _FLOOR_LOCK:
         _REPORTED_FLOORS.clear()
+        _REPORTED_EXCESS.clear()
 
 
 def effective_trigger(configured: int) -> int:
@@ -369,6 +411,8 @@ def effective_trigger(configured: int) -> int:
     - **The prefix, and it is charged whether or not a window is declared.** The system message,
       the skills listing and every bound tool schema are part of the request and are not in the
       thread, so a budget that does not charge them is not a bound on anything the provider sees.
+      Against the budget it is charged up to `agent_context_prefix_basis`; against a declared
+      window, whole — see "charged up to `agent_context_prefix_basis`" below.
 
     **That last subtraction changes what `agent_context_token_budget` means, deliberately.** It was
     a bound on *thread* spend; it is now a bound on *request* spend, and the difference is the
@@ -418,6 +462,24 @@ def effective_trigger(configured: int) -> int:
     budget — `tests/test_compaction._TRACKING_SLACK` measures it and holds the bound, and the
     criterion that matters (does the request fit the model) clears by thousands of tokens.
 
+    **The prefix is charged up to `agent_context_prefix_basis` and not beyond it, and that is the
+    fourth correction.** Both defaults are derived from one connector surface —
+    `tests/test_context_floor.PREFIX_BOUND`, the chart's — and binding another bundle is a
+    per-deployment choice
+    (`D-2026-09-20-declaring-a-capability-and-binding-it-are-different-decisions`) that moves the
+    prefix and not the budget. Subtracting the whole prefix made that choice cost
+    *thread*, silently: measured 2026-10-02 on the four-repo lane, which binds every bundle the
+    fleet publishes, the prefix was 109,743 estimated tokens, the window was left 8,957 and the
+    lossless edit 1,857, so tool results were cleared on almost every model call, the repeat
+    guard's counters were forgiven each time, and research turns re-fetched the same notes until
+    the loop cap — while no floor warning fired, because neither trigger reached 1. So the excess
+    over the basis is paid in *spend*, which is what binding a bundle was always documented to
+    cost, and the thread keeps what the derivation gave it; the excess is reported once
+    (`context.prefix_over_basis`). A declared window still charges the whole prefix, because a
+    provider's limit is not a budget a basis can buy room in, and `agent/spend_cap.py` still bounds
+    the turn. `D-2026-10-02-a-prefix-beyond-the-derivation-basis-is-paid-in-spend-not-thread`
+    records the choice.
+
     **This can only tighten**, so it needs no second safety argument: `budget/ratio - prefix` is
     below `(budget - prefix)/ratio` for every `ratio >= 1`, and the ratio is clamped at 1.0 from
     below. At `ratio == 1.0` — an uncalibrated process — the two are the same number, which is why
@@ -435,13 +497,19 @@ def effective_trigger(configured: int) -> int:
         unconditionally the floor is reachable from a plain misconfiguration and not only from the
         window corner it used to need.
     """
-    budget = float(configured)
     window = settings.llm_context_window_tokens
-    if window:
-        budget = min(budget, float(window - settings.llm_max_tokens))
     prefix = prefix_tokens()
     ratio = estimator_ratio()
-    trigger = int(budget / ratio) - prefix
+    basis = settings.agent_context_prefix_basis
+    if prefix > basis:
+        _note_prefix_over_basis(prefix, basis)
+    # The budget is charged the prefix up to the basis it was derived for; what a deployment binds
+    # beyond that is paid in spend, not thread (see the paragraph above).
+    trigger = int(configured / ratio) - min(prefix, basis)
+    if window:
+        # The window is the provider's limit rather than a spend choice, so it is charged the
+        # *whole* prefix: no basis buys room a model does not have.
+        trigger = min(trigger, int((window - settings.llm_max_tokens) / ratio) - prefix)
     if trigger < 1:
         _note_floored_trigger(configured, prefix, window, ratio)
         return 1

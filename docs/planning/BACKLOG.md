@@ -266,6 +266,18 @@ topic).
   the full suite passed in CI on the same head. Not yet shown to be a flake on a normal runner —
   measure its wall time on an idle host before loosening anything.
 
+- [ ] **`SERVED_ELSEWHERE_ALLOWANCE` is breached and CI cannot see it** — [S].
+  `tests/test_context_floor.py::test_the_allowance_for_the_bundles_this_ratchet_cannot_serve_is_still_a_bound`
+  fails against the sibling checkout the four-repo lane runs (measured 2026-10-02 in `cc3-live`:
+  `chem` 7,307 / 13 tools, `rxnpredict` 2,784, `safety` 1,632 — 11,723 against 11,000), and skips
+  everywhere the sibling has no `.venv`, which includes CI. So `PREFIX_BOUND`, and with it
+  `agent_context_prefix_basis`, sits ~700 under what a chart deployment sends, and every such
+  deployment logs `context.prefix_over_basis` once. Raising the allowance moves `PREFIX_BOUND`, the
+  clear trigger and `tests/test_compaction.BUDGET_THREAD_ALLOWANCE` together, and the warm arm of
+  `test_the_shipped_budget_leaves_the_thread_what_its_derivation_claims` may not survive it —
+  decide between that and narrowing `chem`'s schemas in `Chemclaw3-mcp` with the arithmetic run,
+  not argued.
+
 ## 5 — Where the field moved past us
 
 Filed by the 2026-08-25 field benchmark — see
