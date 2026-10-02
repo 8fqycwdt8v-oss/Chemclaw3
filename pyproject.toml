@@ -301,6 +301,14 @@ explicit = true
 [tool.uv.sources]
 torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
 
+# The other GPU runtime in the closure, with the same answer. xgboost (pulled in only by drfp)
+# depends on `nvidia-nccl-cu12` on Linux, ~400 MB of multi-GPU collectives. xgboost only loads
+# NCCL for distributed GPU training, and nothing here trains on a GPU. A marker that no platform
+# satisfies is uv's documented way to remove a transitive requirement. xgboost's CPU path, which
+# imports and fits without it, is asserted in tests/test_packaging.py.
+[tool.uv]
+override-dependencies = ["nvidia-nccl-cu12 ; sys_platform == 'never'"]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
