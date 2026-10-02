@@ -50,6 +50,8 @@ SELECTABLE = {
     # honest behaviour there rather than a failure to configure something.
     "InMemoryComposedStore": "session_store",
     "InMemoryDesignStore": "session_store",
+    # Artefacts belong to a session, so they are durable exactly when the session is.
+    "InMemoryExhibitStore": "session_store",
     "InMemoryArmResultStore": "session_store",
     # Same switch, for `InMemoryPlanApprovalStore`'s reason: a membership admits somebody to a
     # session, and under `session_store="memory"` the session is a process.

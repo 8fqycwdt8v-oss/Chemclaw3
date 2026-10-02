@@ -23,10 +23,10 @@ from typing import Any, Protocol, runtime_checkable
 
 import psycopg
 from psycopg.rows import TupleRow
-from psycopg.types.json import Jsonb
 
 from chemclaw.core import db
 from chemclaw.core.config import settings
+from chemclaw.core.jsonb import json_column
 from chemclaw.exhibits.models import (
     ExhibitHeader,
     ExhibitKind,
@@ -617,9 +617,11 @@ class PostgresExhibitStore:
                 "author_kind": author_kind,
                 "author": author,
                 "change_note": change_note,
-                "spec": Jsonb(spec_json(spec)),
+                "spec": json_column(spec_json(spec)),
                 "byte_size": spec_bytes(spec),
-                "unverified": None if unverified_figures is None else Jsonb(unverified_figures),
+                "unverified": None
+                if unverified_figures is None
+                else json_column(unverified_figures),
                 "correlation_id": correlation_id,
             },
         )
