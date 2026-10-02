@@ -85,7 +85,14 @@ _MIGRATOR_ONLY = {"schema_migrations"}
 # history and "the sequence *is* the history" (031), so an UPDATE the chat service could issue is
 # exactly the boundary this file exists to keep shut. A one-off run by an operator is not a reason
 # to hand a chat turn that privilege for the rest of the deployment's life.
-_ADMIN_ONLY_MODULES = {"cli/rekey_campaigns.py"}
+#
+# `cli/live_index.py` is the same standing for the fingerprint tables: after the live lane's re-key
+# rebuilt every shelved row, it disposes of the superseded generation — the `DELETE` that
+# `infra/sql/094_fingerprint_definition_identity.sql` names as an operator statement under the
+# owning principal, and which the grant file withholds from the runtime role so that nothing a turn
+# reaches can prune an index. The lane connects as that owning principal; a deployment's chat
+# service never runs this module.
+_ADMIN_ONLY_MODULES = {"cli/rekey_campaigns.py", "cli/live_index.py"}
 
 # Modules that build a statement around an **interpolated** table name, mapped to every table they
 # can target. `_joined` renders an interpolation as `?`, and every verb pattern below matches

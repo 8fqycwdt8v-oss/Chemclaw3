@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Bring up the four-repo ChemClaw3 stack for a full end-to-end pass: this backend, the
-# Chemclaw3-mcp tool fleet (pyexec here; calc and every fleet bundle this repo declares via processes.sh),
-# Chemclaw3_mock (the eln-json/eln-ord data sources, the mock-vendor MCP tool), and Chemclaw3_ui.
+# Chemclaw3-mcp tool fleet (pyexec here; calc, rxnlabel and every fleet bundle this repo declares
+# via processes.sh), Chemclaw3_mock (the eln-json/eln-ord data sources, the mock-vendor MCP tool),
+# and Chemclaw3_ui.
 #
 # Deliberately does not reimplement readiness polling for pieces that already have it:
 # `infra/live/bootstrap.sh` brings up Postgres/Temporal and the note writer's repo, and
@@ -443,11 +444,17 @@ print(os.pathsep.join(sorted(discovered())))')" \
   # `CalcServerError` from a server whose `/healthz` is green, which is how this lane once
   # misdiagnosed a 401 all the way into Temporal.
   assert_credential_accepted calc "http://127.0.0.1:8860/mcp" "${CHEMCLAW_CALC_TOKEN:-dev-token}"
+  # The reaction labeller, on the same terms and for the same reason: a backend rather than a
+  # connector, dialled by the background worker's label drain, and a mismatch there surfaces only as
+  # a drain that never labels anything — the state #520 found, with nothing naming a credential.
+  assert_credential_accepted rxnlabel "http://127.0.0.1:8865/mcp" \
+    "${CHEMCLAW_RXNLABEL_TOKEN:-dev-token}"
 
   log "starting Chemclaw3_ui (BFF + SPA)"
   start_ui
 
   backfill_corpus
+  index_corpus
 
   log "full stack up. UI: http://127.0.0.1:5173 · front door: http://127.0.0.1:${CHEMCLAW_LIVE_API_PORT:-8000} · logs: $LIVE_DIR"
 }
@@ -478,6 +485,55 @@ backfill_corpus() {
   else
     log "WARNING: corpus backfill failed — see $LIVE_DIR/e2e-corpus-backfill.log."
     log "         the ORD half of the corpus is unreachable until it succeeds; \`make live-data\` retries it"
+  fi
+}
+
+# Bring the corpus's derived reaction indexes current, as a deployment keeps them (#520).
+#
+# The backfill above lands records, their record-phase labels and their fingerprints. Two things a
+# deployment does on top of that never happened here, and the structure-search tools said so on every
+# run: no label drain ever ran (a deployment's `reaction-labels` Schedule, against the `rxnlabel`
+# backend `processes.sh` now starts), so `substrate_precedent` reported 0 of 4,282 reactions
+# labelled; and rows a previous lane wrote under an older fingerprint definition stayed in the
+# database across `down`/`up`, so `similar_reactions` reported a partial index. `cli/live_index`
+# runs the label drain, the operator's re-key and — when the re-key rebuilt every shelved row — the
+# disposal of the superseded generation. See its module docstring.
+#
+# **Bounded, idempotent, skippable.** `CHEMCLAW_LIVE_INDEX_TIMEOUT` (seconds, default 600) bounds
+# the whole step; the drain keeps running on the broker past it and a re-run rejoins it. Re-running
+# `up` re-runs this and converges, so a bring-up that ran out of time is finished by the next one.
+# `CHEMCLAW_LIVE_SKIP_INDEX=true` skips it, for a quick `up` that does not need precedent or
+# similarity answers. Non-fatal, like the backfill: a bring-up that got every process up is not torn
+# down over an index, and the tools' own `coverage` and `index_partial` say what state it is in.
+#
+# `CHEMCLAW_NOTE_REPO_DIR` is passed rather than exported: the re-key writes a compound note's
+# successor through the note writer when a standardization bump moved its id, and that has to be the
+# lane's own clone (`processes.sh` sets the same default for the processes it starts) — `up` exports
+# no variable it does not persist (`LANE_ENV_VARS`), and this one is `processes.sh`'s to own.
+index_corpus() {
+  case "${CHEMCLAW_LIVE_SKIP_INDEX:-false}" in
+    true|1|yes)
+      log "index step skipped (CHEMCLAW_LIVE_SKIP_INDEX) — labels and fingerprint generations are as the database left them"
+      return
+      ;;
+    false|0|no|"") ;;
+    *) die "CHEMCLAW_LIVE_SKIP_INDEX must be true or false, got '$CHEMCLAW_LIVE_SKIP_INDEX'" ;;
+  esac
+  local timeout="${CHEMCLAW_LIVE_INDEX_TIMEOUT:-600}"
+  [[ "$timeout" =~ ^[1-9][0-9]*$ ]] \
+    || die "CHEMCLAW_LIVE_INDEX_TIMEOUT must be a positive integer (seconds), got '$timeout'"
+  log "bringing the reaction indexes current: label drain + fingerprint re-key (≤ ${timeout}s; see cli/live_index)"
+  local report="$LIVE_DIR/e2e-corpus-index.log"
+  local status=0 line
+  (cd "$REPO_ROOT" && CHEMCLAW_NOTE_REPO_DIR="${CHEMCLAW_NOTE_REPO_DIR:-$LIVE_DIR/knowledge-repo}" \
+    uv run python -m chemclaw.cli.live_index --timeout "$timeout" >"$report" 2>&1) || status=$?
+  # The step's own summary lines, whichever way it went: a failure in one index says nothing about
+  # the other, and the line that names which one is the useful one. `|| true` because a report with
+  # no summary line (an import error) is not a reason for `set -e` to end the bring-up.
+  while IFS= read -r line; do log "  $line"; done < <(grep -E '^(Labels|Fingerprints):' "$report" || true)
+  if [ "$status" -ne 0 ]; then
+    log "WARNING: the index step reported a failure (exit $status) — see $report."
+    log "         structure-search answers may still be degraded; re-running \`up\` retries it"
   fi
 }
 
@@ -519,7 +575,7 @@ status() {
 # covers the processes this script owns (pyexec, mock-eln, mock-vendor, ui-bff);
 # restarting a piece of this repo's own stack is infra/live/processes.sh's `restart` verb — and
 # since D-2026-08-27-one-lane-starts-the-fleet that includes chem and safety, and since
-# D-2026-08-28-the-durable-half-has-a-backend-too the calc backend as well, and every other fleet
+# D-2026-08-28-the-durable-half-has-a-backend-too the calc and rxnlabel backends as well, and every other fleet
 # bundle `processes.sh::fleet_bundle_names` derives (props, rxnpredict, …). They get a named arm
 # below rather than falling through to "unknown process", because they *are* known: they are
 # simply somebody else's to restart.
@@ -528,7 +584,8 @@ restart() {
   # The fleet bundles are derived rather than listed: a hand-kept `chem|safety|calc` arm is how
   # `restart props` came to die on a pidfile this lane stopped writing once processes.sh took props
   # over. A bundle both trees declare is processes.sh's, the same test `fleet_bundle_names` makes.
-  if [ "$name" = calc ] || { [ -e "$MCP_REPO/manifests/$name/connector.yaml" ] \
+  if [ "$name" = calc ] || [ "$name" = rxnlabel ] \
+      || { [ -e "$MCP_REPO/manifests/$name/connector.yaml" ] \
       && [ -e "$REPO_ROOT/src/chemclaw/connectors/$name/connector.yaml" ]; }; then
     die "$name is started by infra/live/processes.sh, which this lane calls — restart it there:
   bash infra/live/processes.sh restart $name"
