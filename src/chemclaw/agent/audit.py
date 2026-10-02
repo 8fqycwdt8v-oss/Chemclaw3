@@ -49,6 +49,14 @@ the reason now reach the log line. The reason is counted from *here* rather than
 gates: four of them moved no metric at all, and a gate that has to remember to count itself is a
 gate that eventually does not.
 
+**And a connector that answers with nothing has not answered `ok`, which made five.** A fleet tool
+returning `None` reaches this middleware as a successful `ToolMessage` with no content, and the
+row said `ok` with an empty `detail` — the same row as a call whose answer was an empty list on
+purpose, except that there the tool *said* something. `empty` is that call: it ran, it did not
+fail, and it returned no content (`tool_result_shape.returned_nothing`). Connector calls only,
+because that is the result the model is told about in place of (`agent/tool_framing.py`); an
+in-process tool's `""` is a value its own code chose to return.
+
 Note: tool arguments and confirmed-answer payloads are user free text, so audit records may
 contain PII. `agent_audit_max_arg_chars` bounds what is stored; treat the trail accordingly.
 """
@@ -68,6 +76,7 @@ from langchain_core.messages import ToolMessage
 from pydantic import BaseModel, Field
 
 from chemclaw.agent.plan_link import plan_link_for_call
+from chemclaw.agent.tool_result_shape import returned_nothing
 from chemclaw.connectors.transport import SERVED_BY
 from chemclaw.core.authorship import UNNAMED_AGENT
 from chemclaw.core.config import settings
@@ -86,6 +95,12 @@ logger = logging.getLogger(__name__)
 # rather than folded into `error`, because a refusal and a crash are different events with
 # different remedies and the trail recorded them identically.
 REFUSED = "refused"
+
+# The outcome a connector call earns when it succeeded and carried no content at all.
+EMPTY = "empty"
+
+#: `detail` for an `empty` row — what the call returned, said, because the row has nothing to show.
+_EMPTY_DETAIL = "the tool returned no content"
 
 
 @cache
@@ -287,9 +302,10 @@ class AuditEvent(BaseModel):
     plan_step: str = ""
     tool: str
     arguments: str
-    # "ok" | "refused" | "error" | "cancelled". Deliberately a plain string with no CHECK behind it:
-    # the column has none (`infra/sql/006`), and adding one to an append-only table to police four
-    # literals would cost a migration on every future outcome. The producer is this module alone.
+    # "ok" | "refused" | "error" | "cancelled" | "empty". Deliberately a plain string with no CHECK
+    # behind it: the column has none (`infra/sql/006`), and adding one to an append-only table to
+    # police five literals would cost a migration on every future outcome. The producer is this
+    # module alone.
     #
     # `refused` is the fourth, and it is the one that had to be *added* rather than merely
     # documented: a governance gate stopping a call and a parser raising `KeyError` were the same
@@ -539,6 +555,7 @@ def make_audit_middleware(
             # framework-free.
             failed = returned_failure(result)
             recorded.returned_error = None if failed is None else bounded_repr(failed.content)
+            recorded.returned_empty = bool(_served_by(request)) and returned_nothing(result)
             return result
 
     return audit_tool_calls
@@ -559,6 +576,9 @@ class _Recorded:
 
     result: object | None = None
     returned_error: str | None = None
+    #: A connector call that succeeded with no content (`EMPTY`). Same reasoning as above: the
+    #: wrapper does the `ToolMessage` test, and what crosses is the decision.
+    returned_empty: bool = False
 
 
 @asynccontextmanager
@@ -578,7 +598,7 @@ async def _recording(
     """The trail itself, with no framework in it — both engines' middlewares are wrappers.
 
     Everything that makes this the *record* lives here: the identity precedence, the span, the
-    latency histogram, the four outcomes, and the shielded write that survives a teardown. A
+    latency histogram, every outcome, and the shielded write that survives a teardown. A
     second copy of it for the second engine would be the one duplication this system cannot
     afford — an audit trail that disagrees with itself depending on a config flag is not a trail,
     and the `cancelled` outcome exists precisely because a subtle omission here went unnoticed
@@ -734,6 +754,21 @@ async def _recording(
                 args,
             )
             await _emit(sink, event_for("error", detail, elapsed_ms))
+            return
+        if recorded.returned_empty:
+            # WARNING, not INFO: a fleet tool answering nothing is almost always that tool's own
+            # defect (a `None` where a "not found" belonged), and it is invisible from the model's
+            # side of the call, which is told only that nothing came back.
+            elapsed_ms = finished(span, EMPTY, None, _EMPTY_DETAIL)
+            logger.warning(
+                "tool %s returned no content after %.0f ms [cid=%s actor=%s] (args=%s)",
+                name,
+                elapsed_ms,
+                event_cid,
+                event_actor,
+                args,
+            )
+            await _emit(sink, event_for(EMPTY, _EMPTY_DETAIL, elapsed_ms))
             return
         detail = bounded_repr(recorded.result) if recorded.result is not None else ""
         elapsed_ms = finished(span, "ok", None, "")

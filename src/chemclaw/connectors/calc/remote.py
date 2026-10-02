@@ -364,6 +364,19 @@ class KeyedCalculation(BaseModel):
     structure_id: str = ""
 
 
+async def _identity(session: ClientSession, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    """`calculation_key`'s answer for `tool`, refused in this service's words unless an object.
+
+    Both readers call `.get` on it, so anything else — `None` from a server that answered with no
+    content (`core.mcp_session.invoke`), or a JSON list — was an `AttributeError` rather than the
+    `CalcToolError` a caller of this module handles.
+    """
+    identity = await _call(session, "calculation_key", {"tool": tool, "arguments": arguments})
+    if not isinstance(identity, dict):
+        raise CalcToolError(f"calculation_key returned {type(identity).__name__} for {tool}")
+    return identity
+
+
 async def remote_key(
     session: ClientSession, tool: str, arguments: dict[str, Any]
 ) -> KeyedCalculation | None:
@@ -381,7 +394,7 @@ async def remote_key(
     delimiters — `esol-delaney@2004` carries the `@`, `cal-0.28733:-29.3116` carries the `:` — so a
     client splitting the flat form would build a key that misses forever.
     """
-    identity = await _call(session, "calculation_key", {"tool": tool, "arguments": arguments})
+    identity = await _identity(session, tool, arguments)
     key = identity.get("key")
     if key is None:
         return None
@@ -475,7 +488,7 @@ async def remote_version(tool: CalibratedTool, arguments: dict[str, Any]) -> str
     repeated at each call site.
     """
     async with calc_session() as session:
-        identity = await _call(session, "calculation_key", {"tool": tool, "arguments": arguments})
+        identity = await _identity(session, tool, arguments)
     version = identity.get("calc_version")
     if not isinstance(version, str) or not version:
         raise CalcToolError(f"calculation_key returned no calc_version for {tool}: {identity}")
