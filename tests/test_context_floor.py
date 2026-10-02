@@ -912,7 +912,17 @@ SERVED_ELSEWHERE = frozenset({"chem", "rxnpredict", "safety"})
 #: that `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution` is about. It was
 #: made true rather than corrected: `-ra` prints the skip in a list nobody reads, and the epilogue
 #: is the part of a run that says what the run is not evidence about.
-SERVED_ELSEWHERE_ALLOWANCE = 11_000
+#:
+#: **13,200 since 2026-10-02, and the test below is what moved it.** Measured against
+#: `Chemclaw3-mcp` at `be55d99`, the three cost **11,848 over 22 tools** (`chem` 7,432 / 13,
+#: `rxnpredict` 2,784 / 6, `safety` 1,632 / 3), 848 over the 11,000 that stood: `chem` had grown
+#: 1,855 since the measurement above, most of it one tool (`enumerate_substitutions`, 939). 13,200
+#: is the same 11.5% over that. Narrowing `chem`'s docstrings was the alternative and was declined
+#: by the owner: those sentences are the units and the "what this is not" the fleet's own rules
+#: require. What the raise costs is stated at the two thread allowances in
+#: `tests/test_compaction.py`, which each fall by the 2,200 — both defaults stayed where they
+#: were, for the reason given there.
+SERVED_ELSEWHERE_ALLOWANCE = 13_200
 
 #: What the fleet's **whole** published `manifests/` directory costs, as a second and looser bound.
 #:

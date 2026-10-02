@@ -18,8 +18,9 @@ two controls whose own docstrings say they apply to every tool did not apply to 
   evidence — reached the caller's thread with a live one.
 - `agent/tool_result_size.py` did not bound it. Upstream's `FilesystemMiddleware` evicts a result
   over `tool_token_limit_before_evict` (20,000 tokens × 4 chars = **80,000 chars**), and this
-  repository's own ceiling is `agent_max_tool_result_chars` (**60,000**) — so a report measured at
-  **70,048 characters** landed in the caller's thread whole, with neither control applied.
+  repository's own ceiling was `agent_max_tool_result_chars` (**60,000** then) — so a report
+  measured at **70,048 characters** landed in the caller's thread whole, with neither control
+  applied.
 
 This module is the seam that fixes both in one place rather than two, which is the point: a third
 middleware that rewrites a result will reach for the same function and inherit the same coverage,
