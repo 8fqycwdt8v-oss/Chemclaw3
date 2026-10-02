@@ -78,6 +78,10 @@ _EXPECTED_SUBSYSTEMS = {
     # degradation a chemist actually feels (evidence missing from an answer) was the one missing
     # from `chemclaw_degraded_total`.
     "evidence_source",
+    # `agent/exhibit_notes.exhibit_turn_note`. An artefact store that cannot be read at turn start
+    # means the turn runs without the note — no listing and no announcement of a chemist's edit —
+    # which is silent from the chemist's side: the agent simply does not know the table changed.
+    "exhibits",
     # `durable/connector_job.py::ConnectorJobWorkflow._record_run`, whose log line has always said
     # the swallowed write means the run "survives only in Temporal's history" — that it loses data
     # nothing else

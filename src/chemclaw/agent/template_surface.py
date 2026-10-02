@@ -120,7 +120,7 @@ def profile_named_tools() -> frozenset[str]:
     answer rather than a cheaper one: `_reject_unknown_tool_names` asks about a profile that is
     registered by then, so the launcher is bound at exactly the moment a profile that names it can
     be built — and withholding is applied where the tool registry is *read*
-    (`chemclaw_agent._withheld_launcher_names`), so a launcher registered earlier in the process
+    (`chemclaw_agent._withheld_tool_names`), so a launcher registered earlier in the process
     cannot outlive the answer changing.
     """
     from chemclaw.agent.profiles import get_profile

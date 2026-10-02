@@ -40,9 +40,10 @@ See `docs/reference/architektur.md` §1 and CLAUDE.md's four-layer rule.
 
 **Current tools:** knowledge-graph read + write (`graph_tools`), cross-source
 evidence (`research_tools`), condensing many whole protocols into one comparison
-(`protocol_tools`, over `agent/condense.py`), confirmed-answer capture (`memory_tools`), and the durable
+(`protocol_tools`, over `agent/condense.py`), confirmed-answer capture (`memory_tools`), the durable
 report launcher plus the one status tool every durable job is collected with
-(`durable_tools`). Calculators and optimization campaigns are the `calc` bundle and the `bo` bundle
+(`durable_tools`), and the artefact tools beside the chat (`exhibit_tools`, with the per-turn
+note that lists artefacts and announces a chemist's edit in `exhibit_notes`). Calculators and optimization campaigns are the `calc` bundle and the `bo` bundle
 now, advertised out of `connectors/` — including their durable launchers, which are generated from
 each bundle's manifest rather than hand-written here (D-118). There is no QM/DFT job: the whole
 HPC/DFT tier was deleted by `D-2026-08-26-semiempirical-is-the-whole-tier`, and this sentence still

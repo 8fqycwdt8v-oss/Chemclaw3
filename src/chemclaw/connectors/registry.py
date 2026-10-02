@@ -937,7 +937,7 @@ def withheld_job_names() -> list[str]:
     A job says so through its manifest's `unavailable_reason` (`jobs.unavailable_reason`), asked
     now rather than at startup. Still *declared* — `job_names`, `connector_tool_names` and the
     validators keep it, since a skill or a template naming it names something this tree ships — and
-    subtracted from the bound surface by `chemclaw_agent._withheld_launcher_names` as well as here,
+    subtracted from the bound surface by `chemclaw_agent._withheld_tool_names` as well as here,
     because the tool registry only grows and a launcher some earlier build registered would
     otherwise stay bound.
     """

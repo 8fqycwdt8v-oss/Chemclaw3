@@ -2244,6 +2244,7 @@ def test_events_route_claims_a_named_set_of_kinds_and_not_every_kind(monkeypatch
     from chemclaw.agent.session_events import SessionEvent
     from chemclaw.durable.awaiting import AWAITING_KIND
     from chemclaw.durable.digest import DIGEST_KIND
+    from chemclaw.exhibits.models import PUSH_KIND
 
     captured: dict[str, object] = {}
 
@@ -2259,7 +2260,7 @@ def test_events_route_claims_a_named_set_of_kinds_and_not_every_kind(monkeypatch
                 pass
     claimed = captured["kinds"]
     assert isinstance(claimed, tuple)
-    assert set(claimed) == {"job_completed", "job_failed", AWAITING_KIND}
+    assert set(claimed) == {"job_completed", "job_failed", AWAITING_KIND, PUSH_KIND}
     assert DIGEST_KIND not in claimed
 
 
@@ -2406,6 +2407,17 @@ def test_every_session_scoped_route_is_ownership_gated() -> None:
         ("/sessions/{session_id}/queue", "GET"),
         ("/sessions/{session_id}/queue/{ticket}", "DELETE"),
         ("/sessions/{session_id}/turn/stream", "GET"),
+        # The artefacts beside the chat
+        # (`D-2026-10-02-an-artefact-is-part-of-the-answer-not-an-effect`). A stranger is 404 on
+        # every one, reads and writes alike, so none of them says whether an artefact exists; that
+        # a member may read *and* revise is `tests/test_exhibit_routes.py`'s subject.
+        ("/sessions/{session_id}/exhibits", "GET"),
+        ("/sessions/{session_id}/exhibits", "POST"),
+        ("/sessions/{session_id}/exhibits/{exhibit_id}", "GET"),
+        ("/sessions/{session_id}/exhibits/{exhibit_id}/revisions", "GET"),
+        ("/sessions/{session_id}/exhibits/{exhibit_id}/revisions", "POST"),
+        ("/sessions/{session_id}/exhibits/{exhibit_id}/diff", "GET"),
+        ("/sessions/{session_id}/exhibits/{exhibit_id}/export.{fmt}", "GET"),
     }, (
         "new session-scoped route detected — it MUST resolve ownership via _resolve_session, "
         "and this inventory + the non-owner sweep below must cover it"
@@ -2423,13 +2435,28 @@ def test_every_session_scoped_route_is_ownership_gated() -> None:
             # `ref`, `actor` and `ticket` are supplied for the routes that take them and ignored by
             # the rest; `str.format` drops the surplus keyword rather than complaining, so one line
             # still builds a URL for all of them.
-            url = route.path.format(session_id=session_id, ref="0" * 64, actor=bob.oid, ticket=1)
+            url = route.path.format(
+                session_id=session_id,
+                ref="0" * 64,
+                actor=bob.oid,
+                ticket=1,
+                exhibit_id="xb-0000000000000000",
+                fmt="csv",
+            )
             # The upload route takes multipart, the others JSON; send whichever the route expects so
             # a 404 here proves the *ownership* gate rather than a body-parsing rejection.
             if url.endswith("/attachments"):
                 res = client.request(method, url, files={"file": ("a.txt", b"x", "text/plain")})
             elif url.endswith("/plan/decision"):
                 res = client.request(method, url, json={"approved": True, "plan_hash": "x"})
+            elif url.endswith("/exhibits") and method == "POST":
+                spec = {"kind": "document", "markdown": "x"}
+                res = client.request(
+                    method, url, json={"kind": "document", "title": "t", "spec": spec}
+                )
+            elif url.endswith("/revisions") and method == "POST":
+                spec = {"kind": "document", "markdown": "x"}
+                res = client.request(method, url, json={"parent_revision": 1, "spec": spec})
             else:
                 res = client.request(method, url, json={"message": "x"})
             assert res.status_code == 404, (

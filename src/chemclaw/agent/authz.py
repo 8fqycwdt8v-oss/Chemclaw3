@@ -280,6 +280,17 @@ KNOWLEDGE_WRITE_TOOLS: frozenset[str] = frozenset(
 READ_ONLY_TOOLS: frozenset[str] = frozenset(
     {
         "ask_clarifying_question",
+        # **An artefact is part of the answer, not an effect**
+        # (`D-2026-10-02-an-artefact-is-part-of-the-answer-not-an-effect`). Creating or revising
+        # one changes nothing in a laboratory, the knowledge graph or a system this one does not
+        # own — exactly as the answer text does not — so a table does not need an approved plan and
+        # a dry run may draft one. What *is* gated is promoting an artefact to a note or a protocol,
+        # which goes through the tools that already make those writes. The two writers are still
+        # kept off every helper, for `ask_clarifying_question`'s reason
+        # (`agent/subagents.SPEAKS_TO_THE_CHEMIST`).
+        "create_exhibit",
+        "read_exhibit",
+        "revise_exhibit",
         "expand_note",
         "find_knowledge_gaps",
         "find_notes",

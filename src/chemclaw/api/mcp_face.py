@@ -74,6 +74,12 @@ FACE_NAME = "chemclaw-read"
 WITHHELD: dict[str, str] = {
     # Scoped to a turn this caller does not have.
     "ask_clarifying_question": "puts a question to the chemist in the conversation; there is none",
+    # The artefacts beside a session's chat (`exhibits/`): each is resolved against the turn's own
+    # session, so an external caller has none to read or write, and the two writers announce on a
+    # chemist's stream that does not exist here.
+    "create_exhibit": "writes an artefact into a conversation's pane; there is no conversation",
+    "revise_exhibit": "revises an artefact in a conversation's pane; there is no conversation",
+    "read_exhibit": "reads an artefact of the caller's session, which an external caller lacks",
     "list_attachments": "files uploaded to a session, which an external caller does not have",
     "read_attachment": (
         "the contents of a file somebody uploaded to a conversation — a disclosure surface rather "

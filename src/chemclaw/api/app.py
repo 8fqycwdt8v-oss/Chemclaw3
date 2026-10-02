@@ -63,6 +63,7 @@ from chemclaw.api.middleware import (
     _subsystem_unavailable,
 )
 from chemclaw.api.routes import (
+    exhibits,
     jobs,
     members,
     notes,
@@ -640,6 +641,7 @@ def create_app(
         protocols,
         workflows,
         members,
+        exhibits,
     ):
         module.register(app)
 

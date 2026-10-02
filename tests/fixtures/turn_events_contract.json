@@ -52,6 +52,15 @@
       "failed": "bool",
       "source": "str"
     },
+    "exhibit": {
+      "author": "str",
+      "author_kind": "Literal['agent', 'human']",
+      "exhibit_id": "str",
+      "kind": "str",
+      "op": "Literal['created', 'revised']",
+      "revision": "int",
+      "title": "str"
+    },
     "handoff": {
       "from_agent": "str",
       "reason": "str",

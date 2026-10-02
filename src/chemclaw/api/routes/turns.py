@@ -33,6 +33,7 @@ from sse_starlette.sse import EventSourceResponse, SendTimeoutError
 from starlette.responses import Response
 from starlette.types import Receive, Scope, Send
 
+from chemclaw.agent.exhibit_notes import resolve_exhibit_refs
 from chemclaw.agent.session_queue import QueueRefused, Refusal, TurnQueue
 from chemclaw.api.auth import (
     DEV_PRINCIPAL_OID,
@@ -65,6 +66,7 @@ from chemclaw.api.state import (
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import get_current_correlation_id
 from chemclaw.core.metrics import METRICS
+from chemclaw.exhibits.models import UnknownExhibit
 
 logger = logging.getLogger(__name__)
 
@@ -277,6 +279,15 @@ async def post_message(
     # every shared session they belong to and run them all at once, past the cap. The same count is
     # taken again when a waiting message reaches the head (`_refusal_at_the_head`), because what
     # was true when it was sent need not be true when it starts.
+    # **The artefacts this message points at, resolved before anything is claimed.** A reference
+    # to an artefact the session does not hold is a 422 here rather than a turn that quietly runs
+    # without it — the chemist pressed "Ask about this" on something specific — and resolving it
+    # first means a refusal holds no slot, no claim and no permit.
+    if body.exhibit_refs:
+        try:
+            await resolve_exhibit_refs(session_id, body.exhibit_refs)
+        except UnknownExhibit as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
     actor_cap = settings.service_max_concurrent_turns_per_actor
     front_waiters = front.queue_waiters
     held = (
@@ -659,6 +670,7 @@ async def post_message(
                         # the `except TimeoutError` below — which runs *after* the turn has booked
                         # itself. See `run_turn`'s `deadline` argument.
                         deadline=deadline.when(),
+                        exhibit_refs=body.exhibit_refs,
                     ):
                         if event.type == "error":
                             turn_failed = True

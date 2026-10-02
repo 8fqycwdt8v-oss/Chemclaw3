@@ -26,6 +26,7 @@ from chemclaw.agent.tool_result_size import full_result_ref, was_cut
 from chemclaw.api.tool_results import content_address
 from chemclaw.core.authorship import Authorship
 from chemclaw.core.config import settings
+from chemclaw.exhibits.models import ExhibitRef
 
 # How much of a tool's arguments or result the transcript carries. The same bound the audit trail
 # applies for the same reason: a tool argument can be a whole optimization problem or an evidence
@@ -47,6 +48,18 @@ class MessageIn(BaseModel):
     # without doing it — a natural primitive for a deployment whose default autonomy is
     # `plan_only`.
     dry_run: bool = False
+    # Artefacts the chemist points at in this message ("Ask about this"). Each is resolved within
+    # the session before the turn starts — an unknown one is a 422, never a silently dropped
+    # reference — and copied, framed and bounded, into the turn's note (`agent/exhibit_notes`).
+    exhibit_refs: list[ExhibitRef] = Field(default_factory=list)
+
+    @field_validator("exhibit_refs")
+    @classmethod
+    def _few_refs(cls, value: list[ExhibitRef]) -> list[ExhibitRef]:
+        """Reject more references than `exhibit_max_refs`, read at validation time like the cap."""
+        if len(value) > settings.exhibit_max_refs:
+            raise ValueError(f"at most {settings.exhibit_max_refs} artefacts may be referenced")
+        return value
 
     @field_validator("message")
     @classmethod

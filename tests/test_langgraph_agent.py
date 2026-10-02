@@ -36,7 +36,7 @@ from chemclaw.agent.authz import side_effecting_tools
 from chemclaw.agent.chemclaw_agent import (
     _advertised_names,
     _capability_tools,
-    _withheld_launcher_names,
+    _withheld_tool_names,
     available_tool_names,
     harness_tool_names,
     subagent_tool_names,
@@ -179,7 +179,7 @@ def test_every_in_process_tool_reaches_the_graph_unchanged() -> None:
     withheld = set() if personal_skills_available() else set(PERSONAL_TIER_TOOLS)
     # The registry only grows, so a template launcher an earlier build in this process registered
     # under another configuration can be held while this deployment withholds it.
-    withheld |= _withheld_launcher_names()
+    withheld |= _withheld_tool_names()
     assert advertised == ({tool.__name__ for tool in _capability_tools()} - withheld) | ambient
     assert advertised == (set(registered_tool_names()) - withheld) | ambient
 

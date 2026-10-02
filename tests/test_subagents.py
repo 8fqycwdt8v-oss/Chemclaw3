@@ -219,6 +219,22 @@ def test_a_helper_cannot_put_a_question_on_the_chemists_stream(helper: Any) -> N
     assert "ask_clarifying_question" not in _tool_names(helper)
 
 
+def test_a_helper_reads_artefacts_and_cannot_write_one(agent: Any, helper: Any) -> None:
+    """The artefact writers are kept off a helper by name; the reader is not.
+
+    `create_exhibit` and `revise_exhibit` are read-only for authorization — an artefact is part of
+    the answer, not an effect (`D-2026-10-02-an-artefact-is-part-of-the-answer-not-an-effect`) — so
+    `side_effecting_tools()` would hand them to a helper, which would then put something on the
+    pane beside the chemist's chat from a context the chemist cannot see. Asserted on what each
+    graph *bound*, so the subtraction is shown to happen rather than the constant to exist.
+    """
+    held, delegated = _tool_names(agent), _tool_names(helper)
+    for name in ("create_exhibit", "revise_exhibit"):
+        assert name in held and name in SPEAKS_TO_THE_CHEMIST
+        assert name not in delegated, f"a helper can write {name} onto the chemist's pane"
+    assert "read_exhibit" in held and "read_exhibit" in delegated
+
+
 def test_the_set_of_tools_that_speak_to_the_chemist_is_derived_not_remembered() -> None:
     """`SPEAKS_TO_THE_CHEMIST` is a hand-written constant, so this is what keeps it honest.
 
@@ -240,7 +256,7 @@ def test_the_set_of_tools_that_speak_to_the_chemist_is_derived_not_remembered() 
     """
     import ast
 
-    writers = {"record_question", "record_job_started", "record_note_written"}
+    writers = {"record_question", "record_job_started", "record_note_written", "record_exhibit"}
     registered = registered_tool_names()
     speakers: set[str] = set()
     for module in Path("src/chemclaw").rglob("*.py"):

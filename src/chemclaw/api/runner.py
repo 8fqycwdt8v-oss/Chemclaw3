@@ -40,6 +40,7 @@ from chemclaw.agent.authz import (
 from chemclaw.agent.checkpointer import checkpointer
 from chemclaw.agent.chemclaw_agent import connector_specs
 from chemclaw.agent.context_budget import current_context
+from chemclaw.agent.exhibit_notes import exhibit_turn_note
 from chemclaw.agent.framing import frame_untrusted
 from chemclaw.agent.job_results import await_job_results
 from chemclaw.agent.llm_provider import classify_model_failure
@@ -114,6 +115,7 @@ from chemclaw.core.turn_flags import reset_dry_run, set_dry_run
 from chemclaw.core.turn_signals import JobSignal, SkillLoadedSignal
 from chemclaw.core.turn_text import reset_current_user_texts, set_current_user_texts
 from chemclaw.durable.awaiting import AwaitRequest, open_wait
+from chemclaw.exhibits.models import ExhibitRef
 from chemclaw.kg.note import cited_ids
 
 logger = logging.getLogger(__name__)
@@ -199,6 +201,7 @@ async def run_turn(
     profile: str | None = None,
     graph_factory: Callable[..., Any] = build_turn_agent,
     deadline: float | None = None,
+    exhibit_refs: Sequence[ExhibitRef] = (),
 ) -> AsyncIterator[Event]:
     """Run one turn and yield its events (tokens, tool calls, jobs, then the answer).
 
@@ -240,6 +243,9 @@ async def run_turn(
             tell us afterwards. Comparing against the same loop clock the timeout itself uses makes
             the answer exact rather than a tolerance. `None` off the front door, where nothing sets
             a whole-turn deadline and every cancellation is genuinely an abandonment.
+        exhibit_refs: Artefacts the chemist's message points at, already resolved within the
+            session by the route (an unknown one was its 422). Copied into this turn's artefact
+            note (`agent/exhibit_notes.exhibit_turn_note`); empty for a message that names none.
 
     Yields:
         `chemclaw.api.events.Event` values in the order the model produced them, ending with an
@@ -419,6 +425,12 @@ async def run_turn(
                 # The claim is atomic, so a live tab's tailer and this turn cannot both deliver
                 # one row; whichever asks first wins, and both audiences are told the same way.
                 user_input = await _with_pushed_job_results(session.session_id, user_message)
+                # The artefact note — what exists, what the chemist changed since the agent last
+                # saw it, and what this message points at — appended the same way and for the
+                # same reason: it is news for *this* turn, told once, framed as data.
+                note = await exhibit_turn_note(session.session_id, exhibit_refs)
+                if note:
+                    user_input = f"{user_input}\n\n{note}"
                 # **One carry for the whole turn, because a turn can be two graph invocations.**
                 # `model_calls` and `billed_tokens` are untracked channels, so a resume on the same
                 # thread starts them at zero and gets a second full allowance of both caps —

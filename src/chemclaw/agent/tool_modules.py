@@ -25,6 +25,7 @@ from chemclaw.agent import commitment_tools as _commitment_tools  # noqa: F401
 from chemclaw.agent import dialogue_tools as _dialogue_tools  # noqa: F401
 from chemclaw.agent import durable_tools as _durable_tools  # noqa: F401
 from chemclaw.agent import evidence_tools as _evidence_tools  # noqa: F401
+from chemclaw.agent import exhibit_tools as _exhibit_tools  # noqa: F401
 from chemclaw.agent import graph_tools as _graph_tools  # noqa: F401
 from chemclaw.agent import memory_tools as _memory_tools  # noqa: F401
 from chemclaw.agent import operations_tools as _operations_tools  # noqa: F401

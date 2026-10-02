@@ -38,6 +38,7 @@ from typing import Any
 from langchain.agents.middleware import TodoListMiddleware
 
 from chemclaw.agent import tool_modules as _tool_modules  # noqa: F401
+from chemclaw.agent.exhibit_tools import EXHIBIT_TOOLS
 from chemclaw.agent.framing import ENVELOPE_TAG, SYSTEM_SPEECH_MARK
 from chemclaw.agent.handoff import handoff_tool_name
 from chemclaw.agent.profiles import AgentProfile, get_profile, registered_profile_names
@@ -953,6 +954,8 @@ def declared_tool_names() -> set[str]:
         available_tool_names()
         | set(declared_connector_tool_names())
         | set(template_tool_names(declared=True))
+        # The artefact tools are this tree's whether or not a deployment switched them off.
+        | EXHIBIT_TOOLS
     )
 
 
@@ -971,7 +974,7 @@ def capability_tool_names() -> set[str]:
     `tests/test_verifier.py::test_no_capability_tool_is_short_enough_to_collide_with_english`
     asserts the property that makes a bare-token match safe over this set and unsafe over that one.
     """
-    withheld = _withheld_launcher_names()
+    withheld = _withheld_tool_names()
     return {
         *(name for name in registered_tool_names() if name not in withheld),
         # A withheld *job* is still a declared connector name (`connector_tool_names` reports the
@@ -992,7 +995,7 @@ def _reject_unknown_tool_names(profile: AgentProfile) -> None:
     available = available_tool_names()
     # A withheld launcher is a known name this deployment cannot run, not a typo: a profile naming
     # it builds, and the launcher is simply absent from what the build binds.
-    unknown = profile.tool_names - available - _withheld_launcher_names()
+    unknown = profile.tool_names - available - _withheld_tool_names()
     if unknown:
         raise ValueError(
             f"agent profile {profile.name!r} lists unknown tool(s) {sorted(unknown)}; "
@@ -1084,16 +1087,21 @@ def _register_generated_tools() -> list[CapabilityTool]:
         for tool_fn in [*job_tools(), *template_tools()]:
             if tool_fn.__name__ not in known:
                 register_tool(tool_fn)
-        withheld = _withheld_launcher_names()
+        withheld = _withheld_tool_names()
         return [tool for tool in registered_tools() if tool.__name__ not in withheld]
 
 
-def _withheld_launcher_names() -> set[str]:
-    """Launchers this deployment declares and does not bind, read at the moment of asking.
+def _withheld_tool_names() -> set[str]:
+    """Tools this deployment declares and does not bind, read at the moment of asking.
 
-    Two kinds: a template launcher whose opt-in capability is off
-    (`templates.registry.withheld_reason`), and a job launcher whose manifest says the deployment
-    cannot run it (`connectors.registry.withheld_job_names`).
+    Three kinds: a template launcher whose opt-in capability is off
+    (`templates.registry.withheld_reason`), a job launcher whose manifest says the deployment
+    cannot run it (`connectors.registry.withheld_job_names`), and the three artefact tools when
+    `agent_exhibits_enabled` is off (`agent/exhibit_tools.EXHIBIT_TOOLS`). The third is a setting
+    rather than a manifest, and it is here rather than in a fourth mechanism because this is where
+    every reader of the bound surface — the build, the surface the verifier scans, the profile
+    check — already subtracts what a deployment switched off. Off means *unbound*, which is what
+    pays the three schemas back out of every model call's prefix.
 
     **The registry only grows, so what it holds is not the surface.** A launcher registered by an
     earlier build under a different configuration stays registered for the life of the process.
@@ -1105,9 +1113,12 @@ def _withheld_launcher_names() -> set[str]:
     there this subtracts nothing that was registered; in a process that does, it is the difference
     between the rule and the history.
     """
-    return (set(template_tool_names(declared=True)) - set(template_tool_names())) | set(
+    withheld = (set(template_tool_names(declared=True)) - set(template_tool_names())) | set(
         withheld_job_names()
     )
+    if not settings.agent_exhibits_enabled:
+        withheld |= EXHIBIT_TOOLS
+    return withheld
 
 
 def _narrow(

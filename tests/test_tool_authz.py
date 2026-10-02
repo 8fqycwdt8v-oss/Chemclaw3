@@ -974,13 +974,16 @@ def test_a_tool_withheld_for_speaking_to_the_chemist_is_refused_by_name_too() ->
     from chemclaw.agent.subagents import SPEAKS_TO_THE_CHEMIST
     from chemclaw.agent.tool_authz import undeclared_write_refusal
 
-    (name,) = sorted(SPEAKS_TO_THE_CHEMIST)
-    refusal = undeclared_write_refusal(name, frozenset({"expand_note"}))
-    assert refusal is not None, (
-        "a withheld tool's name fell through to the library's inventory dump"
-    )
-    assert name in str(refusal)
-    assert "expand_note" not in str(refusal), "the refusal enumerated the agent's own inventory"
+    # Every member, not one: the artefact writers joined the set beside the question
+    # (`D-2026-10-02-an-artefact-is-part-of-the-answer-not-an-effect`), and each must be refused by
+    # its own name rather than fall through to the inventory dump.
+    for name in sorted(SPEAKS_TO_THE_CHEMIST):
+        refusal = undeclared_write_refusal(name, frozenset({"expand_note"}))
+        assert refusal is not None, (
+            "a withheld tool's name fell through to the library's inventory dump"
+        )
+        assert name in str(refusal)
+        assert "expand_note" not in str(refusal), "the refusal enumerated the agent's own inventory"
     # ...and a name that is neither withheld nor side-effecting is still an ordinary typo.
     assert undeclared_write_refusal("no_such_tool", frozenset({"expand_note"})) is None
 
