@@ -1179,7 +1179,11 @@ def test_the_overrun_indicator_can_fire_at_the_shipped_budget_with_no_window(
 #: **Both gain 250 back** when `SkillManifest.requires` takes three largely-inert skills out of
 #: the default listing — the same arithmetic run the other way, and the only part of this
 #: branch's 2,500 that was ever refundable.
-CLEAR_TRIGGER_THREAD_ALLOWANCE = 27_750
+#:
+#: **Both drop 2,200 when `SERVED_ELSEWHERE_ALLOWANCE` goes to 13,200** for `Chemclaw3-mcp`'s
+#: `chem` growth, and on the same argument: `PREFIX_BOUND` rose, the window did not, and the pair
+#: stays one claim. This is the first entry here whose prefix grew in another repository.
+CLEAR_TRIGGER_THREAD_ALLOWANCE = 25_550
 
 #: The thread allowance `agent_context_token_budget`'s default is derived to leave.
 #:
@@ -1231,7 +1235,12 @@ CLEAR_TRIGGER_THREAD_ALLOWANCE = 27_750
 #: commit before this one and reverted on the argument directly above — the window is the input, so
 #: a budget that rises with the prefix spends head-room a provider decides, and what buys the
 #: thread back is a narrower prefix rather than a raise here.
-BUDGET_THREAD_ALLOWANCE = 34_850
+#:
+#: **32,650 since 2026-10-02**, down 2,200 because `SERVED_ELSEWHERE_ALLOWANCE` rose by that for
+#: the sibling fleet's `chem` (`tests/test_context_floor.py` carries the measurement). 6.3% of the
+#: thread, paid for a surface this repository does not build — the same rule, with nothing here
+#: to narrow instead.
+BUDGET_THREAD_ALLOWANCE = 32_650
 
 #: The smallest context window this stack is designed against, in billed tokens.
 #:
