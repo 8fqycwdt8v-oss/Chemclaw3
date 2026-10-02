@@ -9,12 +9,14 @@ are the seam.
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
 from chemclaw.core.config import settings
 from chemclaw.exhibits.models import (
     EXHIBIT_ID,
     ChartSpec,
     DocumentSpec,
+    ExhibitRef,
     InvalidExhibit,
     TableSpec,
     new_exhibit_id,
@@ -181,6 +183,14 @@ def test_a_minted_id_has_the_contract_shape() -> None:
     first, second = new_exhibit_id(), new_exhibit_id()
     assert EXHIBIT_ID.match(first) and EXHIBIT_ID.match(second)
     assert first != second
+
+
+def test_a_reference_names_an_id_of_the_minted_shape() -> None:
+    """`ExhibitRef` holds a chemist's message to the `xb-` shape before anything looks it up."""
+    assert ExhibitRef(exhibit_id=new_exhibit_id()).revision == 0
+    for bad in ("xb-1", "XB-0000000000000000", "../etc/passwd", "xb-0000000000000000 "):
+        with pytest.raises(ValidationError):
+            ExhibitRef(exhibit_id=bad)
 
 
 def test_a_document_is_the_markdown_and_nothing_else() -> None:

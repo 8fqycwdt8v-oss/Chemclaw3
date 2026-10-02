@@ -24,6 +24,7 @@ session id, so an id from another conversation answers as an unknown one.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any, Literal
@@ -88,6 +89,12 @@ def _session() -> str:
 
 
 def _store() -> ExhibitStore:
+    """The deployment's artefact store, resolved per call.
+
+    Per call rather than bound at import, because the backend follows `session_store` and a tool
+    module is imported once for the life of the process — and so that a test patching this one
+    name reaches every tool here.
+    """
     return default_exhibit_store()
 
 
@@ -230,8 +237,11 @@ async def _changes_since_agent(
     base = await store.view(session_id, view.exhibit_id, agent_revisions[-1])
     if base is None:  # pragma: no cover - revisions are append-only and were just listed
         return None
+    full = await asyncio.to_thread(
+        diff_specs, base.spec, view.spec, from_revision=base.revision, to_revision=view.revision
+    )
     diff, left_out = capped(
-        diff_specs(base.spec, view.spec, from_revision=base.revision, to_revision=view.revision),
+        full,
         max_changes=settings.exhibit_diff_max_changes,
         max_chars=settings.exhibit_diff_max_value_chars,
     )

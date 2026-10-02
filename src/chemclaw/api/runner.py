@@ -40,7 +40,7 @@ from chemclaw.agent.authz import (
 from chemclaw.agent.checkpointer import checkpointer
 from chemclaw.agent.chemclaw_agent import connector_specs
 from chemclaw.agent.context_budget import current_context
-from chemclaw.agent.exhibit_notes import exhibit_turn_note
+from chemclaw.agent.exhibit_notes import exhibit_turn_note, mark_told
 from chemclaw.agent.framing import frame_untrusted
 from chemclaw.agent.job_results import await_job_results
 from chemclaw.agent.llm_provider import classify_model_failure
@@ -425,12 +425,14 @@ async def run_turn(
                 # The claim is atomic, so a live tab's tailer and this turn cannot both deliver
                 # one row; whichever asks first wins, and both audiences are told the same way.
                 user_input = await _with_pushed_job_results(session.session_id, user_message)
-                # The artefact note — what exists, what the chemist changed since the agent last
-                # saw it, and what this message points at — appended the same way and for the
-                # same reason: it is news for *this* turn, told once, framed as data.
+                # The artefact note — what the chemist changed since the agent last saw it, and
+                # what this message points at — appended the same way and for the same reason: it
+                # is news for *this* turn, told once, framed as data. What artefacts *exist* is
+                # state, not news, and reaches every model call on the instructions instead
+                # (`agent/exhibit_notes.ExhibitListing`), so it is never written to the thread.
                 note = await exhibit_turn_note(session.session_id, exhibit_refs)
-                if note:
-                    user_input = f"{user_input}\n\n{note}"
+                if note.text:
+                    user_input = f"{user_input}\n\n{note.text}"
                 # **One carry for the whole turn, because a turn can be two graph invocations.**
                 # `model_calls` and `billed_tokens` are untracked channels, so a resume on the same
                 # thread starts them at zero and gets a second full allowance of both caps —
@@ -458,6 +460,10 @@ async def run_turn(
                 # moment it becomes true, not at the answer, which is still a verifier call and
                 # possibly a job-result wait away.
                 ledger.run_complete = True
+                # The edits the note carried are told now that the graph has run over them — not
+                # when the note was composed, or a turn torn down before its first model call would
+                # mark an edit nobody was shown.
+                await mark_told(session.session_id, note.told)
                 # No trace flush here: every call the graph makes is announced by the `updates`
                 # stream that carried it, so there is nothing left open when that stream ends.
                 # (This used to iterate `tool_trace.flush()` for a call whose arguments finished on

@@ -22,10 +22,11 @@ and a latency (`api/routes/workflows.py` states the convention).
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from fastapi import FastAPI, HTTPException, Query, Response
+from fastapi import FastAPI, HTTPException, Path, Query, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from chemclaw.agent.session_events import record_session_event
@@ -39,6 +40,7 @@ from chemclaw.core.metrics_bridge import degraded
 from chemclaw.exhibits.diff import diff_specs
 from chemclaw.exhibits.export import MEDIA_TYPES, export_filename, render_export
 from chemclaw.exhibits.models import (
+    EXHIBIT_ID,
     PUSH_KIND,
     ExhibitDiff,
     ExhibitHeader,
@@ -57,6 +59,10 @@ from chemclaw.exhibits.models import (
 from chemclaw.exhibits.store import default_exhibit_store
 
 logger = logging.getLogger(__name__)
+
+#: An artefact id in a path, held to the minted shape: a malformed one is a 422 naming the
+#: parameter rather than a lookup, and it reveals nothing a 404 would not.
+ExhibitId = Annotated[str, Path(pattern=EXHIBIT_ID.pattern)]
 
 
 class ExhibitListOut(BaseModel):
@@ -144,7 +150,7 @@ async def create_exhibit_route(
 
 
 async def get_exhibit(
-    session_id: str, exhibit_id: str, live: CurrentSession, revision: int = 0
+    session_id: str, exhibit_id: ExhibitId, live: CurrentSession, revision: int = 0
 ) -> ExhibitView:
     """One revision of an artefact — the head for `revision=0`."""
     view = await default_exhibit_store().view(session_id, exhibit_id, revision)
@@ -154,7 +160,7 @@ async def get_exhibit(
 
 
 async def list_revisions(
-    session_id: str, exhibit_id: str, live: CurrentSession
+    session_id: str, exhibit_id: ExhibitId, live: CurrentSession
 ) -> ExhibitRevisionsOut:
     """An artefact's history, oldest first — enough to pick a revision to open or compare."""
     revisions = await default_exhibit_store().revisions(session_id, exhibit_id)
@@ -165,7 +171,7 @@ async def list_revisions(
 
 async def get_exhibit_diff(
     session_id: str,
-    exhibit_id: str,
+    exhibit_id: ExhibitId,
     live: CurrentSession,
     from_revision: int = Query(default=0, alias="from", ge=0),
     to_revision: int = Query(default=0, alias="to", ge=0),
@@ -177,17 +183,22 @@ async def get_exhibit_diff(
         raise HTTPException(status_code=404, detail=_missing(exhibit_id, to_revision))
     start = from_revision or after.parent_revision
     before = await store.view(session_id, exhibit_id, start) if start else None
-    if before is None:
-        if start:
-            raise HTTPException(status_code=404, detail=_missing(exhibit_id, start))
-        # Revision 1 has no parent: everything in it is an addition, which is the empty-vs-it diff.
-        return ExhibitDiff(from_revision=0, to_revision=after.revision, changes=[])
-    return diff_specs(before.spec, after.spec, from_revision=start, to_revision=after.revision)
+    if before is None and start:
+        raise HTTPException(status_code=404, detail=_missing(exhibit_id, start))
+    # Revision 1 has no parent, so `before` is None and all of it reads as one addition. Off the
+    # loop: a diff is CPU work proportional to the spec, and this route serves every chemist.
+    return await asyncio.to_thread(
+        diff_specs,
+        None if before is None else before.spec,
+        after.spec,
+        from_revision=start,
+        to_revision=after.revision,
+    )
 
 
 async def post_exhibit_revision(
     session_id: str,
-    exhibit_id: str,
+    exhibit_id: ExhibitId,
     body: ExhibitRevisionIn,
     principal: CurrentUser,
     live: CurrentSession,
@@ -220,13 +231,17 @@ async def post_exhibit_revision(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except InvalidExhibit as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ExhibitLimit as exc:
+        raise HTTPException(
+            status_code=409, detail={"code": "exhibit_limit", "message": str(exc)}
+        ) from exc
     await _announce(view, "revised")
     return view
 
 
 async def export_exhibit(
     session_id: str,
-    exhibit_id: str,
+    exhibit_id: ExhibitId,
     fmt: str,
     live: CurrentSession,
     revision: int = 0,

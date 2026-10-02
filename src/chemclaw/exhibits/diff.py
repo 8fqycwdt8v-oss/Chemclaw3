@@ -24,6 +24,7 @@ import difflib
 import json
 from typing import Any
 
+from chemclaw.core.config import settings
 from chemclaw.exhibits.models import (
     ChartSpec,
     DocumentSpec,
@@ -37,11 +38,18 @@ from chemclaw.exhibits.models import (
 from chemclaw.protocols.diff import ChangeKind, FieldChange
 
 
-def diff_specs(before: Spec, after: Spec, *, from_revision: int, to_revision: int) -> ExhibitDiff:
+def diff_specs(
+    before: Spec | None, after: Spec, *, from_revision: int, to_revision: int
+) -> ExhibitDiff:
     """Every change between two specs, in reading order.
 
+    CPU-bound and bounded (`exhibit_diff_max_lines`), but still not free: an async caller runs it
+    with `asyncio.to_thread` so a large table or document never stalls the event loop.
+
     Args:
-        before: The older revision's spec.
+        before: The older revision's spec, or `None` for revision 1 — which has no parent, so all
+            of it is one addition: a document's lines as an added hunk, any other kind as one added
+            `"spec"`.
         after: The newer revision's spec.
         from_revision: The older revision's number, carried onto the diff.
         to_revision: The newer revision's number.
@@ -49,7 +57,13 @@ def diff_specs(before: Spec, after: Spec, *, from_revision: int, to_revision: in
     Returns:
         The changes, empty when the two specs are identical.
     """
-    if isinstance(before, DocumentSpec) and isinstance(after, DocumentSpec):
+    if before is None:
+        changes = (
+            _document("", after.markdown)
+            if isinstance(after, DocumentSpec)
+            else [_absent("spec", spec_json(after), "added")]
+        )
+    elif isinstance(before, DocumentSpec) and isinstance(after, DocumentSpec):
         changes = _document(before.markdown, after.markdown)
     elif isinstance(before, TableSpec) and isinstance(after, TableSpec):
         changes = _table(before, after)
@@ -68,28 +82,50 @@ def diff_specs(before: Spec, after: Spec, *, from_revision: int, to_revision: in
 
 
 def _document(before: str, after: str) -> list[FieldChange]:
-    """One change per differing line hunk, numbered by the *new* document's lines (1-based)."""
+    """One change per differing line hunk, numbered by the *new* document's lines (1-based).
+
+    **The line alignment is bounded, because its cost is not.** `SequenceMatcher` without autojunk
+    is cubic on a document of repeated lines — measured, 500 alternating lines against 500 took
+    0.47 s and 2,000 took 33 s — and a 200 kB spec is tens of thousands of lines. So the common head
+    and tail are stripped first (linear, and all an ordinary edit leaves to align), and a differing
+    middle longer than `exhibit_diff_max_lines` on either side is reported as **one** hunk spanning
+    it, which is true and merely coarser. Autojunk is not the bound: it only discards lines above
+    a frequency threshold and leaves the near-threshold worst case standing.
+    """
     old, new = before.splitlines(), after.splitlines()
-    changes: list[FieldChange] = []
-    matcher = difflib.SequenceMatcher(a=old, b=new, autojunk=False)
-    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        if tag == "equal":
-            continue
-        kind: ChangeKind = (
-            "added" if tag == "insert" else "removed" if tag == "delete" else "changed"
-        )
-        # A deletion has no lines in the new document, so it is located where it would have been.
-        first, last = (j1 + 1, j2) if j2 > j1 else (j1, j1)
-        where = f"line {first}" if first == last else f"lines {first}-{last}"
-        changes.append(
-            FieldChange(
-                path=where,
-                kind=kind,
-                before="\n".join(old[i1:i2]),
-                after="\n".join(new[j1:j2]),
-            )
-        )
-    return changes
+    head = 0
+    while head < min(len(old), len(new)) and old[head] == new[head]:
+        head += 1
+    tail = 0
+    while tail < min(len(old), len(new)) - head and old[-1 - tail] == new[-1 - tail]:
+        tail += 1
+    old_mid, new_mid = old[head : len(old) - tail], new[head : len(new) - tail]
+    if not old_mid and not new_mid:
+        return []
+    limit = settings.exhibit_diff_max_lines
+    if len(old_mid) > limit or len(new_mid) > limit:
+        opcodes = [(_tag(old_mid, new_mid), 0, len(old_mid), 0, len(new_mid))]
+    else:
+        matcher = difflib.SequenceMatcher(a=old_mid, b=new_mid, autojunk=False)
+        opcodes = [op for op in matcher.get_opcodes() if op[0] != "equal"]
+    return [
+        _hunk(tag, old_mid[i1:i2], new_mid[j1:j2], head + j1, head + j2)
+        for tag, i1, i2, j1, j2 in opcodes
+    ]
+
+
+def _tag(old: list[str], new: list[str]) -> str:
+    """The opcode a whole differing span is, as `SequenceMatcher` would have named it."""
+    return "insert" if not old else "delete" if not new else "replace"
+
+
+def _hunk(tag: str, old: list[str], new: list[str], j1: int, j2: int) -> FieldChange:
+    """One differing span, located by the new document's 0-based line range `[j1, j2)`."""
+    kind: ChangeKind = "added" if tag == "insert" else "removed" if tag == "delete" else "changed"
+    # A deletion has no lines in the new document, so it is located where it would have been.
+    first, last = (j1 + 1, j2) if j2 > j1 else (j1, j1)
+    where = f"line {first}" if first == last else f"lines {first}-{last}"
+    return FieldChange(path=where, kind=kind, before="\n".join(old), after="\n".join(new))
 
 
 def _table(before: TableSpec, after: TableSpec) -> list[FieldChange]:

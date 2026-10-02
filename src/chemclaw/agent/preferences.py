@@ -418,8 +418,12 @@ def standing_preferences_section(preferences: list[Preference]) -> str:
     return f"{head}\n{body}\n{STANDING_PREFERENCES_RULE}"
 
 
-def _appended(system: SystemMessage | None, text: str) -> SystemMessage:
-    """`system` with `text` as one more paragraph at its end, whichever content shape it has."""
+def appended_to_system(system: SystemMessage | None, text: str) -> SystemMessage:
+    """`system` with `text` as one more paragraph at its end, whichever content shape it has.
+
+    Shared by every request-only section (`StandingPreferences`, `exhibit_notes.ExhibitListing`):
+    state that is current at request time rides on the instructions, never in the thread.
+    """
     if system is None:
         return SystemMessage(text)
     content = system.content
@@ -474,7 +478,7 @@ class StandingPreferences(AgentMiddleware[Any, Any, Any]):
         if not section:
             return await handler(request)
         return await handler(
-            request.override(system_message=_appended(request.system_message, section))
+            request.override(system_message=appended_to_system(request.system_message, section))
         )
 
 

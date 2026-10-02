@@ -204,6 +204,56 @@ async def test_the_agents_read_mark_follows_its_writes_and_never_moves_back(back
     assert [s.header.exhibit_id for s in await store.states(session)][0] == pinned.exhibit_id
 
 
+@pytest.mark.parametrize("backend", _BACKENDS)
+async def test_an_artefact_at_its_revision_cap_is_refused_another(
+    backend: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every revision is a whole spec kept for the history, so the history has a ceiling."""
+    store = await _backend(backend)
+    monkeypatch.setattr(settings, "exhibit_max_revisions", 2)
+    session = _session()
+    made = await store.create(session, title="T", spec=_table(1), author_kind="agent", author="a")
+    await store.append(
+        session, made.exhibit_id, spec=_table(2), parent_revision=1, author_kind="human", author="b"
+    )
+    with pytest.raises(ExhibitLimit, match="create a new artefact"):
+        await store.append(
+            session,
+            made.exhibit_id,
+            spec=_table(3),
+            parent_revision=2,
+            author_kind="agent",
+            author="a",
+        )
+    assert (await store.view(session, made.exhibit_id)).head_revision == 2  # type: ignore[union-attr]
+
+
+@pytest.mark.parametrize("backend", _BACKENDS)
+async def test_human_edits_pair_each_persons_revision_with_its_parent(backend: str) -> None:
+    """What the grounding check reads, served whole: agent revisions out, revision 1's parent None.
+
+    One read for the whole history, so the check that runs on every agent write costs one round
+    trip rather than two per person-authored revision.
+    """
+    store = await _backend(backend)
+    session = _session()
+    made = await store.create(session, title="T", spec=_table(1), author_kind="human", author="b")
+    for revision, (value, kind) in enumerate([(2, "agent"), (3, "human")], start=1):
+        await store.append(
+            session,
+            made.exhibit_id,
+            spec=_table(value),
+            parent_revision=revision,
+            author_kind=kind,  # type: ignore[arg-type]
+            author=kind,
+        )
+    edits = await store.human_edits(session, made.exhibit_id)
+    assert edits == [(_table(1), None), (_table(3), _table(2))]
+    assert await store.human_edits(_session(), made.exhibit_id) == [], (
+        "another session's is unknown"
+    )
+
+
 def test_the_default_store_follows_the_session_store(monkeypatch: pytest.MonkeyPatch) -> None:
     """Postgres where sessions are durable, the process-lifetime memory store otherwise."""
     monkeypatch.setattr(settings, "session_store", "postgres")

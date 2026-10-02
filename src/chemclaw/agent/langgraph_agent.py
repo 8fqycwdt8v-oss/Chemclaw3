@@ -107,6 +107,7 @@ from chemclaw.agent.chemclaw_agent import (
     instructions_for,
 )
 from chemclaw.agent.compaction import context_compaction_middleware, disabled_summarizer
+from chemclaw.agent.exhibit_notes import ExhibitListing
 from chemclaw.agent.handoff import PEER_BRIEF
 from chemclaw.agent.llm_provider import build_chat_model
 from chemclaw.agent.local_skills import (
@@ -705,6 +706,10 @@ def _middleware(
         # on the request rather than the thread so the window can never cut it
         # (`agent/preferences.py::StandingPreferences`).
         StandingPreferences(),
+        # The session's artefact listing, on the same terms and for the same reasons: state that
+        # is current at request time, so it rides on the instructions and never in the thread
+        # (`agent/exhibit_notes.py::ExhibitListing`).
+        ExhibitListing(),
         # Unconditional, unlike the harness middleware above it: an unbounded thread is a property
         # of a session, not of the plan/execute mode, and the single-turn agent accumulates one just
         # as fast. Last, so the reduction sees everything the middleware above it added.

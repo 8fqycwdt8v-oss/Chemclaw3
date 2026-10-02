@@ -29,6 +29,7 @@ from chemclaw.core.errors import ChemclawError
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 from chemclaw.core.session_context import reset_current_session_id, set_current_session_id
 from chemclaw.core.turn_signals import ExhibitSignal
+from chemclaw.exhibits.grounding import chemist_figures, unverified_figures
 from chemclaw.exhibits.models import parse_spec
 from chemclaw.exhibits.store import default_exhibit_store
 from tests.pg import migrated_db_or_skip
@@ -270,3 +271,44 @@ def test_a_handoff_peer_keeps_the_artefact_tools_a_helper_loses() -> None:
     root = root_surface(AgentProfile(name="default"), [])
     peer = AgentProfile(name="writer", tool_names=frozenset({*EXHIBIT_TOOLS, "find_notes"}))
     assert EXHIBIT_TOOLS <= _peer_surface(root, peer)
+
+
+async def test_the_chemists_figures_are_read_in_one_store_call(
+    turn: tuple[str, list[ExhibitSignal]],
+) -> None:
+    """`chemist_figures` runs on every agent write, so its cost is one read, not two per edit."""
+    session, _ = turn
+    xid = json.loads(await create_exhibit("pKa", _TABLE))["exhibit_id"]
+    for parent, value in enumerate([5.1, 5.2, 5.3], start=1):
+        await _human(session, xid, parent, {**_TABLE, "rows": [{"solvent": "w", "pka": value}]})
+
+    calls: list[str] = []
+    real = default_exhibit_store()
+
+    class _Counting:
+        def __getattr__(self, name: str) -> Any:
+            calls.append(name)
+            return getattr(real, name)
+
+    figures = await chemist_figures(_Counting(), session, xid)
+    assert figures == ["5.1", "5.2", "5.3"]
+    assert calls == ["human_edits"], calls
+
+
+async def test_the_grounding_scan_reads_in_configured_batches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A figure in an older result is found across several batches of the configured size."""
+    await migrated_db_or_skip()
+    monkeypatch.setattr(settings, "session_store", "postgres")
+    monkeypatch.setattr(settings, "exhibit_grounding_batch", 1)
+    session = uuid4().hex
+    await store_tool_result(session_id=session, correlation_id="c", tool="t", text='{"v": 4.76}')
+    for index in range(3):
+        await store_tool_result(
+            session_id=session, correlation_id="c", tool="t", text=f'{{"other": {100 + index}}}'
+        )
+    spec = parse_spec(
+        {**_TABLE, "rows": [{"solvent": "w", "pka": 4.76}, {"solvent": "x", "pka": 7}]}
+    )
+    assert await unverified_figures(session, spec) == ["7"]

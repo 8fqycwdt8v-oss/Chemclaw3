@@ -64,6 +64,8 @@ headroom than `D-2026-09-04` left. If the owner prefers the cap here too, the sw
 `agent_max_tool_result_chars` and `gather_evidence_max_chars` to 50,000 and the budget back to
 118,700.
 
+The owner chose option 2 on 2026-10-02, over a second cut to the result cap.
+
 ## Consequences
 
 - The budget's thread is held and the clear trigger's thread pays 600; the margin under the window

@@ -283,6 +283,14 @@ async def post_message(
     # to an artefact the session does not hold is a 422 here rather than a turn that quietly runs
     # without it — the chemist pressed "Ask about this" on something specific — and resolving it
     # first means a refusal holds no slot, no claim and no permit.
+    if body.exhibit_refs and not settings.agent_exhibits_enabled:
+        # Refused rather than validated and dropped: with artefacts off the turn note is not
+        # composed, so a reference would be checked here and then reach nobody.
+        raise HTTPException(
+            status_code=422,
+            detail="artefacts are switched off in this deployment; send the message without "
+            "exhibit_refs",
+        )
     if body.exhibit_refs:
         try:
             await resolve_exhibit_refs(session_id, body.exhibit_refs)

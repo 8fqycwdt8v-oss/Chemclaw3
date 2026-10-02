@@ -53,9 +53,6 @@ WHERE l.session_id = %s
 ORDER BY l.created_at DESC
 """
 
-#: Results read per round trip; small, because the scan usually stops on the first batch.
-_BATCH = 32
-
 
 def stated_figures(spec: Spec) -> list[str]:
     """Every figure a spec states as a value, as written, deduplicated in first-seen order.
@@ -101,19 +98,9 @@ def _of_value(value: Number | str | None) -> Iterator[str]:
 async def chemist_figures(store: ExhibitStore, session_id: str, exhibit_id: str) -> list[str]:
     """The figures a person introduced into `exhibit_id`: in their revision, not in its parent."""
     introduced: list[str] = []
-    for entry in await store.revisions(session_id, exhibit_id) or []:
-        if entry.author_kind != "human":
-            continue
-        mine = await store.view(session_id, exhibit_id, entry.revision)
-        parent = (
-            await store.view(session_id, exhibit_id, entry.parent_revision)
-            if entry.parent_revision
-            else None
-        )
-        if mine is None:  # pragma: no cover - revisions are append-only and were just listed
-            continue
-        before = set(stated_figures(parent.spec)) if parent is not None else set()
-        introduced += [figure for figure in stated_figures(mine.spec) if figure not in before]
+    for mine, parent in await store.human_edits(session_id, exhibit_id):
+        before = set(stated_figures(parent)) if parent is not None else set()
+        introduced += [figure for figure in stated_figures(mine) if figure not in before]
     return introduced
 
 
@@ -147,7 +134,7 @@ async def unverified_figures(
         async with conn.cursor(name="exhibit_grounding") as cur:
             await cur.execute(_SESSION_RESULTS, (session_id,))
             while remaining:
-                rows = await cur.fetchmany(_BATCH)
+                rows = await cur.fetchmany(settings.exhibit_grounding_batch)
                 if not rows:
                     break
                 texts = [bytes(row[0]).decode("utf-8", errors="replace") for row in rows]

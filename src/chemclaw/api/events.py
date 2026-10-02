@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from chemclaw.agent.verifier import AnswerCheck
 from chemclaw.core.turn_signals import RefusalReason
+from chemclaw.exhibits.models import ExhibitKind
 
 
 class QueuedEvent(BaseModel):
@@ -724,7 +725,7 @@ class ExhibitEvent(BaseModel):
     type: Literal["exhibit"] = "exhibit"
     exhibit_id: str
     revision: int
-    kind: str
+    kind: ExhibitKind
     title: str
     op: Literal["created", "revised"]
     author_kind: Literal["agent", "human"]

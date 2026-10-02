@@ -25,6 +25,7 @@ from chemclaw.api.auth import Principal, require_principal
 from chemclaw.api.routes import exhibits as routes
 from chemclaw.api.routes.streams import _exhibit_event
 from chemclaw.core.config import settings
+from chemclaw.core.db import connect
 from chemclaw.exhibits.models import PUSH_KIND, parse_spec
 from chemclaw.exhibits.store import InMemoryExhibitStore, PostgresExhibitStore
 from tests.fakes_turn import Piece, ScriptedTurn
@@ -307,14 +308,16 @@ class _Recorder(ScriptedTurn):
         yield "ok"
 
 
-def test_a_turn_is_handed_the_listing_and_the_artefact_its_message_points_at(
+def test_a_turn_is_told_the_chemists_artefact_once_and_never_handed_the_listing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """End to end through the front door: the artefact note rides on the turn's own message.
+    """End to end through the front door: news rides on the turn's message, state does not.
 
-    The chemist's words lead; the listing names the artefact; the referenced revision follows
-    framed as data, so "make the yield column percent" reaches the model with the table it is
-    about. The transcript keeps only the chemist's words — the note is the turn's input, not theirs.
+    The chemist's words lead; the artefact they created is announced as theirs; the referenced
+    revision follows framed as data. The *listing* is absent — it is request-only state on the
+    instructions (`ExhibitListing`), and a turn input is persisted with the thread. The read mark
+    moves after the turn completes, so the second turn is not told the same thing again; and the
+    transcript keeps only the chemist's words.
     """
     monkeypatch.setattr(settings, "session_store", "memory")
     turn = _Recorder()
@@ -327,14 +330,128 @@ def test_a_turn_is_handed_the_listing_and_the_artefact_its_message_points_at(
     xid = _create(app, _ANA, session, {"kind": "table", "title": "Screen", "spec": _TABLE}).json()[
         "exhibit_id"
     ]
-    body = {"message": "make the yield a fraction", "exhibit_refs": [{"exhibit_id": xid}]}
-    with _as(app, _ANA).stream("POST", f"/sessions/{session}/messages", json=body) as res:
-        assert res.status_code == 200, res.read()
-        for _line in res.iter_lines():
-            pass
-    (sent,) = turn.messages
-    assert sent.startswith("make the yield a fraction")
-    assert f'{xid} "Screen" (table, revision 1, last by human)' in sent
-    assert "refers to these artefacts" in sent and '"y": 76' in sent
+
+    def _send(body: dict[str, Any]) -> None:
+        with _as(app, _ANA).stream("POST", f"/sessions/{session}/messages", json=body) as res:
+            assert res.status_code == 200, res.read()
+            for _line in res.iter_lines():
+                pass
+
+    _send({"message": "make the yield a fraction", "exhibit_refs": [{"exhibit_id": xid}]})
+    _send({"message": "and sort it"})
+    first, second = turn.messages
+    assert first.startswith("make the yield a fraction")
+    assert f'{xid} "Screen" (table): created by the chemist' in first
+    assert "refers to these artefacts" in first and '"y": 76' in first
+    assert "Artefacts in this conversation" not in first, "the listing is not turn input"
+    assert second == "and sort it", "an edit already told was told again"
     transcript = _as(app, _ANA).get(f"/sessions/{session}/messages").json()
     assert transcript[0]["text"] == "make the yield a fraction"
+
+
+def test_revision_one_diffs_as_one_addition(app: Any) -> None:
+    """Revision 1 has no parent, so all of it is added — never an empty diff reading "unchanged"."""
+    session = _shared(app)
+    table = _create(app, _ANA, session, {"kind": "table", "title": "T", "spec": _TABLE}).json()
+    diff = _as(app, _ANA).get(f"/sessions/{session}/exhibits/{table['exhibit_id']}/diff").json()
+    assert (diff["from_revision"], diff["to_revision"]) == (0, 1)
+    ((change,),) = (diff["changes"],)
+    assert (change["path"], change["kind"], change["before"]) == ("spec", "added", "")
+    doc = {"kind": "document", "markdown": "# Plan\n\nStep one."}
+    made = _create(app, _ANA, session, {"kind": "document", "title": "D", "spec": doc}).json()
+    diff = _as(app, _ANA).get(f"/sessions/{session}/exhibits/{made['exhibit_id']}/diff").json()
+    assert [(c["path"], c["kind"]) for c in diff["changes"]] == [("lines 1-3", "added")]
+
+
+def test_the_revision_cap_is_409_exhibit_limit(app: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """One artefact holds at most `exhibit_max_revisions`; the next write is refused, worded."""
+    monkeypatch.setattr(settings, "exhibit_max_revisions", 2)
+    session = _shared(app)
+    xid = _create(app, _ANA, session, {"kind": "table", "title": "T", "spec": _TABLE}).json()[
+        "exhibit_id"
+    ]
+    url = f"/sessions/{session}/exhibits/{xid}/revisions"
+    assert _as(app, _ANA).post(url, json={"parent_revision": 1, "spec": _TABLE}).status_code == 201
+    full = _as(app, _ANA).post(url, json={"parent_revision": 2, "spec": _TABLE})
+    assert full.status_code == 409
+    assert full.json()["detail"]["code"] == "exhibit_limit"
+    assert "create a new artefact" in full.json()["detail"]["message"]
+
+
+def test_a_malformed_artefact_id_is_refused_as_malformed(app: Any) -> None:
+    """Path segments and message refs are held to the minted `xb-` shape before any lookup."""
+    session = _shared(app)
+    for path in (
+        f"/sessions/{session}/exhibits/not-an-id",
+        f"/sessions/{session}/exhibits/xb-ZZZZ/revisions",
+        f"/sessions/{session}/exhibits/xb-0000000000000000x/diff",
+    ):
+        assert _as(app, _ANA).get(path).status_code == 422, path
+    refused = _as(app, _ANA).post(
+        f"/sessions/{session}/messages",
+        json={"message": "x", "exhibit_refs": [{"exhibit_id": "../etc"}]},
+    )
+    assert refused.status_code == 422
+
+
+def test_exhibit_refs_while_artefacts_are_off_are_refused_not_dropped(
+    app: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Off, no note is composed — so a reference is refused, never checked and then ignored."""
+    session = _shared(app)
+    xid = _create(app, _ANA, session, {"kind": "table", "title": "T", "spec": _TABLE}).json()[
+        "exhibit_id"
+    ]
+    monkeypatch.setattr(settings, "agent_exhibits_enabled", False)
+    refused = _as(app, _ANA).post(
+        f"/sessions/{session}/messages",
+        json={"message": "explain it", "exhibit_refs": [{"exhibit_id": xid}]},
+    )
+    assert refused.status_code == 422 and "switched off" in refused.text
+
+
+def test_a_persons_write_is_recorded_with_who_and_which_request(
+    app: Any, caplog: pytest.LogCaptureFixture, request: pytest.FixtureRequest
+) -> None:
+    """A person's write is audited by its row and its event, as every human REST decision is.
+
+    The revision row names its author and the request's correlation id, and each write emits one
+    structured `exhibit.*` event naming the actor. No `AuditEvent`: that trail is the tool-call
+    middleware's (`api/routes/workflows.py` states the convention), so this is what an auditor
+    joins on.
+    """
+    session = _shared(app)
+    caplog.set_level("INFO", logger="chemclaw.api.routes.exhibits")
+    made = _create(app, _ANA, session, {"kind": "table", "title": "T", "spec": _TABLE})
+    xid = made.json()["exhibit_id"]
+    revised = _as(app, _BEN).post(
+        f"/sessions/{session}/exhibits/{xid}/revisions",
+        json={"parent_revision": 1, "spec": _TABLE, "change_note": "checked"},
+    )
+    assert revised.status_code == 201
+    events = [(r.getMessage(), getattr(r, "actor", None)) for r in caplog.records]
+    assert any("created by" in m and actor == _ANA.oid for m, actor in events), events
+    assert any("revised by" in m and actor == _BEN.oid for m, actor in events), events
+    history = _as(app, _ANA).get(f"/sessions/{session}/exhibits/{xid}/revisions").json()
+    assert [(r["author_kind"], r["author"]) for r in history["revisions"]] == [
+        ("human", _ANA.oid),
+        ("human", _BEN.oid),
+    ]
+    if request.node.callspec.params["app"] == "postgres":
+        expected = [
+            made.headers["x-chemclaw-correlation-id"],
+            revised.headers["x-chemclaw-correlation-id"],
+        ]
+        assert asyncio.run(_correlations(xid)) == expected
+
+
+async def _correlations(exhibit_id: str) -> list[str]:
+    """The correlation id each revision of `exhibit_id` was written under, oldest first."""
+    async with await connect(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT correlation_id FROM session_exhibit_revisions WHERE exhibit_id = %s "
+                "ORDER BY revision",
+                (exhibit_id,),
+            )
+            return [str(row[0]) for row in await cur.fetchall()]

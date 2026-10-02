@@ -1043,6 +1043,9 @@ class AgentSettings(BaseSettings):
     # Artefacts one session may hold; the next create is refused (409 `exhibit_limit` over REST, a
     # worded refusal to the model) rather than evicting one somebody may still be reading.
     exhibit_max_per_session: int = Field(default=100, ge=1)
+    # Revisions one artefact may hold, refused the same way: every revision is a whole spec kept
+    # for the history, so an unbounded loop of edits is an unbounded table.
+    exhibit_max_revisions: int = Field(default=500, ge=1)
     # The tab title and the one-line change note, in characters.
     exhibit_max_title_chars: int = Field(default=200, ge=1)
     exhibit_max_note_chars: int = Field(default=1_000, ge=1)
@@ -1051,12 +1054,21 @@ class AgentSettings(BaseSettings):
     # the length is cut with a marker. The full diff is always `GET …/diff`.
     exhibit_diff_max_changes: int = Field(default=20, ge=1)
     exhibit_diff_max_value_chars: int = Field(default=300, ge=1)
-    # The whole per-turn artefact note (the list, the chemists' edits and any referenced
-    # artefacts), in characters. It is appended to the turn's own message, so it is bounded the way
-    # the job push-back beside it is.
+    # The most differing lines, on either side, a document diff aligns line by line. Past it the
+    # differing span is one hunk: the alignment is cubic on repeated lines (500 lines measured at
+    # 0.47 s, 2,000 at 33 s), and a diff is computed for a REST read, a tool call and a turn note.
+    exhibit_diff_max_lines: int = Field(default=200, ge=1)
+    # The per-turn artefact note (the chemists' edits and any referenced artefacts), in
+    # characters. It is appended to the turn's own message, so it is bounded the way the job
+    # push-back beside it is. The listing is a request-only section and is bounded by the count
+    # below, never persisted.
     exhibit_note_max_chars: int = Field(default=12_000, ge=1)
-    # How many artefacts the per-turn note lists, newest first; the rest are counted.
+    # How many artefacts each model request's listing names, newest first; the rest are counted.
+    # The listing rides on the instructions of every model call (`exhibit_notes.ExhibitListing`),
+    # so it is prefix: the character bound is what it may cost (2,000 is about 500 tokens), and a
+    # session holding none pays nothing.
     exhibit_note_max_listed: int = Field(default=20, ge=1)
+    exhibit_listing_max_chars: int = Field(default=2_000, ge=200)
     # How many artefacts one chemist message may reference (`MessageIn.exhibit_refs`); each is
     # copied into that turn's note, so this and the note's character bound together bound it.
     exhibit_max_refs: int = Field(default=5, ge=0)
@@ -1065,6 +1077,9 @@ class AgentSettings(BaseSettings):
     # How many unchecked figures one revision records. A table of a thousand transcribed numbers
     # is flagged by its first few; the count past this is not what a chemist acts on.
     exhibit_max_unverified_figures: int = Field(default=50, ge=1)
+    # How many evidence rows the grounding check fetches per round trip while it searches the
+    # session's tool results for an artefact's figures.
+    exhibit_grounding_batch: int = Field(default=32, ge=1)
 
     # Where profiles are discovered (`agents.profile_discovery`): one or more directories,
     # OS-path-separator delimited like `PATH` and like `skills_dir`. A profile selects *across*

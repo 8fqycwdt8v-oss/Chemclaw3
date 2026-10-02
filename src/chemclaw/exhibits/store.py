@@ -83,12 +83,13 @@ class ExhibitStore(Protocol):
         correlation_id: str = "",
         unverified_figures: list[str] | None = None,
     ) -> ExhibitView:
-        """Store the next revision, refusing a stale base or a spec of a different kind.
+        """Store the next revision, refusing a stale base, a spec of a different kind or a full one.
 
         Raises:
             UnknownExhibit: the session holds no artefact `exhibit_id`.
             StaleRevision: `parent_revision` is not the head.
             InvalidExhibit: the spec's kind is not the artefact's.
+            ExhibitLimit: the artefact already holds `exhibit_max_revisions` revisions.
         """
         ...
 
@@ -108,6 +109,14 @@ class ExhibitStore(Protocol):
         """The history oldest first, or `None` when the session holds no such artefact."""
         ...
 
+    async def human_edits(self, session_id: str, exhibit_id: str) -> list[tuple[Spec, Spec | None]]:
+        """Each person-authored revision's spec beside its parent's (`None` for revision 1).
+
+        One read rather than two per revision: the grounding check runs on every agent write and
+        wants exactly this pair, so it is served whole.
+        """
+        ...
+
     async def mark_seen(self, session_id: str, exhibit_id: str, revision: int) -> None:
         """Record that the agent has read or been told of `revision`; never moves the mark back."""
         ...
@@ -123,6 +132,16 @@ def _require_kind(exhibit_id: str, kind: str, spec: Spec) -> None:
         raise InvalidExhibit(
             f"{exhibit_id} is a {kind} artefact and the spec is a {spec.kind}; create a new "
             "artefact for a different kind"
+        )
+
+
+def _require_room(exhibit_id: str, head: int) -> None:
+    """Refuse a revision past the per-artefact cap, naming the cap and the way on."""
+    cap = settings.exhibit_max_revisions
+    if head >= cap:
+        raise ExhibitLimit(
+            f"{exhibit_id} already holds {head} revisions, the most one artefact may ({cap}); "
+            "create a new artefact to carry on from its head"
         )
 
 
@@ -206,6 +225,7 @@ class InMemoryExhibitStore:
         if parent_revision != head:
             raise StaleRevision(exhibit_id, head, parent_revision)
         _require_kind(exhibit_id, entry.kind, spec)
+        _require_room(exhibit_id, head)
         if title is not None:
             entry.title = title
         return self._add(
@@ -303,6 +323,18 @@ class InMemoryExhibitStore:
                 byte_size=stored.byte_size,
             )
             for stored in entry.revisions
+        ]
+
+    async def human_edits(self, session_id: str, exhibit_id: str) -> list[tuple[Spec, Spec | None]]:
+        """Each person-authored revision's spec beside its parent's."""
+        entry = self._entry(session_id, exhibit_id)
+        if entry is None:
+            return []
+        specs = {stored.view.revision: stored.view.spec for stored in entry.revisions}
+        return [
+            (stored.view.spec, specs.get(stored.view.parent_revision))
+            for stored in entry.revisions
+            if stored.view.author_kind == "human"
         ]
 
     async def mark_seen(self, session_id: str, exhibit_id: str, revision: int) -> None:
@@ -414,6 +446,16 @@ WHERE r.exhibit_id = %s AND e.session_id = %s
 ORDER BY r.revision
 """
 
+_SELECT_HUMAN_EDITS = """
+SELECT r.spec, p.spec
+FROM session_exhibit_revisions r
+JOIN session_exhibits e ON e.exhibit_id = r.exhibit_id
+LEFT JOIN session_exhibit_revisions p
+       ON p.exhibit_id = r.exhibit_id AND p.revision = r.parent_revision
+WHERE r.exhibit_id = %s AND e.session_id = %s AND r.author_kind = 'human'
+ORDER BY r.revision
+"""
+
 _MARK_SEEN = """
 UPDATE session_exhibits SET agent_seen_revision = GREATEST(agent_seen_revision, %s)
 WHERE exhibit_id = %s AND session_id = %s
@@ -522,6 +564,7 @@ class PostgresExhibitStore:
                 if parent_revision != head:
                     raise StaleRevision(exhibit_id, head, parent_revision)
                 _require_kind(exhibit_id, kind, spec)
+                _require_room(exhibit_id, head)
                 revision = head + 1
                 try:
                     await self._insert_revision(
@@ -648,6 +691,16 @@ class PostgresExhibitStore:
                 byte_size=row[6],
             )
             for row in rows
+        ]
+
+    async def human_edits(self, session_id: str, exhibit_id: str) -> list[tuple[Spec, Spec | None]]:
+        """Each person-authored revision's spec beside its parent's, in one statement."""
+        async with self._connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(_SELECT_HUMAN_EDITS, (exhibit_id, session_id))
+                rows = await cur.fetchall()
+        return [
+            (parse_spec(row[0]), None if row[1] is None else parse_spec(row[1])) for row in rows
         ]
 
     async def mark_seen(self, session_id: str, exhibit_id: str, revision: int) -> None:

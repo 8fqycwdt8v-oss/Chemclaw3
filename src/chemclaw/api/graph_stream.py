@@ -205,8 +205,12 @@ async def graph_events(
     # Read once per turn rather than per event: it is a property of the compiled object, and
     # re-deriving it 400 times a turn would be the same answer 400 times.
     depth = root_depth(graph)
-    async for namespace, mode, payload in graph.astream(
-        {**turn_input(message), **(carry or {})}, config, stream_mode=_MODES, subgraphs=True
+    failure: list[Exception] = []
+    async for namespace, mode, payload in _until_failure(
+        graph.astream(
+            {**turn_input(message), **(carry or {})}, config, stream_mode=_MODES, subgraphs=True
+        ),
+        failure,
     ):
         if mode == "messages":
             chunk, metadata = payload
@@ -322,9 +326,31 @@ async def graph_events(
             if carry is not None and not namespace:
                 _carry_forward(carry, payload)
     # A write the stream never saw a root tools update for — a run cut off between the tool body
-    # and its node completing — is still a write, and the store holds it.
+    # and its node completing, or a graph that raised — is still a write, and the store holds it.
     for exhibit in held_exhibits:
         yield exhibit
+    if failure:
+        raise failure[0]
+
+
+async def _until_failure(
+    stream: AsyncIterator[Any], failure: list[Exception]
+) -> AsyncIterator[Any]:
+    """`stream`'s items until it raises, with the `Exception` recorded in `failure` instead.
+
+    **Why `graph_events` needs this rather than a `finally`.** Artefact announcements are held
+    until the root's tools node completes, and a tool body that wrote one has committed it whatever
+    the graph does next — so a graph that raises after the write must still let the stream carry
+    the announcement, and only then fail. A `finally` cannot do that: an async generator may not
+    yield while it is being closed (`GeneratorExit`), and a yield during a cancellation would
+    swallow it. So only an `Exception` is caught, here, and the caller re-raises it once it has
+    released what it held; anything else propagates untouched.
+    """
+    try:
+        async for item in stream:
+            yield item
+    except Exception as exc:
+        failure.append(exc)
 
 
 # The channels a mid-turn resume has to continue from rather than restart, and nothing else. Named

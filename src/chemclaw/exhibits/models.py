@@ -48,6 +48,8 @@ ExhibitKind = Literal["document", "table", "structures", "chart", "result", "lin
 PUSH_KIND = "exhibit"
 
 #: The shape a minted id takes — `xb-` and sixteen random hex digits (the frozen wire contract).
+#: Every id a caller names is held to it (`ExhibitRef`, the routes' path segment), so a malformed
+#: one is refused as malformed rather than looked up.
 EXHIBIT_ID = re.compile(r"^xb-[0-9a-f]{16}$")
 
 #: A finite JSON number, and never a boolean: `true` is not a yield, and pydantic's lax mode would
@@ -374,7 +376,7 @@ class ExhibitDiff(BaseModel):
 class ExhibitRef(BaseModel):
     """One artefact a chemist's message points at — an id and a revision (0 for the latest)."""
 
-    exhibit_id: str
+    exhibit_id: str = Field(pattern=EXHIBIT_ID.pattern)
     revision: int = Field(default=0, ge=0)
 
     model_config = ConfigDict(frozen=True, extra="forbid")

@@ -48,7 +48,7 @@ def render_export(spec: Spec, fmt: str) -> str | None:
         if fmt == "csv":
             return _csv(header, cells)
         if fmt == "md":
-            lines = [_pipe(header), _pipe(["---"] * len(header))]
+            lines = [_pipe([_md_cell(label) for label in header]), _pipe(["---"] * len(header))]
             lines += [_pipe([_md_cell(value) for value in row]) for row in cells]
             return "\n".join(lines) + "\n"
     if isinstance(spec, StructuresSpec):

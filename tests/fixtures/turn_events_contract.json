@@ -56,7 +56,7 @@
       "author": "str",
       "author_kind": "Literal['agent', 'human']",
       "exhibit_id": "str",
-      "kind": "str",
+      "kind": "Literal['document', 'table', 'structures', 'chart', 'result', 'link']",
       "op": "Literal['created', 'revised']",
       "revision": "int",
       "title": "str"

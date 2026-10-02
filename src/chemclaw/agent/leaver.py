@@ -557,6 +557,13 @@ _BEYOND_REACH: dict[str, str] = {
     "deletes the session or leaves. Find those before erasing with `SELECT DISTINCT e.session_id "
     "FROM session_exhibit_revisions r JOIN session_exhibits e USING (exhibit_id) WHERE r.author = "
     "'<id>'`",
+    "session_exhibits (`created_by`, `head_author` in a session somebody else owns)": "the erase "
+    "tier deletes every artefact in a session this person owns. A member who created or last "
+    "revised an artefact in somebody else's session is named on that artefact's header, and the "
+    "header is the owner's document: blanking its author would misattribute the revisions under "
+    "it, and deleting it would delete the owner's work. It goes when the owner deletes the "
+    "session or leaves. Find those before erasing with `SELECT session_id, exhibit_id FROM "
+    "session_exhibits WHERE created_by = '<id>' OR head_author = '<id>'`",
     "a shared session's graph state (checkpoints of sessions this person was a member of)": "a "
     "member's words are erased from the transcript by author, but the owner's checkpointed thread "
     "still carries them — it is the owner's conversation state and is removed when the owner "

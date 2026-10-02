@@ -8,6 +8,7 @@ the injection case is driven on a cell, a header and a structure label.
 
 import csv
 import io
+import time
 from typing import Any
 
 from chemclaw.exhibits.diff import capped, diff_specs
@@ -182,3 +183,56 @@ def test_an_export_filename_cannot_carry_a_header_break() -> None:
     """The title is typed by a person and reaches `Content-Disposition`; only safe bytes survive."""
     name = export_filename('Plan "v2"\r\nX-Evil: 1', "xb-0123456789abcdef", 3, "md")
     assert name == "Plan-v2-X-Evil-1-xb-0123456789abcdef-r3.md"
+
+
+def test_a_pathological_document_diff_is_bounded_and_returns_quickly() -> None:
+    """200 kB of repeated lines against a shifted copy: one hunk, in well under a second.
+
+    The unbounded alignment measured 0.47 s at 500 such lines and 33 s at 2,000 (cubic), and this
+    document is 100,000 lines — it would not have returned at all. Past `exhibit_diff_max_lines`
+    the differing middle is one hunk, which is true and coarser; the common head and tail are
+    stripped first, so the hunk still says where the edit is.
+    """
+    before = "0\n1\n" * 50_000
+    after = "intro\n" + "1\n2\n0\n" * 33_000
+    assert len(before.encode()) >= 200_000
+    start = time.perf_counter()
+    diff = diff_specs(
+        _spec({"kind": "document", "markdown": before}),
+        _spec({"kind": "document", "markdown": after}),
+        from_revision=1,
+        to_revision=2,
+    )
+    elapsed = time.perf_counter() - start
+    assert elapsed < 1.0, f"{elapsed:.2f} s"
+    ((change,),) = (diff.changes,)
+    assert change.kind == "changed" and change.path == f"lines 1-{len(after.splitlines())}"
+
+    # The same shape, a long document with one edit deep inside: trimmed to the edit, precisely.
+    lines = [f"{i % 2}" for i in range(100_000)]
+    edited = [*lines[:60_000], "changed", *lines[60_001:]]
+    start = time.perf_counter()
+    diff = diff_specs(
+        _spec({"kind": "document", "markdown": "\n".join(lines)}),
+        _spec({"kind": "document", "markdown": "\n".join(edited)}),
+        from_revision=1,
+        to_revision=2,
+    )
+    assert time.perf_counter() - start < 1.0
+    assert [(c.path, c.before, c.after) for c in diff.changes] == [("line 60001", "0", "changed")]
+
+
+def test_a_markdown_table_escapes_its_header_as_it_escapes_its_cells() -> None:
+    """A pipe or a newline in a column label cannot add a column or end the header row."""
+    spec = _table(
+        [{"solvent": "THF", "yield": 76}],
+        columns=[
+            {"key": "solvent", "label": "Solvent | grade"},
+            {"key": "yield", "label": "Yield\nisolated"},
+        ],
+    )
+    text = render_export(spec, "md")
+    assert text is not None
+    header = text.splitlines()[0]
+    assert header == "| Solvent \\| grade | Yield isolated |"
+    assert text.splitlines()[1] == "| --- | --- |"
