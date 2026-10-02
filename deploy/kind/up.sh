@@ -142,13 +142,10 @@ ui_image() {
 check_auth_mode() {
   case "$AUTH" in
     devauth) ;;
-    oidc-mock)
-      # The browser's way to the tenant is a host port, and a port mapping is fixed when the cluster
-      # is created: a cluster made before the mapping existed cannot serve this mode.
-      docker port "$CLUSTER-control-plane" 30443/tcp >/dev/null 2>&1 \
-        || die "the kind node has no host mapping for the mock tenant (30443 → 127.0.0.1:18443);
-  this cluster predates it. Recreate: make kind-down && CHEMCLAW_KIND_AUTH=oidc-mock make kind-up"
-      ;;
+    # The browser reaches the tenant on a host port. A cluster created before kind-config.yaml
+    # mapped 18443 has no such port (a mapping is fixed at creation); `tenant_forward` stands in
+    # for it once the mock is up.
+    oidc-mock) ;;
     *) die "CHEMCLAW_KIND_AUTH must be devauth or oidc-mock, got '$AUTH'" ;;
   esac
 }
@@ -212,6 +209,34 @@ TEMPORAL_TLS_ENABLE_HOST_VERIFICATION=true"
   AUTH_CHANGED="$AUTH_CHANGED$(printf '%s\n' "$ui" | apply_env_configmap chemclaw-ui-auth)"
   AUTH_CHANGED="$AUTH_CHANGED$(printf '%s\n' "$mock" | apply_env_configmap chemclaw-mock-auth)"
   AUTH_CHANGED="$AUTH_CHANGED$(printf '%s\n' "$temporal" | apply_env_configmap chemclaw-temporal-tls-env)"
+}
+
+# The mock tenant on 127.0.0.1:18443 for a cluster that has no host mapping for it.
+#
+# A fresh cluster gets the port from kind-config.yaml (30443 → 18443). One created before that
+# mapping existed cannot gain it — Docker fixes a container's ports at creation — and recreating it
+# means reloading every image, so instead a supervised `kubectl port-forward` serves the same
+# address: a loop that restarts the forward whenever it exits (a pod restart ends one), recorded
+# in a pidfile so `down` and a switch back to devauth stop it. Nothing here runs on a cluster that
+# has the mapping.
+readonly FORWARD_PIDFILE="${TMPDIR:-/tmp}/chemclaw-kind-tenant-forward.pid"
+stop_tenant_forward() {
+  [ -f "$FORWARD_PIDFILE" ] || return 0
+  local pid
+  pid="$(cat "$FORWARD_PIDFILE")"
+  # The loop first, so it cannot start another forward; then the forward it was running.
+  kill "$pid" 2>/dev/null || true
+  pkill -f "port-forward --context $CTX -n $NS svc/mock-eln-public" 2>/dev/null || true
+  rm -f "$FORWARD_PIDFILE"
+}
+tenant_forward() {
+  if [ "$AUTH" != oidc-mock ]; then stop_tenant_forward; return 0; fi
+  if docker port "$CLUSTER-control-plane" 30443/tcp >/dev/null 2>&1; then return 0; fi
+  if [ -f "$FORWARD_PIDFILE" ] && kill -0 "$(cat "$FORWARD_PIDFILE")" 2>/dev/null; then return 0; fi
+  log "this cluster predates the 18443 mapping — serving the mock tenant there by a supervised port-forward"
+  nohup bash -c "while true; do kubectl port-forward --context $CTX -n $NS svc/mock-eln-public \
+    --address 127.0.0.1 18443:8090 >/dev/null 2>&1; sleep 2; done" >/dev/null 2>&1 &
+  echo $! >"$FORWARD_PIDFILE"
 }
 
 # ------------------------------------------------------------------------------------- tls
@@ -418,6 +443,7 @@ apply_dependencies() {
     wait_rollout deployment/mock-vendor 120s
   fi
   for name in ${servers[@]+"${servers[@]}"}; do wait_rollout "deployment/chemclaw-mcp-$name" 600s; done
+  tenant_forward
   log "dependencies ready (fleet: ${servers[*]+"${servers[*]}"})"
 }
 
@@ -611,6 +637,7 @@ up() {
 }
 
 down() {
+  stop_tenant_forward
   if kind get clusters 2>/dev/null | grep -qx "$CLUSTER"; then
     kind delete cluster --name "$CLUSTER"
   else

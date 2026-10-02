@@ -84,8 +84,10 @@ non-loopback host, so the mode also runs both over TLS:
 
 The smoke in this mode mints a token for alice from the tenant, checks an anonymous `POST /sessions`
 is a 401, and runs the same turns and job as alice. Switching modes on a running cluster restarts
-the pods whose environment or certificates changed. A cluster created before the 18443 mapping
-existed cannot serve this mode; `up.sh` says so and how to recreate it.
+the pods whose environment or certificates changed. A fresh cluster gets the tenant's host port from
+`kind-config.yaml` (30443 → 18443); a cluster created before that mapping existed cannot gain one, so
+`up.sh` serves the same address with a supervised `kubectl port-forward` (restarted whenever it
+exits, stopped by `down` and by switching back to devauth).
 
 ## What running it found in the chart and core
 
