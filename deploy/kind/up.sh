@@ -450,14 +450,31 @@ install_chart() {
   AUTH_VALUES=()
   if [ "$AUTH" = oidc-mock ]; then AUTH_VALUES=(-f "$KIND_DIR/values-kind-oidc-mock.yaml"); fi
   log "helm upgrade --install $RELEASE (core image chemclaw/core:$CORE_TAG) — runs the migrate hook first"
-  helm --kube-context "$CTX" upgrade --install "$RELEASE" "$REPO_ROOT/deploy/helm/chemclaw" \
-    --namespace "$NS" -f "$KIND_DIR/values-kind.yaml" ${AUTH_VALUES[@]+"${AUTH_VALUES[@]}"} \
-    --set-string "image.tag=$CORE_TAG" ${LLM_SET[@]+"${LLM_SET[@]}"} ${CHART_SET[@]+"${CHART_SET[@]}"} \
-    --wait --wait-for-jobs --timeout 20m --force-conflicts \
-    || die "helm upgrade --install failed. Hook Jobs are deleted only on success, so a failed one is
-  still there to read:
+  # **Twice at most, and the second attempt is the convergence, not a retry of luck.** A fresh `up`
+  # starts some two dozen Python processes on one node at once; a pod that needs longer than its
+  # Deployment's 600 s progress deadline gets the Deployment marked `ProgressDeadlineExceeded`, and
+  # Helm 4's readiness check fails the release on that *status* at once — while the pod goes on to
+  # become ready a few minutes later. The post-install hooks (convert, schedules) run only after a
+  # successful wait, so stopping there leaves them unrun. So: on a failed wait, give every
+  # Deployment a bounded chance to become Available, then upgrade again — which changes nothing,
+  # finds everything ready, and runs the hooks.
+  local attempt
+  for attempt in 1 2; do
+    if helm --kube-context "$CTX" upgrade --install "$RELEASE" "$REPO_ROOT/deploy/helm/chemclaw" \
+      --namespace "$NS" -f "$KIND_DIR/values-kind.yaml" ${AUTH_VALUES[@]+"${AUTH_VALUES[@]}"} \
+      --set-string "image.tag=$CORE_TAG" ${LLM_SET[@]+"${LLM_SET[@]}"} ${CHART_SET[@]+"${CHART_SET[@]}"} \
+      --wait --wait-for-jobs --timeout 20m --force-conflicts; then
+      break
+    fi
+    [ "$attempt" = 1 ] || die "helm upgrade --install failed twice. Hook Jobs are deleted only on
+  success, so a failed one is still there to read:
     kubectl --context $CTX -n $NS get jobs,pods
     kubectl --context $CTX -n $NS logs job/chemclaw-migrate   (or -convert, -schedules)"
+    warn "helm's readiness wait failed; giving every Deployment up to 15 min to become Available, then upgrading again"
+    k wait --for=condition=Available deployment --all --timeout=900s >/dev/null \
+      || die "not every Deployment became Available:
+$(k get deploy 2>&1)"
+  done
   # The mock LLM validated its catalogue before the release existed; nothing to restart. The UI's
   # readiness follows the front door's, so it is waited on only now.
   if have "$(ui_image)"; then wait_rollout deployment/ui 180s; fi
