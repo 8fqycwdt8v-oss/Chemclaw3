@@ -24,10 +24,12 @@ claim checkable in CI, where no lane runs.
 
 import base64
 import json
+import ssl
 import threading
 import time
 from collections.abc import AsyncIterator, Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 
 import jwt
@@ -43,6 +45,7 @@ from chemclaw.api.app import create_app
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import get_current_actor, get_current_roles
 from tests.fakes_turn import Piece, ScriptedTurn
+from tests.test_netguard import _self_signed
 
 _AUDIENCE = "api://chemclaw-e2e"
 _ISSUER = "https://issuer.e2e.test/v2.0"
@@ -132,9 +135,19 @@ class _JwksIssuer:
     request, so "cached" is a property worth proving rather than asserting in a docstring.
     """
 
-    def __init__(self, jwks: str) -> None:
-        """Start the server on an ephemeral port, publishing `jwks`."""
+    def __init__(self, jwks: str, tls: tuple[Path, Path] | None = None) -> None:
+        """Start the server on an ephemeral port, publishing `jwks` — over https when `tls` is set.
+
+        `tls` is a `(certificate, key)` pair; the certificate is what a tenant on a private CA
+        presents, which is the shape `Chemclaw3_mock`'s https OIDC surface takes.
+        """
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), _JwksHandler)
+        self._scheme = "http"
+        if tls is not None:
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.load_cert_chain(certfile=str(tls[0]), keyfile=str(tls[1]))
+            self._server.socket = context.wrap_socket(self._server.socket, server_side=True)
+            self._scheme = "https"
         self._server.jwks = jwks  # type: ignore[attr-defined]
         self._server.fetches = 0  # type: ignore[attr-defined]
         self._server.lock = threading.Lock()  # type: ignore[attr-defined]
@@ -145,7 +158,7 @@ class _JwksIssuer:
     def keys_url(self) -> str:
         """The endpoint `settings.entra_jwks_url` is pointed at."""
         host, port = self._server.server_address[0], self._server.server_address[1]
-        return f"http://{host!s}:{port}/discovery/v2.0/keys"
+        return f"{self._scheme}://{host!s}:{port}/discovery/v2.0/keys"
 
     @property
     def fetches(self) -> int:
@@ -499,3 +512,163 @@ def test_the_probes_stay_open_while_everything_else_is_closed() -> None:
             "/plans/pending",
         ):
             assert client.get(path).status_code == 401, path
+
+
+# --------------------------------------------------------------------------------------------
+# Key rotation against PyJWT's own refresh cooldown
+# --------------------------------------------------------------------------------------------
+
+
+def test_a_key_rotated_just_after_the_warm_fetch_is_accepted_on_its_first_token(
+    issuer: _JwksIssuer,
+) -> None:
+    """The first token under a new `kid` is admitted at once, at the shipped cooldown.
+
+    The common rotation: the tenant publishes a new key, and the first token signed with it
+    arrives *after* the front door has warmed its cache. `entra_jwks_refresh_cooldown_seconds` is
+    left at its shipped default on purpose, because the claim is that the configured limiter has
+    nothing to limit yet: no forced refresh has been granted, so this token pays one and is
+    admitted, with no latency at all.
+
+    **This one is not what catches a second limiter, and it was measured not to be.** With
+    `_client_for`'s `cooldown_duration=0` removed (PyJWT 2.15.1's own 30 s back), this test still
+    passes: upstream's cooldown runs only between *forced* refreshes, so a warm fetch does not
+    start it. The composition bites when a refresh was already forced, which is
+    `test_rotation_latency_is_the_configured_cooldown_and_no_longer` below, and that one fails
+    under the same mutation.
+    """
+    with _client() as client:
+        assert client.post("/sessions", headers=_bearer(_sign(_KEY_A, "kid-a"))).status_code == 200
+        issuer.publish(_jwks(("kid-a", _KEY_A), ("kid-b", _KEY_B)))
+        rotated = _sign(_KEY_B, "kid-b", oid="u-alice")
+        assert client.post("/sessions", headers=_bearer(rotated)).status_code == 200
+    assert issuer.fetches == 2, "the new kid should cost exactly one refresh"
+
+
+def test_rotation_latency_is_the_configured_cooldown_and_no_longer(
+    issuer: _JwksIssuer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rotated key refused once is admitted as soon as *our* cooldown has passed.
+
+    The worst case for rotation latency: a token under the new `kid` arrives *before* the tenant
+    publishes it, spends the one forced refresh the limiter grants, and is refused. The documented
+    bound is `entra_jwks_refresh_cooldown_seconds` from that refresh — measured here at a 1 s
+    cooldown, so a second limiter composing with ours (PyJWT's 30 s, restarted by that same fetch)
+    would show up as a 401 well after our window closed. Measured with `_client_for`'s
+    `cooldown_duration=0` removed: the last request answers 401, as does the older rotation test
+    above, while with it in place the key is admitted just past the 1 s window.
+    """
+    cooldown = 1.0
+    monkeypatch.setattr(settings, "entra_jwks_refresh_cooldown_seconds", cooldown)
+    with _client() as client:
+        assert client.post("/sessions", headers=_bearer(_sign(_KEY_A, "kid-a"))).status_code == 200
+        rotated = _sign(_KEY_B, "kid-b", oid="u-alice")
+        assert client.post("/sessions", headers=_bearer(rotated)).status_code == 401
+        # Read after the response: the limiter stamps its refresh inside that request, so a stamp
+        # taken before it would let a slow runner wake inside the window and see a 401.
+        refreshed_at = time.monotonic()
+        issuer.publish(_jwks(("kid-a", _KEY_A), ("kid-b", _KEY_B)))
+        # Inside the window the limiter holds — that is the cost it is configured to charge.
+        assert client.post("/sessions", headers=_bearer(rotated)).status_code == 401
+        time.sleep(max(0.0, cooldown - (time.monotonic() - refreshed_at)) + 0.1)
+        assert client.post("/sessions", headers=_bearer(rotated)).status_code == 200
+        admitted_after = time.monotonic() - refreshed_at
+    assert admitted_after < cooldown + 1.0, f"admitted {admitted_after:.2f}s after the refresh"
+    assert issuer.fetches == 3
+
+
+# --------------------------------------------------------------------------------------------
+# A tenant on a private CA (`entra_ca_bundle`)
+# --------------------------------------------------------------------------------------------
+
+
+@pytest.fixture
+def private_ca_issuer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[tuple[_JwksIssuer, Path]]:
+    """An https issuer whose certificate no public root vouches for, and its CA as a PEM file.
+
+    Self-signed for `127.0.0.1`, which is the shape `Chemclaw3_mock`'s browser-facing tenant
+    takes (msal-browser refuses a non-https authority), and the shape a TLS-inspecting proxy's
+    private root presents to a pod. `settings.entra_jwks_url` is pointed at it.
+    """
+    cert, key = _self_signed("private-tenant-ca", tmp_path)
+    running = _JwksIssuer(_jwks(("kid-a", _KEY_A)), tls=(cert, key))
+    monkeypatch.setattr(settings, "entra_jwks_url", running.keys_url)
+    try:
+        yield running, cert
+    finally:
+        running.stop()
+
+
+def test_a_tenant_on_a_private_ca_is_refused_by_default(
+    private_ca_issuer: tuple[_JwksIssuer, Path],
+) -> None:
+    """Unset, the key set is verified against certifi, and a private CA does not pass.
+
+    503 rather than 401 — the token is fine, the tenant could not be verified — and the issuer
+    never served a key, because the handshake failed before any request was made.
+    """
+    issuer, _ = private_ca_issuer
+    assert settings.entra_ca_bundle == ""
+    with _client() as client:
+        res = client.post("/sessions", headers=_bearer(_sign(_KEY_A, "kid-a", oid="u-alice")))
+    assert res.status_code == 503
+    assert issuer.fetches == 0
+
+
+def test_a_tenant_on_a_private_ca_is_trusted_through_the_configured_bundle(
+    private_ca_issuer: tuple[_JwksIssuer, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Naming the CA in `entra_ca_bundle` is the whole change, and the chain then holds.
+
+    Same issuer, same token, one setting: the fetch verifies against the bundle and the token is
+    admitted.
+    """
+    issuer, ca = private_ca_issuer
+    monkeypatch.setattr(settings, "entra_ca_bundle", str(ca))
+    with _client() as client:
+        res = client.post("/sessions", headers=_bearer(_sign(_KEY_A, "kid-a", oid="u-alice")))
+    assert res.status_code == 200
+    assert issuer.fetches == 1
+
+
+def test_an_unset_bundle_is_the_process_trust_store_and_a_set_one_replaces_it(
+    tmp_path: Path,
+) -> None:
+    """Unset is today's behaviour exactly: the very `default_ssl_context` object, certifi.
+
+    Set, the bundle *replaces* certifi rather than joining it — one CA in the file, one CA in the
+    store — so the mounted file is the complete statement of whom the tenant is trusted from.
+    Verification stays on in both.
+    """
+    from chemclaw.core.http import default_ssl_context
+
+    assert auth._tenant_ssl_context("") is default_ssl_context()
+    cert, _ = _self_signed("only-ca", tmp_path)
+    context = auth._tenant_ssl_context(str(cert))
+    assert len(context.get_ca_certs()) == 1
+    assert context.verify_mode == ssl.CERT_REQUIRED
+    assert context.check_hostname is True
+
+
+@pytest.mark.parametrize("shape", ["missing", "directory", "empty", "not a certificate"])
+def test_an_unusable_bundle_refuses_to_boot(
+    shape: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bundle that cannot be used stops the front door at boot, naming the setting.
+
+    Left to the first sign-in it would be an `OSError` inside the fetch, outside every arm that
+    maps a fetch failure to a 503 — a 500 per request, found by chemists before operators.
+    """
+    path = tmp_path / "ca.pem"
+    if shape == "directory":
+        path = tmp_path
+    elif shape == "empty":
+        path.write_text("")
+    elif shape == "not a certificate":
+        _, key = _self_signed("key-only", tmp_path)
+        path = key
+    monkeypatch.setattr(settings, "entra_ca_bundle", str(path))
+    with pytest.raises(RuntimeError, match="CHEMCLAW_ENTRA_CA_BUNDLE"):
+        _client()
