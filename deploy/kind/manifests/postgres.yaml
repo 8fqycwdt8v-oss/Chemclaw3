@@ -10,6 +10,10 @@
 #   and the schema setup after it reports `database "temporal" does not exist`.
 #
 # Passwords come from the `chemclaw-kind-db` Secret `up.sh` generates; none is written in a file.
+#
+# **TLS in every mode**, from the cluster CA `up.sh` issues (`postgres-tls`). Plaintext clients
+# still connect (`sslmode=prefer` negotiates TLS anyway); the oidc-mock mode's DSNs say
+# `sslmode=require`, because core refuses less once sign-in is enforced.
 # The init script runs only on an empty data directory, which is what the PVC makes idempotent.
 apiVersion: v1
 kind: ConfigMap
@@ -63,13 +67,25 @@ spec:
         app.kubernetes.io/name: postgres
     spec:
       enableServiceLinks: false
+      securityContext:
+        fsGroup: 999
       containers:
         - name: postgres
           image: pgvector/pgvector:pg16
           imagePullPolicy: IfNotPresent
           # Room for the chart's declared fleet ceiling (`postgres.maxConnections` in
           # values-kind.yaml) plus Temporal's own pools, which the chart's arithmetic does not see.
-          args: ["-c", "max_connections=400", "-c", "shared_buffers=128MB"]
+          args:
+            - "-c"
+            - "max_connections=400"
+            - "-c"
+            - "shared_buffers=128MB"
+            - "-c"
+            - "ssl=on"
+            - "-c"
+            - "ssl_cert_file=/tls/tls.crt"
+            - "-c"
+            - "ssl_key_file=/tls/tls.key"
           env:
             - name: POSTGRES_USER
               value: chemclaw
@@ -104,7 +120,16 @@ spec:
               mountPath: /var/lib/postgresql/data
             - name: init
               mountPath: /docker-entrypoint-initdb.d
+            - name: tls
+              mountPath: /tls
+              readOnly: true
       volumes:
+        # 0640 under the image's `postgres` group (999): Postgres refuses a key file that is group-
+        # or world-readable unless root owns it, and a Secret volume's files are root's.
+        - name: tls
+          secret:
+            secretName: postgres-tls
+            defaultMode: 0640
         - name: init
           configMap:
             name: postgres-init

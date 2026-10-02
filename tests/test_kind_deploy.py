@@ -61,33 +61,32 @@ def _manifests() -> list[dict[str, Any]]:
     ]
 
 
+# The two auth modes `up.sh` installs, as the values files it passes for each.
+_MODES = {
+    "devauth": ("values-kind.yaml",),
+    "oidc-mock": ("values-kind.yaml", "values-kind-oidc-mock.yaml"),
+}
+
+
 @cache
-def _rendered() -> list[dict[str, Any]]:
-    """The chart under the kind overlay, exactly as `up.sh` installs it (mock LLM, all images)."""
+def _rendered(mode: str = "devauth") -> list[dict[str, Any]]:
+    """The chart under the kind overlay, exactly as `up.sh` installs it in `mode`."""
+    files = [arg for name in _MODES[mode] for arg in ("-f", str(_KIND / name))]
     result = subprocess.run(
-        [
-            "helm",
-            "template",
-            "chemclaw",
-            str(_CHART),
-            "--namespace",
-            "chemclaw",
-            "-f",
-            str(_KIND / "values-kind.yaml"),
-        ],
+        ["helm", "template", "chemclaw", str(_CHART), "--namespace", "chemclaw", *files],
         capture_output=True,
         text=True,
         check=False,
     )
-    assert result.returncode == 0, f"the chart refuses the kind overlay:\n{result.stderr}"
+    assert result.returncode == 0, f"the chart refuses the kind overlay ({mode}):\n{result.stderr}"
     return _documents(result.stdout)
 
 
-def _config_map() -> dict[str, str]:
+def _config_map(mode: str = "devauth") -> dict[str, str]:
     """The release's ConfigMap data — what every pod reads as `CHEMCLAW_*`."""
     found = [
         doc
-        for doc in _rendered()
+        for doc in _rendered(mode)
         if doc["kind"] == "ConfigMap" and doc["metadata"]["name"] == "chemclaw-config"
     ]
     assert len(found) == 1, "the render has no chemclaw-config ConfigMap"
@@ -95,9 +94,9 @@ def _config_map() -> dict[str, str]:
     return data
 
 
-def _dialled() -> dict[str, tuple[str, int]]:
+def _dialled(mode: str = "devauth") -> dict[str, tuple[str, int]]:
     """Every address the release dials, setting or connector name onto (host, port)."""
-    config = _config_map()
+    config = _config_map(mode)
     urls: dict[str, str] = dict(json.loads(config["CHEMCLAW_CONNECTOR_URLS"]))
     for key in (
         "CHEMCLAW_LLM_BASE_URL",
@@ -112,6 +111,10 @@ def _dialled() -> dict[str, tuple[str, int]]:
         dialled[name] = (parts.hostname, parts.port)
     host, port = config["CHEMCLAW_TEMPORAL_ADDRESS"].rsplit(":", 1)
     dialled["CHEMCLAW_TEMPORAL_ADDRESS"] = (host, int(port))
+    if config.get("CHEMCLAW_ENTRA_JWKS_URL"):
+        parts = urlsplit(config["CHEMCLAW_ENTRA_JWKS_URL"])
+        assert parts.hostname and parts.port, "CHEMCLAW_ENTRA_JWKS_URL names no host and port"
+        dialled["CHEMCLAW_ENTRA_JWKS_URL"] = (parts.hostname, parts.port)
     return dialled
 
 
@@ -125,21 +128,24 @@ def _service_ports(documents: list[dict[str, Any]]) -> dict[str, set[int]]:
 
 
 requires_helm = pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+each_mode = pytest.mark.parametrize("mode", sorted(_MODES))
 
 
 @requires_helm
-def test_the_overlay_renders_nothing_a_vanilla_cluster_cannot_serve() -> None:
+@each_mode
+def test_the_overlay_renders_nothing_a_vanilla_cluster_cannot_serve(mode: str) -> None:
     """No OpenShift Route and no prometheus-operator or KEDA object reaches a kind cluster."""
-    kinds = {doc["kind"] for doc in _rendered()}
+    kinds = {doc["kind"] for doc in _rendered(mode)}
     leaked = sorted(kinds & _CLUSTER_OPERATOR_KINDS)
     assert not leaked, f"values-kind.yaml still renders {leaked}, which kind has no API for"
     assert {"Job", "Deployment", "NetworkPolicy"} <= kinds, f"implausible render: {sorted(kinds)}"
 
 
 @requires_helm
-def test_every_pod_runs_the_core_image_the_lane_loads() -> None:
+@each_mode
+def test_every_pod_runs_the_core_image_the_lane_loads(mode: str) -> None:
     """`imagePullPolicy: Never` and the image `up.sh` loads, or a pod waits on a registry."""
-    for doc in _rendered():
+    for doc in _rendered(mode):
         if doc["kind"] not in {"Deployment", "Job"}:
             continue
         spec = doc["spec"]["template"]["spec"]
@@ -150,11 +156,12 @@ def test_every_pod_runs_the_core_image_the_lane_loads() -> None:
 
 
 @requires_helm
-def test_the_production_hook_jobs_still_run_in_their_production_order() -> None:
+@each_mode
+def test_the_production_hook_jobs_still_run_in_their_production_order(mode: str) -> None:
     """The overlay keeps migrate before the rollout and convert/schedules after it."""
     hooks = {
         doc["metadata"]["name"]: doc["metadata"]["annotations"]["helm.sh/hook"]
-        for doc in _rendered()
+        for doc in _rendered(mode)
         if doc["kind"] == "Job"
     }
     assert hooks == {
@@ -165,10 +172,11 @@ def test_the_production_hook_jobs_still_run_in_their_production_order() -> None:
 
 
 @requires_helm
-def test_every_secret_key_the_release_requires_is_one_up_sh_generates() -> None:
+@each_mode
+def test_every_secret_key_the_release_requires_is_one_up_sh_generates(mode: str) -> None:
     """A required `secretKeyRef` the script never writes is a pod stuck before it starts."""
     required: set[str] = set()
-    for doc in _rendered():
+    for doc in _rendered(mode):
         if doc["kind"] not in {"Deployment", "Job"}:
             continue
         spec = doc["spec"]["template"]["spec"]
@@ -180,17 +188,29 @@ def test_every_secret_key_the_release_requires_is_one_up_sh_generates() -> None:
     assert required, "the render references no chemclaw-secrets key — the scan did not parse"
     generated = set(re.findall(r"printf '(CHEMCLAW_[A-Z0-9_]+)=", _UP))
     missing = sorted(required - generated)
+    # And every Secret a pod mounts as a volume (oidc-mock's `chemclaw-temporal-tls`) is one up.sh
+    # creates, or the pod waits in `ContainerCreating` on a mount that never resolves.
+    mounted = {
+        volume["secret"]["secretName"]
+        for doc in _rendered(mode)
+        if doc["kind"] in {"Deployment", "Job"}
+        for volume in doc["spec"]["template"]["spec"].get("volumes") or []
+        if "secret" in volume
+    }
+    created = set(re.findall(r"apply_secret ([a-z0-9-]+) ", _UP))
+    assert mounted <= created, f"pods mount {sorted(mounted - created)}, which up.sh never creates"
     assert not missing, (
         f"the chart requires {missing} from chemclaw-secrets; up.sh never writes them"
     )
 
 
 @requires_helm
-def test_the_release_may_dial_every_port_it_is_configured_to_dial() -> None:
+@each_mode
+def test_the_release_may_dial_every_port_it_is_configured_to_dial(mode: str) -> None:
     """The egress policy is enforced on kind (kindnet), so an unlisted port is a silent drop."""
     egress = [
         doc
-        for doc in _rendered()
+        for doc in _rendered(mode)
         if doc["kind"] == "NetworkPolicy" and doc["metadata"]["name"] == "chemclaw-egress"
     ]
     assert len(egress) == 1, "the render has no chemclaw-egress policy"
@@ -199,7 +219,7 @@ def test_the_release_may_dial_every_port_it_is_configured_to_dial() -> None:
     }
     blocked = sorted(
         f"{name} → {host}:{port}"
-        for name, (host, port) in _dialled().items()
+        for name, (host, port) in _dialled(mode).items()
         if port not in allowed and port != 5432
     )
     assert 5432 in allowed, "the release cannot reach Postgres"
@@ -207,17 +227,18 @@ def test_the_release_may_dial_every_port_it_is_configured_to_dial() -> None:
 
 
 @requires_helm
-def test_every_in_cluster_address_names_a_service_this_lane_creates() -> None:
+@each_mode
+def test_every_in_cluster_address_names_a_service_this_lane_creates(mode: str) -> None:
     """Each dialled host is a Service from the chart, `manifests/`, or the fleet, on that port."""
-    services = _service_ports(_rendered()) | _service_ports(_manifests())
+    services = _service_ports(_rendered(mode)) | _service_ports(_manifests())
     checkout, reason = sibling_root("CHEMCLAW_MCP_REPO", "Chemclaw3-mcp")
-    fleet_hosts = {host for host, _ in _dialled().values() if host.startswith("chemclaw-mcp-")}
+    fleet_hosts = {host for host, _ in _dialled(mode).values() if host.startswith("chemclaw-mcp-")}
     if checkout is not None:
         for path in sorted(checkout.glob("servers/*/deploy/service.yaml")):
             services |= _service_ports(_documents(path.read_text(encoding="utf-8")))
     wrong = [
         f"{name} → {host}:{port}"
-        for name, (host, port) in sorted(_dialled().items())
+        for name, (host, port) in sorted(_dialled(mode).items())
         if (checkout is not None or host not in fleet_hosts)
         and port not in services.get(host, set())
     ]
@@ -273,3 +294,31 @@ def test_the_llm_key_never_becomes_an_argument_or_a_log_line() -> None:
         if re.match(r"\s*(log|warn|die|echo)\b", line):
             assert "LLM_KEY" not in line and "CHEMCLAW_LLM_API_KEY" not in line, line
     assert "--from-env-file=/dev/stdin" in _UP, "the Secret is no longer assembled on a pipe"
+
+
+@requires_helm
+def test_oidc_mock_is_the_shipped_identity_posture_against_the_mock_tenant() -> None:
+    """oidc-mock turns sign-in on with no opt-out, and its prerequisites are what core demands.
+
+    Under `CHEMCLAW_ENTRA_REQUIRED=true` core refuses a plaintext Temporal channel and a Postgres
+    DSN below `sslmode=require` to a non-loopback host, so the mode is only real if both are there:
+    the chart's Temporal mTLS mount on, and `up.sh` writing `sslmode=require` into the DSNs.
+    """
+    config = _config_map("oidc-mock")
+    assert config["CHEMCLAW_ENTRA_REQUIRED"] == "true"
+    assert config["CHEMCLAW_SERVICE_ALLOW_INSECURE"] == "false"
+    assert config["CHEMCLAW_WORKER_ALLOW_UNAUTHENTICATED"] == "false"
+    assert config["CHEMCLAW_ENTRA_PRIVILEGED_ROLES"], "every expensive job would be closed"
+    issuer = urlsplit(config["CHEMCLAW_ENTRA_ISSUER"])
+    assert issuer.scheme == "https", "MSAL.js accepts only an https authority"
+    assert f"{issuer.scheme}://{issuer.netloc}/entra/mock-tenant" in _UP, (
+        "up.sh hands the browser and the mock a different tenant URL than core checks `iss` against"
+    )
+    env = {
+        env["name"]
+        for doc in _rendered("oidc-mock")
+        if doc["kind"] == "Deployment" and doc["metadata"]["name"] == "chemclaw-service"
+        for env in doc["spec"]["template"]["spec"]["containers"][0]["env"]
+    }
+    assert {"CHEMCLAW_TEMPORAL_TLS_CERT", "CHEMCLAW_TEMPORAL_TLS_CA"} <= env
+    assert "sslmode=require" in _UP

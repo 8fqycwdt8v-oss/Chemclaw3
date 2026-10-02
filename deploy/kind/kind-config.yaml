@@ -24,6 +24,11 @@ nodes:
         hostPort: 15173
         listenAddress: 127.0.0.1
         protocol: TCP
+      # The mock tenant, https (oidc-mock mode's MSAL authority; see manifests/mock.yaml)
+      - containerPort: 30443
+        hostPort: 18443
+        listenAddress: 127.0.0.1
+        protocol: TCP
       # Temporal UI
       - containerPort: 30233
         hostPort: 18091

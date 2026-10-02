@@ -20,6 +20,7 @@ $ make kind-validate  # offline: render the chart with these values + the fleet,
 | http://127.0.0.1:15173 | the UI (BFF + SPA) |
 | http://127.0.0.1:18000 | the front door (`/healthz`, `/readyz`, the API) |
 | http://127.0.0.1:18091 | the Temporal UI |
+| https://127.0.0.1:18443/entra/mock-tenant | the mock tenant (oidc-mock mode's sign-in authority) |
 
 The ports avoid 5432 / 8000 / 5173 / 8091, which the compose lanes hold.
 
@@ -65,14 +66,26 @@ into the `chemclaw-secrets` Secret through a pipe and is never an argument, a fi
 live run skips the scripted turns in the smoke, which need the mock's behaviour markers.
 
 **Auth.** `CHEMCLAW_KIND_AUTH=devauth` (default): `CHEMCLAW_ENTRA_REQUIRED=false` with the two stated
-dev opt-outs, and the UI in `AUTH_MODE=dev`. `oidc-mock` — sign-in enforced against the mock tenant
-— is **refused by `up.sh` today**, with the reason: under `CHEMCLAW_ENTRA_REQUIRED=true` core refuses
-a plaintext Postgres DSN and a plaintext Temporal channel to any non-loopback host, so this mode needs
-Postgres TLS and Temporal frontend mTLS in this cluster, plus the UI's `AUTH_MODE=msal` against the
-mock tenant. When those exist the mode sets: `CHEMCLAW_ENTRA_REQUIRED=true`,
-`CHEMCLAW_ENTRA_AUDIENCE=api://chemclaw`, `CHEMCLAW_ENTRA_ISSUER` / `CHEMCLAW_ENTRA_JWKS_URL` under
-`http://mock-eln:8090/entra/mock-tenant/`, `CHEMCLAW_ENTRA_PRIVILEGED_ROLES=process-chemist` (the
-role the mock's test users hold), and `MOCK_ENTRA_ENABLED=true` with a matching issuer on the mock.
+dev opt-outs, the UI in `AUTH_MODE=dev` (`chemclaw/ui:<tag>-devauth`), Temporal plaintext.
+
+`CHEMCLAW_KIND_AUTH=oidc-mock`: the chart's own identity posture against the mock tenant, nothing
+patched — `values-kind-oidc-mock.yaml` over `values-kind.yaml`. Sign-in is enforced, the insecure
+opt-outs are off, and `CHEMCLAW_ENTRA_PRIVILEGED_ROLES=chemist` (the mock's preset testers alice and
+bob hold it; carol holds nothing). Core refuses that posture over plaintext Postgres or Temporal to a
+non-loopback host, so the mode also runs both over TLS:
+
+| Piece | How |
+| --- | --- |
+| Certificates | `up.sh` issues one CA per cluster and leaf certificates for Postgres, the Temporal frontend (plus a client certificate), and the mock; the CA key is never stored. `chemclaw-kind-ca` holds the CA certificate — trust it in a browser to sign in without a warning. |
+| Postgres | TLS in every mode; the DSNs carry `sslmode=require` in this one. |
+| Temporal | Frontend TLS with client certificates required (`chemclaw-temporal-tls-env`); the chart's `secrets.temporalTls.enabled` is back to its production `true`. |
+| Mock tenant | `mock-eln` serves https; the browser reaches it at `https://127.0.0.1:18443/entra/mock-tenant` (NodePort 30443), which is also the issuer every token carries. Core fetches the keys in-cluster (`https://mock-eln:8090/...`) and trusts the cluster CA via `CHEMCLAW_ENTRA_CA_BUNDLE`, which reuses the CA already mounted for Temporal. |
+| UI | `chemclaw/ui:<tag>`, `AUTH_MODE=msal`, `ENTRA_AUTHORITY` = the tenant URL above. |
+
+The smoke in this mode mints a token for alice from the tenant, checks an anonymous `POST /sessions`
+is a 401, and runs the same turns and job as alice. Switching modes on a running cluster restarts
+the pods whose environment or certificates changed. A cluster created before the 18443 mapping
+existed cannot serve this mode; `up.sh` says so and how to recreate it.
 
 ## What running it found in the chart and core
 

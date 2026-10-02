@@ -1,0 +1,33 @@
+# The oidc-mock auth mode, layered over values-kind.yaml (`CHEMCLAW_KIND_AUTH=oidc-mock`, which makes
+# `up.sh` pass `-f values-kind.yaml -f values-kind-oidc-mock.yaml`).
+#
+# **Sign-in enforced, against the mock tenant, with nothing patched.** This is the posture the chart
+# ships — `CHEMCLAW_ENTRA_REQUIRED=true`, no insecure opt-outs, Temporal mTLS — with the tenant
+# swapped for `Chemclaw3_mock`'s. Core refuses that posture over a plaintext Postgres DSN or a
+# plaintext Temporal channel to any non-loopback host, so this mode is also the one that runs both
+# over TLS: `up.sh` issues one CA per cluster, adds `sslmode=require` to the DSNs, and turns on the
+# Temporal frontend's client-certificate TLS.
+
+secrets:
+  # The production default, back on: the chart mounts `chemclaw-temporal-tls` (the client pair and
+  # the cluster CA, issued by `up.sh`) and points CHEMCLAW_TEMPORAL_TLS_* at it.
+  temporalTls:
+    enabled: true
+
+config:
+  CHEMCLAW_ENTRA_REQUIRED: "true"
+  CHEMCLAW_SERVICE_ALLOW_INSECURE: "false"
+  CHEMCLAW_WORKER_ALLOW_UNAUTHENTICATED: "false"
+  CHEMCLAW_ENTRA_TENANT_ID: "mock-tenant"
+  CHEMCLAW_ENTRA_AUDIENCE: "api://chemclaw"
+  # The issuer is a string compared against `iss`, so it is the address the *browser* reaches the
+  # tenant at (kind-config.yaml maps 18443 to the mock's NodePort) — the value the mock stamps and
+  # MSAL.js signs in against. The keys are fetched in-cluster, by Service name, over https.
+  CHEMCLAW_ENTRA_ISSUER: "https://127.0.0.1:18443/entra/mock-tenant/v2.0"
+  CHEMCLAW_ENTRA_JWKS_URL: "https://mock-eln:8090/entra/mock-tenant/discovery/v2.0/keys"
+  # The cluster CA that signed the mock's certificate. It is the same CA as Temporal's, so it is
+  # already on the front door at the chart's Temporal TLS mount; no second volume is needed.
+  CHEMCLAW_ENTRA_CA_BUNDLE: "/etc/temporal/tls/ca.crt"
+  # The role the mock's preset testers alice and bob hold (carol holds none, which is the
+  # unprivileged case). Empty would close every expensive job to everyone — deploy/README.md.
+  CHEMCLAW_ENTRA_PRIVILEGED_ROLES: "chemist"

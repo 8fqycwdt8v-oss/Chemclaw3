@@ -7,9 +7,11 @@
 # values-kind.yaml). The chart has no default for it on purpose, and on a shared broker registering
 # it is the operator's step; here the broker is this lane's own, so auto-setup does it.
 #
-# Plaintext gRPC: `secrets.temporalTls.enabled: false` in values-kind.yaml. That is the README's
-# stated setting for a dev cluster, and it is refused under `CHEMCLAW_ENTRA_REQUIRED=true`, which is
-# why the oidc-mock auth mode needs Temporal mTLS before it can run (see ../README.md).
+# **Plaintext in devauth, mTLS in oidc-mock.** devauth runs `secrets.temporalTls.enabled: false`,
+# the README's dev-cluster setting; core refuses that under `CHEMCLAW_ENTRA_REQUIRED=true`, so
+# oidc-mock turns on frontend TLS with client certificates required. Which one is decided by the
+# `chemclaw-temporal-tls-env` ConfigMap `up.sh` writes per mode (empty in devauth); the certificates
+# (`temporal-tls`, from the cluster CA) are mounted in both, so the manifest names neither mode.
 #
 # `enableServiceLinks: false` on every pod in `manifests/`: Kubernetes injects `<SERVICE>_PORT=
 # tcp://…` for every Service in the namespace, and a Service named `temporal-ui` hands the UI a
@@ -79,6 +81,9 @@ spec:
               value: 0.0.0.0
             - name: TEMPORAL_BROADCAST_ADDRESS
               value: $(POD_IP)
+          envFrom:
+            - configMapRef:
+                name: chemclaw-temporal-tls-env
           ports:
             - name: grpc
               containerPort: 7233
@@ -91,6 +96,14 @@ spec:
           resources:
             requests: {cpu: 250m, memory: 384Mi}
             limits: {cpu: "2", memory: 1Gi}
+          volumeMounts:
+            - name: tls
+              mountPath: /tls
+              readOnly: true
+      volumes:
+        - name: tls
+          secret:
+            secretName: temporal-tls
 ---
 apiVersion: v1
 kind: Service
@@ -136,6 +149,9 @@ spec:
               value: temporal-frontend:7233
             - name: TEMPORAL_DEFAULT_NAMESPACE
               value: chemclaw
+          envFrom:
+            - configMapRef:
+                name: chemclaw-temporal-tls-env
           ports:
             - name: http
               containerPort: 8080
@@ -147,3 +163,11 @@ spec:
           resources:
             requests: {cpu: 25m, memory: 64Mi}
             limits: {cpu: 500m, memory: 256Mi}
+          volumeMounts:
+            - name: tls
+              mountPath: /tls
+              readOnly: true
+      volumes:
+        - name: tls
+          secret:
+            secretName: temporal-tls

@@ -542,6 +542,9 @@ kind-validate:  ## Offline: render the chart with deploy/kind/values-kind.yaml +
 	@command -v kubectl >/dev/null || { echo "kubectl not installed (render-fleet.sh uses kubectl kustomize)"; exit 1; }
 	helm template chemclaw deploy/helm/chemclaw --namespace chemclaw -f deploy/kind/values-kind.yaml \
 	  | kubeconform -strict -summary -kubernetes-version $(KUBE_VERSION)
+	helm template chemclaw deploy/helm/chemclaw --namespace chemclaw -f deploy/kind/values-kind.yaml \
+	  -f deploy/kind/values-kind-oidc-mock.yaml \
+	  | kubeconform -strict -summary -kubernetes-version $(KUBE_VERSION)
 	kubeconform -strict -summary -kubernetes-version $(KUBE_VERSION) deploy/kind/manifests
 	@set -e; mcp="$${CHEMCLAW_MCP_REPO:-.sibling/Chemclaw3-mcp}"; \
 	  [ -d "$$mcp/servers" ] || { echo "kind-validate: no Chemclaw3-mcp checkout at $$mcp — set CHEMCLAW_MCP_REPO"; exit 1; }; \

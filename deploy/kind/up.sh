@@ -12,8 +12,10 @@
 # Knobs (environment):
 #   CHEMCLAW_KIND_CORE_TAG   core image tag (default `kind`) — the chart, the hooks and the mock LLM
 #   CHEMCLAW_KIND_TAG        tag of every other image: chemclaw/mcp-*, chemclaw/mock (default `kind`)
-#   CHEMCLAW_KIND_AUTH       `devauth` (default). `oidc-mock` is refused until its prerequisites
-#                            exist — see ../kind/README.md.
+#   CHEMCLAW_KIND_AUTH       `devauth` (default): sign-in off, the UI in AUTH_MODE=dev.
+#                            `oidc-mock`: sign-in enforced against the mock tenant over https, the UI
+#                            in AUTH_MODE=msal, Postgres TLS and Temporal mTLS (what core requires
+#                            beside CHEMCLAW_ENTRA_REQUIRED=true). See README.md, "Modes".
 #   CHEMCLAW_KIND_LLM        `mock` (default): the scripted mock LLM. `live`: the host's gateway,
 #                            from `chemclaw-live-env.sh` beside the checkouts (macOS Keychain), whose
 #                            key goes straight into the cluster Secret and is never printed or written.
@@ -35,6 +37,10 @@ readonly LLM="${CHEMCLAW_KIND_LLM:-mock}"
 readonly FRONT_DOOR="http://127.0.0.1:18000"
 readonly UI_URL="http://127.0.0.1:15173"
 readonly TEMPORAL_UI_URL="http://127.0.0.1:18091"
+# The mock tenant as the browser reaches it, and therefore the `iss` every token carries: MSAL.js
+# requires an https authority, and the issuer is compared as a string, so the one value the browser,
+# the mock and core all agree on is the host-mapped address (kind-config.yaml, 18443).
+readonly TENANT_URL="https://127.0.0.1:18443/entra/mock-tenant"
 
 log() { printf '\033[36m[kind]\033[0m %s\n' "$*" >&2; }
 warn() { printf '\033[33m[kind] %s\033[0m\n' "$*" >&2; }
@@ -137,25 +143,137 @@ check_auth_mode() {
   case "$AUTH" in
     devauth) ;;
     oidc-mock)
-      die "CHEMCLAW_KIND_AUTH=oidc-mock is not runnable yet. Under CHEMCLAW_ENTRA_REQUIRED=true the
-  core refuses a plaintext Postgres DSN and a plaintext Temporal channel to a non-loopback host
-  (core/config: require_pg_tls, the temporal_tls check), so this mode needs, beyond the mock tenant
-  (MOCK_ENTRA_ENABLED on mock-eln) and the UI's AUTH_MODE=msal against it:
-    - Postgres serving TLS, and DSNs with sslmode=require or stronger;
-    - Temporal frontend mTLS, and the chart's secrets.temporalTls Secret.
-  deploy/kind/README.md lists what the mode will set once those exist."
+      # The browser's way to the tenant is a host port, and a port mapping is fixed when the cluster
+      # is created: a cluster made before the mapping existed cannot serve this mode.
+      docker port "$CLUSTER-control-plane" 30443/tcp >/dev/null 2>&1 \
+        || die "the kind node has no host mapping for the mock tenant (30443 → 127.0.0.1:18443);
+  this cluster predates it. Recreate: make kind-down && CHEMCLAW_KIND_AUTH=oidc-mock make kind-up"
       ;;
     *) die "CHEMCLAW_KIND_AUTH must be devauth or oidc-mock, got '$AUTH'" ;;
   esac
 }
 
-# The per-mode environment for the UI and the mock, one ConfigMap each, so the manifests name
-# neither mode.
+# A ConfigMap from `KEY=value` lines on stdin; prints `changed` when its data differs from what
+# the cluster holds, so the pods that read it through `envFrom` (which never hot-reloads) can be
+# restarted exactly when a mode switch changed their environment.
+apply_env_configmap() {
+  local name="$1" before after
+  before="$(k get configmap "$name" -o jsonpath='{.data}' 2>/dev/null || true)"
+  k create configmap "$name" --from-env-file=/dev/stdin --dry-run=client -o yaml | k apply -f - >/dev/null
+  after="$(k get configmap "$name" -o jsonpath='{.data}')"
+  [ "$before" = "$after" ] || printf 'changed'
+}
+
+# The per-mode environment for the UI, the mock and Temporal, one ConfigMap each, so no manifest
+# names a mode.
+AUTH_CHANGED=""
 apply_auth_config() {
-  k create configmap chemclaw-ui-auth --dry-run=client -o yaml \
-    --from-literal=AUTH_MODE=dev --from-literal=ALLOW_INSECURE_AUTH=true | k apply -f - >/dev/null
-  k create configmap chemclaw-mock-auth --dry-run=client -o yaml \
-    --from-literal=MOCK_ENTRA_ENABLED=false | k apply -f - >/dev/null
+  local ui mock temporal
+  case "$AUTH" in
+    devauth)
+      ui="AUTH_MODE=dev
+ALLOW_INSECURE_AUTH=true"
+      mock="MOCK_ENTRA_ENABLED=false"
+      temporal=""
+      ;;
+    oidc-mock)
+      ui="AUTH_MODE=msal
+ENTRA_TENANT_ID=mock-tenant
+ENTRA_CLIENT_ID=mock-spa-client
+API_SCOPE=api://chemclaw/Chat.Access
+ENTRA_AUTHORITY=$TENANT_URL"
+      mock="MOCK_ENTRA_ENABLED=true
+MOCK_ENTRA_ISSUER=$TENANT_URL/v2.0
+MOCK_ENTRA_AUDIENCE=api://chemclaw
+MOCK_ENTRA_SPA_CLIENT_ID=mock-spa-client
+MOCK_ENTRA_REDIRECT_URIS=http://127.0.0.1:15173/auth/callback,http://localhost:15173/auth/callback
+MOCK_SSL_CERTFILE=/tls/tls.crt
+MOCK_SSL_KEYFILE=/tls/tls.key"
+      # The server's own frontend and internode TLS (auto-setup's config template), client
+      # certificates required, and — under the same names — the client half the bundled `temporal`
+      # CLI (namespace registration) and the Temporal UI read.
+      temporal="TEMPORAL_TLS_SERVER_CA_CERT=/tls/ca.crt
+TEMPORAL_TLS_SERVER_CERT=/tls/tls.crt
+TEMPORAL_TLS_SERVER_KEY=/tls/tls.key
+TEMPORAL_TLS_FRONTEND_CERT=/tls/tls.crt
+TEMPORAL_TLS_FRONTEND_KEY=/tls/tls.key
+TEMPORAL_TLS_CLIENT1_CA_CERT=/tls/ca.crt
+TEMPORAL_TLS_CLIENT2_CA_CERT=/tls/ca.crt
+TEMPORAL_TLS_REQUIRE_CLIENT_AUTH=true
+TEMPORAL_TLS_INTERNODE_SERVER_NAME=temporal-frontend
+TEMPORAL_TLS_FRONTEND_SERVER_NAME=temporal-frontend
+TEMPORAL_TLS_CA=/tls/ca.crt
+TEMPORAL_TLS_CERT=/tls/client.crt
+TEMPORAL_TLS_KEY=/tls/client.key
+TEMPORAL_TLS_SERVER_NAME=temporal-frontend
+TEMPORAL_TLS_ENABLE_HOST_VERIFICATION=true"
+      ;;
+  esac
+  AUTH_CHANGED="$AUTH_CHANGED$(printf '%s\n' "$ui" | apply_env_configmap chemclaw-ui-auth)"
+  AUTH_CHANGED="$AUTH_CHANGED$(printf '%s\n' "$mock" | apply_env_configmap chemclaw-mock-auth)"
+  AUTH_CHANGED="$AUTH_CHANGED$(printf '%s\n' "$temporal" | apply_env_configmap chemclaw-temporal-tls-env)"
+}
+
+# ------------------------------------------------------------------------------------- tls
+
+# One CA per cluster, and the leaf certificates the in-cluster TLS endpoints serve: Postgres, the
+# Temporal frontend (plus the client certificate every Temporal caller presents), and the mock
+# tenant. Issued once and kept as Secrets; the CA's private key is never stored — it exists in a
+# temporary directory for the length of this function, so re-issuing means a new CA, which is
+# what `make kind-down` gives a fresh cluster anyway. `chemclaw-kind-ca` holds the CA certificate
+# alone: the smoke's `--cacert`, and what a browser trusts to sign in without a warning.
+# The CA's key lives here while `ensure_tls` runs, and goes with the process whichever way it exits.
+TLS_WORKDIR=""
+trap '[ -z "$TLS_WORKDIR" ] || rm -rf "$TLS_WORKDIR"' EXIT
+TLS_SECRETS=(chemclaw-kind-ca postgres-tls temporal-tls chemclaw-temporal-tls mock-eln-tls)
+ensure_tls() {
+  local secret missing=""
+  for secret in "${TLS_SECRETS[@]}"; do
+    k get secret "$secret" >/dev/null 2>&1 || missing="$missing $secret"
+  done
+  [ -n "$missing" ] || return 0
+  log "issuing this cluster's CA and TLS certificates (missing:$missing)"
+  local dir
+  dir="$(mktemp -d)"
+  TLS_WORKDIR="$dir"
+  ( umask 077
+    cat >"$dir/openssl.cnf" <<'CNF'
+[req]
+distinguished_name = dn
+[dn]
+[ca]
+basicConstraints = critical,CA:TRUE
+keyUsage = critical,keyCertSign,cRLSign
+subjectKeyIdentifier = hash
+CNF
+    openssl req -x509 -new -nodes -newkey rsa:2048 -sha256 -days 825 -subj "/CN=chemclaw-kind-ca" \
+      -config "$dir/openssl.cnf" -extensions ca -keyout "$dir/ca.key" -out "$dir/ca.crt" 2>/dev/null
+    issue() {
+      local name="$1" sans="$2"
+      printf '[leaf]\nbasicConstraints = CA:FALSE\nkeyUsage = critical,digitalSignature,keyEncipherment\nextendedKeyUsage = serverAuth,clientAuth\nsubjectKeyIdentifier = hash\nauthorityKeyIdentifier = keyid\nsubjectAltName = %s\n' \
+        "$sans" >"$dir/$name.ext"
+      openssl req -new -nodes -newkey rsa:2048 -sha256 -subj "/CN=$name" -config "$dir/openssl.cnf" \
+        -keyout "$dir/$name.key" -out "$dir/$name.csr" 2>/dev/null
+      openssl x509 -req -sha256 -days 825 -in "$dir/$name.csr" -CA "$dir/ca.crt" -CAkey "$dir/ca.key" \
+        -CAcreateserial -extfile "$dir/$name.ext" -extensions leaf -out "$dir/$name.crt" 2>/dev/null
+    }
+    issue postgres "DNS:postgres,DNS:postgres.$NS.svc"
+    issue temporal "DNS:temporal-frontend,DNS:temporal-frontend.$NS.svc,DNS:localhost,IP:127.0.0.1"
+    issue temporal-client "DNS:chemclaw-temporal-client"
+    issue mock-eln "DNS:mock-eln,DNS:mock-eln.$NS.svc,DNS:localhost,IP:127.0.0.1"
+  ) || die "issuing the cluster's certificates failed (openssl: $(command -v openssl))"
+  apply_secret() { k create secret generic "$@" --dry-run=client -o yaml | k apply -f - >/dev/null; }
+  apply_secret chemclaw-kind-ca --from-file=ca.crt="$dir/ca.crt"
+  apply_secret postgres-tls --from-file=tls.crt="$dir/postgres.crt" --from-file=tls.key="$dir/postgres.key"
+  apply_secret temporal-tls --from-file=ca.crt="$dir/ca.crt" \
+    --from-file=tls.crt="$dir/temporal.crt" --from-file=tls.key="$dir/temporal.key" \
+    --from-file=client.crt="$dir/temporal-client.crt" --from-file=client.key="$dir/temporal-client.key"
+  # The chart's own Secret, in the shape deploy/README.md documents: the client pair and the CA.
+  apply_secret chemclaw-temporal-tls --from-file=ca.crt="$dir/ca.crt" \
+    --from-file=tls.crt="$dir/temporal-client.crt" --from-file=tls.key="$dir/temporal-client.key"
+  apply_secret mock-eln-tls --from-file=tls.crt="$dir/mock-eln.crt" --from-file=tls.key="$dir/mock-eln.key"
+  AUTH_CHANGED="${AUTH_CHANGED}changed"
+  rm -rf "$dir"; TLS_WORKDIR=""
 }
 
 # ------------------------------------------------------------------------------------- secrets
@@ -211,9 +329,13 @@ apply_app_secret() {
   app_pw="$(secret_value chemclaw-kind-db APP_PASSWORD)"
   owner_pw="$(secret_value chemclaw-kind-db POSTGRES_PASSWORD)"
   [ -n "$app_pw" ] && [ -n "$owner_pw" ] || die "chemclaw-kind-db is missing a password"
+  # Postgres serves TLS in every mode; oidc-mock *requires* it, because core refuses a non-loopback
+  # DSN below `sslmode=require` once sign-in is enforced (`require_pg_tls`).
+  local tls=""
+  [ "$AUTH" = oidc-mock ] && tls="?sslmode=require"
   {
-    printf 'CHEMCLAW_POSTGRES_DSN=postgresql://chemclaw_app:%s@postgres:5432/chemclaw\n' "$app_pw"
-    printf 'CHEMCLAW_POSTGRES_MIGRATION_DSN=postgresql://chemclaw:%s@postgres:5432/chemclaw\n' "$owner_pw"
+    printf 'CHEMCLAW_POSTGRES_DSN=postgresql://chemclaw_app:%s@postgres:5432/chemclaw%s\n' "$app_pw" "$tls"
+    printf 'CHEMCLAW_POSTGRES_MIGRATION_DSN=postgresql://chemclaw:%s@postgres:5432/chemclaw%s\n' "$owner_pw" "$tls"
     printf 'CHEMCLAW_LLM_API_KEY=%s\n' "$LLM_KEY"
     printf 'CHEMCLAW_KNOWLEDGE_REPO_TOKEN=\n'
     for var in CHEMCLAW_BO_MCP_TOKEN CHEMCLAW_CALC_MCP_TOKEN CHEMCLAW_MOLFP_MCP_TOKEN \
@@ -250,6 +372,7 @@ apply_dependencies() {
   log "applying the dependencies (Postgres, Temporal, mocks, fleet, front door, UI)"
   kubectl --context "$CTX" apply -f "$KIND_DIR/manifests/namespace.yaml" >/dev/null
   ensure_db_secret
+  ensure_tls
   apply_auth_config
   apply_app_secret
   # The two bundles this image does not ship, from the files their owners keep.
@@ -277,6 +400,16 @@ apply_dependencies() {
     "$KIND_DIR/render-fleet.sh" "$MCP_REPO" "$TAG" "${servers[@]}" | k apply -f - >/dev/null
   fi
 
+  # `envFrom` and mounted certificates are read at container start, so a mode switch or a new CA
+  # restarts exactly the pods that read them.
+  if [ -n "$AUTH_CHANGED" ]; then
+    log "auth mode or certificates changed — restarting Postgres, Temporal, the mock and the UI"
+    k rollout restart statefulset/postgres deployment/temporal deployment/temporal-ui >/dev/null
+    if have "chemclaw/mock:$TAG"; then k rollout restart deployment/mock-eln >/dev/null; fi
+    if have "$(ui_image)" && k get deployment/ui >/dev/null 2>&1; then
+      k rollout restart deployment/ui >/dev/null
+    fi
+  fi
   wait_rollout statefulset/postgres 180s
   wait_rollout deployment/temporal 300s
   wait_rollout deployment/mock-llm 180s
@@ -314,9 +447,11 @@ disable_missing_connectors() {
 # conflict instead of converging. On this cluster the release is the source of truth.
 install_chart() {
   disable_missing_connectors
+  AUTH_VALUES=()
+  if [ "$AUTH" = oidc-mock ]; then AUTH_VALUES=(-f "$KIND_DIR/values-kind-oidc-mock.yaml"); fi
   log "helm upgrade --install $RELEASE (core image chemclaw/core:$CORE_TAG) — runs the migrate hook first"
   helm --kube-context "$CTX" upgrade --install "$RELEASE" "$REPO_ROOT/deploy/helm/chemclaw" \
-    --namespace "$NS" -f "$KIND_DIR/values-kind.yaml" \
+    --namespace "$NS" -f "$KIND_DIR/values-kind.yaml" ${AUTH_VALUES[@]+"${AUTH_VALUES[@]}"} \
     --set-string "image.tag=$CORE_TAG" ${LLM_SET[@]+"${LLM_SET[@]}"} ${CHART_SET[@]+"${CHART_SET[@]}"} \
     --wait --wait-for-jobs --timeout 20m --force-conflicts \
     || die "helm upgrade --install failed. Hook Jobs are deleted only on success, so a failed one is
@@ -347,14 +482,39 @@ wait_http_ok() {
   die "smoke: $name answered ${code:-nothing} at $url, not 200"
 }
 
+# The caller's credential for the API: none in devauth (the front door mints its dev principal), a
+# token from the mock tenant's mint in oidc-mock — for `alice`, who holds `chemist`, the role
+# values-kind-oidc-mock.yaml names privileged, so the durable job is hers to launch.
+AUTH_HEADER=(-H "x-kind-smoke: 1")
+smoke_credential() {
+  [ "$AUTH" = oidc-mock ] || return 0
+  local ca token
+  ca="$(mktemp)"
+  k get secret chemclaw-kind-ca -o jsonpath='{.data.ca\.crt}' | base64 -d >"$ca"
+  token="$(curl -sf -m 20 --cacert "$ca" -X POST "$TENANT_URL/oauth2/v2.0/token" \
+    -H 'content-type: application/json' \
+    -d '{"oid":"00000000-0000-0000-0000-00000000a11c","upn":"alice@mock-tenant.test","roles":["chemist","reviewer"]}' \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')" \
+    || { rm -f "$ca"; die "smoke: the mock tenant at $TENANT_URL minted no token"; }
+  rm -f "$ca"
+  AUTH_HEADER=(-H "Authorization: Bearer $token")
+  # And the half that makes the other half mean something: no token, no session.
+  local anonymous
+  anonymous="$(curl -s -o /dev/null -m 10 -w '%{http_code}' -X POST "$FRONT_DOOR/sessions" \
+    -H 'content-type: application/json' -d '{}' || true)"
+  [ "$anonymous" = 401 ] || die "smoke: an anonymous POST /sessions answered $anonymous, not 401"
+  log "smoke: sign-in enforced (anonymous 401) and a mock-tenant token minted for alice"
+}
+
 # One turn through the front door: create a session, post a message carrying a mock-LLM behaviour
 # marker, read the SSE stream to its end. Prints the stream.
 turn() {
   local marker="$1" session
-  session="$(curl -sf -m 20 -X POST "$FRONT_DOOR/sessions" -H 'content-type: application/json' -d '{}' \
+  session="$(curl -sf -m 20 -X POST "$FRONT_DOOR/sessions" "${AUTH_HEADER[@]}" \
+    -H 'content-type: application/json' -d '{}' \
     | python3 -c 'import json,sys; print(json.load(sys.stdin)["session_id"])')" \
     || die "smoke: POST /sessions failed"
-  curl -sN -m 300 -X POST "$FRONT_DOOR/sessions/$session/messages" \
+  curl -sN -m 300 -X POST "$FRONT_DOOR/sessions/$session/messages" "${AUTH_HEADER[@]}" \
     -H 'content-type: application/json' -H 'accept: text/event-stream' \
     -d "{\"message\": \"[[$marker]] kind smoke\"}" || die "smoke: the $marker turn's stream failed"
 }
@@ -370,6 +530,7 @@ smoke() {
     log "smoke: CHEMCLAW_KIND_LLM=$LLM — the scripted turns need the mock LLM; skipping them"
     return
   fi
+  smoke_credential
   local stream
   stream="$(turn a-cheap)"
   grep -q 'Two notes cover this coupling' <<<"$stream" \
@@ -386,7 +547,7 @@ $(tail -n 20 <<<"$stream")"
   log "smoke: durable job $job_id launched; waiting for it to complete (≤ 10 min)"
   local state="" body
   for _ in $(seq 1 120); do
-    body="$(curl -sf -m 10 "$FRONT_DOOR/jobs/$job_id" || true)"
+    body="$(curl -sf -m 10 "${AUTH_HEADER[@]}" "$FRONT_DOOR/jobs/$job_id" || true)"
     state="$(python3 -c 'import json,sys
 try: d=json.load(sys.stdin)
 except Exception: print(""); raise SystemExit
