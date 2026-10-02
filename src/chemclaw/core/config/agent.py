@@ -617,6 +617,17 @@ class AgentSettings(BaseSettings):
     # is what "how this chemist works" should cost a turn.
     preferences_max_per_owner: int = Field(default=200, ge=1)
     preferences_recall_limit: int = Field(default=50, ge=1)
+    # **Character bounds, because every preference now rides on every model call**
+    # (`agent/preferences.StandingPreferences`). A row count does not bound size: one model-written
+    # value of any length would otherwise be paid on every call of every session, and could push
+    # every request past the provider's window — where the chemist cannot recover, because
+    # `forget_preference` itself needs a model call. `preferences_entry_max_chars` caps one
+    # rendered `key: value` line (and is refused at write time in `remember_preference`);
+    # `preferences_section_max_chars` caps the whole appended section. A real working preference
+    # measured ~44 characters, so 300 is several sentences and 4,000 is about a thousand tokens.
+    # The section floor leaves room for its fixed framing (~0.9 kB) plus at least one entry.
+    preferences_entry_max_chars: int = Field(default=300, ge=40)
+    preferences_section_max_chars: int = Field(default=4_000, ge=1_500)
     # **How much of the chemist's own conversation stays quotable** — the ambient
     # `core/turn_text.py` binds and `agent/protocol_design_tools.require_quotes_are_verbatim`
     # checks a `basis="stated"` slot against.
