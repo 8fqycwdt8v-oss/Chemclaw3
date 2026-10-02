@@ -179,6 +179,16 @@ jobs:
           path: .sibling/Chemclaw3-mcp
           persist-credentials: false
 
+      # The mock's seed, read as files only (its CSVs), so no environment is built for it: the
+      # fixed-point sweep over every molecule it seeds carries the same sibling marker, and
+      # `CHEMCLAW_SIBLINGS_REQUIRED` would otherwise fail it here for want of the checkout.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: 8fqycwdt8v-oss/Chemclaw3_mock
+          ref: main
+          path: .sibling/Chemclaw3_mock
+          persist-credentials: false
+
       - name: Install uv
         uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
@@ -191,6 +201,18 @@ jobs:
       # without any gate noticing.
       - name: Sync dependencies
         run: uv sync --locked
+
+      # The fleet's own locked environment, so the tests that *run* its servers run here too — the
+      # ones that measure the tool schemas `SERVED_ELSEWHERE_ALLOWANCE` and
+      # `FLEET_PUBLISHED_ALLOWANCE` bound, which are the half of `PREFIX_BOUND` this repository
+      # cannot author. Without it they skipped in every CI run while the allowance stood breached
+      # (#515's backlog row). `--frozen`, the fleet's own spelling for its lock. Measured on a cold
+      # cache: 24-44 s and 708 MB over 94 packages. RDKit and SciPy, **not** torch — the model
+      # backends are optional extras, so the cost that kept this out ("RDKit, torch and a T5
+      # checkpoint's dependencies") was never what a default sync installs.
+      - name: Build the fleet's environment
+        working-directory: .sibling/Chemclaw3-mcp
+        run: uv sync --frozen
 
       # Not `make helm-validate` — that stays `chart`'s alone (see the docstring on
       # `test_every_gate_make_ci_runs_is_a_step_ci_yml_runs`). This is only the binary the
@@ -247,33 +269,18 @@ jobs:
       # Lint and type used to ride along on this line and now run in `static` above, in parallel.
       # They are still gates and still block a merge; what changed is that they no longer report
       # their answer eleven minutes after they knew it.
-      # `CHEMCLAW_MCP_REPO` is what the cross-repo tests read; without it they skip, and
-      # `tests/conftest.py`'s epilogue then names what the run is not evidence about — and counts
-      # them, which is why no number appears here.
-      #
-      # **That epilogue block is present on every run, and it is expected rather than a symptom.**
-      # This comment used to say the opposite — "that epilogue block should be absent from a CI log
-      # — its presence means this variable stopped reaching them" — which is a diagnosis a reader
-      # acts on and it is wrong in both halves. The variable reaches them; what is absent is the
-      # sibling's own `.venv`. `tests/siblings.py::sibling_python` splits the two costs on purpose
-      # and argues only one is plausible here: reading the fleet's manifests needs a shallow clone,
-      # while *running* its servers to measure their tool schemas needs a built environment with
-      # RDKit, torch and a T5 checkpoint's dependencies. So the manifest-reading tests run against
-      # the checkout above, and the **5** schema-measuring ones skip, which leaves
-      # `SERVED_ELSEWHERE_ALLOWANCE`, `FLEET_PUBLISHED_ALLOWANCE` and therefore `PREFIX_BOUND`
-      # unchecked in CI by design — the epilogue's job is to say so, and it does.
-      #
-      # The two cases are told apart by the *per-test* reason, not by the epilogue's summary line,
-      # which says "could not be read" either way: `no Chemclaw3-mcp checkout at <path> (set
-      # CHEMCLAW_MCP_REPO or CHEMCLAW_MCP_CHECKOUT)` is the variable failing to arrive, against the
-      # current `<path> has no .venv — run \`make install\` there`. A review caught this sentence
-      # naming a string that appears nowhere, which is the same failure class the rewrite was for.
-      # Installing the sibling here is the decision nobody has taken, and it is a real one — it buys
-      # those three allowances a gate and costs every `check` run that install.
+      # `CHEMCLAW_MCP_REPO` is what the cross-repo tests read, and with the checkout above and the
+      # fleet environment beside it every one of them can run here — the manifest readers and the
+      # schema measurements alike. So `CHEMCLAW_SIBLINGS_REQUIRED` turns a sibling skip into a
+      # failure (`tests/conftest.py`): in this job a skip can only mean a precondition broke, and a
+      # bound that skips is the state the allowance sat in, breached, while every run was green.
+      # Locally both stay opt-in, and the epilogue still counts what a run did not check.
       - name: Test with the coverage floor
         run: make cov
         env:
           CHEMCLAW_MCP_REPO: ${{ github.workspace }}/.sibling/Chemclaw3-mcp
+          CHEMCLAW_MOCK_REPO: ${{ github.workspace }}/.sibling/Chemclaw3_mock
+          CHEMCLAW_SIBLINGS_REQUIRED: "1"
 
       - name: Validate knowledge graph
         run: make kg-validate

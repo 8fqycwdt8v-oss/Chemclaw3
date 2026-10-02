@@ -28,7 +28,7 @@ import asyncio
 import logging
 import os
 import socket
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
 from typing import Any
 
 import psycopg
@@ -650,6 +650,38 @@ def _report_sibling_skips(terminalreporter: TerminalReporter) -> None:
         "each skip above names the bundle it could not measure and why — a missing dependency in "
         "that tree's own `.venv` now costs that bundle's measurement and no other."
     )
+
+
+#: Set where the sibling checkout *and* its environment are provisioned on purpose — CI's `check`
+#: job — so a skip that `_report_sibling_skips` would only count is a failure instead.
+SIBLINGS_REQUIRED = "CHEMCLAW_SIBLINGS_REQUIRED"
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_makereport(
+    item: pytest.Item, call: pytest.CallInfo[None]
+) -> Generator[None, pytest.TestReport, pytest.TestReport]:
+    """Fail a cross-repository check that skipped where its sibling was provisioned to be read.
+
+    The epilogue above is the right answer where a sibling is optional, and the wrong one where it
+    is not: `SERVED_ELSEWHERE_ALLOWANCE` stood breached while every CI run printed that block and
+    went green, because the schema measurement needs the fleet's built environment and CI had only
+    its checkout. CI now builds both, so there a sibling skip can only mean a precondition broke —
+    a path, a dependency the fleet added, a bundle that no longer imports — and it is reported as
+    the failure it is. Matched on `tests/siblings.SIBLING_SKIP`, the marker every such skip carries.
+    """
+    report = yield
+    if not report.skipped or os.environ.get(SIBLINGS_REQUIRED) != "1":
+        return report
+    from tests.siblings import SIBLING_SKIP
+
+    if SIBLING_SKIP in str(report.longrepr):
+        report.outcome = "failed"
+        report.longrepr = (
+            f"{SIBLINGS_REQUIRED}=1, and this cross-repository check skipped instead of running: "
+            f"{report.longrepr}"
+        )
+    return report
 
 
 def pytest_terminal_summary(terminalreporter: TerminalReporter) -> None:

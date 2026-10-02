@@ -12,9 +12,9 @@ brought current on the lane, and the structure-search tools said so on every run
 * **Fingerprint generations.** A lane's database outlives `down`/`up`, so rows written under an
   older fingerprint definition stay in it, and `similar_reactions` reported `index_partial` — "part
   of the reaction index is stored under a SUPERSEDED fingerprint definition and was not compared".
-  A deployment carries rows across a definition bump with `make rekey-compounds APPLY=1` and then
-  disposes of the shelved generation under the owning principal (`094`'s header names the
-  statement); the lane did neither.
+  A deployment carries rows across a definition bump and disposes of the shelved generation with
+  `make rekey-compounds APPLY=1 DISPOSE=1` (`094`'s header names the statement); the lane did
+  neither.
 
 So this runs exactly those jobs, on the real broker and the real stores: one label drain (started,
 or rejoined if one is already running), the operator's re-key, and — only when the re-key rebuilt
@@ -28,11 +28,11 @@ sync is also a one-shot (`live_data.backfill`) — because a Schedule persists i
 lane's `down`. Rows ingested after the drain finishes are labelled by the next bring-up, which runs
 this again.
 
-**The disposal is an operator statement, and that is why it lives here.** The runtime role holds
-no `DELETE` on either fingerprint table (`infra/sql/grants/app_privileges.sql`), deliberately; the
-lane connects as the principal that owns the schema, which is the standing `094` names for this
-statement. `tests/test_database_privileges.py` lists this module beside `cli/rekey_campaigns.py`
-for the same reason.
+**The disposal is the operator's, called rather than restated.** `rekey_compounds.settle_indexes` is
+what `make rekey-compounds APPLY=1 DISPOSE=1` runs, guard included, so the lane and a deployment
+dispose under one rule (#526). The runtime role holds no `DELETE` on either fingerprint table
+(`infra/sql/grants/app_privileges.sql`), deliberately; the statement connects as the schema's owner
+(`core.migrate.migration_dsn`), which on the lane is the one principal it has.
 """
 
 from __future__ import annotations
@@ -49,13 +49,9 @@ from temporalio.exceptions import WorkflowAlreadyStartedError
 
 from chemclaw.cli import rekey_compounds
 from chemclaw.core.config import settings
-from chemclaw.core.db import connection as db_connection
 from chemclaw.core.logging import configure_logging
 from chemclaw.core.temporal_client import connect as temporal_connect
 from chemclaw.durable.label_sync import LabelSyncOutcome, ReactionLabelWorkflow
-from chemclaw.science.fingerprints.molfp.fingerprint import molecule_definition
-from chemclaw.science.fingerprints.rekey import FingerprintRekeyCounts
-from chemclaw.science.fingerprints.rxnfp.fingerprint import reaction_definition
 
 logger = logging.getLogger(__name__)
 
@@ -118,47 +114,6 @@ async def finish_label_drain(handle: DrainHandle, timeout_seconds: float) -> str
     )
 
 
-async def dispose_superseded(table: str, definition: str) -> int:
-    """Delete `table`'s rows stored under any definition other than `definition`; return how many.
-
-    The statement `infra/sql/094_fingerprint_definition_identity.sql` names for "disposing of a
-    shelved generation after a completed rebuild". Interpolated, so `table` is checked to be a plain
-    identifier — every caller passes a constant, and this is the trust boundary
-    `PostgresFingerprintStore` draws for the same reason.
-    """
-    if not table.isidentifier():
-        raise ValueError(f"table must be a plain SQL identifier, got {table!r}")
-    async with db_connection(settings.postgres_dsn, operation="live-index-dispose") as conn:
-        cursor = await conn.execute(
-            f"DELETE FROM {table} WHERE definition <> %(definition)s", {"definition": definition}
-        )
-        return cursor.rowcount
-
-
-async def settle_index(
-    kind: str, table: str, definition: str, counts: FingerprintRekeyCounts
-) -> str:
-    """Dispose of `table`'s shelved generation when the re-key rebuilt all of it, and say which.
-
-    **Complete means `unreadable == 0`.** Every other shelved row the re-key saw was rebuilt
-    (`rekeyed`) or already had a current row (`already_current`), so deleting the superseded
-    generation loses nothing the current one does not hold. An unreadable row is the one case where
-    it would: its label no longer parses, so it has no current twin, and dropping it would turn a
-    search that honestly says PARTIAL into one that silently never had the row. Then the shelf
-    stays and `index_partial` keeps saying so.
-    """
-    if counts.unreadable:
-        return (
-            f"{kind}: {counts.unreadable} shelved row(s) could not be rebuilt, so the superseded "
-            "generation is kept and searches still say PARTIAL — re-sync those entries from source"
-        )
-    removed = await dispose_superseded(table, definition)
-    return (
-        f"{kind}: {counts.rekeyed} re-fingerprinted, {counts.current} already current, "
-        f"{removed} superseded row(s) disposed of"
-    )
-
-
 async def rebuild_fingerprints(timeout_seconds: float) -> list[str]:
     """The operator's re-key, applied, then each index's disposal if its rebuild completed."""
     report = await asyncio.wait_for(_rekey(apply=True), timeout=max(timeout_seconds, 0.0))
@@ -166,18 +121,7 @@ async def rebuild_fingerprints(timeout_seconds: float) -> list[str]:
     return [
         f"compound notes ({report.version}): {notes['successors']} successor(s) written, "
         f"{notes['retired']} retired, {notes['blocked_successor']} blocked",
-        await settle_index(
-            "reaction fingerprints",
-            "reaction_fingerprints",
-            reaction_definition(),
-            report.reactions,
-        ),
-        await settle_index(
-            "molecule fingerprints",
-            "molecule_fingerprints",
-            molecule_definition(),
-            report.molecules,
-        ),
+        *await rekey_compounds.settle_indexes(report),
     ]
 
 

@@ -20,7 +20,7 @@ from temporalio import activity
 from temporalio.client import Client
 from temporalio.worker import Worker
 
-from chemclaw.cli import live_index
+from chemclaw.cli import live_index, rekey_compounds
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.durable.label_sync import LabelSyncPlan, ReactionLabelWorkflow
@@ -186,7 +186,9 @@ async def test_a_completed_rebuild_disposes_of_the_shelf_and_the_index_is_whole_
             "the re-key alone cleared the flag, so this test no longer shows why disposal exists"
         )
 
-        said = await live_index.settle_index("molecules", _SCRATCH, molecule_definition(), counts)
+        said = await rekey_compounds.settle_index(
+            "molecules", _SCRATCH, molecule_definition(), counts
+        )
         assert said == (
             "molecules: 2 re-fingerprinted, 0 already current, 2 superseded row(s) disposed of"
         )
@@ -198,7 +200,9 @@ async def test_a_completed_rebuild_disposes_of_the_shelf_and_the_index_is_whole_
         # Idempotent: a second bring-up finds everything current and disposes of nothing.
         again = await rekey_fingerprints(store, molecule_definition(), rebuild_molecule, apply=True)
         assert again.rekeyed == 0
-        said = await live_index.settle_index("molecules", _SCRATCH, molecule_definition(), again)
+        said = await rekey_compounds.settle_index(
+            "molecules", _SCRATCH, molecule_definition(), again
+        )
         assert said.endswith("0 superseded row(s) disposed of")
 
 
@@ -221,7 +225,9 @@ async def test_a_row_the_rebuild_could_not_read_keeps_the_shelf_and_the_search_h
         assert counts.unreadable == 1
         before = await _rows()
 
-        said = await live_index.settle_index("molecules", _SCRATCH, molecule_definition(), counts)
+        said = await rekey_compounds.settle_index(
+            "molecules", _SCRATCH, molecule_definition(), counts
+        )
         assert "1 shelved row(s) could not be rebuilt" in said
         assert await _rows() == before, "a disposal ran over an incomplete rebuild"
         assert (await find_similar_molecules(store, "CCO")).index_partial is True
@@ -230,4 +236,4 @@ async def test_a_row_the_rebuild_could_not_read_keeps_the_shelf_and_the_search_h
 async def test_the_disposal_refuses_a_table_name_it_would_have_to_trust() -> None:
     """The statement interpolates the table, so only a plain identifier may reach it."""
     with pytest.raises(ValueError, match="plain SQL identifier"):
-        await live_index.dispose_superseded("reaction_fingerprints; DROP TABLE x", "d")
+        await rekey_compounds.dispose_superseded("reaction_fingerprints; DROP TABLE x", "d")
