@@ -52,6 +52,9 @@ class _Candidate:
     updated_at: datetime
     title: str | None
     owned: bool
+    # Whose session it is — the caller for an owned one, the owner of record for a shared one
+    # (`None` where the membership store keeps no owner). Carried to `PendingPlan.owner`.
+    owner: str | None
 
 
 @dataclass(frozen=True)
@@ -226,6 +229,7 @@ async def _shared_sessions(oid: str | None) -> list[_Candidate]:
             updated_at=shared.updated_at or shared.added_at,
             title=shared.title,
             owned=False,
+            owner=shared.owner,
         )
         for shared in await session_member_store().shared_with(oid)
         if _plan_gated(shared.profile)
@@ -361,7 +365,7 @@ async def pending_plans(request: Request, principal: CurrentUser) -> PendingPlan
     shared = await _shared_sessions(principal.oid)
     gated = sorted(
         [
-            _Candidate(session_id, updated_at, title, owned=True)
+            _Candidate(session_id, updated_at, title, owned=True, owner=principal.oid)
             for session_id, _created_at, updated_at, title, _profile in owned
         ]
         + shared,
@@ -395,6 +399,7 @@ async def pending_plans(request: Request, principal: CurrentUser) -> PendingPlan
                     plan_hash=read.approvable,
                     plan=read.todos,
                     scope=read.scope,
+                    owner=candidate.owner,
                 )
             )
     return PendingPlansOut(

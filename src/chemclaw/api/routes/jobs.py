@@ -85,7 +85,9 @@ async def get_job(
     The same function the agent's `get_durable_job_status` calls, so a chemist polling in chat
     and a chemist refreshing a page cannot get different answers about one run. Answers for
     finished jobs indefinitely: Temporal expires a closed run's history, and `job_records` is
-    what survives it (D-157).
+    what survives it (D-157). An open run reads `running`, or `queued` when nothing has started it
+    yet — a queued tool call waiting for a slot, or a run on a queue no worker polls — with the
+    reason as `summary`.
     """
     try:
         return await front_door.job_status(job_id)
