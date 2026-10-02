@@ -29,7 +29,7 @@ from chemclaw.operations import (
     spend,
     tool_usage,
 )
-from chemclaw.operations.activity import _TOOL_USAGE, KNOWLEDGE_WRITE_TOOLS
+from chemclaw.operations.activity import _TOOL_USAGE, KNOWLEDGE_WRITE_TOOLS, OUTCOMES, ToolUse
 from tests.pg import migrated_db_or_skip
 
 #: A string no bounded vocabulary could contain, written into every free-text column below.
@@ -258,7 +258,7 @@ async def test_an_outcome_outside_the_vocabulary_is_counted_in_a_column() -> Non
     tool = "ops_probe_unknown_outcome_tool"
     async with await connect(settings.postgres_dsn) as conn:
         await conn.execute("DELETE FROM audit_events WHERE correlation_id LIKE 'c-vocab-%'")
-        for index, outcome in enumerate(("ok", "refused", "a_later_revisions_outcome")):
+        for index, outcome in enumerate(("ok", "refused", "empty", "a_later_revisions_outcome")):
             await conn.execute(
                 "INSERT INTO audit_events (correlation_id, actor, tool, arguments, outcome,"
                 " detail, latency_ms) VALUES (%s, %s, %s, %s, %s, %s, %s)",
@@ -268,13 +268,28 @@ async def test_an_outcome_outside_the_vocabulary_is_counted_in_a_column() -> Non
     try:
         reading = await tool_usage(Window.trailing(1), tool=tool)
         use = {row.tool: row for row in reading.tools}[tool]
-        assert use.calls == 3
+        assert use.calls == 4
+        assert use.empty == 1
         assert use.other == 1
-        assert use.calls == use.ok + use.refused + use.error + use.cancelled + use.other
+        assert use.calls == (
+            use.ok + use.refused + use.error + use.cancelled + use.empty + use.other
+        )
     finally:
         async with await connect(settings.postgres_dsn) as conn:
             await conn.execute("DELETE FROM audit_events WHERE correlation_id LIKE 'c-vocab-%'")
             await conn.commit()
+
+
+def test_every_outcome_the_trail_mints_has_a_column() -> None:
+    """`OUTCOMES` is transcribed, not imported, so a new producer outcome can be forgotten here.
+
+    Forgetting it is not a crash — the row lands in `other` — which is why it needs a test: the
+    `empty` outcome would have been read back as "an older revision's vocabulary".
+    """
+    from chemclaw.agent.audit import EMPTY, REFUSED
+
+    assert {"ok", "error", "cancelled", REFUSED, EMPTY} <= set(OUTCOMES)
+    assert all(outcome in ToolUse.model_fields for outcome in OUTCOMES)
 
 
 async def test_a_hallucinated_tool_name_never_reaches_a_reader_verbatim() -> None:

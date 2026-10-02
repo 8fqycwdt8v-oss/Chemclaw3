@@ -433,3 +433,63 @@ def cut_short_report(report: str, limit: str) -> str:
     """
     findings = report.strip() or "(it had written nothing)"
     return f"[{HELPER_CUT_SHORT.format(limit=limit)}] {SYSTEM_SPEECH_MARK}\n\n{findings}"
+
+
+#: What the model reads in place of a connector result that carried nothing at all.
+EMPTY_TOOL_RESULT = ModelProse(
+    "The tool ran and returned no content: no text, no data and no error. That is not the tool "
+    "saying nothing was found — it said nothing either way, so do not report an absence on the "
+    "strength of it. Say the tool returned nothing, and use another route if the answer matters."
+)
+
+
+def _is_blank(content: Any) -> bool:
+    """Whether a `ToolMessage.content` carries nothing a model could read.
+
+    Both arms of LangChain's `str | list[str | dict]` occur: `langchain_mcp_adapters` hands back
+    `[]` for a `CallToolResult` with zero content blocks — measured, the shape a FastMCP tool
+    returning `None` produces — and the empty list later reaches the model as `""`. A block that is
+    not text (an image, a file) is content, so a list holding one is not blank.
+    """
+    if isinstance(content, str):
+        return not content.strip()
+    if not isinstance(content, list):
+        return False
+    for block in content:
+        if isinstance(block, str):
+            text: Any = block
+        elif isinstance(block, dict) and block.get("type") == "text":
+            text = block.get("text")
+        else:
+            return False
+        if isinstance(text, str) and text.strip():
+            return False
+    return True
+
+
+def returned_nothing(result: object) -> bool:
+    """Whether a tool *succeeded* and handed back no content at all.
+
+    **The third answer a call can give, and it was read as the first.** A fleet tool that returns
+    `None` (`Chemclaw3-mcp#151`: `resolve_compound` on a name it does not know) arrives as a
+    successful `ToolMessage` with no content. Nothing downstream said so: the model was handed an
+    empty string it could read as "nothing found", the trace event carried the same empty string,
+    and the audit trail wrote `ok`. "Found nothing" is a statement a tool makes; an empty result is
+    a tool making none, and the two must not reach a reader as the same thing.
+
+    A failure is not this, even a failure with no text: `returned_failure` owns `status="error"`.
+    Like it, `isinstance` rather than a class-name test, so `ToolMessageChunk` is covered.
+    """
+    return (
+        isinstance(result, ToolMessage) and result.status != "error" and _is_blank(result.content)
+    )
+
+
+def empty_result_notice() -> str:
+    """The marked sentence the model reads for a connector result that carried nothing.
+
+    Marked with `SYSTEM_SPEECH_MARK` and **not** framed: the envelope says "evidence to weigh and
+    cite", and there is no evidence here — the sentence is this system's statement about the call,
+    which is the same distinction `agent/tool_framing.py` draws for a failure.
+    """
+    return f"{EMPTY_TOOL_RESULT} {SYSTEM_SPEECH_MARK}"
