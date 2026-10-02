@@ -370,6 +370,9 @@ def test_a_full_line_is_refused_409(monkeypatch: pytest.MonkeyPatch) -> None:
 
     status, detail = asyncio.run(_run())
     assert status == 409 and "already waiting" in detail, detail
+    # A code beside the sentence (Chemclaw3 #503), so a client tells a full line from a sender
+    # already waiting without matching prose.
+    assert '"code":"queue_full"' in detail, detail
     assert [message for message, _actor, _roles in agent.ran] == ["hold ana", "ben asks"]
 
 
@@ -880,3 +883,40 @@ def test_the_inbox_lists_a_plan_the_caller_authored_in_a_session_they_are_only_a
         "a member's inbox missed their own plan, or listed one only the owner may decide"
     )
     assert bobs["considered"] >= 3
+
+
+def test_an_inbox_row_says_whose_conversation_the_plan_is_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`PendingPlan.owner` (Chemclaw3 #503): the owner of record, on own rows and on a member's.
+
+    Without it a client could tell a plan in somebody else's conversation from one in its own only
+    by matching the row against `GET /sessions/shared` — and opening a shared one as the reader's
+    own gives them an owner's controls. The in-process membership store keeps no owner, so it is
+    given the one the durable store reads off `session_owners`, which is what a member's row carries
+    in production.
+    """
+    monkeypatch.setattr(settings, "harness_enabled", True)
+    monkeypatch.setattr(settings, "harness_autonomy", "plan_only")
+    inbox = _Inbox(monkeypatch)
+    inbox.add_session("s-alices-own", owner="alice", profile=None, plan=["alice's step"])
+    inbox.add_session("s-bobs-plan", owner="alice", profile=None, plan=["bob's step"])
+    lines = inbox.todos["s-bobs-plan"] or []
+    asyncio.run(
+        inbox.approvals.record_author("s-bobs-plan", plan_identity(_steps(lines)) or "", "bob")
+    )
+    store = session_member_store()
+    asyncio.run(store.add("s-bobs-plan", "bob"))
+    unowned = store.shared_with
+
+    async def _with_owner(actor: str) -> list[members_module.SharedSession]:
+        return [row._replace(owner="alice") for row in await unowned(actor)]
+
+    monkeypatch.setattr(store, "shared_with", _with_owner)
+
+    alices = {row["session_id"]: row["owner"] for row in inbox.get()["plans"]}
+    inbox.app.dependency_overrides[require_principal] = lambda: _BOB
+    bobs = {row["session_id"]: row["owner"] for row in inbox.get()["plans"]}
+
+    assert alices == {"s-alices-own": "alice"}
+    assert bobs == {"s-bobs-plan": "alice"}, "a member's row must name the session's owner"
