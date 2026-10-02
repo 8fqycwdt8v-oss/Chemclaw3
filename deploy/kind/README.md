@@ -100,8 +100,9 @@ Fixed in core, with tests, because each one breaks any Kubernetes install and no
 - **`421 Misdirected Request` from every connector's `/mcp`.** `FastMCP(name)` enables MCP's
   DNS-rebinding guard with a loopback-only `Host` list, so a caller dialling a connector by Service
   name was refused while `/healthz` stayed green. Core's `connector_app` now admits loopback plus the
-  connector's own `connector_urls` address. The fleet servers in `Chemclaw3-mcp` have the same
-  default and need the same change there.
+  connector's own `connector_urls` address. The fleet servers have the same default; their fix is
+  `Chemclaw3-mcp` #153, which reads `MCP_ALLOWED_HOSTS` — set by the fleet's own deployment files
+  and, for a checkout that predates it, by `render-fleet.sh`.
 - **The `bo` server is OOM-killed by the shared 512Mi connector limit** (measured 864 MiB at start).
   Connector servers can now declare `connectors.<name>.serverResources`, and `bo` does.
 - **`python -m chemclaw.cli.mock_llm --host`**, so the mock can serve other pods.
@@ -125,6 +126,9 @@ Fixed in core, with tests, because each one breaks any Kubernetes install and no
   production's. Replicas are one per role and the HPA is off (it scales on a Prometheus metric this
   cluster has no adapter for). The startup probes get twice production's budget: a fresh `up`
   starts some two dozen Python processes at once and the node sits at 800–1000 % CPU for minutes.
+- **Certificates are issued once per cluster.** Should one of the TLS Secrets go missing, `up.sh`
+  issues a new CA and every certificate, and restarts the pods that read them at start — Postgres,
+  Temporal, the mock, the UI, and every pod of the release (the Temporal client certificate).
 - **A re-run converges.** `helm upgrade` runs with `--force-conflicts`, so a field changed by hand
   while debugging does not block the next `up`.
 

@@ -3,8 +3,9 @@
 # **An overlay, never a fork.** `helm upgrade --install -f values-kind.yaml` deep-merges this file
 # over `values.yaml`, so every key not named here is the production default — the probes, the
 # security contexts, the hook Jobs (migrate → grants pre-install; convert and schedules
-# post-install), the NetworkPolicies, the derived connection and grace-period arithmetic. Nothing in
-# this file changes what an OpenShift release renders; `tests/test_kind_deploy.py` holds that.
+# post-install), the NetworkPolicies, the derived connection and grace-period arithmetic. An
+# OpenShift release never reads this file, so it renders exactly what `values.yaml` says; what
+# `tests/test_kind_deploy.py` holds is that this overlay renders a release a vanilla cluster serves.
 #
 # What it does change falls into four groups, each said once here and argued beside its key:
 #   1. OpenShift- and cluster-operator-only surface turned off (Route, monitoring CRDs, HPA).
@@ -137,7 +138,7 @@ postgres:
   maxConnections: 256
 
 config:
-  # The scripted mock LLM (`manifests/mock-llm.yaml`) is the default gateway; `up.sh --live-llm`
+  # The scripted mock LLM (`manifests/mock-llm.yaml`) is the default gateway; `CHEMCLAW_KIND_LLM=live`
   # overrides these three with the host's gateway, model and window.
   CHEMCLAW_LLM_BASE_URL: "http://mock-llm:8820/v1"
   CHEMCLAW_LLM_MODEL: "mock"

@@ -252,7 +252,14 @@ tenant_forward() {
 # alone: the smoke's `--cacert`, and what a browser trusts to sign in without a warning.
 # The CA's key lives here while `ensure_tls` runs, and goes with the process whichever way it exits.
 TLS_WORKDIR=""
-trap '[ -z "$TLS_WORKDIR" ] || rm -rf "$TLS_WORKDIR"' EXIT
+# The smoke's bearer, as a curl header file (`-H @file`) rather than an argument `ps` would show.
+TOKEN_HEADER_FILE=""
+cleanup() {
+  [ -z "$TLS_WORKDIR" ] || rm -rf "$TLS_WORKDIR"
+  [ -z "$TOKEN_HEADER_FILE" ] || rm -f "$TOKEN_HEADER_FILE"
+}
+trap cleanup EXIT
+TLS_REISSUED=""
 TLS_SECRETS=(chemclaw-kind-ca postgres-tls temporal-tls chemclaw-temporal-tls mock-eln-tls)
 ensure_tls() {
   local secret missing=""
@@ -301,6 +308,7 @@ CNF
     --from-file=tls.crt="$dir/temporal-client.crt" --from-file=tls.key="$dir/temporal-client.key"
   apply_secret mock-eln-tls --from-file=tls.crt="$dir/mock-eln.crt" --from-file=tls.key="$dir/mock-eln.key"
   AUTH_CHANGED="${AUTH_CHANGED}changed"
+  TLS_REISSUED=1
   rm -rf "$dir"; TLS_WORKDIR=""
 }
 
@@ -321,10 +329,12 @@ existing_or_new() {
 ensure_db_secret() {
   if k get secret chemclaw-kind-db >/dev/null 2>&1; then return; fi
   log "generating database passwords (Secret chemclaw-kind-db)"
-  k create secret generic chemclaw-kind-db \
-    --from-literal=POSTGRES_PASSWORD="$(openssl rand -hex 24)" \
-    --from-literal=APP_PASSWORD="$(openssl rand -hex 24)" \
-    --from-literal=TEMPORAL_PASSWORD="$(openssl rand -hex 24)" >/dev/null
+  # On a pipe, like every other generated credential here: an argument is visible in `ps`.
+  {
+    printf 'POSTGRES_PASSWORD=%s\n' "$(openssl rand -hex 24)"
+    printf 'APP_PASSWORD=%s\n' "$(openssl rand -hex 24)"
+    printf 'TEMPORAL_PASSWORD=%s\n' "$(openssl rand -hex 24)"
+  } | k create secret generic chemclaw-kind-db --from-env-file=/dev/stdin >/dev/null
 }
 
 # The model gateway's variables for the chart, set by `live_llm_env` in live mode.
@@ -477,7 +487,9 @@ disable_missing_connectors() {
 # `--force-conflicts`: Helm 4 applies server-side, so a field someone changed by hand while
 # debugging (`kubectl set resources`, `kubectl scale`) makes the next `up` fail on a field-manager
 # conflict instead of converging. On this cluster the release is the source of truth.
+RELEASE_EXISTED=""
 install_chart() {
+  if helm --kube-context "$CTX" -n "$NS" status "$RELEASE" >/dev/null 2>&1; then RELEASE_EXISTED=1; fi
   disable_missing_connectors
   AUTH_VALUES=()
   if [ "$AUTH" = oidc-mock ]; then AUTH_VALUES=(-f "$KIND_DIR/values-kind-oidc-mock.yaml"); fi
@@ -507,6 +519,12 @@ install_chart() {
       || die "not every Deployment became Available:
 $(k get deploy 2>&1)"
   done
+  # A new CA under a running release: its pods hold the old Temporal client certificate (read at
+  # start), and a Helm upgrade that changed nothing in their templates does not restart them.
+  if [ -n "$TLS_REISSUED" ] && [ -n "$RELEASE_EXISTED" ]; then
+    log "certificates were re-issued — restarting the release's pods onto the new CA"
+    k rollout restart deployment -l "app.kubernetes.io/instance=$RELEASE" >/dev/null
+  fi
   # The mock LLM validated its catalogue before the release existed; nothing to restart. The UI's
   # readiness follows the front door's, so it is waited on only now.
   if have "$(ui_image)"; then wait_rollout deployment/ui 180s; fi
@@ -546,7 +564,10 @@ smoke_credential() {
     | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')" \
     || { rm -f "$ca"; die "smoke: the mock tenant at $TENANT_URL minted no token"; }
   rm -f "$ca"
-  AUTH_HEADER=(-H "Authorization: Bearer $token")
+  TOKEN_HEADER_FILE="$(umask 077; mktemp)"
+  printf 'Authorization: Bearer %s\n' "$token" >"$TOKEN_HEADER_FILE"
+  unset token
+  AUTH_HEADER=(-H "@$TOKEN_HEADER_FILE")
   # And the half that makes the other half mean something: no token, no session.
   local anonymous
   anonymous="$(curl -s -o /dev/null -m 10 -w '%{http_code}' -X POST "$FRONT_DOOR/sessions" \
