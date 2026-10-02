@@ -816,6 +816,23 @@ def test_deleting_a_session_clears_every_table_it_reaches_and_no_one_elses() -> 
                         "VALUES (%s, 'member', now() + interval '1 minute')",
                         (session_id,),
                     )
+                    # An artefact and a revision under it (`infra/sql/115_session_exhibits.sql`):
+                    # the header is what the delete names, and the revision is what the cascade
+                    # has to take with it.
+                    await cur.execute(
+                        "INSERT INTO session_exhibits (exhibit_id, session_id, kind, title, "
+                        "head_revision, head_author_kind, head_author, agent_seen_revision, "
+                        "created_by, correlation_id) "
+                        "VALUES (%s, %s, 'document', 't', 1, 'agent', 'a', 1, 'a', '')",
+                        (f"xb-{session_id[-16:]}", session_id),
+                    )
+                    await cur.execute(
+                        "INSERT INTO session_exhibit_revisions (exhibit_id, revision, "
+                        "parent_revision, author_kind, author, change_note, spec, byte_size, "
+                        "correlation_id) VALUES (%s, 1, 0, 'agent', 'a', '', "
+                        '\'{"kind": "document", "markdown": "x"}\'::jsonb, 1, \'\')',
+                        (f"xb-{session_id[-16:]}",),
+                    )
                 await conn.commit()
             await SessionTurnClaims().claim(session_id, f"holder-{session_id}", 60)
             # One result only this session has, and one both of them do — the same bytes under the
@@ -862,6 +879,7 @@ def test_deleting_a_session_clears_every_table_it_reaches_and_no_one_elses() -> 
         "session_members",
         "plan_authors",
         "session_turn_queue",
+        "session_exhibits",
         "session_owners",
     ):
         assert removed[table] == 1, f"{table} kept a deleted session's row: {removed}"

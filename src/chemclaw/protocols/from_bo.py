@@ -346,7 +346,7 @@ def _label(value: ParamValue) -> str:
     matches an arm's level against the factor's declared labels by string equality, so a float
     formatted one way in the factor and another in the arm fails a design that is in fact correct.
 
-    `%.10g` is the format `protocols/export._cell` writes a float to the run sheet in, so a level
+    `%.10g` is the format `protocols/export.csv_cell` writes a float to the run sheet in, so a level
     reads the same in the factor table, the arm and the CSV a chemist opens.
     """
     return f"{value:.10g}" if isinstance(value, float) else str(value)

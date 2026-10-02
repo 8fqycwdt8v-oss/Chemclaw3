@@ -681,6 +681,10 @@ _SESSION_DELETE: dict[str, str] = {
         "     AND EXISTS (SELECT 1 FROM session_owners o WHERE o.session_id = l.session_id))"
     ),
     "session_messages": "DELETE FROM session_messages WHERE session_id = %(session_id)s",
+    # An artefact is part of the conversation (`D-2026-10-02-an-artefact-is-part-of-the-answer-not-
+    # an-effect`); its revisions go with the header by cascade, so the one statement is the whole of
+    # it and the runtime role needs no DELETE on the append-only revision table.
+    "session_exhibits": "DELETE FROM session_exhibits WHERE session_id = %(session_id)s",
     "session_events": "DELETE FROM session_events WHERE session_id = %(session_id)s",
     "session_turns": "DELETE FROM session_turns WHERE session_id = %(session_id)s",
     # Both also cascade from `session_owners` (`infra/sql/110_shared_sessions.sql`); named so the

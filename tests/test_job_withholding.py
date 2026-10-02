@@ -15,7 +15,7 @@ synthetic job would stay green if the real one went back to being bound with now
 import pytest
 
 from chemclaw.agent.chemclaw_agent import (
-    _withheld_launcher_names,
+    _withheld_tool_names,
     available_tool_names,
     declared_tool_names,
 )
@@ -92,6 +92,6 @@ def test_a_launcher_registered_under_another_configuration_is_still_withheld(
     (launcher,) = [tool for tool in job_tools() if tool.__name__ == _JOB]
     monkeypatch.setitem(tool_registry._REGISTRY, _JOB, launcher)
     _publishing_nowhere(monkeypatch)
-    assert _JOB in _withheld_launcher_names()
+    assert _JOB in _withheld_tool_names()
     assert _JOB not in available_tool_names()
     assert _JOB not in surface(None).tool_names

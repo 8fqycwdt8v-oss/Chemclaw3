@@ -20,6 +20,7 @@ import io
 import math
 import re
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from psycopg.types.json import Jsonb
@@ -48,6 +49,8 @@ from chemclaw.cli.erase_actor import main as erase_actor_main
 from chemclaw.core.config import settings
 from chemclaw.core.db import connect
 from chemclaw.durable.digest import digest_channel
+from chemclaw.exhibits.models import parse_spec
+from chemclaw.exhibits.store import PostgresExhibitStore
 from tests.pg import create_checkpoint_tables, migrated_db_or_skip
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -718,6 +721,9 @@ async def test_the_erase_statements_are_valid_sql() -> None:
         # A place in a session's line, by sender
         # (`D-2026-10-01-a-queued-message-waits-in-its-senders-request`).
         "session_turn_queue",
+        # Artefacts follow `session_messages` (`D-2026-10-02-an-artefact-is-part-of-the-answer-not-
+        # an-effect`); their revisions cascade from the header.
+        "session_exhibits",
         "session_owners",
     }
 
@@ -1309,3 +1315,35 @@ def test_an_erasure_does_not_take_the_organisations_judgment() -> None:
     assert not any(
         prefix.startswith(org_versions_namespace("house-workup")[0]) for prefix in prefixes
     ), "the version history went with a departing chemist"
+
+
+async def test_a_members_artefact_in_someone_elses_session_is_reported_and_findable() -> None:
+    """Ben's artefact in Anna's session outlives Ben's erasure — and the report says where it is.
+
+    The erase tier reaches artefacts through `session_owners`, so a header naming Ben as its
+    creator or last author in a session Anna owns is out of reach by design (it is Anna's
+    document). Accounted for rather than silent: `_BEYOND_REACH` names the two columns, and the
+    query it hands an operator is run here, so a sentence that finds nothing fails this test.
+    """
+    await migrated_db_or_skip()
+    session = f"sess-xb-{uuid4().hex[:8]}"
+    await _seed(_ANNA, session)
+    made = await PostgresExhibitStore().create(
+        session,
+        title="Ben's screen",
+        spec=parse_spec({"kind": "document", "markdown": "Ben wrote this."}),
+        author_kind="human",
+        author=_BEN,
+    )
+    await erase_actor(_BEN)
+
+    reason = next(why for key, why in _BEYOND_REACH.items() if key.startswith("session_exhibits"))
+    assert "created_by" in reason and "head_author" in reason
+    found = re.search(r"`(SELECT [^`]+)`", reason)
+    assert found is not None, "the reason must hand the operator a query"
+    query = found.group(1).replace("'<id>'", "%(id)s")
+    async with await connect(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(query, {"id": _BEN})
+            rows = await cur.fetchall()
+    assert (session, made.exhibit_id) in {(row[0], row[1]) for row in rows}

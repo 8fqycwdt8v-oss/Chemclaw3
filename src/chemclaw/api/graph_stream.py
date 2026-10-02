@@ -48,6 +48,7 @@ from chemclaw.agent.tool_result_size import full_result_ref, was_cut
 from chemclaw.api.events import (
     Event,
     EvidenceSourceEvent,
+    ExhibitEvent,
     HandoffEvent,
     JobStartedEvent,
     NoteRecordedEvent,
@@ -62,6 +63,7 @@ from chemclaw.api.runner_usage import graph_usage_tokens
 from chemclaw.api.schemas import message_text
 from chemclaw.core.turn_signals import _KEY as _SIGNAL_KEY
 from chemclaw.core.turn_signals import (
+    ExhibitSignal,
     HandoffSignal,
     JobSignal,
     QuestionSignal,
@@ -193,11 +195,22 @@ async def graph_events(
     # By call id rather than tool name, because a model may issue two calls to one tool in a single
     # batch and only one of them fail.
     failed_calls: set[str] = set()
+    # Artefact announcements waiting for the tool result of the call that wrote them. The signal is
+    # raised inside the tool body, so it reaches this stream *before* the tools node's update that
+    # carries the call's `ToolMessage`; the contract orders them `tool_call` → `tool_result` →
+    # `exhibit`, so a surface that opens the pane on the event finds the call it came from already
+    # rendered. Held until the root's tools node completes — a helper's own updates arrive during
+    # that node too, and releasing on one of those would put the event before the result again.
+    held_exhibits: list[Event] = []
     # Read once per turn rather than per event: it is a property of the compiled object, and
     # re-deriving it 400 times a turn would be the same answer 400 times.
     depth = root_depth(graph)
-    async for namespace, mode, payload in graph.astream(
-        {**turn_input(message), **(carry or {})}, config, stream_mode=_MODES, subgraphs=True
+    failure: list[Exception] = []
+    async for namespace, mode, payload in _until_failure(
+        graph.astream(
+            {**turn_input(message), **(carry or {})}, config, stream_mode=_MODES, subgraphs=True
+        ),
+        failure,
     ):
         if mode == "messages":
             chunk, metadata = payload
@@ -251,7 +264,9 @@ async def graph_events(
                 # an id for every call.
                 failed_calls.add(signal.call_id)
             event = _custom_event(payload, on_signal)
-            if event is not None:
+            if isinstance(event, ExhibitEvent):
+                held_exhibits.append(event)
+            elif event is not None:
                 yield event
         elif mode == "updates":
             # **A non-empty namespace means "below the root", and that is the only attribution
@@ -298,6 +313,10 @@ async def graph_events(
                 emit_plan=not below_root,
             ):
                 yield event
+            if held_exhibits and not below_root and _TOOL_NODE in (payload or {}):
+                for exhibit in held_exhibits:
+                    yield exhibit
+                held_exhibits.clear()
         elif mode == "values":
             # **The outermost graph's own channels, which is where the carry comes from.** The
             # namespace test is `not namespace` rather than `> depth`: a peer's or a helper's state
@@ -306,6 +325,32 @@ async def graph_events(
             # turn's total and every deeper frame holds a part of it. Nothing else reads this mode.
             if carry is not None and not namespace:
                 _carry_forward(carry, payload)
+    # A write the stream never saw a root tools update for — a run cut off between the tool body
+    # and its node completing, or a graph that raised — is still a write, and the store holds it.
+    for exhibit in held_exhibits:
+        yield exhibit
+    if failure:
+        raise failure[0]
+
+
+async def _until_failure(
+    stream: AsyncIterator[Any], failure: list[Exception]
+) -> AsyncIterator[Any]:
+    """`stream`'s items until it raises, with the `Exception` recorded in `failure` instead.
+
+    **Why `graph_events` needs this rather than a `finally`.** Artefact announcements are held
+    until the root's tools node completes, and a tool body that wrote one has committed it whatever
+    the graph does next — so a graph that raises after the write must still let the stream carry
+    the announcement, and only then fail. A `finally` cannot do that: an async generator may not
+    yield while it is being closed (`GeneratorExit`), and a yield during a cancellation would
+    swallow it. So only an `Exception` is caught, here, and the caller re-raises it once it has
+    released what it held; anything else propagates untouched.
+    """
+    try:
+        async for item in stream:
+            yield item
+    except Exception as exc:
+        failure.append(exc)
 
 
 # The channels a mid-turn resume has to continue from rather than restart, and nothing else. Named
@@ -639,6 +684,8 @@ def _signal_event(signal: Signal) -> Event | None:
         # field is now the same verdict the audit row records, rather than a second opinion.
         #
         return ToolFailedEvent(tool=signal.tool, message=signal.message, reason=signal.reason)
+    if isinstance(signal, ExhibitSignal):
+        return ExhibitEvent(**signal.model_dump())
     if isinstance(signal, SkillLoadedSignal):
         # **The one member of the union with no event, and the only one that must not have one.**
         # Every other signal exists because something happened that the chemist should see; this one

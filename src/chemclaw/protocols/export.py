@@ -101,8 +101,12 @@ def _is_number(text: str) -> bool:
     return True
 
 
-def _cell(value: object) -> str:
+def csv_cell(value: object) -> str:
     """One value as a cell: empty for absent, and never in exponent form inside laboratory range.
+
+    Public because it is the one formula-injection guard for every CSV this system serves: an
+    artefact's table export (`exhibits/export.py`) writes its cells through it rather than through a
+    second copy of the trigger list that could drift from this one.
 
     `None` becomes `""` rather than `"None"` — a spreadsheet reading the literal string `None` in a
     numeric column is the kind of thing that survives all the way to somebody weighing it out.
@@ -163,7 +167,7 @@ def run_sheet_csv(design: ExperimentDesign) -> str:
     for row in rows:
         writer.writerow(
             [
-                *(_cell(getattr(row, column)) for column in _FIXED),
+                *(csv_cell(getattr(row, column)) for column in _FIXED),
                 *(_level(row, name) for name in factors),
             ]
         )
@@ -190,4 +194,4 @@ def _factor_headers(factors: list[str]) -> list[str]:
 
 def _level(row: ArmRow, factor: str) -> str:
     """This arm's level for one factor, or empty where the design does not set it."""
-    return _cell(row.levels.get(factor, ""))
+    return csv_cell(row.levels.get(factor, ""))

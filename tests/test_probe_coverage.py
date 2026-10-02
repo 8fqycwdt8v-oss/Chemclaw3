@@ -48,7 +48,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from chemclaw.agent.chemclaw_agent import _withheld_launcher_names, available_tool_names
+from chemclaw.agent.chemclaw_agent import _withheld_tool_names, available_tool_names
 from chemclaw.agent.profile_discovery import load_profiles
 from chemclaw.evals.probe import ABSENT_MARKER, Probe, ProbeSet
 from tests.siblings import SIBLING_SKIP, fleet_published_tool_names, sibling_root
@@ -69,6 +69,12 @@ EXEMPT: dict[str, str] = {
         "an answer — tests/test_subagents.py, and D-2026-08-10-a-subagent-is-an-attenuation-"
         "not-a-new-actor for the invariants it must keep"
     ),
+    # Both act on an artefact that already exists, which a single-question probe cannot set up:
+    # the turn that created it is the one a probe can ask (`kn-31` expects `create_exhibit`). The
+    # stale-base refusal, the exactly-once `edits` rule and the chemist's-changes diff are driven
+    # against a real store instead.
+    "read_exhibit": "an artefact a previous turn made — tests/test_exhibit_tools.py",
+    "revise_exhibit": "an artefact a previous turn made — tests/test_exhibit_tools.py",
 }
 
 
@@ -135,7 +141,7 @@ def withheld_tools() -> set[str]:
     `fleet_expected_tools` is: `tests/test_live_probes.py` asserts the same rule and imports this
     rather than restating it.
     """
-    return _withheld_launcher_names()
+    return _withheld_tool_names()
 
 
 def fleet_expected_tools() -> set[str]:

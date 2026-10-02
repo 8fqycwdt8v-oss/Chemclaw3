@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from chemclaw.agent.verifier import AnswerCheck
 from chemclaw.core.turn_signals import RefusalReason
+from chemclaw.exhibits.models import ExhibitKind
 
 
 class QueuedEvent(BaseModel):
@@ -708,6 +709,29 @@ class HandoffEvent(BaseModel):
     reason: str
 
 
+class ExhibitEvent(BaseModel):
+    """An artefact was created or revised — the header only; a surface fetches the body.
+
+    Emitted by the turn after the `create_exhibit`/`revise_exhibit` call that wrote it (`tool_call`,
+    then `tool_result`, then this), and on the push-back stream `GET /sessions/{id}/events` when a
+    person creates or revises one over REST — best effort there, because a surface also refetches
+    the list. `revision` is the revision that write produced; `op` says whether it was the first.
+    Header only for `D-2026-08-09-a-preview-is-not-a-result`'s reason: an announcement on a stream
+    is not where a document is read, and a table of two thousand rows does not belong in an SSE
+    frame. "Artefact" is what a chemist reads; `exhibit` is the code name
+    (`D-2026-10-02-an-artefact-is-part-of-the-answer-not-an-effect`).
+    """
+
+    type: Literal["exhibit"] = "exhibit"
+    exhibit_id: str
+    revision: int
+    kind: ExhibitKind
+    title: str
+    op: Literal["created", "revised"]
+    author_kind: Literal["agent", "human"]
+    author: str
+
+
 # The closed set of events a turn can emit. New surfaces switch on `type`; adding an event is a new
 # class here plus one branch in the runner and the UI — never a bespoke per-surface stream.
 Event = (
@@ -729,6 +753,7 @@ Event = (
     | ToolResultEvent
     | EvidenceSourceEvent
     | HandoffEvent
+    | ExhibitEvent
     | ErrorEvent
 )
 

@@ -678,3 +678,24 @@ probes:
       Reporting the conditions with the marker ignored is the failure, and reading a recommendation
       and its refutation as two notes agreeing about temperature is the worse one.
 
+
+  - id: kn-31
+    section: 15
+    persona: lab_leader
+    bucket: A
+    question: >-
+      I'm handing the 4-bromoanisole + PhB(OH)2 coupling to a new starter next week. Write me a
+      one-page plan for their first run that I can edit before I send it — conditions on file, what
+      to watch, what to measure.
+    expects_tools: [create_exhibit]
+    expects_notes: [rxn-suzuki-biaryl, playbook-degassing]
+    forbids_claims:
+      - "a yield, catalyst loading or temperature not stated in the retrieved notes"
+      - "a note id that was not retrieved"
+    direction: >-
+      A deliverable the chemist will edit, so it belongs in a `document` artefact rather than only
+      in the chat: the plan is drafted there and the answer says what it holds in a line or two.
+      The plan carries the conditions actually on file for rxn-suzuki-biaryl (Pd(OAc)2 1.5 mol%,
+      K2CO3 2.0 equiv, THF/water 4:1, 80 °C, 12 h, degassed) and the degassing rule from
+      playbook-degassing, cited by id, and every figure in it traces to a retrieved note. A plan
+      written only in the chat, or one whose numbers came from background knowledge, is weaker.

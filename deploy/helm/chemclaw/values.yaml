@@ -1849,7 +1849,7 @@ retention:
   # The windows, as the CHEMCLAW_RETENTION_* environment keys `core/config/memory.py` reads,
   # rendered into the ConfigMap with CHEMCLAW_RETENTION_ENABLED derived `true` — so stating a
   # window and forgetting the switch cannot happen. **A key here must name one of those fields**,
-  # or the render refuses naming the nine that exist: the map is emitted key by key and
+  # or the render refuses naming the ones that exist: the map is emitted key by key and
   # pydantic-settings ignores an unknown prefixed environment variable, so a typo used to satisfy
   # the posture gate above, put `CHEMCLAW_RETENTION_ENABLED: "true"` in front of the operator, and
   # leave every window at 0 — retention reported on, and nothing ever pruned. Writing
@@ -1859,6 +1859,10 @@ retention:
   #     CHEMCLAW_RETENTION_CHECKPOINTS_DAYS: "30"
   #     CHEMCLAW_RETENTION_SESSION_MESSAGES_DAYS: "365"
   #     CHEMCLAW_RETENTION_SESSION_EVENTS_DAYS: "30"
+  #     # Artefacts beside the chat, dated by their last revision. Unset, a session holding one is
+  #     # never forgotten by the ownership sweep either — the same dependency the tool-result
+  #     # window has (`durable/retention._OWNERSHIP_DEPENDENCIES`).
+  #     CHEMCLAW_RETENTION_SESSION_EXHIBITS_DAYS: "365"
   #     CHEMCLAW_RETENTION_TOOL_RESULTS_DAYS: "30"
   #     CHEMCLAW_RETENTION_RESULT_PUBLICATIONS_DAYS: "90"
   #     # The drain rate, and why it belongs in the same block as the windows it drains under.
@@ -1905,7 +1909,7 @@ retention:
   # The tables then grow exactly as they always did — the posture is unchanged, the silence is not.
   unboundedGrowthAccepted: false
 
-  # **The growth the nine windows above do not bound, and the reason it is asked here.**
+  # **The growth the retention windows above do not bound, and the reason it is asked here.**
   # `artifact_blobs` — a calculation's Hessians, optimized geometries and conformer ensembles —
   # is swept by a different job (`ArtifactEvictionWorkflow`) on a different schedule under two
   # settings that carry no `CHEMCLAW_RETENTION_` prefix and both default to 0, meaning off. No

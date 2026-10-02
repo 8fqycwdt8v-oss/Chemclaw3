@@ -140,7 +140,16 @@ from chemclaw.core.model_prose import ModelProse
 #: for the
 #: signal writers rather than trusting the constant, so a second tool of this shape fails the suite
 #: instead of quietly reaching a helper.
-SPEAKS_TO_THE_CHEMIST: frozenset[str] = frozenset({"ask_clarifying_question"})
+#:
+#: `create_exhibit` and `revise_exhibit` are the second shape it caught: read-only, because an
+#: artefact is part of the answer rather than an effect, and still a write onto the pane beside the
+#: chemist's chat (`record_exhibit`) from a context the chemist cannot see
+#: (`D-2026-10-02-an-artefact-is-part-of-the-answer-not-an-effect`). `read_exhibit` is not here —
+#: it reaches nobody, and a helper reading the session's artefacts is reading, which is what a
+#: helper is for.
+SPEAKS_TO_THE_CHEMIST: frozenset[str] = frozenset(
+    {"ask_clarifying_question", "create_exhibit", "revise_exhibit"}
+)
 
 #: Upstream's own default subagent name, claimed by this repository so that `create_deep_agent`
 #: skips inserting its ungoverned one. One definition, because three places compare against it

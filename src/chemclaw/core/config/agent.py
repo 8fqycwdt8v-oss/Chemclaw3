@@ -228,7 +228,16 @@ class AgentSettings(BaseSettings):
     # number alone. Both halves are asserted in `tests/test_compaction.py`
     # (`BUDGET_THREAD_ALLOWANCE`, `SMALLEST_TARGET_WINDOW`), because the reviewer who found this
     # collapsed the split to 107,000 and got 150 passing tests.
-    agent_context_token_budget: int = Field(default=118_700, ge=1)
+    #
+    # **Raised 600 for the artefact tools, and the floor under the thread is why it moved rather
+    # than the thread** (`D-2026-10-02-the-artefact-prefix-is-paid-from-the-window-margin`). The
+    # thread a pod calibrated on evidence traffic keeps was 271 tokens above one maximal tool batch
+    # after `agent_max_tool_result_chars` came down to 52,000, and the artefact tools at their
+    # measured floor crossed it; below it every evidence turn is unreducible. The cap was the
+    # instrument used last time and cuts evidence on every deployment, artefacts on or off; the
+    # margin under the 128k window is what was spent instead, by exactly the ceiling's raise, so the
+    # thread allowance is held where it was. `tests/test_compaction.py` states the margin.
+    agent_context_token_budget: int = Field(default=119_300, ge=1)
     agent_keep_last_tool_groups: int = Field(default=2, ge=0)
     agent_keep_last_conversation_groups: int = Field(default=0, ge=0)
     # `agent_tool_result_clear_trigger` is the *lossless* edit's own threshold, and splitting it
@@ -337,7 +346,7 @@ class AgentSettings(BaseSettings):
     # `tests/test_compaction.py` asserts the equality — so a ceiling raise moves it in the same
     # commit as the two defaults it is the basis of.
     # D-2026-10-02-a-prefix-beyond-the-derivation-basis-is-paid-in-spend-not-thread.
-    agent_context_prefix_basis: int = Field(default=86_050, ge=0)
+    agent_context_prefix_basis: int = Field(default=86_650, ge=0)
     # **What the two numbers above are denominated in, which used to be left unsaid and was wrong.**
     # Both are counted with `count_tokens_approximately` — chars/4 — and that estimator is content
     # dependent in one direction. Re-measured 2026-09-06 against real BPE encodings, on the observed
@@ -1017,6 +1026,60 @@ class AgentSettings(BaseSettings):
     # Raise it for a deployment whose tools are cheap and whose answers move; 1 disables repeats
     # entirely.
     max_identical_tool_calls: int = Field(default=2, ge=1)
+
+    # **Artefacts** (`src/chemclaw/exhibits/`, `agent/exhibit_tools.py`): versioned working
+    # documents beside the chat — `D-2026-10-02-an-artefact-is-part-of-the-answer-not-an-effect`.
+    # On by default; off unbinds `create_exhibit`/`revise_exhibit`/`read_exhibit` from every turn,
+    # which is what pays their schemas back out of the prefix, and `GET /sessions/{id}/exhibits`
+    # then answers `enabled: false` so a surface hides the pane.
+    agent_exhibits_enabled: bool = True
+    # The size caps one spec is validated against on every write, agent or human. Bytes are the
+    # spec's compact JSON; rows, structures and points bound the three list-shaped kinds, so a
+    # table cannot reach the byte cap by being a list nobody can scroll.
+    exhibit_max_spec_bytes: int = Field(default=200_000, ge=1)
+    exhibit_max_rows: int = Field(default=2_000, ge=1)
+    exhibit_max_structures: int = Field(default=200, ge=1)
+    exhibit_max_points: int = Field(default=5_000, ge=1)
+    # Artefacts one session may hold; the next create is refused (409 `exhibit_limit` over REST, a
+    # worded refusal to the model) rather than evicting one somebody may still be reading.
+    exhibit_max_per_session: int = Field(default=100, ge=1)
+    # Revisions one artefact may hold, refused the same way: every revision is a whole spec kept
+    # for the history, so an unbounded loop of edits is an unbounded table.
+    exhibit_max_revisions: int = Field(default=500, ge=1)
+    # The tab title and the one-line change note, in characters.
+    exhibit_max_title_chars: int = Field(default=200, ge=1)
+    exhibit_max_note_chars: int = Field(default=1_000, ge=1)
+    # How much of a revision diff the model is shown — in `read_exhibit` and in the turn note that
+    # announces a chemist's edit. Changes past the count are summarised as a number; a value past
+    # the length is cut with a marker. The full diff is always `GET …/diff`.
+    exhibit_diff_max_changes: int = Field(default=20, ge=1)
+    exhibit_diff_max_value_chars: int = Field(default=300, ge=1)
+    # The most differing lines, on either side, a document diff aligns line by line. Past it the
+    # differing span is one hunk: the alignment is cubic on repeated lines (500 lines measured at
+    # 0.47 s, 2,000 at 33 s), and a diff is computed for a REST read, a tool call and a turn note.
+    exhibit_diff_max_lines: int = Field(default=200, ge=1)
+    # The per-turn artefact note (the chemists' edits and any referenced artefacts), in
+    # characters. It is appended to the turn's own message, so it is bounded the way the job
+    # push-back beside it is. The listing is a request-only section and is bounded by the count
+    # below, never persisted.
+    exhibit_note_max_chars: int = Field(default=12_000, ge=1)
+    # How many artefacts each model request's listing names, newest first; the rest are counted.
+    # The listing rides on the instructions of every model call (`exhibit_notes.ExhibitListing`),
+    # so it is prefix: the character bound is what it may cost (2,000 is about 500 tokens), and a
+    # session holding none pays nothing.
+    exhibit_note_max_listed: int = Field(default=20, ge=1)
+    exhibit_listing_max_chars: int = Field(default=2_000, ge=200)
+    # How many artefacts one chemist message may reference (`MessageIn.exhibit_refs`); each is
+    # copied into that turn's note, so this and the note's character bound together bound it.
+    exhibit_max_refs: int = Field(default=5, ge=0)
+    # The most headers one `GET /exhibits` page serves across a caller's sessions, whatever it asks.
+    exhibit_max_listing: int = Field(default=200, ge=1)
+    # How many unchecked figures one revision records. A table of a thousand transcribed numbers
+    # is flagged by its first few; the count past this is not what a chemist acts on.
+    exhibit_max_unverified_figures: int = Field(default=50, ge=1)
+    # How many evidence rows the grounding check fetches per round trip while it searches the
+    # session's tool results for an artefact's figures.
+    exhibit_grounding_batch: int = Field(default=32, ge=1)
 
     # Where profiles are discovered (`agents.profile_discovery`): one or more directories,
     # OS-path-separator delimited like `PATH` and like `skills_dir`. A profile selects *across*

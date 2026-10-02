@@ -58,7 +58,7 @@
        `tests/test_deploy_chart.py::test_a_retention_window_naming_no_setting_refuses_to_render`
        renders this chart against that field set, both ways, so the list cannot fall behind the
        settings it mirrors. */ -}}
-{{- $retentionSettings := list "CHEMCLAW_RETENTION_CHECKPOINTS_DAYS" "CHEMCLAW_RETENTION_DELETE_BATCH_ROWS" "CHEMCLAW_RETENTION_MAX_SESSIONS_PER_PASS" "CHEMCLAW_RETENTION_RESULT_PUBLICATIONS_DAYS" "CHEMCLAW_RETENTION_SCHEDULE_MINUTES" "CHEMCLAW_RETENTION_SESSION_EVENTS_DAYS" "CHEMCLAW_RETENTION_SESSION_MESSAGES_DAYS" "CHEMCLAW_RETENTION_TIMEOUT_SECONDS" "CHEMCLAW_RETENTION_TOOL_RESULTS_DAYS" -}}
+{{- $retentionSettings := list "CHEMCLAW_RETENTION_CHECKPOINTS_DAYS" "CHEMCLAW_RETENTION_DELETE_BATCH_ROWS" "CHEMCLAW_RETENTION_MAX_SESSIONS_PER_PASS" "CHEMCLAW_RETENTION_RESULT_PUBLICATIONS_DAYS" "CHEMCLAW_RETENTION_SCHEDULE_MINUTES" "CHEMCLAW_RETENTION_SESSION_EVENTS_DAYS" "CHEMCLAW_RETENTION_SESSION_EXHIBITS_DAYS" "CHEMCLAW_RETENTION_SESSION_MESSAGES_DAYS" "CHEMCLAW_RETENTION_TIMEOUT_SECONDS" "CHEMCLAW_RETENTION_TOOL_RESULTS_DAYS" -}}
 {{- range $key, $value := .Values.retention.windows }}
 {{- if eq $key "CHEMCLAW_RETENTION_ENABLED" }}
 {{- fail "retention.windows: CHEMCLAW_RETENTION_ENABLED is derived from this block rather than written into it — stating a window is what turns retention on. Written by hand it renders the key twice, and every parser silently keeps the last. Remove it." }}
@@ -91,7 +91,7 @@
 
        `artifact_blobs` is swept by a *different* job (`ArtifactEvictionWorkflow`), on a different
        schedule, under two settings that are not `CHEMCLAW_RETENTION_*` and both default to 0 = off.
-       None of the nine windows reaches it. So a release that carefully stated a retention posture
+       None of the retention windows reaches it. So a release that carefully stated a retention posture
        still had an unbounded artifact store and was never asked — the gate above satisfied, the
        operator's belief that growth is bounded wrong, and nothing anywhere saying which half was
        covered.
@@ -116,7 +116,7 @@
 {{- end }}
 {{- if .Values.retention.windows }}
 {{- if eq (empty .Values.retention.artifactStore) (empty .Values.retention.artifactGrowthAccepted) }}
-{{- fail "retention: this release states retention windows, which bound nine tables and not `artifact_blobs` — that store is swept by its own job under CHEMCLAW_ARTIFACT_STORE_MAX_BYTES / CHEMCLAW_ARTIFACT_EVICT_IDLE_DAYS, both of which default to 0 (off). Set exactly one of `retention.artifactStore` (either or both of those two keys) or `retention.artifactGrowthAccepted: true` (calculation by-products accumulate without bound, which is now a stated posture). Neither is set, or both are." }}
+{{- fail "retention: this release states retention windows, which bound the conversation and trace tables and not `artifact_blobs` — that store is swept by its own job under CHEMCLAW_ARTIFACT_STORE_MAX_BYTES / CHEMCLAW_ARTIFACT_EVICT_IDLE_DAYS, both of which default to 0 (off). Set exactly one of `retention.artifactStore` (either or both of those two keys) or `retention.artifactGrowthAccepted: true` (calculation by-products accumulate without bound, which is now a stated posture). Neither is set, or both are." }}
 {{- end }}
 {{- end }}
 {{- range $key, $value := .Values.retention.artifactStore }}

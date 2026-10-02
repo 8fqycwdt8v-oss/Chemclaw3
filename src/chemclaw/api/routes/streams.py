@@ -36,7 +36,7 @@ from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from sse_starlette.sse import EventSourceResponse, SendTimeoutError
 from starlette.types import Receive, Scope, Send
 
@@ -47,6 +47,7 @@ from chemclaw.api.events import (
     TURN_EVENT_REF,
     AwaitingAnswerEvent,
     ErrorEvent,
+    ExhibitEvent,
     JobCompletedEvent,
     JobFailedEvent,
     sse_frame,
@@ -58,6 +59,7 @@ from chemclaw.core.metrics import METRICS
 from chemclaw.durable.awaiting import AWAITING_KIND
 from chemclaw.durable.check_in import CHECK_IN_KIND
 from chemclaw.durable.digest import DIGEST_KIND, digest_channel
+from chemclaw.exhibits.models import PUSH_KIND as EXHIBIT_PUSH_KIND
 
 logger = logging.getLogger(__name__)
 
@@ -239,11 +241,13 @@ async def session_events(
     polls the database for its whole lifetime, so unbounded streams are a load vector (429
     past either cap). The claim is scoped to a named set of kinds in the SQL itself — the
     claim is destructive (at-most-once), so filtering after it would silently destroy events of any
-    other kind meant for another consumer. Three kinds are claimed here: both job outcomes, because
+    other kind meant for another consumer. The kinds claimed here: both job outcomes, because
     a job that failed after its turn ended has exactly the same claim on the asker's attention as
-    one that succeeded and only one of the two used to have a way to reach them; and
+    one that succeeded and only one of the two used to have a way to reach them;
     `awaiting-answer`, because a workflow that has stopped to ask a person is news on the same
-    channel (`D-2026-09-05-a-push-nobody-claims-is-not-a-push`).
+    channel (`D-2026-09-05-a-push-nobody-claims-is-not-a-push`); and a person's artefact write,
+    so a session's other tabs see a chemist's edit
+    (`D-2026-10-02-an-artefact-is-part-of-the-answer-not-an-effect`).
     """
     # **Read here, not where the error is built** — the rule `post_message` states and this route
     # was not swept with: `ErrorEvent.correlation_id` is the join key an operator asks a chemist to
@@ -286,7 +290,7 @@ async def session_events(
         try:
             async for pushed in front_door.stream_new_events(
                 session_id,
-                kinds=("job_completed", "job_failed", AWAITING_KIND),
+                kinds=("job_completed", "job_failed", AWAITING_KIND, EXHIBIT_PUSH_KIND),
                 # One claim's redundant `awaiting-answer` rows are one fact; see
                 # `_newest_per_state` and the comment on the per-connection suppression below.
                 collapse=_newest_per_state,
@@ -342,6 +346,15 @@ async def session_events(
                     if request_id:
                         awaiting_reported[request_id] = state_now
                     yield frame
+                    continue
+                if pushed.kind == EXHIBIT_PUSH_KIND:
+                    # A person's artefact write, pushed by `api/routes/exhibits.py` so the session's
+                    # other tabs — a member's, or the same chemist's second window — learn of it
+                    # without polling. Best effort: the claim is at-most-once across every tab,
+                    # and the pane refetches its list on focus.
+                    exhibit = _exhibit_event(pushed.payload)
+                    if exhibit is not None:
+                        yield sse_frame(exhibit)
                     continue
                 job_id = str(pushed.payload.get("job_id", ""))
                 failed = pushed.kind == "job_failed"
@@ -430,6 +443,20 @@ class Digest(BaseModel):
     note_ids: list[str] = Field(default_factory=list)
     disputed: list[str] = Field(default_factory=list)
     headlines: dict[str, str] = Field(default_factory=dict)
+
+
+def _exhibit_event(payload: dict[str, Any]) -> ExhibitEvent | None:
+    """Read one claimed artefact push into its event, or `None` for a payload that is not one.
+
+    Lenient for `_digest`'s reason: the row is already claimed, so a raise here would destroy the
+    rest of the batch rather than defer this one. A payload that does not validate is logged and
+    dropped — the pane's own refetch is the backstop for exactly this.
+    """
+    try:
+        return ExhibitEvent.model_validate(payload)
+    except ValidationError:
+        logger.warning("dropping an artefact push that is not an exhibit event: %r", payload)
+        return None
 
 
 def _whole(raw: object) -> int:

@@ -188,6 +188,11 @@ function applyEvent(evt, answerEl) {
       // transcript showed a silent gap wherever a tool raised.
       add("trace", `${agentTag(evt)}✗ ${evt.tool} failed — ${evt.message}`);
       return answerEl;
+    case "exhibit":
+      // A header, not the artefact: the body is fetched from `/sessions/{id}/exhibits/{id}` by a
+      // surface that renders it. This page has no pane, so it names what was written and where.
+      add("trace", `\u25a4 artefact ${evt.op} \u2014 ${evt.title} (${evt.kind}, rev ${evt.revision}, ${evt.exhibit_id})`);
+      return answerEl;
     case "handoff":
       // The boundary rather than the speaker: what a reader needs is that the prose after this
       // line comes from an agent with a different surface and a different brief. `reason` is the

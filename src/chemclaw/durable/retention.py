@@ -40,6 +40,14 @@ to be exhaustive, not asserted to be.
   (D-2026-08-10 §2), so both directions are now permanent. So this table is pruned per session
   through `droppable_rows`, which refuses any row whose partner is not also expiring — the sweep
   has to be right the first time.
+- `session_exhibits` — the artefacts a session shows beside its chat
+  (`D-2026-10-02-an-artefact-is-part-of-the-answer-not-an-effect`). Conversation, not record: an
+  artefact a chemist wants kept becomes a note or a protocol through the tools that write those,
+  and what stays here is a working draft. Dated by `updated_at`, which every revision moves, so an
+  artefact somebody is still editing is never aged out from under them; its revisions cascade from
+  the header, so one statement disposes of the whole history and the revision table needs no DELETE
+  grant. A window of its own rather than the conversation's, because an artefact is the part of a
+  session a deployment is most likely to want kept longer than the chat around it.
 
 - `tool_result_blobs` — the full text of what a tool returned, kept so a surface can fetch it
   (`api/tool_results.py`, migration 042). This is the table that shows what the three refusals
@@ -267,6 +275,10 @@ _PRUNABLE: dict[str, tuple[str, str]] = {
     # other swept table's argument.
     "result_publications": ("delivered_at", "state = 'delivered'"),
     "checkpoints": ("(checkpoint->>'ts')::timestamptz", "TRUE"),
+    # Artefacts, dated by their last revision (`updated_at` moves with every append), so an artefact
+    # somebody is still editing is never aged out from under them. Revisions cascade from the header
+    # (`115_session_exhibits.sql`), which is why the revision table is not listed separately.
+    "session_exhibits": ("updated_at", "TRUE"),
     # **Last on purpose.** Like `session_messages` and `checkpoints` this is not pruned by the
     # plain cutoff the pair describes — `_prune_session_owners` handles it, and the pair records
     # only that the table is in scope and what dates a row. The position is the load-bearing part:
@@ -478,6 +490,7 @@ _NOT_PRUNED: dict[str, str] = {
     "bo_suggestions": "cascades from `bo_campaigns`",
     "calculation_artifacts": "cascades from `artifact_blobs`",
     "tool_result_links": "cascades from `tool_result_blobs` (042)",
+    "session_exhibit_revisions": "cascades from `session_exhibits` (115)",
     "document_chunks": "cascades in effect from `document_files` — the same sweep removes any "
     "cutting no remaining file row claims",
     # Derived and rebuildable: the source is elsewhere, so a row is regenerable rather than lost.
@@ -929,6 +942,7 @@ _DELETE_IDS = "DELETE FROM session_messages WHERE session_id = %s AND id = ANY(%
 # ones answer `present` anyway and a uniform question needs no special case to stay correct.
 _SESSION_SCOPED_ROWS: dict[str, str] = {
     "session_messages": "session_id",
+    "session_exhibits": "session_id",
     "session_events": "session_id",
     "tool_result_links": "session_id",
     **dict.fromkeys(CHECKPOINT_TABLES, "thread_id"),
@@ -962,6 +976,7 @@ _OWNERSHIP_DEPENDENCIES: dict[str, tuple[str, str] | None] = {
     # trigger; what belongs here is the absence of a knob, not a knob that does not work.
     "session_events": None,
     "tool_result_links": ("tool_result_blobs", "CHEMCLAW_RETENTION_TOOL_RESULTS_DAYS"),
+    "session_exhibits": ("session_exhibits", "CHEMCLAW_RETENTION_SESSION_EXHIBITS_DAYS"),
     **dict.fromkeys(CHECKPOINT_TABLES, ("checkpoints", "CHEMCLAW_RETENTION_CHECKPOINTS_DAYS")),
 }
 
@@ -1203,6 +1218,7 @@ def _window_days(table: str) -> int:
         "tool_result_blobs": settings.retention_tool_results_days,
         "result_publications": settings.retention_result_publications_days,
         "checkpoints": settings.retention_checkpoints_days,
+        "session_exhibits": settings.retention_session_exhibits_days,
         # **The conversation's window, deliberately, rather than a knob of its own.** An ownership
         # row is disposable only once nothing session-scoped is left (`_prune_session_owners`), so
         # a window here is a *floor* — "how long after it was created may an empty session be

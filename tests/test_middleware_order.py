@@ -144,6 +144,9 @@ _EXPECTED_ORDER = (
     # Above the compaction group, so the preferences it appends to the system message are charged
     # as prefix by `MeasureRequestPrefix` rather than missed by it (`agent/preferences.py`).
     "StandingPreferences",
+    # The artefact listing, on the same terms: request-only state, above the compaction group so
+    # it is charged as prefix (`agent/exhibit_notes.py`).
+    "ExhibitListing",
     # Outermost of the compaction group: a `ContextEdit` sees a message list and a counter, never
     # the request, so the prefix it must budget against can only be published by a middleware above
     # the editor (`agent/context_budget.py`).

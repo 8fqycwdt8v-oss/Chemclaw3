@@ -1183,7 +1183,11 @@ def test_the_overrun_indicator_can_fire_at_the_shipped_budget_with_no_window(
 #: **Both drop 2,200 when `SERVED_ELSEWHERE_ALLOWANCE` goes to 13,200** for `Chemclaw3-mcp`'s
 #: `chem` growth, and on the same argument: `PREFIX_BOUND` rose, the window did not, and the pair
 #: stays one claim. This is the first entry here whose prefix grew in another repository.
-CLEAR_TRIGGER_THREAD_ALLOWANCE = 25_550
+#:
+#: **Both drop 600 for the three artefact tools**, the ceiling's raise to 73,450
+#: (`D-2026-10-02-an-artefact-is-part-of-the-answer-not-an-effect`), by the same arithmetic: the
+#: prefix grew, the trigger and the window were held.
+CLEAR_TRIGGER_THREAD_ALLOWANCE = 24_950
 
 #: The thread allowance `agent_context_token_budget`'s default is derived to leave.
 #:
@@ -1240,6 +1244,12 @@ CLEAR_TRIGGER_THREAD_ALLOWANCE = 25_550
 #: the sibling fleet's `chem` (`tests/test_context_floor.py` carries the measurement). 6.3% of the
 #: thread, paid for a surface this repository does not build — the same rule, with nothing here
 #: to narrow instead.
+#:
+#: **Held at 32,650 through the artefact tools**, which is the first raise here the thread did not
+#: pay: the ceiling rose 600 and the budget rose 600 with it
+#: (`D-2026-10-02-the-artefact-prefix-is-paid-from-the-window-margin`). Paying it would have left a
+#: pod calibrated on evidence traffic 12,705 estimated tokens of thread against the 13,000 one
+#: maximal tool batch occupies — the warm arm below — even after #533 lowered that batch.
 BUDGET_THREAD_ALLOWANCE = 32_650
 
 #: The smallest context window this stack is designed against, in billed tokens.
@@ -1885,7 +1895,11 @@ def test_a_maximal_request_at_the_shipped_budget_fits_the_smallest_window_it_tar
     # prefix — profile routing, or
     # `D-2026-08-29-a-tool-schema-nobody-calls-is-still-paid-for`'s deferred schemas — not a raise
     # here, because every raise is measured against the same unmoved window.
-    assert input_ceiling - budget == 5_204, (
+    # **4,604 since the artefact tools**: the budget rose 600 against the unmoved window, the one
+    # raise this paragraph argues against, taken because the alternative broke a floor rather than
+    # trimmed an allowance — `D-2026-10-02-the-artefact-prefix-is-paid-from-the-window-margin` says
+    # which numbers it weighed. The next raise here has the same question against a smaller margin.
+    assert input_ceiling - budget == 4_604, (
         "the margin under the smallest window this stack targets moved; say which of the two "
         "numbers changed and why"
     )

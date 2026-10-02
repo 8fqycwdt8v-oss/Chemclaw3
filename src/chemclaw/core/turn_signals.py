@@ -207,6 +207,25 @@ class HandoffSignal(BaseModel):
     reason: str
 
 
+class ExhibitSignal(BaseModel):
+    """An artefact the agent created or revised during this turn (`agent/exhibit_tools.py`).
+
+    The header only — the body is fetched over `GET /sessions/{id}/exhibits/{xid}`, for the reason
+    `D-2026-08-09-a-preview-is-not-a-result` gives about a result block: a stream event is the
+    announcement, never the document. A signal rather than something read off the tool's result,
+    for this union's own reason: the store wrote the revision, so the announcement comes from the
+    write and the author comes from the turn's identity — neither from text the model returned.
+    """
+
+    exhibit_id: str
+    revision: int
+    kind: str
+    title: str
+    op: Literal["created", "revised"]
+    author_kind: Literal["agent", "human"]
+    author: str
+
+
 Signal = (
     JobSignal
     | ToolQueuedSignal
@@ -215,6 +234,7 @@ Signal = (
     | SkillLoadedSignal
     | ToolFailureSignal
     | HandoffSignal
+    | ExhibitSignal
 )
 
 
@@ -298,6 +318,11 @@ def record_tool_queued(
 def record_note_written(note_id: str, reference: str) -> None:
     """Note that a note reached the graph. A no-op where nothing is streaming."""
     _emit(NoteRecordedSignal(note_id=note_id, reference=reference))
+
+
+def record_exhibit(signal: ExhibitSignal) -> None:
+    """Announce an artefact write to the chemist's stream. A no-op where nothing is streaming."""
+    _emit(signal)
 
 
 def record_skill_loaded(skill: str) -> None:

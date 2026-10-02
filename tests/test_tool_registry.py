@@ -8,7 +8,7 @@ same audit+authz middleware. See `docs/archive/audit/10-config-extensibility.md`
 
 import pytest
 
-from chemclaw.agent.chemclaw_agent import _capability_tools, _withheld_launcher_names
+from chemclaw.agent.chemclaw_agent import _capability_tools, _withheld_tool_names
 from chemclaw.connectors.registry import enabled, withheld_job_names
 from chemclaw.core.tool_registry import (
     _REGISTRY,
@@ -114,6 +114,12 @@ _EXPECTED_INPROCESS_TOOLS = {
     # The evidence pack (D-2026-08-29). In-process for the reason every operational read
     # is: it spans the whole record, and a bundle could see only its own part of it.
     "assemble_evidence_pack",
+    # Artefacts (`D-2026-10-02-an-artefact-is-part-of-the-answer-not-an-effect`). In-process because
+    # an artefact is session state beside the transcript — the turn's own session id scopes every
+    # read — and part of the answer rather than a capability any bundle owns.
+    "create_exhibit",
+    "revise_exhibit",
+    "read_exhibit",
 }
 
 
@@ -133,7 +139,7 @@ def test_registry_holds_the_inprocess_tools_and_only_generated_launchers_besides
     jobs = {job.name for manifest in enabled() for job in manifest.jobs}
     # Bounded on both sides rather than equal: the registry only grows, so a launcher an earlier
     # build in this process registered under another configuration can still be held while this
-    # deployment withholds it (`chemclaw_agent._withheld_launcher_names` subtracts it on read).
+    # deployment withholds it (`chemclaw_agent._withheld_tool_names` subtracts it on read).
     # A job whose manifest says this deployment cannot run it is withheld from the build too
     # (`registry.withheld_job_names`), so the lower bound leaves it out and the upper keeps it.
     bound_jobs = jobs - set(withheld_job_names())
@@ -152,7 +158,7 @@ def test_capability_tools_are_exactly_the_registry() -> None:
     withholds, which an earlier build in the same process may have registered.
     """
     tools = _capability_tools()
-    withheld = _withheld_launcher_names()
+    withheld = _withheld_tool_names()
     assert tools == [tool for tool in registered_tools() if tool.__name__ not in withheld]
 
 
