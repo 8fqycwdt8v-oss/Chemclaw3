@@ -15,6 +15,7 @@ database an unqualified name resolves through `public` and passes locally while 
 import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
+from uuid import uuid4
 
 import psycopg
 import pytest
@@ -30,6 +31,8 @@ from chemclaw.agent.session_store import PostgresHistoryProvider, SessionOwnerSt
 from chemclaw.agent.state import turn_config, turn_input
 from chemclaw.core import db
 from chemclaw.core.config import settings
+from chemclaw.exhibits.models import parse_spec
+from chemclaw.exhibits.store import PostgresExhibitStore
 from tests.pg import create_checkpoint_tables, migrated_db_or_skip
 
 
@@ -851,3 +854,70 @@ def test_only_the_newest_checkpoint_is_restamped_and_the_rest_keep_the_parents_t
     )
     # And the parent is untouched throughout.
     assert dict(parent_stamps)[newer_id] == _seeded_ts(2)
+
+
+def test_a_fork_carries_each_artefact_as_it_stands_under_a_new_id() -> None:
+    """Head revision only, as revision 1 of a new id, noted with where it came from.
+
+    The parent keeps its history and its ids; the child's copy keeps who wrote the words it
+    carries, and a chemist's edit the parent's agent was never told of is still unseen in the fork.
+    """
+
+    async def _run() -> tuple[list[Any], list[Any], dict[str, Any]]:
+        await migrated_db_or_skip()
+        await create_checkpoint_tables()
+        parent = uuid4().hex
+        await _seed(parent)
+        store = PostgresExhibitStore()
+        plan = await store.create(
+            parent,
+            title="Plan",
+            spec=parse_spec({"kind": "document", "markdown": "# Plan\n\nDry the THF."}),
+            author_kind="agent",
+            author="oid-ana",
+        )
+        await store.append(
+            parent,
+            plan.exhibit_id,
+            spec=parse_spec({"kind": "document", "markdown": "# Plan\n\nDry the 2-MeTHF."}),
+            parent_revision=1,
+            author_kind="human",
+            author="oid-ben",
+            change_note="solvent",
+        )
+        notes = await store.create(
+            parent,
+            title="Notes",
+            spec=parse_spec({"kind": "document", "markdown": "seen"}),
+            author_kind="agent",
+            author="oid-ana",
+        )
+        child = await fork_session(parent, "owner-1", None)
+        views = {}
+        for state in await store.states(child):
+            xid = state.header.exhibit_id
+            views[state.header.title] = (
+                state,
+                await store.view(child, xid),
+                await store.revisions(child, xid),
+            )
+        return (
+            [h.exhibit_id for h in await store.headers(parent)],
+            [plan.exhibit_id, notes.exhibit_id],
+            views,
+        )
+
+    parent_ids, originals, views = asyncio.run(_run())
+    assert sorted(parent_ids) == sorted(originals), "forking touched the parent's artefacts"
+    assert set(views) == {"Plan", "Notes"}
+    plan_state, plan, plan_history = views["Plan"]
+    assert plan.exhibit_id not in originals
+    assert (plan.revision, plan.head_revision, plan.parent_revision) == (1, 1, 0)
+    assert plan.change_note == f"forked from {originals[0]} r2"
+    assert (plan.author_kind, plan.author, plan.head_author) == ("human", "oid-ben", "oid-ben")
+    assert plan.spec == parse_spec({"kind": "document", "markdown": "# Plan\n\nDry the 2-MeTHF."})
+    assert [entry.revision for entry in plan_history] == [1]
+    assert plan_state.agent_seen_revision == 0, "the chemist's unseen edit became seen in the fork"
+    notes_state, notes, _ = views["Notes"]
+    assert notes.change_note == f"forked from {originals[1]} r1"
+    assert notes_state.agent_seen_revision == 1

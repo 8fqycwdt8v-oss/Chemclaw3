@@ -798,6 +798,67 @@ def _header(row: Sequence[Any]) -> ExhibitHeader:
     )
 
 
+# A fork's artefacts: each head revision as revision 1 of a new artefact in the child, named after
+# the revision it came from. `unnest` pairs every parent id with the id minted for it, so the two
+# statements copy exactly the same set and a header never exists without its revision.
+#
+# **Shifted, not copied, in time** — `session_fork._COPY_MESSAGES`' argument one table over:
+# `retention_session_exhibits_days` ages an artefact by `updated_at`, so a verbatim copy of a
+# year-old conversation's artefacts would be swept with the fork's first retention pass. One
+# interval, so the newest lands at now and the listing keeps its order. `created_at` stays the
+# parent's: when the artefact was started is a fact the fork has no business rewriting.
+#
+# The read mark carries over as "seen" only if the agent had seen the head it copies, so a chemist's
+# edit the parent's agent was never told of is told to the fork's.
+_FORK_SHIFT = "now() - (SELECT max(updated_at) FROM session_exhibits WHERE session_id = %(parent)s)"
+_FORK_HEADERS = f"""
+INSERT INTO session_exhibits
+    (exhibit_id, session_id, kind, title, head_revision, head_author_kind, head_author,
+     agent_seen_revision, created_by, correlation_id, created_at, updated_at)
+SELECT m.new_id, %(child)s, e.kind, e.title, 1, r.author_kind, r.author,
+       CASE WHEN e.agent_seen_revision >= e.head_revision THEN 1 ELSE 0 END,
+       e.created_by, e.correlation_id, e.created_at, e.updated_at + ({_FORK_SHIFT})
+FROM unnest(%(old)s::text[], %(new)s::text[]) AS m(old_id, new_id)
+JOIN session_exhibits e ON e.exhibit_id = m.old_id AND e.session_id = %(parent)s
+JOIN session_exhibit_revisions r ON r.exhibit_id = e.exhibit_id AND r.revision = e.head_revision
+"""
+_FORK_REVISIONS = f"""
+INSERT INTO session_exhibit_revisions
+    (exhibit_id, revision, parent_revision, author_kind, author, change_note, spec, byte_size,
+     unverified_figures, correlation_id, created_at)
+SELECT m.new_id, 1, 0, r.author_kind, r.author,
+       'forked from ' || e.exhibit_id || ' r' || e.head_revision, r.spec, r.byte_size,
+       r.unverified_figures, r.correlation_id, e.updated_at + ({_FORK_SHIFT})
+FROM unnest(%(old)s::text[], %(new)s::text[]) AS m(old_id, new_id)
+JOIN session_exhibits e ON e.exhibit_id = m.old_id AND e.session_id = %(parent)s
+JOIN session_exhibit_revisions r ON r.exhibit_id = e.exhibit_id AND r.revision = e.head_revision
+"""
+_PARENT_IDS = "SELECT exhibit_id FROM session_exhibits WHERE session_id = %s ORDER BY exhibit_id"
+
+
+async def fork_exhibits(cur: psycopg.AsyncCursor[TupleRow], parent_id: str, child_id: str) -> int:
+    """Copy `parent_id`'s artefacts into `child_id` on the caller's transaction; return how many.
+
+    Head revision only, as revision 1 of a new id with `change_note` "forked from <xid> r<n>": a
+    fork is a branch of the conversation, and the artefact's history is the parent's record of how
+    the parent got there — the child starts from where it stands, and the note says from where. The
+    revision's own author is kept (who wrote the words), as `session_fork` keeps each message's.
+
+    On a cursor rather than a connection of its own because the fork is one transaction across
+    every table it copies (`agent/session_fork.fork_session`), and an artefact copy that could
+    commit without the transcript, or fail after it, is the half-fork that module refuses.
+    """
+    await cur.execute(_PARENT_IDS, (parent_id,))
+    old = [str(row[0]) for row in await cur.fetchall()]
+    if not old:
+        return 0
+    names = {"parent": parent_id, "child": child_id, "old": old}
+    names["new"] = [new_exhibit_id() for _ in old]
+    await cur.execute(_FORK_HEADERS, names)
+    await cur.execute(_FORK_REVISIONS, names)
+    return len(old)
+
+
 _IN_MEMORY = InMemoryExhibitStore()
 
 
