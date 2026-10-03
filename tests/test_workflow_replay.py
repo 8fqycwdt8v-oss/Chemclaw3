@@ -52,6 +52,9 @@ UNCOVERED_BACKGROUND_WORKFLOWS = frozenset(
         # New in `D-2026-09-25-a-wait-nobody-can-settle-is-settled-by-a-sweep`. It earns a fixture
         # at the first change to its command sequence, the way the two above did.
         "OrphanedWaitsWorkflow",
+        # New in `D-2026-10-03-an-artefact-push-expires-on-its-own-schedule`; earns a fixture at the
+        # first change to its command sequence, as `OrphanedWaitsWorkflow` does.
+        "ExhibitPushPruneWorkflow",
         "ConnectorJobWorkflow",
         "DevelopmentReportWorkflow",
         "DigestWorkflow",
