@@ -36,6 +36,9 @@ readonly AUTH="${CHEMCLAW_KIND_AUTH:-devauth}"
 readonly LLM="${CHEMCLAW_KIND_LLM:-mock}"
 readonly FRONT_DOOR="http://127.0.0.1:18000"
 readonly UI_URL="http://127.0.0.1:15173"
+# The UI's HTML sandbox listener — the browser's origin for it is http://sandbox.localhost:15174
+# (manifests/ui.yaml); probed here on the loopback address the mapping listens on.
+readonly SANDBOX_URL="http://127.0.0.1:15174"
 readonly TEMPORAL_UI_URL="http://127.0.0.1:18091"
 # The mock tenant as the browser reaches it, and therefore the `iss` every token carries: MSAL.js
 # requires an https authority, and the issuer is compared as a string, so the one value the browser,
@@ -79,6 +82,11 @@ require_tools() {
 ensure_cluster() {
   if kind get clusters 2>/dev/null | grep -qx "$CLUSTER"; then
     log "cluster $CLUSTER exists"
+    # A port mapping is fixed when the node container is created, so a cluster from before the
+    # sandbox mapping has none: html artefacts then show an empty frame until it is recreated.
+    docker port "$CLUSTER-control-plane" 30174/tcp >/dev/null 2>&1 \
+      || log "warning: this cluster predates the UI sandbox port (15174); html artefacts will not
+  render until it is recreated (make kind-down && make kind-up)"
   else
     log "creating cluster $CLUSTER"
     kind create cluster --config "$KIND_DIR/kind-config.yaml" --wait 120s
@@ -663,6 +671,8 @@ status() {
   helm --kube-context "$CTX" -n "$NS" status "$RELEASE" 2>/dev/null | sed -n '1,6p' || true
   printf '\n  front door  %s  (/healthz %s)\n' "$FRONT_DOOR" "$(http_code "$FRONT_DOOR/healthz")"
   printf '  UI          %s  (/readyz %s)\n' "$UI_URL" "$(http_code "$UI_URL/readyz")"
+  printf '  UI sandbox  %s  (/sandbox/frame %s; browser origin http://sandbox.localhost:15174)\n' \
+    "$SANDBOX_URL" "$(http_code "$SANDBOX_URL/sandbox/frame")"
   printf '  Temporal UI %s  (%s)\n' "$TEMPORAL_UI_URL" "$(http_code "$TEMPORAL_UI_URL/")"
 }
 

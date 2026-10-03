@@ -112,7 +112,7 @@ class ToolCallTrace:
         return ToolCallEvent(tool=tool, arguments=arguments[: settings.agent_audit_max_arg_chars])
 
     async def returned(
-        self, key: str, text: str, *, cut: bool = False, full_ref: str = ""
+        self, key: str, text: str, *, cut: bool = False, full_ref: str = "", stored_ref: str = ""
     ) -> ToolResultEvent:
         """Record and describe one tool result — this module's one write.
 
@@ -131,6 +131,14 @@ class ToolCallTrace:
         shown. When the full text could not be kept (`full_ref == ""` on a cut), the model's text
         is stored as before — it carries the cut's own notice in-band, so it cannot read as whole.
 
+        **A result the middleware already stored is not stored again.** Every result whose full
+        text the turn's sink kept carries that ref (`tool_result_size.RESULT_REF_KEY`) — it is what
+        the handle line at the foot of the model's copy names — and `stored_ref` is that ref, so the
+        event's `result_ref` and the model's handle address the same bytes and the write happens
+        once (`D-2026-10-03-an-artefact-binds-a-value-to-the-result-it-came-from`). `text` arrives
+        with the handle line already removed (`core.result_handle.without_handle_line`): it is an
+        address, not something the tool returned.
+
         A result whose call was never announced is reported under its own id rather than under a
         name this trace does not have. Nothing takes that fallback today — a node's update carries
         the `tool_calls` entry before the `ToolMessage` answering it — and a `ToolResultEvent` with
@@ -141,6 +149,8 @@ class ToolCallTrace:
             text: The result's text as the model received it.
             cut: Whether the model received a cut of the result (`tool_result_size.was_cut`).
             full_ref: The ref of the full text the cut kept, `""` when it kept none.
+            stored_ref: The ref the middleware stored this result's full text under, `""` when it
+                stored nothing.
 
         Returns:
             The event a surface renders for this result.
@@ -154,8 +164,9 @@ class ToolCallTrace:
             numbers=_capped_numbers(tool, text),
             values=_capped_values(tool, text),
             # Awaited here rather than by the caller so the bytes are durable before the ref
-            # naming them leaves the process. A kept full text was already written, by the cut.
-            result_ref=full_ref or await stored_within_cap(self._sink, tool, text),
+            # naming them leaves the process. A kept full text was already written, by the cut,
+            # and a stamped result by the middleware that stamped it.
+            result_ref=full_ref or stored_ref or await stored_within_cap(self._sink, tool, text),
             result_inline=_inline(text),
             result_cut=cut,
         )

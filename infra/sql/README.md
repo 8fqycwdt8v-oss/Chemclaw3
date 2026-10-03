@@ -77,7 +77,7 @@ the pair applies in filename order and neither shadows the other.
 | `session_turns` | 018 | `agent/session_store.py` | released at turn end, and a lease keyed by `session_id` is overwritten in place rather than duplicated, so it does not accumulate. The lease a crashed worker never released is swept with its session's `session_owners` row, in the same transaction; a **live** lease is never touched |
 | `session_members` | 110 | `agent/session_members.py` | cascades from its session's `session_owners` row, so it goes with the session (delete, retention, the owner's erasure); a member's own rows are erased with them. Who the owner let into a conversation — reach, never authority (D-2026-09-27-in-a-shared-session-the-sender-governs) |
 | `session_turn_queue` | 113 | `agent/session_queue.py` | a lease per waiting message, deleted when it runs, is withdrawn or its sender is erased; a lapsed one is swept by the next enqueue on its session, and the whole line cascades from its session's `session_owners` row. Order only — no message text and no roles (D-2026-10-01-a-queued-message-waits-in-its-senders-request) |
-| `session_exhibits` | 115 (+116 the `geometry` kind) | `exhibits/store.py` | `durable/retention.py` on `retention_session_exhibits_days`, dated by the last revision; deleted with its session (`delete_session`) and by an owner's erasure, as `session_messages` is. The header of an artefact — its head revision, title and who wrote the head — so a listing is one query (D-2026-10-02-an-artefact-is-part-of-the-answer-not-an-effect) |
+| `session_exhibits` | 115 (+116 the `geometry` kind, +117 `html`) | `exhibits/store.py` | `durable/retention.py` on `retention_session_exhibits_days`, dated by the last revision; deleted with its session (`delete_session`) and by an owner's erasure, as `session_messages` is. The header of an artefact — its head revision, title and who wrote the head — so a listing is one query (D-2026-10-02-an-artefact-is-part-of-the-answer-not-an-effect) |
 | `session_exhibit_revisions` | 115 | `exhibits/store.py` | cascades from `session_exhibits`; **INSERT-only by grant** — a revision is what a chemist's edit to an agent's draft *is*, so a credential that could UPDATE one could rewrite the correction it exists to record |
 | `artifact_blobs` | 019 | `science/calc/postgres_artifacts.py` | `durable/artifact_eviction.py`, by idle window and size budget (both off by default) |
 | `calculation_artifacts` | 019 | `science/calc/postgres_artifacts.py` | cascades from `artifact_blobs` |
@@ -221,6 +221,11 @@ ADR carrying the reading behind it.
   loses is reading a `geometry` artefact written before the rollback: its spec model refuses the
   kind, so the listing shows the artefact and opening or exporting it fails. Roll forward
   (D-2026-10-03-a-geometry-artefact-cites-the-calc-store-it-does-not-copy).
+- `117_exhibit_html_kind.sql` — the same widening for the `html` kind, flagged and reviewed the
+  same way. The previous image cannot open or export an `html` artefact, nor a revision that binds
+  a value (a binding is JSON in the existing `spec` column, so it needs no migration of its own and
+  is listed here only because it shares the consequence). Roll forward
+  (D-2026-10-03-model-written-html-runs-in-an-opaque-origin-the-backend-never-serves).
 ### Migrations that are not re-runnable, and the recipe for each
 
 Re-running the whole set is how a restored database whose `schema_migrations` ledger is older than

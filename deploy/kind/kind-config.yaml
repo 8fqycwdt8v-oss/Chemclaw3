@@ -1,4 +1,4 @@
-# The kind cluster `deploy/kind/up.sh` creates: one node, and three host ports on loopback only.
+# The kind cluster `deploy/kind/up.sh` creates: one node, and its host ports on loopback only.
 #
 # One node because this is a workstation lane, not an availability test: every pod lands on it, which
 # is also what lets the mock's ELN export volume (a ReadWriteOnce local-path claim) be shared between
@@ -22,6 +22,11 @@ nodes:
       # UI (the BFF serving the SPA)
       - containerPort: 30173
         hostPort: 15173
+        listenAddress: 127.0.0.1
+        protocol: TCP
+      # The UI's HTML sandbox listener, reached as http://sandbox.localhost:15174 (manifests/ui.yaml)
+      - containerPort: 30174
+        hostPort: 15174
         listenAddress: 127.0.0.1
         protocol: TCP
       # The mock tenant, https (oidc-mock mode's MSAL authority; see manifests/mock.yaml)

@@ -1312,8 +1312,16 @@ def _unreclaimable_batch_tokens() -> int:
     conversation window cannot cut past the newest group, so this is the floor under any thread —
     and `agent_max_tool_result_chars` is the ceiling on it (`agent/tool_result_size.py` shares that
     number across a whole parallel batch, so it bounds the batch and not one result).
+
+    **Plus one handle line per result in the batch**, which nothing re-bounds: the line
+    `agent/tool_framing.stamp_result_handles` appends sits outside the cut
+    (`D-2026-10-03-an-artefact-binds-a-value-to-the-result-it-came-from`), so a maximal batch is the
+    ceiling plus `agent_max_parallel_tool_calls` lines of `len(handle_line(ref))` characters.
     """
-    return settings.agent_max_tool_result_chars // 4
+    from chemclaw.core.result_handle import handle_line
+
+    handles = max(settings.agent_max_parallel_tool_calls, 1) * len(handle_line("0" * 64))
+    return (settings.agent_max_tool_result_chars + handles) // 4
 
 
 def _shipped_prefix() -> int:

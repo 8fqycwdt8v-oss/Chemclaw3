@@ -30,6 +30,7 @@ from chemclaw.agent.tool_result_size import (
     full_result_ref,
     reset_full_result_sink,
     set_full_result_sink,
+    stored_result_ref,
     was_cut,
 )
 from chemclaw.api import tool_results
@@ -132,15 +133,22 @@ def test_a_cut_result_keeps_its_full_text_and_the_model_still_reads_the_cut(
     assert len(str(message.response_metadata)) < 1_000
 
 
-def test_a_result_under_the_ceiling_keeps_nothing_extra_and_carries_no_stamp(
+def test_a_result_under_the_ceiling_is_stored_once_and_carries_no_cut_stamp(
     sink: _Collecting,
 ) -> None:
-    """Nothing was cut, so there is no second text to keep and nothing to say about one."""
+    """Nothing was cut, so nothing says a cut happened — and the whole text is stored once.
+
+    Stored for its handle (`D-2026-10-03-an-artefact-binds-a-value-to-the-result-it-came-from`):
+    the line at the foot of the model's copy names these bytes, so they are kept before the message
+    leaves the middleware, and the stream reuses the ref rather than writing them again.
+    """
     message = _bounded("a small result")
 
-    assert sink.calls == 0
+    assert sink.calls == 1
+    assert sink.kept == {content_address("a small result"): "a small result"}
     assert not was_cut(message)
     assert FULL_RESULT_REF_KEY not in message.response_metadata
+    assert stored_result_ref(message) == content_address("a small result")
 
 
 def test_with_no_sink_a_cut_is_still_marked_and_names_no_full_text() -> None:

@@ -14,7 +14,13 @@ The *paths* are per kind, because what a reader can point at differs:
 - a `chart` per **point** (`"series[0].y[4]"`), plus the axis and series names;
 - a `geometry` per **field, whole-valued** (`"xyz"`, `"source"`, `"label"`): a coordinate block
   re-optimised moves every line, so a line hunk would be the whole block anyway;
-- anything else — a pinned result, a link, or a revision that changed kind — as one `"spec"` row.
+- anything else — a pinned result, a link, an html page, or a revision that changed kind — as one
+  `"spec"` row.
+
+**A diff compares stored specs, bindings and all** (`exhibit.raw_spec`), never resolved ones: a
+bound cell is the binding, so re-reading the artefact after its result was swept — which changes
+what the cell *resolves* to — is not a revision and shows no change, while binding a cell, pointing
+it elsewhere or detaching it to a literal is one (`rows[3].yield`, `series[0].y`, `rows_from`).
 
 Positional rather than keyed, unlike the protocol diff's arms: rows, items and points have no
 identifier of their own, and a chemist's edit is overwhelmingly a value in place.
@@ -25,6 +31,8 @@ from __future__ import annotations
 import difflib
 import json
 from typing import Any
+
+from pydantic import BaseModel
 
 from chemclaw.core.config import settings
 from chemclaw.exhibits.models import (
@@ -144,11 +152,20 @@ def _table(before: TableSpec, after: TableSpec) -> list[FieldChange]:
                 path="columns", kind="changed", before=_text(old_columns), after=_text(new_columns)
             )
         )
+    old_json, new_json = spec_json(before), spec_json(after)
+    old_from, new_from = old_json.get("rows_from"), new_json.get("rows_from")
+    if old_from != new_from:
+        kind: ChangeKind = (
+            "added" if old_from is None else "removed" if new_from is None else "changed"
+        )
+        changes.append(
+            FieldChange(path="rows_from", kind=kind, before=_text(old_from), after=_text(new_from))
+        )
     changes.extend(
         _indexed(
             "rows",
-            [dict(row) for row in before.rows],
-            [dict(row) for row in after.rows],
+            old_json["rows"],
+            new_json["rows"],
             [column.key for column in after.columns],
         )
     )
@@ -179,8 +196,20 @@ def _chart(before: ChartSpec, after: ChartSpec) -> list[FieldChange]:
             changes.append(
                 FieldChange(path=f"{path}.name", kind="changed", before=old.name, after=new.name)
             )
-        changes.extend(_values(f"{path}.x", list(old.x), list(new.x)))
-        changes.extend(_values(f"{path}.y", list(old.y), list(new.y)))
+        for axis, before_values, after_values in (("x", old.x, new.x), ("y", old.y, new.y)):
+            if isinstance(before_values, list) and isinstance(after_values, list):
+                changes.extend(_values(f"{path}.{axis}", before_values, after_values))
+            elif before_values != after_values:
+                # A bound axis is one value — the binding — so binding, re-pointing or detaching
+                # it is one change of the whole axis rather than a point-by-point one.
+                changes.append(
+                    FieldChange(
+                        path=f"{path}.{axis}",
+                        kind="changed",
+                        before=_text(_jsonable(before_values)),
+                        after=_text(_jsonable(after_values)),
+                    )
+                )
     return changes
 
 
@@ -261,6 +290,11 @@ def _values(path: str, before: list[Any], after: list[Any]) -> list[FieldChange]
             FieldChange(path=f"{path}[{index}]", kind=kind, before=_text(old), after=_text(new))
         )
     return changes
+
+
+def _jsonable(value: Any) -> Any:
+    """A spec value as JSON: a binding as its `{"$bind": …}` object, anything else as it is."""
+    return value.model_dump(mode="json") if isinstance(value, BaseModel) else value
 
 
 def _whole(before: dict[str, Any], after: dict[str, Any]) -> list[FieldChange]:

@@ -101,6 +101,9 @@ _EXPECTED_ORDER = (
     "ReloadingSkillsMiddleware",
     "surface_authorization_denials",
     "surface_domain_errors",
+    # Outermost of what rewrites a result, so the handle line lies outside the envelope and the
+    # defang (`D-2026-10-03-an-artefact-binds-a-value-to-the-result-it-came-from`).
+    "stamp_result_handles",
     # Inside both converters and outside the trail
     # (`D-2026-08-27-a-tool-result-crosses-a-boundary-and-must-say-so`): a refusal this system
     # composed must not be wrapped in the envelope the instructions call evidence, and the two

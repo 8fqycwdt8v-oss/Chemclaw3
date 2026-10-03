@@ -47,6 +47,7 @@ from chemclaw.core.config import settings
 from chemclaw.core.metrics_bridge import degraded
 from chemclaw.core.model_prose import ModelProse
 from chemclaw.core.session_context import get_current_session_id
+from chemclaw.exhibits.bindings import resolved_view
 from chemclaw.exhibits.diff import capped, diff_specs
 from chemclaw.exhibits.models import (
     ExhibitHeader,
@@ -158,7 +159,10 @@ def _listed(headers: list[ExhibitHeader]) -> str:
 async def resolve_exhibit_refs(
     session_id: str, refs: Sequence[ExhibitRef], *, store: ExhibitStore | None = None
 ) -> list[ExhibitView]:
-    """The referenced revisions, each resolved within `session_id`.
+    """The referenced revisions, each resolved within `session_id`, bound values filled in.
+
+    Filled in (`exhibits.bindings.resolved_view`) because the note shows the model what the chemist
+    is looking at, and a bound cell shows its value there, not its pointer.
 
     Raises:
         UnknownExhibit: a ref names an artefact this session does not hold, or a revision it does
@@ -174,7 +178,7 @@ async def resolve_exhibit_refs(
                 + (f" at revision {ref.revision}" if ref.revision else "")
                 + " in this session"
             )
-        views.append(view)
+        views.append(await resolved_view(view))
     return views
 
 

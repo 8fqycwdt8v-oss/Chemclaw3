@@ -9,7 +9,7 @@ own manifests, Services instead of loopback ports.
 
 ```console
 $ make kind-up        # create cluster, load images, deploy, wait, smoke — idempotent
-$ make kind-status    # pods, jobs, the release, and the three host URLs
+$ make kind-status    # pods, jobs, the release, and the host URLs
 $ make kind-smoke     # the smoke alone, against a running cluster
 $ make kind-down      # delete the cluster (and everything in it)
 $ make kind-validate  # offline: render the chart with these values + the fleet, schema-check all of it
@@ -17,12 +17,23 @@ $ make kind-validate  # offline: render the chart with these values + the fleet,
 
 | Host URL (127.0.0.1 only) | What |
 | --- | --- |
-| http://127.0.0.1:15173 | the UI (BFF + SPA) |
+| http://127.0.0.1:15173 | the UI (BFF + SPA) — open it at exactly this address (it is the BFF's `APP_ORIGIN`) |
+| http://sandbox.localhost:15174 | the UI's HTML sandbox listener: the frame an `html` artefact renders in, on its own origin |
 | http://127.0.0.1:18000 | the front door (`/healthz`, `/readyz`, the API) |
 | http://127.0.0.1:18091 | the Temporal UI |
 | https://127.0.0.1:18443/entra/mock-tenant | the mock tenant (oidc-mock mode's sign-in authority) |
 
 The ports avoid 5432 / 8000 / 5173 / 8091, which the compose lanes hold.
+
+**The sandbox has a different hostname and a different port.** `sandbox.localhost` resolves to
+loopback in every current browser with no hosts-file entry, so the frame is a different *site* from
+the app at `127.0.0.1`, which is what the UI README asks of a deployment; kind maps host ports, not
+hostnames, so the port differs as well. Open the app as `http://127.0.0.1:15173` — the sandbox shell
+accepts content only from that exact origin, and the app opened as `localhost:15173` shows an empty
+artefact frame. A cluster created before this mapping existed lacks port 15174 (a mapping is fixed
+at creation); `up.sh` warns, and `make kind-down && make kind-up` recreates it. For a browser
+policy beyond the lane, the html decision record recommends `WebRtcIPHandling=disable_non_proxied_udp`
+(`docs/decisions/D-2026-10-03-model-written-html-runs-in-an-opaque-origin-the-backend-never-serves.md`).
 
 ## What is deployed
 

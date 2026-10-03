@@ -281,6 +281,7 @@ class InMemoryExhibitStore:
             change_note=change_note,
             revision_created_at=now,
             spec=spec,
+            raw_spec=spec,
             unverified_figures=list(unverified_figures or []),
         )
         entry.revisions.append(_Revision(view=view, byte_size=spec_bytes(spec)))
@@ -707,6 +708,7 @@ class PostgresExhibitStore:
         if row is None:
             return None
         header = _header(row)
+        stored = parse_spec(row[16])
         return ExhibitView(
             **header.model_dump(),
             revision=row[10],
@@ -715,7 +717,8 @@ class PostgresExhibitStore:
             author=row[13],
             change_note=row[14],
             revision_created_at=row[15],
-            spec=parse_spec(row[16]),
+            spec=stored,
+            raw_spec=stored,
             unverified_figures=list(row[17] or []),
         )
 
