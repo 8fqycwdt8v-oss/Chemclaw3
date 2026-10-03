@@ -393,3 +393,22 @@ def test_arguments_longer_than_any_storable_spec_stop_the_call(
     table = {"columns": [{"key": "v", "label": "V"}], "rows": [{"v": n} for n in range(2_000)]}
     _feed(DraftStream(), "create_exhibit", json.dumps({"title": "T", "spec": table}), size=50)
     assert parses and max(parses) <= 1_000 + 6 * 20 + 1_024
+
+
+def test_a_refused_call_names_the_draft_it_leaves_unsettled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`tool_failed.call_id` is the drafts' `call_id`, so a surface drops exactly that draft.
+
+    The hardening contract's item 2: before, the failure named only the tool, and a surface holding
+    two drafts of `create_exhibit` could not tell which one would never be settled.
+    """
+    from chemclaw.api.events import ToolFailedEvent
+
+    monkeypatch.setattr(settings, "exhibit_draft_min_interval_ms", 0)
+    untitled = {"name": "create_exhibit", "args": {"title": " ", "spec": _create()["args"]["spec"]}}
+    events = _drive([untitled, "done"])
+    drafts = [e for e in events if isinstance(e, ExhibitDraftEvent)]
+    [failed] = [e for e in events if isinstance(e, ToolFailedEvent)]
+    assert drafts and {draft.call_id for draft in drafts} == {"call-1"}
+    assert failed.call_id == "call-1" and not any(isinstance(e, ExhibitEvent) for e in events)

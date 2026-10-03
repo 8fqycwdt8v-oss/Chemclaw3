@@ -117,6 +117,7 @@
     },
     "tool_failed": {
       "agent": "str",
+      "call_id": "str",
       "message": "str",
       "reason": "Optional[Literal['dry_run', 'undeclared_write', 'plan_gate', 'repeat', 'authz']]",
       "tool": "str"

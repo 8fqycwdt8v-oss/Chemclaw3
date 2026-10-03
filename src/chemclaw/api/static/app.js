@@ -190,6 +190,12 @@ function applyEvent(evt, answerEl) {
       // In the trace, not the error lane: the step failed, the turn did not. Without this the
       // transcript showed a silent gap wherever a tool raised.
       add("trace", `${agentTag(evt)}✗ ${evt.tool} failed — ${evt.message}`);
+      // A draft this call was streaming will never be settled by an `exhibit`: it is dropped by
+      // the failed call's own id (`call_id`, "" when the failure is not attributed to one).
+      if (evt.call_id && draftLines.has(evt.call_id)) {
+        draftLines.get(evt.call_id).remove();
+        draftLines.delete(evt.call_id);
+      }
       return answerEl;
     case "exhibit":
       // A header, not the artefact: the body is fetched from `/sessions/{id}/exhibits/{id}` by a
