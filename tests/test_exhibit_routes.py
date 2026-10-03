@@ -775,5 +775,6 @@ def test_a_persons_write_records_the_figures_it_introduced(app: Any) -> None:
         json={"parent_revision": 1, "spec": revised, "change_note": "added THF"},
     )
     assert answer.status_code == 201, answer.text
-    store = routes.default_exhibit_store()
+    # The store the fixture swapped in, read back through the seam it patched.
+    store = getattr(routes, "default_exhibit_store")()  # noqa: B009
     assert asyncio.run(store.chemist_figures(session, xid)) == ["1", "76", "81.5"]

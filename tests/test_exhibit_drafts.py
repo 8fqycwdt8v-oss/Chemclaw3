@@ -18,6 +18,7 @@ import pytest
 from langchain_core.callbacks import CallbackManagerForLLMRun
 from langchain_core.messages import AIMessage, AIMessageChunk
 from langchain_core.outputs import ChatGenerationChunk
+from langchain_core.utils.json import parse_partial_json
 
 from chemclaw.agent.audit import NullAuditSink
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
@@ -360,7 +361,7 @@ def test_a_call_that_shows_nothing_is_parsed_a_logarithmic_number_of_times(
     from chemclaw.api import exhibit_drafts
 
     parses: list[int] = []
-    real = exhibit_drafts.parse_partial_json
+    real = parse_partial_json
 
     def _counting(text: str) -> Any:
         parses.append(len(text))
@@ -383,7 +384,7 @@ def test_arguments_longer_than_any_storable_spec_stop_the_call(
     from chemclaw.api import exhibit_drafts
 
     parses: list[int] = []
-    real = exhibit_drafts.parse_partial_json
+    real = parse_partial_json
 
     def _counting(text: str) -> Any:
         parses.append(len(text))

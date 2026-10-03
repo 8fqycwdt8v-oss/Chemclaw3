@@ -3,31 +3,45 @@
 Contract: "Hardening + activation (frozen 2026-10-03…)" of the artefacts wire contract (items 1-2 are
 this repository's). Owner decisions 2026-10-03: html sandbox on, html scripts on by default.
 
-- [ ] **1. Own readouts are not evidence.** The artefact tools' results are excluded from grounding
+- [x] **1. Own readouts are not evidence.** The artefact tools' results are excluded from grounding
       evidence and from bindable links (one name set, both queries), and get no `⟨r:…⟩` handle.
-- [ ] **2. Draft parse bound.** `DraftStream` re-parses only on argument growth (geometric) before the
+- [x] **2. Draft parse bound.** `DraftStream` re-parses only on argument growth (geometric) before the
       first frame; stops past the spec cap + slack or a non-object `spec`. Test counts parses.
-- [ ] **3. Byte cap first.** Raw spec bytes checked right after `parse_spec` (REST and tools); target
+- [x] **3. Byte cap first.** Raw spec bytes checked right after `parse_spec` (REST and tools); target
       lookups memoised in `_write_plan`; `_SHOWN` → setting.
-- [ ] **4. Chemist figures stored.** Migration 119 adds `human_figures` to revisions, written at
+- [x] **4. Chemist figures stored.** Migration 119 adds `human_figures` to revisions, written at
       human write time; revise reads the distinct set. Measure before/after.
-- [ ] **5. Calc source capped.** `geometry_xyz` and write-time source check apply
+- [x] **5. Calc source capped.** `geometry_xyz` and write-time source check apply
       `calc_artifact_max_download_bytes` from the recorded size; a source is validated as one frame.
-- [ ] **6. Report activity verifies membership** of `requested_by` in `session_id` before writing.
-- [ ] **7. Handles only where bindings resolve** (in-memory session store + result store).
-- [ ] **8. Geometry `structure_id`** (contract item 1): resolve at read/export, ok:false entry when
+- [x] **6. Report activity verifies membership** of `requested_by` in `session_id` before writing.
+- [x] **7. Handles only where bindings resolve** (in-memory session store + result store).
+- [x] **8. Geometry `structure_id`** (contract item 1): resolve at read/export, ok:false entry when
       vanished; advertise in create_exhibit; re-measure the prefix.
-- [ ] **9. `ToolFailedEvent.call_id`** (contract item 2): event, OpenAPI, fixture, dev page.
-- [ ] **10. Agent-path `log_event` + counters** `chemclaw_exhibit_writes_total`,
+- [x] **9. `ToolFailedEvent.call_id`** (contract item 2): event, OpenAPI, fixture, dev page.
+- [x] **10. Agent-path `log_event` + counters** `chemclaw_exhibit_writes_total`,
       `chemclaw_exhibit_refusals_total`.
-- [ ] **G1** retention predicate derived from every `retention_*_days`; push pruning runs whenever
+- [x] **G1** retention predicate derived from every `retention_*_days`; push pruning runs whenever
       artefacts are on.
-- [ ] **G2** runbook rollback row for 115; SQL verified against the schema.
-- [ ] **G3-5** runbook artefacts section.
-- [ ] **G6** chart gate `retention.exhibitsGrowthAccepted`. **G7** values.yaml block. **G8** kind.
+- [x] **G2** runbook rollback row for 115; SQL verified against the schema.
+- [x] **G3-5** runbook artefacts section.
+- [x] **G6** chart gate `retention.exhibitsGrowthAccepted`. **G7** values.yaml block. **G8** kind.
       **G10** `.env.example` + Jenkins ordering.
-- [ ] **ADR** html scripts on by default (supersedes the scripts-off part).
-- [ ] **Verify**: lint, type, validators, targeted tests with Postgres up.
+- [x] **ADR** html scripts on by default (supersedes the scripts-off part).
+- [x] **Verify**: lint, type, validators, targeted tests with Postgres up.
+
+## Review (hardening)
+
+- Measured: draft parses before the first frame 6,306 → 14 (table, kind last) and 6,341 → 2 (string
+  spec) on ~75 kB of arguments, 27 s / 15 s of loop CPU → 0.3 s / 0.4 s; chemist-figures read
+  1.27 s → 0.37 s for 100 human revisions of a 2,000-row table (0.74 s at the 500-revision cap);
+  prefix 73,122 → 73,121 against the 73,450 ceiling with `structure_id` advertised.
+- Choices recorded: G1 as its own schedule (ADR), html scripts on by default (owner ADR). #4 took the
+  owner's preferred stored form (migration 119); pre-119 rows count as no figures (can only flag).
+- #7 resolved by not stamping where bindings cannot resolve (`handles_resolve`), not by opening
+  resolution under the in-memory session store: grounding/bindings there would need Postgres on a
+  deployment that may have none.
+- 115 rollback: runbook row and `infra/sql/README.md`; not added to `_REVIEWED_SEMANTIC_BREAKS`,
+  which requires an ADR naming the file and none of the merged ones can be edited.
 
 # Artefacts, wave 3 — bindings and the html kind
 
