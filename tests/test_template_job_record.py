@@ -155,6 +155,24 @@ def test_a_failed_template_run_records_where_it_stopped_and_keeps_the_steps_that
     }
 
 
+def test_a_step_stopped_by_a_cancellation_is_recorded_as_cancelled() -> None:
+    """A cancelled step reaches the failure path wrapped, and the row says what the broker says.
+
+    `_run_wave` re-raises a bare `CancelledError`, but a step whose activity or child reports the
+    cancellation as its cause arrives as `_StepFailed`; `connector_job.ended_state` reads either,
+    so the template's row agrees with `GET /jobs/{id}` the way a connector job's now does.
+    """
+    from temporalio.exceptions import CancelledError
+
+    from chemclaw.durable.connector_job import ended_state
+
+    record = failed_template_record(
+        "wf-5", _run(), "write", "Cancelled", {}, state=ended_state(CancelledError("Cancelled"))
+    )
+    assert record.state == "cancelled"
+    assert "write" in record.failure_reason
+
+
 def test_both_records_name_the_run_as_its_own_correlation() -> None:
     """The record and the audit rows of the steps inside it join without a second identifier.
 

@@ -34,6 +34,7 @@ with workflow.unsafe.imports_passed_through():
         ConnectorJobInput,
         ConnectorJobResult,
         child_workflow_id,
+        ended_state,
         failure_reason,
         wrapper_execution_timeout,
     )
@@ -237,7 +238,13 @@ def template_job_record(
 
 
 def failed_template_record(
-    job_id: str, run: "TemplateRunInput", step_id: str, reason: str, completed: dict[str, Any]
+    job_id: str,
+    run: "TemplateRunInput",
+    step_id: str,
+    reason: str,
+    completed: dict[str, Any],
+    *,
+    state: str = "failed",
 ) -> JobRecord:
     """The record of a template run that ended badly — what was asked, where it stopped, and why.
 
@@ -248,6 +255,10 @@ def failed_template_record(
 
     The steps that *did* complete are kept. A five-step procedure that died at step four ran four
     real steps, and discarding them would lose the work while recording only the failure.
+
+    `state` is `connector_job.ended_state` of the step's exception: a step whose activity or child
+    was cancelled reaches `_StepFailed` too (wrapped, not as a bare `CancelledError`), and booking
+    it `failed` is the listing-versus-detail disagreement that function exists to close.
     """
     return JobRecord(
         job_id=job_id,
@@ -262,7 +273,7 @@ def failed_template_record(
         # day skip the second lookup.
         result={"steps": completed, "template_fingerprint": template_fingerprint(run.template)},
         payload_kind="template",
-        state="failed",
+        state=state,
         failure_reason=f"step {step_id!r}: {reason}",
     )
 
@@ -374,6 +385,7 @@ class TemplateWorkflow:
                         step.id,
                         failure_reason(exc),
                         dict(results),
+                        state=ended_state(exc),
                     )
                 )
                 await self._notify_failure(run, step, exc)

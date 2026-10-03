@@ -55,6 +55,7 @@ from chemclaw.core.temporal_client import connect_options, telemetry_runtime
 from chemclaw.durable.connector_job import (
     ConnectorJobInput,
     ConnectorJobWorkflow,
+    ended_state,
     failed_job_record,
     failure_reason,
 )
@@ -810,6 +811,95 @@ def test_a_status_poll_with_no_wait_does_not_block_on_a_running_job() -> None:
     # A generous bound: the point is "one round trip", not a latency budget. The defect took the
     # whole life of the job.
     assert elapsed < 5.0
+
+
+def test_a_cancellation_is_recorded_as_cancelled_and_anything_else_as_failed() -> None:
+    """`ended_state` reads the SDK's own cancellation predicate, wrapped or bare."""
+    from temporalio.exceptions import CancelledError
+
+    assert ended_state(asyncio.CancelledError()) == "cancelled"
+    assert ended_state(CancelledError("Cancelled")) == "cancelled"
+    assert ended_state(ValueError("unknown ALPB solvent")) == "failed"
+    record = failed_job_record("job-c", _JOB, "Cancelled", 1.0, state="cancelled")
+    assert (record.state, record.failure_reason) == ("cancelled", "Cancelled")
+
+
+@workflow.defn(name="CancelProbeChild")
+class _CancelProbeChild:
+    """A connector child that is served and never finishes, so only a cancellation ends it.
+
+    Served rather than parked on an unpolled queue (`_hanging_job`), because the wrapper waits for
+    its child to *acknowledge* a cancellation, and a child no worker runs never does.
+    """
+
+    @workflow.run
+    async def run(self, _payload: Any) -> None:
+        """Wait for a condition that never comes."""
+        await workflow.wait_condition(lambda: False)
+
+
+def test_a_cancelled_job_is_listed_as_cancelled_not_failed() -> None:
+    """The registry listing and the job's own status agree on a run stopped by a person.
+
+    Measured on the kind cluster: `DELETE /jobs/{id}` on a running campaign took both runs to
+    CANCELED and `GET /jobs/{id}` answered `cancelled`, while `GET /jobs` — read from
+    `job_records` — listed the same run as `failed`, because `failed_job_record` hard-coded the
+    state. Once Temporal's history ages out the record is the only answer left, so it has to say
+    what the broker said.
+
+    Driven against a real dev server: the cancellation is delivered into the parked child await
+    exactly as `cancel_durable_job` delivers it, and the record is whatever the wrapper writes.
+    """
+    from chemclaw.agent import durable_tools
+
+    recorded: list[JobRecord] = []
+
+    class _CapturingSink:
+        async def record(self, record: JobRecord) -> None:
+            recorded.append(record)
+
+    async def _lookup(job_id: str) -> JobRecord | None:
+        return next((r for r in recorded if r.job_id == job_id), None)
+
+    async def _run() -> tuple[str, str, str]:
+        async with await start_local_env_or_skip() as env:
+            client = pydantic_client(env)
+            with mock.patch("chemclaw.durable.job_record.default_job_record_sink", _CapturingSink):
+                child = Worker(
+                    client,
+                    task_queue="cancel-probe-child",
+                    workflows=[_CancelProbeChild],
+                    workflow_runner=UnsandboxedWorkflowRunner(),
+                )
+                async with _core_worker(client), child:
+                    handle = await client.start_workflow(
+                        ConnectorJobWorkflow.run,
+                        _JOB.model_copy(
+                            update={
+                                "workflow": "CancelProbeChild",
+                                "task_queue": "cancel-probe-child",
+                                "session_id": "",
+                            }
+                        ),
+                        id="cancel-record-probe",
+                        task_queue=settings.background_task_queue,
+                    )
+                    await _until_running(handle)
+                    await handle.cancel()
+                    description = await _until_not_running(handle, timeout=60.0)
+                    with mock.patch.object(durable_tools, "connect", _returning(client)):
+                        live = await durable_tools.job_status(handle.id, wait_seconds=0.0)
+            # The detail once the broker has forgotten the run: the stored record, read back.
+            with mock.patch.object(durable_tools, "lookup_job_record", _lookup):
+                stored = await durable_tools._recorded_status("cancel-record-probe")
+            assert stored is not None
+            return description.status.name, live.status, stored.status
+
+    broker, detail, listed = asyncio.run(_run())
+    assert broker == "CANCELED"
+    assert detail == "cancelled"
+    assert listed == detail
+    assert [record.state for record in recorded] == ["cancelled"]
 
 
 def test_a_failed_job_reaches_its_session_even_with_the_record_queue_unserved(

@@ -442,7 +442,7 @@ _JOB_ACTIVITY = """
     SELECT connector, job, count(*), count(*) FILTER (WHERE state = 'failed'),
            count(DISTINCT requested_by),
            count(*) FILTER (WHERE note_id <> ''),
-           max(completed_at) FILTER (WHERE state <> 'failed')
+           max(completed_at) FILTER (WHERE state = 'completed')
     FROM job_records
     WHERE completed_at >= %s AND completed_at < %s
     GROUP BY connector, job
