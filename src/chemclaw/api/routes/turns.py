@@ -1075,7 +1075,7 @@ async def watch_turn(
             detail="too many concurrent event streams; close one and retry",
             headers={"Retry-After": "1"},
         )
-    watch = turn.watch()
+    watch = turn.watch(principal.oid)
     if watch is None:
         release_slot()
         raise HTTPException(status_code=404, detail="no turn is running for this session")

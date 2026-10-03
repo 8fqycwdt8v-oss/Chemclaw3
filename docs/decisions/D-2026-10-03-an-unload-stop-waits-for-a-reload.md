@@ -32,6 +32,15 @@ cannot choose between the two; whatever it sends at unload is sent for both.
   stop — reattaches with `GET /sessions/{id}/turn/stream` first; that reattach cancels the pending
   stop and the turn runs on with the reloaded page watching it (`DetachableTurn.defer_stop` /
   `resume`).
+- **Either order.** The reloaded page's watch can reach the service *before* the old page's
+  keepalive stop (likelier when the unload first withdraws a queued ticket, then stops), and then
+  there is nothing yet to cancel. So the window's expiry also reads who is watching: a resumer with
+  a view open at that moment keeps the turn. It is read at expiry rather than when the stop
+  arrives, because a page that was itself following the turn unloads with its own view still open,
+  and that view closes inside the window.
+- **A pending deferral lives and dies with its process**, as the turn's pump does: a front door
+  that exits during the window takes the turn and its pending stop with it (the shutdown drain is
+  the only grace a running turn gets there).
 - **Without `reason`, a stop is immediate**, exactly as before — including over a pending
   deferral. The Stop button never waits.
 - **Authorized exactly as an immediate stop is**: the same session gate and the same
@@ -58,8 +67,11 @@ cannot choose between the two; whatever it sends at unload is sent for both.
 - `service_turn_unload_grace_seconds=0` restores the immediate unload stop exactly.
 
 `Chemclaw3_ui` sends the reason from its unload path, and after a reload reattaches through
-`GET /sessions/{id}/turn/stream` rather than polling the transcript; a 404 there (the turn is
-over, or runs on another replica) falls back to a bounded transcript read. Against a core without
+`GET /sessions/{id}/turn/stream` rather than polling the transcript. A 404 there says only that no
+turn runs on the replica that answered — the turn may have ended or may run on another — so it falls
+back to the live path's full transcript poll; only a running turn named as somebody else's (or, from
+an older core, not named) gets a short bounded read and then an honest "could not be recovered".
+Against a core without
 this decision the reason is an unknown query parameter, ignored, so the UI change is safe to land
 first.
 
@@ -89,8 +101,10 @@ first.
   the row `docs/planning/DEFERRED.md` already holds for streaming reattach.
 - **Cross-replica deferral.** The pending stop lives on the pump, which lives in one process — the
   stop route's and the watch route's existing scope. A reload that lands on another replica gets a
-  404 from the watch route and recovers from the transcript; the stop it left behind expires on its
-  own. **Revisit when:** front-door replicas run without session affinity and reloads are measured
+  404 from the watch route and falls back to the full transcript poll — but nothing reattached on the
+  replica holding the turn, so the stop it left behind expires there and the turn is cancelled; the
+  poll then ends in the UI's "could not be recovered". That is D5 again for that one case, and it
+  is the case this declines. **Revisit when:** front-door replicas run without session affinity and reloads are measured
   losing turns to the expiry — the fix is the same cross-process relay the watch route would need.
 
 ## Consequences
@@ -100,6 +114,7 @@ first.
   cost none; with the default window that is seconds of a turn whose deadline is minutes.
 - `tests/test_unload_grace.py` drives each claim over a real socket: a reload inside the window
   continues; no reattach stops the turn after the window; an explicit stop is immediate even over a
-  pending deferral; another participant's view does not cancel it; the watch response names the
+  pending deferral; a reattach that arrives before the stop keeps the turn, while a view that closes
+  inside the window does not; another participant's view does not cancel it; the watch response names the
   sender's turn; repeated unload stops neither
   move the deadline nor exceed the cap; and the counters record each outcome.

@@ -179,6 +179,9 @@ class DetachableTurn:
         self._readers: set[_Reader] = {self._sender}
         # Watchers whose stream is still open — fed or cut off — which is what the cap counts.
         self._watching: set[_Reader] = set()
+        # Who each open watch belongs to, so a deferred unload stop can tell whether the page it
+        # was waiting for is already here (`_stop_after`).
+        self._watcher_oids: dict[_Reader, str | None] = {}
         self._sender_attached = True
         self._stopper: asyncio.Task[None] | None = None
         # An unload stop waiting out its grace window (`defer_stop`), who may cancel it by
@@ -330,8 +333,11 @@ class DetachableTurn:
         """The sender's view of the turn. Cancelling it detaches; the turn does not notice."""
         return self._view(self._sender)
 
-    def watch(self) -> Watch | None:
+    def watch(self, oid: str | None = None) -> Watch | None:
         """Another participant's view, from this moment on; `None` once the turn is over.
+
+        `oid` is whose view it is, held for as long as the view is open: a deferred unload stop
+        that expires while its sender is watching is a reload that arrived first, not a departure.
 
         Attached here, synchronously, rather than on first iteration, so the view starts at the
         event after this call and not at whatever the response's first read happens to be.
@@ -344,11 +350,13 @@ class DetachableTurn:
         reader = _Reader()
         self._readers.add(reader)
         self._watching.add(reader)
+        self._watcher_oids[reader] = oid
 
         def _close() -> None:
             """Release the view's place, whether or not its generator ever ran."""
             self._readers.discard(reader)
             self._watching.discard(reader)
+            self._watcher_oids.pop(reader, None)
 
         return Watch(self._view(reader), _close)
 
@@ -373,6 +381,7 @@ class DetachableTurn:
         finally:
             self._readers.discard(reader)
             self._watching.discard(reader)
+            self._watcher_oids.pop(reader, None)
             if reader is self._sender:
                 self._sender_gone()
             while not reader.queue.empty():
@@ -459,12 +468,28 @@ class DetachableTurn:
             pending.cancel()
 
     async def _stop_after(self, grace: float) -> None:
-        """Wait out the grace window, then stop the turn — nobody it was waiting for came back."""
+        """Wait out the grace window, then stop the turn — unless whoever it waited for is here.
+
+        **Read at expiry, not at the stop.** The reloaded page's watch can reach the service
+        *before* the old page's keepalive stop does — likelier when the unload first withdraws a
+        queued ticket and only then stops — and then `resume` ran with nothing to cancel. So a
+        resumer with a view open when the window ends is a reload that arrived first, and the turn
+        runs on. Not read when the stop arrives: a page that was itself following the turn has its
+        own watch open while it unloads, and that view closes within the window, so the stop lands.
+        """
         await asyncio.sleep(grace)
         # Past the window the stop is no longer cancellable: released *before* the await below, so
         # a reattach racing it cannot cancel this task half-way through the turn's teardown.
         self._pending_stop = None
         if not self.running:
+            return
+        if any(oid in self._resumers for oid in self._watcher_oids.values() if oid):
+            METRICS.increment("chemclaw_turns_stop_resumed_total")
+            logger.info(
+                "session %s's deferred unload stop expired with its sender watching (a reload that "
+                "arrived before the stop); the turn continues",
+                self._session_id,
+            )
             return
         METRICS.increment("chemclaw_turns_stop_expired_total")
         METRICS.increment("chemclaw_turns_stopped_total")

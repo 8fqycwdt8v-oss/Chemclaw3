@@ -138,6 +138,45 @@ def test_a_reload_inside_the_window_reattaches_and_the_turn_answers(
     }
 
 
+def test_a_reload_that_reattaches_before_the_unload_stop_arrives_keeps_the_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other order: the reloaded page's watch lands first, the old page's keepalive stop later.
+
+    `resume` then has nothing to cancel, and the stop that arrives next would kill the turn the
+    reloaded page is watching — D5 again, on a race the queued path (withdraw, then stop) makes
+    likely. The window's expiry reads who is watching.
+    """
+    monkeypatch.setattr(settings, "service_turn_unload_grace_seconds", 0.5)
+    agent = _Ledger()
+    before = _counts()
+
+    async def _run() -> tuple[Any, list[dict[str, Any]], bool]:
+        with _served(agent) as served:
+            async with httpx.AsyncClient(base_url=served.base, timeout=30) as client:
+                session_id = await _shared_session(client)
+                await _start_and_unload(client, session_id)
+                attached = asyncio.Event()
+                named: list[str] = []
+                watch = asyncio.create_task(_reattach(client, session_id, attached, named))
+                await asyncio.wait_for(attached.wait(), 10)
+                deferred = await _unload_stop(client, session_id)
+                await asyncio.sleep(1.5)  # well past the window
+                still_running = _running(served.app, session_id)
+                agent.gate.set()
+                events = await watch
+                served.wait_for_slot_release(session_id)
+                return deferred, events, still_running
+
+    deferred, events, still_running = asyncio.run(_run())
+    assert deferred.json() == {"stopped": False, "deferred": True}
+    assert still_running, "an unload stop arriving after the reload's reattach killed the turn"
+    assert events and events[-1]["type"] == "answer", events
+    moved = _moved(before)
+    assert moved["chemclaw_turns_stop_expired_total"] == 0
+    assert moved["chemclaw_turns_stop_resumed_total"] == 1
+
+
 def test_without_a_reattach_the_turn_is_stopped_after_the_window(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -307,3 +346,27 @@ def test_a_turn_that_ends_inside_the_window_takes_its_pending_stop_with_it() -> 
 
     assert asyncio.run(_run()) is False
     assert _moved(before)["chemclaw_turns_stop_expired_total"] == 0
+
+
+def test_a_view_open_at_the_stop_that_closes_in_the_window_does_not_keep_the_turn() -> None:
+    """A page that was itself following the turn unloads with its watch still open.
+
+    That view closes within the window, so the stop lands — it is read at expiry, not at the stop.
+    A view still open at expiry keeps the turn only when it is a resumer's.
+    """
+
+    async def _run() -> tuple[bool, bool]:
+        leaving = DetachableTurn(_forever(), session_id="s-leaving")
+        dying = leaving.watch("ana")
+        assert dying is not None
+        leaving.defer_stop(0.2, resumers=frozenset({"ana"}), max_deferrals=3)
+        dying.close()  # the unloading page's socket goes
+        stranger = DetachableTurn(_forever(), session_id="s-stranger")
+        assert stranger.watch("ben") is not None
+        stranger.defer_stop(0.2, resumers=frozenset({"ana"}), max_deferrals=3)
+        await asyncio.sleep(0.6)
+        return leaving.running, stranger.running
+
+    leaving_running, stranger_running = asyncio.run(_run())
+    assert not leaving_running, "a view that closed inside the window kept the turn alive"
+    assert not stranger_running, "a non-resumer's view kept the turn alive past the window"
