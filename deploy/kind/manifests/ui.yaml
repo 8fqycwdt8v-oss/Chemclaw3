@@ -6,6 +6,14 @@
 # environment (`AUTH_MODE`, and the tenant/client/scope in oidc-mock) arrives through the
 # `chemclaw-ui-auth` ConfigMap `up.sh` writes per mode.
 #
+# **The HTML sandbox is a second listener on a distinct origin** (`Chemclaw3_ui` README, "HTML
+# sandbox"): `SANDBOX_PORT` serves `GET /sandbox/frame` and nothing else. The browser reaches it at
+# `http://sandbox.localhost:15174` while the app is `http://127.0.0.1:15173` — a different hostname
+# *and* port, so a different origin and a different site. `*.localhost` resolves to loopback in
+# every current browser with no hosts-file entry; kind's port mapping cannot route by hostname, so
+# the port differs too. `APP_ORIGIN` is exact: a chemist who opens the app as `localhost:15173`
+# instead sees a blank artefact frame, because the shell takes content only from `APP_ORIGIN`.
+#
 # Reaches the front door because values-kind.yaml's `networkPolicy.ingressNamespaces` admits this
 # namespace. `/readyz` asks the front door's own `/readyz`, so this pod is ready only when the
 # backend is.
@@ -25,6 +33,10 @@ spec:
       port: 8080
       targetPort: 8080
       nodePort: 30173
+    - name: sandbox
+      port: 8081
+      targetPort: 8081
+      nodePort: 30174
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -63,12 +75,22 @@ spec:
               value: http://chemclaw-service:8080
             - name: APP_VERSION
               value: kind
+            - name: SANDBOX_PORT
+              value: "8081"
+            - name: SANDBOX_BIND_HOST
+              value: 0.0.0.0
+            - name: SANDBOX_ORIGIN
+              value: http://sandbox.localhost:15174
+            - name: APP_ORIGIN
+              value: http://127.0.0.1:15173
           envFrom:
             - configMapRef:
                 name: chemclaw-ui-auth
           ports:
             - name: http
               containerPort: 8080
+            - name: sandbox
+              containerPort: 8081
           readinessProbe:
             httpGet: {path: /readyz, port: http}
             periodSeconds: 10
