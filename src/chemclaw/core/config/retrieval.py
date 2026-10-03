@@ -81,11 +81,11 @@ class RetrievalSettings(BaseSettings):
     # `D-2026-08-01-a-cap-that-starves-a-source` is about the *shape* of a cut, and a second cap
     # in a different currency applied the old way would reintroduce the starvation it fixed.
     #
-    # **52,000 since 2026-10-02, following `agent_max_tool_result_chars` down** (its comment says
-    # why). The two are one number on purpose: a sweep over the tool-result cap is cut head-and-tail
-    # by `agent/tool_result_size.py`, which drops the middle of a cross-source ranking — the shape
-    # of cut `D-2026-08-01-a-cap-that-starves-a-source` exists to prevent.
-    gather_evidence_max_chars: int = Field(default=52_000, ge=1_000)
+    # **The same number as `agent_max_tool_result_chars`, and it moves when that does** (it went to
+    # 52,000 for a day and back). A sweep over the tool-result cap is cut head-and-tail by
+    # `agent/tool_result_size.py`, which drops the middle of a cross-source ranking — the shape of
+    # cut `D-2026-08-01-a-cap-that-starves-a-source` exists to prevent.
+    gather_evidence_max_chars: int = Field(default=60_000, ge=1_000)
     # ── Condensing many whole protocols into one comparison (`agent.condense`) ────────────
     # Asking for similar reactions returns many protocols, and a protocol is atomic: it cannot be
     # split, so the unit that must fit is one whole procedure. These bound what a single turn may

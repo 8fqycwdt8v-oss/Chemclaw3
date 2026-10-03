@@ -1187,7 +1187,12 @@ def test_the_overrun_indicator_can_fire_at_the_shipped_budget_with_no_window(
 #: **Both drop 600 for the three artefact tools**, the ceiling's raise to 73,450
 #: (`D-2026-10-02-an-artefact-is-part-of-the-answer-not-an-effect`), by the same arithmetic: the
 #: prefix grew, the trigger and the window were held.
-CLEAR_TRIGGER_THREAD_ALLOWANCE = 24_950
+#:
+#: **Both gain 2,950 back when `SERVED_ELSEWHERE_ALLOWANCE` falls to 10,250**, after
+#: Chemclaw3-mcp#152 narrowed `chem` to its rules: the first entry here whose prefix *shrank* in
+#: another repository, and the 2,200 above is refunded with interest
+#: (`D-2026-10-03-the-fleet-narrowed-and-the-thread-and-the-cap-come-back`).
+CLEAR_TRIGGER_THREAD_ALLOWANCE = 27_900
 
 #: The thread allowance `agent_context_token_budget`'s default is derived to leave.
 #:
@@ -1250,7 +1255,12 @@ CLEAR_TRIGGER_THREAD_ALLOWANCE = 24_950
 #: (`D-2026-10-02-the-artefact-prefix-is-paid-from-the-window-margin`). Paying it would have left a
 #: pod calibrated on evidence traffic 12,705 estimated tokens of thread against the 13,000 one
 #: maximal tool batch occupies — the warm arm below — even after #533 lowered that batch.
-BUDGET_THREAD_ALLOWANCE = 32_650
+#:
+#: **35,600 since 2026-10-03**, up 2,950 because `SERVED_ELSEWHERE_ALLOWANCE` fell by that once the
+#: fleet narrowed `chem`; the warm arm then clears a 60,000-character batch by ~1,225, so the cap
+#: #533 lowered is restored in the same commit
+#: (`D-2026-10-03-the-fleet-narrowed-and-the-thread-and-the-cap-come-back`).
+BUDGET_THREAD_ALLOWANCE = 35_600
 
 #: The smallest context window this stack is designed against, in billed tokens.
 #:
