@@ -36,6 +36,9 @@ collide — and the newest marked user message decides (`MockLlm.select`), so an
 * `[[e2e:long-job]]` — `start_optimization_campaign` on the `measured` objective, seeded from the
   message; then quotes the job id the launcher returned.
 * `[[e2e:slow]]` — no tool; streams its answer over `SLOW_STREAM_SECONDS`.
+* `[[e2e:artefact]]` — `create_exhibit` with a `document`, its arguments streamed in
+  `ARTEFACT_FRAGMENTS` pieces so the turn stream carries `exhibit_draft` frames before the
+  `exhibit` event; then a one-line answer pointing at the artefact.
 
 `deploy/kind/README.md` carries the same list with what a browser test asserts on each, and what
 the UI suite should send.
@@ -334,6 +337,38 @@ SLOW_TEXT = " ".join(
 )
 
 
+# ------------------------------------------------------------------------------- an artefact
+
+ARTEFACT = "e2e:artefact"
+ARTEFACT_TITLE = "Amide coupling plan"
+#: Long enough that its fragments arrive over a visible stretch of the stream, so the pane can be
+#: seen filling in rather than appearing whole — the property the `exhibit_draft` event exists for.
+ARTEFACT_MARKDOWN = "\n".join(
+    [
+        "# Amide coupling plan",
+        "",
+        "## Goal",
+        "",
+        "Couple the acid and the amine with EDC/HOBt and isolate the amide by extraction.",
+        "",
+        "## Steps",
+        "",
+        *(
+            f"{n}. Step {n} of the plan, written out so the draft has something to stream."
+            for n in range(1, 13)
+        ),
+        "",
+        "## Checks",
+        "",
+        "- Conversion by HPLC before work-up.",
+        "- Residual EDC urea removed by the acid wash.",
+    ]
+)
+#: How many pieces the call's arguments are streamed in.
+ARTEFACT_FRAGMENTS = 40
+ARTEFACT_ANSWER = "I drafted the plan as an artefact beside this answer."
+
+
 E2E_BEHAVIOURS: list[Behaviour] = [
     Behaviour(name=PLAN, calls=[_PLAN_CALL, _RUN_CALL], text=PLAN_PROPOSED, script=_plan),
     Behaviour(
@@ -350,4 +385,21 @@ E2E_BEHAVIOURS: list[Behaviour] = [
     Behaviour(name=CITE, calls=_CITE_TEMPLATES, text="", script=_cite),
     Behaviour(name=LONG_JOB, calls=[_LONG_JOB_TEMPLATE], text="", script=_long_job),
     Behaviour(name=SLOW, text=SLOW_TEXT, think_seconds=0.5, stream_seconds=SLOW_STREAM_SECONDS),
+    Behaviour(
+        name=ARTEFACT,
+        calls=[
+            ToolCall(
+                tool="create_exhibit",
+                arguments={
+                    "title": ARTEFACT_TITLE,
+                    "spec": {"kind": "document", "markdown": ARTEFACT_MARKDOWN},
+                },
+                fragments=ARTEFACT_FRAGMENTS,
+            )
+        ],
+        text=ARTEFACT_ANSWER,
+        # Spread over the fragments (`think_seconds / fragments` between them), so a browser sees
+        # several throttled draft frames rather than one.
+        think_seconds=1.0,
+    ),
 ]

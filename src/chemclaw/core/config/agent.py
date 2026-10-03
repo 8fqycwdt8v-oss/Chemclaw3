@@ -232,11 +232,11 @@ class AgentSettings(BaseSettings):
     # **Raised 600 for the artefact tools, and the floor under the thread is why it moved rather
     # than the thread** (`D-2026-10-02-the-artefact-prefix-is-paid-from-the-window-margin`). The
     # thread a pod calibrated on evidence traffic keeps was 271 tokens above one maximal tool batch
-    # after `agent_max_tool_result_chars` came down to 52,000, and the artefact tools at their
-    # measured floor crossed it; below it every evidence turn is unreducible. The cap was the
-    # instrument used last time and cuts evidence on every deployment, artefacts on or off; the
-    # margin under the 128k window is what was spent instead, by exactly the ceiling's raise, so the
-    # thread allowance is held where it was. `tests/test_compaction.py` states the margin.
+    # after `agent_max_tool_result_chars` came down to 52,000 (since restored), and the artefact
+    # tools at their measured floor crossed it; below it every evidence turn is unreducible. The cap
+    # was the instrument used last time and cuts evidence on every deployment, artefacts on or off;
+    # the margin under the 128k window is what was spent instead, by exactly the ceiling's raise, so
+    # the thread allowance is held where it was. `tests/test_compaction.py` states the margin.
     agent_context_token_budget: int = Field(default=119_300, ge=1)
     agent_keep_last_tool_groups: int = Field(default=2, ge=0)
     agent_keep_last_conversation_groups: int = Field(default=0, ge=0)
@@ -346,7 +346,7 @@ class AgentSettings(BaseSettings):
     # `tests/test_compaction.py` asserts the equality — so a ceiling raise moves it in the same
     # commit as the two defaults it is the basis of.
     # D-2026-10-02-a-prefix-beyond-the-derivation-basis-is-paid-in-spend-not-thread.
-    agent_context_prefix_basis: int = Field(default=86_650, ge=0)
+    agent_context_prefix_basis: int = Field(default=83_700, ge=0)
     # **What the two numbers above are denominated in, which used to be left unsaid and was wrong.**
     # Both are counted with `count_tokens_approximately` — chars/4 — and that estimator is content
     # dependent in one direction. Re-measured 2026-09-06 against real BPE encodings, on the observed
@@ -442,17 +442,16 @@ class AgentSettings(BaseSettings):
     # `calc_find_max_result_chars` and the rest); it is the floor under all of them, applied at the
     # one place every tool result passes.
     #
-    # **52,000 since 2026-10-02, and the window is what set it.** Neither edit may reclaim the
-    # newest batch, so a pod calibrated on evidence traffic has to leave the window edit more thread
-    # than one maximal batch occupies, or every evidence turn is over the budget and unreducible —
-    # `test_the_shipped_budget_leaves_the_thread_what_its_derivation_claims` in
-    # `tests/test_compaction.py` asserts it. Raising
-    # `tests/test_context_floor.SERVED_ELSEWHERE_ALLOWANCE` for the sibling fleet's grown `chem`
-    # took that thread to ~13,300 estimated tokens against the ~15,000 a 60,000-character batch is;
-    # the budget is pinned by the smallest target window, so this was the knob that could give (an
-    # owner decision). `gather_evidence_max_chars` moved with it, because a sweep over this cap
-    # would be cut head-and-tail through the middle of its ranking.
-    agent_max_tool_result_chars: int = Field(default=52_000, ge=0)
+    # **52,000 for a day, and back to 60,000 on 2026-10-03.** Neither edit may reclaim the newest
+    # batch, so a pod calibrated on evidence traffic must leave the window edit more thread than one
+    # maximal batch occupies — the warm arm in `tests/test_compaction.py` asserts it. Raising
+    # `SERVED_ELSEWHERE_ALLOWANCE` for the sibling fleet's grown `chem` took that thread under a
+    # 60,000-character batch, and this cap was lowered to pay; the fleet then narrowed `chem` and
+    # the allowance fell, which gives the thread back with ~1,225 to spare at 60,000.
+    # `gather_evidence_max_chars` moves with it, because a sweep over this cap is cut head-and-tail
+    # through the middle of its ranking.
+    # `D-2026-10-03-the-fleet-narrowed-and-the-thread-and-the-cap-come-back`.
+    agent_max_tool_result_chars: int = Field(default=60_000, ge=0)
     # Durable working memory for the agent's scratchpad (`agent/scratchpad.py`), and the switch the
     # whole personal/organisation skills stack rides on.
     #
@@ -1040,6 +1039,21 @@ class AgentSettings(BaseSettings):
     exhibit_max_rows: int = Field(default=2_000, ge=1)
     exhibit_max_structures: int = Field(default=200, ge=1)
     exhibit_max_points: int = Field(default=5_000, ge=1)
+    # Atoms one inline `geometry` XYZ block may hold — a viewer's bound, not a chemistry one: a
+    # drug-sized substrate with a catalyst is under a hundred, and five hundred is a small protein
+    # pocket. A `source` geometry is the calc store's bytes and is not counted here.
+    exhibit_max_atoms: int = Field(default=500, ge=1)
+    # The fewest milliseconds between two `exhibit_draft` frames of one tool call on the turn
+    # stream. Each frame carries the whole document so far, so the frame rate times the document's
+    # size is the bandwidth a drafted artefact costs; a quarter second reads as live typing.
+    exhibit_draft_min_interval_ms: int = Field(default=250, ge=0)
+    # The draft rate per call, in bytes of document per millisecond of interval: a frame of N
+    # bytes is followed by the next no sooner than N / this. Each frame is the whole document, so
+    # a fixed interval makes a draft's bytes quadratic in its size — measured, a 200 kB document
+    # written over five minutes at 250 ms was ~1,200 frames averaging ~100 kB, ~120 MB per viewer.
+    # At 100 (100 kB/s) the same document costs ~150 frames and ~15 MB, and a short one still
+    # streams at the floor above.
+    exhibit_draft_bytes_per_ms: int = Field(default=100, ge=1)
     # Artefacts one session may hold; the next create is refused (409 `exhibit_limit` over REST, a
     # worded refusal to the model) rather than evicting one somebody may still be reading.
     exhibit_max_per_session: int = Field(default=100, ge=1)

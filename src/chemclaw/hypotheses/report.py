@@ -33,7 +33,7 @@ from chemclaw.kg.note import as_cell, is_note_slug
 #:
 #: **This is a bound on the tool result, measured rather than guessed.** The summary and the
 #: structured outcome ride in the same `ToolMessage`, so they share `agent_max_tool_result_chars`
-#: (60,000 when measured, 52,000 now). A ten-hypothesis field with verbose content serialises to
+#: (60,000). A ten-hypothesis field with verbose content serialises to
 #: 32,378 characters of `data` and the summary re-rendered every one of those rows for another
 #: 24,837 — 57,215 combined, a factor of 1.05 rather than the 2x an earlier comment claimed by
 #: counting `data` alone. Going over does not fail loudly: `agent/tool_result_size.py` cuts from the

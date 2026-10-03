@@ -12,6 +12,8 @@ The *paths* are per kind, because what a reader can point at differs:
 - a `table` diffs per **cell** (`"rows[3].yield"`), plus `"columns"` when the header changed;
 - a `structures` panel per **item field** (`"items[2].smiles"`, `"items[2].props.pka"`);
 - a `chart` per **point** (`"series[0].y[4]"`), plus the axis and series names;
+- a `geometry` per **field, whole-valued** (`"xyz"`, `"source"`, `"label"`): a coordinate block
+  re-optimised moves every line, so a line hunk would be the whole block anyway;
 - anything else — a pinned result, a link, or a revision that changed kind — as one `"spec"` row.
 
 Positional rather than keyed, unlike the protocol diff's arms: rows, items and points have no
@@ -29,6 +31,7 @@ from chemclaw.exhibits.models import (
     ChartSpec,
     DocumentSpec,
     ExhibitDiff,
+    GeometrySpec,
     Spec,
     Structure,
     StructuresSpec,
@@ -76,6 +79,8 @@ def diff_specs(
         )
     elif isinstance(before, ChartSpec) and isinstance(after, ChartSpec):
         changes = _chart(before, after)
+    elif isinstance(before, GeometrySpec) and isinstance(after, GeometrySpec):
+        changes = _fields("", spec_json(before), spec_json(after), _GEOMETRY_ORDER, nested=False)
     else:
         changes = _whole(spec_json(before), spec_json(after))
     return ExhibitDiff(from_revision=from_revision, to_revision=to_revision, changes=changes)
@@ -204,10 +209,24 @@ def _indexed(
     return changes
 
 
+#: A geometry's fields in reading order; `source` is one whole value, its two halves never apart.
+_GEOMETRY_ORDER = ["xyz", "source", "label", "energy_hartree", "highlight_atoms", "format"]
+
+
 def _fields(
-    path: str, before: dict[str, Any], after: dict[str, Any], order: list[str] | None = None
+    path: str,
+    before: dict[str, Any],
+    after: dict[str, Any],
+    order: list[str] | None = None,
+    *,
+    nested: bool = True,
 ) -> list[FieldChange]:
-    """Every key of two objects that differs, a nested object descended one level (`props`)."""
+    """Every key of two objects that differs, a nested object descended one level (`props`).
+
+    `nested=False` reports a nested object as one whole value instead — a geometry's `source`,
+    whose calc key and name only mean something together. An empty `path` names a top-level key
+    bare (`"xyz"`, not `".xyz"`).
+    """
     changes: list[FieldChange] = []
     present = set(before) | set(after)
     keys = [key for key in order or [] if key in present]
@@ -216,15 +235,14 @@ def _fields(
         old, new = before.get(key), after.get(key)
         if old == new:
             continue
-        if isinstance(old, dict) and isinstance(new, dict):
-            changes.extend(_fields(f"{path}.{key}", old, new, None))
+        where = f"{path}.{key}" if path else key
+        if nested and isinstance(old, dict) and isinstance(new, dict):
+            changes.extend(_fields(where, old, new, None))
             continue
         kind: ChangeKind = (
             "added" if key not in before else "removed" if key not in after else "changed"
         )
-        changes.append(
-            FieldChange(path=f"{path}.{key}", kind=kind, before=_text(old), after=_text(new))
-        )
+        changes.append(FieldChange(path=where, kind=kind, before=_text(old), after=_text(new)))
     return changes
 
 

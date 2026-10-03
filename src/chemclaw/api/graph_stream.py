@@ -20,7 +20,11 @@ different branch and yields two-tuples instead):
   that arrives *while* the model is producing rather than after the node finishes. Tool calls are
   deliberately **not** read from here even though the chunks carry `tool_call_chunks`: that is the
   streamed, fragmented shape whose reassembly cost the previous engine two live-run defects
-  (D-138, and the OpenAI-Responses case that announced ten `tool_call` events for one call).
+  (D-138, and the OpenAI-Responses case that announced ten `tool_call` events for one call). The
+  one reader of those fragments is `api/exhibit_drafts.py`, for a *preview* of a document artefact
+  being written (`ExhibitDraftEvent`) that decides nothing and is replaced by the `exhibit` event
+  the completed call produces
+  (`D-2026-10-03-a-draft-is-read-off-the-arguments-the-model-is-still-writing`).
 - `updates` carries `{node: state_update}` once a node completes, so a tool call arrives *whole*.
   That is where calls, results and the todo list are read.
 - `custom` carries what a *node* chose to publish about itself. Today that is the evidence
@@ -36,6 +40,7 @@ order (RCH-4/RCH-5) and the two engines must not disagree about it.
 """
 
 import logging
+import re
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -58,6 +63,7 @@ from chemclaw.api.events import (
     ToolFailedEvent,
     ToolQueuedEvent,
 )
+from chemclaw.api.exhibit_drafts import DraftStream
 from chemclaw.api.runner_trace import ToolCallTrace
 from chemclaw.api.runner_usage import graph_usage_tokens
 from chemclaw.api.schemas import message_text
@@ -202,6 +208,10 @@ async def graph_events(
     # rendered. Held until the root's tools node completes — a helper's own updates arrive during
     # that node too, and releasing on one of those would put the event before the result again.
     held_exhibits: list[Event] = []
+    # A document artefact the root agent is still writing, previewed from its call's arguments.
+    # Closed on every root update, so a call's last frame precedes the `tool_call` its completed
+    # model node yields.
+    drafts = DraftStream()
     # Read once per turn rather than per event: it is a property of the compiled object, and
     # re-deriving it 400 times a turn would be the same answer 400 times.
     depth = root_depth(graph)
@@ -226,6 +236,9 @@ async def graph_events(
             # tool-internal call has the property, not just the one that was caught.
             if (metadata or {}).get("langgraph_node") == _TOOL_NODE:
                 continue
+            if len(namespace) <= depth:
+                for draft in drafts.feed(chunk):
+                    yield draft
             text = _text_of(chunk)
             # **Only the root's tokens are the answer, and the attribution is what says so.**
             # The runner concatenates unattributed `TokenEvent`s into the turn's final answer, so
@@ -303,6 +316,9 @@ async def graph_events(
             # is talking to and sits one frame down, while a `task` helper spawned inside that peer
             # sits two. See `root_depth`.
             below_root = len(namespace) > depth
+            if not below_root:
+                for draft in drafts.close():
+                    yield draft
             async for event in _from_update(
                 payload,
                 "subagent" if below_root else "",
@@ -315,7 +331,7 @@ async def graph_events(
                 yield event
             if held_exhibits and not below_root and _TOOL_NODE in (payload or {}):
                 for exhibit in held_exhibits:
-                    yield exhibit
+                    yield _with_call_id(exhibit, payload[_TOOL_NODE])
                 held_exhibits.clear()
         elif mode == "values":
             # **The outermost graph's own channels, which is where the carry comes from.** The
@@ -331,6 +347,34 @@ async def graph_events(
         yield exhibit
     if failure:
         raise failure[0]
+
+
+#: The two tools whose result names the artefact revision they wrote.
+_EXHIBIT_WRITERS = frozenset({"create_exhibit", "revise_exhibit"})
+
+
+def _with_call_id(event: Event, update: Any) -> Event:
+    """`event` carrying the id of the tool call that wrote it, read off the tools node's results.
+
+    The signal is raised inside the tool body, which knows nothing of the provider's call id; the
+    `ToolMessage` answering that call knows both — its `tool_call_id`, and the `exhibit_id` and
+    `revision` the tool returned. Matching on the pair is what lets a surface settle a draft by
+    `call_id` (the drafts carry the same id) rather than by "the next `exhibit` of the turn", which
+    two writes in one batch make ambiguous. A write with no matching result keeps `""` — the
+    contract's value for a write no tool call announced.
+    """
+    if not isinstance(event, ExhibitEvent) or not isinstance(update, dict):
+        return event
+    revision = re.compile(rf'"revision":\s*{event.revision}\b')
+    for message in update.get("messages") or []:
+        if (
+            isinstance(message, ToolMessage)
+            and message.name in _EXHIBIT_WRITERS
+            and event.exhibit_id in (text := message_text(message))
+            and revision.search(text)
+        ):
+            return event.model_copy(update={"call_id": str(message.tool_call_id or "")})
+    return event
 
 
 async def _until_failure(

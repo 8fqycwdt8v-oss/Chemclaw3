@@ -27,7 +27,7 @@ import random
 import time
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
-from typing import Any
+from typing import Any, Literal
 
 import psycopg
 from fastapi import FastAPI, HTTPException, Request
@@ -72,6 +72,11 @@ from chemclaw.exhibits.models import UnknownExhibit
 
 logger = logging.getLogger(__name__)
 
+#: On a watch response: the correlation id of the turn being watched — the id its sender's own
+#: `POST …/messages` response carried — as distinct from the watch request's own
+#: `X-Chemclaw-Correlation-Id` (`D-2026-10-03-an-unload-stop-waits-for-a-reload`).
+TURN_CORRELATION_HEADER = "X-Chemclaw-Turn-Correlation-Id"
+
 
 class _TurnStream(EventSourceResponse):
     """A turn stream that ends *itself* when the client stops reading, rather than being collected.
@@ -102,6 +107,7 @@ class _TurnStream(EventSourceResponse):
         ping: int,
         send_timeout: float,
         release: Callable[[], None] | None = None,
+        headers: dict[str, str] | None = None,
     ) -> None:
         """Wrap `content`, bounding each send and remembering whose turn this is.
 
@@ -110,7 +116,7 @@ class _TurnStream(EventSourceResponse):
         `finally` (`routes/streams._SlotBoundEventStream` measured that window). A watcher's place
         and stream slot are held by the *socket*, so this is the scope they are returned in.
         """
-        super().__init__(content, ping=ping, send_timeout=send_timeout)
+        super().__init__(content, ping=ping, send_timeout=send_timeout, headers=headers)
         self._session_id = session_id
         self._release = release
 
@@ -143,6 +149,16 @@ def _retry_after_hint() -> str:
     """
     base = settings.service_turn_admission_timeout_seconds
     return str(max(1, math.ceil(base + random.random() * base)))
+
+
+def _invalid_exhibit_ref(message: str) -> dict[str, str]:
+    """The 422 detail for an `exhibit_refs` this turn cannot resolve: a `code` and the sentence.
+
+    `_queue_refusal`'s shape and reason: the code is what a surface acts on (it greys out the
+    reference chip), the sentence what a person reads, and matching the sentence is the coupling
+    the code exists to remove.
+    """
+    return {"code": "invalid_exhibit_ref", "message": message}
 
 
 def _queue_refusal(reason: Refusal) -> dict[str, str]:
@@ -285,19 +301,24 @@ async def post_message(
     # to an artefact the session does not hold is a 422 here rather than a turn that quietly runs
     # without it — the chemist pressed "Ask about this" on something specific — and resolving it
     # first means a refusal holds no slot, no claim and no permit.
+    #
+    # Both refusals carry `detail.code = "invalid_exhibit_ref"` beside the sentence, so a surface
+    # keys its "this reference no longer resolves" state on a code rather than on wording.
     if body.exhibit_refs and not settings.agent_exhibits_enabled:
         # Refused rather than validated and dropped: with artefacts off the turn note is not
         # composed, so a reference would be checked here and then reach nobody.
         raise HTTPException(
             status_code=422,
-            detail="artefacts are switched off in this deployment; send the message without "
-            "exhibit_refs",
+            detail=_invalid_exhibit_ref(
+                "artefacts are switched off in this deployment; send the message without "
+                "exhibit_refs"
+            ),
         )
     if body.exhibit_refs:
         try:
             await resolve_exhibit_refs(session_id, body.exhibit_refs)
         except UnknownExhibit as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
+            raise HTTPException(status_code=422, detail=_invalid_exhibit_ref(str(exc))) from exc
     actor_cap = settings.service_max_concurrent_turns_per_actor
     front_waiters = front.queue_waiters
     held = (
@@ -839,6 +860,7 @@ async def post_message(
             session_id=session_id,
             survive_disconnect=settings.service_turn_survives_disconnect,
             on_detach=_release_permit,
+            correlation_id=correlation_id,
         )
         if slot is not None:
             front.running_turns.register(session_id, turn)
@@ -898,6 +920,7 @@ async def stop_turn(
     session_id: str,
     principal: CurrentUser,
     live: CurrentSession,
+    reason: Literal["unload"] | None = None,
 ) -> dict[str, bool]:
     """Stop the session's running turn — the explicit act a disconnect no longer performs.
 
@@ -912,6 +935,13 @@ async def stop_turn(
     which happened. Only this process's turns are stoppable — the pump lives here — so on a
     multi-replica deployment the client calls the same origin its stream was on, which it always
     does, because the stream *is* how it knows a turn is running.
+
+    **`?reason=unload` defers the stop** (`D-2026-10-03-an-unload-stop-waits-for-a-reload`): the
+    page sending it is being discarded, and a reload cannot be told from a close at that moment, so
+    the turn is stopped only if neither its sender nor the requester reattaches through
+    `GET /sessions/{id}/turn/stream` within `service_turn_unload_grace_seconds`. Answered
+    `{"stopped": false, "deferred": true}`. Authorized exactly as an immediate stop is, and without
+    the reason the stop is immediate, as it always was — including over a pending deferral.
     """
     front = state(request)
     turn = front.running_turns.get(session_id)
@@ -925,6 +955,23 @@ async def stop_turn(
     sender = lease.actor if lease is not None else None
     if sender is not None and sender != principal.oid:
         require_owner(live, principal, session_id, "stop somebody else's turn")
+    grace = settings.service_turn_unload_grace_seconds
+    if (
+        reason == "unload"
+        and grace > 0
+        and turn.defer_stop(
+            grace,
+            resumers=frozenset(oid for oid in (principal.oid, sender) if oid),
+            max_deferrals=settings.service_turn_unload_grace_max_deferrals,
+        )
+    ):
+        METRICS.increment("chemclaw_turns_stop_deferred_total")
+        logger.info(
+            "session %s's turn will be stopped in %ss unless its page reattaches (unload stop)",
+            session_id,
+            grace,
+        )
+        return {"stopped": False, "deferred": True}
     await turn.stop()
     METRICS.increment("chemclaw_turns_stopped_total")
     logger.info("session %s's turn was stopped by request", session_id)
@@ -1021,6 +1068,11 @@ async def watch_turn(
     (`api/state._take_event_stream_slot`). Both places are held until the *socket* closes, not until
     the pump stops feeding the view (`api/detach.Watch`).
 
+    The response names the turn it is a view of in `TURN_CORRELATION_HEADER`, so a page coming
+    back after a reload follows only the turn it sent. **The sender reattaching cancels a pending
+    unload stop** — a reload is how a chemist comes back
+    to a turn their own page's unload asked to stop (`DetachableTurn.resume`).
+
     **Membership is re-read while watching** (`_while_a_participant`): an owner who removes a
     member mid-turn stops that member's view rather than leaving it open to the turn's end.
     """
@@ -1053,10 +1105,14 @@ async def watch_turn(
             detail="too many concurrent event streams; close one and retry",
             headers={"Retry-After": "1"},
         )
-    watch = turn.watch()
+    watch = turn.watch(principal.oid)
     if watch is None:
         release_slot()
         raise HTTPException(status_code=404, detail="no turn is running for this session")
+    # A page that reloaded mid-turn comes back here, and its own unload stop is waiting for exactly
+    # this (`D-2026-10-03-an-unload-stop-waits-for-a-reload`): its sender reattaching cancels it.
+    # Anyone else's view leaves it pending — `resume` checks who.
+    turn.resume(principal.oid)
 
     def _release() -> None:
         """Give back the watcher's place and the caller's stream slot, when the socket is gone."""
@@ -1069,6 +1125,10 @@ async def watch_turn(
         ping=settings.service_sse_ping_seconds,
         send_timeout=settings.service_sse_send_timeout_seconds,
         release=_release,
+        # Which turn this is: the response's own correlation header names *this* request, and a
+        # page coming back after a reload needs to know the running turn is the one it sent rather
+        # than another participant's that started meanwhile.
+        headers={TURN_CORRELATION_HEADER: turn.correlation_id} if turn.correlation_id else None,
     )
 
 

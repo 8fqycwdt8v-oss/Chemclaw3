@@ -285,6 +285,19 @@ _COUNTERS: dict[str, str] = {
         "Turns whose client disconnected mid-run and that continued to completion detached."
     ),
     "chemclaw_turns_stopped_total": "Turns cancelled by the explicit stop route.",
+    # An unloading page's stop waits out `service_turn_unload_grace_seconds` for a reload to
+    # reattach (`D-2026-10-03-an-unload-stop-waits-for-a-reload`). Deferred = resumed + expired +
+    # the turn ending on its own inside the window, so a resumed rate near the deferred rate says
+    # those unloads were reloads, and an expired rate near it says chemists really left.
+    "chemclaw_turns_stop_deferred_total": (
+        "Unload stops that were deferred for a reload to reattach rather than applied at once."
+    ),
+    "chemclaw_turns_stop_resumed_total": (
+        "Deferred unload stops cancelled because the turn's sender reattached inside the window."
+    ),
+    "chemclaw_turns_stop_expired_total": (
+        "Deferred unload stops that cancelled the turn because nobody reattached in the window."
+    ),
     # A plan that could not be read at all, as distinct from a session proposing none. Alertable
     # because it is the one state in which a one-shot approval is left unspent (`agent/plan_gate.py`
     # says what that would cost if it passed silently as "no plan").

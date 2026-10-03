@@ -8,17 +8,35 @@ the note-write path (5b.7). Retriever construction (the production sources) live
 the factory is module-level so tests swap it.
 """
 
+import asyncio
+import hashlib
+import logging
 from datetime import timedelta
 
+from pydantic import BaseModel, Field
 from temporalio import activity, workflow
 from temporalio.exceptions import ActivityError
+from temporalio.exceptions import CancelledError as TemporalCancelledError
 
 with workflow.unsafe.imports_passed_through():
+    from chemclaw.agent.session_events import record_session_event
+    from chemclaw.agent.session_store import SessionOwnerStore
     from chemclaw.core.config import settings
     from chemclaw.core.identity_context import reset_current_identity, set_current_identity
+    from chemclaw.core.logging import log_event
+    from chemclaw.core.metrics_bridge import degraded
+    from chemclaw.core.turn_signals import ExhibitSignal
     from chemclaw.durable.connector_job import ConnectorJobResult
     from chemclaw.durable.observation_jobs import workflow_safe_today
     from chemclaw.durable.registry import durable_activity, durable_workflow
+    from chemclaw.exhibits.models import (
+        PUSH_KIND,
+        DocumentSpec,
+        ExhibitLimit,
+        InvalidExhibit,
+        require_writable,
+    )
+    from chemclaw.exhibits.store import default_exhibit_store
     from chemclaw.ingest.eln.records import default_record_store
     from chemclaw.ingest.sources.registry import active_retrieve_sources
     from chemclaw.kg.git_writer import default_writer
@@ -41,12 +59,17 @@ from chemclaw.durable.deliver_message import (
     OutboundMessage,
     deliver_best_effort,
 )
+from chemclaw.durable.notify import notify_session_best_effort
 from chemclaw.durable.orchestrator import fan_out
 from chemclaw.durable.publish import (
     BAD_DATA_RETRY,
+    activity_failure_reason,
     fan_out_queue_wait_timeout,
+    light_write_queue_wait_timeout,
     publish_note,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def default_retrievers() -> list[SourceRetriever]:
@@ -164,6 +187,143 @@ async def propose_report(report: Report, requested_by: str = "", correlation_id:
     disagree about what a `report` note is.
     """
     return await record_report_note(report, requested_by, correlation_id)
+
+
+class ReportExhibitInput(BaseModel):
+    """The finished draft as a `document` artefact for the session that asked for the report."""
+
+    session_id: str = Field(min_length=1)
+    # `report_exhibit_id(workflow_id)`, derived in workflow code so every attempt names one id.
+    exhibit_id: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+    markdown: str
+    # The chemist who asked: the artefact's author, `author_kind` agent — the agent wrote the
+    # draft on their behalf, exactly as a `create_exhibit` call in their turn is recorded.
+    requested_by: str = Field(min_length=1)
+    correlation_id: str = ""
+
+
+#: The result key naming the session a report's artefact lives in. Internal: every reader strips it
+#: (`agent/durable_tools.readable_in_this_session`), so no surface publishes a session id.
+EXHIBIT_SESSION = "exhibit_session"
+
+
+def report_exhibit_id(workflow_id: str) -> str:
+    """The artefact id a report run writes: `xb-` and the first 16 hex of sha256(workflow id).
+
+    Deterministic, so a retried activity — and a replayed workflow — names the artefact the first
+    attempt wrote rather than minting a second one; and in the minted shape, so every reader that
+    holds an id to `EXHIBIT_ID` accepts it.
+    """
+    return f"xb-{hashlib.sha256(workflow_id.encode('utf-8')).hexdigest()[:16]}"
+
+
+@durable_activity("background")
+@activity.defn
+async def record_report_exhibit(request: ReportExhibitInput) -> str:
+    """Show the finished report in the session that asked, as a `document` artefact; return its id.
+
+    **Idempotent on a retry**: the id is the workflow's, so a second attempt after a committed but
+    unacknowledged first one gets the same artefact back (`ExhibitStore.create`'s create-or-return)
+    and the push lands on the same `dedupe_key`. **Skipped, with a log line and `""`**, when the
+    artefact cannot be shown: no durable session store (an in-memory one lives in the front door's
+    process, not this worker's), the session deleted since it asked, the session at its artefact
+    cap, or a draft over the spec cap — the report note is the durable result either way, and the
+    chemist still has it.
+
+    The `exhibit` push on `GET /sessions/{id}/events` is best effort inside the activity, so a
+    mailbox that cannot be written never costs the id the job summary carries.
+    """
+    if settings.session_store != "postgres":
+        log_event(logger, "report.exhibit_skipped", "no durable session store", reason="memory")
+        return ""
+    found, _, _ = await SessionOwnerStore().lookup(request.session_id)
+    if not found:
+        log_event(
+            logger,
+            "report.exhibit_skipped",
+            "session %s no longer exists; the report stays a note",
+            request.session_id,
+            reason="session_gone",
+            session=request.session_id,
+        )
+        return ""
+    spec = DocumentSpec(kind="document", markdown=request.markdown)
+    title = request.title[: settings.exhibit_max_title_chars]
+    try:
+        require_writable(spec, title=title, change_note="")
+        view = await default_exhibit_store().create(
+            request.session_id,
+            title=title,
+            spec=spec,
+            author_kind="agent",
+            author=request.requested_by,
+            correlation_id=request.correlation_id,
+            exhibit_id=request.exhibit_id,
+        )
+    except (InvalidExhibit, ExhibitLimit) as exc:
+        log_event(
+            logger,
+            "report.exhibit_skipped",
+            "the report cannot be shown as an artefact in session %s: %s",
+            request.session_id,
+            exc,
+            reason=type(exc).__name__,
+            session=request.session_id,
+        )
+        return ""
+    announced = ExhibitSignal(
+        exhibit_id=view.exhibit_id,
+        revision=view.revision,
+        kind=view.kind,
+        title=view.title,
+        op="created",
+        author_kind=view.author_kind,
+        author=view.author,
+    )
+    try:
+        await record_session_event(
+            request.session_id,
+            PUSH_KIND,
+            announced.model_dump(),
+            dedupe_key=f"report-exhibit:{view.exhibit_id}",
+        )
+    except Exception:
+        degraded(
+            logger,
+            "exhibits",
+            "could not push report artefact %s to session %s",
+            view.exhibit_id,
+            request.session_id,
+        )
+    return view.exhibit_id
+
+
+async def _report_exhibit_best_effort(request: ReportExhibitInput) -> str:
+    """Run `record_report_exhibit`, and never fail the report because the artefact did not land.
+
+    The `notify_session_best_effort` discipline: the note is the report's result and the artefact
+    is how it is shown, so a failure to show it is a warning and an empty id — and a cancellation
+    is re-raised as the workflow's own, never swallowed as a failed courtesy.
+    """
+    try:
+        return await workflow.execute_activity(
+            record_report_exhibit,
+            request,
+            task_queue=settings.background_task_queue,
+            start_to_close_timeout=timedelta(seconds=settings.activity_timeout_seconds),
+            schedule_to_start_timeout=light_write_queue_wait_timeout(),
+            retry_policy=BAD_DATA_RETRY,
+        )
+    except ActivityError as exc:
+        if isinstance(exc.cause, TemporalCancelledError):
+            raise asyncio.CancelledError("the report artefact was cancelled with its run") from exc
+        workflow.logger.warning(
+            "report artefact for session %s failed: %s",
+            request.session_id,
+            activity_failure_reason(exc),
+        )
+        return ""
 
 
 @durable_workflow("background")
@@ -352,21 +512,55 @@ class DevelopmentReportWorkflow:
                 ],
             )
         )
-        return ConnectorJobResult(
-            summary=(
-                # `report.sections`, not the fan-out's return: after reconciliation that is one
-                # per requested section, so the count the chemist is told is the count they asked
-                # for. Reading the short list is how "Drafted 'X' with 2 section(s)" came to be a
-                # true sentence about a report that was missing one.
-                # **"opened for review" until D-2026-09-05 deleted the gate it named.** This is
-                # the one place that claim survived wave 15's sweep, because it is neither a
-                # docstring nor the `propose_report` symbol name the queue already tracks — it is
-                # the sentence the chemist reads in the job result, telling them a person would
-                # look before the report counted. Nobody does: `record_note` writes it, and it is
-                # readable beside its own citations the moment this returns. A control a chemist
-                # believes in is worse than one they know they do not have.
-                f"Drafted {request.title!r} with {len(report.sections)} section(s); "
-                f"recorded as {note_ref}."
-            ),
-            data={"note_ref": note_ref, "title": request.title, "sections": len(report.sections)},
+        # `report.sections`, not the fan-out's return: after reconciliation that is one per
+        # requested section, so the count the chemist is told is the count they asked for. Reading
+        # the short list is how "Drafted 'X' with 2 section(s)" came to be a true sentence about a
+        # report that was missing one.
+        # **"opened for review" until D-2026-09-05 deleted the gate it named.** This is the one
+        # place that claim survived wave 15's sweep, because it is neither a docstring nor the
+        # `propose_report` symbol name the queue already tracks — it is the sentence the chemist
+        # reads in the job result, telling them a person would look before the report counted.
+        # Nobody does: `record_note` writes it, and it is readable beside its own citations the
+        # moment this returns. A control a chemist believes in is worse than one they know they do
+        # not have.
+        summary = (
+            f"Drafted {request.title!r} with {len(report.sections)} section(s); "
+            f"recorded as {note_ref}."
         )
+        data: dict[str, object] = {
+            "note_ref": note_ref,
+            "title": request.title,
+            "sections": len(report.sections),
+        }
+        # **Shown where it was asked for**, when it was asked for from a conversation: the draft as
+        # a `document` artefact, and the completion pushed to that session. Only for a request that
+        # names a session, which no history started before `ReportRequest.session_id` existed
+        # does — so an in-flight run replays the commands it recorded and issues these only if it
+        # was launched by this code.
+        if request.session_id:
+            exhibit_id = await _report_exhibit_best_effort(
+                ReportExhibitInput(
+                    session_id=request.session_id,
+                    exhibit_id=report_exhibit_id(workflow.info().workflow_id),
+                    title=request.title,
+                    markdown=drafted.body,
+                    requested_by=request.requested_by,
+                    correlation_id=request.correlation_id,
+                )
+            )
+            pushed: dict[str, object] = {
+                "job_id": workflow.info().workflow_id,
+                "job": "report",
+                "summary": summary,
+                "note_id": drafted.id,
+                "note_ref": note_ref,
+            }
+            if exhibit_id:
+                data["exhibit_id"] = pushed["exhibit_id"] = exhibit_id
+                # Which session can open it. The run is shared by every session that asks for the
+                # same report (`_report_id` leaves the session out), and only the first gets an
+                # artefact; a status read from any other one drops the id rather than hand over a
+                # link that 404s there (`agent/durable_tools.readable_in_this_session`).
+                data[EXHIBIT_SESSION] = request.session_id
+            await notify_session_best_effort(request.session_id, "job_completed", pushed)
+        return ConnectorJobResult(summary=summary, data=data)

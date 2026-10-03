@@ -2137,6 +2137,7 @@ nothing", not "the database matches this image".
 | 093 | `record_observation` stops writing: the restored image's `ON CONFLICT (property, input_hash)` no longer plans against a key that now carries `source`, so no observation is recorded and no calibration is scored | yes — `InvalidColumnReference` in the log |
 | 094 | every fingerprint and corpus-reaction write stops: the restored image's `ON CONFLICT (id)` / `(source, id)` no longer plans against a key that now carries `definition` | yes — `InvalidColumnReference` in the log |
 | 106 | nothing — a plain GIN index on `turn_costs.skills_loaded` is dropped, and no `ON CONFLICT` names it and no query plans through it. Re-run 105 if you want it back | n/a |
+| 116 | no write — the `session_exhibits` kind `CHECK` widens, and the restored image writes only kinds it still admits. But a `geometry` artefact written before the rollback **cannot be opened or exported** by it: its spec model refuses the kind, so the listing shows the artefact and every read of its body fails | yes — a refusal naming `geometry` on every such read. Roll forward, or leave those artefacts unopened until you do |
 
 058 and 106 are exempted and do not actually break: 058's `CHECK` widens, and 106 drops a plain index rather than a unique one — `DROP INDEX` is flagged because the pattern cannot tell the two apart.
 

@@ -151,7 +151,7 @@ def stored_authorship(message: BaseMessage) -> Authorship | None:
     return Authorship.model_validate(value) if isinstance(value, dict) else None
 
 
-#: How the turn a stored *question* opened has ended so far (`session_messages.turn_status`, 116).
+#: How the turn a stored *question* opened has ended so far (`session_messages.turn_status`, 117).
 #:
 #: Only a chemist's message written ahead of its turn carries one; every other row — an answer, a
 #: tool exchange, a row written before the column existed — is `None`, which a reader takes as "this
@@ -411,7 +411,7 @@ _INSERT = (
 # The authorship pair rides at the end, so a reader that indexes the first four columns — the
 # retention sweep does — reads exactly what it did.
 #
-# `turn_status` (116) rides after them for the same reason.
+# `turn_status` (117) rides after them for the same reason.
 SELECT_SESSION_ROWS = (
     "SELECT id, message, message_shape, correlation_id, actor, agent, turn_status "
     "FROM session_messages WHERE session_id = %s ORDER BY id"
@@ -450,7 +450,7 @@ _SETTLE_UNANSWERED = (
 # the `UPDATE` takes the row lock, a concurrent one re-evaluates `turn_status = 'running'` after it
 # and matches nothing, and only the statement that flipped the row gets it back from `RETURNING` —
 # which is what the caller books the turn's `interrupted` outcome from. Served by the partial index
-# 116 adds, so a session with no running question costs one empty index probe.
+# 117 adds, so a session with no running question costs one empty index probe.
 _MARK_INTERRUPTED = (
     "UPDATE session_messages m SET turn_status = 'interrupted' "
     "WHERE m.session_id = %s AND m.turn_status = 'running' "
