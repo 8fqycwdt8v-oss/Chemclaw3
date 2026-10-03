@@ -37,6 +37,7 @@ from chemclaw.agent.context_budget import estimator_ratio, note_model_call, rese
 from chemclaw.agent.llm_provider import classify_model_failure
 from chemclaw.agent.turn_usage import graph_usage_tokens
 from chemclaw.cli.delegation_behaviours import DELEGATION_BEHAVIOURS
+from chemclaw.cli.e2e_behaviours import E2E_BEHAVIOURS
 from chemclaw.cli.mock_llm import Behaviour, MockLlm, ToolCall, build_app
 from chemclaw.cli.storm_behaviours import BEHAVIOURS as STORM_BEHAVIOURS
 
@@ -443,7 +444,9 @@ def _decided(app: Any, route: str, payload: dict[str, Any]) -> dict[str, Any]:
 
 
 @pytest.mark.parametrize(
-    "behaviour", [*STORM_BEHAVIOURS, *DELEGATION_BEHAVIOURS], ids=lambda b: b.name
+    "behaviour",
+    [*STORM_BEHAVIOURS, *DELEGATION_BEHAVIOURS, *E2E_BEHAVIOURS],
+    ids=lambda b: b.name,
 )
 @pytest.mark.parametrize(
     ("chars", "tool_result"),
@@ -462,7 +465,9 @@ def test_both_routes_decide_one_turn_the_same_way(
     against. The whole storm catalogue is driven because the divergence that matters is the one in
     a behaviour nobody re-read: every lane in `infra/live/` selects by name out of *this* list.
 
-    **Both catalogues, because the property is the wire's and not one catalogue's.**
+    **Every catalogue, because the property is the wire's and not one catalogue's.** The `e2e`
+    entries read the request through a script, which is one more reason to drive them here: a
+    script that read a field only one route's body carries would decide differently per wire.
     `cli/mock_llm.catalogue` serves one set per process and `make live-delegation` serves the
     delegation one, so a divergence reached only by a `task`-calling behaviour would be exactly as
     invisible as the divergence this test was written for.
@@ -470,10 +475,10 @@ def test_both_routes_decide_one_turn_the_same_way(
     Three probes per behaviour, because three of the shared decisions are properties of the
     request rather than of the behaviour: a short turn, one grown past `refuse_over_input_tokens`,
     and a second pass carrying a tool result (the collapse to an answer). `think_seconds` is
-    zeroed — latency is the one thing in a behaviour that is not a decision, and `f-slow` declares
-    eight seconds of it.
+    zeroed, and so is `stream_seconds` — latency is the one thing in a behaviour that is not a
+    decision, and `f-slow` declares eight seconds of it, `e2e:slow` twenty.
     """
-    served = replace(behaviour, think_seconds=0.0)
+    served = replace(behaviour, think_seconds=0.0, stream_seconds=0.0)
     app = _app(served)
     payload = _cross_wire_payload(served.name, chars=chars, tool_result=tool_result)
 

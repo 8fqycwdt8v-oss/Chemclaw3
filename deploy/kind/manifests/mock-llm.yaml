@@ -3,6 +3,10 @@
 # protocols and picks a behaviour by the `[[name]]` marker in the user message, which is how the
 # smoke in `up.sh` asks for a plain turn and for a turn that launches a durable job.
 #
+# `--catalogue e2e` serves the storm's behaviours plus the browser suite's scripted workflows
+# (`cli/e2e_behaviours.py`, markers `[[e2e:…]]`, listed in `deploy/kind/README.md`). The storm's
+# list comes first, so an unmarked turn is answered exactly as before.
+#
 # `--host 0.0.0.0` because its callers are other pods; the flag's default stays loopback for the
 # live lane. The image is the core image `up.sh` loads, substituted at apply time.
 #
@@ -51,7 +55,8 @@ spec:
         - name: mock-llm
           image: chemclaw/core:kind
           imagePullPolicy: Never
-          command: ["/app/.venv/bin/python", "-m", "chemclaw.cli.mock_llm", "--host", "0.0.0.0"]
+          command: ["/app/.venv/bin/python", "-m", "chemclaw.cli.mock_llm",
+                    "--host", "0.0.0.0", "--catalogue", "e2e"]
           ports:
             - name: http
               containerPort: 8820
