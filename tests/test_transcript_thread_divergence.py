@@ -10,7 +10,8 @@ outcome").
 They can, and this is the third outcome: a teardown landing between the graph run and
 `_record_transcript` leaves the exchange in the model's record and out of the chemist's. Measured
 before it was counted at `checkpoints: 8, session_messages: 0`, with the runner logging "the
-committed turn is kept".
+committed turn is kept". Since the question is written ahead of the turn, what is left of the
+divergence is the answer alone: the question is in both records, marked `stopped`.
 
 **The window is instrumented rather than waited for**, the way the review that found it did:
 `build_answer_event` is wrapped to block, which is the window the verifier's judge call really
@@ -29,7 +30,11 @@ from langchain_core.runnables import RunnableConfig
 from chemclaw.agent.checkpointer import checkpointer, close_checkpointer
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
 from chemclaw.agent.session import TurnSession
-from chemclaw.agent.session_store import PostgresHistoryProvider, SessionOwnerStore
+from chemclaw.agent.session_store import (
+    PostgresHistoryProvider,
+    SessionOwnerStore,
+    stored_turn_status,
+)
 from chemclaw.agent.state import turn_config
 from chemclaw.api.runner import run_turn
 from chemclaw.core.config import settings
@@ -132,9 +137,13 @@ async def test_a_teardown_after_the_run_leaves_the_checkpoint_ahead_of_the_trans
 
     # The measurement, pinned so the "no third outcome" claim cannot come back.
     assert "the question the chemist asked" in thread, thread
-    assert transcript == [], (
-        f"the transcript is expected to be empty on this path; got {transcript}"
-    )
+    assert "the answer" in thread, thread
+    # **What the divergence is now, since the question is written ahead of the turn**
+    # (`D-2026-10-03-a-turn-is-written-ahead-and-an-interrupted-one-says-so`): the chemist's
+    # question is in both records and says how its turn ended, and only the answer the teardown
+    # cut off is the model's alone. Before the write-ahead the transcript held nothing at all.
+    assert [str(message.content) for message in transcript] == ["the question the chemist asked"]
+    assert stored_turn_status(transcript[0]) == "stopped", transcript[0].additional_kwargs
     after = METRICS.value("chemclaw_transcript_thread_divergence_total")
     assert after == before + 1, (
         "a turn kept in the checkpointer and missing from the transcript must be counted; "

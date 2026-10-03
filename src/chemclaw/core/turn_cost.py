@@ -84,7 +84,9 @@ class TurnCost(BaseModel):
     # How the turn ended (`chemclaw.api.runner._OUTCOMES`). Two producers, because a step is not
     # a chat turn: `api.runner._settle_outcome` for a chat turn, and
     # `durable.template_activities._book_step_spend` for a harness step — which cannot import
-    # `api` (`tests/test_layering.py`), so it spells four of the six values as literals.
+    # `api` (`tests/test_layering.py`), so it spells four of the six values as literals. A chat
+    # turn whose own process died books nothing; `api.runner.settle_interrupted_turns` books its
+    # `interrupted` row, once, from whichever process next touches the session.
     # `unknown` is the column default a row written before this field existed carries, and it is
     # *also* written live, by `_book_turn_spend`'s caught-exception fallback, which logs when it
     # does.

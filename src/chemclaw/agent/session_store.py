@@ -10,7 +10,9 @@ framework wrote it as the turn went and read it back before each model call, whi
 load-bearing, made it grow without bound, made a half-written turn a poison pill, and made three
 mechanisms necessary that are now gone (a disconnect rollback, a read-time orphan repair, and a
 compaction pass over the stored rows). Turn state lives in the LangGraph checkpointer now. What is
-written here is written once, by `chemclaw.api.runner._record_transcript`, after the answer exists;
+written here is written by `chemclaw.api.runner` in two steps: the chemist's message **ahead** of
+the turn, carrying `turn_status='running'`, and the rest of the exchange once the answer exists,
+which settles that status (`D-2026-10-03-a-turn-is-written-ahead-and-an-interrupted-one-says-so`);
 what reads it is `GET /sessions/{id}/messages` and the audit trail's join, both for a person — and,
 since the `basis="stated"` window was widened to the thread, `recent_user_texts`, which is not for a
 person and is bounded accordingly.
@@ -61,7 +63,7 @@ from collections.abc import AsyncIterator, Iterable, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import datetime
 from functools import cache
-from typing import Any
+from typing import Any, Literal, get_args
 
 import psycopg
 from langchain_core.messages import (
@@ -149,6 +151,40 @@ def stored_authorship(message: BaseMessage) -> Authorship | None:
     return Authorship.model_validate(value) if isinstance(value, dict) else None
 
 
+#: How the turn a stored *question* opened has ended so far (`session_messages.turn_status`, 118).
+#:
+#: Only a chemist's message written ahead of its turn carries one; every other row — an answer, a
+#: tool exchange, a row written before the column existed — is `None`, which a reader takes as "this
+#: turn's answer is in the transcript, or nobody recorded otherwise". `running` is the write-ahead
+#: state; `done`, `failed` and `stopped` are what the turn's own process settles it to; and
+#: `interrupted` is the one value a *different* process writes, when the turn's claim lapsed with no
+#: live owner (`PostgresHistoryProvider.mark_interrupted`). See
+#: `D-2026-10-03-a-turn-is-written-ahead-and-an-interrupted-one-says-so`.
+TurnStatus = Literal["running", "done", "failed", "stopped", "interrupted"]
+
+#: Where a stored message carries its turn's status, stamped as the correlation id is.
+STORED_TURN_STATUS = "chemclaw_turn_status"
+
+_TURN_STATUSES: dict[str, TurnStatus] = {status: status for status in get_args(TurnStatus)}
+
+
+def turn_status_of(value: object) -> TurnStatus | None:
+    """`value` as a member of the vocabulary, or `None` for anything else.
+
+    The column carries no constraint, and a contract field that can say anything says nothing — so
+    an unknown spelling reads as "nobody recorded", never passes through.
+    """
+    return _TURN_STATUSES.get(value) if isinstance(value, str) else None
+
+
+def stored_turn_status(message: BaseMessage) -> TurnStatus | None:
+    """The status of the turn this stored question opened, or `None` for every other row.
+
+    Public for the transcript route, which is this column's reader.
+    """
+    return turn_status_of(message.additional_kwargs.get(STORED_TURN_STATUS))
+
+
 def message_authorship(message: BaseMessage, actor: str | None) -> Authorship:
     """Who wrote a message this system is about to store, on behalf of `actor`.
 
@@ -163,13 +199,18 @@ def message_authorship(message: BaseMessage, actor: str | None) -> Authorship:
 
 
 def _stamped(
-    message: BaseMessage, correlation_id: str, authorship: Authorship | None = None
+    message: BaseMessage,
+    correlation_id: str,
+    authorship: Authorship | None = None,
+    turn_status: str | None = None,
 ) -> BaseMessage:
-    """`message` carrying its turn's correlation id and its authorship, where either is known."""
+    """`message` carrying its turn's correlation id, authorship and status, where each is known."""
     if correlation_id:
         message.additional_kwargs[STORED_CORRELATION_ID] = correlation_id
     if authorship is not None and (authorship.actor is not None or authorship.agent is not None):
         message.additional_kwargs[STORED_AUTHORSHIP] = authorship.model_dump()
+    if turn_status:
+        message.additional_kwargs[STORED_TURN_STATUS] = turn_status
     return message
 
 
@@ -369,9 +410,58 @@ _INSERT = (
 #
 # The authorship pair rides at the end, so a reader that indexes the first four columns — the
 # retention sweep does — reads exactly what it did.
+#
+# `turn_status` (118) rides after them for the same reason.
 SELECT_SESSION_ROWS = (
-    "SELECT id, message, message_shape, correlation_id, actor, agent FROM session_messages "
-    "WHERE session_id = %s ORDER BY id"
+    "SELECT id, message, message_shape, correlation_id, actor, agent, turn_status "
+    "FROM session_messages WHERE session_id = %s ORDER BY id"
+)
+
+# **The chemist's message, written ahead of the turn it opens**
+# (`D-2026-10-03-a-turn-is-written-ahead-and-an-interrupted-one-says-so`). The row `_INSERT` writes,
+# plus `turn_status = 'running'`, and its id back so the turn can settle *this* row when it ends.
+# The checkpointer holds the message from the graph's first step, so a process that died mid-turn
+# used to leave the model's record holding a question the chemist's transcript did not.
+_INSERT_TURN = (
+    "INSERT INTO session_messages "
+    "(session_id, message, message_shape, correlation_id, actor, agent, turn_status) "
+    "VALUES (%s, %s, %s, %s, %s, %s, 'running') RETURNING id"
+)
+# Settling a turn's question. Two forms, because the two outcomes carry different authority. An
+# **answer** that exists overrides whatever the row says — including `interrupted`, which another
+# process can write when this one's claim lapsed while it was in fact still alive (the lease
+# property `SessionTurnClaims` states); the transcript then shows the answer the chemist received.
+# A turn that ended **without** one settles only a row still `running`, so a teardown racing its own
+# successful write, or arriving after another process's mark, can never demote a settled turn.
+_SETTLE_ANSWERED = "UPDATE session_messages SET turn_status = %s WHERE id = %s AND session_id = %s"
+_SETTLE_UNANSWERED = (
+    "UPDATE session_messages SET turn_status = %s "
+    "WHERE id = %s AND session_id = %s AND turn_status = 'running'"
+)
+# **A turn whose owner is gone, noticed by whoever touches the session next.** A question is still
+# `running` and no live claim covers it: the session's `session_turns` row is absent, expired, or
+# was taken *after* the question was written — by a successor, which happens only once this turn's
+# own lease lapsed. `claimed_at <= created_at` is that last test: a turn's claim is always taken
+# before its question is written (both clocks are this database's `now()`), and a refresh moves
+# `expires_at` and never `claimed_at`, so a live owner's claim always passes it and a successor's
+# never does.
+#
+# One statement, so it is exactly-once across every process that might notice at the same moment:
+# the `UPDATE` takes the row lock, a concurrent one re-evaluates `turn_status = 'running'` after it
+# and matches nothing, and only the statement that flipped the row gets it back from `RETURNING` —
+# which is what the caller books the turn's `interrupted` outcome from. Served by the partial index
+# 118 adds, so a session with no running question costs one empty index probe.
+_MARK_INTERRUPTED = (
+    "UPDATE session_messages m SET turn_status = 'interrupted' "
+    "WHERE m.session_id = %s AND m.turn_status = 'running' "
+    "AND NOT EXISTS (SELECT 1 FROM session_turns t WHERE t.session_id = m.session_id "
+    "AND t.expires_at > now() AND t.claimed_at <= m.created_at) "
+    "RETURNING m.correlation_id, m.actor"
+)
+# The newest turn's status, for the reattach route's "what happened to the turn I was following".
+_LATEST_TURN_STATUS = (
+    "SELECT turn_status FROM session_messages "
+    "WHERE session_id = %s AND turn_status IS NOT NULL ORDER BY id DESC LIMIT 1"
 )
 
 # The chemist's own words in one thread, newest first — the bounded read behind `core/turn_text`'s
@@ -890,6 +980,7 @@ class PostgresHistoryProvider:
                 message_from_row(row[1], row[2]),
                 str(row[3] or ""),
                 Authorship(actor=row[4], agent=row[5]),
+                row[6],
             )
             for row in rows
         ]
@@ -959,29 +1050,125 @@ class PostgresHistoryProvider:
         """
         if not session_id or not messages:
             return
-        # Read once for the whole batch: these messages are one turn's work, so they share its
-        # correlation id. Empty off the request path (the CLI, tests), where there is no turn.
-        correlation_id = get_current_correlation_id() or ""
-        # The person the turn runs for, read once for the batch for the correlation id's reason.
-        actor = get_current_actor()
-        rows = []
-        for message in messages:
-            authorship = message_authorship(message, actor)
-            rows.append(
-                (
-                    session_id,
-                    Jsonb(message_to_dict(message)),
-                    LANGCHAIN_SHAPE,
-                    correlation_id,
-                    authorship.actor,
-                    authorship.agent,
-                )
-            )
         async with self._connection() as conn:
             async with conn.cursor() as cur:
-                await cur.executemany(_INSERT, rows)
+                await cur.executemany(_INSERT, _rows(session_id, messages))
                 await cur.execute(_OWNER_TOUCH, (session_id,))
             await conn.commit()
+
+    async def begin_turn(
+        self,
+        session_id: str | None,
+        message: BaseMessage,
+        *,
+        state: dict[str, Any] | None = None,
+    ) -> int | None:
+        """Write the chemist's message ahead of its turn, `running`; return the row to settle.
+
+        **Why ahead** (`D-2026-10-03-a-turn-is-written-ahead-and-an-interrupted-one-says-so`): the
+        checkpointer holds this message from the graph's first step, and the rest of the exchange
+        lands only once an answer exists, so a process killed in between left the model's record of
+        the conversation holding a question the chemist's transcript did not. Written here, the
+        question is in both from the start, and how its turn ended is a column on it rather than an
+        absence. The session list's sort key moves with it, in the same transaction, for
+        `save_messages`' reason.
+
+        `None` for no session, which the caller reads as "settle nothing, write the exchange whole".
+        """
+        if not session_id:
+            return None
+        async with self._connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(_INSERT_TURN, _rows(session_id, [message])[0])
+                row = await cur.fetchone()
+                await cur.execute(_OWNER_TOUCH, (session_id,))
+            await conn.commit()
+        return int(row[0]) if row is not None else None
+
+    async def finish_turn(
+        self,
+        session_id: str | None,
+        turn: int,
+        messages: Sequence[BaseMessage],
+        status: TurnStatus,
+        *,
+        state: dict[str, Any] | None = None,
+    ) -> None:
+        """Append the rest of a turn's exchange and settle its question's status, in one commit.
+
+        `messages` is everything after the question — the tool exchanges and the answer — and is
+        empty for a turn that ended without one. `done` overrides whatever the question's row says,
+        and anything else settles only a row still `running` (see `_SETTLE_ANSWERED`): an answer the
+        chemist received is the record, and a teardown never demotes a settled turn.
+        """
+        if not session_id:
+            return
+        settle = _SETTLE_ANSWERED if status == "done" else _SETTLE_UNANSWERED
+        async with self._connection() as conn:
+            async with conn.cursor() as cur:
+                if messages:
+                    await cur.executemany(_INSERT, _rows(session_id, messages))
+                await cur.execute(settle, (status, turn, session_id))
+                if messages:
+                    await cur.execute(_OWNER_TOUCH, (session_id,))
+            await conn.commit()
+
+    async def mark_interrupted(
+        self, session_id: str | None, *, state: dict[str, Any] | None = None
+    ) -> list[tuple[str, str | None]]:
+        """Mark this session's turns whose owner is gone `interrupted`; return the ones marked now.
+
+        Each is `(correlation_id, actor)`, and a turn is returned by **exactly one** call across
+        every process (`_MARK_INTERRUPTED`), so the caller can book its outcome without a second
+        writer ever booking it again. Asked by whoever touches the session next — its next turn, a
+        reattach, a transcript read — because the process that would have settled it is the one
+        that died.
+        """
+        if not session_id:
+            return []
+        async with self._connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(_MARK_INTERRUPTED, (session_id,))
+                rows = await cur.fetchall()
+            await conn.commit()
+        return [(str(row[0] or ""), row[1]) for row in rows]
+
+    async def latest_turn_status(
+        self, session_id: str | None, *, state: dict[str, Any] | None = None
+    ) -> TurnStatus | None:
+        """How the session's newest written-ahead turn stands, or `None` when it has none."""
+        if not session_id:
+            return None
+        async with self._connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(_LATEST_TURN_STATUS, (session_id,))
+                row = await cur.fetchone()
+        return turn_status_of(row[0]) if row is not None else None
+
+
+def _rows(session_id: str, messages: Sequence[BaseMessage]) -> list[tuple[Any, ...]]:
+    """The `_INSERT` parameters for these messages, stamped with their turn's id and authorship.
+
+    Read once for the whole batch: these messages are one turn's work, so they share its
+    correlation id — empty off the request path (the CLI, tests), where there is no turn — and the
+    person the turn runs for.
+    """
+    correlation_id = get_current_correlation_id() or ""
+    actor = get_current_actor()
+    rows: list[tuple[Any, ...]] = []
+    for message in messages:
+        authorship = message_authorship(message, actor)
+        rows.append(
+            (
+                session_id,
+                Jsonb(message_to_dict(message)),
+                LANGCHAIN_SHAPE,
+                correlation_id,
+                authorship.actor,
+                authorship.agent,
+            )
+        )
+    return rows
 
 
 def owner_permits(owner: str | None, actor: str | None) -> bool:
@@ -1411,13 +1598,78 @@ class InMemoryHistoryProvider:
         # Copies, stamped as the durable provider stamps them on read, so the transcript route
         # reports a turn's correlation id under either store. Copies because these are the turn's
         # own message objects, and the stamp belongs to the stored transcript, not to them.
-        correlation_id = get_current_correlation_id() or ""
-        actor = get_current_actor()
-        state.setdefault(self._KEY, []).extend(
-            _stamped(
-                message.model_copy(update={"additional_kwargs": dict(message.additional_kwargs)}),
-                correlation_id,
-                message_authorship(message, actor),
-            )
-            for message in messages
+        state.setdefault(self._KEY, []).extend(_copies(messages))
+
+    async def begin_turn(
+        self,
+        session_id: str | None,
+        message: BaseMessage,
+        *,
+        state: dict[str, Any] | None = None,
+    ) -> int | None:
+        """The durable provider's write-ahead, over the thread kept in `state`; its index back."""
+        if state is None:
+            return None
+        stored = state.setdefault(self._KEY, [])
+        stored.extend(_copies([message], "running"))
+        return len(stored) - 1
+
+    async def finish_turn(
+        self,
+        session_id: str | None,
+        turn: int,
+        messages: Sequence[BaseMessage],
+        status: TurnStatus,
+        *,
+        state: dict[str, Any] | None = None,
+    ) -> None:
+        """Settle the question at `turn` and append the rest, by the durable provider's rule.
+
+        The question is looked for where `begin_turn` put it and settled only while it is still a
+        written-ahead one: a turn rolled back across a teardown restores `state` to before the
+        question was written (`api/runner._roll_back_unfinished`), and the index may then name
+        nothing, or a message that opened no turn.
+        """
+        if state is None:
+            return
+        stored = state.setdefault(self._KEY, [])
+        if 0 <= turn < len(stored):
+            current = stored_turn_status(stored[turn])
+            if current == "running" or (status == "done" and current is not None):
+                stored[turn].additional_kwargs[STORED_TURN_STATUS] = status
+        stored.extend(_copies(messages))
+
+    async def mark_interrupted(
+        self, session_id: str | None, *, state: dict[str, Any] | None = None
+    ) -> list[tuple[str, str | None]]:
+        """Nothing, ever: an in-memory transcript dies with the process whose turn it would mark."""
+        return []
+
+    async def latest_turn_status(
+        self, session_id: str | None, *, state: dict[str, Any] | None = None
+    ) -> TurnStatus | None:
+        """The newest written-ahead question's status in `state`, or `None`."""
+        for message in reversed((state or {}).get(self._KEY) or []):
+            status = stored_turn_status(message)
+            if status is not None:
+                return status
+        return None
+
+
+def _copies(messages: Sequence[BaseMessage], turn_status: str | None = None) -> list[BaseMessage]:
+    """Stamped copies of `messages`, as the durable provider stamps its rows on read.
+
+    Copies because these are the turn's own message objects, and the stamp belongs to the stored
+    transcript, not to them.
+    """
+    correlation_id = get_current_correlation_id() or ""
+    actor = get_current_actor()
+    return [
+        _stamped(
+            message.model_copy(update={"additional_kwargs": dict(message.additional_kwargs)}),
+            correlation_id,
+            message_authorship(message, actor),
+            turn_status,
         )
+        for message in messages
+    ]

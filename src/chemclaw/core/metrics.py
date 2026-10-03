@@ -936,7 +936,8 @@ _COUNTERS: dict[str, str] = {
     "chemclaw_turns_finished_total": (
         "Turns that ended, by outcome — the one series that separates `answered` from "
         "`loop_capped`, `empty_answer`, `errored`, `timed_out` and `abandoned`, which "
-        "`turn_costs.completed` collapsed into a boolean."
+        "`turn_costs.completed` collapsed into a boolean — and `interrupted`, a turn whose own "
+        "process died mid-turn, counted by whichever process noticed it."
     ),
     # --- the durable tier ----------------------------------------------------------------------
     # Measured on a live broker: a successful job emitted zero log lines and a failed job emitted

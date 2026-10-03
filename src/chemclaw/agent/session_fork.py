@@ -123,14 +123,21 @@ _INSERT_BACK = sql.SQL("INSERT INTO {table} SELECT * FROM {temp}")
 # said, and the authorship pair (`core/authorship.py`) is a fact about the saying: stamping the
 # person who forked onto the parent's messages would attribute words to them they did not write,
 # which in a shared session would be somebody else's words.
+#
+# **How each turn ended is copied too, except a turn still running**, which the fork records as
+# `interrupted` (`D-2026-10-03-a-turn-is-written-ahead-and-an-interrupted-one-says-so`): the
+# parent's turn may finish, but it finishes in the parent — nothing will ever settle the copy, and a
+# copied `running` would be marked by the fork's next reader as an interrupted turn of the fork's
+# own, with an outcome booked against a turn the fork never ran.
 _COPY_MESSAGES = """
     INSERT INTO session_messages
-        (session_id, message, created_at, message_shape, correlation_id, actor, agent)
+        (session_id, message, created_at, message_shape, correlation_id, actor, agent, turn_status)
     SELECT %s, message,
            created_at + (now() - (
                SELECT max(created_at) FROM session_messages WHERE session_id = %s
            )),
-           message_shape, correlation_id, actor, agent
+           message_shape, correlation_id, actor, agent,
+           CASE WHEN turn_status = 'running' THEN 'interrupted' ELSE turn_status END
     FROM session_messages WHERE session_id = %s
 """
 
