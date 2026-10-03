@@ -40,6 +40,7 @@ from chemclaw.core.metrics_bridge import degraded
 from chemclaw.exhibits.bindings import bind_for_write, resolved_view
 from chemclaw.exhibits.diff import diff_specs
 from chemclaw.exhibits.export import MEDIA_TYPES, export_filename, resolve_export
+from chemclaw.exhibits.grounding import introduced_figures
 from chemclaw.exhibits.models import (
     EXHIBIT_ID,
     PUSH_KIND,
@@ -140,6 +141,7 @@ async def create_exhibit_route(
             status_code=422, detail=f"kind is {body.kind!r} and the spec is a {spec.kind!r}"
         )
     await _require_session_result(session_id, spec)
+    introduced = await asyncio.to_thread(introduced_figures, spec, None)
     try:
         view = await default_exhibit_store().create(
             session_id,
@@ -148,6 +150,7 @@ async def create_exhibit_route(
             author_kind="human",
             author=principal.oid,
             correlation_id=get_current_correlation_id() or "",
+            chemist_figures=introduced,
         )
     except ExhibitLimit as exc:
         raise HTTPException(
@@ -225,6 +228,9 @@ async def post_exhibit_revision(
         session_id, body.spec, title=title, change_note=body.change_note, parent=current.raw_spec
     )
     await _require_session_result(session_id, spec)
+    # What this person introduced over the revision they edited, recorded with it so an agent
+    # revision's grounding check reads it rather than re-deriving it (`introduced_figures`).
+    introduced = await asyncio.to_thread(introduced_figures, spec, current.raw_spec)
     try:
         view = await store.append(
             session_id,
@@ -236,6 +242,7 @@ async def post_exhibit_revision(
             change_note=body.change_note,
             title=body.title,
             correlation_id=get_current_correlation_id() or "",
+            chemist_figures=introduced,
         )
     except StaleRevision as exc:
         raise HTTPException(

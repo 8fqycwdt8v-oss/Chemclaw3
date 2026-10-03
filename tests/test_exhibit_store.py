@@ -263,27 +263,40 @@ async def test_an_artefact_at_its_revision_cap_is_refused_another(
 
 
 @pytest.mark.parametrize("backend", _BACKENDS)
-async def test_human_edits_pair_each_persons_revision_with_its_parent(backend: str) -> None:
-    """What the grounding check reads, served whole: agent revisions out, revision 1's parent None.
+async def test_the_chemists_figures_are_read_as_recorded_each_once(backend: str) -> None:
+    """What the grounding check reads: each figure a person's revision recorded, once, in order.
 
-    One read for the whole history, so the check that runs on every agent write costs one round
-    trip rather than two per person-authored revision.
+    Recorded at write time, so the read parses no spec — the check that runs on every agent write
+    used to parse every person's revision and its parent. An agent revision's figures and an
+    unrecorded (pre-119) person's revision count for nothing; another session's are unknown.
     """
     store = await _backend(backend)
     session = _session()
-    made = await store.create(session, title="T", spec=_table(1), author_kind="human", author="b")
-    for revision, (value, kind) in enumerate([(2, "agent"), (3, "human")], start=1):
+    made = await store.create(
+        session,
+        title="T",
+        spec=_table(1),
+        author_kind="human",
+        author="b",
+        chemist_figures=["4.76", "9.95"],
+    )
+    writes: list[tuple[str, list[str] | None]] = [
+        ("agent", ["1.5"]),
+        ("human", ["9.95", "16"]),
+        ("human", None),
+    ]
+    for revision, (kind, figures) in enumerate(writes, start=1):
         await store.append(
             session,
             made.exhibit_id,
-            spec=_table(value),
+            spec=_table(revision + 1),
             parent_revision=revision,
             author_kind=kind,  # type: ignore[arg-type]
             author=kind,
+            chemist_figures=figures,
         )
-    edits = await store.human_edits(session, made.exhibit_id)
-    assert edits == [(_table(1), None), (_table(3), _table(2))]
-    assert await store.human_edits(_session(), made.exhibit_id) == [], (
+    assert await store.chemist_figures(session, made.exhibit_id) == ["4.76", "9.95", "16"]
+    assert await store.chemist_figures(_session(), made.exhibit_id) == [], (
         "another session's is unknown"
     )
 

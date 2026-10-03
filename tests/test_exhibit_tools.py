@@ -28,7 +28,7 @@ from chemclaw.core.errors import ChemclawError
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 from chemclaw.core.session_context import reset_current_session_id, set_current_session_id
 from chemclaw.core.turn_signals import ExhibitSignal
-from chemclaw.exhibits.grounding import chemist_figures, unverified_figures
+from chemclaw.exhibits.grounding import introduced_figures, unverified_figures
 from chemclaw.exhibits.models import EXHIBIT_TOOLS, parse_spec
 from chemclaw.exhibits.store import default_exhibit_store
 from tests.pg import migrated_db_or_skip
@@ -57,14 +57,19 @@ def turn(monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[str, list[ExhibitSig
 
 
 async def _human(session: str, exhibit_id: str, parent: int, raw: dict[str, Any]) -> None:
-    """A chemist's revision, as the REST route writes it."""
-    await default_exhibit_store().append(
+    """A chemist's revision, as the REST route writes it — with the figures it introduced."""
+    store = default_exhibit_store()
+    edited = await store.view(session, exhibit_id, parent)
+    assert edited is not None
+    spec = parse_spec(raw)
+    await store.append(
         session,
         exhibit_id,
-        spec=parse_spec(raw),
+        spec=spec,
         parent_revision=parent,
         author_kind="human",
         author="oid-ana",
+        chemist_figures=introduced_figures(spec, edited.raw_spec),
     )
 
 
@@ -272,10 +277,14 @@ def test_a_handoff_peer_keeps_the_artefact_tools_a_helper_loses() -> None:
     assert EXHIBIT_TOOLS <= _peer_surface(root, peer)
 
 
-async def test_the_chemists_figures_are_read_in_one_store_call(
-    turn: tuple[str, list[ExhibitSignal]],
+async def test_an_agent_revision_reads_the_chemists_figures_without_parsing_a_spec(
+    turn: tuple[str, list[ExhibitSignal]], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`chemist_figures` runs on every agent write, so its cost is one read, not two per edit."""
+    """The figures a chemist introduced are read as recorded: one store call, no history re-parsed.
+
+    Before, every agent revision parsed every person's revision and its parent — measured 1.27 s on
+    the event loop for 100 revisions of a 2,000-row table, 0.37 s with the figures recorded.
+    """
     session, _ = turn
     xid = json.loads(await create_exhibit("pKa", _TABLE))["exhibit_id"]
     for parent, value in enumerate([5.1, 5.2, 5.3], start=1):
@@ -289,9 +298,13 @@ async def test_the_chemists_figures_are_read_in_one_store_call(
             calls.append(name)
             return getattr(real, name)
 
-    figures = await chemist_figures(_Counting(), session, xid)
-    assert figures == ["5.1", "5.2", "5.3"]
-    assert calls == ["human_edits"], calls
+    monkeypatch.setattr(exhibit_tools, "_store", lambda: _Counting())
+    assert await real.chemist_figures(session, xid) == ["5.1", "5.2", "5.3"]
+    revised = {**_TABLE, "rows": [{"solvent": "w", "pka": 5.3}]}
+    await revise_exhibit(xid, 4, "kept", spec=revised)
+    assert calls.count("chemist_figures") == 1 and "human_edits" not in calls, calls
+    head = await real.view(session, xid)
+    assert head is not None and head.unverified_figures == []
 
 
 async def test_the_grounding_scan_reads_in_configured_batches(

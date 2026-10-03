@@ -758,3 +758,22 @@ def test_a_person_keeps_or_detaches_a_binding_and_cannot_invent_one(
     assert invented.status_code == 422 and "not a tool result of this conversation" in (
         invented.text
     )
+
+
+def test_a_persons_write_records_the_figures_it_introduced(app: Any) -> None:
+    """A create records its figures; a revision records only what it added over the one edited.
+
+    What an agent revision's grounding check then reads (`ExhibitStore.chemist_figures`) instead
+    of re-parsing every person's revision.
+    """
+    session = _shared(app)
+    made = _create(app, _ANA, session, {"kind": "table", "title": "S", "spec": _TABLE})
+    xid = made.json()["exhibit_id"]
+    revised = {**_TABLE, "rows": [*_TABLE["rows"], {"solvent": "THF", "y": 81.5}]}
+    answer = _as(app, _BEN).post(
+        f"/sessions/{session}/exhibits/{xid}/revisions",
+        json={"parent_revision": 1, "spec": revised, "change_note": "added THF"},
+    )
+    assert answer.status_code == 201, answer.text
+    store = routes.default_exhibit_store()
+    assert asyncio.run(store.chemist_figures(session, xid)) == ["1", "76", "81.5"]

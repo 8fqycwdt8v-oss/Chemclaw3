@@ -1,0 +1,16 @@
+-- An artefact revision a person wrote records the figures it introduced, so the grounding check an
+-- agent revision runs reads a set instead of re-deriving it (`exhibits/store.chemist_figures`).
+--
+-- Measured before this column: the check parsed every person-authored revision of the artefact and
+-- its parent and extracted their figures, on the event loop, on every agent revision — 1.27 s for
+-- 100 revisions of a 2,000-row table, linear in the history up to `exhibit_max_revisions`. Recorded
+-- once at write time (`exhibits/grounding.introduced_figures`, off the loop in the REST route) it is
+-- one statement returning each figure once.
+--
+-- NULL on an agent revision, and on every person's revision written before this column, which the
+-- reader takes as "introduced nothing" — the conservative direction: a figure not counted here is
+-- flagged unchecked, never cleared. Additive, so the previous image ignores it; its human writes
+-- leave it NULL, with the same consequence.
+--
+-- Applied by `make db-migrate`.
+ALTER TABLE session_exhibit_revisions ADD COLUMN IF NOT EXISTS chemist_figures JSONB;

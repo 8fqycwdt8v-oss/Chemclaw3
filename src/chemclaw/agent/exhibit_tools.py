@@ -42,7 +42,7 @@ from chemclaw.core.tool_registry import tool
 from chemclaw.core.turn_signals import ExhibitSignal, record_exhibit
 from chemclaw.exhibits.bindings import bind_for_write, resolved_view
 from chemclaw.exhibits.diff import capped, diff_specs
-from chemclaw.exhibits.grounding import chemist_figures, unverified_figures
+from chemclaw.exhibits.grounding import unverified_figures
 from chemclaw.exhibits.models import (
     DocumentSpec,
     ExhibitView,
@@ -198,7 +198,7 @@ async def revise_exhibit(
         vanished=bound.vanished,
     )
     await require_source_stored(revised)
-    chemist = await chemist_figures(store, session_id, exhibit_id)
+    chemist = await store.chemist_figures(session_id, exhibit_id)
     try:
         view = await store.append(
             session_id,
