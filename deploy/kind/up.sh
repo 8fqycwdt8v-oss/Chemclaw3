@@ -558,35 +558,9 @@ $(k get deploy 2>&1)"
 # repository digest it was started from, and the node lists the digests its current image for that
 # tag answers to (`crictl inspecti`). A pod whose digest is not among them is stale.
 stale_deployments() {
-  local pods tags image digests="{}"
+  local pods
   pods="$(k get pods -o json)" || return 1
-  tags="$(python3 -c 'import json,sys
-for p in json.load(sys.stdin)["items"]:
-    for c in p["spec"]["containers"]:
-        if c["image"].startswith("chemclaw/"): print(c["image"])' <<<"$pods" | sort -u)"
-  for image in $tags; do
-    digests="$(docker exec "$CLUSTER-control-plane" crictl inspecti -o json "docker.io/$image" 2>/dev/null \
-      | python3 -c 'import json,sys
-known=json.loads(sys.argv[1]); image=sys.argv[2]
-try: status=json.load(sys.stdin)["status"]
-except Exception: status={"repoDigests": [], "id": ""}
-known[image]=status.get("repoDigests", []) + [status.get("id", "")]
-print(json.dumps(known))' "$digests" "$image")"
-  done
-  python3 -c 'import json,sys
-current=json.loads(sys.argv[1]); stale=set()
-for p in json.load(sys.stdin)["items"]:
-    owners=p["metadata"].get("ownerReferences") or [{}]
-    rs=owners[0].get("name", "")
-    if owners[0].get("kind") != "ReplicaSet" or "-" not in rs:
-        continue
-    deployment=rs.rsplit("-", 1)[0]
-    for spec, status in zip(p["spec"]["containers"], p["status"].get("containerStatuses", [])):
-        ok=current.get(spec["image"])
-        image_id=status.get("imageID", "")
-        if ok is not None and not any(d and (image_id == d or image_id.endswith(d.split("@")[-1])) for d in ok):
-            stale.add(deployment)
-print("\n".join(sorted(stale)))' "$digests" <<<"$pods"
+  python3 "$REPO_ROOT/src/chemclaw/cli/kind_stale_images.py" --node "$CLUSTER-control-plane" <<<"$pods"
 }
 
 # Restart the stale Deployments two at a time, each pair waited on, so a same-tag reload of the

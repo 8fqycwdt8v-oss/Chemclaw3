@@ -16,10 +16,12 @@ check.
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 import shutil
 import subprocess
+import sys
 from functools import cache
 from pathlib import Path
 from typing import Any
@@ -28,6 +30,7 @@ from urllib.parse import urlsplit
 import pytest
 import yaml
 
+from chemclaw.cli import kind_stale_images
 from tests.siblings import SIBLING_SKIP, sibling_root
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -352,3 +355,154 @@ def test_oidc_mock_is_the_shipped_identity_posture_against_the_mock_tenant() -> 
     assert "sslmode=require" in _UP
     # The UI is told the privileged role separately; a mismatch hides actions core would accept.
     assert f"REVIEWER_ROLES={config['CHEMCLAW_ENTRA_PRIVILEGED_ROLES']}" in _UP
+
+
+def test_the_lane_scripts_are_executable_in_git() -> None:
+    """The README runs `deploy/kind/up.sh up`, which a dropped executable bit refuses outright.
+
+    The mode is what git records, not what this working tree happens to have, so it is read from the
+    index: an editor that rewrites the file can clear the bit and the commit carries it silently.
+    """
+    if shutil.which("git") is None:
+        pytest.skip("no git to read file modes with")
+    listed = subprocess.run(
+        ["git", "ls-files", "-s", "--", "deploy/kind", "src/chemclaw/cli"],
+        cwd=_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if listed.returncode != 0:
+        pytest.skip(f"not a readable git checkout: {listed.stderr.strip()}")
+    modes = {line.split("\t", 1)[1]: line.split(" ", 1)[0] for line in listed.stdout.splitlines()}
+    for script in (
+        "deploy/kind/up.sh",
+        "deploy/kind/render-fleet.sh",
+        "src/chemclaw/cli/kind_stale_images.py",
+    ):
+        assert modes.get(script) == "100755", f"{script} is not executable in git"
+
+
+_OLD = "sha256:" + "a" * 64
+_NEW = "sha256:" + "b" * 64
+_NEW_ID = "sha256:" + "c" * 64
+
+
+def _pod(deployment: str, containers: list[tuple[str, str]], statuses: list[dict[str, Any]]) -> Any:
+    """A pod as `kubectl get pods -o json` lists it, owned by `<deployment>`'s ReplicaSet."""
+    return {
+        "metadata": {
+            "name": f"{deployment}-5d9f7c-x1",
+            "ownerReferences": [{"kind": "ReplicaSet", "name": f"{deployment}-5d9f7c"}],
+        },
+        "spec": {"containers": [{"name": n, "image": i} for n, i in containers]},
+        "status": {"containerStatuses": statuses},
+    }
+
+
+def _current() -> dict[str, set[str]]:
+    """The node after a core rebuild: the new repo digest and image id answer to the tag."""
+    inspecti = {"status": {"repoDigests": [f"docker.io/chemclaw/core@{_NEW}"], "id": _NEW_ID}}
+    return {
+        "chemclaw/core:kind": kind_stale_images.node_digests(inspecti),
+        "chemclaw/ui:kind": kind_stale_images.node_digests(None),  # the node could not be asked
+    }
+
+
+def test_a_pod_on_the_superseded_digest_is_stale_and_one_on_the_current_is_not() -> None:
+    """The tag is the same either way; only the digest tells the two pods apart."""
+    core = [("service", "chemclaw/core:kind")]
+    pods = {
+        "items": [
+            _pod("old", core, [{"name": "service", "imageID": f"docker.io/chemclaw/core@{_OLD}"}]),
+            _pod("new", core, [{"name": "service", "imageID": f"docker.io/chemclaw/core@{_NEW}"}]),
+        ]
+    }
+    assert kind_stale_images.stale_deployments(pods, _current()) == ["old"]
+
+
+@pytest.mark.parametrize(
+    "image_id",
+    [
+        f"docker.io/chemclaw/core@{_NEW}",  # a repo digest
+        _NEW_ID,  # the bare image id a `kind load`ed image is often started as
+        f"docker-pullable://chemclaw/core@{_NEW}",  # a runtime prefix
+    ],
+)
+def test_every_spelling_of_the_current_image_counts_as_current(image_id: str) -> None:
+    """`imageID` is a repo digest or an image id depending on how the image reached the node."""
+    pods = {
+        "items": [_pod("svc", [("c", "chemclaw/core:kind")], [{"name": "c", "imageID": image_id}])]
+    }
+    assert kind_stale_images.stale_deployments(pods, _current()) == []
+
+
+def test_containers_are_matched_to_their_statuses_by_name_not_position() -> None:
+    """The worker runs two `chemclaw/` containers, and Kubernetes promises no order between lists.
+
+    Here the statuses arrive reversed: matching by position would compare the sidecar's status
+    against the worker's spec. Only the sidecar is old, and the pod is stale because of it.
+    """
+    containers = [
+        ("background-worker", "chemclaw/core:kind"),
+        ("knowledge-sync", "chemclaw/core:kind"),
+    ]
+    statuses = [
+        {"name": "knowledge-sync", "imageID": f"docker.io/chemclaw/core@{_OLD}"},
+        {"name": "background-worker", "imageID": f"docker.io/chemclaw/core@{_NEW}"},
+    ]
+    pods = {"items": [_pod("worker", containers, statuses)]}
+    assert kind_stale_images.stale_deployments(pods, _current()) == ["worker"]
+
+    statuses[0]["imageID"] = _NEW_ID
+    assert kind_stale_images.stale_deployments(pods, _current()) == []
+
+
+def test_what_cannot_be_compared_is_not_counted_stale() -> None:
+    """No status, no `imageID` yet, a tag the node could not be asked about, a non-Deployment pod.
+
+    Each would otherwise read as "not on a current digest" and restart pods for nothing.
+    """
+    core = [("c", "chemclaw/core:kind")]
+    old = [{"name": "c", "imageID": f"docker.io/chemclaw/core@{_OLD}"}]
+    unowned = _pod("job", core, old)
+    unowned["metadata"]["ownerReferences"] = [{"kind": "Job", "name": "migrate-abc12"}]
+    pods = {
+        "items": [
+            _pod("creating", core, []),
+            _pod("pulling", core, [{"name": "c", "imageID": ""}]),
+            _pod("ui", [("ui", "chemclaw/ui:kind")], [{"name": "ui", "imageID": f"x@{_OLD}"}]),
+            _pod("postgres", [("pg", "postgres:16")], [{"name": "pg", "imageID": f"x@{_OLD}"}]),
+            unowned,
+        ]
+    }
+    assert kind_stale_images.stale_deployments(pods, _current()) == []
+
+
+def test_only_chemclaw_images_are_asked_about() -> None:
+    """The node is asked once per distinct `chemclaw/` tag, never about a third-party image."""
+    pods = {
+        "items": [
+            _pod("a", [("c", "chemclaw/core:kind"), ("s", "chemclaw/core:kind")], []),
+            _pod("b", [("pg", "postgres:16"), ("ui", "chemclaw/ui:kind")], []),
+        ]
+    }
+    assert kind_stale_images.chemclaw_images(pods) == ["chemclaw/core:kind", "chemclaw/ui:kind"]
+
+
+def test_the_stale_image_check_needs_nothing_but_the_standard_library() -> None:
+    """`up.sh` runs it as a file on the host's `python3`, where no dependency is installed."""
+    tree = ast.parse(Path(kind_stale_images.__file__).read_text(encoding="utf-8"))
+    imported = {
+        name.split(".")[0]
+        for node in ast.walk(tree)
+        for name in (
+            [a.name for a in node.names]
+            if isinstance(node, ast.Import)
+            else [node.module or ""]
+            if isinstance(node, ast.ImportFrom)
+            else []
+        )
+    }
+    assert imported <= set(sys.stdlib_module_names) | {"__future__"}, imported
+    assert "src/chemclaw/cli/kind_stale_images.py" in _UP

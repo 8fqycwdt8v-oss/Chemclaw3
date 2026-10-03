@@ -12,6 +12,7 @@ and the terminal get the same answer.
 | `schedules.py` | register the Temporal schedules |
 | `backfill_corpus.py`, `refresh_baseline.py` | one-shot operational jobs |
 | `validate_*.py` | the validators `make` runs |
+| `kind_stale_images.py` | which kind Deployments run a superseded image under an unchanged tag (`deploy/kind/up.sh`, run as a file on the host's `python3`, standard library only) |
 
 ## Why the validators are here and not in the packages they check
 
