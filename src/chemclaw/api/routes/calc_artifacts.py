@@ -19,7 +19,7 @@ from fastapi import FastAPI, HTTPException, Query, Response
 from chemclaw.api.deps import CurrentUser
 from chemclaw.core.config import settings
 from chemclaw.exhibits.export import safe_filename
-from chemclaw.exhibits.sources import calc_artifact_at, read_calc_artifact
+from chemclaw.exhibits.sources import calc_artifact_at, read_calc_artifact, within_download_cap
 
 
 async def get_calc_artifact_content(
@@ -34,8 +34,8 @@ async def get_calc_artifact_content(
     found = await calc_artifact_at(ref)
     if found is None:
         raise HTTPException(status_code=404, detail=f"no stored calculation artifact {ref!r}")
-    cap = settings.calc_artifact_max_download_bytes
-    if found.byte_size > cap:
+    if not within_download_cap(found):
+        cap = settings.calc_artifact_max_download_bytes
         raise HTTPException(
             status_code=413,
             detail=f"{ref!r} is {found.byte_size} bytes, over the {cap}-byte download cap",

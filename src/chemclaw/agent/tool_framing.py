@@ -138,7 +138,8 @@ from chemclaw.agent.tool_result_size import (
 )
 from chemclaw.connectors.transport import SERVED_BY
 from chemclaw.core.config import settings
-from chemclaw.core.result_handle import handle_line
+from chemclaw.core.result_handle import handle_line, handles_resolve
+from chemclaw.exhibits.evidence import is_evidence
 
 #: What `defanged_payload` preserves: a payload comes back as the type it went in as.
 _Payload = TypeVar("_Payload")
@@ -689,15 +690,16 @@ def _without_forged_handles(content: Any) -> Any:
     return _rewritten(content, lambda text: text.replace("⟨r:", f"{_ESCAPED_BRACKET}r:"))
 
 
-def _with_handle(message: ToolMessage) -> ToolMessage:
+def _with_handle(message: ToolMessage, *, stamp: bool = True) -> ToolMessage:
     """`message` ending in its handle line, forged ones escaped; unstamped where nothing was stored.
 
     The escape runs on every result, stamped or not, because a sinkless driver's model reads the
-    same text and must not take a tool's line for this system's.
+    same text and must not take a tool's line for this system's. `stamp` false leaves the handle
+    off a result that was stored but that no binding may name (see `stamp_result_handles`).
     """
     content = _without_forged_handles(message.content)
     ref = stored_result_ref(message)
-    if not ref or message.status == "error":
+    if not stamp or not ref or message.status == "error":
         if content == message.content:
             return message
         return message.model_copy(update={"content": content})
@@ -731,7 +733,16 @@ async def stamp_result_handles(request: Any, handler: Callable[[Any], Any]) -> A
     and every turn on a driver with no result sink (the CLI, a template step) carry none
     (`D-2026-10-03-an-artefact-binds-a-value-to-the-result-it-came-from`).
 
+    **Nor where no binding could resolve it.** Two cases, each a handle that would be refused: a
+    deployment whose bindings cannot read the store (`core.result_handle.handles_resolve`), and an
+    result that is not evidence (`exhibits.evidence.is_evidence` — a `read_exhibit` readout, a
+    helper's report, a scratchpad file), which `exhibits.bindings` never binds to: it is the
+    agent's own text handed back.
+
     Nothing re-bounds after this, and that is the cost the decision record states: a stamped result
     is its batch's share of the ceiling plus one line of `len(handle_line(ref))` characters.
     """
-    return rewritten_tool_messages(await handler(request), _with_handle)
+    stamp = handles_resolve() and is_evidence(str(request.tool_call["name"]))
+    return rewritten_tool_messages(
+        await handler(request), lambda message: _with_handle(message, stamp=stamp)
+    )

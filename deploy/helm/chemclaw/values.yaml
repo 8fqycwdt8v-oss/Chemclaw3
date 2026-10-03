@@ -1343,6 +1343,22 @@ config:
   # checks that they still agree, rather than reading the test process's own `Settings`.
   CHEMCLAW_CONNECTOR_HEALTH_TIMEOUT_SECONDS: "2"
   CHEMCLAW_SERVICE_READINESS_DB_TIMEOUT_SECONDS: "2"
+  # **Artefacts** — the versioned working documents beside the chat (`src/chemclaw/exhibits/`,
+  # `docs/guides/runbook.md` "(xvi-c) Artefacts"). All on by default in code; stated here when a
+  # release decides otherwise. Off, `CHEMCLAW_AGENT_EXHIBITS_ENABLED` unbinds the three tools and
+  # the UI shows the pane read-only where a session already holds artefacts (no new-artefact UI,
+  # and none at all where it holds none); off,
+  # `CHEMCLAW_AGENT_HTML_ARTEFACTS_ENABLED` refuses a *new* html artefact, while the UI's own
+  # `HTML_SCRIPTS_DEFAULT=off` is the switch for whether a page's scripts run. A person's push to
+  # the session's other tabs expires after `CHEMCLAW_EXHIBIT_PUSH_RETENTION_HOURS`, on its own
+  # schedule whatever `retention` says. A geometry citing a calc artifact, and
+  # `GET /calc-artifacts/content`, read a blob only under `CHEMCLAW_CALC_ARTIFACT_MAX_DOWNLOAD_BYTES`
+  # — decided from its recorded size, because the read decompresses the whole blob into the front
+  # door's memory. Upgrading to artefacts? Read the runbook's context-budget note first.
+  #   CHEMCLAW_AGENT_EXHIBITS_ENABLED: "true"
+  #   CHEMCLAW_AGENT_HTML_ARTEFACTS_ENABLED: "true"
+  #   CHEMCLAW_EXHIBIT_PUSH_RETENTION_HOURS: "24"
+  #   CHEMCLAW_CALC_ARTIFACT_MAX_DOWNLOAD_BYTES: "33554432"
 
 # Secret refs (F6-T6). This list is the whole of what is at rest: nothing else here is a
 # credential, and no component mints an outbound Entra token of its own (the workload-federation
@@ -1873,6 +1889,10 @@ retention:
   #     # never forgotten by the ownership sweep either — the same dependency the tool-result
   #     # window has (`durable/retention._OWNERSHIP_DEPENDENCIES`).
   #     CHEMCLAW_RETENTION_SESSION_EXHIBITS_DAYS: "365"
+  #     # **Keep this at least the artefacts' window if a bound value must stay readable for as
+  #     # long as the artefact is kept**: a `$bind` cell reads its stored tool result on every read,
+  #     # and once this window sweeps the result the cell reads empty with "source no longer
+  #     # available" while the artefact is still there. 30 against 365 above is that trade, stated.
   #     CHEMCLAW_RETENTION_TOOL_RESULTS_DAYS: "30"
   #     CHEMCLAW_RETENTION_RESULT_PUBLICATIONS_DAYS: "90"
   #     # The drain rate, and why it belongs in the same block as the windows it drains under.
@@ -1957,6 +1977,15 @@ retention:
   # The escape hatch for this half, on the same terms as `unboundedGrowthAccepted` above: a
   # deployment that wants every by-product kept says so where the next person greps for it.
   artifactGrowthAccepted: false
+
+  # **Artefacts, asked the same way.** `windows` is free-form, so a release that states a policy
+  # and leaves CHEMCLAW_RETENTION_SESSION_EXHIBITS_DAYS out keeps every artefact and every revision
+  # for its lifetime — and, since a session holding one is never forgotten by the ownership sweep,
+  # every session that made one too. Once `windows` is set, state exactly one of
+  # `windows.CHEMCLAW_RETENTION_SESSION_EXHIBITS_DAYS` or `exhibitsGrowthAccepted: true`, or the
+  # render refuses naming both. Only the `windows` arm is asked, for `artifactGrowthAccepted`'s
+  # reason.
+  exhibitsGrowthAccepted: false
 
 networkPolicy:
   enabled: true

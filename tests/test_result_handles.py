@@ -31,6 +31,7 @@ from chemclaw.api.runner_trace import ToolCallTrace
 from chemclaw.api.schemas import message_text
 from chemclaw.api.tool_results import content_address
 from chemclaw.connectors.transport import SERVED_BY
+from chemclaw.core.config import settings
 from chemclaw.core.quantities import labelled_values, returned_values, stated_numerals
 from chemclaw.core.result_handle import (
     handle_line,
@@ -38,6 +39,7 @@ from chemclaw.core.result_handle import (
     without_handle_line,
     without_handles,
 )
+from chemclaw.exhibits.models import EXHIBIT_TOOLS
 from chemclaw.kg.note import mentioned_ids
 from tests.middleware import tool_request
 
@@ -58,6 +60,16 @@ class _Collecting:
         return ref
 
 
+@pytest.fixture(autouse=True)
+def _bindings_resolve(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The durable session store, where a binding can resolve a handle — the stamp's precondition.
+
+    `core.result_handle.handles_resolve`: under the in-memory one no handle is stamped, which
+    `test_no_handle_is_stamped_where_no_binding_could_resolve_it` pins on its own.
+    """
+    monkeypatch.setattr(settings, "session_store", "postgres")
+
+
 @pytest.fixture
 def sink() -> Iterator[_Collecting]:
     """The turn has a sink, as `api/runner._turn_ambient` installs one."""
@@ -76,15 +88,15 @@ class _Served:
     metadata = {SERVED_BY: {"connector": "props", "build": "probe"}}
 
 
-def _chain(content: Any, *, status: str = "success", served: bool = False) -> ToolMessage:
+def _chain(
+    content: Any, *, status: str = "success", served: bool = False, name: str = "lookup_solvents"
+) -> ToolMessage:
     """`content` through the three presentation passes in the order the chain nests them."""
     tool = _Served() if served else None
-    request = tool_request("lookup_solvents", tool=tool)
+    request = tool_request(name, tool=tool)
 
     async def _tool(_request: Any) -> ToolMessage:
-        return ToolMessage(
-            content=content, tool_call_id="call-1", name="lookup_solvents", status=status
-        )
+        return ToolMessage(content=content, tool_call_id="call-1", name=name, status=status)
 
     async def _bound(inner: Any) -> Any:
         return await bound_tool_results.awrap_tool_call(inner, _tool)
@@ -134,6 +146,28 @@ def test_a_failure_or_an_empty_result_carries_no_handle(
     message = _chain(content, status=status)
     assert "⟨r:" not in message_text(message)
     assert stored_result_ref(message) == ""
+
+
+def test_no_handle_is_stamped_where_no_binding_could_resolve_it(
+    sink: _Collecting, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The stamp follows the resolver: no handle that every binding would be refused on.
+
+    Two cases. Under the in-memory session store the result store still keeps the result (the
+    transcript opens it), but `exhibits.bindings` cannot resolve one — before, every result there
+    carried a handle and every `$bind` naming it was refused. And a result that is not evidence — an
+    artefact readout, a helper's report, a scratchpad file (`exhibits.evidence`) — is stored and
+    never bindable, so it carries none either.
+    """
+    ref = content_address(_PAYLOAD)
+    for name in sorted({*EXHIBIT_TOOLS, "task", "read_file", "write_todos", "transfer_to_x"}):
+        message = _chain(_PAYLOAD, name=name)
+        assert stored_result_ref(message) == ref, "still stored: the transcript opens it"
+        assert message_text(message) == _PAYLOAD
+    monkeypatch.setattr(settings, "session_store", "memory")
+    message = _chain(_PAYLOAD)
+    assert stored_result_ref(message) == ref
+    assert message_text(message) == _PAYLOAD
 
 
 def test_with_no_sink_nothing_is_stored_and_no_handle_is_written() -> None:

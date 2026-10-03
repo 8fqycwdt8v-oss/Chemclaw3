@@ -921,3 +921,62 @@ def test_a_fork_carries_each_artefact_as_it_stands_under_a_new_id() -> None:
     notes_state, notes, _ = views["Notes"]
     assert notes.change_note == f"forked from {originals[1]} r1"
     assert notes_state.agent_seen_revision == 1
+
+
+def test_a_forked_artefact_carries_every_figure_people_introduced_across_its_history() -> None:
+    """The fork copies the head alone, so it records the union of the source's chemist figures.
+
+    Before, revision 1 of the copy carried only the head's own column: a figure a person introduced
+    two revisions back — or one written before migration 119 and derived — counted for nothing in
+    the child, and its first agent revision flagged the chemist's own value as unchecked.
+    """
+
+    def _table(*values: float) -> Any:
+        rows = [{"y": value} for value in values]
+        return parse_spec({"kind": "table", "columns": [{"key": "y", "label": "Y"}], "rows": rows})
+
+    async def _run() -> tuple[list[str], list[str]]:
+        await migrated_db_or_skip()
+        await create_checkpoint_tables()
+        parent = uuid4().hex
+        await _seed(parent)
+        store = PostgresExhibitStore()
+        made = await store.create(
+            parent, title="T", spec=_table(1.5), author_kind="agent", author="oid-ana"
+        )
+        await store.append(
+            parent,
+            made.exhibit_id,
+            spec=_table(1.5, 76.5),
+            parent_revision=1,
+            author_kind="human",
+            author="oid-ben",
+            chemist_figures=["76.5"],
+        )
+        # A pre-119 person's revision: nothing recorded, so it is derived ("81").
+        await store.append(
+            parent,
+            made.exhibit_id,
+            spec=_table(1.5, 76.5, 81),
+            parent_revision=2,
+            author_kind="human",
+            author="oid-ben",
+        )
+        await store.append(
+            parent,
+            made.exhibit_id,
+            spec=_table(1.5, 76.5, 81, 2.25),
+            parent_revision=3,
+            author_kind="agent",
+            author="oid-ana",
+        )
+        child = await fork_session(parent, "owner-1", None)
+        [copied] = await store.headers(child)
+        return (
+            await store.chemist_figures(parent, made.exhibit_id),
+            await store.chemist_figures(child, copied.exhibit_id),
+        )
+
+    source, forked = asyncio.run(_run())
+    assert source == ["76.5", "81"]
+    assert forked == source

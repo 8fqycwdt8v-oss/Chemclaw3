@@ -45,6 +45,12 @@ archives it:
 }
 ```
 
+**`order` is the apply order, and the backend precedes the UI.** The fleet first (core dials it),
+then `core` — whose chart runs the migrations as a pre-upgrade hook, so the schema lands with the
+backend — then `ui`. A release whose UI reads a shape only the new backend serves (the artefacts
+wave: a geometry's `structure_id`, `tool_failed.call_id`, the sandbox handshake) rolls the UI
+last for that reason; `Jenkinsfile.release` builds `order` that way and nothing reorders it.
+
 **Digests, never tags.** `values.yaml` treats `image.digest` as the release knob and ignores
 `image.tag` when it is set, because a tag is a pointer: `helm rollback` to a release naming `0.1.0`
 fetches whatever `0.1.0` means now, and every audit record stamps a build revision that stops being

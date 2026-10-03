@@ -45,6 +45,7 @@ from chemclaw.durable.retention import (
     _prune_checkpoints,
     _sweep_once,
     _window_days,
+    prune_exhibit_pushes,
     prune_expired_rows,
     unwindowed_ownership_dependencies,
 )
@@ -696,7 +697,8 @@ def test_an_artefact_push_goes_on_age_alone_and_nothing_else_does() -> None:
     An artefact push is a notification — the list route is the source of truth — so an unconsumed
     one is not owed to anybody the way a `job_completed` is. Driven with the conversation's own
     `session_events` window **off**, which is the shipped default: the push window must not depend
-    on it, and an unconsumed `job_completed` of the same age must still survive.
+    on it, and an unconsumed `job_completed` of the same age must still survive. Driven through
+    `prune_exhibit_pushes`, the job of its own that runs whether or not a policy is stated.
     """
 
     async def _run() -> dict[tuple[str, str], int]:
@@ -726,7 +728,7 @@ def test_an_artefact_push_goes_on_age_alone_and_nothing_else_does() -> None:
                         )
                 await conn.commit()
 
-            await prune_expired_rows()
+            assert await prune_exhibit_pushes() == 2
 
             async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
                 await cur.execute(
@@ -2908,6 +2910,8 @@ def _rendered_retention_rule() -> dict[str, object]:
             "retention.artifactGrowthAccepted=true",
             "--set",
             "retention.windows.CHEMCLAW_RETENTION_SESSION_MESSAGES_DAYS=365",
+            "--set",
+            "retention.windows.CHEMCLAW_RETENTION_SESSION_EXHIBITS_DAYS=365",
         ],
         capture_output=True,
         text=True,

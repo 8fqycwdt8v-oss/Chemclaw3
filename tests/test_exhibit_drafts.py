@@ -18,6 +18,7 @@ import pytest
 from langchain_core.callbacks import CallbackManagerForLLMRun
 from langchain_core.messages import AIMessage, AIMessageChunk
 from langchain_core.outputs import ChatGenerationChunk
+from langchain_core.utils.json import parse_partial_json
 
 from chemclaw.agent.audit import NullAuditSink
 from chemclaw.agent.langgraph_agent import build_langgraph_agent
@@ -33,6 +34,11 @@ from tests.fakes_langgraph import ScriptedChatModel
 #: How many characters of a call's JSON arguments each streamed fragment carries.
 _FRAGMENT_CHARS = 12
 _REPORT = "# Plan\n\nStep one: dry the THF.\n\nStep two: add the base slowly.\n"
+#: Long enough that the arguments have doubled several times after the text begins, which is what
+#: lets a call's first frame go (`exhibit_drafts`' module docstring) — so several frames follow it.
+_LONG_REPORT = _REPORT + "".join(
+    f"\nStep {n}: stir for {n} min, then sample.\n" for n in range(3, 12)
+)
 
 
 class _FragmentingModel(ScriptedChatModel):
@@ -129,16 +135,16 @@ def test_drafts_grow_and_precede_the_call_its_result_and_its_artefact(
 ) -> None:
     """Unthrottled: a frame per growth, each the whole text so far, all before `tool_call`."""
     monkeypatch.setattr(settings, "exhibit_draft_min_interval_ms", 0)
-    events = _drive([_create(), "done"])
+    events = _drive([_create(_LONG_REPORT), "done"])
     kinds = [event.type for event in events]
     drafts = [event for event in events if isinstance(event, ExhibitDraftEvent)]
     assert len(drafts) > 3, kinds
     assert kinds[: len(drafts)] == ["exhibit_draft"] * len(drafts)
     assert kinds[len(drafts) :] == ["tool_call", "tool_result", "exhibit", "token"]
     texts = [draft.markdown for draft in drafts]
-    assert all(_REPORT.startswith(text) for text in texts)
+    assert all(_LONG_REPORT.startswith(text) for text in texts)
     assert all(len(a) < len(b) for a, b in zip(texts, texts[1:], strict=False)), texts
-    assert texts[-1] == _REPORT
+    assert texts[-1] == _LONG_REPORT
     first = drafts[0]
     assert (first.call_id, first.op, first.exhibit_id, first.kind, first.title) == (
         "call-1",
@@ -234,15 +240,25 @@ def test_a_draft_past_the_spec_cap_stops_and_a_kind_in_progress_does_not(
 ) -> None:
     """Past `exhibit_max_spec_bytes` the call goes quiet; markdown before `kind` drafts as `""`."""
     monkeypatch.setattr(settings, "exhibit_draft_min_interval_ms", 0)
-    monkeypatch.setattr(settings, "exhibit_max_spec_bytes", 20)
-    long = json.dumps({"title": "T", "spec": {"kind": "document", "markdown": "x" * 60}})
+    monkeypatch.setattr(settings, "exhibit_max_spec_bytes", 200)
+    long = json.dumps({"title": "T", "spec": {"kind": "document", "markdown": "x" * 600}})
     frames = _feed(DraftStream(), "create_exhibit", long, size=5)
-    assert frames and max(len(frame.markdown.encode()) for frame in frames) <= 20
+    assert frames and max(len(frame.markdown.encode()) for frame in frames) <= 200
     assert not any(frame.done for frame in frames)
     monkeypatch.setattr(settings, "exhibit_max_spec_bytes", 200_000)
-    unkinded = json.dumps({"title": "T", "spec": {"markdown": "# hi there", "kind": "document"}})
-    frames = _feed(DraftStream(), "create_exhibit", unkinded, size=5)
-    assert frames and {frame.kind for frame in frames} == {""}
+    unkinded = json.dumps(
+        {"title": "T", "spec": {"markdown": "# hi there " * 20, "kind": "document"}}
+    )
+    # The throttle must not decide which frames exist: with the size-scaled interval at its real
+    # rate, a slow runner let a frame through after `kind` arrived (CI), a fast one did not. So the
+    # interval is driven to zero and the rule is asserted as it is — frames sent before `kind` is
+    # known draft as `""`, and any after it say `document`.
+    monkeypatch.setattr(settings, "exhibit_draft_bytes_per_ms", 10**9)
+    frames = [f for f in _feed(DraftStream(), "create_exhibit", unkinded, size=5) if not f.done]
+    assert frames and frames[0].kind == ""
+    assert {frame.kind for frame in frames} <= {"", "document"}
+    kinded_from = next((i for i, f in enumerate(frames) if f.kind), len(frames))
+    assert all(frame.kind == "document" for frame in frames[kinded_from:])
     table = json.dumps({"title": "T", "spec": {"kind": "table", "markdown": "# not a doc"}})
     assert _feed(DraftStream(), "create_exhibit", table, size=5) == []
 
@@ -328,3 +344,104 @@ def test_a_slow_reader_holds_one_draft_per_call_and_gets_the_newest() -> None:
         ("exhibit_draft", "other"),
         ("token", "after"),
     ]
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        # A table whose `kind` comes last: never a document, and nothing says so until the end.
+        {"columns": [{"key": "v", "label": "V"}], "rows": [{"v": n} for n in range(6_000)]},
+        # A spec the model wrote as a JSON string rather than an object.
+        json.dumps({"kind": "document", "markdown": "x " * 38_000}),
+    ],
+    ids=["kind-last", "string-spec"],
+)
+def test_a_call_that_shows_nothing_is_parsed_a_logarithmic_number_of_times(
+    monkeypatch: pytest.MonkeyPatch, spec: Any
+) -> None:
+    """Before the first frame a call is re-parsed only when its arguments have doubled.
+
+    Measured before: ~75 kB of arguments in 12-character fragments was 6,306 whole-argument parses
+    (27 s of event-loop CPU) for the table and 6,341 (15 s) for the string spec — one per fragment,
+    for no frame. Now the table is parsed about log2 of its size, and the string spec stops at the
+    first parse that sees it.
+    """
+    from chemclaw.api import exhibit_drafts
+
+    parses: list[int] = []
+    real = parse_partial_json
+
+    def _counting(text: str) -> Any:
+        parses.append(len(text))
+        return real(text)
+
+    monkeypatch.setattr(exhibit_drafts, "parse_partial_json", _counting)
+    arguments = json.dumps({"title": "T", "spec": spec})
+    assert len(arguments) > 60_000
+    assert _feed(DraftStream(), "create_exhibit", arguments, size=12) == []
+    assert len(parses) <= 20, len(parses)
+
+
+def test_arguments_longer_than_any_storable_spec_stop_the_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Past the spec cap plus a title and a note at their caps, nothing more is read."""
+    monkeypatch.setattr(settings, "exhibit_max_spec_bytes", 1_000)
+    monkeypatch.setattr(settings, "exhibit_max_title_chars", 10)
+    monkeypatch.setattr(settings, "exhibit_max_note_chars", 10)
+    monkeypatch.setattr(settings, "exhibit_draft_argument_slack_chars", 500)
+    from chemclaw.api import exhibit_drafts
+
+    parses: list[int] = []
+    real = parse_partial_json
+
+    def _counting(text: str) -> Any:
+        parses.append(len(text))
+        return real(text)
+
+    monkeypatch.setattr(exhibit_drafts, "parse_partial_json", _counting)
+    table = {"columns": [{"key": "v", "label": "V"}], "rows": [{"v": n} for n in range(2_000)]}
+    _feed(DraftStream(), "create_exhibit", json.dumps({"title": "T", "spec": table}), size=50)
+    assert parses and max(parses) <= 1_000 + 6 * 20 + 500
+
+    # And the bound is the setting's: a stream fed past it stops within one fragment of it.
+    stream = DraftStream()
+    arguments = json.dumps({"title": "T", "spec": table})
+    for start in range(0, len(arguments), 50):
+        stream.feed(
+            AIMessageChunk(
+                content="",
+                id="m",
+                tool_call_chunks=[
+                    {
+                        "name": "create_exhibit" if start == 0 else None,
+                        "args": arguments[start : start + 50],
+                        "id": "c1" if start == 0 else None,
+                        "index": 0,
+                        "type": "tool_call_chunk",
+                    }
+                ],
+            )
+        )
+    [call] = stream._calls.values()
+    bound = 1_000 + 6 * 20 + 500
+    assert call.stopped and bound < len(call.arguments) <= bound + 50
+
+
+def test_a_refused_call_names_the_draft_it_leaves_unsettled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`tool_failed.call_id` is the drafts' `call_id`, so a surface drops exactly that draft.
+
+    The hardening contract's item 2: before, the failure named only the tool, and a surface holding
+    two drafts of `create_exhibit` could not tell which one would never be settled.
+    """
+    from chemclaw.api.events import ToolFailedEvent
+
+    monkeypatch.setattr(settings, "exhibit_draft_min_interval_ms", 0)
+    untitled = {"name": "create_exhibit", "args": {"title": " ", "spec": _create()["args"]["spec"]}}
+    events = _drive([untitled, "done"])
+    drafts = [e for e in events if isinstance(e, ExhibitDraftEvent)]
+    [failed] = [e for e in events if isinstance(e, ToolFailedEvent)]
+    assert drafts and {draft.call_id for draft in drafts} == {"call-1"}
+    assert failed.call_id == "call-1" and not any(isinstance(e, ExhibitEvent) for e in events)

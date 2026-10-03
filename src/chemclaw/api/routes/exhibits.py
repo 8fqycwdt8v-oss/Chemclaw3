@@ -35,11 +35,11 @@ from chemclaw.api.deps import CurrentSession, CurrentUser
 from chemclaw.api.events import ExhibitEvent
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import get_current_correlation_id
-from chemclaw.core.logging import log_event
 from chemclaw.core.metrics_bridge import degraded
 from chemclaw.exhibits.bindings import bind_for_write, resolved_view
 from chemclaw.exhibits.diff import diff_specs
 from chemclaw.exhibits.export import MEDIA_TYPES, export_filename, resolve_export
+from chemclaw.exhibits.grounding import introduced_figures
 from chemclaw.exhibits.models import (
     EXHIBIT_ID,
     PUSH_KIND,
@@ -60,6 +60,7 @@ from chemclaw.exhibits.models import (
 )
 from chemclaw.exhibits.sources import require_source_stored
 from chemclaw.exhibits.store import default_exhibit_store
+from chemclaw.exhibits.telemetry import record_refusal, record_write
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +114,8 @@ async def list_exhibits(session_id: str, live: CurrentSession) -> ExhibitListOut
     """The session's artefacts, most recently updated first, and whether the feature is on.
 
     `enabled` is `agent_exhibits_enabled`: off, the agent holds no artefact tools and a surface
-    hides the pane. What a session already holds is still listed, because switching the agent's
+    shows the pane read-only, offering no new artefact. What a session already holds is still
+    listed, because switching the agent's
     tools off is not a reason to hide what a chemist pinned. `html_enabled` is
     `agent_html_artefacts_enabled`, under the same rule: off refuses a new html artefact and still
     lists the ones the session holds.
@@ -136,10 +138,12 @@ async def create_exhibit_route(
     """
     spec = await _parsed(session_id, body.spec, title=body.title, change_note="", creating=True)
     if spec.kind != body.kind:
+        record_refusal("invalid")
         raise HTTPException(
             status_code=422, detail=f"kind is {body.kind!r} and the spec is a {spec.kind!r}"
         )
     await _require_session_result(session_id, spec)
+    introduced = await asyncio.to_thread(introduced_figures, spec, None)
     try:
         view = await default_exhibit_store().create(
             session_id,
@@ -148,8 +152,10 @@ async def create_exhibit_route(
             author_kind="human",
             author=principal.oid,
             correlation_id=get_current_correlation_id() or "",
+            chemist_figures=introduced,
         )
     except ExhibitLimit as exc:
+        record_refusal("exhibit_limit")
         raise HTTPException(
             status_code=409, detail={"code": "exhibit_limit", "message": str(exc)}
         ) from exc
@@ -225,6 +231,9 @@ async def post_exhibit_revision(
         session_id, body.spec, title=title, change_note=body.change_note, parent=current.raw_spec
     )
     await _require_session_result(session_id, spec)
+    # What this person introduced over the revision they edited, recorded with it so an agent
+    # revision's grounding check reads it rather than re-deriving it (`introduced_figures`).
+    introduced = await asyncio.to_thread(introduced_figures, spec, current.raw_spec)
     try:
         view = await store.append(
             session_id,
@@ -236,16 +245,21 @@ async def post_exhibit_revision(
             change_note=body.change_note,
             title=body.title,
             correlation_id=get_current_correlation_id() or "",
+            chemist_figures=introduced,
         )
     except StaleRevision as exc:
+        record_refusal("stale_revision")
         raise HTTPException(
             status_code=409, detail={"code": "stale_revision", "head_revision": exc.head}
         ) from exc
     except UnknownExhibit as exc:
+        record_refusal("not_found")
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except InvalidExhibit as exc:
+        record_refusal("invalid")
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except ExhibitLimit as exc:
+        record_refusal("exhibit_limit")
         raise HTTPException(
             status_code=409, detail={"code": "exhibit_limit", "message": str(exc)}
         ) from exc
@@ -327,8 +341,9 @@ async def _parsed(
             stored=bound.stored,
             vanished=bound.vanished,
         )
-        await require_source_stored(spec)
+        await require_source_stored(spec, session_id, parent=parent)
     except InvalidExhibit as exc:
+        record_refusal("invalid")
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return bound.stored
 
@@ -338,6 +353,7 @@ async def _require_session_result(session_id: str, spec: Spec) -> None:
     if isinstance(spec, ResultSpec) and spec.result_ref not in await front_door.fetchable_refs(
         session_id
     ):
+        record_refusal("invalid")
         raise HTTPException(
             status_code=422, detail="result_ref is not a stored tool result of this session"
         )
@@ -352,19 +368,7 @@ async def _announce(view: ExhibitView, op: Literal["created", "revised"]) -> Non
     a refresh. A mailbox that cannot be written is counted and does not fail the write that already
     committed. The in-memory session store has no mailbox, so nothing is pushed there.
     """
-    log_event(
-        logger,
-        f"exhibit.{op}",
-        "artefact %s revision %d %s by %s",
-        view.exhibit_id,
-        view.revision,
-        op,
-        view.author,
-        actor=view.author,
-        session=view.session_id,
-        exhibit_id=view.exhibit_id,
-        revision=view.revision,
-    )
+    record_write(view, op)
     if settings.session_store != "postgres":
         return
     event = ExhibitEvent(

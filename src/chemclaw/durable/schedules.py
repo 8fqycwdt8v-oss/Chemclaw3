@@ -58,7 +58,7 @@ from chemclaw.durable.note_index import NoteReindexWorkflow
 from chemclaw.durable.observation_jobs import ObservationSynthesisWorkflow
 from chemclaw.durable.orphaned_waits import OrphanedWaitsWorkflow
 from chemclaw.durable.publish_results import PublishResultsWorkflow
-from chemclaw.durable.retention import RetentionWorkflow
+from chemclaw.durable.retention import ExhibitPushPruneWorkflow, RetentionWorkflow
 from chemclaw.ingest.sources.registry import (
     active_commitment_sources,
     active_ingest_source_names,
@@ -119,6 +119,7 @@ OWNED_SCHEDULE_IDS = frozenset(
         # the full plan.
         "result-publish",
         "orphaned-waits",
+        "exhibit-pushes",
     }
 )
 
@@ -126,17 +127,24 @@ OWNED_SCHEDULE_IDS = frozenset(
 def _retention_windows_are_set() -> bool:
     """Whether any table has a retention window, i.e. whether the sweep would delete anything.
 
-    Reads the same four settings `retention._window_days` maps, because the condition being asked
-    is exactly "would that function return a non-zero for anything". Kept a predicate here rather
-    than imported from there so the plan stays free of the workflow module's own imports.
+    **Derived from the settings, not listed.** It read four named windows while the sweep maps six
+    (`retention._window_days`), so a release whose only window was its artefacts'
+    (`retention_session_exhibits_days`) or its delivered publications' never scheduled the sweep —
+    a stated policy, applied by nothing, and the chart's own posture gate satisfied. Every
+    `retention_*_days` field is a window by this naming rule, which
+    `tests/test_schedules.py::test_every_retention_window_turns_the_sweep_on` holds against the
+    sweep's own map, so a window added there counts here with no edit. Kept a predicate here rather
+    than imported from `retention` so the plan stays free of the workflow module's own imports.
     """
-    return any(
-        (
-            settings.retention_session_events_days,
-            settings.retention_session_messages_days,
-            settings.retention_tool_results_days,
-            settings.retention_checkpoints_days,
-        )
+    return any(getattr(settings, name) for name in retention_window_fields())
+
+
+def retention_window_fields() -> list[str]:
+    """Every `retention_*_days` setting — each one a table's window, in days, 0 meaning off."""
+    return sorted(
+        name
+        for name in type(settings).model_fields
+        if name.startswith("retention_") and name.endswith("_days")
     )
 
 
@@ -252,6 +260,14 @@ def planned_schedules() -> list[PlannedSchedule]:
     if settings.retention_enabled and _retention_windows_are_set():
         retention_every = timedelta(minutes=settings.retention_schedule_minutes)
         schedules.append(PlannedSchedule("retention", RetentionWorkflow, retention_every))
+    # Artefact pushes expire on their own window wherever a mailbox can hold one — the durable
+    # session store, which every artefact push is written to — and whether or not a retention
+    # policy is stated: a push is a notification, and `exhibit_push_retention_hours` is not
+    # 0-disabled for that reason (`D-2026-10-03-an-artefact-push-expires-on-its-own-schedule`). It
+    # fires once a window, so a push outlives its window by at most one more.
+    if settings.session_store == "postgres":
+        push_every = timedelta(hours=settings.exhibit_push_retention_hours)
+        schedules.append(PlannedSchedule("exhibit-pushes", ExhibitPushPruneWorkflow, push_every))
     # Artifact eviction earns a Schedule as soon as either of its two bounds is set — those two
     # settings *are* the documented way to turn eviction on, and until this entry existed they
     # turned on nothing: the workflow was decorated, imported by the background worker and

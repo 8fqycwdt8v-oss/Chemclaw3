@@ -424,6 +424,61 @@ def test_retention_needs_a_window_and_not_only_the_boolean(
     assert RetentionWorkflow in {p.workflow for p in planned_schedules()}
 
 
+def test_every_retention_window_turns_the_sweep_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each `retention_*_days` window alone schedules the sweep, and the set is the sweep's own.
+
+    The predicate listed four windows while the sweep mapped six, so a release whose only window
+    was `retention_session_exhibits_days` (or `retention_result_publications_days`) stated a policy
+    that nothing ever applied. Driven one window at a time, and held against `_window_days`' map so
+    a seventh window counts here with no edit.
+    """
+    from chemclaw.durable.retention import _PRUNABLE, _window_days
+    from chemclaw.durable.schedules import retention_window_fields
+
+    windows = retention_window_fields()
+    assert {"retention_session_exhibits_days", "retention_result_publications_days"} <= set(windows)
+    for name in windows:
+        monkeypatch.setattr(settings, name, 0)
+    assert {_window_days(table) for table in _PRUNABLE} == {0}
+    monkeypatch.setattr(settings, "retention_enabled", True)
+    assert RetentionWorkflow not in {p.workflow for p in planned_schedules()}
+    for name in windows:
+        monkeypatch.setattr(settings, name, 30)
+        assert RetentionWorkflow in {p.workflow for p in planned_schedules()}, name
+        monkeypatch.setattr(settings, name, 0)
+    # Every window the sweep reads is one of these, so none can be set without scheduling it.
+    for name in windows:
+        monkeypatch.setattr(settings, name, 7)
+    assert all(_window_days(table) == 7 for table in _PRUNABLE)
+
+
+def test_artefact_pushes_expire_whether_or_not_a_retention_policy_is_stated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wherever a push can be written the prune is planned, retention off and every window 0.
+
+    `exhibit_push_retention_hours` is not 0-disabled because a notification queue nobody bounds is
+    not a policy anybody chose — and it was applied only by the retention sweep, which a default
+    deployment never schedules, so it pruned nothing.
+    """
+    from chemclaw.durable.retention import ExhibitPushPruneWorkflow
+    from chemclaw.durable.schedules import retention_window_fields
+
+    monkeypatch.setattr(settings, "retention_enabled", False)
+    for name in retention_window_fields():
+        monkeypatch.setattr(settings, name, 0)
+    monkeypatch.setattr(settings, "exhibit_push_retention_hours", 12)
+    monkeypatch.setattr(settings, "session_store", "postgres")
+    plan = {p.schedule_id: p for p in planned_schedules()}
+    assert "retention" not in plan
+    pushes = plan["exhibit-pushes"]
+    assert pushes.workflow is ExhibitPushPruneWorkflow and pushes.interval == timedelta(hours=12)
+    monkeypatch.setattr(settings, "session_store", "memory")
+    assert "exhibit-pushes" not in {p.schedule_id for p in planned_schedules()}, (
+        "the in-memory session store has no mailbox to hold a push"
+    )
+
+
 def test_the_eln_sync_is_planned_only_where_there_is_an_eln_to_sync(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

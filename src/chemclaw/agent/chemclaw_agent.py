@@ -38,7 +38,6 @@ from typing import Any
 from langchain.agents.middleware import TodoListMiddleware
 
 from chemclaw.agent import tool_modules as _tool_modules  # noqa: F401
-from chemclaw.agent.exhibit_tools import EXHIBIT_TOOLS
 from chemclaw.agent.framing import ENVELOPE_TAG, SYSTEM_SPEECH_MARK
 from chemclaw.agent.handoff import handoff_tool_name
 from chemclaw.agent.profiles import AgentProfile, get_profile, registered_profile_names
@@ -58,6 +57,7 @@ from chemclaw.core.tool_registry import (
     registered_tool_names,
     registered_tools,
 )
+from chemclaw.exhibits.models import EXHIBIT_TOOLS
 
 # `template_tool_names` is re-exported deliberately, alongside the three sibling name-space readers
 # defined below: this module is where the seven of them are assembled (`available_tool_names`), and
@@ -1097,7 +1097,7 @@ def _withheld_tool_names() -> set[str]:
     Three kinds: a template launcher whose opt-in capability is off
     (`templates.registry.withheld_reason`), a job launcher whose manifest says the deployment
     cannot run it (`connectors.registry.withheld_job_names`), and the three artefact tools when
-    `agent_exhibits_enabled` is off (`agent/exhibit_tools.EXHIBIT_TOOLS`). The third is a setting
+    `agent_exhibits_enabled` is off (`exhibits/models.EXHIBIT_TOOLS`). The third is a setting
     rather than a manifest, and it is here rather than in a fourth mechanism because this is where
     every reader of the bound surface — the build, the surface the verifier scans, the profile
     check — already subtracts what a deployment switched off. Off means *unbound*, which is what

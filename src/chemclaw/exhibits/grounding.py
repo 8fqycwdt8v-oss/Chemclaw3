@@ -34,6 +34,8 @@ from html.parser import HTMLParser
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.core.quantities import returned_values, stated_numerals, ungrounded
+from chemclaw.core.result_handle import handles_resolve
+from chemclaw.exhibits.evidence import evidence_params, evidence_predicate
 from chemclaw.exhibits.models import (
     Binding,
     ChartSpec,
@@ -45,17 +47,21 @@ from chemclaw.exhibits.models import (
     StructuresSpec,
     TableSpec,
 )
-from chemclaw.exhibits.store import ExhibitStore
 
 # Newest first, so a figure transcribed from this turn's result is found on the first batch and the
 # scan stops; only a figure that really is unaccounted for reads the whole session.
+#
+# **Only evidence is evidence** (`exhibits.evidence`): a result the model wrote and a tool handed
+# back — `read_exhibit`, a helper's report, a scratchpad file — would ground every figure the agent
+# wrote the moment it read its own work. Filtered by the link's tool rather than by not storing the
+# result, because the stored text is also what the chemist's transcript opens.
 _SESSION_RESULTS = """
 SELECT b.data
 FROM tool_result_links l
 JOIN tool_result_blobs b ON b.content_hash = l.content_hash
-WHERE l.session_id = %s
+WHERE l.session_id = %s AND {evidence}
 ORDER BY l.created_at DESC
-"""
+""".format(evidence=evidence_predicate("l.tool"))
 
 
 def stated_figures(spec: Spec) -> list[str]:
@@ -159,13 +165,15 @@ def _of_value(value: Number | str | Binding | None) -> Iterator[str]:
         yield repr(value)
 
 
-async def chemist_figures(store: ExhibitStore, session_id: str, exhibit_id: str) -> list[str]:
-    """The figures a person introduced into `exhibit_id`: in their revision, not in its parent."""
-    introduced: list[str] = []
-    for mine, parent in await store.human_edits(session_id, exhibit_id):
-        before = set(stated_figures(parent)) if parent is not None else set()
-        introduced += [figure for figure in stated_figures(mine) if figure not in before]
-    return introduced
+def introduced_figures(mine: Spec, parent: Spec | None) -> list[str]:
+    """The figures a person's revision states that its parent did not — what they introduced.
+
+    Computed once, when the revision is written, and recorded on it (`store.chemist_figures`):
+    deriving it again for every person's revision on every agent write was linear in the history.
+    CPU work over a whole spec, so a caller on the event loop runs it in a thread.
+    """
+    before = set(stated_figures(parent)) if parent is not None else set()
+    return [figure for figure in stated_figures(mine) if figure not in before]
 
 
 async def unverified_figures(
@@ -176,8 +184,8 @@ async def unverified_figures(
     Args:
         session_id: The session whose stored tool results are the evidence.
         spec: The agent-authored spec being written.
-        chemist_figures: Figures a person introduced into the same artefact (`chemist_figures`);
-            they count as grounded.
+        chemist_figures: Figures a person introduced into the same artefact
+            (`ExhibitStore.chemist_figures`); they count as grounded.
 
     Returns:
         At most `exhibit_max_unverified_figures` figures, in the order the spec states them; `[]`
@@ -187,16 +195,17 @@ async def unverified_figures(
     remaining = stated_figures(spec)
     if not remaining:
         return []
-    if settings.session_store != "postgres" or settings.stream_max_result_bytes <= 0:
+    if not handles_resolve():
         return None
     human = [float(figure.replace(",", "")) for figure in chemist_figures]
-    remaining = ungrounded(remaining, human)
+    if human:
+        remaining = await asyncio.to_thread(ungrounded, remaining, human)
     async with db.connection(settings.postgres_dsn) as conn:
         # A server-side cursor, so a batch is what crosses the wire: a client-side one would fetch
         # every stored result of the session before the first comparison, and the early stop would
         # save the regex and nothing else.
         async with conn.cursor(name="exhibit_grounding") as cur:
-            await cur.execute(_SESSION_RESULTS, (session_id,))
+            await cur.execute(_SESSION_RESULTS, (session_id, *evidence_params()))
             while remaining:
                 rows = await cur.fetchmany(settings.exhibit_grounding_batch)
                 if not rows:

@@ -12,7 +12,7 @@ revision always comes back typed. `require_writable` is the caps (bytes, rows, s
 atoms) and the RDKit parse of every SMILES, and only a *write* runs it: a deployment that lowers a
 cap must not make the artefacts it already holds unreadable, and re-parsing two hundred molecules on
 every read would pay for a check whose answer cannot have changed. The one write-time check that is
-not here is whether a geometry's `source` is stored — it is a database read, so it is async and
+not here is whether what a geometry cites is stored — it is a database read, so it is async and
 lives in `exhibits.sources` beside the store it asks.
 
 **A value may be bound rather than written**
@@ -58,6 +58,16 @@ from chemclaw.protocols.models import AuthorKind
 ExhibitKind = Literal[
     "document", "table", "structures", "chart", "result", "link", "geometry", "html"
 ]
+
+#: The agent's three artefact tools, by the name the model calls them (`agent/exhibit_tools`).
+#:
+#: Named here, below `agent`, because two readers in this package need the set as well as the
+#: agent: **an artefact tool's own result is never evidence and never bindable**
+#: (`exhibits.grounding`, `exhibits.bindings`). `read_exhibit` returns the artefact back to the
+#: model — every figure the agent wrote included — so counting its stored result as a tool result
+#: would ground every figure the moment the agent read its own work, and a `$bind` into it would be
+#: provenance pointing at the agent's own transcription.
+EXHIBIT_TOOLS: frozenset[str] = frozenset({"create_exhibit", "revise_exhibit", "read_exhibit"})
 
 #: The `session_events` kind a person's create or revision is pushed under, for
 #: `GET /sessions/{id}/events` to claim and render as the turn stream's `exhibit` event.
@@ -244,8 +254,13 @@ ELEMENTS: frozenset[str] = frozenset(
 )
 
 
-def xyz_atom_count(xyz: str) -> int:
+def xyz_atom_count(xyz: str, *, max_atoms: int | None = None) -> int:
     """How many atoms one standard XYZ block holds, having checked every line of it.
+
+    `max_atoms` refuses a block whose count line declares more, read off the first line before the
+    text is split: a cited artifact is up to `calc_artifact_max_download_bytes`, and splitting and
+    checking tens of megabytes of lines to refuse it on its count afterwards is the cost the cap
+    exists to avoid. The block is still checked whole when the count is within it.
 
     The layout is the one every program writes: an atom count, a comment line (which may be
     empty), then exactly that many `El x y z` lines in ångström. Trailing blank lines are allowed;
@@ -257,13 +272,17 @@ def xyz_atom_count(xyz: str) -> int:
     Raises:
         ValueError: naming the line and what is wrong with it.
     """
-    lines = xyz.rstrip().splitlines()
+    trimmed = xyz.rstrip()
     try:
-        count = int(lines[0].strip()) if lines else -1
+        # The first line alone, by the same line breaks `splitlines` honours below for `\n`/`\r\n`.
+        count = int(trimmed.split("\n", 1)[0].strip()) if trimmed else -1
     except ValueError:
         raise ValueError("xyz: the first line must be the atom count") from None
     if count < 1:
         raise ValueError("xyz: the first line must be the atom count, at least 1")
+    if max_atoms is not None and count > max_atoms:
+        raise ValueError(f"xyz: the count line says {count} atoms, over the {max_atoms}-atom cap")
+    lines = trimmed.splitlines()
     atoms = lines[2:]
     if len(atoms) != count:
         raise ValueError(
@@ -307,13 +326,22 @@ class GeometrySource(_Spec):
         return f"{self.calc_key}#{self.name}"
 
 
-class GeometrySpec(_Spec):
-    """One 3D structure, inline as an XYZ block or named as a stored calculation artifact.
+#: A geometry's content address in the structure store (`science.calc.models.Structure`): `st_`
+#: and the sixteen hex digits `core.ids.stable_hash` writes.
+STRUCTURE_ID = r"^st_[0-9a-f]{16}$"
 
-    Exactly one of `xyz` and `source`. `highlight_atoms` are **0-based** indices into the atom
-    lines, held inside the inline block's atom count (a `source` is not read to check them — its
-    bytes are the calc store's, and an eviction may take them). `energy_hartree` is a label the
-    viewer shows, not a figure anything here computes.
+
+class GeometrySpec(_Spec):
+    """One 3D structure: inline XYZ, a stored calculation artifact, or a stored structure.
+
+    Exactly one of `xyz`, `source` and `structure_id`. `structure_id` is what the agent holds —
+    every calculation result names its geometry by it and none hands the model coordinates — and
+    is resolved to XYZ from the structure store when the artefact is read
+    (`exhibits.sources.resolved_geometry`), so a reader is served `xyz` and the stored revision
+    keeps the address. `highlight_atoms` are **0-based** indices into the atom lines, held inside
+    the inline block's atom count here and inside a cited one's when it is written
+    (`exhibits.sources.require_source_stored`). `energy_hartree` is a label the viewer shows, not a
+    figure anything here computes.
     """
 
     kind: Literal["geometry"]
@@ -324,15 +352,20 @@ class GeometrySpec(_Spec):
     # schema as an empty object and hide every field from the OpenAPI document.
     xyz: str | None = Field(default=None, exclude_if=_absent)
     source: GeometrySource | None = Field(default=None, exclude_if=_absent)
+    structure_id: str | None = Field(default=None, pattern=STRUCTURE_ID, exclude_if=_absent)
     label: str = ""
     energy_hartree: Number | None = Field(default=None, exclude_if=_absent)
     highlight_atoms: list[Annotated[int, Strict(), Field(ge=0)]] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _one_structure(self) -> GeometrySpec:
-        """Exactly one of `xyz` and `source`, an inline block that parses, highlights inside it."""
-        if (self.xyz is None) == (self.source is None):
-            raise ValueError("a geometry takes exactly one of `xyz` (inline) or `source`")
+        """Exactly one structure, an inline block that parses, highlights inside it."""
+        given = [self.xyz, self.source, self.structure_id]
+        if sum(value is not None for value in given) != 1:
+            raise ValueError(
+                "a geometry takes exactly one of `structure_id` (a stored structure), `xyz` "
+                "(inline) or `source` (a calculation artifact)"
+            )
         if self.xyz is not None:
             count = xyz_atom_count(self.xyz)
             if outside := sorted({index for index in self.highlight_atoms if index >= count}):

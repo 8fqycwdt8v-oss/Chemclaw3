@@ -18,7 +18,6 @@ import pytest
 from chemclaw.agent import exhibit_tools
 from chemclaw.agent.chemclaw_agent import _capability_tools, available_tool_names
 from chemclaw.agent.exhibit_tools import (
-    EXHIBIT_TOOLS,
     create_exhibit,
     read_exhibit,
     revise_exhibit,
@@ -29,8 +28,8 @@ from chemclaw.core.errors import ChemclawError
 from chemclaw.core.identity_context import reset_current_identity, set_current_identity
 from chemclaw.core.session_context import reset_current_session_id, set_current_session_id
 from chemclaw.core.turn_signals import ExhibitSignal
-from chemclaw.exhibits.grounding import chemist_figures, unverified_figures
-from chemclaw.exhibits.models import parse_spec
+from chemclaw.exhibits.grounding import introduced_figures, unverified_figures
+from chemclaw.exhibits.models import EXHIBIT_TOOLS, parse_spec
 from chemclaw.exhibits.store import default_exhibit_store
 from tests.pg import migrated_db_or_skip
 
@@ -58,14 +57,19 @@ def turn(monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[str, list[ExhibitSig
 
 
 async def _human(session: str, exhibit_id: str, parent: int, raw: dict[str, Any]) -> None:
-    """A chemist's revision, as the REST route writes it."""
-    await default_exhibit_store().append(
+    """A chemist's revision, as the REST route writes it — with the figures it introduced."""
+    store = default_exhibit_store()
+    edited = await store.view(session, exhibit_id, parent)
+    assert edited is not None
+    spec = parse_spec(raw)
+    await store.append(
         session,
         exhibit_id,
-        spec=parse_spec(raw),
+        spec=spec,
         parent_revision=parent,
         author_kind="human",
         author="oid-ana",
+        chemist_figures=introduced_figures(spec, edited.raw_spec),
     )
 
 
@@ -273,10 +277,14 @@ def test_a_handoff_peer_keeps_the_artefact_tools_a_helper_loses() -> None:
     assert EXHIBIT_TOOLS <= _peer_surface(root, peer)
 
 
-async def test_the_chemists_figures_are_read_in_one_store_call(
-    turn: tuple[str, list[ExhibitSignal]],
+async def test_an_agent_revision_reads_the_chemists_figures_without_parsing_a_spec(
+    turn: tuple[str, list[ExhibitSignal]], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`chemist_figures` runs on every agent write, so its cost is one read, not two per edit."""
+    """The figures a chemist introduced are read as recorded: one store call, no history re-parsed.
+
+    Before, every agent revision parsed every person's revision and its parent — measured 1.27 s on
+    the event loop for 100 revisions of a 2,000-row table, 0.37 s with the figures recorded.
+    """
     session, _ = turn
     xid = json.loads(await create_exhibit("pKa", _TABLE))["exhibit_id"]
     for parent, value in enumerate([5.1, 5.2, 5.3], start=1):
@@ -290,9 +298,13 @@ async def test_the_chemists_figures_are_read_in_one_store_call(
             calls.append(name)
             return getattr(real, name)
 
-    figures = await chemist_figures(_Counting(), session, xid)
-    assert figures == ["5.1", "5.2", "5.3"]
-    assert calls == ["human_edits"], calls
+    monkeypatch.setattr(exhibit_tools, "_store", lambda: _Counting())
+    assert await real.chemist_figures(session, xid) == ["5.1", "5.2", "5.3"]
+    revised = {**_TABLE, "rows": [{"solvent": "w", "pka": 5.3}]}
+    await revise_exhibit(xid, 4, "kept", spec=revised)
+    assert calls.count("chemist_figures") == 1 and "human_edits" not in calls, calls
+    head = await real.view(session, xid)
+    assert head is not None and head.unverified_figures == []
 
 
 async def test_the_grounding_scan_reads_in_configured_batches(
@@ -312,3 +324,154 @@ async def test_the_grounding_scan_reads_in_configured_batches(
         {**_TABLE, "rows": [{"solvent": "w", "pka": 4.76}, {"solvent": "x", "pka": 7}]}
     )
     assert await unverified_figures(session, spec) == ["7"]
+
+
+async def test_reading_the_artefact_back_neither_grounds_its_figures_nor_lends_a_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The agent's own readout is not evidence and not a bindable result.
+
+    Every tool result of the turn is stored and linked, `read_exhibit`'s included — so before the
+    filter, reading the artefact back put the agent's figures into the evidence, and the next
+    revision found every one of them "returned by a tool": revise -> read -> revise cleared
+    `['9.95', '16']` to `[]`. And the readout's handle was a ref a `$bind` resolved against.
+    """
+    await migrated_db_or_skip()
+    monkeypatch.setattr(settings, "session_store", "postgres")
+    monkeypatch.setattr(exhibit_tools, "record_exhibit", lambda signal: None)
+    session = uuid4().hex
+    await store_tool_result(
+        session_id=session, correlation_id="c", tool="predict_pka", text='{"pka": 4.7563}'
+    )
+    session_token = set_current_session_id(session)
+    identity = set_current_identity("oid-ana", frozenset())
+    try:
+        rows = [
+            {"solvent": "acetic acid", "pka": 4.76},
+            {"solvent": "phenol", "pka": 9.95},
+            {"solvent": "ethanol", "pka": "about 16"},
+        ]
+        xid = json.loads(await create_exhibit("pKa", {**_TABLE, "rows": rows}))["exhibit_id"]
+        # What the trace does with the readout: stores and links it like any tool result.
+        readout = await read_exhibit(xid)
+        ref = await store_tool_result(
+            session_id=session, correlation_id="c", tool="read_exhibit", text=readout
+        )
+        await revise_exhibit(xid, 1, "same values", spec={**_TABLE, "rows": rows})
+        head = await default_exhibit_store().view(session, xid)
+        assert head is not None and head.unverified_figures == ["9.95", "16"]
+
+        bound = {"$bind": {"result": f"r:{ref[:12]}", "pointer": "/spec/rows/1/pka"}}
+        with pytest.raises(ChemclawError, match="not a tool result of this conversation"):
+            await revise_exhibit(
+                xid, 2, "bind", spec={**_TABLE, "rows": [{"solvent": "phenol", "pka": bound}]}
+            )
+    finally:
+        reset_current_identity(identity)
+        reset_current_session_id(session_token)
+
+
+async def test_an_agent_write_is_an_exhibit_event_and_counted_and_so_is_a_refusal(
+    turn: tuple[str, list[ExhibitSignal]], caplog: pytest.LogCaptureFixture
+) -> None:
+    """The agent's writes reach the same `exhibit.*` event and counters the REST path does.
+
+    Before, the tools wrote a bare `logger.info` line no query could filter on and nothing was
+    counted on either path.
+    """
+    from chemclaw.core.metrics import METRICS
+
+    session, _ = turn
+    caplog.set_level("INFO", logger="chemclaw.exhibits.telemetry")
+    writes = METRICS.value("chemclaw_exhibit_writes_total")
+    refusals = METRICS.value("chemclaw_exhibit_refusals_total")
+
+    xid = json.loads(await create_exhibit("pKa", _TABLE))["exhibit_id"]
+    await revise_exhibit(xid, 1, "same", spec=_TABLE)
+    with pytest.raises(ChemclawError, match="is at revision 2"):
+        await revise_exhibit(xid, 1, "stale", spec=_TABLE)
+    with pytest.raises(ChemclawError, match="columns"):
+        await create_exhibit("bad", {"kind": "table", "rows": []})
+
+    recorded = [
+        (getattr(r, "event", None), getattr(r, "exhibit_id", None), getattr(r, "author_kind", None))
+        for r in caplog.records
+    ]
+    assert ("exhibit.created", xid, "agent") in recorded
+    assert ("exhibit.revised", xid, "agent") in recorded
+    assert METRICS.value("chemclaw_exhibit_writes_total") == writes + 2
+    assert METRICS.value("chemclaw_exhibit_refusals_total") == refusals + 2
+    exposition = METRICS.render()
+    assert 'chemclaw_exhibit_writes_total{author_kind="agent",op="revised"}' in exposition
+    assert 'chemclaw_exhibit_refusals_total{reason="stale_revision"}' in exposition
+    assert 'chemclaw_exhibit_refusals_total{reason="invalid"}' in exposition
+    assert session
+
+
+async def test_a_helpers_report_of_the_artefact_neither_grounds_its_figures_nor_lends_a_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A `task` helper that read the artefact and reported back is the agent's own text too.
+
+    After `read_exhibit` was excluded, the same figures came back through a helper: its report is
+    stored and linked under `task`, quoting the artefact, and the next revision found `9.95`
+    "returned by a tool". The evidence rule (`exhibits.evidence`) excludes every non-capability
+    result, so it stays flagged and a `$bind` into the report is refused.
+    """
+    await migrated_db_or_skip()
+    monkeypatch.setattr(settings, "session_store", "postgres")
+    monkeypatch.setattr(exhibit_tools, "record_exhibit", lambda signal: None)
+    session = uuid4().hex
+    session_token = set_current_session_id(session)
+    identity = set_current_identity("oid-ana", frozenset())
+    try:
+        rows = [{"solvent": "phenol", "pka": 9.95}]
+        xid = json.loads(await create_exhibit("pKa", {**_TABLE, "rows": rows}))["exhibit_id"]
+        report = json.dumps({"summary": "the artefact lists phenol", "pka": 9.95})
+        for tool in ("task", "read_file", "write_todos"):
+            await store_tool_result(
+                session_id=session, correlation_id="c", tool=tool, text=f"{tool}: {report}"
+            )
+        ref = await store_tool_result(
+            session_id=session, correlation_id="c", tool="task", text=report
+        )
+        await revise_exhibit(xid, 1, "same", spec={**_TABLE, "rows": rows})
+        head = await default_exhibit_store().view(session, xid)
+        assert head is not None and head.unverified_figures == ["9.95"]
+
+        bound = {"$bind": {"result": f"r:{ref[:12]}", "pointer": "/pka"}}
+        with pytest.raises(ChemclawError, match="not a tool result of this conversation"):
+            await revise_exhibit(
+                xid, 2, "bind", spec={**_TABLE, "rows": [{"solvent": "phenol", "pka": bound}]}
+            )
+    finally:
+        reset_current_identity(identity)
+        reset_current_session_id(session_token)
+
+
+async def test_every_refusal_a_tool_words_is_counted_by_a_closed_reason(
+    turn: tuple[str, list[ExhibitSignal]],
+) -> None:
+    """The tools' own worded refusals reach `chemclaw_exhibit_refusals_total` too.
+
+    Before, only `InvalidExhibit`, `StaleRevision` and `ExhibitLimit` were counted, so a pinned
+    result the agent tried to create or revise, `edits` on a table, an `old` that does not occur
+    once and an unknown id were refusals no series saw.
+    """
+    from chemclaw.core.metrics import METRICS
+
+    def _count(reason: str) -> int:
+        line = f'chemclaw_exhibit_refusals_total{{reason="{reason}"}} '
+        found = [row for row in METRICS.render().splitlines() if row.startswith(line)]
+        return int(float(found[0].split()[-1])) if found else 0
+
+    before = {reason: _count(reason) for reason in ("invalid", "not_found")}
+    with pytest.raises(ChemclawError, match="pinned by the chemist"):
+        await create_exhibit("pinned", {"kind": "result", "result_ref": "a" * 64})
+    xid = json.loads(await create_exhibit("t", _TABLE))["exhibit_id"]
+    with pytest.raises(ChemclawError, match="applies to a document"):
+        await revise_exhibit(xid, 1, "n", edits=[{"old": "water", "new": "THF"}])
+    with pytest.raises(ChemclawError, match="no artefact"):
+        await revise_exhibit("xb-00000000000000ff", 1, "n", spec=_TABLE)
+    assert _count("invalid") == before["invalid"] + 2
+    assert _count("not_found") == before["not_found"] + 1

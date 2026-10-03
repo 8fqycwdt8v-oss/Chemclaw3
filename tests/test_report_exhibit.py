@@ -214,3 +214,36 @@ def test_a_second_session_rejoining_the_run_is_not_handed_an_artefact_it_cannot_
     assert _read_in("a") == {"note_ref": "commit://1", "exhibit_id": "xb-00000000000000ab"}
     assert _read_in("b") == {"note_ref": "commit://1"}
     assert _read_in(None) == {"note_ref": "commit://1"}
+
+
+async def test_a_requester_who_is_not_in_the_session_writes_nothing_there(
+    durable_sessions: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The payload's session and requester are checked against each other before any write.
+
+    The owner and a member the owner admitted may have the report shown there; anybody else named
+    as the requester is skipped with a logged reason — the front door's own session rule, because a
+    workflow payload is not an authenticated request.
+    """
+    from chemclaw.agent.session_members import session_member_store
+
+    monkeypatch.setattr(settings, "entra_required", True)
+    session_member_store.cache_clear()
+    session = await _session(owner="ana@corp")
+    try:
+        stranger = _input(session, f"report-{uuid4().hex}").model_copy(
+            update={"requested_by": "eve@corp"}
+        )
+        assert await record_report_exhibit(stranger) == ""
+        assert await default_exhibit_store().headers(session) == []
+        assert await claim_unconsumed(session) == []
+
+        await session_member_store().add(session, "ben@corp")
+        member = _input(session, f"report-{uuid4().hex}").model_copy(
+            update={"requested_by": "ben@corp"}
+        )
+        assert await record_report_exhibit(member) == member.exhibit_id
+        owner = _input(session, f"report-{uuid4().hex}")
+        assert await record_report_exhibit(owner) == owner.exhibit_id
+    finally:
+        session_member_store.cache_clear()

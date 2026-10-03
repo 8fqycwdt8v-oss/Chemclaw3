@@ -124,6 +124,19 @@
 {{- fail (printf "retention.artifactStore: %q is not an artifact-eviction bound, so it would render into the ConfigMap and be read by nothing — a release that states an artifact posture and evicts nothing. Use one of: %s (the sweep's cadence is CHEMCLAW_ARTIFACT_EVICTION_SCHEDULE_MINUTES and belongs in `config`, because it is not a bound)." $key (join ", " $artifactSettings)) }}
 {{- end }}
 {{- end }}
+{{- /* The artefacts' half, asked exactly as the artifact store's above and for the same reason: a
+       release that states windows and leaves the artefacts' out keeps every artefact, revision
+       and — because the ownership sweep holds a session back while one remains — every session
+       that made one, for its lifetime. A boolean, never a string, for `artifactGrowthAccepted`'s
+       reason. */ -}}
+{{- if kindIs "string" .Values.retention.exhibitsGrowthAccepted }}
+{{- fail (printf "retention.exhibitsGrowthAccepted must be a boolean, not the string %q — a quoted boolean is truthy in Helm and would satisfy this gate while reading as off, leaving every artefact kept forever. Set it as `exhibitsGrowthAccepted: true`/`false` (no quotes), and do not pass it via --set-string." .Values.retention.exhibitsGrowthAccepted) }}
+{{- end }}
+{{- if .Values.retention.windows }}
+{{- if eq (hasKey .Values.retention.windows "CHEMCLAW_RETENTION_SESSION_EXHIBITS_DAYS") (not (empty .Values.retention.exhibitsGrowthAccepted)) }}
+{{- fail "retention: this release states retention windows and must say how long artefacts are kept — `session_exhibits` and its revisions are bounded only by CHEMCLAW_RETENTION_SESSION_EXHIBITS_DAYS, which defaults to 0 (off), and while it is 0 a session holding an artefact is never forgotten either. Set exactly one of `retention.windows.CHEMCLAW_RETENTION_SESSION_EXHIBITS_DAYS` or `retention.exhibitsGrowthAccepted: true` (artefacts are kept for the deployment's lifetime, which is now a stated posture). Neither is set, or both are." }}
+{{- end }}
+{{- end }}
 {{- /* **The hook copies run on every hook event the migrate Job runs on, `pre-rollback` included.**
        They are deleted when the hooks that created them succeed (`hook-succeeded`), so nothing of
        theirs survives an upgrade: a hook event that runs the Job without also creating them hands

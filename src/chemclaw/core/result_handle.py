@@ -17,6 +17,8 @@ digits are all decimal digits about one time in three hundred (`(10/16)**12`), a
 
 import re
 
+from chemclaw.core.config import settings
+
 #: How many hex digits of the content hash the line carries — 48 bits, so two results of one
 #: session sharing a prefix is a birthday bound over ~16 million results, and a collision is refused
 #: by name rather than resolved by guess (`exhibits.bindings`).
@@ -31,6 +33,20 @@ _LINE = re.compile(r"\n⟨r:[0-9a-f]{" + str(HANDLE_HEX) + r"}⟩\Z")
 #: in a `$bind`), eight to sixty-four hex digits. Word-bounded so `vr:12345678` or a longer hex run
 #: is not cut in half.
 _ANYWHERE = re.compile(r"⟨?(?<![\w])r:[0-9a-f]{8,64}(?![\w])⟩?")
+
+
+def handles_resolve() -> bool:
+    """Whether a binding can resolve a handle on this deployment — and so whether one is stamped.
+
+    One predicate for the stamp and the resolver (`agent/tool_framing.stamp_result_handles`,
+    `exhibits.bindings`, `exhibits.grounding`). They disagreed: with the in-memory session store
+    the result store still kept every result in Postgres, so the stamp put a handle on each one,
+    and every binding the model then wrote was refused as "this deployment keeps no tool results" —
+    an address handed out that nothing accepts. The session store is in the condition because the
+    exhibit store follows it, and an artefact on the in-memory one has no durable session whose
+    stored results a later read can scope to.
+    """
+    return settings.session_store == "postgres" and settings.stream_max_result_bytes > 0
 
 
 def handle_of(ref: str) -> str:

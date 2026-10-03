@@ -40,36 +40,48 @@ from typing import Any, Literal
 
 from chemclaw.core import db
 from chemclaw.core.config import settings
+from chemclaw.core.result_handle import handles_resolve
+from chemclaw.exhibits.evidence import evidence_params, evidence_predicate
 from chemclaw.exhibits.models import (
     ExhibitBinding,
     ExhibitView,
+    GeometrySpec,
     InvalidExhibit,
     Spec,
     parse_spec,
+    spec_bytes,
     spec_json,
 )
+from chemclaw.exhibits.sources import resolved_geometry
 
 #: What each bound position accepts, by the name a refusal uses for it.
 Expect = Literal["cell", "prop", "smiles", "x", "y", "rows"]
 
-_SESSION_LINKS = "SELECT content_hash, tool FROM tool_result_links WHERE session_id = %s"
+# **Only evidence is bindable** (`exhibits.evidence`): a `read_exhibit` readout, a helper's report
+# or a scratchpad file is the agent's own transcription handed back, and a value bound to it would
+# carry the provenance marker of a tool result while being exactly the transcription a binding
+# exists to replace. Every query here carries the same predicate, so a ref into one resolves to
+# nothing — the "not a tool result of this conversation" refusal on a write, `ok: false` on a read.
+_EVIDENCE = evidence_predicate("tool")
+
+_SESSION_LINKS = (
+    f"SELECT content_hash, tool FROM tool_result_links WHERE session_id = %s AND {_EVIDENCE}"
+)
 
 # A read names exact refs, so it asks only for those — served by the links' primary key
 # `(session_id, content_hash)` — rather than for every result the session ever stored.
 _LINKS_FOR = (
     "SELECT content_hash, tool FROM tool_result_links "
-    "WHERE session_id = %s AND content_hash = ANY(%s)"
+    f"WHERE session_id = %s AND content_hash = ANY(%s) AND {_EVIDENCE}"
 )
 
-_BLOBS = """
+_BLOBS = f"""
 SELECT l.content_hash, b.data
 FROM tool_result_links l
 JOIN tool_result_blobs b ON b.content_hash = l.content_hash
-WHERE l.session_id = %s AND l.content_hash = ANY(%s)
+WHERE l.session_id = %s AND l.content_hash = ANY(%s) AND {evidence_predicate("l.tool")}
 """
 
-#: How many binding problems one refusal names before it counts the rest.
-_SHOWN = 5
 
 #: Parsed result documents, by content hash, most recently used last, each with its stored size.
 #:
@@ -160,11 +172,6 @@ def _bound(value: object) -> tuple[str, str] | None:
     return None
 
 
-def _available() -> bool:
-    """Whether this deployment keeps the session's tool results a binding could read."""
-    return settings.session_store == "postgres" and settings.stream_max_result_bytes > 0
-
-
 async def _links(session_id: str, refs: Collection[str] | None = None) -> dict[str, str]:
     """The session's stored results, ref to tool — all of them, or only those among `refs`.
 
@@ -174,9 +181,9 @@ async def _links(session_id: str, refs: Collection[str] | None = None) -> dict[s
     async with db.connection(settings.postgres_dsn) as conn:
         async with conn.cursor() as cur:
             if refs is None:
-                await cur.execute(_SESSION_LINKS, (session_id,))
+                await cur.execute(_SESSION_LINKS, (session_id, *evidence_params()))
             else:
-                await cur.execute(_LINKS_FOR, (session_id, list(refs)))
+                await cur.execute(_LINKS_FOR, (session_id, list(refs), *evidence_params()))
             rows = await cur.fetchall()
     return {str(row[0]): str(row[1]) for row in rows}
 
@@ -187,7 +194,7 @@ async def _blobs(session_id: str, refs: list[str]) -> dict[str, bytes]:
         return {}
     async with db.connection(settings.postgres_dsn) as conn:
         async with conn.cursor() as cur:
-            await cur.execute(_BLOBS, (session_id, refs))
+            await cur.execute(_BLOBS, (session_id, refs, *evidence_params()))
             rows = await cur.fetchall()
     return {str(row[0]): bytes(row[1]) for row in rows}
 
@@ -483,12 +490,21 @@ def _write_plan(sites: list[_Site], links: Mapping[str, str], parent: Spec | Non
     refs: dict[int, str] = {}
     refusals: dict[int, str] = {}
     tolerated: set[int] = set()
+    # One prefix scan per distinct target, not per site: a table binds a whole column to one result
+    # cell by cell, and `_ref_for` walks every link the session holds — 2,000 cells over 2,000
+    # links is 4 million prefix tests on the event loop for an answer that has one value.
+    named: dict[str, str | _Unresolved] = {}
     for index, site in enumerate(sites):
-        try:
-            refs[index] = _ref_for(site.target, links)
+        if site.target not in named:
+            try:
+                named[site.target] = _ref_for(site.target, links)
+            except _Unresolved as exc:
+                named[site.target] = exc
+        found = named[site.target]
+        if isinstance(found, str):
+            refs[index] = found
             continue
-        except _Unresolved as exc:
-            reason = str(exc)
+        reason = str(found)
         if (site.target, site.pointer) in carried:
             refs[index] = site.target
             tolerated.add(index)
@@ -571,17 +587,30 @@ async def bind_for_write(session_id: str, spec: Spec, *, parent: Spec | None = N
     `ok: false` as a read does (`_write_plan`). A spec with no binding is returned as both, with no
     read of the store.
 
+    Every writer comes through here, so this is also where the spec byte cap is first applied —
+    before any binding is resolved.
+
     Raises:
-        InvalidExhibit: a binding names a result this session does not hold (or names it
+        InvalidExhibit: the spec is over `exhibit_max_spec_bytes`; a binding names a result this
+            session does not hold (or names it
             ambiguously, or held it once and retention swept it), its pointer does not resolve,
             its value does not fit the position, the spec binds into more results than
             `exhibit_max_bound_results`, or this deployment keeps no tool results to bind to.
     """
     raw = spec_json(spec)
+    # The byte cap before anything is resolved: a binding is a read and a parse of a stored result,
+    # and a spec the store will refuse anyway must not buy them — 20,000 bound cells over the cap
+    # resolved first and were refused after. The handles grow by the full ref when stored, so the
+    # stored form is checked again by `require_writable`; this is the floor of that, and free.
+    if (size := spec_bytes(spec)) > settings.exhibit_max_spec_bytes:
+        raise InvalidExhibit(
+            f"the spec is {size} bytes, over the {settings.exhibit_max_spec_bytes}-byte cap; "
+            "split it into more than one artefact"
+        )
     sites = list(_sites(raw))
     if not sites:
         return Bound(stored=spec, resolved=spec, bindings=[])
-    if not _available():
+    if not handles_resolve():
         raise InvalidExhibit(
             "this deployment keeps no tool results to bind to; write the values as literals"
         )
@@ -589,10 +618,11 @@ async def bind_for_write(session_id: str, spec: Spec, *, parent: Spec | None = N
         raw, sites, session_id, writing=True, parent=parent
     )
     if problems:
-        more = len(problems) - _SHOWN
+        shown = settings.exhibit_binding_problems_shown
+        more = len(problems) - shown
         raise InvalidExhibit(
             "a binding does not resolve: "
-            + "; ".join(problems[:_SHOWN])
+            + "; ".join(problems[:shown])
             + (f"; and {more} more" if more > 0 else "")
         )
     return Bound(stored=parse_spec(stored), resolved=parse_spec(resolved), bindings=bindings)
@@ -602,13 +632,16 @@ async def resolved_view(view: ExhibitView) -> ExhibitView:
     """`view` as a reader is served it: `spec` resolved, `raw_spec` as stored, `bindings` listed.
 
     A binding whose stored result is gone reads `null` with `ok: false`; nothing here raises for
-    it, because an artefact must stay readable when retention takes what one cell pointed at.
+    it, because an artefact must stay readable when retention takes what one cell pointed at. A
+    geometry citing a `structure_id` is resolved the same way (`sources.resolved_geometry`).
     """
+    if isinstance(view.raw_spec, GeometrySpec):
+        return await resolved_geometry(view)
     raw = spec_json(view.raw_spec)
     sites = list(_sites(raw))
     if not sites:
         return view
-    if not _available():
+    if not handles_resolve():
         bindings = [
             ExhibitBinding(
                 path=site.path,

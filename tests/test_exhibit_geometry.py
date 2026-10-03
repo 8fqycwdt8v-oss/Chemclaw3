@@ -40,6 +40,8 @@ from chemclaw.exhibits.models import (
 )
 from chemclaw.exhibits.store import InMemoryExhibitStore, PostgresExhibitStore
 from chemclaw.science.calc.artifacts import InMemoryArtifactStore
+from chemclaw.science.calc.models import Structure
+from chemclaw.science.calc.structures import InMemoryStructureStore
 from tests.pg import migrated_db_or_skip
 from tests.test_service import _FakeOwnerStore, _no_connectors
 
@@ -138,10 +140,10 @@ async def test_a_source_must_be_stored_when_it_is_written(
     """Nothing stored is refused naming the reference; once stored, the same spec passes."""
     spec = parse_spec(_geometry(source={"calc_key": _CALC_KEY, "name": "xtbopt.xyz"}))
     with pytest.raises(InvalidExhibit, match=f"{_CALC_KEY}#xtbopt.xyz"):
-        await sources.require_source_stored(spec)
+        await sources.require_source_stored(spec, "s")
     await _stored_water(calc_store)
-    await sources.require_source_stored(spec)
-    await sources.require_source_stored(parse_spec(_geometry(xyz=_WATER)))
+    await sources.require_source_stored(spec, "s")
+    await sources.require_source_stored(parse_spec(_geometry(xyz=_WATER)), "s")
 
 
 async def test_a_source_must_be_a_geometry_not_any_stored_artifact(
@@ -154,7 +156,7 @@ async def test_a_source_must_be_a_geometry_not_any_stored_artifact(
     assert hessian is not None
     spec = parse_spec(_geometry(source={"calc_key": _CALC_KEY, "name": "hessian"}))
     with pytest.raises(InvalidExhibit, match="application/x-turbomole-hessian artifact, not a"):
-        await sources.require_source_stored(spec)
+        await sources.require_source_stored(spec, "s")
 
 
 def test_a_reference_splits_at_its_first_hash_whatever_the_key_holds() -> None:
@@ -307,7 +309,216 @@ def test_the_published_schema_shows_the_geometry_fields(app: Any) -> None:
     generated from the document had no fields to type; absent optionals are excluded per field.
     """
     schema = app.openapi()["components"]["schemas"]["GeometrySpec"]
-    assert {"kind", "format", "xyz", "source", "label", "energy_hartree", "highlight_atoms"} <= set(
-        schema["properties"]
-    )
+    fields = {"kind", "format", "xyz", "source", "structure_id", "label", "energy_hartree"}
+    assert fields | {"highlight_atoms"} <= set(schema["properties"])
     assert "kind" in schema["required"]
+
+
+# --- `structure_id` (the hardening contract, item 1) and the calc download cap ------------------
+
+_WATER_STRUCTURE = Structure(
+    elements=[8, 1, 1],
+    positions=[[0.0, 0.0, 0.117], [0.0, 0.757, -0.467], [0.0, -0.757, -0.467]],
+)
+_ENSEMBLE = _WATER + _WATER
+
+
+@pytest.fixture
+def structures(monkeypatch: pytest.MonkeyPatch) -> InMemoryStructureStore:
+    """A structure store holding one water, swapped in where the artefacts read."""
+    store = InMemoryStructureStore()
+    monkeypatch.setattr(sources, "default_structure_store", lambda: store)
+    return store
+
+
+def test_a_geometry_takes_exactly_one_of_three_structures() -> None:
+    """`structure_id` is a third way to name the structure, and still exactly one is taken."""
+    sid = _WATER_STRUCTURE.structure_id
+    cited = parse_spec(_geometry(structure_id=sid))
+    assert isinstance(cited, GeometrySpec) and spec_json(cited)["structure_id"] == sid
+    assert "xyz" not in spec_json(cited)
+    with pytest.raises(InvalidExhibit, match="exactly one"):
+        parse_spec(_geometry(structure_id=sid, xyz=_WATER))
+    with pytest.raises(InvalidExhibit, match="structure_id"):
+        parse_spec(_geometry(structure_id="water"))
+
+
+async def test_a_structure_id_must_be_stored_one_frame_and_inside_its_highlights(
+    structures: InMemoryStructureStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A guessed id is refused naming it; a stored one passes; the atom and highlight caps hold."""
+    sid = _WATER_STRUCTURE.structure_id
+    with pytest.raises(InvalidExhibit, match=f"{sid}.*no stored structure"):
+        await sources.require_source_stored(parse_spec(_geometry(structure_id=sid)), "s")
+    await structures.put([_WATER_STRUCTURE])
+    await sources.require_source_stored(parse_spec(_geometry(structure_id=sid)), "s")
+    with pytest.raises(InvalidExhibit, match=r"highlight_atoms \[3\]"):
+        await sources.require_source_stored(
+            parse_spec(_geometry(structure_id=sid, highlight_atoms=[3])), "s"
+        )
+    monkeypatch.setattr(settings, "exhibit_max_atoms", 2)
+    with pytest.raises(InvalidExhibit, match="3 atoms, over the 2-atom cap"):
+        await sources.require_source_stored(parse_spec(_geometry(structure_id=sid)), "s")
+
+
+async def test_a_cited_structure_is_served_as_xyz_and_a_vanished_one_says_so(
+    structures: InMemoryStructureStore,
+) -> None:
+    """`spec.xyz` resolved and `raw_spec.structure_id` kept; gone, no `xyz` and an `ok: false`."""
+    from chemclaw.exhibits.bindings import resolved_view
+
+    sid = _WATER_STRUCTURE.structure_id
+    store = InMemoryExhibitStore()
+    session = uuid4().hex
+    view = await store.create(
+        session,
+        title="water",
+        spec=parse_spec(_geometry(structure_id=sid)),
+        author_kind="agent",
+        author="a",
+    )
+    gone = await resolved_view(view)
+    assert spec_json(gone.spec) == spec_json(gone.raw_spec)
+    assert [b.model_dump() for b in gone.bindings] == [
+        {
+            "path": "xyz",
+            "result_ref": "",
+            "tool": "structure",
+            "pointer": sid,
+            "ok": False,
+            "error": "no structure is stored under this id any more",
+        }
+    ]
+    assert await resolve_export(gone.spec, "xyz") is None
+
+    await structures.put([_WATER_STRUCTURE])
+    shown = await resolved_view(view)
+    assert isinstance(shown.spec, GeometrySpec) and shown.bindings == []
+    assert "structure_id" not in spec_json(shown.spec)
+    assert spec_json(shown.raw_spec)["structure_id"] == sid
+    xyz = shown.spec.xyz or ""
+    assert xyz.splitlines()[0] == "3" and xyz.splitlines()[2] == "O 0.0000 0.0000 0.1170"
+    assert parse_spec(spec_json(shown.spec)) == shown.spec, "the served spec is a valid one"
+    assert await resolve_export(shown.spec, "xyz") == xyz
+
+
+async def test_the_agent_cites_a_structure_and_reads_back_its_address(
+    turn: str, structures: InMemoryStructureStore
+) -> None:
+    """`create_exhibit` takes a `structure_id`; `read_exhibit` shows the id, not 3N coordinates."""
+    from chemclaw.agent.exhibit_tools import read_exhibit
+
+    sid = _WATER_STRUCTURE.structure_id
+    with pytest.raises(ChemclawError, match="no stored structure"):
+        await create_exhibit("Water", _geometry(structure_id=sid))
+    await structures.put([_WATER_STRUCTURE])
+    xid = json.loads(await create_exhibit("Water", _geometry(structure_id=sid)))["exhibit_id"]
+    readout = json.loads(await read_exhibit(xid))
+    assert readout["spec"]["structure_id"] == sid and "xyz" not in readout["spec"]
+    assert "structure_id" in (create_exhibit.__doc__ or "")
+    assert "calc_key" not in (create_exhibit.__doc__ or ""), "source is no longer advertised"
+
+
+async def test_a_cited_ensemble_or_an_artifact_over_the_download_cap_is_refused(
+    calc_store: InMemoryArtifactStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A conformer ensemble is one stored XYZ file of many frames; a geometry shows one."""
+    await calc_store.put(
+        _CALC_KEY, "crest_conformers.xyz", _ENSEMBLE.encode(), media_type="chemical/x-xyz"
+    )
+    ensemble = parse_spec(_geometry(source={"calc_key": _CALC_KEY, "name": "crest_conformers.xyz"}))
+    with pytest.raises(InvalidExhibit, match="not one XYZ structure"):
+        await sources.require_source_stored(ensemble, "s")
+
+    await _stored_water(calc_store)
+    cited = parse_spec(_geometry(source={"calc_key": _CALC_KEY, "name": "xtbopt.xyz"}))
+    reads: list[str] = []
+    real_open = calc_store.open
+
+    async def _open(digest: str) -> bytes | None:
+        reads.append(digest)
+        return await real_open(digest)
+
+    monkeypatch.setattr(calc_store, "open", _open)
+    monkeypatch.setattr(settings, "calc_artifact_max_download_bytes", len(_WATER) - 1)
+    with pytest.raises(InvalidExhibit, match="download cap"):
+        await sources.require_source_stored(cited, "s")
+    assert await resolve_export(cited, "xyz") is None
+    assert reads == [], "the cap is decided from the recorded size, before the blob is opened"
+
+
+async def test_a_structure_cited_must_be_one_this_conversation_was_shown(
+    turn: str, structures: InMemoryStructureStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Session scope: an id a calculation here reported is citable; one from elsewhere is not.
+
+    `D-2026-10-03-a-cited-structure-is-one-this-conversation-was-shown`. A mention in the agent's
+    own text handed back (a helper's report) is not a report; a revision carrying the cited id
+    forward is accepted without asking again.
+    """
+    from chemclaw.agent.exhibit_tools import revise_exhibit
+    from chemclaw.api.tool_results import store_tool_result
+
+    await migrated_db_or_skip()
+    monkeypatch.setattr(settings, "session_store", "postgres")
+    store = InMemoryExhibitStore()
+    monkeypatch.setattr(exhibit_tools, "_store", lambda: store)
+    sid = _WATER_STRUCTURE.structure_id
+    await structures.put([_WATER_STRUCTURE])
+    spec = _geometry(structure_id=sid)
+    with pytest.raises(ChemclawError, match="not one a tool result of this conversation reported"):
+        await create_exhibit("Water", spec)
+    await store_tool_result(
+        session_id=turn, correlation_id="c", tool="task", text=f'{{"seen": "{sid}"}}'
+    )
+    with pytest.raises(ChemclawError, match="not one a tool result of this conversation reported"):
+        await create_exhibit("Water", spec)
+    report = json.dumps({"structure_id": sid, "energy_hartree": -5.07})
+    elsewhere = uuid4().hex
+    await store_tool_result(
+        session_id=elsewhere, correlation_id="c", tool="optimize_geometry", text=report
+    )
+    with pytest.raises(ChemclawError, match="not one a tool result of this conversation reported"):
+        await create_exhibit("Water", spec)
+    await store_tool_result(
+        session_id=turn, correlation_id="c", tool="optimize_geometry", text=report
+    )
+    xid = json.loads(await create_exhibit("Water", spec))["exhibit_id"]
+    relabelled = {**spec, "label": "water, GFN2-xTB"}
+    assert json.loads(await revise_exhibit(xid, 1, "label", spec=relabelled))["revision"] == 2
+
+
+async def test_a_referenced_geometry_reaches_the_turn_note_as_its_address(
+    turn: str, structures: InMemoryStructureStore
+) -> None:
+    """Asking about a cited geometry shows the model its id, not the resolved coordinates.
+
+    The turn note resolved every referenced artefact for the model, so a cited structure arrived as
+    an XYZ block — fifty characters an atom, and an invitation to transcribe it back inline.
+    """
+    from chemclaw.agent.exhibit_notes import exhibit_turn_note
+    from chemclaw.exhibits.models import ExhibitRef
+
+    sid = _WATER_STRUCTURE.structure_id
+    await structures.put([_WATER_STRUCTURE])
+    xid = json.loads(await create_exhibit("Water", _geometry(structure_id=sid)))["exhibit_id"]
+    note = await exhibit_turn_note(turn, [ExhibitRef(exhibit_id=xid)])
+    assert sid in note.text
+    assert "0.1170" not in note.text and '"xyz":' not in note.text
+
+
+async def test_a_cited_block_over_the_atom_cap_is_refused_on_its_count_line(
+    calc_store: InMemoryArtifactStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The count line decides an over-cap block before the rest of the text is split and checked.
+
+    A cited artifact may be megabytes; refusing it on its atom count after splitting and checking
+    every line spent exactly what the cap is there to save. The refusal names the declared count,
+    which only the first-line read can produce — the whole-block check names the lines it found.
+    """
+    monkeypatch.setattr(settings, "exhibit_max_atoms", 500)
+    big = "100000\nensemble\n" + "C 0 0 0\n" * 20_000
+    await calc_store.put(_CALC_KEY, "big.xyz", big.encode(), media_type="chemical/x-xyz")
+    cited = parse_spec(_geometry(source={"calc_key": _CALC_KEY, "name": "big.xyz"}))
+    with pytest.raises(InvalidExhibit, match="count line says 100000 atoms, over the 500-atom cap"):
+        await sources.require_source_stored(cited, "s")

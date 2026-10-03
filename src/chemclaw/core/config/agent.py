@@ -1030,7 +1030,8 @@ class AgentSettings(BaseSettings):
     # documents beside the chat — `D-2026-10-02-an-artefact-is-part-of-the-answer-not-an-effect`.
     # On by default; off unbinds `create_exhibit`/`revise_exhibit`/`read_exhibit` from every turn,
     # which is what pays their schemas back out of the prefix, and `GET /sessions/{id}/exhibits`
-    # then answers `enabled: false` so a surface hides the pane.
+    # then answers `enabled: false` so a surface offers no new artefact and shows what a session
+    # already holds read-only.
     agent_exhibits_enabled: bool = True
     # The size caps one spec is validated against on every write, agent or human. Bytes are the
     # spec's compact JSON; rows, structures and points bound the three list-shaped kinds, so a
@@ -1061,6 +1062,10 @@ class AgentSettings(BaseSettings):
     # document is several times that in memory). A blob is immutable, so a cached document is
     # never stale; 0 turns the cache off.
     exhibit_binding_cache_bytes: int = Field(default=8_388_608, ge=0)
+    # How many failing bindings one refused write names before it counts the rest: enough for a
+    # writer to correct several in one attempt, few enough that a 2,000-row table bound to the
+    # wrong result is one sentence rather than 2,000.
+    exhibit_binding_problems_shown: int = Field(default=5, ge=1)
     # The fewest milliseconds between two `exhibit_draft` frames of one tool call on the turn
     # stream. Each frame carries the whole document so far, so the frame rate times the document's
     # size is the bandwidth a drafted artefact costs; a quarter second reads as live typing.
@@ -1072,6 +1077,11 @@ class AgentSettings(BaseSettings):
     # At 100 (100 kB/s) the same document costs ~150 frames and ~15 MB, and a short one still
     # streams at the floor above.
     exhibit_draft_bytes_per_ms: int = Field(default=100, ge=1)
+    # Characters a drafted call may spend beyond its spec, title and note — keys, an id, a revision
+    # number, the model's whitespace — before the preview stops reading it as a call the tool would
+    # refuse anyway (`api/exhibit_drafts._argument_bound`). A preview bound only: too small stops a
+    # pretty-printed draft early, too large re-parses a doomed call longer.
+    exhibit_draft_argument_slack_chars: int = Field(default=1_024, ge=0)
     # Artefacts one session may hold; the next create is refused (409 `exhibit_limit` over REST, a
     # worded refusal to the model) rather than evicting one somebody may still be reading.
     exhibit_max_per_session: int = Field(default=100, ge=1)

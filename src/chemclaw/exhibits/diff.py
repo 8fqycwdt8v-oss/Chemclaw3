@@ -12,8 +12,8 @@ The *paths* are per kind, because what a reader can point at differs:
 - a `table` diffs per **cell** (`"rows[3].yield"`), plus `"columns"` when the header changed;
 - a `structures` panel per **item field** (`"items[2].smiles"`, `"items[2].props.pka"`);
 - a `chart` per **point** (`"series[0].y[4]"`), plus the axis and series names;
-- a `geometry` per **field, whole-valued** (`"xyz"`, `"source"`, `"label"`): a coordinate block
-  re-optimised moves every line, so a line hunk would be the whole block anyway;
+- a `geometry` per **field, whole-valued** (`"xyz"`, `"source"`, `"structure_id"`, `"label"`): a
+  coordinate block re-optimised moves every line, so a line hunk would be the whole block anyway;
 - anything else — a pinned result, a link, an html page, or a revision that changed kind — as one
   `"spec"` row.
 
@@ -239,7 +239,15 @@ def _indexed(
 
 
 #: A geometry's fields in reading order; `source` is one whole value, its two halves never apart.
-_GEOMETRY_ORDER = ["xyz", "source", "label", "energy_hartree", "highlight_atoms", "format"]
+_GEOMETRY_ORDER = [
+    "xyz",
+    "source",
+    "structure_id",
+    "label",
+    "energy_hartree",
+    "highlight_atoms",
+    "format",
+]
 
 
 def _fields(

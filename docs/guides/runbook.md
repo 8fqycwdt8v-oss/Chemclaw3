@@ -2137,8 +2137,11 @@ nothing", not "the database matches this image".
 | 093 | `record_observation` stops writing: the restored image's `ON CONFLICT (property, input_hash)` no longer plans against a key that now carries `source`, so no observation is recorded and no calibration is scored | yes — `InvalidColumnReference` in the log |
 | 094 | every fingerprint and corpus-reaction write stops: the restored image's `ON CONFLICT (id)` / `(source, id)` no longer plans against a key that now carries `definition` | yes — `InvalidColumnReference` in the log |
 | 106 | nothing — a plain GIN index on `turn_costs.skills_loaded` is dropped, and no `ON CONFLICT` names it and no query plans through it. Re-run 105 if you want it back | n/a |
+| 115 | nothing it reads — but artefacts have no foreign key to `session_owners`, so the restored image **deletes a session, erases a leaver and forgets an empty session without their artefacts**: the transcript goes and the artefacts stay, reachable by no session, and a leaver's artefact revisions in other people's sessions keep their name | **no — this one is silent.** After rolling forward, run `DELETE FROM session_exhibits e WHERE NOT EXISTS (SELECT 1 FROM session_owners o WHERE o.session_id = e.session_id)` on the session database (revisions cascade), then re-run every erasure requested during the rollback window (`(xv)`, *Offboard: erase their data*) so the leaver's revisions elsewhere go too |
 | 116 | no write — the `session_exhibits` kind `CHECK` widens, and the restored image writes only kinds it still admits. But a `geometry` artefact written before the rollback **cannot be opened or exported** by it: its spec model refuses the kind, so the listing shows the artefact and every read of its body fails | yes — a refusal naming `geometry` on every such read. Roll forward, or leave those artefacts unopened until you do |
 | 117 | no write — the kind `CHECK` widens again, for `html`. A restored image **cannot open or export** an `html` artefact, nor any revision whose spec binds a value (`$bind`, `rows_from`) — its spec model refuses both — so the listing shows them and every read of their bodies fails | yes — a refusal naming `html`, `$bind` or `rows_from` on every such read. Roll forward, or leave those artefacts unopened until you do |
+
+119 needs no row: it adds a nullable column the restored image never names, and a person's revision written during the window records no introduced figures, which the newer image derives from the revision and its parent exactly as it did before the column existed.
 
 058 and 106 are exempted and do not actually break: 058's `CHECK` widens, and 106 drops a plain index rather than a unique one — `DROP INDEX` is flagged because the pattern cannot tell the two apart.
 
@@ -2591,6 +2594,125 @@ To enable: set the `CHEMCLAW_VERIFIER_*` keys the chart's `values.yaml` carries 
 route the judge with `CHEMCLAW_MODEL_ROUTES='{"verifier": "<cheap-model>"}'`, and roll. To re-fit
 the band on your own corpus: `make live-verifier-margin` re-rolls the raw judge and prints the
 recommended width (see the CLI's own docstring for what the number does and does not mean).
+
+## (xvi-c) Artefacts: turn them on, sandbox their html, keep them bounded
+
+Artefacts are the versioned working documents a session shows beside its chat — a plan, a table,
+structures, a chart, a 3D geometry, an html page, a pinned tool result (`src/chemclaw/exhibits/`,
+`D-2026-10-02-an-artefact-is-part-of-the-answer-not-an-effect`). The agent writes them with
+`create_exhibit`/`revise_exhibit`/`read_exhibit`; a chemist edits, pins and exports them over
+`/sessions/{id}/exhibits`. They are **on by default**, and so are html pages and their scripts.
+
+**1. The switches.** Both in `config:` (`values.yaml` carries the commented block):
+
+| Setting | Off means |
+|---|---|
+| `CHEMCLAW_AGENT_EXHIBITS_ENABLED` | the three tools are unbound from every turn (their prefix is paid back) and `GET /sessions/{id}/exhibits` answers `enabled: false`, so the UI shows what a session already holds **read-only**, with no new-artefact UI; a message carrying `exhibit_refs` is a 422 `invalid_exhibit_ref` |
+| `CHEMCLAW_AGENT_HTML_ARTEFACTS_ENABLED` | a *new* html artefact is refused (422 over REST, a worded refusal to the model, and `create_exhibit` stops offering the kind); existing ones still list, read and revise; the listing says `html_enabled: false` |
+
+Whether an html page's **scripts** run is not a backend switch — it is the UI's
+`HTML_SCRIPTS_DEFAULT` (step 2).
+
+**2. The UI's html sandbox — a second origin, and it is a deployment step.** An html page never
+runs on the API origin (no route here answers `text/html` for an artefact). It renders in the UI's
+**second listener** on its own origin, inside an opaque-origin frame — `Chemclaw3_ui`'s README,
+"HTML sandbox", is the reference and its `deploy/openshift/` the example manifests. What the release
+owes it:
+
+- **A separate hostname, a Route with its own TLS, and a Service port to the UI's `SANDBOX_PORT`**
+  (default `8081`, never `PORT`). Prefer a host under a *separate registrable domain* from the app,
+  so the two are different sites as well as origins. Nothing in front of the sandbox host may
+  authenticate or rewrite headers: no oauth-proxy, no added `X-Frame-Options`, the page's own CSP
+  passed through untouched.
+- **`APP_ORIGIN` and `SANDBOX_ORIGIN` exactly as the browser types them** — scheme, host and port.
+  The shell takes content only from `APP_ORIGIN`; a chemist who reaches the app at any other address
+  sees the page as escaped source with a notice naming both origins. Unset `SANDBOX_ORIGIN` and
+  every html artefact is shown as source ("HTML preview needs a separate sandbox origin"). The BFF
+  logs one line at startup, `html sandbox on: …` or `html sandbox off: …` — read it.
+- **Scripts run by default** (owner decision,
+  `D-2026-10-03-model-written-html-runs-its-scripts-by-default`); a viewer can **Disable scripts**
+  per view. **`HTML_SCRIPTS_DEFAULT=off` on the UI is the kill switch** — a UI configuration
+  change, no backend release — after which nothing runs until somebody presses **Run scripts**.
+- **Apply the browser policy on every managed browser**, because CSP cannot stop WebRTC: on Chrome
+  and Edge `WebRtcIPHandling=disable_non_proxied_udp` (this *reduces* the exposure — a page can still
+  relay over TURN/TCP through a proxy), on Firefox `media.peerconnection.enabled=false` (this removes
+  WebRTC). What is left with scripts on is the stated residual risk: egress of what the page holds
+  where the policy is not applied, and a clipboard write after a click — never the session, the
+  transcript or another artefact.
+
+**3. Deploy order: backend and migrations before the UI.** The core chart runs migrations
+115–119 as its pre-upgrade hook, and the UI reads shapes only this backend serves (a geometry's
+`structure_id`, `tool_failed.call_id`, the sandbox `ready` handshake). `Jenkinsfile.release` applies
+`core` before `ui` and nothing reorders it; by hand, `helm upgrade` the core release, wait for it to
+be ready, then roll the UI. The UI must be `Chemclaw3_ui#138` or later — the release that renders
+bound values and html artefacts in its sandbox — and a UI built for this backend's hardening shapes
+needs this backend first.
+
+**4. Sizing.** Every write is bounded by the `CHEMCLAW_EXHIBIT_MAX_*` caps (`.env.example` names
+each): the spec's bytes (checked before any binding resolves), rows, structures, points, atoms, the
+html page, artefacts per session and revisions per artefact. Two costs sit in the **front door's
+memory** and are worth sizing the pod for:
+
+- a geometry citing a calc artifact, its `.xyz` export and `GET /calc-artifacts/content` read the
+  blob **decompressed whole** — bounded by `CHEMCLAW_CALC_ARTIFACT_MAX_DOWNLOAD_BYTES`, decided from
+  the recorded size before the read;
+- the binding cache (`CHEMCLAW_EXHIBIT_BINDING_CACHE_BYTES`, stored bytes, several times that once
+  parsed) is **per process**: every front-door replica holds its own.
+
+**5. Retention.** State `retention.windows.CHEMCLAW_RETENTION_SESSION_EXHIBITS_DAYS` — the chart
+refuses windows that leave it out unless `retention.exhibitsGrowthAccepted: true` says artefacts are
+kept for the deployment's lifetime. **Upgrade step: a release whose values set `retention.windows`
+without the exhibits window or `retention.exhibitsGrowthAccepted` now refuses to render** —
+`helm upgrade` stops on "retention: this release states retention windows and must say how long
+artefacts are kept"; add one of the two to the values file before upgrading. While it is 0 a session holding an artefact is never forgotten
+by the ownership sweep either. **Keep `CHEMCLAW_RETENTION_TOOL_RESULTS_DAYS` at least as long if a
+bound value must stay readable**: a `$bind` cell reads its stored tool result on every read, and
+once that window sweeps the result the cell reads empty. A person's push to the session's other
+tabs expires after `CHEMCLAW_EXHIBIT_PUSH_RETENTION_HOURS` (default 24) through its own schedule,
+`exhibit-pushes`, wherever the session store is Postgres, whatever the windows say
+(`D-2026-10-03-an-artefact-push-expires-on-its-own-schedule`).
+
+**6. The upgrade that brings artefacts moves the context budget, and a site pin holds it back.**
+The three tools' schemas are prefix on every model call, and every stored tool result now ends with
+one line, `⟨r:<12 hex>⟩` — the handle a binding names it by (a model that quotes it is quoting an
+address, not a figure; no grounding check reads it as one). The shipped budgets were re-derived for
+both (`D-2026-10-02-the-artefact-prefix-is-paid-from-the-window-margin`,
+`D-2026-10-03-an-artefact-binds-a-value-to-the-result-it-came-from`). **Remove any site pin of
+`CHEMCLAW_AGENT_CONTEXT_TOKEN_BUDGET`, `CHEMCLAW_AGENT_CONTEXT_PREFIX_BASIS`,
+`CHEMCLAW_AGENT_MAX_TOOL_RESULT_CHARS` or `CHEMCLAW_GATHER_EVIDENCE_MAX_CHARS`** so the derived
+defaults apply — or re-derive the pinned values from `core/config/agent.py`'s arithmetic against
+this release's `tests/test_context_floor.PREFIX_BOUND`. A pin left from the previous release keeps
+the old budget under a larger prefix, and the thread pays the difference.
+
+**7. Monitoring.** On the *Tools and model* dashboard, **Artefact writes and refusals**:
+
+- `chemclaw_exhibit_writes_total{author_kind,op}` — every revision written, agent or human, created
+  or revised;
+- `chemclaw_exhibit_refusals_total{reason}` — `invalid` (a 422 or a worded refusal: spec, binding,
+  citation, cap), `stale_revision`, `exhibit_limit`. A climbing `invalid` with flat writes is a model
+  that cannot write the shape it is offered.
+
+Log events: `exhibit.created` / `exhibit.revised` (fields `exhibit_id`, `session`, `actor`,
+`author_kind`, `kind`, `revision`) for every write on every path; `report.exhibit_skipped` with a
+`reason` (`memory`, `session_gone`, `not_a_participant`, or the refusal's class) when a development
+report could not be shown as an artefact — the report note is the result either way; and
+`retention.exhibit_pushes` from the push prune. A push or a structure read that failed is counted on
+`chemclaw_degraded_total{subsystem="exhibits"}`, which is what fires
+**`ChemclawSubsystemDegraded{subsystem="exhibits"}`**: the write committed and a tab missed its push
+(it refetches on focus), or a geometry's structure could not be read and showed as unavailable.
+
+**8. Troubleshooting.**
+
+| Symptom | What it means |
+|---|---|
+| 409 `{"code": "exhibit_limit"}` | the session holds `CHEMCLAW_EXHIBIT_MAX_PER_SESSION` artefacts, or the artefact `CHEMCLAW_EXHIBIT_MAX_REVISIONS` revisions. Revise an existing one, or carry on in a new one from its head; raising the cap is a sizing decision |
+| 409 `{"code": "stale_revision", "head_revision": N}` | the edit was made against an older revision — somebody (or the agent) revised it first. The UI refetches and re-applies; nothing was lost |
+| 422 `{"code": "invalid_exhibit_ref"}` on `POST …/messages` | an `exhibit_refs` entry names an artefact this session does not hold or a revision it lacks, or artefacts are off. (More references than `CHEMCLAW_EXHIBIT_MAX_REFS` is a plain validation 422.) |
+| `GET /calc-artifacts/content` 404 | the reference is malformed, names nothing, or the blob was evicted between the listing and the read. An artefact citing it still reads; its `.xyz` export is a 404 too |
+| `GET /calc-artifacts/content` 413 | the artifact is over `CHEMCLAW_CALC_ARTIFACT_MAX_DOWNLOAD_BYTES`, judged before reading. Raise the cap only with the front door's memory in mind (step 4) |
+| a bound cell reads empty, `bindings[].ok: false` "no longer stored (retention swept it)" | the tool result it was bound to went with `CHEMCLAW_RETENTION_TOOL_RESULTS_DAYS`. The artefact still reads and revises (the binding is carried); detach the value to keep it. Avoid it with step 5 |
+| a geometry shows no structure, `bindings` entry `{path: "xyz", tool: "structure", ok: false}` | its `structure_id` no longer resolves in the structure store, or the store could not be read (then `ChemclawSubsystemDegraded{subsystem="exhibits"}` fired) |
+| html artefacts show as source | the UI's sandbox is off or the page is opened at an address other than `APP_ORIGIN` — read the UI's `html sandbox` startup line |
 
 ## (xvii) The other commands with no section of their own
 

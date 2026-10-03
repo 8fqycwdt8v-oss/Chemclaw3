@@ -189,12 +189,15 @@ temporal:
   # cluster's own, so the namespace-per-release hazard the chart guards against cannot arise.
   namespace: chemclaw
 
-# 4 · Retention, stated: a local cluster keeps a month of history and two weeks of checkpoints and
-# tool results, and bounds the artifact store at 2 GiB. Production states its own.
+# 4 · Retention, stated: a local cluster keeps a month of history and two weeks of checkpoints, tool
+# results and artefacts, and bounds the artifact store at 2 GiB. Production states its own. The
+# artefacts' window is no longer than the tool results', so a value an artefact binds is never swept
+# from under it while the artefact is kept.
 retention:
   windows:
     CHEMCLAW_RETENTION_CHECKPOINTS_DAYS: 14
     CHEMCLAW_RETENTION_TOOL_RESULTS_DAYS: 14
+    CHEMCLAW_RETENTION_SESSION_EXHIBITS_DAYS: 14
     CHEMCLAW_RETENTION_SESSION_EVENTS_DAYS: 30
     CHEMCLAW_RETENTION_SESSION_MESSAGES_DAYS: 30
     CHEMCLAW_RETENTION_RESULT_PUBLICATIONS_DAYS: 30

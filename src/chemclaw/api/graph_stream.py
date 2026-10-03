@@ -729,7 +729,9 @@ def _signal_event(signal: Signal) -> Event | None:
         # cannot see the classes. Downstream reads a field either way; what changed is that the
         # field is now the same verdict the audit row records, rather than a second opinion.
         #
-        return ToolFailedEvent(tool=signal.tool, message=signal.message, reason=signal.reason)
+        return ToolFailedEvent(
+            tool=signal.tool, message=signal.message, reason=signal.reason, call_id=signal.call_id
+        )
     if isinstance(signal, ExhibitSignal):
         return ExhibitEvent(**signal.model_dump())
     if isinstance(signal, SkillLoadedSignal):

@@ -57,6 +57,7 @@ from chemclaw.exhibits.models import (
     UnknownExhibit,
     spec_json,
 )
+from chemclaw.exhibits.sources import spec_for_model
 from chemclaw.exhibits.store import ExhibitStore, default_exhibit_store
 
 logger = logging.getLogger(__name__)
@@ -305,7 +306,8 @@ def _compose(notices: list[tuple[ExhibitHeader, str]], referenced: list[ExhibitV
                     "exhibit_id": view.exhibit_id,
                     "title": view.title,
                     "revision": view.revision,
-                    "spec": spec_json(view.spec),
+                    # A cited structure as its address, as `read_exhibit` shows it.
+                    "spec": spec_json(spec_for_model(view)),
                 },
                 ensure_ascii=False,
             )

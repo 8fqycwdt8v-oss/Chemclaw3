@@ -1,0 +1,17 @@
+-- An artefact revision a person wrote records the figures it introduced, so the grounding check an
+-- agent revision runs reads a set instead of re-deriving it (`exhibits/store.chemist_figures`).
+--
+-- Measured before this column: the check parsed every person-authored revision of the artefact and
+-- its parent and extracted their figures, on the event loop, on every agent revision — 1.27 s for
+-- 100 revisions of a 2,000-row table, linear in the history up to `exhibit_max_revisions`. Recorded
+-- once at write time (`exhibits/grounding.introduced_figures`, off the loop in the REST route) it is
+-- one statement returning each figure once.
+--
+-- NULL on an agent revision, and on every person's revision written before this column. The reader
+-- derives a person's NULL row the old way — its figures not in its parent's — so the history an
+-- upgrade inherits is read as it always was; that set of rows is closed, so the derivation's cost
+-- does not grow. A fork's revision 1 records the union of its source's figures, whoever authored
+-- it. Additive, so the previous image ignores it; its human writes leave it NULL and are derived.
+--
+-- Applied by `make db-migrate`.
+ALTER TABLE session_exhibit_revisions ADD COLUMN IF NOT EXISTS chemist_figures JSONB;

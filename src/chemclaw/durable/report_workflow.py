@@ -20,6 +20,7 @@ from temporalio.exceptions import CancelledError as TemporalCancelledError
 
 with workflow.unsafe.imports_passed_through():
     from chemclaw.agent.session_events import record_session_event
+    from chemclaw.agent.session_members import participant_permits
     from chemclaw.agent.session_store import SessionOwnerStore
     from chemclaw.core.config import settings
     from chemclaw.core.identity_context import reset_current_identity, set_current_identity
@@ -37,6 +38,7 @@ with workflow.unsafe.imports_passed_through():
         require_writable,
     )
     from chemclaw.exhibits.store import default_exhibit_store
+    from chemclaw.exhibits.telemetry import record_refusal, record_write
     from chemclaw.ingest.eln.records import default_record_store
     from chemclaw.ingest.sources.registry import active_retrieve_sources
     from chemclaw.kg.git_writer import default_writer
@@ -227,7 +229,8 @@ async def record_report_exhibit(request: ReportExhibitInput) -> str:
     unacknowledged first one gets the same artefact back (`ExhibitStore.create`'s create-or-return)
     and the push lands on the same `dedupe_key`. **Skipped, with a log line and `""`**, when the
     artefact cannot be shown: no durable session store (an in-memory one lives in the front door's
-    process, not this worker's), the session deleted since it asked, the session at its artefact
+    process, not this worker's), the session deleted since it asked, a requester who is not the
+    session's owner or a member of it, the session at its artefact
     cap, or a draft over the spec cap — the report note is the durable result either way, and the
     chemist still has it.
 
@@ -237,7 +240,7 @@ async def record_report_exhibit(request: ReportExhibitInput) -> str:
     if settings.session_store != "postgres":
         log_event(logger, "report.exhibit_skipped", "no durable session store", reason="memory")
         return ""
-    found, _, _ = await SessionOwnerStore().lookup(request.session_id)
+    found, owner, _ = await SessionOwnerStore().lookup(request.session_id)
     if not found:
         log_event(
             logger,
@@ -245,6 +248,22 @@ async def record_report_exhibit(request: ReportExhibitInput) -> str:
             "session %s no longer exists; the report stays a note",
             request.session_id,
             reason="session_gone",
+            session=request.session_id,
+        )
+        return ""
+    # The payload names the session and the requester, and nothing re-checked that the one may
+    # write into the other: anything that can start a workflow on this queue could put a document
+    # into any conversation, authored as anybody. The rule is `resolve_session`'s — the owner or a
+    # member the owner let in — asked of the session as it stands now, so a member removed while
+    # the report ran is refused as the front door would refuse them.
+    if not await participant_permits(request.session_id, owner, request.requested_by):
+        log_event(
+            logger,
+            "report.exhibit_skipped",
+            "%s is not the owner or a member of session %s; the report stays a note",
+            request.requested_by,
+            request.session_id,
+            reason="not_a_participant",
             session=request.session_id,
         )
         return ""
@@ -262,6 +281,7 @@ async def record_report_exhibit(request: ReportExhibitInput) -> str:
             exhibit_id=request.exhibit_id,
         )
     except (InvalidExhibit, ExhibitLimit) as exc:
+        record_refusal("exhibit_limit" if isinstance(exc, ExhibitLimit) else "invalid")
         log_event(
             logger,
             "report.exhibit_skipped",
@@ -272,6 +292,10 @@ async def record_report_exhibit(request: ReportExhibitInput) -> str:
             session=request.session_id,
         )
         return ""
+    # Counted on a retry that found the first attempt's artefact too — the store's create-or-return
+    # cannot say which it did, and an over-count on a committed-then-retried attempt is the rare
+    # side of a counter whose question is the agent's share of writes.
+    record_write(view, "created")
     announced = ExhibitSignal(
         exhibit_id=view.exhibit_id,
         revision=view.revision,

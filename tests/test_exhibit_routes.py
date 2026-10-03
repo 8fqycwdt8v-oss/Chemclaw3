@@ -437,7 +437,7 @@ def test_a_persons_write_is_recorded_with_who_and_which_request(
     joins on.
     """
     session = _shared(app)
-    caplog.set_level("INFO", logger="chemclaw.api.routes.exhibits")
+    caplog.set_level("INFO", logger="chemclaw.exhibits.telemetry")
     made = _create(app, _ANA, session, {"kind": "table", "title": "T", "spec": _TABLE})
     xid = made.json()["exhibit_id"]
     revised = _as(app, _BEN).post(
@@ -706,7 +706,7 @@ def test_a_person_keeps_or_detaches_a_binding_and_cannot_invent_one(
     results are stored in the real database the binding reads.
     """
     asyncio.run(migrated_db_or_skip())
-    monkeypatch.setattr(bindings, "_available", lambda: True)
+    monkeypatch.setattr(bindings, "handles_resolve", lambda: True)
     session = _shared(app)
     asyncio.run(
         store_tool_result(session_id=session, correlation_id="c", tool="screen", text=_RESULT)
@@ -758,3 +758,23 @@ def test_a_person_keeps_or_detaches_a_binding_and_cannot_invent_one(
     assert invented.status_code == 422 and "not a tool result of this conversation" in (
         invented.text
     )
+
+
+def test_a_persons_write_records_the_figures_it_introduced(app: Any) -> None:
+    """A create records its figures; a revision records only what it added over the one edited.
+
+    What an agent revision's grounding check then reads (`ExhibitStore.chemist_figures`) instead
+    of re-parsing every person's revision.
+    """
+    session = _shared(app)
+    made = _create(app, _ANA, session, {"kind": "table", "title": "S", "spec": _TABLE})
+    xid = made.json()["exhibit_id"]
+    revised = {**_TABLE, "rows": [*_TABLE["rows"], {"solvent": "THF", "y": 81.5}]}
+    answer = _as(app, _BEN).post(
+        f"/sessions/{session}/exhibits/{xid}/revisions",
+        json={"parent_revision": 1, "spec": revised, "change_note": "added THF"},
+    )
+    assert answer.status_code == 201, answer.text
+    # The store the fixture swapped in, read back through the seam it patched.
+    store = getattr(routes, "default_exhibit_store")()  # noqa: B009
+    assert asyncio.run(store.chemist_figures(session, xid)) == ["1", "76", "81.5"]

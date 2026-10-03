@@ -903,6 +903,20 @@ _COUNTERS: dict[str, str] = {
         "visibility predicate only ever narrows, so an unconfigured deployment permits every "
         "string a model can invent, and `skills/README.md` resolves."
     ),
+    "chemclaw_exhibit_writes_total": (
+        "Artefact revisions written, by who wrote them (`agent` / `human`) and whether the write "
+        "created the artefact or revised it (`created` / `revised`). The agent's share against the "
+        "chemists' is the question the feature exists to answer — is it drafting what people then "
+        "correct — and before this it was a log line on the REST path and nothing on the agent's."
+    ),
+    "chemclaw_exhibit_refusals_total": (
+        "Artefact writes refused, by reason: `invalid` (a spec, binding, citation or cap the write "
+        "broke, or any other refusal the writer can correct — a 422, or a worded refusal to the "
+        "model), `stale_revision` (written against anything but the head), `exhibit_limit` (the "
+        "session's or the artefact's cap) and `not_found` (an artefact the session does not "
+        "hold). A climbing `invalid` with flat writes is a model that cannot write the shape it is "
+        "offered."
+    ),
     "chemclaw_behaviour_proposals_total": (
         "Proposed changes to what the agent does, by kind and by what became of them. The only "
         "answer to the question this queue exists to make answerable — is the agent proposing "
@@ -1361,6 +1375,11 @@ _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
     # than by the visibility predicate, which is inert in a deployment that configures no gate.
     "chemclaw_behaviour_proposals_total": ("kind", "outcome"),
     "chemclaw_skill_loads_total": ("skill",),
+    # Both closed sets fixed in source (`exhibits/telemetry.py`'s `WriteOp`, `RefusalReason` and the
+    # store's `AuthorKind`): four write series and four refusal series, never a caller's string —
+    # an artefact id or a session would be unbounded, and both are on the `exhibit.*` log line.
+    "chemclaw_exhibit_writes_total": ("author_kind", "op"),
+    "chemclaw_exhibit_refusals_total": ("reason",),
     "chemclaw_tool_refusals_total": ("reason",),
     "chemclaw_invalid_tool_calls_total": ("tool",),
     "chemclaw_turns_finished_total": ("outcome",),

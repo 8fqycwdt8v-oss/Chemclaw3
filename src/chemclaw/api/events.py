@@ -434,6 +434,11 @@ class ToolFailedEvent(BaseModel):
     # other repositories read (`Chemclaw3_ui`, `Chemclaw3_mock`): a surface that ignores it is
     # unchanged, and one that switches on it can be exhaustive.
     reason: RefusalReason | None = None
+    # The provider's id for the failed call — the `call_id` its `exhibit_draft` frames carried — so
+    # a surface drops exactly the draft that will now never be settled, rather than every draft of
+    # that tool. `""` when the failure is not attributed to one call (`ToolFailureSignal.call_id`).
+    # Additive and defaulted, for `reason`'s reason above.
+    call_id: str = ""
 
 
 class ResultValue(BaseModel):

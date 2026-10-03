@@ -376,6 +376,10 @@ _MAY_PARK = frozenset(
         # (`durable/orphaned_waits.py`).
         "OrphanedWaitsWorkflow",
         "RetentionWorkflow",
+        # Artefact push expiry: Schedule-only, idempotent and nothing reads the run — its rows are
+        # notifications whose source of truth is the artefact list, so a parked run costs stale
+        # mailbox rows until a fix ships, never a lost answer (`durable/retention.py`).
+        "ExhibitPushPruneWorkflow",
     }
 )
 
