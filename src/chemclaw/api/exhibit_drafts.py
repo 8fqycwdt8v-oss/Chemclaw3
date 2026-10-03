@@ -12,10 +12,11 @@ never persisted and never decides anything, and a reassembly mistake costs a wro
 `exhibit` event then replaces — the failure mode a preview is allowed to have.
 
 **Whole text, throttled, growth only, capped.** `markdown` is everything so far, so a dropped frame
-costs nothing; frames of one call are at least `exhibit_draft_min_interval_ms` apart, and the
-throttle is checked *before* the arguments are re-parsed, so the cost of parsing a growing document
-is bounded by the frame rate rather than by the chunk rate; a frame is sent only when the text
-grew; past `exhibit_max_spec_bytes` the call stops streaming, because the tool will refuse it.
+costs nothing. Frames of one call are at least `exhibit_draft_min_interval_ms` apart, and further
+apart as the text grows (`_interval_seconds`), so a document's draft bytes are linear in its size.
+The throttle is checked *before* the arguments are re-parsed, so the cost of parsing a growing
+document is bounded by the frame rate rather than by the chunk rate; a frame is sent only when the
+text grew; past `exhibit_max_spec_bytes` the call stops streaming, because the tool will refuse it.
 When the model finishes the call (`close`), one last `done` frame carries whatever the throttle
 held back — once per call, so it is outside the throttle by construction.
 
@@ -49,6 +50,7 @@ class _Call:
     op: Literal["create", "revise"] | None
     arguments: str = ""
     sent_chars: int = 0
+    sent_bytes: int = 0
     checked_at: float | None = None
     stopped: bool = False
 
@@ -86,7 +88,7 @@ class DraftStream:
                 continue
             call.arguments += str(fragment.get("args") or "")
             now = time.monotonic()
-            interval = settings.exhibit_draft_min_interval_ms / 1000
+            interval = _interval_seconds(call.sent_bytes)
             # Once a frame has gone, throttled on the last *parse* rather than the last frame, so
             # arguments that stopped growing the text (a title written after the spec) are not
             # re-parsed per chunk. Before it, every fragment is parsed — the arguments are still a
@@ -115,6 +117,19 @@ class DraftStream:
         return frames
 
 
+def _interval_seconds(sent_bytes: int) -> float:
+    """How long a call waits after a frame of `sent_bytes` before its next one is considered.
+
+    The floor `exhibit_draft_min_interval_ms`, stretched to
+    `sent_bytes / exhibit_draft_bytes_per_ms` once the document is long: every frame is the whole
+    text, so at a fixed interval a document's draft bytes grow with the square of its size, and
+    this makes them grow with the size alone. It also bounds the parse — `parse_partial_json`
+    over 200 kB is ~17 ms on the event loop.
+    """
+    floor = settings.exhibit_draft_min_interval_ms
+    return max(floor, sent_bytes / settings.exhibit_draft_bytes_per_ms) / 1000
+
+
 def _frame(call: _Call, op: Literal["create", "revise"], *, done: bool) -> ExhibitDraftEvent | None:
     """The frame `call`'s arguments make now, or `None` when there is nothing new to show.
 
@@ -139,12 +154,14 @@ def _frame(call: _Call, op: Literal["create", "revise"], *, done: bool) -> Exhib
         return None
     if not isinstance(markdown, str):
         return None
-    if len(markdown.encode("utf-8")) > settings.exhibit_max_spec_bytes:
+    size = len(markdown.encode("utf-8"))
+    if size > settings.exhibit_max_spec_bytes:
         call.stopped = True
         return None
     if len(markdown) <= call.sent_chars:
         return None
     call.sent_chars = len(markdown)
+    call.sent_bytes = size
     return ExhibitDraftEvent(
         call_id=call.call_id,
         op=op,

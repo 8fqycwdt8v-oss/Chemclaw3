@@ -149,6 +149,8 @@ def test_drafts_grow_and_precede_the_call_its_result_and_its_artefact(
     )
     exhibit = events[kinds.index("exhibit")]
     assert isinstance(exhibit, ExhibitEvent) and exhibit.kind == "document"
+    # The artefact names the call its drafts named, so a surface settles the draft by it.
+    assert exhibit.call_id == first.call_id == "call-1"
 
 
 def test_the_throttle_holds_a_call_to_its_first_frame_and_one_closing_frame(
@@ -243,3 +245,86 @@ def test_a_draft_past_the_spec_cap_stops_and_a_kind_in_progress_does_not(
     assert frames and {frame.kind for frame in frames} == {""}
     table = json.dumps({"title": "T", "spec": {"kind": "table", "markdown": "# not a doc"}})
     assert _feed(DraftStream(), "create_exhibit", table, size=5) == []
+
+
+def test_the_draft_interval_stretches_with_the_document(monkeypatch: pytest.MonkeyPatch) -> None:
+    """After a frame of N bytes the next waits N / `exhibit_draft_bytes_per_ms` ms: linear cost.
+
+    Driven on a clock that advances one millisecond per fragment, with the floor at zero: under a
+    fixed interval every fragment that grew the text would be a frame and the bytes sent would grow
+    with the square of the document; stretched, the gap after each frame is at least its size over
+    the rate and the total stays within a small multiple of the document.
+    """
+    now = [0.0]
+
+    def _clock() -> float:
+        now[0] += 0.001
+        return now[0]
+
+    monkeypatch.setattr("chemclaw.api.exhibit_drafts.time.monotonic", _clock)
+    monkeypatch.setattr(settings, "exhibit_draft_min_interval_ms", 0)
+    monkeypatch.setattr(settings, "exhibit_draft_bytes_per_ms", 4)
+    text = "x" * 4_000
+    arguments = json.dumps({"title": "T", "spec": {"kind": "document", "markdown": text}})
+    stream = DraftStream()
+    stamped: list[tuple[float, int]] = []
+    for start in range(0, len(arguments), 8):
+        for frame in stream.feed(
+            AIMessageChunk(
+                content="",
+                id="m",
+                tool_call_chunks=[
+                    {
+                        "name": "create_exhibit" if start == 0 else None,
+                        "args": arguments[start : start + 8],
+                        "id": "c1" if start == 0 else None,
+                        "index": 0,
+                        "type": "tool_call_chunk",
+                    }
+                ],
+            )
+        ):
+            stamped.append((now[0], len(frame.markdown.encode())))
+    assert len(stamped) > 2
+    for (at, size), (next_at, _) in zip(stamped, stamped[1:], strict=False):
+        assert (next_at - at) * 1000 >= size / 4 - 1, (at, size, next_at)
+    # Unstretched this is ~500 frames and ~1 MB; stretched, a few times the document.
+    assert sum(size for _, size in stamped) < 4 * len(text), stamped
+
+
+def test_a_slow_reader_holds_one_draft_per_call_and_gets_the_newest() -> None:
+    """A reader that is not reading is offered fifty drafts of one call; it holds and reads one.
+
+    The other events keep their order around it, and a draft of a second call is its own slot.
+    """
+    from chemclaw.api.detach import DetachableTurn
+    from chemclaw.api.events import TokenEvent, sse_frame
+
+    def _draft(call_id: str, text: str) -> dict[str, str]:
+        return sse_frame(ExhibitDraftEvent(call_id=call_id, op="create", markdown=text))
+
+    async def _source() -> Any:
+        yield sse_frame(TokenEvent(text="before"))
+        for n in range(1, 51):
+            yield _draft("c1", "x" * n)
+        yield _draft("c2", "other")
+        yield sse_frame(TokenEvent(text="after"))
+        yield _draft("c1", "x" * 60)
+
+    async def _run() -> tuple[int, list[dict[str, str]]]:
+        turn = DetachableTurn(_source(), session_id="s-drafts")
+        await asyncio.sleep(0.05)  # the pump finishes before the reader reads anything
+        held = turn._sender.queue.qsize()
+        return held, [frame async for frame in turn.events()]
+
+    held, frames = asyncio.run(_run())
+    assert held == 5, "the buffer holds a draft per call, not one per frame"
+    seen = [(frame["event"], json.loads(frame["data"])) for frame in frames]
+    assert [(event, data.get("markdown", data.get("text"))) for event, data in seen] == [
+        ("token", "before"),
+        # The first slot of `c1` was still queued when its later frames came, so it carries the
+        # newest text — even the one offered after "after", since every frame is the whole text.
+        ("exhibit_draft", "x" * 60),
+        ("exhibit_draft", "other"),
+        ("token", "after"),
+    ]

@@ -76,6 +76,7 @@ when that response ends (`Watch.close`), whichever way it ends.
 
 import asyncio
 import contextlib
+import json
 import logging
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from typing import Any, NamedTuple
@@ -106,15 +107,52 @@ _LAGGED_MESSAGE = (
 )
 
 
+class _DraftSlot:
+    """A queued `exhibit_draft` frame whose content a newer frame of the same call may replace.
+
+    **Why a draft is coalesced and nothing else is.** Every draft frame carries the *whole*
+    document so far (`ExhibitDraftEvent`), so a frame a reader has not yet taken is made worthless
+    by the next one of its call — and a reader that has stopped reading would otherwise hold every
+    one of them: up to `_QUEUE_SIZE` frames of a 200 kB document is ~200 MB pinned by one stalled
+    tab. So a reader's buffer holds at most one draft per call, refreshed in place, and the reader
+    receives the newest text when it gets there. Every other event is a fact in a sequence and is
+    queued as it is.
+    """
+
+    __slots__ = ("call_id", "frame")
+
+    def __init__(self, call_id: str, frame: dict[str, str]) -> None:
+        """Hold `frame` for `call_id` until the reader takes it."""
+        self.call_id = call_id
+        self.frame = frame
+
+
 class _Reader:
     """One view of a running turn: its own bounded buffer, and whether the pump has cut it off."""
 
-    __slots__ = ("queue", "lagged")
+    __slots__ = ("queue", "lagged", "drafts")
 
     def __init__(self) -> None:
         """An empty buffer, attached."""
         self.queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=_QUEUE_SIZE)
         self.lagged = False
+        # The draft slots still in `queue`, by tool-call id — what `_offer` refreshes in place.
+        self.drafts: dict[str, _DraftSlot] = {}
+
+
+def _draft_call_id(item: Any) -> str | None:
+    """The tool-call id of an `exhibit_draft` frame, or `None` for every other item.
+
+    Read off the frame's own JSON because a frame is what the pump is handed; parsed only for the
+    one event type that is coalesced, so every other event pays a dict lookup.
+    """
+    if not isinstance(item, dict) or item.get("event") != "exhibit_draft":
+        return None
+    try:
+        call_id = json.loads(item["data"]).get("call_id")
+    except (KeyError, TypeError, ValueError):
+        return None
+    return call_id if isinstance(call_id, str) else None
 
 
 class Watch(NamedTuple):
@@ -216,10 +254,20 @@ class DetachableTurn:
         No `await`, so a reader cannot detach half-way through one delivery and no reader's pace
         reaches the turn. A cut-off reader keeps what is already buffered — it reads that first and
         is then told it lagged — so it never sees a gap in the middle of its stream, only an end.
+
+        A draft frame whose call already has one waiting in a reader's buffer replaces it there
+        rather than queueing behind it (`_DraftSlot`).
         """
+        call_id = _draft_call_id(item)
         for reader in list(self._readers):
+            if call_id is not None and (slot := reader.drafts.get(call_id)) is not None:
+                slot.frame = item
+                continue
+            queued = item if call_id is None else _DraftSlot(call_id, item)
             try:
-                reader.queue.put_nowait(item)
+                reader.queue.put_nowait(queued)
+                if isinstance(queued, _DraftSlot):
+                    reader.drafts[queued.call_id] = queued
             except asyncio.QueueFull:
                 reader.lagged = True
                 self._readers.discard(reader)
@@ -349,6 +397,10 @@ class DetachableTurn:
                         ErrorEvent(message=_LAGGED_MESSAGE, code="stream_lagged", retryable=True)
                     )
                     return
+                if isinstance(item, _DraftSlot):
+                    # Taken: a later draft of this call is queued afresh, behind what came between.
+                    reader.drafts.pop(item.call_id, None)
+                    item = item.frame
                 yield item
         finally:
             self._readers.discard(reader)

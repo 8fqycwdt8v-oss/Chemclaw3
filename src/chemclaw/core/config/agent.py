@@ -1048,6 +1048,13 @@ class AgentSettings(BaseSettings):
     # stream. Each frame carries the whole document so far, so the frame rate times the document's
     # size is the bandwidth a drafted artefact costs; a quarter second reads as live typing.
     exhibit_draft_min_interval_ms: int = Field(default=250, ge=0)
+    # The draft rate per call, in bytes of document per millisecond of interval: a frame of N
+    # bytes is followed by the next no sooner than N / this. Each frame is the whole document, so
+    # a fixed interval makes a draft's bytes quadratic in its size — measured, a 200 kB document
+    # written over five minutes at 250 ms was ~1,200 frames averaging ~100 kB, ~120 MB per viewer.
+    # At 100 (100 kB/s) the same document costs ~150 frames and ~15 MB, and a short one still
+    # streams at the floor above.
+    exhibit_draft_bytes_per_ms: int = Field(default=100, ge=1)
     # Artefacts one session may hold; the next create is refused (409 `exhibit_limit` over REST, a
     # worded refusal to the model) rather than evicting one somebody may still be reading.
     exhibit_max_per_session: int = Field(default=100, ge=1)

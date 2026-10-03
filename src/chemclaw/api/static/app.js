@@ -194,7 +194,18 @@ function applyEvent(evt, answerEl) {
     case "exhibit":
       // A header, not the artefact: the body is fetched from `/sessions/{id}/exhibits/{id}` by a
       // surface that renders it. This page has no pane, so it names what was written and where.
-      add("trace", `\u25a4 artefact ${evt.op} \u2014 ${evt.title} (${evt.kind}, rev ${evt.revision}, ${evt.exhibit_id})`);
+      // A draft line this write settles is rewritten in place (matched by `call_id`, "" for a
+      // write no tool call made); otherwise the write gets a line of its own.
+      {
+        const text = `\u25a4 artefact ${evt.op} \u2014 ${evt.title} (${evt.kind}, rev ${evt.revision}, ${evt.exhibit_id})`;
+        const drafted = evt.call_id ? draftLines.get(evt.call_id) : undefined;
+        if (drafted) {
+          drafted.textContent = text;
+          draftLines.delete(evt.call_id);
+        } else {
+          add("trace", text);
+        }
+      }
       return answerEl;
     case "exhibit_draft": {
       // A preview of a document artefact the model is still writing; every frame carries the
@@ -236,6 +247,9 @@ function applyEvent(evt, answerEl) {
 
 async function sendMessage(message) {
   const id = await ensureSession();
+  // A turn's drafts belong to that turn: one that no `exhibit` settled (the tool refused, the turn
+  // failed) is dropped here rather than kept for the life of the page.
+  draftLines.clear();
   const res = await fetch(`/sessions/${id}/messages`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },

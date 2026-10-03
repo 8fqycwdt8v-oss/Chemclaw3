@@ -618,4 +618,5 @@ def test_the_artefact_turn_streams_drafts_through_the_real_stream(
     assert {draft.call_id for draft in drafts} == {drafts[0].call_id} and drafts[0].call_id
     exhibit = next(event for event in events if isinstance(event, ExhibitEvent))
     assert (exhibit.kind, exhibit.title, exhibit.op) == ("document", e2e.ARTEFACT_TITLE, "created")
+    assert exhibit.call_id == drafts[0].call_id
     assert kinds[-1] == "token"

@@ -294,6 +294,7 @@ async def test_a_persons_write_is_pushed_to_the_sessions_other_tabs(
         "human",
         _BEN.oid,
     )
+    assert event.call_id == "", "a person's write was made by no tool call"
     assert _exhibit_event({"exhibit_id": "x"}) is None
 
 

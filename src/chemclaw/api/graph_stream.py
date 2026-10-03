@@ -40,6 +40,7 @@ order (RCH-4/RCH-5) and the two engines must not disagree about it.
 """
 
 import logging
+import re
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -330,7 +331,7 @@ async def graph_events(
                 yield event
             if held_exhibits and not below_root and _TOOL_NODE in (payload or {}):
                 for exhibit in held_exhibits:
-                    yield exhibit
+                    yield _with_call_id(exhibit, payload[_TOOL_NODE])
                 held_exhibits.clear()
         elif mode == "values":
             # **The outermost graph's own channels, which is where the carry comes from.** The
@@ -346,6 +347,34 @@ async def graph_events(
         yield exhibit
     if failure:
         raise failure[0]
+
+
+#: The two tools whose result names the artefact revision they wrote.
+_EXHIBIT_WRITERS = frozenset({"create_exhibit", "revise_exhibit"})
+
+
+def _with_call_id(event: Event, update: Any) -> Event:
+    """`event` carrying the id of the tool call that wrote it, read off the tools node's results.
+
+    The signal is raised inside the tool body, which knows nothing of the provider's call id; the
+    `ToolMessage` answering that call knows both — its `tool_call_id`, and the `exhibit_id` and
+    `revision` the tool returned. Matching on the pair is what lets a surface settle a draft by
+    `call_id` (the drafts carry the same id) rather than by "the next `exhibit` of the turn", which
+    two writes in one batch make ambiguous. A write with no matching result keeps `""` — the
+    contract's value for a write no tool call announced.
+    """
+    if not isinstance(event, ExhibitEvent) or not isinstance(update, dict):
+        return event
+    revision = re.compile(rf'"revision":\s*{event.revision}\b')
+    for message in update.get("messages") or []:
+        if (
+            isinstance(message, ToolMessage)
+            and message.name in _EXHIBIT_WRITERS
+            and event.exhibit_id in (text := message_text(message))
+            and revision.search(text)
+        ):
+            return event.model_copy(update={"call_id": str(message.tool_call_id or "")})
+    return event
 
 
 async def _until_failure(

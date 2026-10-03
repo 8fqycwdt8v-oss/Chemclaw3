@@ -730,6 +730,10 @@ class ExhibitEvent(BaseModel):
     op: Literal["created", "revised"]
     author_kind: Literal["agent", "human"]
     author: str
+    # The provider tool-call id of the `create_exhibit`/`revise_exhibit` call that wrote this
+    # revision — the id its `exhibit_draft` frames carried, so a surface settles a draft by it.
+    # `""` for a person's write, a report's artefact and every push on `/events`.
+    call_id: str = ""
 
 
 class ExhibitDraftEvent(BaseModel):
