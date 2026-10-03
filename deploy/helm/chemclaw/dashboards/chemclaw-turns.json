@@ -565,6 +565,21 @@
           "refId": "E"
         },
         {
+          "expr": "sum(rate(chemclaw_turns_stop_deferred_total[5m]))",
+          "legendFormat": "unload stop deferred",
+          "refId": "K"
+        },
+        {
+          "expr": "sum(rate(chemclaw_turns_stop_resumed_total[5m]))",
+          "legendFormat": "unload stop cancelled by a reload",
+          "refId": "L"
+        },
+        {
+          "expr": "sum(rate(chemclaw_turns_stop_expired_total[5m]))",
+          "legendFormat": "unload stop applied (nobody came back)",
+          "refId": "M"
+        },
+        {
           "expr": "sum(rate(chemclaw_turn_send_timeouts_total[5m]))",
           "legendFormat": "turn SSE send timeout",
           "refId": "F"
