@@ -155,7 +155,7 @@ from chemclaw.agent.tool_authz import (
     surface_authorization_denials,
     surface_domain_errors,
 )
-from chemclaw.agent.tool_framing import frame_connector_results
+from chemclaw.agent.tool_framing import frame_connector_results, stamp_result_handles
 from chemclaw.agent.tool_result_size import bound_tool_results
 from chemclaw.agent.tool_schema import as_structured_tool
 from chemclaw.connectors.registry import ConnectorError, skills_dirs
@@ -1701,7 +1701,7 @@ def tool_governance_middleware(audit: Any, profile: AgentProfile) -> list[Any]:
 
 
 def tool_call_middleware(audit: Any, profile: AgentProfile) -> list[Any]:
-    """The governed chain plus the three entries that exist only because a *model* reads the result.
+    """The governed chain plus the entries that exist only because a *model* reads the result.
 
     The two converters go outermost, so an exception still reaches audit unchanged and is recorded
     as an `error` outcome before either turns it into what the model reads. LangChain nests
@@ -1712,11 +1712,18 @@ def tool_call_middleware(audit: Any, profile: AgentProfile) -> list[Any]:
     `tool_governance_middleware` for the same reason the converters are: a template step
     (`agent/tool_invocation.py`) has no model, and interpolating `${steps.<id>.result}` from a
     result wrapped in a prompt envelope would put the delimiter into a launched workflow's
-    arguments. Governance must be identical for both callers; presentation must not be.
+    arguments. Governance must be identical for both callers; presentation must not be. The
+    handle line `stamp_result_handles` appends is presentation on the same terms: a template step's
+    `${steps.<id>.result}` must be what the tool returned, not that plus an address.
     """
     return [
         surface_authorization_denials,
         surface_domain_errors,
+        # Outermost of what rewrites a result, so the handle line is the last thing the model
+        # reads and lies outside the envelope and the defang below it; inside the converters,
+        # because a refusal is this system's sentence and names no stored result
+        # (`D-2026-10-03-an-artefact-binds-a-value-to-the-result-it-came-from`).
+        stamp_result_handles,
         # Inside both converters and outside the audit trail, and both halves are decisions.
         #
         # Inside the converters, because they are what turns a refusal this system composed into a

@@ -127,15 +127,18 @@ from chemclaw.agent.tool_result_shape import (
     rewritten_tool_messages,
 )
 from chemclaw.agent.tool_result_size import (
+    FULL_RESULT_REF_KEY,
     bounded_for_batch,
     full_text,
     kept_in_full,
     original_chars,
+    stored_result_ref,
     text_chars,
     was_cut,
 )
 from chemclaw.connectors.transport import SERVED_BY
 from chemclaw.core.config import settings
+from chemclaw.core.result_handle import handle_line
 
 #: What `defanged_payload` preserves: a payload comes back as the type it went in as.
 _Payload = TypeVar("_Payload")
@@ -520,9 +523,21 @@ async def frame_connector_results(request: Any, handler: Callable[[Any], Any]) -
     # recorded is the pre-escape content, which on that path *is* what the tool returned.
     originals: dict[str, str] = {}
 
-    def _kept(message: ToolMessage, offered: Any, bounded: Any) -> None:
-        if bounded is not offered and not was_cut(message):
+    def _kept(message: ToolMessage, offered: Any, bounded: Any) -> dict[str, Any]:
+        """The metadata the delivered message carries, recording a cut only this pass made.
+
+        A result the inner pass stored whole already names its full text (`RESULT_REF_KEY`), so
+        this pass's cut points at that ref rather than storing the same bytes a second time.
+        """
+        metadata = dict(message.response_metadata or {})
+        if bounded is offered or was_cut(message):
+            return metadata
+        stored = stored_result_ref(message)
+        if stored:
+            metadata[FULL_RESULT_REF_KEY] = stored
+        else:
             originals[message.tool_call_id] = full_text(message.content)
+        return metadata
 
     # A helper a turn limit stopped says so before anything it wrote. Read off the `Command`
     # before the per-message rewrite, which sees only the `ToolMessage` — see
@@ -572,8 +587,9 @@ async def frame_connector_results(request: Any, handler: Callable[[Any], Any]) -
             expanded_from=in_hand,
             count=original_chars(message) is None,
         )
-        _kept(message, escaped, bounded)
-        return message.model_copy(update={"content": bounded})
+        return message.model_copy(
+            update={"content": bounded, "response_metadata": _kept(message, escaped, bounded)}
+        )
 
     origin = served_by(request)
     if origin:
@@ -643,8 +659,9 @@ async def frame_connector_results(request: Any, handler: Callable[[Any], Any]) -
                 expanded_from=in_hand,
                 count=original_chars(message) is None,
             )
-            _kept(message, framed, bounded)
-            return message.model_copy(update={"content": bounded})
+            return message.model_copy(
+                update={"content": bounded, "response_metadata": _kept(message, framed, bounded)}
+            )
 
         return await kept_in_full(
             rewritten_tool_messages(result, _framed), originals, str(request.tool_call["name"])
@@ -653,3 +670,42 @@ async def frame_connector_results(request: Any, handler: Callable[[Any], Any]) -
     if name in subagent_tool_names() or name in scratchpad_tools():
         return await kept_in_full(rewritten_tool_messages(result, _defanged), originals, str(name))
     return result
+
+
+def _with_handle(message: ToolMessage) -> ToolMessage:
+    """`message` ending in its handle line, or unchanged when nothing stored its full text."""
+    ref = stored_result_ref(message)
+    if not ref or message.status == "error":
+        return message
+    line = handle_line(ref)
+    content = message.content
+    if isinstance(content, str):
+        stamped: Any = content + line
+    elif isinstance(content, list):
+        stamped = [*content, {"type": "text", "text": line}]
+    else:
+        return message
+    return message.model_copy(update={"content": stamped})
+
+
+@wrap_tool_call
+async def stamp_result_handles(request: Any, handler: Callable[[Any], Any]) -> Any:
+    """End every stored result with `⟨r:<12 hex>⟩`, the handle an artefact binding names it by.
+
+    **Outside the framing, so the handle is this system's line rather than part of the evidence.**
+    The envelope says "retrieved data, weigh and cite it" and the defang neutralises anything inside
+    it; a handle inside either would be a third-party-shaped string the model is asked to copy back
+    verbatim, and a tool result that spelled `⟨r:…⟩` itself could have pointed a binding at another
+    result. Appended here, after every rewrite, it is the last line of what the model reads and the
+    one part of it nothing upstream wrote.
+
+    **Only where the full text was stored** (`tool_result_size.RESULT_REF_KEY`, stamped by
+    `bound_tool_results` before the message left it): a handle that names bytes nobody kept would be
+    an address a binding is refused on. So a failure, an empty result, a result over the store's cap
+    and every turn on a driver with no result sink (the CLI, a template step) carry none
+    (`D-2026-10-03-an-artefact-binds-a-value-to-the-result-it-came-from`).
+
+    Nothing re-bounds after this, and that is the cost the decision record states: a stamped result
+    is its batch's share of the ceiling plus one line of `len(handle_line(ref))` characters.
+    """
+    return rewritten_tool_messages(await handler(request), _with_handle)

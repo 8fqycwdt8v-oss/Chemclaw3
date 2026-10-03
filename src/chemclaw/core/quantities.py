@@ -34,6 +34,8 @@ from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
+from chemclaw.core.result_handle import without_handle_line, without_handles
+
 # A decimal literal, optionally signed, optionally in exponent form, with thousands separators
 # allowed so an answer's "14,224 g" is one number rather than two.
 #
@@ -74,9 +76,12 @@ def returned_values(text: str) -> list[float]:
 
     Deduplication is not cosmetic: one 18-chunk `gather_evidence` sweep holds 133 numeric literals
     and 35 distinct values, and it is the distinct set that a comparison needs.
+
+    A result handle (`core.result_handle`) is skipped: it is an address the model was handed, and
+    its hex is all digits often enough to vouch for a twelve-digit figure nobody computed.
     """
     seen: dict[float, None] = {}
-    for match in _NUMBER.finditer(text):
+    for match in _NUMBER.finditer(without_handles(text)):
         value = _as_float(match)
         if value is not None:
             seen.setdefault(value, None)
@@ -129,7 +134,8 @@ def labelled_values(text: str) -> list[Quantity]:
     value does not repeat the entry.
     """
     try:
-        parsed = json.loads(text)
+        # A stamped result is JSON followed by its handle line, which is no part of the payload.
+        parsed = json.loads(without_handle_line(text))
     except (ValueError, TypeError, RecursionError):
         # `RecursionError` is not a `ValueError`, and `json.loads` raises it at about 1000 levels
         # of nesting — measured, not assumed. A tool result is arbitrary text, so that is reachable
@@ -209,9 +215,9 @@ def stated_numerals(text: str) -> list[str]:
     Returned as the *literal* rather than as a float for two reasons, and both matter. The written
     form carries the precision the answer chose, which `is_rounding_of` needs; and it is the string
     a reader — or a judge — can find in the answer, where a re-formatted `4.56` might not be there
-    at all.
+    at all. A result handle the answer quotes (`r:3fa2b1c0d9e8`) is an address, not a figure.
     """
-    stripped = _NOT_A_QUANTITY.sub(" ", text)
+    stripped = _NOT_A_QUANTITY.sub(" ", without_handles(text))
     seen: dict[str, None] = {}
     for match in _NUMBER.finditer(stripped):
         if _as_float(match) is not None:
