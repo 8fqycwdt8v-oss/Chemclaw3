@@ -2939,27 +2939,36 @@ async def settle_interrupted_turns(
         )
         return 0
     for correlation_id, actor in interrupted:
-        METRICS.increment("chemclaw_turns_finished_total", labels={"outcome": INTERRUPTED})
-        log_event(
-            logger,
-            "turn.interrupted",
-            "turn interrupted for session %s: its process ended mid-turn and its claim lapsed",
-            session_id,
-            session_id=session_id,
-            actor=actor or "",
-            correlation_id=correlation_id,
-            outcome=INTERRUPTED,
-        )
-        if correlation_id:
-            # Without a correlation id there is no turn to name — a row written off the request
-            # path — and `TurnCost` refuses an empty one, rightly.
-            record_turn_cost(
-                TurnCost(
-                    correlation_id=correlation_id,
-                    session_id=session_id,
-                    actor=actor or "",
-                    completed=False,
-                    outcome=INTERRUPTED,
-                )
-            )
+        _book_interrupted(session_id, correlation_id, actor)
     return len(interrupted)
+
+
+def _book_interrupted(session_id: str, correlation_id: str, actor: str | None) -> None:
+    """The record of one interrupted turn: its counter, its log record and its `turn_costs` row.
+
+    Called once per turn `mark_interrupted` returned, which is once across every process — see
+    `settle_interrupted_turns`.
+    """
+    METRICS.increment("chemclaw_turns_finished_total", labels={"outcome": INTERRUPTED})
+    log_event(
+        logger,
+        "turn.interrupted",
+        "turn interrupted for session %s: its process ended mid-turn and its claim lapsed",
+        session_id,
+        session_id=session_id,
+        actor=actor or "",
+        correlation_id=correlation_id,
+        outcome=INTERRUPTED,
+    )
+    if correlation_id:
+        # Without a correlation id there is no turn to name — a row written off the request path —
+        # and `TurnCost` refuses an empty one, rightly.
+        record_turn_cost(
+            TurnCost(
+                correlation_id=correlation_id,
+                session_id=session_id,
+                actor=actor or "",
+                completed=False,
+                outcome=INTERRUPTED,
+            )
+        )
