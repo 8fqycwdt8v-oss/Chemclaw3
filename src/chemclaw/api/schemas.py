@@ -21,7 +21,12 @@ from typing import Any
 
 from pydantic import BaseModel, Field, computed_field, field_validator
 
-from chemclaw.agent.session_store import stored_authorship, stored_correlation_id
+from chemclaw.agent.session_store import (
+    TurnStatus,
+    stored_authorship,
+    stored_correlation_id,
+    stored_turn_status,
+)
 from chemclaw.agent.tool_result_size import full_result_ref, was_cut
 from chemclaw.api.tool_results import content_address
 from chemclaw.core.authorship import Authorship
@@ -245,6 +250,13 @@ class TranscriptMessage(BaseModel):
     # and the same pair the audit trail and a knowledge note carry. `None` for a row that records
     # neither half. Optional and additive, like `correlation_id` above.
     author: Authorship | None = None
+    # How the turn this *question* opened has ended so far
+    # (`D-2026-10-03-a-turn-is-written-ahead-and-an-interrupted-one-says-so`): `running` while it
+    # runs, then `done`, `failed`, `stopped`, or `interrupted` when its process died mid-turn — the
+    # question is written ahead of the turn now, so a reader sees what the model will see and is
+    # told how it ended rather than finding it missing. `None` on every other message, and on a
+    # question stored before the column existed. Optional and additive, like the two above.
+    turn_status: TurnStatus | None = None
 
 
 class PlanDecisionIn(BaseModel):
@@ -626,6 +638,7 @@ def _transcript(
                 tool_calls=calls,
                 correlation_id=stored_correlation_id(message),
                 author=stored_authorship(message),
+                turn_status=stored_turn_status(message),
             )
         )
     return transcript

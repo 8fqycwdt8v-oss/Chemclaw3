@@ -27,7 +27,9 @@ import random
 import time
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
+from typing import Any
 
+import psycopg
 from fastapi import FastAPI, HTTPException, Request
 from sse_starlette.sse import EventSourceResponse, SendTimeoutError
 from starlette.responses import Response
@@ -47,7 +49,7 @@ from chemclaw.api.deps import CurrentSession, CurrentUser, _resolve_session, req
 from chemclaw.api.detach import DetachableTurn
 from chemclaw.api.events import TURN_EVENT_REF, ErrorEvent, QueuedEvent, sse_frame
 from chemclaw.api.middleware import AT_CAPACITY
-from chemclaw.api.runner import failure_event, run_turn
+from chemclaw.api.runner import failure_event, run_turn, settle_interrupted_turns
 from chemclaw.api.schemas import MessageIn, QueuedMessageOut, SessionQueueOut, session_title
 from chemclaw.api.state import (
     SessionTurns,
@@ -1007,6 +1009,12 @@ async def watch_turn(
     404 when no turn is running here — including one running on another replica, whose pump this
     process cannot reach (the stop route's scope, for the same reason). A late joiner sees events
     from the moment it attaches; what came earlier is in the transcript once the answer lands.
+
+    **410 `turn_interrupted` when the session's latest turn died with its process**
+    (`D-2026-10-03-a-turn-is-written-ahead-and-an-interrupted-one-says-so`, `_interrupted`). A bare
+    404 told a client whose stream was cut by a killed pod nothing: "not running" is equally true of
+    a turn that finished, one on another replica, and one that will never answer. Gone, and said so,
+    is what lets the client offer to send the question again instead of polling for an answer.
     429 when the turn already has `service_turn_max_watchers` watchers, or when the caller already
     holds `service_max_event_streams_per_user` long-lived streams — a followed turn is held open as
     long as a push-back stream is, so it is charged to the same ledger
@@ -1019,6 +1027,14 @@ async def watch_turn(
     front = state(request)
     turn = front.running_turns.get(session_id)
     if turn is None:
+        if await _interrupted(front.history, session_id, live.session.state):
+            raise HTTPException(
+                status_code=410,
+                detail={
+                    "code": "turn_interrupted",
+                    "message": _INTERRUPTED_MESSAGE,
+                },
+            )
         raise HTTPException(status_code=404, detail="no turn is running for this session")
     if turn.watchers >= settings.service_turn_max_watchers:
         raise HTTPException(
@@ -1054,6 +1070,34 @@ async def watch_turn(
         send_timeout=settings.service_sse_send_timeout_seconds,
         release=_release,
     )
+
+
+#: What a client following a turn that died with its process is told. The service restarted under
+#: the turn; nothing ran twice, and the question is in the transcript marked as interrupted.
+_INTERRUPTED_MESSAGE = (
+    "This answer was interrupted: the service restarted while it was being written. Your question "
+    "is in the conversation; send it again to get an answer."
+)
+
+
+async def _interrupted(history: Any, session_id: str, session_state: dict[str, Any]) -> bool:
+    """Whether the session's latest turn ended `interrupted` — after first asking it to settle.
+
+    Asked only once nothing is running here, so it costs the reattach that would have been a 404
+    one probe of the running-question index and, at most, one row read. A store that cannot answer
+    leaves the route answering 404, as before this existed.
+    """
+    await settle_interrupted_turns(history, session_id, state=session_state)
+    latest = getattr(history, "latest_turn_status", None)
+    if latest is None:
+        return False
+    try:
+        return bool(await latest(session_id, state=session_state) == "interrupted")
+    except (ConnectionError, psycopg.Error):
+        logger.warning(
+            "could not read session %s's latest turn; answering 404", session_id, exc_info=True
+        )
+        return False
 
 
 async def _while_a_participant(

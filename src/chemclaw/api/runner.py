@@ -144,6 +144,10 @@ _DURABLE_SUBSYSTEM = "durable-jobs (Temporal)"
 #: `chemclaw_turns_shed_total`, `chemclaw_turns_conflict_total`). Adding them here would publish a
 #: second answer to a question already answered, and would break the pairing an operator reads
 #: `chemclaw_turns_started_total` against, since all three happen *before* a turn is started.
+#:
+#: **One more ending is recorded and is deliberately not in this set: `INTERRUPTED`**, because its
+#: producer is not `_settle_outcome` and cannot be. It names a turn whose own process died
+#: mid-turn, so nothing in that process books anything.
 _OUTCOMES = (
     "answered",
     "loop_capped",
@@ -153,6 +157,12 @@ _OUTCOMES = (
     "timed_out",
     "abandoned",
 )
+
+#: A turn whose process died mid-turn, booked by whichever process next touches its session —
+#: exactly once (`settle_interrupted_turns`,
+#: `D-2026-10-03-a-turn-is-written-ahead-and-an-interrupted-one-says-so`) and with no spend: what
+#: the dead process metered died with it, which the row's zeros say rather than hide.
+INTERRUPTED = "interrupted"
 
 
 # `classify_model_failure` labels that mean the model provider failed rather than the request
@@ -299,6 +309,10 @@ async def run_turn(
     # worker — the reason it is synchronous at all. The history read is therefore the caller's, and
     # its result is passed in.
     earlier_said = await _earlier_user_texts(history, session)
+    # The transcript row this turn's question was written ahead into, and whether this turn has
+    # settled it (`_begin_transcript_turn`). Out here so the teardown can read both on every path.
+    turn_row: int | None = None
+    transcript_settled = False
     with (
         _turn_ambient(
             session.session_id,
@@ -348,6 +362,13 @@ async def run_turn(
                 model=_resolved_model(),
                 dry_run=dry_run,
             )
+            # **The question is in the transcript before the model sees it**
+            # (`D-2026-10-03-a-turn-is-written-ahead-and-an-interrupted-one-says-so`). The graph's
+            # first step commits it to the checkpointer, so writing it only with the answer left a
+            # turn whose process died in between holding a question the model will read on the
+            # next turn and the chemist cannot. Inside the ambient, which is what stamps the row
+            # with this turn's correlation id and its sender.
+            turn_row = await _begin_transcript_turn(history, session, user_message)
             async with AsyncExitStack() as stack:
                 turn_tools, unreachable = await _open_turn_surface(stack, connectors)
                 if unreachable:
@@ -529,6 +550,8 @@ async def run_turn(
                 # exists to name. The teardown below still books the spend and the duration,
                 # which is right: the turn cost what it cost.
                 if not ledger.answer_text.strip():
+                    await _settle_transcript_turn(history, session, turn_row, "failed")
+                    transcript_settled = True
                     return
                 # Before the answer, because the answer is the turn's final event: a chemist reading
                 # "review the plan and approve it" in the answer text used to have nothing to act on
@@ -684,8 +707,9 @@ async def run_turn(
             for event in _cap_events(session, ledger):
                 yield event
             await _record_transcript(
-                history, session, user_message, ledger.answer_text, ledger.exchanges
+                history, session, user_message, ledger.answer_text, ledger.exchanges, turn=turn_row
             )
+            transcript_settled = True
             # Drain the turn's buffered audit rows before answering, so "the turn is done" also
             # means "its trail is queryable" — the off-path batching in `PostgresAuditSink` makes
             # the write eventually-consistent otherwise, and one batched write here costs
@@ -741,6 +765,9 @@ async def run_turn(
             raise
         except Exception as exc:
             yield _failure_event(exc, session, ledger)
+            if not transcript_settled:
+                await _settle_transcript_turn(history, session, turn_row, "failed")
+                transcript_settled = True
             # A turn that spent the authorization and then broke has still spent it: tools may have
             # run before it failed, and re-running under the same approval is exactly what a person
             # would want asked about again.
@@ -748,6 +775,15 @@ async def run_turn(
                 await consume_turn_approval(session.session_id)
         finally:
             _book_turn_spend(ledger, session=session, actor=actor, profile=profile, budget=budget)
+            # The torn-down turn's question, settled off this frame: a teardown reached by
+            # cancellation may not `await` (D-130). A Stop is `stopped`; the clock is a failure.
+            if turn_row is not None and not transcript_settled:
+                _settle_after_teardown(
+                    history,
+                    session,
+                    turn_row,
+                    "stopped" if ledger.cancelled and not ledger.timed_out else "failed",
+                )
 
 
 @dataclass(slots=True)
@@ -2108,7 +2144,9 @@ def _roll_back_unfinished(
     the instant it is written, on the checkpointer's autocommit pool, and nothing in this process
     owns it by then. Keeping the exchange is still the right call — the alternative is deleting a
     *complete, correctly paired* exchange because a client dropped — so what changes is that the
-    divergence is counted rather than denied.
+    divergence is counted rather than denied. (Since
+    `D-2026-10-03-a-turn-is-written-ahead-and-an-interrupted-one-says-so` the question is in both
+    records from the turn's start, settled `stopped` here, so what diverges is the answer alone.)
 
     **The counter names one branch and not the whole class**, deliberately. The same divergence
     arrives on the ordinary failure path (a gateway that refuses one model call leaves the
@@ -2689,6 +2727,8 @@ async def _record_transcript(
     user_message: str,
     answer: str,
     exchanges: list[Any] | None = None,
+    *,
+    turn: int | None = None,
 ) -> None:
     """Write this turn's exchange to the session transcript, best-effort.
 
@@ -2703,11 +2743,13 @@ async def _record_transcript(
     **Written from the turn's own text, which is the trade this being "the light option" names.**
     The alternative is projecting from the checkpoint stream, which survives a process that dies
     mid-turn because the checkpoint is already committed. This runs after the answer is assembled,
-    so a turn killed before it answers leaves no transcript row — **and the checkpoint it leaves
-    behind is not rolled back to match.** This paragraph used to end "so the two agree about what a
-    half-turn is worth", and they do not: `_roll_back_unfinished` reverts `session.state` and
-    nothing else, so a teardown landing after the graph run and before this call leaves the
-    exchange in the model's record and out of the chemist's. Measured at `checkpoints: 8,
+    so a turn killed before it answers left no transcript row — until the question was written ahead
+    of the turn (`_begin_transcript_turn`), which is what the chemist now sees of such a turn,
+    marked with how it ended. What is left below is the *answer's* half: **the checkpoint a
+    torn-down turn leaves behind is not rolled back to match.** This paragraph used to end "so the
+    two agree about what a half-turn is worth", and they do not: `_roll_back_unfinished` reverts
+    `session.state` and nothing else, so a teardown landing after the graph run and before this call
+    leaves the exchange in the model's record and out of the chemist's. Measured at `checkpoints: 8,
     session_messages: 0`; counted at `chemclaw_transcript_thread_divergence_total`; the whole
     argument, and why the exchange is kept rather than deleted, is in `_roll_back_unfinished`.
 
@@ -2723,6 +2765,12 @@ async def _record_transcript(
     is worth failing an answered turn over, which is the rule `chemclaw.api.tool_results` already
     states for stored tool results. An empty answer is not written at all: the turn yielded an
     `ErrorEvent` saying nothing was produced, and a blank assistant row would contradict it.
+
+    **The question is usually already there** (`turn`, from `_begin_transcript_turn`): written ahead
+    of the turn, so this appends the rest and settles the question `done` in the same commit. Only a
+    turn whose write-ahead did not land — no provider that keeps one, or a store that refused it —
+    writes the exchange whole, as every turn did before
+    `D-2026-10-03-a-turn-is-written-ahead-and-an-interrupted-one-says-so`.
     """
     if history is None or not answer.strip():
         return
@@ -2733,6 +2781,15 @@ async def _record_transcript(
         return
     session_id = session.session_id
     try:
+        if turn is not None and hasattr(history, "finish_turn"):
+            await history.finish_turn(
+                session_id,
+                turn,
+                [*(exchanges or []), AIMessage(content=answer)],
+                "done",
+                state=session.state,
+            )
+            return
         await history.save_messages(
             session_id,
             [
@@ -2755,3 +2812,154 @@ async def _record_transcript(
             session_id,
             exc,
         )
+
+
+async def _begin_transcript_turn(
+    history: Any | None, session: TurnSession, user_message: str
+) -> int | None:
+    """Write this turn's question ahead of it, `running`; the row to settle, or `None`.
+
+    **First, settle whatever the session's previous turn left behind.** A turn whose process died
+    left its question `running`, and the turn starting now holds the session's claim — so if that
+    question is still unsettled, no live owner covers it, and this is the moment that is certain
+    (`settle_interrupted_turns`). Before the write rather than after, so the turn about to run is
+    never a candidate.
+
+    `None` when there is no provider that writes ahead (the CLI, a test's recorder) or the store
+    refused the write. The turn runs either way — a transcript is a rendering, and no rendering is
+    worth refusing a chemist's turn over — and `_record_transcript` then writes the exchange whole,
+    exactly as it did before the write-ahead existed.
+    """
+    begin = getattr(history, "begin_turn", None)
+    if begin is None:
+        return None
+    await settle_interrupted_turns(history, session.session_id, state=session.state)
+    try:
+        turn: int | None = await begin(
+            session.session_id, HumanMessage(content=user_message), state=session.state
+        )
+    except (ConnectionError, psycopg.Error) as exc:
+        degraded(
+            logger,
+            "transcript_projection",
+            "could not write session %s's question ahead of its turn (%s); the turn runs and its "
+            "exchange is written whole once it answers",
+            session.session_id,
+            exc,
+        )
+        return None
+    return turn
+
+
+async def _settle_transcript_turn(
+    history: Any | None, session: TurnSession, turn: int | None, status: str
+) -> None:
+    """Settle a written-ahead question that ended without an answer, best-effort.
+
+    `failed` or `stopped`, never `done` — an answer is settled with the rest of its exchange by
+    `_record_transcript`. Only a question still `running` moves (the provider's own rule), so this
+    cannot undo an answer that landed or a mark another process made.
+    """
+    finish = getattr(history, "finish_turn", None)
+    if turn is None or finish is None:
+        return
+    try:
+        await finish(session.session_id, turn, [], status, state=session.state)
+    except (ConnectionError, psycopg.Error) as exc:
+        degraded(
+            logger,
+            "transcript_projection",
+            "could not settle session %s's question as %s (%s); it stays `running` until the "
+            "session is next touched, which then reads it as interrupted",
+            session.session_id,
+            status,
+            exc,
+        )
+
+
+#: Teardown settlements still in flight, held so the task cannot be collected mid-write.
+_PENDING_SETTLES: set["asyncio.Task[None]"] = set()
+
+
+def _settle_after_teardown(
+    history: Any | None, session: TurnSession, turn: int, status: str
+) -> None:
+    """`_settle_transcript_turn` from a teardown, where an `await` would re-raise the cancellation.
+
+    The same contract as `agent/turn_cost.record_turn_cost` and `plan_gate.spend_approval_after_
+    teardown`: synchronous, the write on its own task, its failure its own (the settle degrades
+    rather than raises), and the task held until it finishes.
+    """
+    try:
+        task = asyncio.get_running_loop().create_task(
+            _settle_transcript_turn(history, session, turn, status)
+        )
+    except RuntimeError:  # no running loop — a synchronous caller has nowhere to schedule
+        logger.warning("no event loop to settle session %s's question", session.session_id)
+        return
+    _PENDING_SETTLES.add(task)
+    task.add_done_callback(_PENDING_SETTLES.discard)
+
+
+async def settle_interrupted_turns(
+    history: Any | None, session_id: str, *, state: dict[str, Any] | None = None
+) -> int:
+    """Mark the session's turns whose owner died `interrupted`, and book each one's outcome once.
+
+    **The other producer of a turn's record, for the one ending its own process cannot book**
+    (`D-2026-10-03-a-turn-is-written-ahead-and-an-interrupted-one-says-so`). A front-door pod killed
+    mid-turn runs no teardown: its question stays `running` and nothing records how the turn ended.
+    So whoever touches the session next asks — the session's next turn (`_begin_transcript_turn`), a
+    reattach that finds nothing running (`routes/turns.watch_turn`), a transcript read
+    (`routes/sessions.get_messages`) — and the provider marks a question only once its claim has
+    lapsed with no live owner. The mark is exactly-once across every process, so the outcome booked
+    here is too: one `turn_costs` row with `outcome="interrupted"`, one `turn.interrupted` log
+    record, and one `chemclaw_turns_finished_total{outcome="interrupted"}`.
+
+    The row books no spend. What the dead process metered died with its memory; zeros that say so
+    are honest, and an estimate made here would be a number nothing measured.
+
+    Best-effort and quiet on the reader paths: a store that cannot answer leaves the question
+    `running` for the next reader, and the caller carries on exactly as before this existed.
+
+    Returns how many turns this call marked.
+    """
+    mark = getattr(history, "mark_interrupted", None)
+    if mark is None:
+        return 0
+    try:
+        interrupted: list[tuple[str, str | None]] = await mark(session_id, state=state)
+    except (ConnectionError, psycopg.Error) as exc:
+        degraded(
+            logger,
+            "transcript_projection",
+            "could not check session %s for an interrupted turn (%s); the next reader will",
+            session_id,
+            exc,
+        )
+        return 0
+    for correlation_id, actor in interrupted:
+        METRICS.increment("chemclaw_turns_finished_total", labels={"outcome": INTERRUPTED})
+        log_event(
+            logger,
+            "turn.interrupted",
+            "turn interrupted for session %s: its process ended mid-turn and its claim lapsed",
+            session_id,
+            session_id=session_id,
+            actor=actor or "",
+            correlation_id=correlation_id,
+            outcome=INTERRUPTED,
+        )
+        if correlation_id:
+            # Without a correlation id there is no turn to name — a row written off the request
+            # path — and `TurnCost` refuses an empty one, rightly.
+            record_turn_cost(
+                TurnCost(
+                    correlation_id=correlation_id,
+                    session_id=session_id,
+                    actor=actor or "",
+                    completed=False,
+                    outcome=INTERRUPTED,
+                )
+            )
+    return len(interrupted)

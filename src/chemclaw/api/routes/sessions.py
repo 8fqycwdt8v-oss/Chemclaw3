@@ -30,6 +30,7 @@ from chemclaw.api.deps import (
     resolve_owned_session,
     resolve_session,
 )
+from chemclaw.api.runner import settle_interrupted_turns
 from chemclaw.api.schemas import (
     SessionIn,
     SessionOut,
@@ -315,7 +316,13 @@ async def get_messages(
     and every `result_ref` is then `""` — the same value with the same meaning the live stream
     gives a result it did not store. See `D-2026-08-09-a-derivable-ref-is-not-a-fetchable-one`.
     """
-    stored = await state(request).history.get_messages(session_id, state=live.session.state)
+    history = state(request).history
+    # **A turn whose process died is noticed here too**, so a chemist reloading after a pod was
+    # killed reads the question marked `interrupted` rather than `running` for ever
+    # (`D-2026-10-03-a-turn-is-written-ahead-and-an-interrupted-one-says-so`). A turn whose claim is
+    # still live is left alone; nothing here can mark a turn that is running.
+    await settle_interrupted_turns(history, session_id, state=live.session.state)
+    stored = await history.get_messages(session_id, state=live.session.state)
     return _transcript(stored, fetchable=await front_door.fetchable_refs(session_id))
 
 
