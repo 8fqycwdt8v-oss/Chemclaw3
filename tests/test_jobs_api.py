@@ -254,6 +254,79 @@ def test_a_provider_stall_is_worded_as_one_and_not_as_an_internal_error() -> Non
     assert "model provider" in event.message
 
 
+def _gateway_error(status: int) -> Any:
+    """An OpenAI-compatible gateway answering `status`, as the SDK raises it after its retries."""
+    import httpx2
+    import openai
+
+    request = httpx2.Request("POST", "https://gateway.example/v1/chat/completions")
+    body = {"message": "injected failure", "type": "server_error"}
+    response = httpx2.Response(status, request=request, json={"error": body})
+    kind = openai.RateLimitError if status == 429 else openai.InternalServerError
+    return kind(f"Error code: {status}", response=response, body=body)
+
+
+def _provider_failures() -> list[Exception]:
+    """Every shape a provider-side failure reaches `_classify` in, raw and as LangChain re-raises.
+
+    `OpenAIAPIError` is the one the kind cluster's turn ended on (the mock answering HTTP 500): it
+    is what `langchain_openai` re-raises a 5xx as, and it is an `InternalServerError`.
+    """
+    import httpx2
+    import openai
+    from langchain_openai.chat_models.base import (
+        OpenAIAPIError,
+        OpenAIConnectionError,
+        OpenAITimeoutError,
+    )
+
+    request = httpx2.Request("POST", "https://gateway.example/v1/chat/completions")
+    server = _gateway_error(500)
+    return [
+        server,
+        OpenAIAPIError(message=server.message, response=server.response, body=server.body),
+        _gateway_error(503),
+        _gateway_error(429),
+        openai.APIConnectionError(request=request),
+        OpenAIConnectionError(request=request),
+        openai.APITimeoutError(request=request),
+        OpenAITimeoutError(request=request),
+    ]
+
+
+def test_a_model_gateway_failure_is_the_provider_retryable_not_an_internal_error() -> None:
+    """A gateway that answered 500 reached the chemist as "an internal error", not retryable.
+
+    Measured on the kind cluster with the scripted mock's `f-http-500`: the SDK retried three
+    times, `model.call_failed … (transport: OpenAIAPIError)` was logged, and two lines later the
+    turn ended `internal`. `classify_model_failure` already knew it was the provider; `_classify`
+    only asked it about `context_length`.
+    """
+    from chemclaw.api.runner import failure_event
+
+    for exc in _provider_failures():
+        assert _classify(exc) == ("llm_timeout", True), type(exc).__name__
+        event = failure_event(exc, "s-1", "c-1")
+        assert "internal error" not in event.message, type(exc).__name__
+        assert "model provider" in event.message
+
+
+def test_a_request_the_provider_refused_as_wrong_is_not_called_transient() -> None:
+    """A 401 or a 404 is about the request (a key, a model name), not a provider outage.
+
+    It stays `internal, do not retry`: telling a chemist to try again in a moment about a
+    misconfigured credential would send them round a loop that cannot succeed.
+    """
+    import httpx2
+    import openai
+
+    request = httpx2.Request("POST", "https://gateway.example/v1/chat/completions")
+    for status, kind in ((401, openai.AuthenticationError), (404, openai.NotFoundError)):
+        response = httpx2.Response(status, request=request, json={"error": {"message": "no"}})
+        exc = kind(f"Error code: {status}", response=response, body=None)
+        assert _classify(exc) == ("internal", False), status
+
+
 def test_only_an_unclassified_failure_is_called_an_internal_error() -> None:
     """A code that knows its cause has a sentence naming it; `internal` alone admits it does not."""
     from chemclaw.api.runner import failure_event
