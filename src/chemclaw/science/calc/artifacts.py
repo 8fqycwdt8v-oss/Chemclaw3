@@ -160,10 +160,11 @@ async def find_link(store: ArtifactStore, calc_key: str, name: str) -> ArtifactR
 def split_ref(text: str) -> tuple[str, str] | None:
     """`<calc_key>#<name>` as its two halves, or `None` when it is not one.
 
-    `rpartition` because a calculation key is `calc_type@version:input_hash:params_hash` and holds
-    no `#`, while the name is the producer's filename — the last `#` is the separator.
+    Split at the **first** `#`: a calculation key may hold any non-whitespace character except
+    `#` (real keys carry `/`, `+`, `@` and `:`), so the first `#` is the separator and whatever
+    follows it — a `#` included — is the producer's name for the file.
     """
-    calc_key, separator, name = text.rpartition("#")
+    calc_key, separator, name = text.partition("#")
     if not separator or not calc_key or not name:
         return None
     return calc_key, name

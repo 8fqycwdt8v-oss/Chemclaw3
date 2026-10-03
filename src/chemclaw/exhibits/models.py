@@ -31,11 +31,9 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
-    SerializerFunctionWrapHandler,
     Strict,
     TypeAdapter,
     ValidationError,
-    model_serializer,
     model_validator,
 )
 
@@ -230,6 +228,11 @@ def xyz_atom_count(xyz: str) -> int:
     return count
 
 
+def _absent(value: object) -> bool:
+    """Whether an optional spec field was not given, and so is left out of the dumped object."""
+    return value is None
+
+
 class GeometrySource(_Spec):
     """A calculation by-product a geometry is read from: `science.calc.artifacts.ArtifactRef`'s key.
 
@@ -257,10 +260,14 @@ class GeometrySpec(_Spec):
 
     kind: Literal["geometry"]
     format: Literal["xyz"] = "xyz"
-    xyz: str | None = None
-    source: GeometrySource | None = None
+    # `xyz?`, `source?` and `energy_hartree?` are *absent* in the wire contract, not `null`, so a
+    # client testing `"source" in spec` reads the same answer it would from the writer's object.
+    # Excluded per field rather than by a wrapping serializer, which would publish the spec's JSON
+    # schema as an empty object and hide every field from the OpenAPI document.
+    xyz: str | None = Field(default=None, exclude_if=_absent)
+    source: GeometrySource | None = Field(default=None, exclude_if=_absent)
     label: str = ""
-    energy_hartree: Number | None = None
+    energy_hartree: Number | None = Field(default=None, exclude_if=_absent)
     highlight_atoms: list[Annotated[int, Strict(), Field(ge=0)]] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -275,19 +282,6 @@ class GeometrySpec(_Spec):
                     f"highlight_atoms {outside} are not atoms of a {count}-atom block (0-based)"
                 )
         return self
-
-    @model_serializer(mode="wrap")
-    def _without_absent(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
-        """The stored and served object omits an optional field that was not given.
-
-        `xyz?`, `source?` and `energy_hartree?` are *absent* in the wire contract, not `null`, so a
-        client testing `"source" in spec` reads the same answer it would from the writer's object.
-        """
-        dumped: dict[str, Any] = handler(self)
-        for name in ("xyz", "source", "energy_hartree"):
-            if dumped.get(name) is None:
-                dumped.pop(name, None)
-        return dumped
 
 
 Spec = Annotated[

@@ -144,6 +144,31 @@ async def test_a_source_must_be_stored_when_it_is_written(
     await sources.require_source_stored(parse_spec(_geometry(xyz=_WATER)))
 
 
+async def test_a_source_must_be_a_geometry_not_any_stored_artifact(
+    calc_store: InMemoryArtifactStore,
+) -> None:
+    """A Hessian is stored too; citing it as a geometry is refused naming what it is."""
+    hessian = await calc_store.put(
+        _CALC_KEY, "hessian", b"$hessian\n0.1 0.2\n", media_type="application/x-turbomole-hessian"
+    )
+    assert hessian is not None
+    spec = parse_spec(_geometry(source={"calc_key": _CALC_KEY, "name": "hessian"}))
+    with pytest.raises(InvalidExhibit, match="application/x-turbomole-hessian artifact, not a"):
+        await sources.require_source_stored(spec)
+
+
+def test_a_reference_splits_at_its_first_hash_whatever_the_key_holds() -> None:
+    """Keys carry `/`, `+`, `@` and `:` (the amended contract); only a `#` ends one."""
+    from chemclaw.science.calc.artifacts import split_ref
+
+    key = "xtb.opt@1:ab/c+d=:e"
+    assert split_ref(f"{key}#xtbopt.xyz") == (key, "xtbopt.xyz")
+    assert split_ref(f"{key}#frame#2") == (key, "frame#2")
+    assert split_ref("no-separator") is None
+    assert split_ref(f"{key}#") is None
+    assert split_ref("#name") is None
+
+
 async def test_the_export_is_the_xyz_text_and_an_evicted_source_has_none(
     calc_store: InMemoryArtifactStore,
 ) -> None:
@@ -273,3 +298,16 @@ async def test_the_calc_artifact_download_serves_the_stored_bytes(
     monkeypatch.setattr(settings, "calc_artifact_max_download_bytes", len(_WATER) - 1)
     over = client.get("/calc-artifacts/content", params={"ref": f"{_CALC_KEY}#xtbopt.xyz"})
     assert over.status_code == 413 and reads == []
+
+
+def test_the_published_schema_shows_the_geometry_fields(app: Any) -> None:
+    """The OpenAPI document `Chemclaw3_ui` generates from names every field of the spec.
+
+    A wrapping serializer published `GeometrySpec` as `{"additionalProperties": true}`, so a client
+    generated from the document had no fields to type; absent optionals are excluded per field.
+    """
+    schema = app.openapi()["components"]["schemas"]["GeometrySpec"]
+    assert {"kind", "format", "xyz", "source", "label", "energy_hartree", "highlight_atoms"} <= set(
+        schema["properties"]
+    )
+    assert "kind" in schema["required"]

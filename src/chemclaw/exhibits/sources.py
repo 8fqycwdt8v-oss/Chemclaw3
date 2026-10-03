@@ -22,6 +22,10 @@ from chemclaw.exhibits.models import GeometrySpec, InvalidExhibit, Spec
 from chemclaw.science.calc.artifacts import ArtifactRef, find_link, split_ref
 from chemclaw.science.calc.postgres_artifacts import default_artifact_store
 
+#: The media type the calc store records for a coordinate file (`artifacts.media_type_for`), and
+#: the only kind of artifact a geometry may cite.
+XYZ_MEDIA_TYPE = "chemical/x-xyz"
+
 
 async def find_calc_artifact(calc_key: str, name: str) -> ArtifactRef | None:
     """The stored artifact `(calc_key, name)`, or `None` when nothing is stored under it."""
@@ -40,7 +44,7 @@ async def read_calc_artifact(ref: ArtifactRef) -> bytes | None:
 
 
 async def require_source_stored(spec: Spec) -> None:
-    """Refuse a geometry whose `source` names no stored artifact; every other spec passes.
+    """Refuse a geometry whose `source` names no stored XYZ artifact; every other spec passes.
 
     Write-time only, like `models.require_writable` and beside it in every writer: a stored
     revision stays readable when its source is later evicted.
@@ -50,10 +54,20 @@ async def require_source_stored(spec: Spec) -> None:
     """
     if not isinstance(spec, GeometrySpec) or spec.source is None:
         return
-    if await find_calc_artifact(spec.source.calc_key, spec.source.name) is None:
+    found = await find_calc_artifact(spec.source.calc_key, spec.source.name)
+    if found is None:
         raise InvalidExhibit(
             f"source {spec.source.as_ref()!r} is not a stored calculation artifact; name one "
             "list_artifacts returns, or give the structure inline as `xyz`"
+        )
+    if found.media_type != XYZ_MEDIA_TYPE:
+        # A Hessian or a vibrational spectrum is a stored artifact too, and the geometry's export
+        # would hand it out as an `.xyz` file a viewer cannot read. Its media type is the store's
+        # own record of what the bytes are (`science/calc/artifacts.media_type_for`).
+        raise InvalidExhibit(
+            f"source {spec.source.as_ref()!r} is a {found.media_type} artifact, not a geometry; "
+            f"a geometry cites a {XYZ_MEDIA_TYPE} artifact (an optimised structure or a "
+            "conformer ensemble)"
         )
 
 
