@@ -459,3 +459,55 @@ async def _correlations(exhibit_id: str) -> list[str]:
                 (exhibit_id,),
             )
             return [str(row[0]) for row in await cur.fetchall()]
+
+
+def test_a_report_job_keeps_its_artefact_only_for_a_reader_of_its_origin(
+    app: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`GET /jobs/{id}?session_id=` keeps `exhibit_id` for the origin's readers and only them.
+
+    The owner and a member reading the origin keep it, so a reloaded conversation can still offer
+    "Open report"; a stranger naming the origin, a reader naming another session, an unknown
+    session and no session at all get the same answer without it — never an error, so the
+    parameter says nothing about which sessions exist.
+    """
+    from chemclaw.agent.durable_tools import completed_job_status
+    from chemclaw.durable.connector_job import ConnectorJobResult
+
+    origin = _shared(app)
+    elsewhere = str(_as(app, _ANA).post("/sessions").json()["session_id"])
+    raw = ConnectorJobResult(
+        summary="Drafted 'W'",
+        data={
+            "note_ref": "commit://1",
+            "exhibit_id": "xb-00000000000000ab",
+            "exhibit_session": origin,
+        },
+    ).model_dump()
+
+    async def _status(job_id: str) -> Any:
+        return completed_job_status(job_id, raw)
+
+    monkeypatch.setattr(front_door, "job_status", _status)
+
+    def _result(principal: Principal, session: str | None) -> dict[str, Any]:
+        params = {"session_id": session} if session is not None else {}
+        response = _as(app, principal).get("/jobs/report-x", params=params)
+        assert response.status_code == 200, response.text
+        return dict(response.json()["result"])
+
+    kept = {"note_ref": "commit://1", "exhibit_id": "xb-00000000000000ab"}
+    stripped = {"note_ref": "commit://1"}
+    assert _result(_ANA, origin) == kept
+    assert _result(_BEN, origin) == kept
+    assert _result(_CAT, origin) == stripped
+    assert _result(_ANA, elsewhere) == stripped
+    assert _result(_ANA, "0" * 32) == stripped
+    assert _result(_ANA, None) == stripped
+
+
+def test_the_published_job_route_declares_its_reading_session(app: Any) -> None:
+    """The OpenAPI document names the optional `session_id` on `GET /jobs/{id}`."""
+    parameters = app.openapi()["paths"]["/jobs/{job_id}"]["get"]["parameters"]
+    named = {parameter["name"]: parameter for parameter in parameters}
+    assert "session_id" in named and named["session_id"]["required"] is False
