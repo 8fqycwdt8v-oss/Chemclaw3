@@ -84,6 +84,8 @@ def test_a_pointer_reaches_what_rfc_6901_says_it_does(pointer: str, value: Any) 
     ("pointer", "why"),
     [
         ("/rows/01", "not an array index"),
+        ("/rows/²", "not an array index"),
+        ("/rows/١", "not an array index"),
         ("/rows/-", "not an array index"),
         ("/rows/3", "past the end"),
         ("/missing", "no key"),
@@ -352,26 +354,178 @@ def test_with_no_result_store_a_binding_is_refused_and_a_literal_is_not(
     assert asyncio.run(bind_for_write(uuid4().hex, literal)).stored is literal
 
 
-def test_a_swept_result_reads_null_with_a_reason_and_the_rest_still_reads(stored: str) -> None:
-    """Retention takes the blob; the cell is `null`, `ok` false, the table still opens."""
-    spec = _table([{"solvent": "THF", "y": _bind("/rows/0/yield")}])
-    bound = asyncio.run(bind_for_write(stored, spec))
+def _sweepable(session: str) -> tuple[str, str]:
+    """A result only this test holds — `(text, ref)` — so sweeping it touches no other test's."""
+    text = json.dumps({**_RESULT, "nonce": uuid4().hex})
+    asyncio.run(store_tool_result(session_id=session, correlation_id="c", tool="screen", text=text))
+    return text, content_address(text)
 
-    async def _write_and_sweep() -> Any:
-        view = await default_exhibit_store().create(
+
+def _sweep(ref: str) -> None:
+    """What retention does to a result: the blob goes, and its links with it (042's cascade)."""
+
+    async def _delete() -> None:
+        async with db.connection(settings.postgres_dsn) as conn:
+            await conn.execute("DELETE FROM tool_result_blobs WHERE content_hash = %s", (ref,))
+            await conn.commit()
+
+    asyncio.run(_delete())
+
+
+def test_a_swept_result_reads_null_with_a_reason_and_the_rest_still_reads(stored: str) -> None:
+    """Retention takes the blob; the cell is `null`, `ok` false, the table still opens.
+
+    Read once before the sweep, so the parsed document is in the cache: a cache hit is never the
+    authorization, and the link the sweep removed is what decides.
+    """
+    _, ref = _sweepable(stored)
+    spec = _table([{"solvent": "THF", "y": _bind("/rows/0/yield", f"r:{ref[:12]}")}])
+    bound = asyncio.run(bind_for_write(stored, spec))
+    view = asyncio.run(
+        default_exhibit_store().create(
             stored, title="Screen", spec=bound.stored, author_kind="human", author="oid-ana"
         )
-        async with db.connection(settings.postgres_dsn) as conn:
-            await conn.execute("DELETE FROM tool_result_blobs WHERE content_hash = %s", (_REF,))
-            await conn.commit()
-        return await resolved_view(view)
+    )
+    assert spec_json(asyncio.run(resolved_view(view)).spec)["rows"][0]["y"] == 76.5
+    _sweep(ref)
 
-    shown = asyncio.run(_write_and_sweep())
+    shown = asyncio.run(resolved_view(view))
     assert spec_json(shown.spec)["rows"] == [{"solvent": "THF", "y": None}]
-    assert spec_json(shown.raw_spec)["rows"][0]["y"] == _bind("/rows/0/yield", _REF)
+    assert spec_json(shown.raw_spec)["rows"][0]["y"] == _bind("/rows/0/yield", ref)
     [binding] = shown.bindings
-    assert (binding.ok, binding.result_ref) == (False, _REF)
+    assert (binding.ok, binding.result_ref) == (False, ref)
     assert "no longer stored" in binding.error
+
+
+def test_a_revision_carrying_a_swept_binding_unchanged_is_accepted_and_reads_null(
+    stored: str,
+) -> None:
+    """One expired cell must not block every whole-spec revision.
+
+    A binding copied unchanged from the parent is kept, reading `null` with `ok: false` — even at a
+    position (a structure property) a writer may not put a literal `null` in. A *new* binding to the
+    swept ref is refused naming that cause, and a ref the session never held is refused as such.
+    """
+    _, ref = _sweepable(stored)
+    handle = f"r:{ref[:12]}"
+    panel = parse_spec(
+        {
+            "kind": "structures",
+            "items": [{"smiles": "C1CCOC1", "props": {"y": _bind("/rows/0/yield", handle)}}],
+        }
+    )
+    parent = asyncio.run(bind_for_write(stored, panel)).stored
+    _sweep(ref)
+    carried = spec_json(parent)
+    carried["items"][0]["label"] = "THF, relabelled"
+
+    bound = asyncio.run(bind_for_write(stored, parse_spec(carried), parent=parent))
+    require_writable(
+        bound.resolved,
+        title="t",
+        change_note="",
+        stored=bound.stored,
+        vanished=bound.vanished,
+    )
+    assert spec_json(bound.resolved)["items"][0]["props"] == {"y": None}
+    assert [(b.path, b.ok) for b in bound.bindings] == [("items[0].props.y", False)]
+    with pytest.raises(InvalidExhibit, match="not null"):
+        require_writable(bound.resolved, title="t", change_note="", stored=bound.stored)
+
+    moved = json.loads(json.dumps(carried))
+    moved["items"][0]["props"]["y"] = _bind("/rows/1/yield", ref)
+    with pytest.raises(InvalidExhibit, match="no longer stored.*detach the value"):
+        asyncio.run(bind_for_write(stored, parse_spec(moved), parent=parent))
+    stranger = json.loads(json.dumps(carried))
+    stranger["items"][0]["props"]["y"] = _bind("/a", "f" * 64)
+    with pytest.raises(InvalidExhibit, match="not a tool result of this conversation"):
+        asyncio.run(bind_for_write(stored, parse_spec(stranger), parent=parent))
+    # Without the parent the same carried spec is a new binding to a swept ref, and is refused.
+    with pytest.raises(InvalidExhibit, match="not a tool result of this conversation"):
+        asyncio.run(bind_for_write(stored, parse_spec(carried)))
+
+
+def test_a_non_ascii_index_is_a_worded_refusal_not_a_crash(stored: str) -> None:
+    """`²` is a digit to `str.isdigit` and not to `int`; it is refused like any bad index."""
+    with pytest.raises(InvalidExhibit, match="not an array index"):
+        asyncio.run(bind_for_write(stored, _table([{"y": _bind("/temps/²")}])))
+
+
+def test_a_read_asks_only_for_its_own_refs_and_reuses_parsed_documents(
+    stored: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A read asks the links for its own refs, and a second read fetches no blob.
+
+    The parsed document is cached by content hash; the link query still runs every time, because
+    it — not the cache — is what says the session holds the result.
+    """
+    _, ref = _sweepable(stored)
+    spec = _table([{"y": _bind("/rows/0/yield", f"r:{ref[:12]}")}])
+    view = asyncio.run(
+        default_exhibit_store().create(
+            stored,
+            title="S",
+            spec=asyncio.run(bind_for_write(stored, spec)).stored,
+            author_kind="human",
+            author="oid-ana",
+        )
+    )
+    bindings._DOCUMENTS.clear()
+    asked: list[Any] = []
+    read: list[list[str]] = []
+    real_links, real_blobs = bindings._links, bindings._blobs
+
+    async def _links(session_id: str, refs: Any = None) -> Any:
+        asked.append(refs)
+        return await real_links(session_id, refs)
+
+    async def _blobs(session_id: str, refs: list[str]) -> Any:
+        read.append(list(refs))
+        return await real_blobs(session_id, refs)
+
+    monkeypatch.setattr(bindings, "_links", _links)
+    monkeypatch.setattr(bindings, "_blobs", _blobs)
+    for _ in range(2):
+        shown = asyncio.run(resolved_view(view))
+        assert spec_json(shown.spec)["rows"][0]["y"] == 76.5
+    assert asked == [{ref}, {ref}], "a read asked for the whole session's links"
+    assert read == [[ref], []], "the second read fetched a blob the cache held"
+
+
+def test_the_document_cache_holds_its_byte_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Least recently used goes first; a document over the whole budget is not kept at all."""
+    bindings._DOCUMENTS.clear()
+    monkeypatch.setattr(settings, "exhibit_binding_cache_bytes", 10)
+    bindings._remember("a", {"a": 1}, 4)
+    bindings._remember("b", {"b": 1}, 4)
+    assert bindings._cached("a") is not None  # now the most recently used
+    bindings._remember("c", {"c": 1}, 4)
+    assert list(bindings._DOCUMENTS) == ["a", "c"]
+    bindings._remember("huge", {}, 11)
+    assert "huge" not in bindings._DOCUMENTS
+    bindings._DOCUMENTS.clear()
+
+
+def test_the_offload_threshold_counts_stored_bytes_not_characters(
+    stored: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A result of multi-byte text is over the threshold in bytes while under it in characters."""
+    text = json.dumps({"label": "µ" * 400, "v": 1}, ensure_ascii=False)
+    asyncio.run(store_tool_result(session_id=stored, correlation_id="c", tool="t", text=text))
+    assert len(text) < 600 < len(text.encode("utf-8"))
+    monkeypatch.setattr(settings, "exhibit_binding_offload_bytes", 600)
+    bindings._DOCUMENTS.clear()
+    offloaded: list[Any] = []
+    real = asyncio.to_thread
+
+    async def _spy(function: Any, *args: Any) -> Any:
+        offloaded.append(function)
+        return await real(function, *args)
+
+    monkeypatch.setattr(asyncio, "to_thread", _spy)
+    ref = content_address(text)
+    asyncio.run(bind_for_write(stored, _table([{"y": _bind("/v", f"r:{ref[:12]}")}])))
+    assert any(getattr(f, "__module__", "") == bindings.__name__ for f in offloaded)
 
 
 # --- the agent's tools ----------------------------------------------------------------------------

@@ -108,6 +108,7 @@ from chemclaw.agent.chemclaw_agent import (
 )
 from chemclaw.agent.compaction import context_compaction_middleware, disabled_summarizer
 from chemclaw.agent.exhibit_notes import ExhibitListing
+from chemclaw.agent.exhibit_tools import described_for_deployment
 from chemclaw.agent.handoff import PEER_BRIEF
 from chemclaw.agent.llm_provider import build_chat_model
 from chemclaw.agent.local_skills import (
@@ -1200,7 +1201,9 @@ def _bound_surface(
     # would hand the conversation to a server instead of to a peer, with every gate firing
     # correctly against the name it believed. That is `D-2026-09-12`'s defect with the control flow
     # as its payload.
-    first_party = [as_structured_tool(fn) for fn in tools] + list(handoffs or [])
+    first_party = [described_for_deployment(as_structured_tool(fn)) for fn in tools] + list(
+        handoffs or []
+    )
     claimed = {tool.name for tool in first_party}
     for tool in connectors or []:
         if tool.name in claimed:

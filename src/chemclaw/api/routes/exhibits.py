@@ -221,7 +221,9 @@ async def post_exhibit_revision(
     if current is None:
         raise HTTPException(status_code=404, detail=_missing(exhibit_id, 0))
     title = current.title if body.title is None else body.title
-    spec = await _parsed(session_id, body.spec, title=title, change_note=body.change_note)
+    spec = await _parsed(
+        session_id, body.spec, title=title, change_note=body.change_note, parent=current.raw_spec
+    )
     await _require_session_result(session_id, spec)
     try:
         view = await store.append(
@@ -303,19 +305,28 @@ async def _parsed(
     title: str,
     change_note: str,
     creating: bool = False,
+    parent: Spec | None = None,
 ) -> Spec:
     """The spec to store, write-checked with its bindings resolved, or the 422 naming the fault.
 
     A person's spec may keep any binding whose result this session holds — one copied from
     `raw_spec` — or replace it with a literal; a ref outside the session's results is refused, so
-    nobody can bind bytes the conversation never produced (`exhibits.bindings`).
+    nobody can bind bytes the conversation never produced (`exhibits.bindings`). A binding carried
+    unchanged from `parent`, the revision being revised, is kept even when retention has swept its
+    result, so an expired cell does not block every other edit.
     """
     try:
         spec = parse_spec(raw)
         if creating:
             require_creatable(spec)
-        bound = await bind_for_write(session_id, spec)
-        require_writable(bound.resolved, title=title, change_note=change_note, stored=bound.stored)
+        bound = await bind_for_write(session_id, spec, parent=parent)
+        require_writable(
+            bound.resolved,
+            title=title,
+            change_note=change_note,
+            stored=bound.stored,
+            vanished=bound.vanished,
+        )
         await require_source_stored(spec)
     except InvalidExhibit as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc

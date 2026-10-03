@@ -29,6 +29,7 @@ import json
 import logging
 from typing import Any, Literal
 
+from langchain_core.tools import BaseTool
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
 from chemclaw.agent.authz import require_actor
@@ -81,6 +82,26 @@ class Edit(BaseModel):
 
 
 _EDITS: TypeAdapter[list[Edit]] = TypeAdapter(list[Edit])
+
+
+#: The part of `create_exhibit`'s description that names the html kind — what a deployment with
+#: `agent_html_artefacts_enabled` off removes, so the model is not offered a kind it is refused.
+HTML_CLAUSE = "; html `html` (self-contained, no network), `height`"
+
+
+def described_for_deployment(tool: BaseTool) -> BaseTool:
+    """`tool`, or a copy of `create_exhibit` without the html clause when html artefacts are off.
+
+    A copy per build rather than a second registered function: the schema stays the one
+    `tool_schema.as_structured_tool` derived once, and only the description text differs. The
+    clause is required to be in the description, so an edit to the docstring that drops or rewords
+    it fails here rather than leaving html advertised on a deployment that refuses it.
+    """
+    if tool.name != "create_exhibit" or settings.agent_html_artefacts_enabled:
+        return tool
+    if HTML_CLAUSE not in tool.description:
+        raise RuntimeError("create_exhibit's description no longer carries HTML_CLAUSE verbatim")
+    return tool.model_copy(update={"description": tool.description.replace(HTML_CLAUSE, "", 1)})
 
 
 def _session() -> str:
@@ -172,8 +193,14 @@ async def revise_exhibit(
     if base_revision != current.head_revision:
         raise ChemclawError(_stale(exhibit_id, current.head_revision, base_revision))
     revised = _revised_spec(current, edits, spec)
-    bound = await bind_for_write(session_id, revised)
-    require_writable(bound.resolved, title=current.title, change_note=note, stored=bound.stored)
+    bound = await bind_for_write(session_id, revised, parent=current.raw_spec)
+    require_writable(
+        bound.resolved,
+        title=current.title,
+        change_note=note,
+        stored=bound.stored,
+        vanished=bound.vanished,
+    )
     await require_source_stored(revised)
     chemist = await chemist_figures(store, session_id, exhibit_id)
     try:

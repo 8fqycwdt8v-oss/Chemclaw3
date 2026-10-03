@@ -99,39 +99,45 @@ def _figures(spec: Spec) -> Iterator[str]:
         yield from stated_numerals(html_text(spec.html))
 
 
+#: Elements whose character data is code, not text a reader sees: never scanned for figures.
+_NOT_TEXT = frozenset({"script", "style"})
+
+
 class _TextOf(HTMLParser):
-    """The text content of a page — every character data run, `<style>` excepted."""
+    """The text content of a page — every character data run outside `<script>` and `<style>`."""
 
     def __init__(self) -> None:
-        """Start with no text and outside any `<style>`."""
+        """Start with no text and outside any code element."""
         super().__init__(convert_charrefs=True)
         self.parts: list[str] = []
-        self._style = 0
+        self._inside = 0
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        """Note entering a stylesheet, whose numbers are lengths and colours, never figures."""
-        if tag == "style":
-            self._style += 1
+        """Note entering a script or stylesheet."""
+        if tag in _NOT_TEXT:
+            self._inside += 1
 
     def handle_endtag(self, tag: str) -> None:
         """Note leaving one."""
-        if tag == "style" and self._style:
-            self._style -= 1
+        if tag in _NOT_TEXT and self._inside:
+            self._inside -= 1
 
     def handle_data(self, data: str) -> None:
         """Keep a run of text, separated from its neighbours so two runs never join into one."""
-        if not self._style:
+        if not self._inside:
             self.parts.append(data)
 
 
 def html_text(page: str) -> str:
-    """The text a reader of `page` could see a figure in — the grounding scan's input for `html`.
+    """The text a reader of `page` sees — the grounding scan's input for `html`.
 
     The standard library's tolerant parser rather than a dependency: this needs character data and
-    nothing else, and a malformed page still yields what text it has. **Script text is kept**, on
-    purpose: a page that draws a chart from an array in a `<script>` is stating those figures as
-    surely as a table cell is, and leaving them out would let a transcribed chart pass as grounded.
-    Style text is not — `width: 100%` is layout. Attributes are not text and are not read.
+    nothing else, and a malformed page still yields what text it has. What it reads is what a
+    reader sees as text: paragraphs, table cells, and an inline SVG's `<text>` labels, which are
+    character data like any other. **Not `<script>` or `<style>`** — code and layout, where a
+    number is a loop bound or a width far more often than a figure — and **not attributes**, so an
+    SVG's coordinates are never read as figures. The cost is stated in the decision record: a
+    chart a script draws from a JS array goes unchecked.
     """
     parser = _TextOf()
     parser.feed(page)

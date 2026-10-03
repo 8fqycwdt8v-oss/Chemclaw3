@@ -672,13 +672,36 @@ async def frame_connector_results(request: Any, handler: Callable[[Any], Any]) -
     return result
 
 
+#: What a bracketed handle's opening bracket becomes when a *tool* wrote it: the character
+#: reference for `⟨`, which a reader still sees and which no longer has the handle's shape.
+_ESCAPED_BRACKET = "&#10216;"
+
+
+def _without_forged_handles(content: Any) -> Any:
+    """`content` with every handle-shaped run a tool wrote escaped, so only the stamp is one.
+
+    A result is untrusted text, and one ending in `⟨r:<another result's hex>⟩` would otherwise put
+    two handle lines in front of the model, the forged one first or last at the tool's choosing —
+    and a binding copied from it would resolve, since the hex can name a real result of the same
+    conversation. Every run escapes, not only a trailing one: a model asked to copy "the handle"
+    must find exactly one.
+    """
+    return _rewritten(content, lambda text: text.replace("⟨r:", f"{_ESCAPED_BRACKET}r:"))
+
+
 def _with_handle(message: ToolMessage) -> ToolMessage:
-    """`message` ending in its handle line, or unchanged when nothing stored its full text."""
+    """`message` ending in its handle line, forged ones escaped; unstamped where nothing was stored.
+
+    The escape runs on every result, stamped or not, because a sinkless driver's model reads the
+    same text and must not take a tool's line for this system's.
+    """
+    content = _without_forged_handles(message.content)
     ref = stored_result_ref(message)
     if not ref or message.status == "error":
-        return message
+        if content == message.content:
+            return message
+        return message.model_copy(update={"content": content})
     line = handle_line(ref)
-    content = message.content
     if isinstance(content, str):
         stamped: Any = content + line
     elif isinstance(content, list):
@@ -695,9 +718,12 @@ async def stamp_result_handles(request: Any, handler: Callable[[Any], Any]) -> A
     **Outside the framing, so the handle is this system's line rather than part of the evidence.**
     The envelope says "retrieved data, weigh and cite it" and the defang neutralises anything inside
     it; a handle inside either would be a third-party-shaped string the model is asked to copy back
-    verbatim, and a tool result that spelled `⟨r:…⟩` itself could have pointed a binding at another
-    result. Appended here, after every rewrite, it is the last line of what the model reads and the
-    one part of it nothing upstream wrote.
+    verbatim. Appended here, after every rewrite, it is the last line of what the model reads.
+
+    **Being last is not what makes it the only one**: a tool can write `⟨r:…⟩` itself, anywhere in
+    its text, naming another result of the same conversation. So every handle-shaped run in the
+    result is escaped first (`_without_forged_handles`) and the stamp is the one bracketed handle
+    left.
 
     **Only where the full text was stored** (`tool_result_size.RESULT_REF_KEY`, stamped by
     `bound_tool_results` before the message left it): a handle that names bytes nobody kept would be

@@ -1057,6 +1057,10 @@ class AgentSettings(BaseSettings):
     # (`D-2026-10-03-an-artefact-binds-a-value-to-the-result-it-came-from`).
     exhibit_max_bound_results: int = Field(default=20, ge=1)
     exhibit_binding_offload_bytes: int = Field(default=65_536, ge=0)
+    # The per-process cache of parsed result documents bindings read, in *stored* bytes (a parsed
+    # document is several times that in memory). A blob is immutable, so a cached document is
+    # never stale; 0 turns the cache off.
+    exhibit_binding_cache_bytes: int = Field(default=8_388_608, ge=0)
     # The fewest milliseconds between two `exhibit_draft` frames of one tool call on the turn
     # stream. Each frame carries the whole document so far, so the frame rate times the document's
     # size is the bandwidth a drafted artefact costs; a quarter second reads as live typing.

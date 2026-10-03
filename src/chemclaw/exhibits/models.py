@@ -32,7 +32,7 @@ import json
 import math
 import re
 import secrets
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
@@ -429,7 +429,12 @@ def spec_bytes(spec: Spec) -> int:
 
 
 def require_writable(
-    spec: Spec, *, title: str, change_note: str, stored: Spec | None = None
+    spec: Spec,
+    *,
+    title: str,
+    change_note: str,
+    stored: Spec | None = None,
+    vanished: Collection[str] = (),
 ) -> None:
     """Refuse a spec, title or note over a cap, a SMILES RDKit cannot read, or unstorable text.
 
@@ -438,6 +443,8 @@ def require_writable(
     row, point and structure caps and the RDKit parse bound what a reader is served; `stored` is
     the spec as it is kept, with its bindings, and is held to the byte cap too. Without `stored` the
     spec is its own stored form, which is the case for every spec with no binding in it.
+    `vanished` names the paths of bindings a revision carried unchanged whose result retention has
+    since swept (`exhibits.bindings.Bound.vanished`): those read `null`, and may.
 
     Raises:
         InvalidExhibit: naming the cap and the value, or the SMILES and why RDKit refused it.
@@ -447,7 +454,7 @@ def require_writable(
             f"the spec as stored is {kept} bytes, over the {settings.exhibit_max_spec_bytes}-byte "
             "cap; bind fewer cells one by one (`rows_from` binds a whole table in one entry)"
         )
-    _require_literal(spec)
+    _require_literal(spec, vanished)
     if not title.strip():
         raise InvalidExhibit("an artefact needs a title")
     if len(title) > settings.exhibit_max_title_chars:
@@ -485,7 +492,7 @@ def require_creatable(spec: Spec) -> None:
         )
 
 
-def _require_literal(spec: Spec) -> None:
+def _require_literal(spec: Spec, vanished: Collection[str] = ()) -> None:
     """Refuse a binding left unresolved, and a `null` where only a binding's absence may put one.
 
     The positions a binding occupies admit `null` so that a binding whose stored result is gone
@@ -510,7 +517,7 @@ def _require_literal(spec: Spec) -> None:
         for index, series in enumerate(spec.series):
             sites += [(f"series[{index}].x", series.x), (f"series[{index}].y", series.y)]
     for path, value in sites:
-        if value is None:
+        if value is None and path not in vanished:
             raise InvalidExhibit(f"{path}: a value is required here, not null")
         if isinstance(value, Binding):
             raise InvalidExhibit(f"{path}: a binding must be resolved before it is written")
@@ -535,6 +542,8 @@ def _require_within_counts(spec: Spec) -> None:
                 f"{settings.exhibit_max_structures}-structure cap"
             )
         for index, item in enumerate(spec.items):
+            if item.smiles is None:  # a carried binding whose result is gone; nothing to parse
+                continue
             try:
                 require_molecule(str(item.smiles))
             except InvalidSmilesError as exc:

@@ -627,10 +627,31 @@ def test_the_page_cap_is_its_own_bytes(app: Any, monkeypatch: pytest.MonkeyPatch
     assert refused.status_code == 422 and "10-byte cap" in refused.text
 
 
-def test_a_pages_figures_are_read_from_its_text_and_scripts_but_not_its_styles() -> None:
-    """`width:100%` is layout; the paragraph's figure and the script's data are stated figures."""
+def test_a_pages_figures_are_its_visible_text_never_its_code_or_attributes() -> None:
+    """Paragraph and SVG `<text>` figures are read; script, style and attributes are not."""
     assert "100" not in html_text(_PAGE) and "76.5" in html_text(_PAGE)
-    assert stated_figures(parse_spec(_HTML)) == ["76.5", "12.25", "40"]
+    assert stated_figures(parse_spec(_HTML)) == ["76.5"]
+    svg = (
+        '<svg width="640" viewBox="0 0 640 480"><rect x="12" height="300"/>'
+        '<text x="40" y="20">81.5 %</text><script>for (let i = 0; i < 999; i++) {}</script></svg>'
+    )
+    assert stated_figures(parse_spec({"kind": "html", "html": svg})) == ["81.5"]
+
+
+def test_create_exhibits_description_drops_html_where_the_kind_is_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Off, the model is not offered a kind it would be refused; on, the bound tool is unchanged."""
+    from chemclaw.agent.exhibit_tools import HTML_CLAUSE, described_for_deployment
+    from chemclaw.agent.tool_schema import as_structured_tool
+
+    bound = as_structured_tool(create_exhibit)
+    assert HTML_CLAUSE in bound.description
+    assert described_for_deployment(bound) is bound
+    monkeypatch.setattr(settings, "agent_html_artefacts_enabled", False)
+    off = described_for_deployment(bound)
+    assert "html" not in off.description and off.args_schema is bound.args_schema
+    assert HTML_CLAUSE in bound.description, "the shared, cached tool was edited in place"
 
 
 def test_the_agent_creates_a_page_and_is_refused_one_when_html_is_off(

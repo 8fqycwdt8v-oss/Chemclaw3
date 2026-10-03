@@ -33,7 +33,8 @@ from __future__ import annotations
 import asyncio
 import json
 import math
-from collections.abc import Iterator, Mapping
+from collections import OrderedDict
+from collections.abc import Collection, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -53,6 +54,13 @@ Expect = Literal["cell", "prop", "smiles", "x", "y", "rows"]
 
 _SESSION_LINKS = "SELECT content_hash, tool FROM tool_result_links WHERE session_id = %s"
 
+# A read names exact refs, so it asks only for those — served by the links' primary key
+# `(session_id, content_hash)` — rather than for every result the session ever stored.
+_LINKS_FOR = (
+    "SELECT content_hash, tool FROM tool_result_links "
+    "WHERE session_id = %s AND content_hash = ANY(%s)"
+)
+
 _BLOBS = """
 SELECT l.content_hash, b.data
 FROM tool_result_links l
@@ -62,6 +70,16 @@ WHERE l.session_id = %s AND l.content_hash = ANY(%s)
 
 #: How many binding problems one refusal names before it counts the rest.
 _SHOWN = 5
+
+#: Parsed result documents, by content hash, most recently used last, each with its stored size.
+#:
+#: **Safe to share across sessions and requests because a blob is immutable**: its key is the hash
+#: of its bytes, so a cached document can never disagree with the store. What it does not carry is
+#: authorization — a hit is used only for a ref the session's own links have just been asked for
+#: (`_run`), so the cache saves the blob read and the parse, never the link join. Per process and
+#: bounded by `exhibit_binding_cache_bytes` of *stored* bytes; a parsed document is several times
+#: that in memory, which is what the default is sized against.
+_DOCUMENTS: OrderedDict[str, tuple[Any, int]] = OrderedDict()
 
 
 @dataclass(frozen=True)
@@ -89,6 +107,11 @@ class Bound:
     stored: Spec
     resolved: Spec
     bindings: list[ExhibitBinding]
+
+    @property
+    def vanished(self) -> frozenset[str]:
+        """The paths of carried bindings whose result is gone, which read `null` and may."""
+        return frozenset(binding.path for binding in self.bindings if not binding.ok)
 
 
 class _Unresolved(Exception):
@@ -142,24 +165,50 @@ def _available() -> bool:
     return settings.session_store == "postgres" and settings.stream_max_result_bytes > 0
 
 
-async def _links(session_id: str) -> dict[str, str]:
-    """The session's stored results, ref to tool — the set every target must fall inside."""
+async def _links(session_id: str, refs: Collection[str] | None = None) -> dict[str, str]:
+    """The session's stored results, ref to tool — all of them, or only those among `refs`.
+
+    A write needs all of them, because a handle is a prefix and only the session's set can say
+    which ref it names; a read already holds exact refs and asks for just those.
+    """
     async with db.connection(settings.postgres_dsn) as conn:
         async with conn.cursor() as cur:
-            await cur.execute(_SESSION_LINKS, (session_id,))
+            if refs is None:
+                await cur.execute(_SESSION_LINKS, (session_id,))
+            else:
+                await cur.execute(_LINKS_FOR, (session_id, list(refs)))
             rows = await cur.fetchall()
     return {str(row[0]): str(row[1]) for row in rows}
 
 
-async def _texts(session_id: str, refs: list[str]) -> dict[str, str]:
-    """The stored text of each ref this session still holds; a swept one is simply absent."""
+async def _blobs(session_id: str, refs: list[str]) -> dict[str, bytes]:
+    """The stored bytes of each ref this session still holds; a swept one is simply absent."""
     if not refs:
         return {}
     async with db.connection(settings.postgres_dsn) as conn:
         async with conn.cursor() as cur:
             await cur.execute(_BLOBS, (session_id, refs))
             rows = await cur.fetchall()
-    return {str(row[0]): bytes(row[1]).decode("utf-8", errors="replace") for row in rows}
+    return {str(row[0]): bytes(row[1]) for row in rows}
+
+
+def _cached(ref: str) -> tuple[Any, int] | None:
+    """A parsed document from the cache, marked as just used — or `None`."""
+    hit = _DOCUMENTS.get(ref)
+    if hit is not None:
+        _DOCUMENTS.move_to_end(ref)
+    return hit
+
+
+def _remember(ref: str, document: Any, size: int) -> None:
+    """Keep a parsed document, evicting the least recently used past the byte budget."""
+    budget = settings.exhibit_binding_cache_bytes
+    if size > budget:
+        return
+    _DOCUMENTS[ref] = (document, size)
+    _DOCUMENTS.move_to_end(ref)
+    while sum(held for _, held in _DOCUMENTS.values()) > budget:
+        _DOCUMENTS.popitem(last=False)
 
 
 def _ref_for(target: str, links: Mapping[str, str]) -> str:
@@ -185,11 +234,12 @@ def _refuse_constant(name: str) -> float:
     raise ValueError(f"{name} is not a JSON number")
 
 
-def _parsed(texts: Mapping[str, str]) -> dict[str, Any]:
-    """Each stored text as JSON, or the `ValueError` it raised — kept, so a binding can say why."""
+def _parsed(blobs: Mapping[str, bytes]) -> dict[str, Any]:
+    """Each stored result as JSON, or the `ValueError` it raised, kept so a binding can say why."""
     parsed: dict[str, Any] = {}
-    for ref, text in texts.items():
+    for ref, data in blobs.items():
         try:
+            text = data.decode("utf-8", errors="replace")
             parsed[ref] = json.loads(text, parse_constant=_refuse_constant)
         except (ValueError, RecursionError) as exc:
             parsed[ref] = exc if isinstance(exc, ValueError) else ValueError(str(exc))
@@ -215,7 +265,10 @@ def pointer_get(document: Any, pointer: str) -> Any:
                 raise KeyError(f"no key {token!r}")
             node = node[token]
         elif isinstance(node, list):
-            if not token.isdigit() or (token != "0" and token.startswith("0")):
+            # ASCII digits only: `str.isdigit` also accepts `²` (which `int` then refuses) and
+            # `١` (which `int` reads as 1), and an RFC 6901 index is `0` or `[1-9][0-9]*`.
+            ascii_index = token.isascii() and token.isdigit()
+            if not ascii_index or (token != "0" and token.startswith("0")):
                 raise KeyError(f"{token!r} is not an array index")
             if int(token) >= len(node):
                 raise KeyError(f"index {token} is past the end of a {len(node)}-element array")
@@ -334,40 +387,60 @@ def _restamped(raw: dict[str, Any], site: _Site, ref: str) -> None:
     (held if site.expect == "rows" else held["$bind"])["result"] = ref
 
 
+@dataclass(frozen=True)
+class _Plan:
+    """What each site resolves against, decided before anything is parsed.
+
+    `refs` is the ref each site reads (by its index in the site list), `refusals` the sites that are
+    refused before any read, and `tolerated` the sites a missing result does not refuse — every
+    site on a read, and on a write a binding carried unchanged from the revision being revised.
+    """
+
+    refs: Mapping[int, str]
+    refusals: Mapping[int, str]
+    tolerated: frozenset[int]
+
+
 def _resolve(
     raw: dict[str, Any],
     sites: list[_Site],
     links: Mapping[str, str],
     parsed: Mapping[str, Any],
+    plan: _Plan,
     *,
     writing: bool,
 ) -> tuple[dict[str, Any], dict[str, Any], list[ExhibitBinding], list[str]]:
     """The stored JSON, the resolved JSON, the bindings and the problems — pure, off the loop.
 
-    `writing` decides what a problem is: a refusal (collected, so a writer sees several at once) or
-    a `null` value with `ok: false` (a read of a revision whose result has been swept).
+    A problem on a site that is not tolerated refuses a write (collected, so a writer sees several
+    at once); everything else reads as a `null` value with `ok: false`, which is what a read of a
+    swept result always is and what a write keeps for a binding it carried unchanged.
     """
     stored = json.loads(json.dumps(raw))
     resolved = json.loads(json.dumps(raw))
     bindings: list[ExhibitBinding] = []
     problems: list[str] = []
-    for site in sites:
-        ref = ""
+    for index, site in enumerate(sites):
+        ref = plan.refs.get(index, "")
+        swept = False
         try:
-            ref = _ref_for(site.target, links) if writing else site.target
+            if index in plan.refusals:
+                raise _Unresolved(plan.refusals[index])
             document = parsed.get(ref)
             if document is None:
+                swept = True
                 raise _Unresolved("its tool result is no longer stored (retention swept it)")
             if isinstance(document, ValueError):
                 raise _Unresolved(f"its tool result is not JSON to point into ({document})")
             try:
                 found = pointer_get(document, site.pointer)
-            except KeyError as exc:
-                missing = exc.args[0]
+            except (KeyError, ValueError) as exc:
+                missing = exc.args[0] if exc.args else exc
                 raise _Unresolved(f"pointer {site.pointer!r} does not resolve: {missing}") from exc
             value = _fitted(found, site)
         except _Unresolved as exc:
-            problems.append(f"{site.path} ({site.target}): {exc}")
+            if writing and not (swept and index in plan.tolerated):
+                problems.append(f"{site.path} ({site.target}): {exc}")
             bindings.append(
                 ExhibitBinding(
                     path=site.path,
@@ -395,43 +468,114 @@ def _resolve(
     return stored, resolved, bindings, problems
 
 
-async def _run(raw: dict[str, Any], sites: list[_Site], session_id: str, *, writing: bool) -> Any:
-    """Read what `sites` need from the store, then resolve — the parse off the loop when large."""
-    links = await _links(session_id)
+def _write_plan(sites: list[_Site], links: Mapping[str, str], parent: Spec | None) -> _Plan:
+    """Which ref each site of a write names, and which are refused or carried.
+
+    A binding copied unchanged from the parent revision — the same full ref and pointer — is
+    carried even when retention has since swept its result: it was checked when it was written,
+    and refusing it would block every whole-spec revision of the artefact until a person detached
+    a value they never touched. A ref the parent bound and the session no longer holds, at any
+    other pointer, is refused naming that cause; anything else outside the links is refused as
+    not a result of this conversation.
+    """
+    carried = _bound_pairs(parent)
+    once_held = {ref for ref, _ in carried}
+    refs: dict[int, str] = {}
+    refusals: dict[int, str] = {}
+    tolerated: set[int] = set()
+    for index, site in enumerate(sites):
+        try:
+            refs[index] = _ref_for(site.target, links)
+            continue
+        except _Unresolved as exc:
+            reason = str(exc)
+        if (site.target, site.pointer) in carried:
+            refs[index] = site.target
+            tolerated.add(index)
+        elif site.target in once_held:
+            refusals[index] = (
+                f"{site.target} was a tool result of this conversation and is no longer stored "
+                "(retention swept it); detach the value — write it as a literal — or bind to a "
+                "result that is still held"
+            )
+        else:
+            refusals[index] = reason
+    return _Plan(refs=refs, refusals=refusals, tolerated=frozenset(tolerated))
+
+
+def _bound_pairs(spec: Spec | None) -> frozenset[tuple[str, str]]:
+    """Each `(full ref, pointer)` a stored spec binds — what a revision of it may carry."""
+    if spec is None:
+        return frozenset()
+    return frozenset((site.target, site.pointer) for site in _sites(spec_json(spec)))
+
+
+async def _run(
+    raw: dict[str, Any],
+    sites: list[_Site],
+    session_id: str,
+    *,
+    writing: bool,
+    parent: Spec | None = None,
+) -> Any:
+    """Read what `sites` need from the store, then resolve — the parse off the loop when large.
+
+    The session's links are asked first, and only a ref they name is read, from the cache or the
+    blob table: a cached document is never the authorization.
+    """
     if writing:
-        refs: list[str] = []
-        for site in sites:
-            try:
-                refs.append(_ref_for(site.target, links))
-            except _Unresolved:
-                continue
+        links = await _links(session_id)
+        plan = _write_plan(sites, links, parent)
     else:
-        refs = [site.target for site in sites]
-    distinct = sorted(set(refs))
+        links = await _links(session_id, {site.target for site in sites})
+        plan = _Plan(
+            refs={index: site.target for index, site in enumerate(sites)},
+            refusals={},
+            tolerated=frozenset(range(len(sites))),
+        )
+    distinct = sorted({ref for ref in plan.refs.values() if ref in links})
     if writing and len(distinct) > settings.exhibit_max_bound_results:
         raise InvalidExhibit(
             f"the spec binds into {len(distinct)} tool results, over the "
             f"{settings.exhibit_max_bound_results}-result cap; write some values, or split it"
         )
-    texts = await _texts(session_id, distinct)
-    size = sum(len(text) for text in texts.values())
-    if size > settings.exhibit_binding_offload_bytes:
-        return await asyncio.to_thread(
-            lambda: _resolve(raw, sites, links, _parsed(texts), writing=writing)
-        )
-    return _resolve(raw, sites, links, _parsed(texts), writing=writing)
+    documents: dict[str, Any] = {}
+    sizes: dict[str, int] = {}
+    for ref in distinct:
+        if (hit := _cached(ref)) is not None:
+            documents[ref], sizes[ref] = hit
+    blobs = await _blobs(session_id, [ref for ref in distinct if ref not in documents])
+    sizes.update({ref: len(data) for ref, data in blobs.items()})
+
+    def _work() -> tuple[dict[str, Any], Any]:
+        fresh = _parsed(blobs)
+        result = _resolve(raw, sites, links, {**documents, **fresh}, plan, writing=writing)
+        return fresh, result
+
+    # Measured in stored UTF-8 bytes, cached documents included: the walk over a large document
+    # costs the same whether its parse was saved or not.
+    if sum(sizes.values()) > settings.exhibit_binding_offload_bytes:
+        fresh, result = await asyncio.to_thread(_work)
+    else:
+        fresh, result = _work()
+    for ref, document in fresh.items():
+        _remember(ref, document, sizes[ref])
+    return result
 
 
-async def bind_for_write(session_id: str, spec: Spec) -> Bound:
+async def bind_for_write(session_id: str, spec: Spec, *, parent: Spec | None = None) -> Bound:
     """The spec to store and the spec to show, or a refusal naming every binding that fails.
 
-    A spec with no binding is returned as both, with no read of the store.
+    `parent` is the stored spec of the revision being revised, `None` for a create: a binding
+    copied from it unchanged stays even when its result has been swept, reading `null` with
+    `ok: false` as a read does (`_write_plan`). A spec with no binding is returned as both, with no
+    read of the store.
 
     Raises:
         InvalidExhibit: a binding names a result this session does not hold (or names it
-            ambiguously), its pointer does not resolve, its value does not fit the position, the
-            spec binds into more results than `exhibit_max_bound_results`, or this deployment keeps
-            no tool results to bind to.
+            ambiguously, or held it once and retention swept it), its pointer does not resolve,
+            its value does not fit the position, the spec binds into more results than
+            `exhibit_max_bound_results`, or this deployment keeps no tool results to bind to.
     """
     raw = spec_json(spec)
     sites = list(_sites(raw))
@@ -441,7 +585,9 @@ async def bind_for_write(session_id: str, spec: Spec) -> Bound:
         raise InvalidExhibit(
             "this deployment keeps no tool results to bind to; write the values as literals"
         )
-    stored, resolved, bindings, problems = await _run(raw, sites, session_id, writing=True)
+    stored, resolved, bindings, problems = await _run(
+        raw, sites, session_id, writing=True, parent=parent
+    )
     if problems:
         more = len(problems) - _SHOWN
         raise InvalidExhibit(
