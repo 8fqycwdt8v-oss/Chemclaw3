@@ -2910,6 +2910,8 @@ def _rendered_retention_rule() -> dict[str, object]:
             "retention.artifactGrowthAccepted=true",
             "--set",
             "retention.windows.CHEMCLAW_RETENTION_SESSION_MESSAGES_DAYS=365",
+            "--set",
+            "retention.windows.CHEMCLAW_RETENTION_SESSION_EXHIBITS_DAYS=365",
         ],
         capture_output=True,
         text=True,
