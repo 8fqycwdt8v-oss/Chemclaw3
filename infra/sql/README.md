@@ -67,7 +67,7 @@ the pair applies in filename order and neither shadows the other.
 | `corpus_cursors` | 072 | `ingest/labels/cursor.py` | — (one row per append-only corpus source; deleting a row is the supported way to force a full re-walk) |
 | `audit_events` | 006 (+010, 011, 026, 044, 045, 059) | `agent/audit_store.py` | **refused**: the trail is the record of who ran what, and disposing of it is a policy decision for whoever owns that record rather than an age cutoff in a cleanup job. `prev_hash`/`row_hash`/`chain_version` are retired columns, unwritten, at their defaults |
 | `sync_cursors` | 007 | `ingest/eln/cursor.py` | — (one row per ingest source; bounded by the source count) |
-| `session_messages` | 008 (+022, 026, 043, 046 `message_shape` check, 067 `message_original`, 098 the ambient's partial index, 109 `actor`/`agent`, 118 `turn_status`) | `agent/session_store.py` | `durable/retention.py`, per session through the pairing closure (D-145). The in-line compaction on write this row used to name went with the engine that needed it. `message_original` needs no disposal of its own: it dies with its row, and its population cannot grow — nothing has written a `maf`-shaped row since M6, so the set that can ever carry one was fixed then (D-2026-08-27-a-conversion-that-cannot-be-rolled-back-is-not-a-pre-upgrade-step). An operator who has trusted the conversion may `SET message_original = NULL` to reclaim it, which is the deliberate act of giving up the rollback. **098 adds an index rather than a column**: the `stated`-quote ambient reads this table once per turn on the answer path, and on a busy database it planned `Index Scan Backward using session_messages_pkey` and discarded **120,020** rows to return 20 — O(table) per turn — because Postgres has no statistics for the expression `message->>'type'`. The partial index makes the quotable rows directly addressable: 0 discarded, 14.8 ms to 0.036 ms, and no measurable write cost (162 -> 161 us/row) because it covers only a minority of the table (D-2026-09-14-two-of-three-bets-are-no-ops-and-the-index-is-free). **109 adds who wrote each row** — `actor`, the person it was written for, and `agent`, the agent that wrote it (`NULL` when the chemist did) — in the two names `audit_events` spells the same pair in, backfilled from `session_owners` and the row's own speaker label and never invented (D-2026-09-27-an-author-is-a-person-and-an-agent). Both die with the row; an erasure reaches a row by its `actor` as well as through its session. **118 adds `turn_status`** on the question a turn opens, which is now written *ahead* of the turn (`running`) and settled when it ends (`done`/`failed`/`stopped`), or marked `interrupted` by whichever process next touches the session once the turn's `session_turns` lease lapsed with no live owner — so a turn whose process died mid-turn shows in the transcript the question its checkpoint already holds, rather than vanishing from it (D-2026-10-03-a-turn-is-written-ahead-and-an-interrupted-one-says-so). Its partial index holds only the questions in flight |
+| `session_messages` | 008 (+022, 026, 043, 046 `message_shape` check, 067 `message_original`, 098 the ambient's partial index, 109 `actor`/`agent`, 118 `turn_status`) | `agent/session_store.py` | `durable/retention.py`, per session through the pairing closure (D-145). The in-line compaction on write this row used to name went with the engine that needed it. `message_original` needs no disposal of its own: it dies with its row, and its population cannot grow — nothing has written a `maf`-shaped row since M6, so the set that can ever carry one was fixed then (D-2026-08-27-a-conversion-that-cannot-be-rolled-back-is-not-a-pre-upgrade-step). An operator who has trusted the conversion may `SET message_original = NULL` to reclaim it, which is the deliberate act of giving up the rollback. **098 adds an index rather than a column**: the `stated`-quote ambient reads this table once per turn on the answer path, and on a busy database it planned `Index Scan Backward using session_messages_pkey` and discarded **120,020** rows to return 20 — O(table) per turn — because Postgres has no statistics for the expression `message->>'type'`. The partial index makes the quotable rows directly addressable: 0 discarded, 14.8 ms to 0.036 ms, and no measurable write cost (162 -> 161 us/row) because it covers only a minority of the table (D-2026-09-14-two-of-three-bets-are-no-ops-and-the-index-is-free). **109 adds who wrote each row** — `actor`, the person it was written for, and `agent`, the agent that wrote it (`NULL` when the chemist did) — in the two names `audit_events` spells the same pair in, backfilled from `session_owners` and the row's own speaker label and never invented (D-2026-09-27-an-author-is-a-person-and-an-agent). Both die with the row; an erasure reaches a row by its `actor` as well as through its session. **118 adds `turn_status`** on the question a turn opens, which is now written *ahead* of the turn (`running`) and settled when it ends (`done`/`failed`/`stopped`), or marked `interrupted` by whichever process next touches the session once the turn's `session_turns` lease lapsed with no live owner — so a turn whose process died mid-turn shows in the transcript the question its checkpoint already holds, rather than vanishing from it (D-2026-10-03-a-turn-is-written-ahead-and-an-interrupted-one-says-so). Its partial index holds only the questions in flight; **its build blocks the table's writes** — see *Migrations that lock a hot table* below |
 | `session_events` | 009 (+014, 028) | `agent/session_events.py` | `durable/retention.py`, **consumed rows only** — an undelivered push-back must outlive the window that would have destroyed it — except an artefact push (`kind = 'exhibit'`), a notification whose source of truth is the artefact list, pruned after `exhibit_push_retention_hours` whether consumed or not |
 | `note_index` | 012 (+035, 039, 099) | `retrieval/vector_index.py` | derived and rebuildable (`make reindex`, which now also heals a model change); rows for notes deleted from the corpus **are** pruned, bounded by the corpus revision the row was built from (099) so a pod with an older checkout cannot retire what it has not fetched |
 | `session_owners` | 013 (+021, 043, 046 index, 092 sort key) | `agent/session_store.py` | `durable/retention.py`, **last** and only once nothing is left to reopen: past the conversation window, no session-scoped row anywhere, no live turn lease (`D-2026-08-27-a-session-nobody-can-reopen-is-disposable`). The row is what makes a session reopenable *and* what every session-scoped sweep starts from, so it is disposed of behind everything it keys, never in front of it |
@@ -151,6 +151,61 @@ grant is a reconciliation between a schema that keeps growing and a runtime role
 at any point, so run-once semantics would leave every later table ungranted and break the
 application on first use of it. It re-runs on every deploy, after the migrations, and no-ops where
 no `chemclaw_app` role exists (D-2026-08-05-append-only-by-grant-not-by-contract).
+
+## Migrations that lock a hot table
+
+`core/migrate.py` applies the whole set in **one transaction** with `lock_timeout` set from
+`CHEMCLAW_PG_MIGRATION_LOCK_TIMEOUT_SECONDS` (5 s shipped), so `CREATE INDEX CONCURRENTLY` is not
+available to a migration — Postgres refuses it inside a transaction block — and a statement that
+needs a lock queues behind in-flight writes and aborts the whole run when the wait passes the
+timeout. `059` and `098` carry their own measurements and recipes in their headers. **`118` does
+not**, and an applied file is never edited, so its reading is here.
+
+**`118_session_message_turn_status.sql` takes two locks on `session_messages`**, the table every turn
+writes to — twice per turn since the question is written ahead of it:
+
+- `ALTER TABLE … ADD COLUMN turn_status TEXT` — nullable, no default, so it rewrites nothing and
+  holds its lock for milliseconds, but the lock is `ACCESS EXCLUSIVE`: it waits for every in-flight
+  transaction on the table, and every read and write queues behind *it* while it waits.
+- `CREATE INDEX … session_messages_running_turn_idx … WHERE turn_status = 'running'` — `SHARE`, which
+  blocks every INSERT for the build. The build scans the whole table even though the index holds
+  only the questions in flight.
+
+Measured on this repository's Postgres image, a `session_messages`-shaped table of **1,012,000 rows
+/ 441 MB** (one 12,000-row session plus 1,000,000 rows across 300 others, 250-character payloads,
+`VACUUM ANALYZE`, a host under heavy unrelated load): the `ADD COLUMN` took **3 ms**; two runs of
+four index builds took **1.77, 1.34, 0.73, 0.62 s** and **0.68, 0.43, 0.30, 0.30 s** — ~0.3-1.8 s per
+million rows, the spread being the host — for an index of a few pages. What the index buys, on the same
+table: `mark_interrupted` — run on every turn's start, every transcript read and every reattach
+that finds nothing running — read a 12,000-row session through `(session_id, id)` in **5.8 ms /
+857 buffers** without it and **0.25 ms / 2 buffers** with it; an INSERT batch of 2,000 rows
+measured no cost from it (29 ms with, 71 ms without — noise in the direction of none).
+`latest_turn_status` needs no index of its own (0.06 ms backwards over `(session_id, id)`).
+
+So the build is short and what can fail the deploy is **the lock wait**, as `098` measured for its
+own `CREATE INDEX IF NOT EXISTS` (which opens the table with `ShareLock` before it checks the name,
+so a pre-built index removes the build and not the wait). On a deployment taking continuous turns:
+
+1. Optionally pre-build the index on the live database, outside any transaction — it shortens
+   the window the migration holds the lock and is free:
+
+       CREATE INDEX CONCURRENTLY IF NOT EXISTS session_messages_running_turn_idx
+           ON session_messages (session_id) WHERE turn_status = 'running';
+
+   It needs the column, so it can only follow the `ADD COLUMN` — which is metadata-only and may be
+   run by hand first (`ALTER TABLE session_messages ADD COLUMN IF NOT EXISTS turn_status TEXT;`,
+   under a short `SET lock_timeout`, retried until it gets its moment).
+
+   A `CONCURRENTLY` build that fails part-way leaves an **invalid** index under that name, and
+   `118`'s `IF NOT EXISTS` would then skip it silently, leaving an index the planner never uses.
+   Check before running the migration, and drop and rebuild an invalid one:
+
+       SELECT indisvalid FROM pg_index
+        WHERE indexrelid = 'session_messages_running_turn_idx'::regclass;
+       -- false → DROP INDEX CONCURRENTLY session_messages_running_turn_idx; then build again
+2. Then plan for the lock either way: a quiet moment, or a raised
+   `CHEMCLAW_PG_MIGRATION_LOCK_TIMEOUT_SECONDS` for the upgrade. The migration hook Job
+   self-heals only within its `backoffLimit`.
 
 ## What a rollback and a replay cannot assume
 
