@@ -12,7 +12,7 @@ revision always comes back typed. `require_writable` is the caps (bytes, rows, s
 atoms) and the RDKit parse of every SMILES, and only a *write* runs it: a deployment that lowers a
 cap must not make the artefacts it already holds unreadable, and re-parsing two hundred molecules on
 every read would pay for a check whose answer cannot have changed. The one write-time check that is
-not here is whether a geometry's `source` is stored — it is a database read, so it is async and
+not here is whether what a geometry cites is stored — it is a database read, so it is async and
 lives in `exhibits.sources` beside the store it asks.
 
 **A value may be bound rather than written**
@@ -317,13 +317,22 @@ class GeometrySource(_Spec):
         return f"{self.calc_key}#{self.name}"
 
 
-class GeometrySpec(_Spec):
-    """One 3D structure, inline as an XYZ block or named as a stored calculation artifact.
+#: A geometry's content address in the structure store (`science.calc.models.Structure`): `st_`
+#: and the sixteen hex digits `core.ids.stable_hash` writes.
+STRUCTURE_ID = r"^st_[0-9a-f]{16}$"
 
-    Exactly one of `xyz` and `source`. `highlight_atoms` are **0-based** indices into the atom
-    lines, held inside the inline block's atom count (a `source` is not read to check them — its
-    bytes are the calc store's, and an eviction may take them). `energy_hartree` is a label the
-    viewer shows, not a figure anything here computes.
+
+class GeometrySpec(_Spec):
+    """One 3D structure: inline XYZ, a stored calculation artifact, or a stored structure.
+
+    Exactly one of `xyz`, `source` and `structure_id`. `structure_id` is what the agent holds —
+    every calculation result names its geometry by it and none hands the model coordinates — and
+    is resolved to XYZ from the structure store when the artefact is read
+    (`exhibits.sources.resolved_geometry`), so a reader is served `xyz` and the stored revision
+    keeps the address. `highlight_atoms` are **0-based** indices into the atom lines, held inside
+    the inline block's atom count here and inside a cited one's when it is written
+    (`exhibits.sources.require_source_stored`). `energy_hartree` is a label the viewer shows, not a
+    figure anything here computes.
     """
 
     kind: Literal["geometry"]
@@ -334,15 +343,20 @@ class GeometrySpec(_Spec):
     # schema as an empty object and hide every field from the OpenAPI document.
     xyz: str | None = Field(default=None, exclude_if=_absent)
     source: GeometrySource | None = Field(default=None, exclude_if=_absent)
+    structure_id: str | None = Field(default=None, pattern=STRUCTURE_ID, exclude_if=_absent)
     label: str = ""
     energy_hartree: Number | None = Field(default=None, exclude_if=_absent)
     highlight_atoms: list[Annotated[int, Strict(), Field(ge=0)]] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _one_structure(self) -> GeometrySpec:
-        """Exactly one of `xyz` and `source`, an inline block that parses, highlights inside it."""
-        if (self.xyz is None) == (self.source is None):
-            raise ValueError("a geometry takes exactly one of `xyz` (inline) or `source`")
+        """Exactly one structure, an inline block that parses, highlights inside it."""
+        given = [self.xyz, self.source, self.structure_id]
+        if sum(value is not None for value in given) != 1:
+            raise ValueError(
+                "a geometry takes exactly one of `structure_id` (a stored structure), `xyz` "
+                "(inline) or `source` (a calculation artifact)"
+            )
         if self.xyz is not None:
             count = xyz_atom_count(self.xyz)
             if outside := sorted({index for index in self.highlight_atoms if index >= count}):

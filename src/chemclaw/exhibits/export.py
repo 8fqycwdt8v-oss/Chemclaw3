@@ -108,10 +108,11 @@ def render_export(spec: Spec, fmt: str) -> str | None:
 async def resolve_export(spec: Spec, fmt: str) -> str | None:
     """`render_export`, plus the one format whose text is read from the calc artifact store.
 
-    `None` both when the kind does not offer `fmt` and when a geometry's source has been evicted
-    since it was written — the route answers 404 to either, because neither has a file to give.
+    `None` both when the kind does not offer `fmt` and when what a geometry cites is gone, or is
+    an artifact now over the download cap — the route answers 404 to each, because none has a file
+    to give. A `structure_id` the reader's view already resolved arrives here as inline `xyz`.
     """
-    if isinstance(spec, GeometrySpec) and fmt == "xyz" and spec.source is not None:
+    if isinstance(spec, GeometrySpec) and fmt == "xyz" and spec.xyz is None:
         text = await geometry_xyz(spec)
         return None if text is None else _with_newline(text)
     return render_export(spec, fmt)

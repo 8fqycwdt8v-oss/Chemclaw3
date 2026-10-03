@@ -46,6 +46,7 @@ from chemclaw.exhibits.grounding import unverified_figures
 from chemclaw.exhibits.models import (
     DocumentSpec,
     ExhibitView,
+    GeometrySpec,
     Spec,
     StaleRevision,
     parse_spec,
@@ -125,7 +126,7 @@ async def create_exhibit(title: str, spec: dict[str, Any]) -> str:
     Revise it later rather than copying it. Figures no tool returned are flagged unchecked.
     `spec` fields by `kind`: document `markdown`; table `columns` [{key,label,unit}], `rows`;
     structures `items` [{smiles,label,props}]; chart `chart` (line|scatter|bar), `x_label`,
-    `y_label`, `series` [{name,x,y}]; geometry `xyz` or `source` {calc_key,name}, `label`; link
+    `y_label`, `series` [{name,x,y}]; geometry `structure_id` (from a result), `label`; link
     `target` (protocol|note|job), `id`; html `html` (self-contained, no network), `height`.
     Copy a value from a result ending ⟨r:HEX⟩: any cell, prop, smiles, x or y may be
     {"$bind":{"result":"r:HEX","pointer":"/json/pointer"}}; a table may give `rows_from`
@@ -245,7 +246,10 @@ async def read_exhibit(exhibit_id: str, revision: int = 0) -> str:
         "revision": view.revision,
         "head_revision": view.head_revision,
         "author_kind": view.author_kind,
-        "spec": spec_json(shown.spec),
+        # A cited structure is shown as its address, which is what the agent holds and writes
+        # back: its resolved coordinates are a viewer's input and cost the model ~50 characters an
+        # atom for nothing it can act on.
+        "spec": spec_json(view.raw_spec if _cites_structure(view.raw_spec) else shown.spec),
     }
     if shown.bindings:
         # Both forms, because a revision is written in the stored one: a `spec` sent back with the
@@ -258,6 +262,11 @@ async def read_exhibit(exhibit_id: str, revision: int = 0) -> str:
     # the chemist's edit is not the agent that answers the chemist having seen it. The mark moves
     # on the agent's own writes and when the turn note announces an edit (`agent/exhibit_notes`).
     return defang(json.dumps(readout, ensure_ascii=False))
+
+
+def _cites_structure(spec: Spec) -> bool:
+    """Whether `spec` is a geometry citing a stored structure by its `structure_id`."""
+    return isinstance(spec, GeometrySpec) and spec.structure_id is not None
 
 
 async def _changes_since_agent(

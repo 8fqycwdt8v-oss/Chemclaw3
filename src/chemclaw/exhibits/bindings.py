@@ -45,12 +45,14 @@ from chemclaw.exhibits.models import (
     EXHIBIT_TOOLS,
     ExhibitBinding,
     ExhibitView,
+    GeometrySpec,
     InvalidExhibit,
     Spec,
     parse_spec,
     spec_bytes,
     spec_json,
 )
+from chemclaw.exhibits.sources import resolved_geometry
 
 #: What each bound position accepts, by the name a refusal uses for it.
 Expect = Literal["cell", "prop", "smiles", "x", "y", "rows"]
@@ -630,8 +632,11 @@ async def resolved_view(view: ExhibitView) -> ExhibitView:
     """`view` as a reader is served it: `spec` resolved, `raw_spec` as stored, `bindings` listed.
 
     A binding whose stored result is gone reads `null` with `ok: false`; nothing here raises for
-    it, because an artefact must stay readable when retention takes what one cell pointed at.
+    it, because an artefact must stay readable when retention takes what one cell pointed at. A
+    geometry citing a `structure_id` is resolved the same way (`sources.resolved_geometry`).
     """
+    if isinstance(view.raw_spec, GeometrySpec):
+        return await resolved_geometry(view)
     raw = spec_json(view.raw_spec)
     sites = list(_sites(raw))
     if not sites:
