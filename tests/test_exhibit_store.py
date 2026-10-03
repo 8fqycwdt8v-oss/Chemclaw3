@@ -264,11 +264,13 @@ async def test_an_artefact_at_its_revision_cap_is_refused_another(
 
 @pytest.mark.parametrize("backend", _BACKENDS)
 async def test_the_chemists_figures_are_read_as_recorded_each_once(backend: str) -> None:
-    """What the grounding check reads: each figure a person's revision recorded, once, in order.
+    """What the grounding check reads: each figure people introduced, once, in order.
 
-    Recorded at write time, so the read parses no spec — the check that runs on every agent write
-    used to parse every person's revision and its parent. An agent revision's figures and an
-    unrecorded (pre-119) person's revision count for nothing; another session's are unknown.
+    Recorded at write time, so the read parses no spec for a recorded row. A person's revision with
+    nothing recorded — every one written before migration 119 — is derived from its spec and its
+    parent's, as before the column existed: counting it as introducing nothing flagged the
+    chemist's own figures after an upgrade. An agent revision records nothing; another session's
+    artefact is unknown.
     """
     store = await _backend(backend)
     session = _session()
@@ -281,7 +283,7 @@ async def test_the_chemists_figures_are_read_as_recorded_each_once(backend: str)
         chemist_figures=["4.76", "9.95"],
     )
     writes: list[tuple[str, list[str] | None]] = [
-        ("agent", ["1.5"]),
+        ("agent", None),
         ("human", ["9.95", "16"]),
         ("human", None),
     ]
@@ -295,7 +297,8 @@ async def test_the_chemists_figures_are_read_as_recorded_each_once(backend: str)
             author=kind,
             chemist_figures=figures,
         )
-    assert await store.chemist_figures(session, made.exhibit_id) == ["4.76", "9.95", "16"]
+    # Revision 4 is unrecorded: `_table(4)` against its parent `_table(3)` introduced "4".
+    assert await store.chemist_figures(session, made.exhibit_id) == ["4.76", "9.95", "16", "4"]
     assert await store.chemist_figures(_session(), made.exhibit_id) == [], (
         "another session's is unknown"
     )

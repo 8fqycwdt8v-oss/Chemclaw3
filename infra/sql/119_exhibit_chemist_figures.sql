@@ -7,10 +7,11 @@
 -- once at write time (`exhibits/grounding.introduced_figures`, off the loop in the REST route) it is
 -- one statement returning each figure once.
 --
--- NULL on an agent revision, and on every person's revision written before this column, which the
--- reader takes as "introduced nothing" — the conservative direction: a figure not counted here is
--- flagged unchecked, never cleared. Additive, so the previous image ignores it; its human writes
--- leave it NULL, with the same consequence.
+-- NULL on an agent revision, and on every person's revision written before this column. The reader
+-- derives a person's NULL row the old way — its figures not in its parent's — so the history an
+-- upgrade inherits is read as it always was; that set of rows is closed, so the derivation's cost
+-- does not grow. A fork's revision 1 records the union of its source's figures, whoever authored
+-- it. Additive, so the previous image ignores it; its human writes leave it NULL and are derived.
 --
 -- Applied by `make db-migrate`.
 ALTER TABLE session_exhibit_revisions ADD COLUMN IF NOT EXISTS chemist_figures JSONB;

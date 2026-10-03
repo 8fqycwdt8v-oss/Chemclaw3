@@ -15,6 +15,7 @@ yours" — so neither a tool nor a route can be used as an oracle for which ids 
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -27,6 +28,7 @@ from psycopg.rows import TupleRow
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.core.jsonb import json_column
+from chemclaw.exhibits.grounding import introduced_figures
 from chemclaw.exhibits.models import (
     EXHIBIT_ID,
     ExhibitHeader,
@@ -167,7 +169,7 @@ class _Revision:
 
     view: ExhibitView
     byte_size: int
-    chemist_figures: list[str] = field(default_factory=list)
+    chemist_figures: list[str] | None = None
 
 
 @dataclass
@@ -313,7 +315,7 @@ class InMemoryExhibitStore:
             unverified_figures=list(unverified_figures or []),
         )
         entry.revisions.append(
-            _Revision(view=view, byte_size=spec_bytes(spec), chemist_figures=chemist_figures or [])
+            _Revision(view=view, byte_size=spec_bytes(spec), chemist_figures=chemist_figures)
         )
         return view
 
@@ -376,11 +378,17 @@ class InMemoryExhibitStore:
         entry = self._entry(session_id, exhibit_id)
         if entry is None:
             return []
+        specs = {stored.view.revision: stored.view.raw_spec for stored in entry.revisions}
         seen: dict[str, None] = {}
         for stored in entry.revisions:
-            if stored.view.author_kind != "human":
-                continue
-            for figure in stored.chemist_figures:
+            figures = stored.chemist_figures
+            if figures is None:
+                if stored.view.author_kind != "human":
+                    continue
+                # A person's revision written with nothing recorded: derived, as Postgres does.
+                parent = specs.get(stored.view.parent_revision)
+                figures = introduced_figures(stored.view.raw_spec, parent)
+            for figure in figures:
                 seen.setdefault(figure, None)
         return list(seen)
 
@@ -511,21 +519,57 @@ WHERE r.exhibit_id = %s AND e.session_id = %s
 ORDER BY r.revision
 """
 
-# Each figure once, in the order people first introduced it. A revision written before migration
-# 119 has no recorded figures (NULL) and contributes none — the conservative direction, since a
-# figure not counted here is flagged "unchecked", never cleared.
-_SELECT_CHEMIST_FIGURES = """
-SELECT figure FROM (
-    SELECT DISTINCT ON (f.figure) f.figure, r.revision, f.position
-    FROM session_exhibit_revisions r
-    JOIN session_exhibits e ON e.exhibit_id = r.exhibit_id
-    CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(r.chemist_figures, '[]'::jsonb))
-               WITH ORDINALITY AS f(figure, position)
-    WHERE r.exhibit_id = %s AND e.session_id = %s AND r.author_kind = 'human'
-    ORDER BY f.figure, r.revision, f.position
-) first_seen
-ORDER BY revision, position
+# Every row that can say what a person introduced, oldest first: one carrying recorded figures (any
+# author — a fork's revision 1 carries the union of its source's, `fork_exhibits`), and a person's
+# revision written before migration 119, which recorded none and is derived from its spec and its
+# parent's (`_figures_of`). The two specs are read only for those legacy rows.
+_SELECT_FIGURE_ROWS = """
+SELECT r.chemist_figures,
+       CASE WHEN r.chemist_figures IS NULL THEN r.spec END,
+       p.spec
+FROM session_exhibit_revisions r
+JOIN session_exhibits e ON e.exhibit_id = r.exhibit_id
+LEFT JOIN session_exhibit_revisions p
+       ON r.chemist_figures IS NULL AND p.exhibit_id = r.exhibit_id
+      AND p.revision = r.parent_revision
+WHERE r.exhibit_id = %s AND e.session_id = %s
+  AND (r.chemist_figures IS NOT NULL OR r.author_kind = 'human')
+ORDER BY r.revision
 """
+
+
+async def _figures_of(
+    cur: psycopg.AsyncCursor[TupleRow], session_id: str, exhibit_id: str
+) -> list[str]:
+    """The figures people introduced into `exhibit_id`, each once, in the order first introduced.
+
+    Recorded figures are read as they are. A person's revision from before migration 119 has none
+    recorded, and is derived the way it was before the column existed — its figures not in its
+    parent's — off the event loop: that set of rows is closed (nothing writes NULL for a person any
+    more), so the derivation's cost is bounded by the history an upgrade inherited and does not
+    grow. Counting those as introducing nothing instead flagged the chemist's own figures as
+    unchecked on the first agent revision after the upgrade.
+    """
+    await cur.execute(_SELECT_FIGURE_ROWS, (exhibit_id, session_id))
+    rows = await cur.fetchall()
+
+    def _merged() -> list[str]:
+        seen: dict[str, None] = {}
+        for recorded, mine, parent in rows:
+            if recorded is not None:
+                figures = [str(figure) for figure in recorded]
+            else:
+                figures = introduced_figures(
+                    parse_spec(mine), None if parent is None else parse_spec(parent)
+                )
+            for figure in figures:
+                seen.setdefault(figure, None)
+        return list(seen)
+
+    if any(recorded is None for recorded, _, _ in rows):
+        return await asyncio.to_thread(_merged)
+    return _merged()
+
 
 _MARK_SEEN = """
 UPDATE session_exhibits SET agent_seen_revision = GREATEST(agent_seen_revision, %s)
@@ -804,12 +848,10 @@ class PostgresExhibitStore:
         ]
 
     async def chemist_figures(self, session_id: str, exhibit_id: str) -> list[str]:
-        """The figures people introduced, each once, in one statement; no spec is read or parsed."""
+        """The figures people introduced, each once, in one statement (`_figures_of`)."""
         async with self._connection() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(_SELECT_CHEMIST_FIGURES, (exhibit_id, session_id))
-                rows = await cur.fetchall()
-        return [str(row[0]) for row in rows]
+                return await _figures_of(cur, session_id, exhibit_id)
 
     async def mark_seen(self, session_id: str, exhibit_id: str, revision: int) -> None:
         """Raise the agent's read mark to `revision`; `GREATEST` keeps it from moving back."""
@@ -872,8 +914,8 @@ INSERT INTO session_exhibit_revisions
      unverified_figures, chemist_figures, correlation_id, created_at)
 SELECT m.new_id, 1, 0, r.author_kind, r.author,
        'forked from ' || e.exhibit_id || ' r' || e.head_revision, r.spec, r.byte_size,
-       r.unverified_figures, r.chemist_figures, r.correlation_id, e.updated_at + ({_FORK_SHIFT})
-FROM unnest(%(old)s::text[], %(new)s::text[]) AS m(old_id, new_id)
+       r.unverified_figures, m.figures, r.correlation_id, e.updated_at + ({_FORK_SHIFT})
+FROM unnest(%(old)s::text[], %(new)s::text[], %(figures)s::jsonb[]) AS m(old_id, new_id, figures)
 JOIN session_exhibits e ON e.exhibit_id = m.old_id AND e.session_id = %(parent)s
 JOIN session_exhibit_revisions r ON r.exhibit_id = e.exhibit_id AND r.revision = e.head_revision
 """
@@ -886,7 +928,8 @@ async def fork_exhibits(cur: psycopg.AsyncCursor[TupleRow], parent_id: str, chil
     Head revision only, as revision 1 of a new id with `change_note` "forked from <xid> r<n>": a
     fork is a branch of the conversation, and the artefact's history is the parent's record of how
     the parent got there — the child starts from where it stands, and the note says from where. The
-    revision's own author is kept (who wrote the words), as `session_fork` keeps each message's.
+    revision's own author is kept (who wrote the words), as `session_fork` keeps each message's,
+    and it records the union of the figures people introduced across the whole source history.
 
     On a cursor rather than a connection of its own because the fork is one transaction across
     every table it copies (`agent/session_fork.fork_session`), and an artefact copy that could
@@ -896,8 +939,12 @@ async def fork_exhibits(cur: psycopg.AsyncCursor[TupleRow], parent_id: str, chil
     old = [str(row[0]) for row in await cur.fetchall()]
     if not old:
         return 0
-    names = {"parent": parent_id, "child": child_id, "old": old}
+    names: dict[str, Any] = {"parent": parent_id, "child": child_id, "old": old}
     names["new"] = [new_exhibit_id() for _ in old]
+    # The revision a fork copies is the head alone, so it carries the union of every figure people
+    # introduced across the source's history — otherwise the child's first agent revision would
+    # flag the chemist's own figures from every revision the fork did not copy.
+    names["figures"] = [json_column(await _figures_of(cur, parent_id, xid)) for xid in old]
     await cur.execute(_FORK_HEADERS, names)
     await cur.execute(_FORK_REVISIONS, names)
     return len(old)
