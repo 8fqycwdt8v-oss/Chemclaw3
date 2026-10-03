@@ -16,6 +16,7 @@ the next turn, the reattach route and the transcript route.
 
 import asyncio
 import contextlib
+import json
 import uuid
 from collections.abc import AsyncIterator, Callable, Iterator
 from typing import Any, cast
@@ -41,10 +42,13 @@ from chemclaw.agent.session_store import (
     stored_turn_status,
 )
 from chemclaw.agent.state import turn_config
+from chemclaw.agent.turn_cost import TurnCost
+from chemclaw.agent.turn_cost_store import PostgresTurnCostSink
 from chemclaw.api import runner
 from chemclaw.api.app import create_app
 from chemclaw.api.auth import Principal, require_principal
 from chemclaw.api.events import Event
+from chemclaw.api.routes import turns as turns_module
 from chemclaw.api.runner import run_turn
 from chemclaw.core import db
 from chemclaw.core.config import settings
@@ -52,7 +56,10 @@ from chemclaw.core.identity_context import (
     reset_current_correlation_id,
     set_current_correlation_id,
 )
+from chemclaw.core.metrics import METRICS
+from tests.fakes_turn import Piece, ScriptedTurn
 from tests.pg import create_checkpoint_tables, migrated_db_or_skip
+from tests.test_detach import _Served
 
 _ALICE = Principal(oid="alice-write-ahead", upn="alice@corp", roles=frozenset())
 
@@ -187,6 +194,16 @@ async def _outcomes(correlation_id: str) -> list[str]:
     async with db.connection(settings.session_store_dsn or settings.postgres_dsn) as conn:
         cursor = await conn.execute(
             "SELECT outcome FROM turn_costs WHERE correlation_id = %s", (correlation_id,)
+        )
+        return [str(row[0]) for row in await cursor.fetchall()]
+
+
+async def _ledger(correlation_id: str) -> list[str]:
+    """Every `turn_costs` outcome for one turn, as the table holds it now."""
+    async with db.connection(settings.session_store_dsn or settings.postgres_dsn) as conn:
+        cursor = await conn.execute(
+            "SELECT outcome FROM turn_costs WHERE correlation_id = %s ORDER BY outcome",
+            (correlation_id,),
         )
         return [str(row[0]) for row in await cursor.fetchall()]
 
@@ -374,7 +391,7 @@ async def test_a_question_under_a_live_claim_is_never_marked_and_a_successors_cl
     # Its lease lapses and a successor claims the session: the question is now nobody's.
     await _expire_claim(session_id)
     assert await claims.claim(session_id, "successor", 60)
-    assert await history.mark_interrupted(session_id) == [("wa-live-1", None)]
+    assert await history.mark_interrupted(session_id) == [("wa-live-1", None, False)]
     assert await history.mark_interrupted(session_id) == [], "marked — and booked — twice"
     assert await history.latest_turn_status(session_id) == "interrupted"
 
@@ -466,3 +483,136 @@ async def test_a_failed_turn_leaves_its_question_marked_failed(durable: None) ->
         ("a doomed question", "failed")
     ]
     assert thread == ["a doomed question"]
+
+
+class _Held(ScriptedTurn):
+    """A turn that parks at `hold` until stopped, and answers anything else at once."""
+
+    def __init__(self) -> None:
+        """Nothing has started yet."""
+        self.started: list[str] = []
+
+    async def stream(self, message: str) -> AsyncIterator[Piece]:
+        """Record the message, then answer — or, for `hold`, wait to be stopped."""
+        self.started.append(message)
+        yield "working "
+        if message.startswith("hold"):
+            await asyncio.Event().wait()
+        yield f"done {message}"
+
+
+async def _post(client: httpx.AsyncClient, session_id: str, message: str) -> list[dict[str, Any]]:
+    """POST one message and read its stream to the end."""
+    events: list[dict[str, Any]] = []
+    async with client.stream(
+        "POST", f"/sessions/{session_id}/messages", json={"message": message}
+    ) as response:
+        assert response.status_code == 200, await response.aread()
+        async for line in response.aiter_lines():
+            if line.startswith("data:"):
+                events.append(json.loads(line.removeprefix("data:")))
+    return events
+
+
+def test_a_stopped_turns_settle_lands_before_the_message_behind_it_runs(
+    durable: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Stop a turn with a message waiting behind it: the stopped turn is `stopped`, booked once.
+
+    **The ordering this pins.** A Stop cancels the pump, and the cancelled teardown settles the
+    question `stopped` on a task of its own (it may not `await`). The pump's `finally` then released
+    the claim and woke the line — so a message waiting on this same process could take the claim
+    and run its own `settle_interrupted_turns` *before that settle landed*: it found the stopped
+    turn's question still `running` under a successor's claim, marked it `interrupted`, and booked a
+    second outcome beside the `abandoned` the turn had already booked for itself. The settle is
+    slowed here so the window is wide rather than lucky; the fix is that the pump's `finally` waits
+    for it before giving the claim up.
+    """
+    real_finish = PostgresHistoryProvider.finish_turn
+
+    async def _slow_finish(self: Any, *args: Any, **kwargs: Any) -> None:
+        if args[3] != "done":
+            await asyncio.sleep(1.0)
+        await real_finish(self, *args, **kwargs)
+
+    monkeypatch.setattr(PostgresHistoryProvider, "finish_turn", _slow_finish)
+    monkeypatch.setattr(settings, "service_turn_queue_poll_seconds", 0.05)
+
+    async def _reauthorized(request: Any, principal: Principal) -> Principal:
+        return principal
+
+    monkeypatch.setattr(turns_module, "reauthorize", _reauthorized)
+    asyncio.run(migrated_db_or_skip())
+    agent = _Held()
+    app = create_app(
+        graph_factory=agent.graph_factory,
+        connector_factory=_no_connectors,
+        owner_store=SessionOwnerStore(),
+        turn_claims=SessionTurnClaims(),
+    )
+    app.dependency_overrides[require_principal] = lambda: _ALICE
+
+    async def _run() -> list[BaseMessage]:
+        with _Served(app) as served:
+            async with httpx.AsyncClient(base_url=served.base, timeout=60) as client:
+                session_id = str((await client.post("/sessions")).json()["session_id"])
+                first = asyncio.create_task(_post(client, session_id, "hold the first"))
+                await _until(lambda: _true(agent.started == ["hold the first"]))
+                second = asyncio.create_task(_post(client, session_id, "the second"))
+
+                async def _waiting() -> bool:
+                    line = (await client.get(f"/sessions/{session_id}/queue")).json()
+                    return len(line["waiting"]) == 1
+
+                await _until(_waiting)
+                stopped = await client.post(f"/sessions/{session_id}/turn/stop")
+                assert stopped.status_code == 200, stopped.text
+                await first
+                assert (await second)[-1]["type"] == "answer"
+                return await PostgresHistoryProvider().get_messages(session_id)
+
+    transcript = asyncio.run(_run())
+    questions = [m for m in transcript if isinstance(m, HumanMessage)]
+    assert [(str(m.content), stored_turn_status(m)) for m in questions] == [
+        ("hold the first", "stopped"),
+        ("the second", "done"),
+    ], "the stopped turn was read as interrupted by the message that ran after it"
+    first_turn = stored_correlation_id(questions[0])
+    assert first_turn is not None
+    # The ledger was written on the server's own loop, now stopped, so it is read directly rather
+    # than through `_outcomes`, which waits on this loop's pending writes.
+    assert asyncio.run(_ledger(first_turn)) == ["abandoned"], "booked twice"
+
+
+async def _true(value: bool) -> bool:
+    """`value`, as the async predicate `_until` polls."""
+    return value
+
+
+async def test_a_turn_whose_settle_failed_is_marked_but_not_booked_a_second_time(
+    durable: None,
+) -> None:
+    """The degraded path: the turn booked its own outcome, then could not settle its question.
+
+    Its process was alive to write `turn_costs` and the store refused the settle (or the process
+    died between the two writes), so the question is still `running` with nobody behind it. The
+    next reader marks it — the transcript should say the turn is over — and books nothing, because
+    a second outcome would count one turn twice on the ledger and on the turns counter.
+    """
+    session_id = await _session()
+    history = PostgresHistoryProvider()
+    token = set_current_correlation_id("wa-booked-1")
+    try:
+        turn = await history.begin_turn(session_id, HumanMessage(content="answered, unsettled"))
+    finally:
+        reset_current_correlation_id(token)
+    assert turn is not None
+    await PostgresTurnCostSink().record(
+        TurnCost(correlation_id="wa-booked-1", session_id=session_id, outcome="errored")
+    )
+    before = METRICS.value("chemclaw_turns_finished_total")
+
+    assert await runner.settle_interrupted_turns(history, session_id) == 1
+    assert await history.latest_turn_status(session_id) == "interrupted"
+    assert await _outcomes("wa-booked-1") == ["errored"], "booked a second outcome"
+    assert METRICS.value("chemclaw_turns_finished_total") == before, "counted twice"
