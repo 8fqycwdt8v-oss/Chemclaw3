@@ -505,3 +505,20 @@ async def test_a_referenced_geometry_reaches_the_turn_note_as_its_address(
     note = await exhibit_turn_note(turn, [ExhibitRef(exhibit_id=xid)])
     assert sid in note.text
     assert "0.1170" not in note.text and '"xyz":' not in note.text
+
+
+async def test_a_cited_block_over_the_atom_cap_is_refused_on_its_count_line(
+    calc_store: InMemoryArtifactStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The count line decides an over-cap block before the rest of the text is split and checked.
+
+    A cited artifact may be megabytes; refusing it on its atom count after splitting and checking
+    every line spent exactly what the cap is there to save. The refusal names the declared count,
+    which only the first-line read can produce — the whole-block check names the lines it found.
+    """
+    monkeypatch.setattr(settings, "exhibit_max_atoms", 500)
+    big = "100000\nensemble\n" + "C 0 0 0\n" * 20_000
+    await calc_store.put(_CALC_KEY, "big.xyz", big.encode(), media_type="chemical/x-xyz")
+    cited = parse_spec(_geometry(source={"calc_key": _CALC_KEY, "name": "big.xyz"}))
+    with pytest.raises(InvalidExhibit, match="count line says 100000 atoms, over the 500-atom cap"):
+        await sources.require_source_stored(cited, "s")

@@ -254,8 +254,13 @@ ELEMENTS: frozenset[str] = frozenset(
 )
 
 
-def xyz_atom_count(xyz: str) -> int:
+def xyz_atom_count(xyz: str, *, max_atoms: int | None = None) -> int:
     """How many atoms one standard XYZ block holds, having checked every line of it.
+
+    `max_atoms` refuses a block whose count line declares more, read off the first line before the
+    text is split: a cited artifact is up to `calc_artifact_max_download_bytes`, and splitting and
+    checking tens of megabytes of lines to refuse it on its count afterwards is the cost the cap
+    exists to avoid. The block is still checked whole when the count is within it.
 
     The layout is the one every program writes: an atom count, a comment line (which may be
     empty), then exactly that many `El x y z` lines in ångström. Trailing blank lines are allowed;
@@ -267,13 +272,17 @@ def xyz_atom_count(xyz: str) -> int:
     Raises:
         ValueError: naming the line and what is wrong with it.
     """
-    lines = xyz.rstrip().splitlines()
+    trimmed = xyz.rstrip()
     try:
-        count = int(lines[0].strip()) if lines else -1
+        # The first line alone, by the same line breaks `splitlines` honours below for `\n`/`\r\n`.
+        count = int(trimmed.split("\n", 1)[0].strip()) if trimmed else -1
     except ValueError:
         raise ValueError("xyz: the first line must be the atom count") from None
     if count < 1:
         raise ValueError("xyz: the first line must be the atom count, at least 1")
+    if max_atoms is not None and count > max_atoms:
+        raise ValueError(f"xyz: the count line says {count} atoms, over the {max_atoms}-atom cap")
+    lines = trimmed.splitlines()
     atoms = lines[2:]
     if len(atoms) != count:
         raise ValueError(

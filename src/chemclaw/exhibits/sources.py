@@ -131,13 +131,9 @@ async def require_source_stored(spec: Spec, session_id: str, *, parent: Spec | N
     else:
         return
     try:
-        atoms = xyz_atom_count(text)
+        atoms = xyz_atom_count(text, max_atoms=settings.exhibit_max_atoms)
     except ValueError as exc:
-        raise InvalidExhibit(f"{cited!r} is not one XYZ structure: {exc}") from exc
-    if atoms > settings.exhibit_max_atoms:
-        raise InvalidExhibit(
-            f"{cited!r} has {atoms} atoms, over the {settings.exhibit_max_atoms}-atom cap"
-        )
+        raise InvalidExhibit(f"{cited!r} is not one XYZ structure within the caps: {exc}") from exc
     if outside := sorted({index for index in spec.highlight_atoms if index >= atoms}):
         raise InvalidExhibit(
             f"highlight_atoms {outside} are not atoms of {cited!r}, which has {atoms} (0-based)"
