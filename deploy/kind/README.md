@@ -220,6 +220,14 @@ it out works in principle; the steps below were faster both times.
    `kubectl --context kind-chemclaw -n chemclaw delete secret sh.helm.release.v1.chemclaw.v<N>`.
 5. **Re-run `up.sh up`** with the same auth mode. It finds the pods ready, completes the release with
    its hooks, and runs the smoke.
+6. **A reloaded image under the same tag restarts nothing by itself.** Every build here is loaded as
+   `chemclaw/<x>:kind`, so after a rebuild no pod template changes: `helm upgrade` leaves the
+   connector servers, the front door and the mock LLM on the previous image, and `kubectl apply`
+   leaves the UI and the fleet on theirs (the workers only moved because step 1–3 restarted them).
+   `up.sh up` now finds these by digest — a pod whose `imageID` is not one the node's current image
+   for that tag answers to — and restarts them two at a time. By hand:
+   `kubectl --context kind-chemclaw -n chemclaw rollout restart deployment/<a> deployment/<b>`, a pair
+   at a time, waiting for each pair's `rollout status`.
 
 ### Reclaiming node disk
 

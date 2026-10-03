@@ -533,13 +533,83 @@ $(k get deploy 2>&1)"
     log "certificates were re-issued — restarting the release's pods onto the new CA"
     k rollout restart deployment -l "app.kubernetes.io/instance=$RELEASE" >/dev/null
   fi
-  # The mock LLM validated its catalogue before the release existed; nothing to restart. The UI's
-  # readiness follows the front door's, so it is waited on only now.
+  restart_stale_images
+  # The UI's readiness follows the front door's, so it is waited on only now.
   if have "$(ui_image)"; then wait_rollout deployment/ui 180s; fi
   wait_rollout deployment/front-door 60s
   k wait --for=condition=Available deployment --all --timeout=300s >/dev/null \
     || die "not every Deployment is Available: $(k get deploy 2>&1)"
   log "release $RELEASE deployed"
+}
+
+# ------------------------------------------------------------------------------------- stale images
+
+# The Deployments whose running pods are not on the image the node now holds for their tag.
+#
+# **A reloaded image under an unchanged tag restarts nothing by itself.** This lane loads every
+# build as `chemclaw/<x>:kind`, so after a rebuild the pod templates are byte-for-byte what they
+# were: `helm upgrade` changes no Deployment and `kubectl apply` none of the manifests, and the old
+# pods keep running the previous image while the release reports success. Measured on the suite run
+# that followed a core rebuild: the workers (scaled through the staged procedure) came back on the
+# new image, while the connector servers, the front door, the mock LLM and the UI stayed on the old
+# one until restarted by hand.
+#
+# The comparison is by digest, which is what a tag cannot tell apart: a pod's `imageID` is the
+# repository digest it was started from, and the node lists the digests its current image for that
+# tag answers to (`crictl inspecti`). A pod whose digest is not among them is stale.
+stale_deployments() {
+  local pods tags image digests="{}"
+  pods="$(k get pods -o json)" || return 1
+  tags="$(python3 -c 'import json,sys
+for p in json.load(sys.stdin)["items"]:
+    for c in p["spec"]["containers"]:
+        if c["image"].startswith("chemclaw/"): print(c["image"])' <<<"$pods" | sort -u)"
+  for image in $tags; do
+    digests="$(docker exec "$CLUSTER-control-plane" crictl inspecti -o json "docker.io/$image" 2>/dev/null \
+      | python3 -c 'import json,sys
+known=json.loads(sys.argv[1]); image=sys.argv[2]
+try: status=json.load(sys.stdin)["status"]
+except Exception: status={"repoDigests": [], "id": ""}
+known[image]=status.get("repoDigests", []) + [status.get("id", "")]
+print(json.dumps(known))' "$digests" "$image")"
+  done
+  python3 -c 'import json,sys
+current=json.loads(sys.argv[1]); stale=set()
+for p in json.load(sys.stdin)["items"]:
+    owners=p["metadata"].get("ownerReferences") or [{}]
+    rs=owners[0].get("name", "")
+    if owners[0].get("kind") != "ReplicaSet" or "-" not in rs:
+        continue
+    deployment=rs.rsplit("-", 1)[0]
+    for spec, status in zip(p["spec"]["containers"], p["status"].get("containerStatuses", [])):
+        ok=current.get(spec["image"])
+        image_id=status.get("imageID", "")
+        if ok is not None and not any(d and (image_id == d or image_id.endswith(d.split("@")[-1])) for d in ok):
+            stale.add(deployment)
+print("\n".join(sorted(stale)))' "$digests" <<<"$pods"
+}
+
+# Restart the stale Deployments two at a time, each pair waited on, so a same-tag reload of the
+# core image does not restart a dozen Python processes at once (the single-node storm the README's
+# operator notes describe).
+restart_stale_images() {
+  local stale pair=()
+  stale="$(stale_deployments)" || { warn "could not compare running images with the node's"; return 0; }
+  [ -n "$stale" ] || return 0
+  log "pods on a superseded image under an unchanged tag — restarting in pairs: $(echo $stale)"
+  for d in $stale; do
+    pair+=("$d")
+    if [ ${#pair[@]} -eq 2 ]; then
+      k rollout restart "deployment/${pair[0]}" "deployment/${pair[1]}" >/dev/null
+      wait_rollout "deployment/${pair[0]}" 1800s
+      wait_rollout "deployment/${pair[1]}" 1800s
+      pair=()
+    fi
+  done
+  if [ ${#pair[@]} -eq 1 ]; then
+    k rollout restart "deployment/${pair[0]}" >/dev/null
+    wait_rollout "deployment/${pair[0]}" 1800s
+  fi
 }
 
 # ------------------------------------------------------------------------------------- smoke
