@@ -18,9 +18,9 @@ frontend built in parallel — names and shapes exactly as frozen.
 - [x] **4. Report → artefact** — optional session/requester on the workflow input; an activity
       creates the `document` with id `xb-` + sha256(workflow_id)[:16], idempotent on retry;
       `job_completed.summary.exhibit_id`; `exhibit` pushed on `/events`; a deleted session skips.
-- [ ] **5. Fork copies artefacts** (head only, new ids, `forked from <xid> r<n>`).
-- [ ] **6. `exhibit_refs` 422 carries `detail.code = "invalid_exhibit_ref"`.**
-- [ ] **7. Retention prunes `exhibit` push rows** older than `exhibit_push_retention_hours`.
+- [x] **5. Fork copies artefacts** (head only, new ids, `forked from <xid> r<n>`).
+- [x] **6. `exhibit_refs` 422 carries `detail.code = "invalid_exhibit_ref"`.**
+- [x] **7. Retention prunes `exhibit` push rows** older than `exhibit_push_retention_hours`.
 - [ ] **8. Mock LLM scenario** creating a document artefact — only if the mock's design fits.
 - [ ] Verify: lint, type, skill/prose-validate, the targeted test files (Postgres up, helm on PATH).
 

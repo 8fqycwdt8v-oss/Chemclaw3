@@ -15,6 +15,7 @@ import shutil
 import subprocess
 from pathlib import Path
 from typing import Any, cast
+from uuid import uuid4
 
 import psycopg
 import pytest
@@ -687,6 +688,57 @@ def test_an_undelivered_push_back_event_survives_the_window() -> None:
     surviving_unread, surviving_read = asyncio.run(_run())
     assert surviving_unread == 1, "an undelivered push-back event was deleted by age alone"
     assert surviving_read == 0, "a delivered event past the window should still be pruned"
+
+
+def test_an_artefact_push_goes_on_age_alone_and_nothing_else_does() -> None:
+    """`exhibit` rows past `exhibit_push_retention_hours` go, consumed or not; nothing else does.
+
+    An artefact push is a notification — the list route is the source of truth — so an unconsumed
+    one is not owed to anybody the way a `job_completed` is. Driven with the conversation's own
+    `session_events` window **off**, which is the shipped default: the push window must not depend
+    on it, and an unconsumed `job_completed` of the same age must still survive.
+    """
+
+    async def _run() -> dict[tuple[str, str], int]:
+        await migrated_db_or_skip()
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(settings, "retention_session_events_days", 0)
+        monkeypatch.setattr(settings, "retention_session_messages_days", 0)
+        monkeypatch.setattr(settings, "exhibit_push_retention_hours", 24)
+        session = f"retention-pushes-{uuid4().hex}"
+        rows = [
+            # (label, kind, hours old, consumed)
+            ("old-unread", "exhibit", 30, False),
+            ("old-read", "exhibit", 30, True),
+            ("young-unread", "exhibit", 2, False),
+            ("old-job", "job_completed", 30, False),
+        ]
+        try:
+            async with db.connection(settings.postgres_dsn) as conn:
+                async with conn.cursor() as cur:
+                    for label, kind, hours, consumed in rows:
+                        await cur.execute(
+                            "INSERT INTO session_events "
+                            "(session_id, kind, payload, created_at, consumed_at) VALUES "
+                            "(%s, %s, %s, now() - make_interval(hours => %s), "
+                            "CASE WHEN %s THEN now() END)",
+                            (session, kind, Jsonb({"label": label}), hours, consumed),
+                        )
+                await conn.commit()
+
+            await prune_expired_rows()
+
+            async with db.connection(settings.postgres_dsn) as conn, conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT kind, payload->>'label' FROM session_events WHERE session_id = %s",
+                    (session,),
+                )
+                left = await cur.fetchall()
+            return {(str(kind), str(label)): 1 for kind, label in left}
+        finally:
+            monkeypatch.undo()
+
+    assert asyncio.run(_run()) == {("exhibit", "young-unread"): 1, ("job_completed", "old-job"): 1}
 
 
 async def _seed_expired_sessions(count: int, prefix: str) -> str:
