@@ -45,3 +45,14 @@ Session-owned and conversation-tier: deleting the session deletes its artefacts,
 those of the leaver's sessions (`agent/leaver.py`), and `retention_session_exhibits_days` ages them
 out (`durable/retention.py`). The revisions table is INSERT-only by grant and goes only behind its
 header, by cascade.
+
+## A development report as an artefact, and its one limitation
+
+A report requested from a conversation is also written there as a `document` artefact by the
+report's own activity (`durable/report_workflow.record_report_exhibit`), with an id derived from
+the workflow so a retry writes nothing twice. **The run is shared, the artefact is not**: the
+report's job id leaves the session out on purpose (`agent/durable_tools._report_id`), so a second
+session asking for the same report rejoins the first run and gets the note but **no artefact of
+its own**, and a status read there omits `exhibit_id` rather than name an artefact it cannot open
+(`agent/durable_tools.readable_in_this_session`). Copying the artefact into every session that
+rejoins would need the run to learn who rejoined it, which nothing records today.

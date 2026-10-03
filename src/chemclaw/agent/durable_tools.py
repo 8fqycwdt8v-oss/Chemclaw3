@@ -88,7 +88,7 @@ from chemclaw.durable.memory_jobs import (
     PlaybookDistillationWorkflow,
 )
 from chemclaw.durable.observation_jobs import ObservationPromotionWorkflow
-from chemclaw.durable.report_workflow import DevelopmentReportWorkflow
+from chemclaw.durable.report_workflow import EXHIBIT_SESSION, DevelopmentReportWorkflow
 from chemclaw.retrieval.harness import ReportRequest, ReportSection
 from chemclaw.science.calc.geometry import without_geometry
 
@@ -633,7 +633,7 @@ async def _recorded_status(job_id: str) -> DurableJobStatus | None:
         # record written before D-2026-08-21 holds the whole geometry, so a months-old conformer
         # search collected here would still spend a context window on coordinates. The projection
         # is idempotent, so applying it to a record already written without them costs a walk.
-        result=without_geometry(record.result),
+        result=readable_in_this_session(without_geometry(record.result)),
         rationale=record.rationale,
     )
 
@@ -759,8 +759,26 @@ def completed_job_status(job_id: str, raw: Any) -> DurableJobStatus:
         calc_refs=envelope.calc_refs,
         # A `calc` envelope arrives already projected (`CalcJobWorkflow`); this covers every other
         # bundle's, and an in-flight run started by the previous release. Idempotent either way.
-        result=without_geometry(envelope.data),
+        result=readable_in_this_session(without_geometry(envelope.data)),
     )
+
+
+def readable_in_this_session(result: Any) -> Any:
+    """A job result with a report artefact's id only where that artefact can be opened.
+
+    A development report run is shared by every session that asks for the same report — the run's
+    id deliberately leaves the session out — and the artefact is written into the session that
+    started it, alone. So the id travels with the session it belongs to (`EXHIBIT_SESSION`), and a
+    status read anywhere else (another session's poll, `GET /jobs/{id}`, which has no session) gets
+    the note and no `exhibit_id`, rather than a link that answers 404 there. The session key itself
+    is dropped everywhere: it is a session id, and this result reaches any signed-in caller.
+    """
+    if not isinstance(result, dict) or EXHIBIT_SESSION not in result:
+        return result
+    readable = dict(result)
+    if readable.pop(EXHIBIT_SESSION) != get_current_session_id():
+        readable.pop("exhibit_id", None)
+    return readable
 
 
 async def cancel_job(job_id: str) -> bool:

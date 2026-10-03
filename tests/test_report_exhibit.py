@@ -20,6 +20,7 @@ from temporalio.worker import Worker
 import chemclaw.durable.report_workflow as report_workflow
 from chemclaw.agent.session_events import claim_unconsumed
 from chemclaw.agent.session_store import SessionOwnerStore
+from chemclaw.api.routes.streams import _exhibit_event
 from chemclaw.core.config import settings
 from chemclaw.durable.notify import record_session_event_activity
 from chemclaw.durable.orchestrator import resolve_fan_out_limit
@@ -97,6 +98,8 @@ async def test_a_retry_returns_the_artefact_the_first_attempt_wrote(durable_sess
     assert [(event.kind, event.payload["exhibit_id"], event.payload["op"]) for event in pushed] == [
         (PUSH_KIND, first, "created")
     ]
+    announced = _exhibit_event(pushed[0].payload)
+    assert announced is not None and announced.call_id == "", "a report is no tool call's write"
 
 
 async def test_a_session_deleted_since_it_asked_is_skipped(durable_sessions: None) -> None:
@@ -178,3 +181,36 @@ async def test_a_report_from_no_session_issues_none_of_it(
     await migrated_db_or_skip()
     result = await _run_report(monkeypatch, _request(), f"report-{uuid4().hex}")
     assert "exhibit_id" not in result.data
+
+
+def test_a_second_session_rejoining_the_run_is_not_handed_an_artefact_it_cannot_open() -> None:
+    """The run is shared; the artefact is the origin's. Elsewhere the id is dropped, the note kept.
+
+    Read through `completed_job_status`, the decode both the agent's poll and the mid-turn resume
+    use, with the reading session bound the way a turn binds it — and with none, which is
+    `GET /jobs/{id}`. The origin's session id never leaves in any of the three.
+    """
+    from chemclaw.agent.durable_tools import completed_job_status
+    from chemclaw.core.session_context import reset_current_session_id, set_current_session_id
+    from chemclaw.durable.connector_job import ConnectorJobResult
+
+    raw = ConnectorJobResult(
+        summary="Drafted 'W'",
+        data={
+            "note_ref": "commit://1",
+            "exhibit_id": "xb-00000000000000ab",
+            "exhibit_session": "a",
+        },
+    )
+
+    def _read_in(session: str | None) -> dict[str, Any]:
+        token = set_current_session_id(session) if session else None
+        try:
+            return dict(completed_job_status("report-x", raw.model_dump()).result)
+        finally:
+            if token is not None:
+                reset_current_session_id(token)
+
+    assert _read_in("a") == {"note_ref": "commit://1", "exhibit_id": "xb-00000000000000ab"}
+    assert _read_in("b") == {"note_ref": "commit://1"}
+    assert _read_in(None) == {"note_ref": "commit://1"}

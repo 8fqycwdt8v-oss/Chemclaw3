@@ -203,6 +203,11 @@ class ReportExhibitInput(BaseModel):
     correlation_id: str = ""
 
 
+#: The result key naming the session a report's artefact lives in. Internal: every reader strips it
+#: (`agent/durable_tools.readable_in_this_session`), so no surface publishes a session id.
+EXHIBIT_SESSION = "exhibit_session"
+
+
 def report_exhibit_id(workflow_id: str) -> str:
     """The artefact id a report run writes: `xb-` and the first 16 hex of sha256(workflow id).
 
@@ -552,5 +557,10 @@ class DevelopmentReportWorkflow:
             }
             if exhibit_id:
                 data["exhibit_id"] = pushed["exhibit_id"] = exhibit_id
+                # Which session can open it. The run is shared by every session that asks for the
+                # same report (`_report_id` leaves the session out), and only the first gets an
+                # artefact; a status read from any other one drops the id rather than hand over a
+                # link that 404s there (`agent/durable_tools.readable_in_this_session`).
+                data[EXHIBIT_SESSION] = request.session_id
             await notify_session_best_effort(request.session_id, "job_completed", pushed)
         return ConnectorJobResult(summary=summary, data=data)
