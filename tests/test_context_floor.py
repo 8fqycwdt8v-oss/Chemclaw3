@@ -936,15 +936,16 @@ SERVED_ELSEWHERE = frozenset({"chem", "rxnpredict", "safety"})
 #: made true rather than corrected: `-ra` prints the skip in a list nobody reads, and the epilogue
 #: is the part of a run that says what the run is not evidence about.
 #:
-#: **13,200 since 2026-10-02, and the test below is what moved it.** Measured against
-#: `Chemclaw3-mcp` at d25e165 in CI, the three cost **12,020 over 22 tools** (`chem` 7,604 / 13,
-#: `rxnpredict` 2,784 / 6, `safety` 1,632 / 3), 1,020 over the 11,000 that stood; `chem` is all of
-#: it. 13,200 is 9.8% over that — less than the 11.5% this was set with, because the warm floor
-#: in `tests/test_compaction.py` is what bounds it now. Narrowing `chem` was the alternative and
-#: the owner declined it; what pays instead is `agent_max_tool_result_chars`, and both thread
-#: allowances fall by the 2,200. The whole trade, and the tolerance constant it deleted, is
-#: `D-2026-10-02-the-allowance-follows-the-fleet-and-the-result-cap-pays-for-it`.
-SERVED_ELSEWHERE_ALLOWANCE = 13_200
+#: **Raised to 13,200 on 2026-10-02 and back down to 10,250 on 2026-10-03.** `chem` had grown to
+#: 7,604 tokens and took the three to 12,020, so the allowance followed it and
+#: `agent_max_tool_result_chars` paid for the thread
+#: (`D-2026-10-02-the-allowance-follows-the-fleet-and-the-result-cap-pays-for-it`).
+#: Chemclaw3-mcp#152 then narrowed `chem`'s descriptions to their rules: measured against that
+#: branch, **9,192 over 22 tools** (`chem` 4,776 / 13, `rxnpredict` 2,784 / 6, `safety` 1,632 / 3).
+#: 10,250 is 11.5% over it, the headroom this was first set with; the fleet ratchets `chem`'s own
+#: surface now too (`servers/chem/tests/test_prompt_cost.py` there).
+#: `D-2026-10-03-the-fleet-narrowed-and-the-thread-and-the-cap-come-back`.
+SERVED_ELSEWHERE_ALLOWANCE = 10_250
 
 #: What the fleet's **whole** published `manifests/` directory costs, as a second and looser bound.
 #:
