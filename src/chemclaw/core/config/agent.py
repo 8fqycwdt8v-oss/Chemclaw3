@@ -447,9 +447,9 @@ class AgentSettings(BaseSettings):
     # maximal batch occupies — the warm arm in `tests/test_compaction.py` asserts it. Raising
     # `SERVED_ELSEWHERE_ALLOWANCE` for the sibling fleet's grown `chem` took that thread under a
     # 60,000-character batch, and this cap was lowered to pay; the fleet then narrowed `chem` and
-    # the allowance fell, which gives the thread back with ~1,225 to spare at 60,000.
-    # `gather_evidence_max_chars` moves with it, because a sweep over this cap is cut head-and-tail
-    # through the middle of its ranking.
+    # the allowance fell, which gives the thread back with room to spare at 60,000 (the warm arm
+    # states how much). `gather_evidence_max_chars` moves with it, because a sweep over this cap is
+    # cut head-and-tail through the middle of its ranking.
     # `D-2026-10-03-the-fleet-narrowed-and-the-thread-and-the-cap-come-back`.
     agent_max_tool_result_chars: int = Field(default=60_000, ge=0)
     # Durable working memory for the agent's scratchpad (`agent/scratchpad.py`), and the switch the
