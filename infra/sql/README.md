@@ -216,6 +216,11 @@ ADR carrying the reading behind it.
   the column's one reader scans the corpus in a single pass. The previous image writes exactly as
   before; re-running `105` restores the index
   (D-2026-09-18-a-control-that-names-a-module-is-a-claim-about-where-somebody-put-the-code).
+- `116_exhibit_geometry_kind.sql` — flagged for the `DROP CONSTRAINT` text; the drop-and-re-add
+  *widens* `session_exhibits`' kind `CHECK`, so the previous image's writes all still pass. What it
+  loses is reading a `geometry` artefact written before the rollback: its spec model refuses the
+  kind, so the listing shows the artefact and opening or exporting it fails. Roll forward
+  (D-2026-10-03-a-geometry-artefact-cites-the-calc-store-it-does-not-copy).
 ### Migrations that are not re-runnable, and the recipe for each
 
 Re-running the whole set is how a restored database whose `schema_migrations` ledger is older than

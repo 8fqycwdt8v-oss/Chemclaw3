@@ -22,7 +22,21 @@ frontend built in parallel — names and shapes exactly as frozen.
 - [x] **6. `exhibit_refs` 422 carries `detail.code = "invalid_exhibit_ref"`.**
 - [x] **7. Retention prunes `exhibit` push rows** older than `exhibit_push_retention_hours`.
 - [x] **8. Mock LLM scenario** creating a document artefact — only if the mock's design fits.
-- [ ] Verify: lint, type, skill/prose-validate, the targeted test files (Postgres up, helm on PATH).
+- [x] Verify: lint, type, skill/prose-validate, the targeted test files (Postgres up, helm on PATH).
+
+## Review (wave 2)
+
+- Prefix: `create_exhibit` naming the geometry kind costs +15 tokens (default 73,012 -> 73,027
+  under the 73,450 ceiling); no ceiling or budget moved.
+- Two ADRs: the geometry source is a citation checked on write and not pinned (with migration
+  116's rollback reading), and the draft is read off the streamed call arguments for a preview only.
+- The report push is new: a report never pushed `job_completed` before, so the payload is
+  `{job_id, job: "report", summary, note_id, note_ref, exhibit_id?}` — `exhibit_id` omitted when
+  the artefact was skipped. A second session rejoining the same report run gets no artefact.
+- Interpretations to confirm with the frontend: `highlight_atoms` are 0-based; the geometry diff
+  also names `energy_hartree`/`highlight_atoms`/`format`; a `done: true` draft frame closes a call
+  when the text grew after the last throttled frame; FastAPI's own 422 for too many
+  `exhibit_refs` keeps its list-shaped `detail`.
 
 ---
 
