@@ -17,6 +17,16 @@ apart as the text grows (`_interval_seconds`), so a document's draft bytes are l
 The throttle is checked *before* the arguments are re-parsed, so the cost of parsing a growing
 document is bounded by the frame rate rather than by the chunk rate; a frame is sent only when the
 text grew; past `exhibit_max_spec_bytes` the call stops streaming, because the tool will refuse it.
+
+**Before the first frame the throttle is the arguments' length, not the clock.** A call that has
+not shown text yet — a table whose `kind` comes last, a `spec` the model wrote as a JSON *string* —
+used to be re-parsed whole on every fragment, and `parse_partial_json` is linear in what it reads:
+measured on 75 kB of arguments in 12-character fragments, 6,306 parses and 27 s of event-loop CPU
+for a table, 6,341 and 15 s for a string spec, for zero frames. So it is parsed again only once the
+arguments have doubled since the last parse (`_Call.parse_at`), which bounds the parses to the
+logarithm of the size; a `spec` that parses as anything but an object stops the call; and so do
+arguments longer than the spec cap plus what else a call may carry (`_argument_bound`), which the
+tool would refuse whatever they hold.
 When the model finishes the call (`close`), one last `done` frame carries whatever the throttle
 held back — once per call, so it is outside the throttle by construction.
 
@@ -52,6 +62,7 @@ class _Call:
     sent_chars: int = 0
     sent_bytes: int = 0
     checked_at: float | None = None
+    parse_at: int = 0
     stopped: bool = False
 
 
@@ -87,15 +98,21 @@ class DraftStream:
             if call.op is None or call.stopped:
                 continue
             call.arguments += str(fragment.get("args") or "")
+            if len(call.arguments) > _argument_bound():
+                call.stopped = True
+                continue
             now = time.monotonic()
             interval = _interval_seconds(call.sent_bytes)
             # Once a frame has gone, throttled on the last *parse* rather than the last frame, so
             # arguments that stopped growing the text (a title written after the spec) are not
-            # re-parsed per chunk. Before it, every fragment is parsed — the arguments are still a
-            # title and a kind — so the first frame goes the moment there is text to show.
-            if call.sent_chars and call.checked_at is not None and now - call.checked_at < interval:
+            # re-parsed per chunk. Before it, on the arguments' growth (see the module docstring).
+            if call.sent_chars:
+                if call.checked_at is not None and now - call.checked_at < interval:
+                    continue
+            elif len(call.arguments) < call.parse_at:
                 continue
             call.checked_at = now
+            call.parse_at = 2 * len(call.arguments)
             if (frame := _frame(call, call.op, done=False)) is not None:
                 frames.append(frame)
         return frames
@@ -130,11 +147,31 @@ def _interval_seconds(sent_bytes: int) -> float:
     return max(floor, sent_bytes / settings.exhibit_draft_bytes_per_ms) / 1000
 
 
+def _argument_bound() -> int:
+    """The longest a call's arguments may be and still hold a spec under `exhibit_max_spec_bytes`.
+
+    The spec cap plus everything else a call carries: the title and the note at their caps, each
+    character escaped at worst as a six-character unicode escape, and the keys, an artefact id and a
+    revision number, which `_KEYS_SLACK` covers. Characters against bytes is the safe direction:
+    the cap is on the spec's compact JSON with non-ASCII escaped, which is never shorter than the
+    characters the model wrote for it — so a call over this would be refused by the tool.
+    """
+    escaped = 6 * (settings.exhibit_max_title_chars + settings.exhibit_max_note_chars)
+    return settings.exhibit_max_spec_bytes + escaped + _KEYS_SLACK
+
+
+#: The characters a draft-able call spends on anything but its spec, title and note: the key names,
+#: punctuation, an `xb-` id and a base revision — a few hundred, rounded up so whitespace between
+#: them never stops a call the tool would accept.
+_KEYS_SLACK = 1_024
+
+
 def _frame(call: _Call, op: Literal["create", "revise"], *, done: bool) -> ExhibitDraftEvent | None:
     """The frame `call`'s arguments make now, or `None` when there is nothing new to show.
 
-    Stops the call for good when it revises by `edits`, its spec is another kind, or its text
-    passes the spec cap. A `kind` still being written (`"docu"`) is not yet another kind.
+    Stops the call for good when it revises by `edits`, its spec is not an object or is another
+    kind, or its text passes the spec cap. A `kind` still being written (`"docu"`) is not yet
+    another kind.
     """
     try:
         parsed = parse_partial_json(call.arguments) if call.arguments else None
@@ -147,6 +184,9 @@ def _frame(call: _Call, op: Literal["create", "revise"], *, done: bool) -> Exhib
         return None
     spec = parsed.get("spec")
     if not isinstance(spec, dict):
+        # Absent or not yet begun is waiting; anything else — a spec written as a JSON string, a
+        # list — is not a document this preview can read however long it grows.
+        call.stopped = spec is not None
         return None
     kind, markdown = spec.get("kind"), spec.get("markdown")
     if kind is not None and kind != "document":

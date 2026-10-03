@@ -33,6 +33,11 @@ from tests.fakes_langgraph import ScriptedChatModel
 #: How many characters of a call's JSON arguments each streamed fragment carries.
 _FRAGMENT_CHARS = 12
 _REPORT = "# Plan\n\nStep one: dry the THF.\n\nStep two: add the base slowly.\n"
+#: Long enough that the arguments have doubled several times after the text begins, which is what
+#: lets a call's first frame go (`exhibit_drafts`' module docstring) — so several frames follow it.
+_LONG_REPORT = _REPORT + "".join(
+    f"\nStep {n}: stir for {n} min, then sample.\n" for n in range(3, 12)
+)
 
 
 class _FragmentingModel(ScriptedChatModel):
@@ -129,16 +134,16 @@ def test_drafts_grow_and_precede_the_call_its_result_and_its_artefact(
 ) -> None:
     """Unthrottled: a frame per growth, each the whole text so far, all before `tool_call`."""
     monkeypatch.setattr(settings, "exhibit_draft_min_interval_ms", 0)
-    events = _drive([_create(), "done"])
+    events = _drive([_create(_LONG_REPORT), "done"])
     kinds = [event.type for event in events]
     drafts = [event for event in events if isinstance(event, ExhibitDraftEvent)]
     assert len(drafts) > 3, kinds
     assert kinds[: len(drafts)] == ["exhibit_draft"] * len(drafts)
     assert kinds[len(drafts) :] == ["tool_call", "tool_result", "exhibit", "token"]
     texts = [draft.markdown for draft in drafts]
-    assert all(_REPORT.startswith(text) for text in texts)
+    assert all(_LONG_REPORT.startswith(text) for text in texts)
     assert all(len(a) < len(b) for a, b in zip(texts, texts[1:], strict=False)), texts
-    assert texts[-1] == _REPORT
+    assert texts[-1] == _LONG_REPORT
     first = drafts[0]
     assert (first.call_id, first.op, first.exhibit_id, first.kind, first.title) == (
         "call-1",
@@ -234,14 +239,16 @@ def test_a_draft_past_the_spec_cap_stops_and_a_kind_in_progress_does_not(
 ) -> None:
     """Past `exhibit_max_spec_bytes` the call goes quiet; markdown before `kind` drafts as `""`."""
     monkeypatch.setattr(settings, "exhibit_draft_min_interval_ms", 0)
-    monkeypatch.setattr(settings, "exhibit_max_spec_bytes", 20)
-    long = json.dumps({"title": "T", "spec": {"kind": "document", "markdown": "x" * 60}})
+    monkeypatch.setattr(settings, "exhibit_max_spec_bytes", 200)
+    long = json.dumps({"title": "T", "spec": {"kind": "document", "markdown": "x" * 600}})
     frames = _feed(DraftStream(), "create_exhibit", long, size=5)
-    assert frames and max(len(frame.markdown.encode()) for frame in frames) <= 20
+    assert frames and max(len(frame.markdown.encode()) for frame in frames) <= 200
     assert not any(frame.done for frame in frames)
     monkeypatch.setattr(settings, "exhibit_max_spec_bytes", 200_000)
-    unkinded = json.dumps({"title": "T", "spec": {"markdown": "# hi there", "kind": "document"}})
-    frames = _feed(DraftStream(), "create_exhibit", unkinded, size=5)
+    unkinded = json.dumps(
+        {"title": "T", "spec": {"markdown": "# hi there " * 20, "kind": "document"}}
+    )
+    frames = [f for f in _feed(DraftStream(), "create_exhibit", unkinded, size=5) if not f.done]
     assert frames and {frame.kind for frame in frames} == {""}
     table = json.dumps({"title": "T", "spec": {"kind": "table", "markdown": "# not a doc"}})
     assert _feed(DraftStream(), "create_exhibit", table, size=5) == []
@@ -328,3 +335,61 @@ def test_a_slow_reader_holds_one_draft_per_call_and_gets_the_newest() -> None:
         ("exhibit_draft", "other"),
         ("token", "after"),
     ]
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        # A table whose `kind` comes last: never a document, and nothing says so until the end.
+        {"columns": [{"key": "v", "label": "V"}], "rows": [{"v": n} for n in range(6_000)]},
+        # A spec the model wrote as a JSON string rather than an object.
+        json.dumps({"kind": "document", "markdown": "x " * 38_000}),
+    ],
+    ids=["kind-last", "string-spec"],
+)
+def test_a_call_that_shows_nothing_is_parsed_a_logarithmic_number_of_times(
+    monkeypatch: pytest.MonkeyPatch, spec: Any
+) -> None:
+    """Before the first frame a call is re-parsed only when its arguments have doubled.
+
+    Measured before: ~75 kB of arguments in 12-character fragments was 6,306 whole-argument parses
+    (27 s of event-loop CPU) for the table and 6,341 (15 s) for the string spec — one per fragment,
+    for no frame. Now the table is parsed about log2 of its size, and the string spec stops at the
+    first parse that sees it.
+    """
+    from chemclaw.api import exhibit_drafts
+
+    parses: list[int] = []
+    real = exhibit_drafts.parse_partial_json
+
+    def _counting(text: str) -> Any:
+        parses.append(len(text))
+        return real(text)
+
+    monkeypatch.setattr(exhibit_drafts, "parse_partial_json", _counting)
+    arguments = json.dumps({"title": "T", "spec": spec})
+    assert len(arguments) > 60_000
+    assert _feed(DraftStream(), "create_exhibit", arguments, size=12) == []
+    assert len(parses) <= 20, len(parses)
+
+
+def test_arguments_longer_than_any_storable_spec_stop_the_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Past the spec cap plus a title and a note at their caps, nothing more is read."""
+    monkeypatch.setattr(settings, "exhibit_max_spec_bytes", 1_000)
+    monkeypatch.setattr(settings, "exhibit_max_title_chars", 10)
+    monkeypatch.setattr(settings, "exhibit_max_note_chars", 10)
+    from chemclaw.api import exhibit_drafts
+
+    parses: list[int] = []
+    real = exhibit_drafts.parse_partial_json
+
+    def _counting(text: str) -> Any:
+        parses.append(len(text))
+        return real(text)
+
+    monkeypatch.setattr(exhibit_drafts, "parse_partial_json", _counting)
+    table = {"columns": [{"key": "v", "label": "V"}], "rows": [{"v": n} for n in range(2_000)]}
+    _feed(DraftStream(), "create_exhibit", json.dumps({"title": "T", "spec": table}), size=50)
+    assert parses and max(parses) <= 1_000 + 6 * 20 + 1_024
