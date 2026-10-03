@@ -140,10 +140,10 @@ async def test_a_source_must_be_stored_when_it_is_written(
     """Nothing stored is refused naming the reference; once stored, the same spec passes."""
     spec = parse_spec(_geometry(source={"calc_key": _CALC_KEY, "name": "xtbopt.xyz"}))
     with pytest.raises(InvalidExhibit, match=f"{_CALC_KEY}#xtbopt.xyz"):
-        await sources.require_source_stored(spec)
+        await sources.require_source_stored(spec, "s")
     await _stored_water(calc_store)
-    await sources.require_source_stored(spec)
-    await sources.require_source_stored(parse_spec(_geometry(xyz=_WATER)))
+    await sources.require_source_stored(spec, "s")
+    await sources.require_source_stored(parse_spec(_geometry(xyz=_WATER)), "s")
 
 
 async def test_a_source_must_be_a_geometry_not_any_stored_artifact(
@@ -156,7 +156,7 @@ async def test_a_source_must_be_a_geometry_not_any_stored_artifact(
     assert hessian is not None
     spec = parse_spec(_geometry(source={"calc_key": _CALC_KEY, "name": "hessian"}))
     with pytest.raises(InvalidExhibit, match="application/x-turbomole-hessian artifact, not a"):
-        await sources.require_source_stored(spec)
+        await sources.require_source_stored(spec, "s")
 
 
 def test_a_reference_splits_at_its_first_hash_whatever_the_key_holds() -> None:
@@ -349,16 +349,16 @@ async def test_a_structure_id_must_be_stored_one_frame_and_inside_its_highlights
     """A guessed id is refused naming it; a stored one passes; the atom and highlight caps hold."""
     sid = _WATER_STRUCTURE.structure_id
     with pytest.raises(InvalidExhibit, match=f"{sid}.*no stored structure"):
-        await sources.require_source_stored(parse_spec(_geometry(structure_id=sid)))
+        await sources.require_source_stored(parse_spec(_geometry(structure_id=sid)), "s")
     await structures.put([_WATER_STRUCTURE])
-    await sources.require_source_stored(parse_spec(_geometry(structure_id=sid)))
+    await sources.require_source_stored(parse_spec(_geometry(structure_id=sid)), "s")
     with pytest.raises(InvalidExhibit, match=r"highlight_atoms \[3\]"):
         await sources.require_source_stored(
-            parse_spec(_geometry(structure_id=sid, highlight_atoms=[3]))
+            parse_spec(_geometry(structure_id=sid, highlight_atoms=[3])), "s"
         )
     monkeypatch.setattr(settings, "exhibit_max_atoms", 2)
     with pytest.raises(InvalidExhibit, match="3 atoms, over the 2-atom cap"):
-        await sources.require_source_stored(parse_spec(_geometry(structure_id=sid)))
+        await sources.require_source_stored(parse_spec(_geometry(structure_id=sid)), "s")
 
 
 async def test_a_cited_structure_is_served_as_xyz_and_a_vanished_one_says_so(
@@ -428,7 +428,7 @@ async def test_a_cited_ensemble_or_an_artifact_over_the_download_cap_is_refused(
     )
     ensemble = parse_spec(_geometry(source={"calc_key": _CALC_KEY, "name": "crest_conformers.xyz"}))
     with pytest.raises(InvalidExhibit, match="not one XYZ structure"):
-        await sources.require_source_stored(ensemble)
+        await sources.require_source_stored(ensemble, "s")
 
     await _stored_water(calc_store)
     cited = parse_spec(_geometry(source={"calc_key": _CALC_KEY, "name": "xtbopt.xyz"}))
@@ -442,6 +442,47 @@ async def test_a_cited_ensemble_or_an_artifact_over_the_download_cap_is_refused(
     monkeypatch.setattr(calc_store, "open", _open)
     monkeypatch.setattr(settings, "calc_artifact_max_download_bytes", len(_WATER) - 1)
     with pytest.raises(InvalidExhibit, match="download cap"):
-        await sources.require_source_stored(cited)
+        await sources.require_source_stored(cited, "s")
     assert await resolve_export(cited, "xyz") is None
     assert reads == [], "the cap is decided from the recorded size, before the blob is opened"
+
+
+async def test_a_structure_cited_must_be_one_this_conversation_was_shown(
+    turn: str, structures: InMemoryStructureStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Session scope: an id a calculation here reported is citable; one from elsewhere is not.
+
+    `D-2026-10-03-a-cited-structure-is-one-this-conversation-was-shown`. A mention in the agent's
+    own text handed back (a helper's report) is not a report; a revision carrying the cited id
+    forward is accepted without asking again.
+    """
+    from chemclaw.agent.exhibit_tools import revise_exhibit
+    from chemclaw.api.tool_results import store_tool_result
+
+    await migrated_db_or_skip()
+    monkeypatch.setattr(settings, "session_store", "postgres")
+    store = InMemoryExhibitStore()
+    monkeypatch.setattr(exhibit_tools, "_store", lambda: store)
+    sid = _WATER_STRUCTURE.structure_id
+    await structures.put([_WATER_STRUCTURE])
+    spec = _geometry(structure_id=sid)
+    with pytest.raises(ChemclawError, match="not one a tool result of this conversation reported"):
+        await create_exhibit("Water", spec)
+    await store_tool_result(
+        session_id=turn, correlation_id="c", tool="task", text=f'{{"seen": "{sid}"}}'
+    )
+    with pytest.raises(ChemclawError, match="not one a tool result of this conversation reported"):
+        await create_exhibit("Water", spec)
+    report = json.dumps({"structure_id": sid, "energy_hartree": -5.07})
+    elsewhere = uuid4().hex
+    await store_tool_result(
+        session_id=elsewhere, correlation_id="c", tool="optimize_geometry", text=report
+    )
+    with pytest.raises(ChemclawError, match="not one a tool result of this conversation reported"):
+        await create_exhibit("Water", spec)
+    await store_tool_result(
+        session_id=turn, correlation_id="c", tool="optimize_geometry", text=report
+    )
+    xid = json.loads(await create_exhibit("Water", spec))["exhibit_id"]
+    relabelled = {**spec, "label": "water, GFN2-xTB"}
+    assert json.loads(await revise_exhibit(xid, 1, "label", spec=relabelled))["revision"] == 2

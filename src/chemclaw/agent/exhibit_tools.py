@@ -144,7 +144,7 @@ async def create_exhibit(title: str, spec: dict[str, Any]) -> str:
         require_creatable(parsed)
         bound = await bind_for_write(session_id, parsed)
         require_writable(bound.resolved, title=title, change_note="", stored=bound.stored)
-        await require_source_stored(parsed)
+        await require_source_stored(parsed, session_id)
         view = await _store().create(
             session_id,
             title=title,
@@ -196,7 +196,7 @@ async def revise_exhibit(
                 stored=bound.stored,
                 vanished=bound.vanished,
             )
-            await require_source_stored(revised)
+            await require_source_stored(revised, session_id, parent=current.raw_spec)
             chemist = await store.chemist_figures(session_id, exhibit_id)
             view = await store.append(
                 session_id,

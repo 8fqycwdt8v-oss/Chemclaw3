@@ -339,7 +339,7 @@ async def _parsed(
             stored=bound.stored,
             vanished=bound.vanished,
         )
-        await require_source_stored(spec)
+        await require_source_stored(spec, session_id, parent=parent)
     except InvalidExhibit as exc:
         record_refusal("invalid")
         raise HTTPException(status_code=422, detail=str(exc)) from exc

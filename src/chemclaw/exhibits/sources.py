@@ -33,8 +33,11 @@ from __future__ import annotations
 
 import logging
 
+from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.core.metrics_bridge import degraded
+from chemclaw.core.result_handle import handles_resolve
+from chemclaw.exhibits.evidence import evidence_params, evidence_predicate
 from chemclaw.exhibits.models import (
     ExhibitBinding,
     ExhibitView,
@@ -91,12 +94,17 @@ def structure_xyz(structure: Structure) -> str:
     return "\n".join(lines) + "\n"
 
 
-async def require_source_stored(spec: Spec) -> None:
+async def require_source_stored(spec: Spec, session_id: str, *, parent: Spec | None = None) -> None:
     """Refuse a geometry citing something not stored, not one frame, or past a cap; else pass.
 
     Write-time only, like `models.require_writable` and beside it in every writer: a stored
     revision stays readable when what it cites is later evicted. An inline block is checked by the
     spec itself and passes here; every other kind of spec passes too.
+
+    A `structure_id` must also have been **reported to this conversation** — named by one of its
+    stored tool results that is evidence (`_reported_here`) — unless `parent`, the revision being
+    revised, already cites it, in which case it is carried as a binding is
+    (`D-2026-10-03-a-cited-structure-is-one-this-conversation-was-shown`).
 
     Raises:
         InvalidExhibit: naming the reference and what is wrong with it, so the writer can name a
@@ -107,6 +115,12 @@ async def require_source_stored(spec: Spec) -> None:
     if spec.source is not None:
         cited, text = spec.source.as_ref(), await _source_text(spec.source)
     elif spec.structure_id is not None:
+        carried = isinstance(parent, GeometrySpec) and parent.structure_id == spec.structure_id
+        if not carried and not await _reported_here(session_id, spec.structure_id):
+            raise InvalidExhibit(
+                f"structure_id {spec.structure_id!r} is not one a tool result of this conversation "
+                "reported; cite a structure a calculation here returned"
+            )
         structure = await default_structure_store().get(spec.structure_id)
         if structure is None:
             raise InvalidExhibit(
@@ -128,6 +142,36 @@ async def require_source_stored(spec: Spec) -> None:
         raise InvalidExhibit(
             f"highlight_atoms {outside} are not atoms of {cited!r}, which has {atoms} (0-based)"
         )
+
+
+# Does any evidence this session stored name the id? A substring over the stored bytes, newest
+# links first so a structure the turn just computed is found in the first rows. Measured on
+# Postgres 16 with the id absent (the worst case, every blob read): 4.5 ms for 50 results of 20 kB,
+# 13 ms for 200 of 50 kB, 46 ms for 500 of 100 kB — once per geometry write.
+_REPORTED_HERE = f"""
+SELECT 1
+FROM tool_result_links l
+JOIN tool_result_blobs b ON b.content_hash = l.content_hash
+WHERE l.session_id = %s AND {evidence_predicate("l.tool")} AND position(%s::bytea IN b.data) > 0
+LIMIT 1
+"""
+
+
+async def _reported_here(session_id: str, structure_id: str) -> bool:
+    """Whether a stored, evidence-bearing tool result of `session_id` names `structure_id`.
+
+    Where this deployment keeps no session's results (`handles_resolve` false) there is nothing to
+    ask, and the id resolves as the calc tools resolve one — globally — rather than being refused
+    on every write.
+    """
+    if not handles_resolve():
+        return True
+    async with db.connection(settings.postgres_dsn) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                _REPORTED_HERE, (session_id, *evidence_params(), structure_id.encode("utf-8"))
+            )
+            return await cur.fetchone() is not None
 
 
 async def _source_text(source: GeometrySource) -> str:
