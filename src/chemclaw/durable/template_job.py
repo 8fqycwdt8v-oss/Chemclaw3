@@ -365,6 +365,38 @@ class TemplateWorkflow:
                 finished = await self._run_wave(
                     wave, scope, identity, timeout, run.template.name, run.max_parallel_steps
                 )
+            except asyncio.CancelledError as cancelled:
+                # **A cancelled run leaves a row too, and the row says `cancelled`.** `_run_wave`
+                # re-raises a bare cancellation rather than wrapping it as `_StepFailed` — a
+                # cancellation is not a failure at a step — and this clause caught only
+                # `_StepFailed`, so a cancellation that surfaced bare (a wave's `gather`, anything
+                # that is not an activity's own result) wrote no `job_records` row: the run was
+                # missing from `GET /jobs` and its id stopped answering once Temporal's history
+                # aged out. A step whose *activity* reports the cancel arrives as `_StepFailed`
+                # below instead. Either way, the record-then-announce-then-raise shape
+                # `ConnectorJobWorkflow` takes on its cancel, so the run still closes CANCELED and
+                # listing and detail agree.
+                #
+                # An eviction is not a cancellation and needs the event loop this clause would
+                # use; `ConnectorJobWorkflow.run` explains the guard. No `workflow.patched` marker:
+                # a cancel is processed in the workflow task that delivers it and the old code
+                # closed the run in that same task, so no open history has a cancellation behind
+                # it for this branch to disagree with on replay.
+                if not workflow.in_workflow():
+                    raise
+                step = wave[0]
+                await self._record_run(
+                    failed_template_record(
+                        workflow.info().workflow_id,
+                        run,
+                        step.id,
+                        failure_reason(cancelled),
+                        dict(results),
+                        state="cancelled",
+                    )
+                )
+                await self._notify_failure(run, step, cancelled)
+                raise
             except _StepFailed as failure:
                 step, exc = failure.step, failure.cause
                 # The completion push-back below had no counterpart, so a template that failed at
@@ -378,6 +410,7 @@ class TemplateWorkflow:
                 # The record comes first for the same reason it does on the success path, and
                 # matters more here: a run that failed is the one somebody goes looking for, and
                 # until now it left nothing anywhere but Temporal's expiring history.
+                ended = ended_state(exc)
                 await self._record_run(
                     failed_template_record(
                         workflow.info().workflow_id,
@@ -385,10 +418,17 @@ class TemplateWorkflow:
                         step.id,
                         failure_reason(exc),
                         dict(results),
-                        state=ended_state(exc),
+                        state=ended,
                     )
                 )
                 await self._notify_failure(run, step, exc)
+                if ended == "cancelled":
+                    # **Raised with its cause, so the run closes CANCELED and not FAILED.** A
+                    # cancelled step arrives here as `ActivityError` whose `.cause` — which the SDK
+                    # reads off `__cause__` — is the `CancelledError`; `from None` below erases it,
+                    # and the SDK then sees a plain activity failure. Measured on a dev server: a
+                    # template cancelled mid-step closed FAILED while its row said `cancelled`.
+                    raise exc from exc.__cause__
                 raise exc from None
             # Folded in the wave's own declared order, so `results` and `scope` are built in the
             # file's sequence whatever order the activities actually completed in. A dict built

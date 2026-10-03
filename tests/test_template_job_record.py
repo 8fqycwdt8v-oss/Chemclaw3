@@ -297,6 +297,107 @@ async def test_a_real_template_run_writes_the_row_and_a_failing_one_writes_its_o
     assert "write" in failed.failure_reason
 
 
+def test_a_cancelled_template_run_is_listed_as_cancelled_not_failed() -> None:
+    """`DELETE /jobs/{id}` on a running template: the row exists, and it agrees with the detail.
+
+    Measured on a real-time dev server before the fix: cancelling a run mid-step closed it
+    **FAILED**, not CANCELED, and its row said `failed`. The step's `ActivityError` carries the
+    `CancelledError` as its cause, and `TemplateWorkflow.run` re-raised it `from None`, which
+    erases the cause the SDK reads to decide a cancellation — so the broker, `GET /jobs/{id}` and
+    `GET /jobs` all said "failed" for a run a person stopped. A cancellation that surfaces bare
+    rather than through the step (`_run_wave` re-raises those unwrapped) wrote no row at all; that
+    branch now records too. The cancel reaches the in-flight step the way `cancel_durable_job`
+    delivers it.
+    """
+    import asyncio
+    from datetime import timedelta
+    from unittest import mock
+
+    from temporalio import activity
+    from temporalio.worker import Worker
+
+    from chemclaw.agent import durable_tools
+    from chemclaw.core.config import settings
+    from chemclaw.durable.template_job import TemplateWorkflow
+    from tests.temporal_env import pydantic_client, start_local_env_or_skip
+
+    written: list[JobRecord] = []
+
+    @activity.defn(name="record_job")
+    async def _capture(record: JobRecord) -> None:
+        written.append(record)
+
+    @activity.defn(name="completed_steps")
+    async def _resume(request: Any) -> dict[str, Any]:
+        return {}
+
+    @activity.defn(name="run_agent_step")
+    async def _agent(step: Any) -> str:
+        # Runs until the worker shuts down: only a cancellation ends this run.
+        await asyncio.sleep(3600)
+        return "never"
+
+    async def _lookup(job_id: str) -> JobRecord | None:
+        return next((r for r in written if r.job_id == job_id), None)
+
+    template = Template.model_validate(
+        {
+            "name": "stoppable",
+            "summary": "One agent step that never finishes.",
+            "inputs": [],
+            "steps": [{"id": "write", "kind": "agent", "purpose": "write", "prompt": "go"}],
+        }
+    )
+
+    async def _run() -> tuple[str, str, str]:
+        async with await start_local_env_or_skip() as env:
+            client = pydantic_client(env)
+            async with Worker(
+                client,
+                task_queue=settings.background_task_queue,
+                workflows=[TemplateWorkflow],
+                activities=[_capture, _agent, _resume],
+            ):
+                handle = await client.start_workflow(
+                    TemplateWorkflow.run,
+                    TemplateRunInput(template=template, requested_by="tester"),
+                    id="template-cancel-probe",
+                    task_queue=settings.background_task_queue,
+                    execution_timeout=timedelta(seconds=120),
+                )
+                deadline = asyncio.get_running_loop().time() + 30
+                while asyncio.get_running_loop().time() < deadline:
+                    pending = (await handle.describe()).raw_description.pending_activities
+                    if any(a.activity_type.name == "run_agent_step" for a in pending):
+                        break
+                    await asyncio.sleep(0.2)
+                else:
+                    raise AssertionError("the step never started")
+                await handle.cancel()
+                deadline = asyncio.get_running_loop().time() + 60
+                while (described := await handle.describe()).status is not None and (
+                    described.status.name == "RUNNING"
+                ):
+                    assert asyncio.get_running_loop().time() < deadline, "never left RUNNING"
+                    await asyncio.sleep(0.2)
+                with mock.patch.object(
+                    durable_tools, "connect", mock.AsyncMock(return_value=client)
+                ):
+                    live = await durable_tools.job_status(handle.id, wait_seconds=0.0)
+            with mock.patch.object(durable_tools, "lookup_job_record", _lookup):
+                stored = await durable_tools._recorded_status("template-cancel-probe")
+            assert stored is not None, "the cancelled run wrote no job_records row"
+            assert described.status is not None
+            return described.status.name, live.status, stored.status
+
+    broker, detail, listed = asyncio.run(_run())
+    assert broker == "CANCELED"
+    assert detail == "cancelled"
+    assert listed == detail
+    assert [record.state for record in written] == ["cancelled"]
+    assert "write" in written[0].failure_reason
+
+
 # --- what the resume read will and will not hand back --------------------------------------------
 
 
