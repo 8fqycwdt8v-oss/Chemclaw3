@@ -152,7 +152,8 @@ def _table(before: TableSpec, after: TableSpec) -> list[FieldChange]:
                 path="columns", kind="changed", before=_text(old_columns), after=_text(new_columns)
             )
         )
-    old_from, new_from = spec_json(before).get("rows_from"), spec_json(after).get("rows_from")
+    old_json, new_json = spec_json(before), spec_json(after)
+    old_from, new_from = old_json.get("rows_from"), new_json.get("rows_from")
     if old_from != new_from:
         kind: ChangeKind = (
             "added" if old_from is None else "removed" if new_from is None else "changed"
@@ -163,8 +164,8 @@ def _table(before: TableSpec, after: TableSpec) -> list[FieldChange]:
     changes.extend(
         _indexed(
             "rows",
-            spec_json(before)["rows"],
-            spec_json(after)["rows"],
+            old_json["rows"],
+            new_json["rows"],
             [column.key for column in after.columns],
         )
     )
