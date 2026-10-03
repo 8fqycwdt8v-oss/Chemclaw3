@@ -66,6 +66,13 @@ The **sender's** reader keeps the one role no watcher has: its departure is the 
 (`on_detach`, or a stop under `survive_disconnect=False`). A watcher closing their tab changes
 nothing about the turn.
 
+**A stop sent by an unloading page waits for a reload**
+(`D-2026-10-03-an-unload-stop-waits-for-a-reload`). The browser cannot tell a reload from a closed
+tab at unload time, so the page's stop arrives from both; `defer_stop` holds it for
+`service_turn_unload_grace_seconds`, and the sender coming back through
+`GET /sessions/{id}/turn/stream` inside that window cancels it (`resume`). An explicit stop stays
+immediate, and cancels a pending one on the way.
+
 **A watcher counts against the cap until its socket is gone, not until the pump stops feeding it.**
 Being cut off ends the *delivery*; the connection and whatever it had buffered stay until the
 reader drains or the send timeout closes it. Counting only the readers the pump still feeds let a
@@ -142,6 +149,7 @@ class DetachableTurn:
         session_id: str,
         survive_disconnect: bool = True,
         on_detach: Callable[[], None] | None = None,
+        correlation_id: str = "",
     ) -> None:
         """Start pumping `source` immediately; the turn is running from this moment.
 
@@ -158,8 +166,13 @@ class DetachableTurn:
         Its caller uses it to give back what was held *for the reader* rather than for the turn
         (see `chemclaw.api.routes.turns`); it must not raise and must not block, because it runs
         inside a reader teardown that is usually a cancellation.
+
+        `correlation_id` is the id of the request that started the turn — the one its sender's
+        response header carried — so a page reattaching through the watch route can tell *its*
+        turn from another participant's that started since (`TURN_CORRELATION_HEADER`).
         """
         self._session_id = session_id
+        self.correlation_id = correlation_id
         self._survive_disconnect = survive_disconnect
         self._on_detach = on_detach
         self._sender = _Reader()
@@ -168,11 +181,18 @@ class DetachableTurn:
         self._watching: set[_Reader] = set()
         self._sender_attached = True
         self._stopper: asyncio.Task[None] | None = None
+        # An unload stop waiting out its grace window (`defer_stop`), who may cancel it by
+        # reattaching, and how many this turn has been granted.
+        self._pending_stop: asyncio.Task[None] | None = None
+        self._resumers: frozenset[str] = frozenset()
+        self._deferrals = 0
         self._task = asyncio.create_task(self._pump(source), name=f"turn:{session_id}")
         # **On the task, not on a reader's path.** See `_note_pump_failure`: the two places a
         # reader could retrieve it are both places a reader may never reach, and a turn that
         # detached has no reader at all. A done callback runs on every ending there is.
         self._task.add_done_callback(self._note_pump_failure)
+        # A turn that ends inside a grace window takes its pending stop with it.
+        self._task.add_done_callback(lambda _t: self._drop_pending_stop())
 
     @property
     def running(self) -> bool:
@@ -378,6 +398,83 @@ class DetachableTurn:
                 self._stopper = asyncio.get_running_loop().create_task(self.stop())
         self._sender_attached = False
 
+    @property
+    def stop_pending(self) -> bool:
+        """Whether an unload stop is waiting out its grace window on this turn."""
+        return self._pending_stop is not None
+
+    def defer_stop(self, grace: float, *, resumers: frozenset[str], max_deferrals: int) -> bool:
+        """Stop the turn in `grace` seconds unless one of `resumers` reattaches first.
+
+        **Why a stop can wait** (`D-2026-10-03-an-unload-stop-waits-for-a-reload`). A page that is
+        being discarded stops its turn so a chemist who closed the tab does not hold capacity for
+        an answer nobody reads — but the browser cannot tell a reload from a close at unload time,
+        so the same stop arrived from every reload and killed the turn the reloaded page was about
+        to pick up again. Deferred, the stop only lands if nobody comes back.
+
+        `True` when a window is pending after this call — a new one, or one already pending, whose
+        deadline this does **not** move: one window per stop, so repeating the unload stop cannot
+        keep a turn alive. `False` when no window may be granted — the turn is over, or it has had
+        `max_deferrals` already (each reattach cancels the pending stop, so a reload loop would
+        otherwise restart the window indefinitely) — and the caller stops at once instead.
+
+        `resumers` are the principals whose reattach cancels the stop: the one who asked for it
+        and the turn's sender. Anyone else watching the turn changes nothing.
+        """
+        if not self.running:
+            return False
+        if self._pending_stop is not None:
+            return True
+        if self._deferrals >= max_deferrals:
+            return False
+        self._deferrals += 1
+        self._resumers = resumers
+        self._pending_stop = asyncio.get_running_loop().create_task(
+            self._stop_after(grace), name=f"turn-unload-stop:{self._session_id}"
+        )
+        return True
+
+    def resume(self, oid: str | None) -> bool:
+        """Cancel a pending unload stop because `oid` came back to the turn; whether it did.
+
+        Only a principal named when the stop was deferred cancels it — the turn's sender or the
+        one who asked for the stop — so another participant opening a view of the turn cannot keep
+        alive a turn its sender walked away from.
+        """
+        if self._pending_stop is None or oid is None or oid not in self._resumers:
+            return False
+        self._drop_pending_stop()
+        METRICS.increment("chemclaw_turns_stop_resumed_total")
+        logger.info(
+            "session %s's turn was reattached inside its unload grace; the deferred stop is "
+            "cancelled and the turn continues",
+            self._session_id,
+        )
+        return True
+
+    def _drop_pending_stop(self) -> None:
+        """Cancel the pending stop's timer, if there is one; idempotent."""
+        pending, self._pending_stop = self._pending_stop, None
+        if pending is not None and not pending.done():
+            pending.cancel()
+
+    async def _stop_after(self, grace: float) -> None:
+        """Wait out the grace window, then stop the turn — nobody it was waiting for came back."""
+        await asyncio.sleep(grace)
+        # Past the window the stop is no longer cancellable: released *before* the await below, so
+        # a reattach racing it cannot cancel this task half-way through the turn's teardown.
+        self._pending_stop = None
+        if not self.running:
+            return
+        METRICS.increment("chemclaw_turns_stop_expired_total")
+        METRICS.increment("chemclaw_turns_stopped_total")
+        logger.info(
+            "session %s's turn was stopped: its page unloaded and nobody reattached within %ss",
+            self._session_id,
+            grace,
+        )
+        await self.stop()
+
     async def stop(self) -> None:
         """Cancel the running turn — the explicit act a disconnect no longer performs.
 
@@ -393,6 +490,9 @@ class DetachableTurn:
         logged, because "stopped cleanly" and "stopped, and its teardown broke" are different
         facts and only the server can keep the second one.
         """
+        # An explicit stop is immediate whatever is pending: the window was for a reload, and
+        # this is somebody pressing Stop (or the window itself expiring, which released it first).
+        self._drop_pending_stop()
         self._task.cancel()
         try:
             await self._task
