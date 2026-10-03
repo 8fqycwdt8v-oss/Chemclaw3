@@ -4192,9 +4192,9 @@ def test_stating_retention_windows_also_requires_an_artefact_posture() -> None:
     # And an upgrade that hits the refusal finds it named in the runbook's upgrade steps, quoted as
     # the render prints it — a new refusal nobody is told about reads as a broken chart.
     runbook = (Path(__file__).resolve().parents[1] / "docs/guides/runbook.md").read_text("utf-8")
-    quoted = "retention: this release states retention windows and must say how long"
-    assert quoted in silent.stderr
-    assert "now refuses to render" in runbook and quoted in " ".join(runbook.split())
+    refusal = "retention: this release states retention windows and must say how long"
+    assert refusal in silent.stderr
+    assert "now refuses to render" in runbook and refusal in " ".join(runbook.split())
 
 
 # What a switch needs *besides itself* to render the branch it gates. The only literal here, and it
