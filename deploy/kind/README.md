@@ -160,6 +160,11 @@ Fixed in core, with tests, because each one breaks any Kubernetes install and no
   create step connects to a database named after its role, which does not exist.
 - **The ELN exports reuse the chart's `documentShare` mount** (read-only, background worker only). No
   share source is enabled, so nothing crawls it as documents; `CHEMCLAW_ELN_EXPORT_DIR` reads it.
+- **One node is one failure domain for the control plane too.** Rolling the whole release at once
+  (a `helm upgrade` that changes every pod template) runs this 8-CPU node to a load average near 90:
+  etcd times out, the API server answers transient RBAC errors, and Helm can fail at the end of a
+  rollout that Kubernetes itself completes. `up.sh` retries the install once; the startup budgets
+  below keep the pods from restart-looping meanwhile. Measured in the K5 resilience run.
 - **Requests are sized to a workstation** (the whole system on 8 CPU / 12.5 GB); limits are
   production's. Replicas are one per role and the HPA is off (it scales on a Prometheus metric this
   cluster has no adapter for). The startup probes get twice production's budget: a fresh `up`
