@@ -706,7 +706,7 @@ def test_a_person_keeps_or_detaches_a_binding_and_cannot_invent_one(
     results are stored in the real database the binding reads.
     """
     asyncio.run(migrated_db_or_skip())
-    monkeypatch.setattr(bindings, "_available", lambda: True)
+    monkeypatch.setattr(bindings, "handles_resolve", lambda: True)
     session = _shared(app)
     asyncio.run(
         store_tool_result(session_id=session, correlation_id="c", tool="screen", text=_RESULT)

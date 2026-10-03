@@ -1,3 +1,34 @@
+# Artefacts — hardening + activation
+
+Contract: "Hardening + activation (frozen 2026-10-03…)" of the artefacts wire contract (items 1-2 are
+this repository's). Owner decisions 2026-10-03: html sandbox on, html scripts on by default.
+
+- [ ] **1. Own readouts are not evidence.** The artefact tools' results are excluded from grounding
+      evidence and from bindable links (one name set, both queries), and get no `⟨r:…⟩` handle.
+- [ ] **2. Draft parse bound.** `DraftStream` re-parses only on argument growth (geometric) before the
+      first frame; stops past the spec cap + slack or a non-object `spec`. Test counts parses.
+- [ ] **3. Byte cap first.** Raw spec bytes checked right after `parse_spec` (REST and tools); target
+      lookups memoised in `_write_plan`; `_SHOWN` → setting.
+- [ ] **4. Chemist figures stored.** Migration 119 adds `human_figures` to revisions, written at
+      human write time; revise reads the distinct set. Measure before/after.
+- [ ] **5. Calc source capped.** `geometry_xyz` and write-time source check apply
+      `calc_artifact_max_download_bytes` from the recorded size; a source is validated as one frame.
+- [ ] **6. Report activity verifies membership** of `requested_by` in `session_id` before writing.
+- [ ] **7. Handles only where bindings resolve** (in-memory session store + result store).
+- [ ] **8. Geometry `structure_id`** (contract item 1): resolve at read/export, ok:false entry when
+      vanished; advertise in create_exhibit; re-measure the prefix.
+- [ ] **9. `ToolFailedEvent.call_id`** (contract item 2): event, OpenAPI, fixture, dev page.
+- [ ] **10. Agent-path `log_event` + counters** `chemclaw_exhibit_writes_total`,
+      `chemclaw_exhibit_refusals_total`.
+- [ ] **G1** retention predicate derived from every `retention_*_days`; push pruning runs whenever
+      artefacts are on.
+- [ ] **G2** runbook rollback row for 115; SQL verified against the schema.
+- [ ] **G3-5** runbook artefacts section.
+- [ ] **G6** chart gate `retention.exhibitsGrowthAccepted`. **G7** values.yaml block. **G8** kind.
+      **G10** `.env.example` + Jenkins ordering.
+- [ ] **ADR** html scripts on by default (supersedes the scripts-off part).
+- [ ] **Verify**: lint, type, validators, targeted tests with Postgres up.
+
 # Artefacts, wave 3 — bindings and the html kind
 
 Contract: "Wave 3 (frozen 2026-10-03)" of the artefacts wire contract, shared with the frontend

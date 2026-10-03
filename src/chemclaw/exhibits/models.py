@@ -59,6 +59,16 @@ ExhibitKind = Literal[
     "document", "table", "structures", "chart", "result", "link", "geometry", "html"
 ]
 
+#: The agent's three artefact tools, by the name the model calls them (`agent/exhibit_tools`).
+#:
+#: Named here, below `agent`, because two readers in this package need the set as well as the
+#: agent: **an artefact tool's own result is never evidence and never bindable**
+#: (`exhibits.grounding`, `exhibits.bindings`). `read_exhibit` returns the artefact back to the
+#: model — every figure the agent wrote included — so counting its stored result as a tool result
+#: would ground every figure the moment the agent read its own work, and a `$bind` into it would be
+#: provenance pointing at the agent's own transcription.
+EXHIBIT_TOOLS: frozenset[str] = frozenset({"create_exhibit", "revise_exhibit", "read_exhibit"})
+
 #: The `session_events` kind a person's create or revision is pushed under, for
 #: `GET /sessions/{id}/events` to claim and render as the turn stream's `exhibit` event.
 PUSH_KIND = "exhibit"

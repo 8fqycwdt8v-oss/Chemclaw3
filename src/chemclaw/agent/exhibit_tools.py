@@ -58,10 +58,6 @@ from chemclaw.exhibits.store import ExhibitStore, default_exhibit_store
 
 logger = logging.getLogger(__name__)
 
-#: The three tools this module registers, by the name the model calls them — read by
-#: `chemclaw_agent` to withhold them all when `agent_exhibits_enabled` is off.
-EXHIBIT_TOOLS: frozenset[str] = frozenset({"create_exhibit", "revise_exhibit", "read_exhibit"})
-
 #: Kinds only a chemist creates. A `result` artefact pins a stored tool result by its content hash,
 #: which the UI holds and the model never sees, so a model-written one would name a ref it guessed.
 _CHEMIST_ONLY_KINDS = frozenset({"result"})

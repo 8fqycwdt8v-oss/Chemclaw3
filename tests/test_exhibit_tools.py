@@ -18,7 +18,6 @@ import pytest
 from chemclaw.agent import exhibit_tools
 from chemclaw.agent.chemclaw_agent import _capability_tools, available_tool_names
 from chemclaw.agent.exhibit_tools import (
-    EXHIBIT_TOOLS,
     create_exhibit,
     read_exhibit,
     revise_exhibit,
@@ -30,7 +29,7 @@ from chemclaw.core.identity_context import reset_current_identity, set_current_i
 from chemclaw.core.session_context import reset_current_session_id, set_current_session_id
 from chemclaw.core.turn_signals import ExhibitSignal
 from chemclaw.exhibits.grounding import chemist_figures, unverified_figures
-from chemclaw.exhibits.models import parse_spec
+from chemclaw.exhibits.models import EXHIBIT_TOOLS, parse_spec
 from chemclaw.exhibits.store import default_exhibit_store
 from tests.pg import migrated_db_or_skip
 
@@ -312,3 +311,48 @@ async def test_the_grounding_scan_reads_in_configured_batches(
         {**_TABLE, "rows": [{"solvent": "w", "pka": 4.76}, {"solvent": "x", "pka": 7}]}
     )
     assert await unverified_figures(session, spec) == ["7"]
+
+
+async def test_reading_the_artefact_back_neither_grounds_its_figures_nor_lends_a_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The agent's own readout is not evidence and not a bindable result.
+
+    Every tool result of the turn is stored and linked, `read_exhibit`'s included — so before the
+    filter, reading the artefact back put the agent's figures into the evidence, and the next
+    revision found every one of them "returned by a tool": revise -> read -> revise cleared
+    `['9.95', '16']` to `[]`. And the readout's handle was a ref a `$bind` resolved against.
+    """
+    await migrated_db_or_skip()
+    monkeypatch.setattr(settings, "session_store", "postgres")
+    monkeypatch.setattr(exhibit_tools, "record_exhibit", lambda signal: None)
+    session = uuid4().hex
+    await store_tool_result(
+        session_id=session, correlation_id="c", tool="predict_pka", text='{"pka": 4.7563}'
+    )
+    session_token = set_current_session_id(session)
+    identity = set_current_identity("oid-ana", frozenset())
+    try:
+        rows = [
+            {"solvent": "acetic acid", "pka": 4.76},
+            {"solvent": "phenol", "pka": 9.95},
+            {"solvent": "ethanol", "pka": "about 16"},
+        ]
+        xid = json.loads(await create_exhibit("pKa", {**_TABLE, "rows": rows}))["exhibit_id"]
+        # What the trace does with the readout: stores and links it like any tool result.
+        readout = await read_exhibit(xid)
+        ref = await store_tool_result(
+            session_id=session, correlation_id="c", tool="read_exhibit", text=readout
+        )
+        await revise_exhibit(xid, 1, "same values", spec={**_TABLE, "rows": rows})
+        head = await default_exhibit_store().view(session, xid)
+        assert head is not None and head.unverified_figures == ["9.95", "16"]
+
+        bound = {"$bind": {"result": f"r:{ref[:12]}", "pointer": "/spec/rows/1/pka"}}
+        with pytest.raises(ChemclawError, match="not a tool result of this conversation"):
+            await revise_exhibit(
+                xid, 2, "bind", spec={**_TABLE, "rows": [{"solvent": "phenol", "pka": bound}]}
+            )
+    finally:
+        reset_current_identity(identity)
+        reset_current_session_id(session_token)

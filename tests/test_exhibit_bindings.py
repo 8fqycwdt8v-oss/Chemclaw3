@@ -553,3 +553,61 @@ def test_the_agent_binds_through_create_and_reads_both_forms_back(
     finally:
         reset_current_identity(identity)
         reset_current_session_id(session_token)
+
+
+def test_a_spec_over_the_byte_cap_is_refused_before_any_binding_is_resolved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cap is the first check a write meets: no link read, no blob read, no parse.
+
+    Before, a spec of a few thousand bound cells over the cap had every binding resolved — the
+    session's links read, each bound result fetched and parsed — and was refused afterwards.
+    """
+    monkeypatch.setattr(settings, "session_store", "postgres")
+    monkeypatch.setattr(settings, "exhibit_max_spec_bytes", 500)
+    reads: list[str] = []
+
+    async def _links(*_args: Any) -> dict[str, str]:
+        reads.append("links")
+        return {}
+
+    monkeypatch.setattr(bindings, "_links", _links)
+    rows = [{"solvent": "x", "y": _bind(f"/rows/{index}/yield")} for index in range(50)]
+    with pytest.raises(InvalidExhibit, match="500-byte cap"):
+        asyncio.run(bind_for_write(uuid4().hex, _table(rows)))
+    assert reads == []
+
+
+def test_a_write_scans_the_links_once_per_distinct_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two thousand cells bound to one result are one prefix scan, not two thousand."""
+    links = {hashlib.sha256(str(index).encode()).hexdigest(): "t" for index in range(2_000)}
+    target = next(iter(links))
+    sites = [
+        bindings._Site(f"rows[{i}].y", ("rows", i, "y"), f"r:{target[:12]}", "/v", "cell")
+        for i in range(2_000)
+    ]
+    scans: list[str] = []
+    real = bindings._ref_for
+
+    def _counting(handle: str, held: Any) -> str:
+        scans.append(handle)
+        return real(handle, held)
+
+    monkeypatch.setattr(bindings, "_ref_for", _counting)
+    plan = bindings._write_plan(sites, links, None)
+    assert len(scans) == 1
+    assert set(plan.refs.values()) == {target}
+
+
+def test_how_many_binding_problems_a_refusal_names_is_a_setting(
+    stored: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The count is configuration, and the rest are counted rather than listed."""
+    monkeypatch.setattr(settings, "exhibit_binding_problems_shown", 2)
+    rows = [{"y": _bind(f"/missing{index}")} for index in range(5)]
+    with pytest.raises(InvalidExhibit) as refused:
+        asyncio.run(bind_for_write(stored, _table(rows)))
+    assert str(refused.value).count("(r:") == 2
+    assert str(refused.value).endswith("; and 3 more")

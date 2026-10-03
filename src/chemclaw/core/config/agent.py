@@ -1061,6 +1061,10 @@ class AgentSettings(BaseSettings):
     # document is several times that in memory). A blob is immutable, so a cached document is
     # never stale; 0 turns the cache off.
     exhibit_binding_cache_bytes: int = Field(default=8_388_608, ge=0)
+    # How many failing bindings one refused write names before it counts the rest: enough for a
+    # writer to correct several in one attempt, few enough that a 2,000-row table bound to the
+    # wrong result is one sentence rather than 2,000.
+    exhibit_binding_problems_shown: int = Field(default=5, ge=1)
     # The fewest milliseconds between two `exhibit_draft` frames of one tool call on the turn
     # stream. Each frame carries the whole document so far, so the frame rate times the document's
     # size is the bandwidth a drafted artefact costs; a quarter second reads as live typing.
