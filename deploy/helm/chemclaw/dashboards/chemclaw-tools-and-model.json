@@ -591,6 +591,62 @@
         "x": 0,
         "y": 48
       }
+    },
+    {
+      "id": 11,
+      "type": "graph",
+      "title": "Artefact writes and refusals",
+      "datasource": "prometheus",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 56
+      },
+      "span": 6,
+      "fill": 1,
+      "stack": true,
+      "linewidth": 2,
+      "nullPointMode": "null",
+      "legend": {
+        "show": true,
+        "current": true,
+        "max": true,
+        "values": true
+      },
+      "tooltip": {
+        "shared": true,
+        "sort": 2,
+        "value_type": "individual"
+      },
+      "yaxes": [
+        {
+          "format": "reqps",
+          "show": true,
+          "min": 0
+        },
+        {
+          "format": "short",
+          "show": false
+        }
+      ],
+      "xaxis": {
+        "mode": "time",
+        "show": true
+      },
+      "targets": [
+        {
+          "expr": "sum by (author_kind, op) (rate(chemclaw_exhibit_writes_total[15m]))",
+          "legendFormat": "{{author_kind}} {{op}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (reason) (rate(chemclaw_exhibit_refusals_total[15m]))",
+          "legendFormat": "refused: {{reason}}",
+          "refId": "B"
+        }
+      ],
+      "description": "Artefact revisions written, by author kind and op, against the writes refused, by reason. Agent creates with few human revisions is a pane nobody corrects; a climbing `invalid` refusal with flat writes is a model that cannot write the spec it is offered."
     }
   ],
   "refresh": "30s",

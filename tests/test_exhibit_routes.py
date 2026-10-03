@@ -437,7 +437,7 @@ def test_a_persons_write_is_recorded_with_who_and_which_request(
     joins on.
     """
     session = _shared(app)
-    caplog.set_level("INFO", logger="chemclaw.api.routes.exhibits")
+    caplog.set_level("INFO", logger="chemclaw.exhibits.telemetry")
     made = _create(app, _ANA, session, {"kind": "table", "title": "T", "spec": _TABLE})
     xid = made.json()["exhibit_id"]
     revised = _as(app, _BEN).post(

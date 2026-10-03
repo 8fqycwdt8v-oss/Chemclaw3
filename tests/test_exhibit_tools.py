@@ -369,3 +369,40 @@ async def test_reading_the_artefact_back_neither_grounds_its_figures_nor_lends_a
     finally:
         reset_current_identity(identity)
         reset_current_session_id(session_token)
+
+
+async def test_an_agent_write_is_an_exhibit_event_and_counted_and_so_is_a_refusal(
+    turn: tuple[str, list[ExhibitSignal]], caplog: pytest.LogCaptureFixture
+) -> None:
+    """The agent's writes reach the same `exhibit.*` event and counters the REST path does.
+
+    Before, the tools wrote a bare `logger.info` line no query could filter on and nothing was
+    counted on either path.
+    """
+    from chemclaw.core.metrics import METRICS
+
+    session, _ = turn
+    caplog.set_level("INFO", logger="chemclaw.exhibits.telemetry")
+    writes = METRICS.value("chemclaw_exhibit_writes_total")
+    refusals = METRICS.value("chemclaw_exhibit_refusals_total")
+
+    xid = json.loads(await create_exhibit("pKa", _TABLE))["exhibit_id"]
+    await revise_exhibit(xid, 1, "same", spec=_TABLE)
+    with pytest.raises(ChemclawError, match="is at revision 2"):
+        await revise_exhibit(xid, 1, "stale", spec=_TABLE)
+    with pytest.raises(ChemclawError, match="columns"):
+        await create_exhibit("bad", {"kind": "table", "rows": []})
+
+    recorded = [
+        (getattr(r, "event", None), getattr(r, "exhibit_id", None), getattr(r, "author_kind", None))
+        for r in caplog.records
+    ]
+    assert ("exhibit.created", xid, "agent") in recorded
+    assert ("exhibit.revised", xid, "agent") in recorded
+    assert METRICS.value("chemclaw_exhibit_writes_total") == writes + 2
+    assert METRICS.value("chemclaw_exhibit_refusals_total") == refusals + 2
+    exposition = METRICS.render()
+    assert 'chemclaw_exhibit_writes_total{author_kind="agent",op="revised"}' in exposition
+    assert 'chemclaw_exhibit_refusals_total{reason="stale_revision"}' in exposition
+    assert 'chemclaw_exhibit_refusals_total{reason="invalid"}' in exposition
+    assert session

@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 from typing import Any, Literal
 
 from langchain_core.tools import BaseTool
@@ -56,8 +55,7 @@ from chemclaw.exhibits.models import (
 )
 from chemclaw.exhibits.sources import require_source_stored
 from chemclaw.exhibits.store import ExhibitStore, default_exhibit_store
-
-logger = logging.getLogger(__name__)
+from chemclaw.exhibits.telemetry import record_write, refusals_counted
 
 #: Kinds only a chemist creates. A `result` artefact pins a stored tool result by its content hash,
 #: which the UI holds and the model never sees, so a model-written one would name a ref it guessed.
@@ -136,30 +134,28 @@ async def create_exhibit(title: str, spec: dict[str, Any]) -> str:
         JSON with `exhibit_id` and `revision`.
     """
     session_id = _session()
-    parsed = parse_spec(spec)
-    if parsed.kind in _CHEMIST_ONLY_KINDS:
-        raise ChemclawError(
-            "a 'result' artefact is pinned by the chemist from a tool result block; show the "
-            "values as a table, or say which result to pin"
+    with refusals_counted():
+        parsed = parse_spec(spec)
+        if parsed.kind in _CHEMIST_ONLY_KINDS:
+            raise ChemclawError(
+                "a 'result' artefact is pinned by the chemist from a tool result block; show the "
+                "values as a table, or say which result to pin"
+            )
+        require_creatable(parsed)
+        bound = await bind_for_write(session_id, parsed)
+        require_writable(bound.resolved, title=title, change_note="", stored=bound.stored)
+        await require_source_stored(parsed)
+        view = await _store().create(
+            session_id,
+            title=title,
+            spec=bound.stored,
+            author_kind="agent",
+            author=require_actor(),
+            correlation_id=get_current_correlation_id() or "",
+            unverified_figures=await unverified_figures(session_id, bound.stored),
         )
-    require_creatable(parsed)
-    bound = await bind_for_write(session_id, parsed)
-    require_writable(bound.resolved, title=title, change_note="", stored=bound.stored)
-    await require_source_stored(parsed)
-    author = require_actor()
-    view = await _store().create(
-        session_id,
-        title=title,
-        spec=bound.stored,
-        author_kind="agent",
-        author=author,
-        correlation_id=get_current_correlation_id() or "",
-        unverified_figures=await unverified_figures(session_id, bound.stored),
-    )
     record_exhibit(_announced(view, "created"))
-    logger.info(
-        "exhibit.created exhibit_id=%s kind=%s session=%s", view.exhibit_id, view.kind, session_id
-    )
+    record_write(view, "created")
     return json.dumps({"exhibit_id": view.exhibit_id, "revision": view.revision})
 
 
@@ -187,37 +183,38 @@ async def revise_exhibit(
         raise ChemclawError(f"no artefact {exhibit_id!r} in this conversation")
     if current.kind in _CHEMIST_ONLY_KINDS:
         raise ChemclawError(f"{exhibit_id} is a result the chemist pinned; it is not revisable")
-    if base_revision != current.head_revision:
-        raise ChemclawError(_stale(exhibit_id, current.head_revision, base_revision))
-    revised = _revised_spec(current, edits, spec)
-    bound = await bind_for_write(session_id, revised, parent=current.raw_spec)
-    require_writable(
-        bound.resolved,
-        title=current.title,
-        change_note=note,
-        stored=bound.stored,
-        vanished=bound.vanished,
-    )
-    await require_source_stored(revised)
-    chemist = await store.chemist_figures(session_id, exhibit_id)
     try:
-        view = await store.append(
-            session_id,
-            exhibit_id,
-            spec=bound.stored,
-            parent_revision=base_revision,
-            author_kind="agent",
-            author=require_actor(),
-            change_note=note,
-            correlation_id=get_current_correlation_id() or "",
-            unverified_figures=await unverified_figures(
-                session_id, bound.stored, chemist_figures=chemist
-            ),
-        )
+        with refusals_counted():
+            if base_revision != current.head_revision:
+                raise StaleRevision(exhibit_id, current.head_revision, base_revision)
+            revised = _revised_spec(current, edits, spec)
+            bound = await bind_for_write(session_id, revised, parent=current.raw_spec)
+            require_writable(
+                bound.resolved,
+                title=current.title,
+                change_note=note,
+                stored=bound.stored,
+                vanished=bound.vanished,
+            )
+            await require_source_stored(revised)
+            chemist = await store.chemist_figures(session_id, exhibit_id)
+            view = await store.append(
+                session_id,
+                exhibit_id,
+                spec=bound.stored,
+                parent_revision=base_revision,
+                author_kind="agent",
+                author=require_actor(),
+                change_note=note,
+                correlation_id=get_current_correlation_id() or "",
+                unverified_figures=await unverified_figures(
+                    session_id, bound.stored, chemist_figures=chemist
+                ),
+            )
     except StaleRevision as exc:
         raise ChemclawError(_stale(exhibit_id, exc.head, base_revision)) from exc
     record_exhibit(_announced(view, "revised"))
-    logger.info("exhibit.revised exhibit_id=%s revision=%d", exhibit_id, view.revision)
+    record_write(view, "revised")
     return json.dumps({"exhibit_id": exhibit_id, "revision": view.revision})
 
 

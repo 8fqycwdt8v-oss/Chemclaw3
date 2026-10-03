@@ -35,7 +35,6 @@ from chemclaw.api.deps import CurrentSession, CurrentUser
 from chemclaw.api.events import ExhibitEvent
 from chemclaw.core.config import settings
 from chemclaw.core.identity_context import get_current_correlation_id
-from chemclaw.core.logging import log_event
 from chemclaw.core.metrics_bridge import degraded
 from chemclaw.exhibits.bindings import bind_for_write, resolved_view
 from chemclaw.exhibits.diff import diff_specs
@@ -61,6 +60,7 @@ from chemclaw.exhibits.models import (
 )
 from chemclaw.exhibits.sources import require_source_stored
 from chemclaw.exhibits.store import default_exhibit_store
+from chemclaw.exhibits.telemetry import record_refusal, record_write
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +137,7 @@ async def create_exhibit_route(
     """
     spec = await _parsed(session_id, body.spec, title=body.title, change_note="", creating=True)
     if spec.kind != body.kind:
+        record_refusal("invalid")
         raise HTTPException(
             status_code=422, detail=f"kind is {body.kind!r} and the spec is a {spec.kind!r}"
         )
@@ -153,6 +154,7 @@ async def create_exhibit_route(
             chemist_figures=introduced,
         )
     except ExhibitLimit as exc:
+        record_refusal("exhibit_limit")
         raise HTTPException(
             status_code=409, detail={"code": "exhibit_limit", "message": str(exc)}
         ) from exc
@@ -245,14 +247,17 @@ async def post_exhibit_revision(
             chemist_figures=introduced,
         )
     except StaleRevision as exc:
+        record_refusal("stale_revision")
         raise HTTPException(
             status_code=409, detail={"code": "stale_revision", "head_revision": exc.head}
         ) from exc
     except UnknownExhibit as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except InvalidExhibit as exc:
+        record_refusal("invalid")
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except ExhibitLimit as exc:
+        record_refusal("exhibit_limit")
         raise HTTPException(
             status_code=409, detail={"code": "exhibit_limit", "message": str(exc)}
         ) from exc
@@ -336,6 +341,7 @@ async def _parsed(
         )
         await require_source_stored(spec)
     except InvalidExhibit as exc:
+        record_refusal("invalid")
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return bound.stored
 
@@ -345,6 +351,7 @@ async def _require_session_result(session_id: str, spec: Spec) -> None:
     if isinstance(spec, ResultSpec) and spec.result_ref not in await front_door.fetchable_refs(
         session_id
     ):
+        record_refusal("invalid")
         raise HTTPException(
             status_code=422, detail="result_ref is not a stored tool result of this session"
         )
@@ -359,19 +366,7 @@ async def _announce(view: ExhibitView, op: Literal["created", "revised"]) -> Non
     a refresh. A mailbox that cannot be written is counted and does not fail the write that already
     committed. The in-memory session store has no mailbox, so nothing is pushed there.
     """
-    log_event(
-        logger,
-        f"exhibit.{op}",
-        "artefact %s revision %d %s by %s",
-        view.exhibit_id,
-        view.revision,
-        op,
-        view.author,
-        actor=view.author,
-        session=view.session_id,
-        exhibit_id=view.exhibit_id,
-        revision=view.revision,
-    )
+    record_write(view, op)
     if settings.session_store != "postgres":
         return
     event = ExhibitEvent(

@@ -38,6 +38,7 @@ with workflow.unsafe.imports_passed_through():
         require_writable,
     )
     from chemclaw.exhibits.store import default_exhibit_store
+    from chemclaw.exhibits.telemetry import record_refusal, record_write
     from chemclaw.ingest.eln.records import default_record_store
     from chemclaw.ingest.sources.registry import active_retrieve_sources
     from chemclaw.kg.git_writer import default_writer
@@ -280,6 +281,7 @@ async def record_report_exhibit(request: ReportExhibitInput) -> str:
             exhibit_id=request.exhibit_id,
         )
     except (InvalidExhibit, ExhibitLimit) as exc:
+        record_refusal("exhibit_limit" if isinstance(exc, ExhibitLimit) else "invalid")
         log_event(
             logger,
             "report.exhibit_skipped",
@@ -290,6 +292,10 @@ async def record_report_exhibit(request: ReportExhibitInput) -> str:
             session=request.session_id,
         )
         return ""
+    # Counted on a retry that found the first attempt's artefact too — the store's create-or-return
+    # cannot say which it did, and an over-count on a committed-then-retried attempt is the rare
+    # side of a counter whose question is the agent's share of writes.
+    record_write(view, "created")
     announced = ExhibitSignal(
         exhibit_id=view.exhibit_id,
         revision=view.revision,
