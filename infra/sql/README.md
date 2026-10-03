@@ -195,6 +195,14 @@ so a pre-built index removes the build and not the wait). On a deployment taking
    It needs the column, so it can only follow the `ADD COLUMN` — which is metadata-only and may be
    run by hand first (`ALTER TABLE session_messages ADD COLUMN IF NOT EXISTS turn_status TEXT;`,
    under a short `SET lock_timeout`, retried until it gets its moment).
+
+   A `CONCURRENTLY` build that fails part-way leaves an **invalid** index under that name, and
+   `118`'s `IF NOT EXISTS` would then skip it silently, leaving an index the planner never uses.
+   Check before running the migration, and drop and rebuild an invalid one:
+
+       SELECT indisvalid FROM pg_index
+        WHERE indexrelid = 'session_messages_running_turn_idx'::regclass;
+       -- false → DROP INDEX CONCURRENTLY session_messages_running_turn_idx; then build again
 2. Then plan for the lock either way: a quiet moment, or a raised
    `CHEMCLAW_PG_MIGRATION_LOCK_TIMEOUT_SECONDS` for the upgrade. The migration hook Job
    self-heals only within its `backoffLimit`.
