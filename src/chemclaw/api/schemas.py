@@ -27,10 +27,11 @@ from chemclaw.agent.session_store import (
     stored_correlation_id,
     stored_turn_status,
 )
-from chemclaw.agent.tool_result_size import full_result_ref, was_cut
+from chemclaw.agent.tool_result_size import full_result_ref, stored_result_ref, was_cut
 from chemclaw.api.tool_results import content_address
 from chemclaw.core.authorship import Authorship
 from chemclaw.core.config import settings
+from chemclaw.core.result_handle import without_handle_line
 from chemclaw.exhibits.models import ExhibitRef
 
 # How much of a tool's arguments or result the transcript carries. The same bound the audit trail
@@ -603,8 +604,16 @@ def _transcript(
         # (`tool_result_size.FULL_RESULT_REF_KEY`, which the row's JSON round trip preserves).
         # Falling back to the hash when the stamp is empty is the stream's own fallback: the full
         # text was not kept, so the stream stored the cut, and this names that.
-        text = message_text(message)
-        ref = full_result_ref(message) or (content_address(text) if text else "")
+        # **A stamped result names its stored bytes by the stamp too**: the row's text ends in the
+        # handle line the model read (`core.result_handle`), which is not what was stored, so the
+        # hash of the row would name nothing. The line is removed before the text is shown, and
+        # the hash is the fallback for a row written before results were stamped.
+        text = without_handle_line(message_text(message))
+        ref = (
+            full_result_ref(message)
+            or stored_result_ref(message)
+            or (content_address(text) if text else "")
+        )
         results[str(call_id)] = (
             _truncate_for_transcript(text),
             ref if ref in fetchable else "",

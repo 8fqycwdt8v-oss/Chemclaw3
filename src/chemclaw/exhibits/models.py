@@ -14,6 +14,16 @@ cap must not make the artefacts it already holds unreadable, and re-parsing two 
 every read would pay for a check whose answer cannot have changed. The one write-time check that is
 not here is whether a geometry's `source` is stored — it is a database read, so it is async and
 lives in `exhibits.sources` beside the store it asks.
+
+**A value may be bound rather than written**
+(`D-2026-10-03-an-artefact-binds-a-value-to-the-result-it-came-from`): where a kind takes a literal
+cell, property, SMILES or series, it also takes
+`{"$bind": {"result": "r:<hex>", "pointer": "/json/pointer"}}`, and a table may take `rows_from`
+instead of `rows`. The shape is checked here; whether the result exists, the pointer resolves and
+the value fits is `exhibits.bindings`', which reads the session's stored results. So the positions
+a binding may occupy also admit `null` — what a binding whose stored result is gone resolves to —
+and a literal `null` there is refused on write by `require_writable`, which is where the literal
+contract is held.
 """
 
 from __future__ import annotations
@@ -22,7 +32,7 @@ import json
 import math
 import re
 import secrets
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
@@ -43,9 +53,11 @@ from chemclaw.core.errors import ChemclawError
 from chemclaw.protocols.diff import FieldChange
 from chemclaw.protocols.models import AuthorKind
 
-#: Every kind an artefact can be. The CHECK constraint (`116_exhibit_geometry_kind.sql`) names the
-#: same seven.
-ExhibitKind = Literal["document", "table", "structures", "chart", "result", "link", "geometry"]
+#: Every kind an artefact can be. The CHECK constraint (`117_exhibit_html_kind.sql`) names the same
+#: eight.
+ExhibitKind = Literal[
+    "document", "table", "structures", "chart", "result", "link", "geometry", "html"
+]
 
 #: The `session_events` kind a person's create or revision is pushed under, for
 #: `GET /sessions/{id}/events` to claim and render as the turn stream's `exhibit` event.
@@ -62,11 +74,51 @@ Number = Annotated[float, Strict(), AllowInfNan(False)] | Annotated[int, Strict(
 #: A value one table cell or one structure property may hold.
 Cell = Annotated[str, Strict()] | Number
 
+#: What a binding names its result by: the handle the model read (`r:` and at least eight hex
+#: digits of the content hash, `core.result_handle`), or the full 64-hex ref a stored spec carries.
+RESULT_TARGET = r"^(?:r:[0-9a-f]{8,64}|[0-9a-f]{64})$"
+
+#: An RFC 6901 JSON Pointer: empty (the whole document) or `/`-separated reference tokens in which
+#: `~` occurs only as the escapes `~0` and `~1`.
+JSON_POINTER = r"^(?:/(?:[^~/]|~[01])*)*$"
+
 
 class _Spec(BaseModel):
     """The shared configuration: frozen, and refusing every key the kind does not define."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
+
+
+class BindTarget(_Spec):
+    """Which stored result a bound value comes from, and where inside it."""
+
+    result: str = Field(pattern=RESULT_TARGET)
+    pointer: str = Field(pattern=JSON_POINTER)
+
+
+class Binding(_Spec):
+    """A value taken verbatim from a stored tool result: `{"$bind": {"result", "pointer"}}`."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", serialize_by_alias=True)
+
+    bind: BindTarget = Field(alias="$bind")
+
+
+class RowsFrom(_Spec):
+    """A whole table bound to one array in a stored result, one row per element.
+
+    `columns` maps a column key to a pointer *relative to each element*; an element that lacks it
+    gives an empty cell, because a list of records with an optional field is the ordinary case.
+    """
+
+    result: str = Field(pattern=RESULT_TARGET)
+    pointer: str = Field(pattern=JSON_POINTER)
+    columns: dict[str, Annotated[str, Field(pattern=JSON_POINTER)]] = Field(min_length=1)
+
+
+#: A position that takes a literal or a binding; `None` is what a binding resolves to when its
+#: stored result is gone, and a literal one is refused on write (`require_writable`).
+BoundCell = Cell | Binding | None
 
 
 class DocumentSpec(_Spec):
@@ -89,7 +141,8 @@ class TableSpec(_Spec):
 
     kind: Literal["table"]
     columns: list[Column] = Field(min_length=1)
-    rows: list[dict[str, Cell | None]] = Field(default_factory=list)
+    rows: list[dict[str, BoundCell]] = Field(default_factory=list)
+    rows_from: RowsFrom | None = Field(default=None, exclude_if=lambda value: value is None)
 
     @model_validator(mode="after")
     def _keys_agree(self) -> TableSpec:
@@ -101,15 +154,20 @@ class TableSpec(_Spec):
         for index, row in enumerate(self.rows):
             if unknown := sorted(set(row) - declared):
                 raise ValueError(f"rows[{index}] uses keys no column declares: {unknown}")
+        if self.rows_from is not None:
+            if self.rows:
+                raise ValueError("a table takes `rows` or `rows_from`, not both")
+            if unknown := sorted(set(self.rows_from.columns) - declared):
+                raise ValueError(f"rows_from.columns names keys no column declares: {unknown}")
         return self
 
 
 class Structure(_Spec):
     """One molecule in a structures panel, drawn by the client from its SMILES."""
 
-    smiles: str = Field(min_length=1)
+    smiles: Annotated[str, Field(min_length=1)] | Binding | None
     label: str = ""
-    props: dict[str, Cell] = Field(default_factory=dict)
+    props: dict[str, BoundCell] = Field(default_factory=dict)
 
 
 class StructuresSpec(_Spec):
@@ -123,13 +181,13 @@ class Series(_Spec):
     """One plotted series: x and y of equal length."""
 
     name: str
-    x: list[Annotated[str, Strict()] | Number]
-    y: list[Number]
+    x: list[Annotated[str, Strict()] | Number] | Binding | None
+    y: list[Number] | Binding | None
 
     @model_validator(mode="after")
     def _paired(self) -> Series:
-        """Every x has its y."""
-        if len(self.x) != len(self.y):
+        """Every x has its y — checked once both are values (a binding is checked when resolved)."""
+        if isinstance(self.x, list) and isinstance(self.y, list) and len(self.x) != len(self.y):
             raise ValueError(
                 f"series {self.name!r} has {len(self.x)} x values and {len(self.y)} y values"
             )
@@ -150,7 +208,7 @@ class ChartSpec(_Spec):
         """A text x value is a category, and only a bar chart has categories."""
         if self.chart != "bar":
             for series in self.series:
-                if any(isinstance(value, str) for value in series.x):
+                if isinstance(series.x, list) and any(isinstance(v, str) for v in series.x):
                     raise ValueError(
                         f"series {series.name!r} has text x values; only a 'bar' chart takes them"
                     )
@@ -284,8 +342,29 @@ class GeometrySpec(_Spec):
         return self
 
 
+class HtmlSpec(_Spec):
+    """A page the model wrote, rendered only inside the UI's sandbox origin, never by this server.
+
+    The backend stores and exports it as text and never serves it as `text/html`
+    (`D-2026-10-03-model-written-html-runs-in-an-opaque-origin-the-backend-never-serves`); the
+    page runs in an opaque-origin iframe on a separate origin with `connect-src 'none'`. `height` is
+    the frame's initial height in CSS pixels, which the frame may report back.
+    """
+
+    kind: Literal["html"]
+    html: str
+    height: Annotated[int, Strict(), Field(ge=1)] = 480
+
+
 Spec = Annotated[
-    DocumentSpec | TableSpec | StructuresSpec | ChartSpec | ResultSpec | LinkSpec | GeometrySpec,
+    DocumentSpec
+    | TableSpec
+    | StructuresSpec
+    | ChartSpec
+    | ResultSpec
+    | LinkSpec
+    | GeometrySpec
+    | HtmlSpec,
     Field(discriminator="kind"),
 ]
 _SPEC: TypeAdapter[Spec] = TypeAdapter(Spec)
@@ -315,7 +394,7 @@ class ExhibitLimit(ChemclawError):
 
 
 def parse_spec(raw: object) -> Spec:
-    """The typed spec for `raw`, refusing anything that is not one of the seven shapes.
+    """The typed spec for `raw`, refusing anything that is not one of the eight shapes.
 
     Raises:
         InvalidExhibit: `raw` is not an object, names no known `kind`, or does not fit its kind —
@@ -349,14 +428,33 @@ def spec_bytes(spec: Spec) -> int:
     return len(json.dumps(spec_json(spec), separators=(",", ":")).encode("utf-8"))
 
 
-def require_writable(spec: Spec, *, title: str, change_note: str) -> None:
+def require_writable(
+    spec: Spec,
+    *,
+    title: str,
+    change_note: str,
+    stored: Spec | None = None,
+    vanished: Collection[str] = (),
+) -> None:
     """Refuse a spec, title or note over a cap, a SMILES RDKit cannot read, or unstorable text.
 
     The write-time half of validation (see the module docstring for why it is not `parse_spec`).
+    `spec` is what the artefact will *show* — every binding resolved (`exhibits.bindings`) — so the
+    row, point and structure caps and the RDKit parse bound what a reader is served; `stored` is
+    the spec as it is kept, with its bindings, and is held to the byte cap too. Without `stored` the
+    spec is its own stored form, which is the case for every spec with no binding in it.
+    `vanished` names the paths of bindings a revision carried unchanged whose result retention has
+    since swept (`exhibits.bindings.Bound.vanished`): those read `null`, and may.
 
     Raises:
         InvalidExhibit: naming the cap and the value, or the SMILES and why RDKit refused it.
     """
+    if stored is not None and (kept := spec_bytes(stored)) > settings.exhibit_max_spec_bytes:
+        raise InvalidExhibit(
+            f"the spec as stored is {kept} bytes, over the {settings.exhibit_max_spec_bytes}-byte "
+            "cap; bind fewer cells one by one (`rows_from` binds a whole table in one entry)"
+        )
+    _require_literal(spec, vanished)
     if not title.strip():
         raise InvalidExhibit("an artefact needs a title")
     if len(title) > settings.exhibit_max_title_chars:
@@ -378,8 +476,61 @@ def require_writable(spec: Spec, *, title: str, change_note: str) -> None:
             )
 
 
+def require_creatable(spec: Spec) -> None:
+    """Refuse a new artefact of a kind this deployment has switched off — today only `html`.
+
+    Create only: an html artefact a session already holds still lists, reads and revises when the
+    switch goes off, as `agent_exhibits_enabled` leaves what a chemist pinned in place.
+
+    Raises:
+        InvalidExhibit: the spec is `html` and `agent_html_artefacts_enabled` is off.
+    """
+    if isinstance(spec, HtmlSpec) and not settings.agent_html_artefacts_enabled:
+        raise InvalidExhibit(
+            "html artefacts are switched off on this deployment; show it as a document, a table "
+            "or a chart instead"
+        )
+
+
+def _require_literal(spec: Spec, vanished: Collection[str] = ()) -> None:
+    """Refuse a binding left unresolved, and a `null` where only a binding's absence may put one.
+
+    The positions a binding occupies admit `null` so that a binding whose stored result is gone
+    still reads (see the module docstring); a *writer* sending one is not that, and is refused here
+    as it was refused by the shape before bindings existed.
+    """
+    sites: list[tuple[str, object]] = []
+    if isinstance(spec, TableSpec):
+        if spec.rows_from is not None:
+            raise InvalidExhibit("rows_from: a binding must be resolved before it is written")
+        sites += [
+            (f"rows[{index}].{key}", value)
+            for index, row in enumerate(spec.rows)
+            for key, value in row.items()
+            if isinstance(value, Binding)
+        ]
+    elif isinstance(spec, StructuresSpec):
+        for index, item in enumerate(spec.items):
+            sites.append((f"items[{index}].smiles", item.smiles))
+            sites += [(f"items[{index}].props.{k}", v) for k, v in item.props.items()]
+    elif isinstance(spec, ChartSpec):
+        for index, series in enumerate(spec.series):
+            sites += [(f"series[{index}].x", series.x), (f"series[{index}].y", series.y)]
+    for path, value in sites:
+        if value is None and path not in vanished:
+            raise InvalidExhibit(f"{path}: a value is required here, not null")
+        if isinstance(value, Binding):
+            raise InvalidExhibit(f"{path}: a binding must be resolved before it is written")
+
+
 def _require_within_counts(spec: Spec) -> None:
     """The per-kind count caps, and the SMILES parse for a structures panel."""
+    if isinstance(spec, HtmlSpec):
+        size = len(spec.html.encode("utf-8"))
+        if size > settings.exhibit_max_html_bytes:
+            raise InvalidExhibit(
+                f"the page is {size} bytes, over the {settings.exhibit_max_html_bytes}-byte cap"
+            )
     if isinstance(spec, TableSpec) and len(spec.rows) > settings.exhibit_max_rows:
         raise InvalidExhibit(
             f"the table has {len(spec.rows)} rows, over the {settings.exhibit_max_rows}-row cap"
@@ -391,12 +542,14 @@ def _require_within_counts(spec: Spec) -> None:
                 f"{settings.exhibit_max_structures}-structure cap"
             )
         for index, item in enumerate(spec.items):
+            if item.smiles is None:  # a carried binding whose result is gone; nothing to parse
+                continue
             try:
-                require_molecule(item.smiles)
+                require_molecule(str(item.smiles))
             except InvalidSmilesError as exc:
                 raise InvalidExhibit(f"items[{index}].smiles: {exc}") from exc
     if isinstance(spec, ChartSpec):
-        points = sum(len(series.y) for series in spec.series)
+        points = sum(len(series.y) for series in spec.series if isinstance(series.y, list))
         if points > settings.exhibit_max_points:
             raise InvalidExhibit(
                 f"the chart has {points} points, over the {settings.exhibit_max_points}-point cap"
@@ -451,13 +604,38 @@ class ExhibitHeader(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
 
+class ExhibitBinding(BaseModel):
+    """One bound value of a revision: where it sits, what it reads, and whether it still resolves.
+
+    `path` is the spec path the diff uses (`rows[3].yield`, `items[2].props.pka`, `series[0].y`,
+    `rows_from`). `tool` is the stored result's tool, `""` when the store cannot name one call (the
+    link's own convention) or the result is gone. `ok` is false, with `error` saying why, when the
+    stored result has been swept by retention since the revision was written — the value then
+    reads as `null`.
+    """
+
+    path: str
+    result_ref: str
+    tool: str
+    pointer: str
+    ok: bool
+    error: str = ""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+
 class ExhibitView(ExhibitHeader):
     """One revision of an artefact: its header, the revision's own record, and its spec.
+
+    `spec` is what a renderer shows — every binding replaced by its value — and `raw_spec` the
+    revision as stored, bindings and all, with `bindings` naming each. For a spec with no binding
+    the two specs are one and `bindings` is empty. The store fills `spec` and `raw_spec` alike;
+    `exhibits.bindings.resolved_view` is what turns the one into the other for a reader.
 
     `unverified_figures` lists the numerals an agent-authored revision states that no tool in this
     session returned — *unchecked*, not wrong: the figure may be the chemist's own, or arithmetic,
     or a value the grounding scan could not see. Empty for a human revision and wherever nothing
-    was checked.
+    was checked. A bound value is never one: it is the tool's own.
     """
 
     revision: int
@@ -467,6 +645,8 @@ class ExhibitView(ExhibitHeader):
     change_note: str
     revision_created_at: datetime
     spec: Spec
+    raw_spec: Spec
+    bindings: list[ExhibitBinding] = Field(default_factory=list)
     unverified_figures: list[str] = Field(default_factory=list)
 
 

@@ -1043,6 +1043,24 @@ class AgentSettings(BaseSettings):
     # drug-sized substrate with a catalyst is under a hundred, and five hundred is a small protein
     # pocket. A `source` geometry is the calc store's bytes and is not counted here.
     exhibit_max_atoms: int = Field(default=500, ge=1)
+    # The `html` kind: a page the model writes, rendered only in the UI's separate sandbox origin
+    # and never served as `text/html` here
+    # (`D-2026-10-03-model-written-html-runs-in-an-opaque-origin-the-backend-never-serves`). Off
+    # refuses the kind on create (a 422, or a worded refusal to the model) while the html
+    # artefacts a session already holds still list and read; `GET /sessions/{id}/exhibits` says
+    # which as `html_enabled`. The byte cap is the page's UTF-8 source.
+    agent_html_artefacts_enabled: bool = True
+    exhibit_max_html_bytes: int = Field(default=200_000, ge=1)
+    # Bindings (`exhibits/bindings.py`): how many distinct stored results one spec may bind into —
+    # each is a blob read and a JSON parse on every read of the artefact — and the size above which
+    # a stored result is parsed off the event loop rather than on it
+    # (`D-2026-10-03-an-artefact-binds-a-value-to-the-result-it-came-from`).
+    exhibit_max_bound_results: int = Field(default=20, ge=1)
+    exhibit_binding_offload_bytes: int = Field(default=65_536, ge=0)
+    # The per-process cache of parsed result documents bindings read, in *stored* bytes (a parsed
+    # document is several times that in memory). A blob is immutable, so a cached document is
+    # never stale; 0 turns the cache off.
+    exhibit_binding_cache_bytes: int = Field(default=8_388_608, ge=0)
     # The fewest milliseconds between two `exhibit_draft` frames of one tool call on the turn
     # stream. Each frame carries the whole document so far, so the frame rate times the document's
     # size is the bandwidth a drafted artefact costs; a quarter second reads as live typing.

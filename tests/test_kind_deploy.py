@@ -248,7 +248,7 @@ def test_every_in_cluster_address_names_a_service_this_lane_creates(mode: str) -
 
 
 def test_the_host_ports_are_loopback_and_land_on_the_nodeports_manifests_declare() -> None:
-    """`kind-config.yaml` and `manifests/` name the same three NodePorts, and only on 127.0.0.1."""
+    """`kind-config.yaml` and `manifests/` name the same NodePorts, and only on 127.0.0.1."""
     config = yaml.safe_load((_KIND / "kind-config.yaml").read_text(encoding="utf-8"))
     mappings = config["nodes"][0]["extraPortMappings"]
     assert all(mapping["listenAddress"] == "127.0.0.1" for mapping in mappings), mappings
@@ -265,6 +265,34 @@ def test_the_host_ports_are_loopback_and_land_on_the_nodeports_manifests_declare
     host_ports = {int(mapping["hostPort"]) for mapping in mappings}
     # The ports the compose lanes and the cc3-live container keep on the same workstation.
     assert not host_ports & {5432, 5173, 8000, 8091}, host_ports
+
+
+def test_the_ui_sandbox_is_its_own_origin_and_the_origins_are_the_mapped_ports() -> None:
+    """The html sandbox is a different hostname from the app, on the host port of its own listener.
+
+    So the frame is a different site, and the browser reaches it at the origin the BFF was told.
+
+    The UI's BFF refuses to start a sandbox whose origin equals the app's; it cannot check that the
+    origin it was told is the address the browser actually uses, which is this lane's port mapping.
+    """
+    from urllib.parse import urlsplit
+
+    docs = _manifests()
+    [deployment] = [d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == "ui"]
+    [container] = deployment["spec"]["template"]["spec"]["containers"]
+    env = {item["name"]: item.get("value") for item in container["env"]}
+    sandbox, app = urlsplit(env["SANDBOX_ORIGIN"]), urlsplit(env["APP_ORIGIN"])
+    assert sandbox.hostname != app.hostname, (sandbox, app)
+    [service] = [d for d in docs if d["kind"] == "Service" and d["metadata"]["name"] == "ui"]
+    node_port = {int(p["targetPort"]): int(p["nodePort"]) for p in service["spec"]["ports"]}
+    config = yaml.safe_load((_KIND / "kind-config.yaml").read_text(encoding="utf-8"))
+    host_port = {
+        int(m["containerPort"]): int(m["hostPort"]) for m in config["nodes"][0]["extraPortMappings"]
+    }
+    assert host_port[node_port[int(env["SANDBOX_PORT"])]] == sandbox.port
+    assert host_port[node_port[int(env["PORT"])]] == app.port
+    listening = {int(p["containerPort"]) for p in container["ports"]}
+    assert {int(env["SANDBOX_PORT"]), int(env["PORT"])} <= listening
 
 
 def test_up_sh_deploys_every_server_the_fleet_ships_a_deployment_for() -> None:

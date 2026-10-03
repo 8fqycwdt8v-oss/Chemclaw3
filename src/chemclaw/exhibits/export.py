@@ -24,6 +24,7 @@ from chemclaw.exhibits.models import (
     ChartSpec,
     DocumentSpec,
     GeometrySpec,
+    HtmlSpec,
     Spec,
     StructuresSpec,
     TableSpec,
@@ -37,6 +38,12 @@ MEDIA_TYPES: dict[str, str] = {
     "csv": "text/csv; charset=utf-8",
     "smi": "chemical/x-daylight-smiles; charset=utf-8",
     "xyz": "chemical/x-xyz; charset=utf-8",
+    # **Text, never `text/html`, and the extension does not change that.** A page the model wrote
+    # is untrusted markup; served as HTML from this origin it would run with the front door's
+    # cookies and its `connect-src`. The file a chemist saves opens in their browser from disk if
+    # they choose — the one place it may run besides the UI's sandbox origin
+    # (`D-2026-10-03-model-written-html-runs-in-an-opaque-origin-the-backend-never-serves`).
+    "html": "text/plain; charset=utf-8",
 }
 
 #: What a filename may carry of a title; everything else becomes `-`, because the name reaches a
@@ -48,12 +55,16 @@ def render_export(spec: Spec, fmt: str) -> str | None:
     """The artefact as a file of format `fmt`, or `None` when its kind does not offer that format.
 
     Offered: a document as `md`; a table as `csv` or `md`; a structures panel as `smi` or `csv`; a
-    chart as `csv`. A pinned result and a link have no file of their own — the pane opens what they
-    point at — so every format answers `None` for them. A geometry is `xyz` when it carries its
+    chart as `csv`; an html page as `html` — served as plain text (`MEDIA_TYPES`). A spec arrives
+    resolved: every binding is its value, and one that no longer resolves is an empty cell. A
+    pinned result and a link have no file of their own — the pane opens what they point at — so
+    every format answers `None` for them. A geometry is `xyz` when it carries its
     block inline; one citing a calculation artifact needs a read, which is `resolve_export`'s.
     """
     if isinstance(spec, GeometrySpec) and fmt == "xyz" and spec.xyz is not None:
         return _with_newline(spec.xyz)
+    if isinstance(spec, HtmlSpec) and fmt == "html":
+        return _with_newline(spec.html)
     if isinstance(spec, DocumentSpec) and fmt == "md":
         return _with_newline(spec.markdown)
     if isinstance(spec, TableSpec):
@@ -67,8 +78,13 @@ def render_export(spec: Spec, fmt: str) -> str | None:
             return "\n".join(lines) + "\n"
     if isinstance(spec, StructuresSpec):
         if fmt == "smi":
-            # `SMILES<tab>label`, the SMILES-file layout every reader expects.
-            return "".join(f"{item.smiles}\t{_one_line(item.label)}\n" for item in spec.items)
+            # `SMILES<tab>label`, the SMILES-file layout every reader expects. A structure whose
+            # bound SMILES no longer resolves has no line to give.
+            return "".join(
+                f"{item.smiles}\t{_one_line(item.label)}\n"
+                for item in spec.items
+                if isinstance(item.smiles, str)
+            )
         if fmt == "csv":
             names = list(dict.fromkeys(name for item in spec.items for name in item.props))
             rows = [
@@ -77,10 +93,12 @@ def render_export(spec: Spec, fmt: str) -> str | None:
             ]
             return _csv(["smiles", "label", *names], rows)
     if isinstance(spec, ChartSpec) and fmt == "csv":
-        # Long form, one row per point named by its series, so series of any length fit.
+        # Long form, one row per point named by its series, so series of any length fit. A series
+        # whose binding no longer resolves has no points to give, so it gives none.
         points = [
             [series.name, x, y]
             for series in spec.series
+            if isinstance(series.x, list) and isinstance(series.y, list)
             for x, y in zip(series.x, series.y, strict=True)
         ]
         return _csv(["series", spec.x_label or "x", spec.y_label or "y"], points)

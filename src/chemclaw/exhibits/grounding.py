@@ -29,14 +29,17 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Iterable, Iterator
+from html.parser import HTMLParser
 
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.core.quantities import returned_values, stated_numerals, ungrounded
 from chemclaw.exhibits.models import (
+    Binding,
     ChartSpec,
     DocumentSpec,
     GeometrySpec,
+    HtmlSpec,
     Number,
     Spec,
     StructuresSpec,
@@ -59,10 +62,12 @@ def stated_figures(spec: Spec) -> list[str]:
     """Every figure a spec states as a value, as written, deduplicated in first-seen order.
 
     Values, not names: a table's cells, a structure's property values, a chart's points, a
-    geometry's energy and a document's prose. Titles, column labels, units, structure labels and
-    SMILES are names, and a "Compound 12" or a ring-closure digit is not a figure anybody
-    transcribed. A geometry's coordinates are not figures either: they are a structure, read by a
-    viewer rather than quoted, and three per atom would bury the one figure a chemist does quote.
+    geometry's energy, a document's prose and an html page's text (`html_text`). Literal values
+    only — a `$bind` is the tool's own value, so a spec is read as stored, bindings unresolved.
+    Titles, column labels, units, structure labels and SMILES are names, and a "Compound 12" or a
+    ring-closure digit is not a figure anybody transcribed. A geometry's coordinates are not
+    figures either: they are a structure, read by a viewer rather than quoted, and three per atom
+    would bury the one figure a chemist does quote.
     """
     seen: dict[str, None] = {}
     for figure in _figures(spec):
@@ -84,15 +89,69 @@ def _figures(spec: Spec) -> Iterator[str]:
                 yield from _of_value(value)
     elif isinstance(spec, ChartSpec):
         for series in spec.series:
-            for value in [*series.x, *series.y]:
-                yield from _of_value(value)
+            for axis in (series.x, series.y):
+                if isinstance(axis, list):
+                    for value in axis:
+                        yield from _of_value(value)
     elif isinstance(spec, GeometrySpec):
         yield from _of_value(spec.energy_hartree)
+    elif isinstance(spec, HtmlSpec):
+        yield from stated_numerals(html_text(spec.html))
 
 
-def _of_value(value: Number | str | None) -> Iterator[str]:
-    """A literal number as the numeral it is written as; a text cell's figures by the prose rule."""
-    if value is None:
+#: Elements whose character data is code, not text a reader sees: never scanned for figures.
+_NOT_TEXT = frozenset({"script", "style"})
+
+
+class _TextOf(HTMLParser):
+    """The text content of a page — every character data run outside `<script>` and `<style>`."""
+
+    def __init__(self) -> None:
+        """Start with no text and outside any code element."""
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+        self._inside = 0
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        """Note entering a script or stylesheet."""
+        if tag in _NOT_TEXT:
+            self._inside += 1
+
+    def handle_endtag(self, tag: str) -> None:
+        """Note leaving one."""
+        if tag in _NOT_TEXT and self._inside:
+            self._inside -= 1
+
+    def handle_data(self, data: str) -> None:
+        """Keep a run of text, separated from its neighbours so two runs never join into one."""
+        if not self._inside:
+            self.parts.append(data)
+
+
+def html_text(page: str) -> str:
+    """The text a reader of `page` sees — the grounding scan's input for `html`.
+
+    The standard library's tolerant parser rather than a dependency: this needs character data and
+    nothing else, and a malformed page still yields what text it has. What it reads is what a
+    reader sees as text: paragraphs, table cells, and an inline SVG's `<text>` labels, which are
+    character data like any other. **Not `<script>` or `<style>`** — code and layout, where a
+    number is a loop bound or a width far more often than a figure — and **not attributes**, so an
+    SVG's coordinates are never read as figures. The cost is stated in the decision record: a
+    chart a script draws from a JS array goes unchecked.
+    """
+    parser = _TextOf()
+    parser.feed(page)
+    parser.close()
+    return " ".join(parser.parts)
+
+
+def _of_value(value: Number | str | Binding | None) -> Iterator[str]:
+    """A literal number as the numeral it is written as; a text cell's figures by the prose rule.
+
+    A binding states no figure of its own: its value is the tool result's, verbatim, so it is
+    grounded by construction and never reaches the scan.
+    """
+    if value is None or isinstance(value, Binding):
         return
     if isinstance(value, str):
         yield from stated_numerals(value)

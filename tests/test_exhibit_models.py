@@ -59,10 +59,11 @@ def _writable(raw: dict[str, Any], title: str = "Screen") -> None:
         },
         {"kind": "result", "result_ref": "a" * 64, "tool": "screen_hazards"},
         {"kind": "link", "target": "protocol", "id": "design-0123456789ab"},
+        {"kind": "html", "html": "<p>76 %</p>", "height": 480},
     ],
 )
 def test_every_kind_round_trips_through_its_stored_json(raw: dict[str, Any]) -> None:
-    """Each of the six kinds parses, passes the write check, and dumps back to what was sent."""
+    """Each kind parses, passes the write check, and dumps back to what was sent."""
     spec = parse_spec(raw)
     require_writable(spec, title="t", change_note="")
     assert parse_spec(spec_json(spec)) == spec
@@ -82,6 +83,9 @@ def test_every_kind_round_trips_through_its_stored_json(raw: dict[str, Any]) -> 
         ({"kind": "structures", "items": []}, "items"),
         ({"kind": "result", "result_ref": "not-a-hash"}, "result_ref"),
         ({"kind": "link", "target": "calculation", "id": "x"}, "target"),
+        ({"kind": "html", "html": "<p>x</p>", "height": 0}, "height"),
+        ({"kind": "html", "html": "<p>x</p>", "height": "480"}, "height"),
+        ({"kind": "html", "markdown": "x"}, "html"),
     ],
 )
 def test_a_spec_that_does_not_fit_its_kind_is_refused_naming_where(raw: object, names: str) -> None:

@@ -1,3 +1,44 @@
+# Artefacts, wave 3 — bindings and the html kind
+
+Contract: "Wave 3 (frozen 2026-10-03)" of the artefacts wire contract, shared with the frontend
+built in parallel — names and shapes exactly as frozen. Owner decision 2026-10-03: build both.
+
+- [x] **0. Baseline** the targeted test files before the first edit.
+- [x] **1. Result handle.** `bound_tool_results` stores every successful result's full text through
+      the turn's sink (one write; a cut keeps its existing ref) and stamps the ref on
+      `response_metadata`; an outermost presentation middleware appends `\n⟨r:<12 hex>⟩` outside
+      the framed/defanged region. `runner_trace.returned()` reuses the stamped ref instead of a second
+      write; the transcript pairs by the stamp. Grounding (`returned_values`, `stated_numerals`,
+      `mentioned_ids`) never reads the handle (test). Measure what the handle costs the thread.
+- [x] **2. `$bind` and `rows_from`** in the spec models; `exhibits/bindings.py` resolves them (RFC
+      6901, session-scoped prefix lookup, ambiguity refusal, type checks, caps, off the loop for
+      large results, a missing blob → null + ok:false). Stored spec keeps bindings with full refs;
+      `ExhibitView` gains `raw_spec` + `bindings[]`, `spec` is resolved. Writes (tool + REST) resolve
+      and validate; bound values are grounded; diff compares raw specs; exports use resolved values;
+      `read_exhibit` shows both.
+- [x] **3. `html` kind**: spec, `exhibit_max_html_bytes`, `agent_html_artefacts_enabled`,
+      `html_enabled` on the list route, export `.html` as `text/plain` attachment, grounding over
+      text content (stdlib `html.parser`), migration 117 widens the kind CHECK, create_exhibit names
+      it. A test that no route answers `text/html` for artefact content.
+- [x] **4. Docstring + skill** teach `$bind` compactly; re-measure the prefix
+      (`tests/test_context_floor.py`) and the warm arm (`tests/test_compaction.py`) — stop and report
+      if the warm arm would fail.
+- [x] **5. Two ADRs** (bindings; html sandbox) with `Revisit when:` on what is declined; ledger rows.
+- [x] **6. Verify**: lint, type, skill-validate, prose-validate, the targeted files with Postgres up.
+
+## Review (wave 3)
+
+- Handle: 17 characters, +4 tokens per result on the approximate counter (12 on cl100k); the
+  compaction warm arm's unreclaimable batch now charges one per parallel call, 13,000 -> 13,034,
+  and the arm reads 14,181 on this tree. No compaction or thread test failed before or after.
+- Prefix: create_exhibit +75, read_exhibit +20; default 73,027 -> 73,122 under the 73,450 ceiling.
+  No ceiling, budget or `PREFIX_BOUND` moved.
+- Deviations from the frozen contract: none in names or shapes. Choices inside it: a handle is
+  written only where the full text was stored (no handle on a failure, an empty or over-cap
+  result, or a sinkless driver); a `rows_from` whose result is gone reads as no rows (`rows` is a
+  list); a `rows_from` column pointer an element lacks is an empty cell; the html export filename is
+  the existing `<title>-<xid>-r<N>.html`; `height` must be an integer >= 1.
+
 # Artefacts, wave 2 — geometry, drafts, report artefacts, fork, push pruning
 
 Contract: "Wave 2 additions (frozen 2026-10-03)" of the artefacts wire contract, shared with the

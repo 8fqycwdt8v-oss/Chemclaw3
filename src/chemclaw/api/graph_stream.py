@@ -49,7 +49,7 @@ from langchain_core.messages import AIMessageChunk, ToolMessage
 from chemclaw.agent.plan_gate import plan_identity
 from chemclaw.agent.plan_scope import declared_scope
 from chemclaw.agent.state import PEER_DEPTH_ATTR, turn_input
-from chemclaw.agent.tool_result_size import full_result_ref, was_cut
+from chemclaw.agent.tool_result_size import full_result_ref, stored_result_ref, was_cut
 from chemclaw.api.events import (
     Event,
     EvidenceSourceEvent,
@@ -67,6 +67,7 @@ from chemclaw.api.exhibit_drafts import DraftStream
 from chemclaw.api.runner_trace import ToolCallTrace
 from chemclaw.api.runner_usage import graph_usage_tokens
 from chemclaw.api.schemas import message_text
+from chemclaw.core.result_handle import without_handle_line
 from chemclaw.core.turn_signals import _KEY as _SIGNAL_KEY
 from chemclaw.core.turn_signals import (
     ExhibitSignal,
@@ -577,9 +578,10 @@ async def _from_update(
                     yield _attributed(
                         await trace.returned(
                             str(getattr(message, "tool_call_id", "")),
-                            message_text(message),
+                            without_handle_line(message_text(message)),
                             cut=was_cut(message),
                             full_ref=full_result_ref(message),
+                            stored_ref=stored_result_ref(message),
                         ),
                         agent,
                     )

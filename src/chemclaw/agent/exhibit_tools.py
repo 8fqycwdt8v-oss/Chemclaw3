@@ -29,6 +29,7 @@ import json
 import logging
 from typing import Any, Literal
 
+from langchain_core.tools import BaseTool
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
 from chemclaw.agent.authz import require_actor
@@ -39,6 +40,7 @@ from chemclaw.core.identity_context import get_current_correlation_id
 from chemclaw.core.session_context import get_current_session_id
 from chemclaw.core.tool_registry import tool
 from chemclaw.core.turn_signals import ExhibitSignal, record_exhibit
+from chemclaw.exhibits.bindings import bind_for_write, resolved_view
 from chemclaw.exhibits.diff import capped, diff_specs
 from chemclaw.exhibits.grounding import chemist_figures, unverified_figures
 from chemclaw.exhibits.models import (
@@ -47,6 +49,7 @@ from chemclaw.exhibits.models import (
     Spec,
     StaleRevision,
     parse_spec,
+    require_creatable,
     require_writable,
     spec_json,
 )
@@ -81,6 +84,26 @@ class Edit(BaseModel):
 _EDITS: TypeAdapter[list[Edit]] = TypeAdapter(list[Edit])
 
 
+#: The part of `create_exhibit`'s description that names the html kind — what a deployment with
+#: `agent_html_artefacts_enabled` off removes, so the model is not offered a kind it is refused.
+HTML_CLAUSE = "; html `html` (self-contained, no network), `height`"
+
+
+def described_for_deployment(tool: BaseTool) -> BaseTool:
+    """`tool`, or a copy of `create_exhibit` without the html clause when html artefacts are off.
+
+    A copy per build rather than a second registered function: the schema stays the one
+    `tool_schema.as_structured_tool` derived once, and only the description text differs. The
+    clause is required to be in the description, so an edit to the docstring that drops or rewords
+    it fails here rather than leaving html advertised on a deployment that refuses it.
+    """
+    if tool.name != "create_exhibit" or settings.agent_html_artefacts_enabled:
+        return tool
+    if HTML_CLAUSE not in tool.description:
+        raise RuntimeError("create_exhibit's description no longer carries HTML_CLAUSE verbatim")
+    return tool.model_copy(update={"description": tool.description.replace(HTML_CLAUSE, "", 1)})
+
+
 def _session() -> str:
     """The turn's session, or a refusal: an artefact always belongs to one conversation."""
     session_id = get_current_session_id()
@@ -107,7 +130,10 @@ async def create_exhibit(title: str, spec: dict[str, Any]) -> str:
     `spec` fields by `kind`: document `markdown`; table `columns` [{key,label,unit}], `rows`;
     structures `items` [{smiles,label,props}]; chart `chart` (line|scatter|bar), `x_label`,
     `y_label`, `series` [{name,x,y}]; geometry `xyz` or `source` {calc_key,name}, `label`; link
-    `target` (protocol|note|job), `id`.
+    `target` (protocol|note|job), `id`; html `html` (self-contained, no network), `height`.
+    Copy a value from a result ending ⟨r:HEX⟩: any cell, prop, smiles, x or y may be
+    {"$bind":{"result":"r:HEX","pointer":"/json/pointer"}}; a table may give `rows_from`
+    {result,pointer,columns:{key:pointer}} for rows.
 
     Returns:
         JSON with `exhibit_id` and `revision`.
@@ -119,17 +145,19 @@ async def create_exhibit(title: str, spec: dict[str, Any]) -> str:
             "a 'result' artefact is pinned by the chemist from a tool result block; show the "
             "values as a table, or say which result to pin"
         )
-    require_writable(parsed, title=title, change_note="")
+    require_creatable(parsed)
+    bound = await bind_for_write(session_id, parsed)
+    require_writable(bound.resolved, title=title, change_note="", stored=bound.stored)
     await require_source_stored(parsed)
     author = require_actor()
     view = await _store().create(
         session_id,
         title=title,
-        spec=parsed,
+        spec=bound.stored,
         author_kind="agent",
         author=author,
         correlation_id=get_current_correlation_id() or "",
-        unverified_figures=await unverified_figures(session_id, parsed),
+        unverified_figures=await unverified_figures(session_id, bound.stored),
     )
     record_exhibit(_announced(view, "created"))
     logger.info(
@@ -165,21 +193,28 @@ async def revise_exhibit(
     if base_revision != current.head_revision:
         raise ChemclawError(_stale(exhibit_id, current.head_revision, base_revision))
     revised = _revised_spec(current, edits, spec)
-    require_writable(revised, title=current.title, change_note=note)
+    bound = await bind_for_write(session_id, revised, parent=current.raw_spec)
+    require_writable(
+        bound.resolved,
+        title=current.title,
+        change_note=note,
+        stored=bound.stored,
+        vanished=bound.vanished,
+    )
     await require_source_stored(revised)
     chemist = await chemist_figures(store, session_id, exhibit_id)
     try:
         view = await store.append(
             session_id,
             exhibit_id,
-            spec=revised,
+            spec=bound.stored,
             parent_revision=base_revision,
             author_kind="agent",
             author=require_actor(),
             change_note=note,
             correlation_id=get_current_correlation_id() or "",
             unverified_figures=await unverified_figures(
-                session_id, revised, chemist_figures=chemist
+                session_id, bound.stored, chemist_figures=chemist
             ),
         )
     except StaleRevision as exc:
@@ -194,7 +229,8 @@ async def read_exhibit(exhibit_id: str, revision: int = 0) -> str:
     """Read an artefact (`revision` 0 = latest) and the chemist's changes since your last one.
 
     Returns:
-        JSON with `spec` and `changes_since_agent`.
+        JSON with `spec` (bound values filled in), `raw_spec` and `bindings` when it binds any,
+        and `changes_since_agent`.
     """
     session_id = _session()
     store = _store()
@@ -205,6 +241,7 @@ async def read_exhibit(exhibit_id: str, revision: int = 0) -> str:
             + (f" at revision {revision}" if revision else "")
             + " in this conversation"
         )
+    shown = await resolved_view(view)
     readout: dict[str, Any] = {
         "exhibit_id": exhibit_id,
         "kind": view.kind,
@@ -212,10 +249,15 @@ async def read_exhibit(exhibit_id: str, revision: int = 0) -> str:
         "revision": view.revision,
         "head_revision": view.head_revision,
         "author_kind": view.author_kind,
-        "spec": spec_json(view.spec),
-        "unchecked_figures": view.unverified_figures,
-        "changes_since_agent": await _changes_since_agent(store, session_id, view),
+        "spec": spec_json(shown.spec),
     }
+    if shown.bindings:
+        # Both forms, because a revision is written in the stored one: a `spec` sent back with the
+        # values filled in would detach every binding the chemist can see the provenance of.
+        readout["raw_spec"] = spec_json(view.raw_spec)
+        readout["bindings"] = [binding.model_dump(mode="json") for binding in shown.bindings]
+    readout["unchecked_figures"] = view.unverified_figures
+    readout["changes_since_agent"] = await _changes_since_agent(store, session_id, view)
     # No read mark is set here, deliberately: a helper holds this tool too, and a helper reading
     # the chemist's edit is not the agent that answers the chemist having seen it. The mark moves
     # on the agent's own writes and when the turn note announces an edit (`agent/exhibit_notes`).

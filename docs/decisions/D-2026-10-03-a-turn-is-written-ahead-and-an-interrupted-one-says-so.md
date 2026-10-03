@@ -31,7 +31,7 @@ marking the turn.
 
 `run_turn` writes the chemist's message to `session_messages` before the graph runs
 (`_begin_transcript_turn` → `begin_turn`), stamped with the turn's correlation id and sender as every
-row is, and with a new column `turn_status = 'running'` (migration 117, additive, nullable, a partial
+row is, and with a new column `turn_status = 'running'` (migration 118, additive, nullable, a partial
 index over the running rows). When the turn ends, its own process settles that row in the same
 commit that appends the rest of the exchange (`finish_turn`):
 

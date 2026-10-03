@@ -67,6 +67,14 @@ before the message leaves this module, and stamps the ref that sink answered on 
 `response_metadata` (`FULL_RESULT_REF_KEY`), which travels with the message and is not part of what
 the model reads. The stream then names that ref on `ToolResultEvent.result_ref`. There is no tool
 that lets the model fetch it back: that would re-inflate exactly what the cut reclaimed.
+
+**A result that is not cut is stored here too, since wave 3 of artefacts**
+(`D-2026-10-03-an-artefact-binds-a-value-to-the-result-it-came-from`). Every successful result's
+full text goes through the same sink and its ref is stamped as `RESULT_REF_KEY`, which is what the
+handle line `⟨r:<12 hex>⟩` at the foot of the model's copy names and what an artefact binding
+resolves against. It is the write the stream used to make after the node finished, moved earlier
+rather than added: `api/runner_trace.ToolCallTrace.returned` reuses the stamped ref instead of
+storing the model's copy a second time.
 """
 
 import logging
@@ -548,24 +556,67 @@ def full_text(content: Any) -> str:
     return "".join(_spans(content))
 
 
-async def kept_in_full(result: Any, originals: dict[str, str], tool: str) -> Any:
-    """Store each cut result's full text and stamp its ref on the message the model is handed.
+#: Where a result names the stored full text its handle line points at — present on every result
+#: whose full text the turn's `FullResultSink` stored, cut or not, and absent when nothing stored it
+#: (no sink on this driver, over the store's cap, a failed write, a failure, an empty result).
+#: `stamp_result_handles` appends `⟨r:<first 12 hex>⟩` from it, and the stream and the transcript
+#: name it as the result's `result_ref` instead of storing a second copy
+#: (`D-2026-10-03-an-artefact-binds-a-value-to-the-result-it-came-from`).
+#:
+#: Beside `FULL_RESULT_REF_KEY` rather than in place of it, because the two say different things:
+#: that one is *present iff the model saw a cut* (with `""` when the full text could not be kept),
+#: this one is *the stored bytes a binding may resolve against*. For a cut result kept whole they
+#: hold the same ref.
+RESULT_REF_KEY = "chemclaw_result_ref"
 
-    `originals` maps a `tool_call_id` to the text that call returned *before* it was cut; a
-    middleware's synchronous rewrite fills it and this, the one `await` in the pair, drains it.
+
+def stored_result_ref(message: Any) -> str:
+    """The ref of this result's stored full text, or `""` when nothing stored it."""
+    ref = (getattr(message, "response_metadata", None) or {}).get(RESULT_REF_KEY)
+    return ref if isinstance(ref, str) else ""
+
+
+def is_referable(message: Any) -> bool:
+    """Whether a result is one a later binding may point at: a success that carried some text.
+
+    A failure is a statement about the call, not evidence (`api/graph_stream` reports it as
+    `tool_failed` and never as a result), and an empty result has nothing to point into.
+    """
+    return (
+        isinstance(message, ToolMessage)
+        and message.status != "error"
+        and bool(full_text(message.content).strip())
+    )
+
+
+async def kept_in_full(
+    result: Any, originals: dict[str, str], tool: str, *, cut: bool = True
+) -> Any:
+    """Store each result's full text and stamp its ref on the message the model is handed.
+
+    `originals` maps a `tool_call_id` to the text that call returned *before* anything rewrote it;
+    a middleware's synchronous rewrite fills it and this, the one `await` in the pair, drains it.
     Written before the message leaves the middleware, so the bytes are durable before the stream
     can announce the ref naming them — the ordering `api/runner_trace.py` states for its own write.
 
-    **A caller records only a message not already carrying `FULL_RESULT_REF_KEY`.** The chain cuts
-    in two places (`bound_tool_results`, then `frame_connector_results`' re-bound after escaping),
-    and the first one to cut saw more of the tool's output than the second, so its stamp stands and
-    the outer pass records nothing for that message (`tool_framing`'s `_kept` checks `was_cut`).
+    Two callers, told apart by `cut`:
 
-    Returns `result` itself when nothing was cut, so identity still means "unchanged".
+    - **a cut** (`cut=True`) stamps `FULL_RESULT_REF_KEY` whatever the sink answered — presence is
+      the fact "the model saw less than the tool returned" — plus `RESULT_REF_KEY` when it stored.
+      The chain cuts in two places (`bound_tool_results`, then `frame_connector_results`' re-bound
+      after escaping), and the first one to cut saw more of the tool's output than the second, so
+      its stamp stands and the outer pass records nothing for that message (`tool_framing`'s
+      `_kept` checks `was_cut`).
+    - **a whole result** (`cut=False`) stamps only `RESULT_REF_KEY`, and only when the sink stored:
+      the handle line names stored bytes or is not written at all.
+
+    Returns `result` itself when there is nothing to store, so identity still means "unchanged".
     """
     if not originals:
         return result
     sink = _full_results.get()
+    if sink is None and not cut:
+        return result
     refs = {
         call_id: (await sink(tool, text) if sink is not None else "")
         for call_id, text in originals.items()
@@ -574,13 +625,14 @@ async def kept_in_full(result: Any, originals: dict[str, str], tool: str) -> Any
     def _stamped(message: ToolMessage) -> ToolMessage:
         if message.tool_call_id not in refs:
             return message
+        ref = refs[message.tool_call_id]
+        stamps: dict[str, str] = {FULL_RESULT_REF_KEY: ref} if cut else {}
+        if ref and message.status != "error":
+            stamps[RESULT_REF_KEY] = ref
+        if not stamps:
+            return message
         return message.model_copy(
-            update={
-                "response_metadata": {
-                    **(message.response_metadata or {}),
-                    FULL_RESULT_REF_KEY: refs[message.tool_call_id],
-                }
-            }
+            update={"response_metadata": {**(message.response_metadata or {}), **stamps}}
         )
 
     return rewritten_tool_messages(result, _stamped)
@@ -774,8 +826,10 @@ async def bound_tool_results(request: Any, handler: Callable[[Any], Any]) -> Any
     """
     result = await handler(request)
     # The full text of every result this pass cuts, for `kept_in_full` to store once the
-    # synchronous rewrite below has decided which ones those are.
+    # synchronous rewrite below has decided which ones those are — and of every result it does not
+    # cut, stored the same way so its handle line names bytes a binding can resolve against.
     originals: dict[str, str] = {}
+    wholes: dict[str, str] = {}
 
     def _bounded(message: ToolMessage) -> ToolMessage:
         # Measured before the cut, because after it the number is gone: `frame_connector_results`
@@ -784,6 +838,8 @@ async def bound_tool_results(request: Any, handler: Callable[[Any], Any]) -> Any
         was = sum(len(span) for span in _spans(message.content))
         content = bounded_for_batch(request, message.content)
         if content is message.content:
+            if is_referable(message):
+                wholes[message.tool_call_id] = full_text(message.content)
             return message
         originals[message.tool_call_id] = full_text(message.content)
         return message.model_copy(
@@ -796,10 +852,10 @@ async def bound_tool_results(request: Any, handler: Callable[[Any], Any]) -> Any
             }
         )
 
+    tool = str(request.tool_call["name"])
+    bounded = rewritten_tool_messages(result, _bounded)
     return rewritten_command_files(
-        await kept_in_full(
-            rewritten_tool_messages(result, _bounded), originals, str(request.tool_call["name"])
-        ),
+        await kept_in_full(await kept_in_full(bounded, originals, tool), wholes, tool, cut=False),
         _bounded_file,
         (getattr(request, "state", None) or {}).get("files"),
         _files_budget(request),

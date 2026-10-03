@@ -95,6 +95,8 @@ def test_profile_attenuates_but_audit_and_authz_always_attach() -> None:
     assert [type(entry).__name__ for entry in middleware] == [
         "surface_authorization_denials",
         "surface_domain_errors",
+        # Outermost of what rewrites a result: the handle line lies outside the envelope.
+        "stamp_result_handles",
         # Inside both converters and outside the trail
         # (`D-2026-08-27-a-tool-result-crosses-a-boundary-and-must-say-so`): every out-of-process
         # result is framed as data, and a refusal this system composed is not.
