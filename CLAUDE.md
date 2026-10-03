@@ -330,7 +330,7 @@ invocations — CI runs exactly these, so a green `make` locally means a green C
 - **The validators**, each guarding a declaration against the live surface: `kg-validate`,
   `skill-validate`, `connector-validate`, `datasource-validate`, `sink-validate`,
   `channel-validate`,
-  `template-validate`, `prose-validate`, `eln-validate`, `helm-validate`. Not counted here, and
+  `template-validate`, `prose-validate`, `eln-validate`, `helm-validate`, `kind-validate`. Not counted here, and
   derived from the `ci` target by `tests/test_repo_map.py`: the count that used to open this list
   said eight over nine targets, and the one it omitted was the newest.
 - **Running things**: `make up` (docker-compose: Temporal + Postgres/pgvector) · `make connectors`

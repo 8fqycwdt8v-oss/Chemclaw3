@@ -481,3 +481,25 @@ def test_both_routes_decide_one_turn_the_same_way(
     chat = _decided(app, "/v1/chat/completions", payload)
 
     assert responses == chat
+
+
+def test_the_bind_address_defaults_to_loopback_and_a_pod_can_widen_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--host` lets `deploy/kind/` serve the mock to other pods; omitted, it stays on loopback.
+
+    A mock bound to 127.0.0.1 inside a pod answers nobody, so the cluster lane names `0.0.0.0` —
+    and every existing caller (the live lane, the storm) passes no flag and must keep exposing
+    exactly what it exposed before.
+    """
+    from chemclaw.cli import mock_llm
+
+    bound: list[tuple[str, int]] = []
+    monkeypatch.setattr(mock_llm, "catalogue", lambda _name: [])
+    monkeypatch.setattr(
+        "chemclaw.cli.mock_llm.uvicorn.run",
+        lambda _app, host, port, **_kw: bound.append((host, port)),
+    )
+    mock_llm.main([])
+    mock_llm.main(["--host", "0.0.0.0", "--port", "8821"])
+    assert bound == [(mock_llm.MOCK_HOST, mock_llm.MOCK_PORT), ("0.0.0.0", 8821)]

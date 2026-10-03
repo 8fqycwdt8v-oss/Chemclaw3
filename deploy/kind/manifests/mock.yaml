@@ -1,0 +1,192 @@
+# `Chemclaw3_mock`, as the two processes the four-repo lane runs (infra/live/e2e-full-stack/up.sh):
+#
+# - `mock-eln` (:8090) — the ELN/ORD export writer and, in oidc-mock mode, the mock Entra tenant
+#   (issuer, JWKS, token endpoint). With `MOCK_ELN_SEED_ON_STARTUP` it writes the seeded exports into
+#   the `chemclaw-eln-exports` claim; the chart mounts that same claim read-only on the background
+#   worker (values-kind.yaml `documentShare`), which is how core's `eln-json`/`eln-ord` sources see
+#   them. One claim, one writer, one reader, one node — ReadWriteOnce is enough.
+# - `mock-vendor` (:8091) — the vendor-catalog MCP server, bound by core as the `mock-vendor`
+#   connector from `infra/live/e2e-full-stack/manifests/mock-vendor/` (no auth: its manifest says
+#   `mode: none`).
+#
+# The auth mode's environment (MOCK_ENTRA_*, and MOCK_SSL_* in oidc-mock) arrives through the
+# `chemclaw-mock-auth` ConfigMap `up.sh` writes per mode, so one manifest serves both. In oidc-mock
+# `mock-eln` serves https (MSAL.js accepts only an https authority) with the cluster CA's
+# `mock-eln-tls`, and `mock-eln-public` is the browser's way to it: NodePort 30443, which
+# kind-config.yaml maps to 127.0.0.1:18443 — the authority the UI hands the browser and the issuer
+# every token carries. The image's own `start.sh` is the entrypoint, because it is what turns
+# MOCK_SSL_* into uvicorn's TLS flags.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: chemclaw-eln-exports
+  namespace: chemclaw
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mock-eln
+  namespace: chemclaw
+  labels:
+    app.kubernetes.io/name: mock-eln
+spec:
+  selector:
+    app.kubernetes.io/name: mock-eln
+  ports:
+    - name: http
+      port: 8090
+      targetPort: 8090
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mock-eln-public
+  namespace: chemclaw
+  labels:
+    app.kubernetes.io/name: mock-eln
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: mock-eln
+  ports:
+    - name: https
+      port: 8090
+      targetPort: 8090
+      nodePort: 30443
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mock-eln
+  namespace: chemclaw
+  labels:
+    app.kubernetes.io/name: mock-eln
+spec:
+  replicas: 1
+  # Two writers seeding one export directory during a rollout is the race to avoid.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mock-eln
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mock-eln
+    spec:
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      securityContext:
+        # The claim is a local-path hostPath directory; group-writable for whatever UID the image runs as.
+        fsGroup: 1001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: mock-eln
+          image: chemclaw/mock:kind
+          imagePullPolicy: Never
+          env:
+            - name: MOCK_SERVER_PORT
+              value: "8090"
+            - name: MOCK_ELN_EXPORT_DIR
+              value: /exports
+            - name: MOCK_ORD_EXPORT_DIR
+              value: /exports/ord
+            - name: MOCK_ELN_SEED_ON_STARTUP
+              value: "true"
+          envFrom:
+            - configMapRef:
+                name: chemclaw-mock-auth
+          ports:
+            - name: http
+              containerPort: 8090
+          # TCP rather than `GET /healthz`: the same port is http in one mode and https in the other.
+          readinessProbe:
+            tcpSocket: {port: http}
+            periodSeconds: 5
+            failureThreshold: 60
+          resources:
+            requests: {cpu: 50m, memory: 192Mi}
+            limits: {cpu: "1", memory: 1Gi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - name: exports
+              mountPath: /exports
+            - name: tls
+              mountPath: /tls
+              readOnly: true
+      volumes:
+        - name: exports
+          persistentVolumeClaim:
+            claimName: chemclaw-eln-exports
+        - name: tls
+          secret:
+            secretName: mock-eln-tls
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mock-vendor
+  namespace: chemclaw
+  labels:
+    app.kubernetes.io/name: mock-vendor
+spec:
+  selector:
+    app.kubernetes.io/name: mock-vendor
+  ports:
+    - name: http
+      port: 8091
+      targetPort: 8091
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mock-vendor
+  namespace: chemclaw
+  labels:
+    app.kubernetes.io/name: mock-vendor
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mock-vendor
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mock-vendor
+    spec:
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      securityContext:
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: mock-vendor
+          image: chemclaw/mock:kind
+          imagePullPolicy: Never
+          command: ["/app/.venv/bin/python", "-m", "app.mcp_tools.vendor_server"]
+          env:
+            - name: MOCK_MCP_VENDOR_HOST
+              value: 0.0.0.0
+            - name: MOCK_MCP_VENDOR_PORT
+              value: "8091"
+          ports:
+            - name: http
+              containerPort: 8091
+          # No /healthz on the MCP transport; a TCP accept is the same "reachable" bar the e2e
+          # lane's poll uses for this server.
+          readinessProbe:
+            tcpSocket: {port: http}
+            periodSeconds: 5
+            failureThreshold: 24
+          resources:
+            requests: {cpu: 25m, memory: 96Mi}
+            limits: {cpu: 500m, memory: 512Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}

@@ -28,11 +28,13 @@ from contextlib import asynccontextmanager
 from hmac import compare_digest
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.lowlevel.server import request_ctx
+from mcp.server.transport_security import TransportSecuritySettings
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
 from starlette.responses import Response
@@ -541,6 +543,39 @@ def _publishing(
     return _run
 
 
+# The addresses FastMCP itself admits by default: its DNS-rebinding guard, on for any server whose
+# configured host is loopback — which `FastMCP(name)` always is, however uvicorn binds it.
+_LOOPBACK_HOSTS = ("127.0.0.1:*", "localhost:*", "[::1]:*")
+
+
+def _transport_security(name: str) -> TransportSecuritySettings:
+    """The Host/Origin allow-list for this connector's `/mcp`: loopback, plus its own address.
+
+    **Without this every in-cluster call is refused with 421.** `FastMCP(name)` enables MCP's
+    DNS-rebinding protection with a loopback-only allow-list, and the bundles build their server
+    that way, so the transport answered `421 Misdirected Request` to any request whose `Host` was
+    not `127.0.0.1`/`localhost` — i.e. to every caller that dials it by Service name. Measured on
+    a kind cluster running the chart: the front door logged `connector molfp is unreachable
+    (421 Misdirected Request)` for every bundle on every turn, while `/healthz` (a plain route,
+    outside the transport) kept every probe green. The live lanes never saw it because they dial
+    `127.0.0.1`.
+
+    The guard stays on, narrowed rather than dropped: it admits loopback — the dev lanes, unchanged
+    — and the one address this connector is configured to be reached at, `connector_urls[name]`,
+    which the chart renders into every pod's ConfigMap including this one's. A deployment that
+    names no URL gets exactly FastMCP's default.
+    """
+    hosts = list(_LOOPBACK_HOSTS)
+    origins = [f"http://{host}" for host in _LOOPBACK_HOSTS]
+    address = urlsplit(settings.connector_urls.get(name, ""))
+    if address.netloc:
+        hosts.append(address.netloc)
+        origins.append(f"{address.scheme}://{address.netloc}")
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True, allowed_hosts=hosts, allowed_origins=origins
+    )
+
+
 def connector_app(
     server: FastMCP,
     *,
@@ -580,6 +615,7 @@ def connector_app(
     # Innermost of the three: it runs inside the tool body's own frame, where the result is still
     # the model it was declared as. See `_publish_tool_results`.
     _publish_tool_results(server, name=name)
+    server.settings.transport_security = _transport_security(name)
     mcp_app = server.streamable_http_app()
 
     @asynccontextmanager

@@ -450,6 +450,16 @@ connectors:
       replicas: 1
       maxReplicas: 2
       maxConcurrentActivities: 2
+    # **Its own server sizing, because the shared connector budget kills it at start.** This
+    # bundle's MCP app imports BoFire and with it PyTorch before it answers anything. Measured on a
+    # kind cluster running the shipped image: the server's cgroup peaked at 864 MiB and settled at
+    # 790 MiB idle, so `resources.connector`'s 512Mi limit OOM-killed it on every start
+    # (`OOMKilled`, exit 137, restart loop) — and under `CHEMCLAW_CONNECTORS_REQUIRED` a bound
+    # bundle that never answers keeps the front door from starting. The limit leaves room for a
+    # surrogate fit on top of the idle footprint; the request is that footprint.
+    serverResources:
+      requests: { cpu: "100m", memory: "896Mi" }
+      limits: { cpu: "2", memory: "1536Mi" }
   results:
     # Republishing computed results to an external results store (D-2026-08-25). A jobs-only
     # bundle, so `server: false` and no app pod or Service renders.

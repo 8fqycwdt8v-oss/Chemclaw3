@@ -1,0 +1,173 @@
+# Temporal, self-hosted as production runs it (deploy/README.md, "Stateful dependencies"), in its
+# smallest form: `temporalio/auto-setup` — every Temporal service in one process — against the
+# `postgres` above, under its own `temporal` role and its own two databases. Same image and version
+# as `infra/docker-compose.yml`, so the compose lane and this one exercise one broker.
+#
+# `DEFAULT_NAMESPACE` registers the namespace the chart is told to use (`temporal.namespace` in
+# values-kind.yaml). The chart has no default for it on purpose, and on a shared broker registering
+# it is the operator's step; here the broker is this lane's own, so auto-setup does it.
+#
+# **Plaintext in devauth, mTLS in oidc-mock.** devauth runs `secrets.temporalTls.enabled: false`,
+# the README's dev-cluster setting; core refuses that under `CHEMCLAW_ENTRA_REQUIRED=true`, so
+# oidc-mock turns on frontend TLS with client certificates required. Which one is decided by the
+# `chemclaw-temporal-tls-env` ConfigMap `up.sh` writes per mode (empty in devauth); the certificates
+# (`temporal-tls`, from the cluster CA) are mounted in both, so the manifest names neither mode.
+#
+# `enableServiceLinks: false` on every pod in `manifests/`: Kubernetes injects `<SERVICE>_PORT=
+# tcp://…` for every Service in the namespace, and a Service named `temporal-ui` hands the UI a
+# `TEMPORAL_UI_PORT` it parses as its own listen port — it crash-loops on `cannot unmarshal !!str
+# "tcp://…" into int`. Nothing here discovers a peer through those variables.
+apiVersion: v1
+kind: Service
+metadata:
+  name: temporal-frontend
+  namespace: chemclaw
+  labels:
+    app.kubernetes.io/name: temporal
+spec:
+  selector:
+    app.kubernetes.io/name: temporal
+  ports:
+    - name: grpc
+      port: 7233
+      targetPort: 7233
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: temporal
+  namespace: chemclaw
+  labels:
+    app.kubernetes.io/name: temporal
+spec:
+  replicas: 1
+  # One broker process owns the schema setup; two racing it on a rollout is a failure to avoid.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: temporal
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: temporal
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: temporal
+          image: temporalio/auto-setup:1.25.2
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: DB
+              value: postgres12
+            - name: DB_PORT
+              value: "5432"
+            - name: POSTGRES_SEEDS
+              value: postgres
+            - name: POSTGRES_USER
+              value: temporal
+            - name: POSTGRES_PWD
+              valueFrom: {secretKeyRef: {name: chemclaw-kind-db, key: TEMPORAL_PASSWORD}}
+            # Created by `postgres.yaml`'s init script; see the note there.
+            - name: SKIP_DB_CREATE
+              value: "true"
+            - name: DEFAULT_NAMESPACE
+              value: chemclaw
+            - name: DEFAULT_NAMESPACE_RETENTION
+              value: 72h
+            - name: POD_IP
+              valueFrom: {fieldRef: {fieldPath: status.podIP}}
+            - name: BIND_ON_IP
+              value: 0.0.0.0
+            - name: TEMPORAL_BROADCAST_ADDRESS
+              value: $(POD_IP)
+          envFrom:
+            - configMapRef:
+                name: chemclaw-temporal-tls-env
+          ports:
+            - name: grpc
+              containerPort: 7233
+          readinessProbe:
+            tcpSocket:
+              port: 7233
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 24
+          resources:
+            requests: {cpu: 250m, memory: 384Mi}
+            limits: {cpu: "2", memory: 1Gi}
+          volumeMounts:
+            - name: tls
+              mountPath: /tls
+              readOnly: true
+      volumes:
+        - name: tls
+          secret:
+            secretName: temporal-tls
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: temporal-ui
+  namespace: chemclaw
+  labels:
+    app.kubernetes.io/name: temporal-ui
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: temporal-ui
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      nodePort: 30233
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: temporal-ui
+  namespace: chemclaw
+  labels:
+    app.kubernetes.io/name: temporal-ui
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: temporal-ui
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: temporal-ui
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: temporal-ui
+          image: temporalio/ui:2.31.2
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: TEMPORAL_ADDRESS
+              value: temporal-frontend:7233
+            - name: TEMPORAL_DEFAULT_NAMESPACE
+              value: chemclaw
+          envFrom:
+            - configMapRef:
+                name: chemclaw-temporal-tls-env
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 25m, memory: 64Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+          volumeMounts:
+            - name: tls
+              mountPath: /tls
+              readOnly: true
+      volumes:
+        - name: tls
+          secret:
+            secretName: temporal-tls

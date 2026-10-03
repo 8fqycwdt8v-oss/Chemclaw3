@@ -24,6 +24,19 @@ spec:
         azure.workload.identity/use: "true"
     spec:
       serviceAccountName: {{ .Values.serviceAccount.name }}
+      {{- /* **No service links, on every pod this chart renders.** Kubernetes injects
+             `<SERVICE>_HOST` / `<SERVICE>_PORT=tcp://…` for every Service in the namespace into
+             every container started after it, and this chart's own front-door Service is named
+             `chemclaw-service` — so every pod that (re)started after the first install received
+             `CHEMCLAW_SERVICE_PORT=tcp://10.96.x.y:8080` and `CHEMCLAW_SERVICE_HOST=10.96.x.y`,
+             which `Settings` reads as `service_port` / `service_host`. Measured on a kind
+             cluster: every component died at import on `service_port: unable to parse string as
+             an integer`, and the front door would have bound its ClusterIP had it parsed. A
+             first install hides it (the pods start before the Service exists); the first
+             restart, rollout or node drain does not. Nothing here discovers a peer through these
+             variables — every address is a setting — so turning them off costs nothing.
+             `tests/test_deploy_chart.py` holds it on every rendered pod. */}}
+      enableServiceLinks: false
       {{- include "chemclaw.imagePullSecrets" . | nindent 6 }}
       {{- include "chemclaw.spreadAcrossNodes" (dict "Release" .Release "component" "service") | nindent 6 }}
       {{- /* A turn runs up to `CHEMCLAW_SERVICE_TURN_TIMEOUT_SECONDS`, and the default grace period

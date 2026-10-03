@@ -1,0 +1,10 @@
+# Everything in one namespace, and that is a requirement rather than tidiness: `Chemclaw3-mcp`'s
+# NetworkPolicies admit their caller with a bare `podSelector`, which is same-namespace only, and the
+# chart's connector addresses are bare Service names (deploy/README.md, "Attaching a connector
+# bundle"). The name is also the chart's `temporal.namespace` default in `values-kind.yaml`.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: chemclaw
+  labels:
+    app.kubernetes.io/part-of: chemclaw3

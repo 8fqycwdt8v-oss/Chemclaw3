@@ -953,3 +953,31 @@ def test_the_dev_banner_does_not_echo_a_credential_the_operator_already_exported
     assert "SUPER-SECRET-PROD-TOKEN" in exported
     for env_var in rest:  # a minted token is printed either way
         assert tokens[env_var] in banner
+
+
+def test_a_connector_answers_the_address_it_is_configured_at_and_refuses_others(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In a cluster a connector is dialled by Service name; FastMCP's default refused that with 421.
+
+    `FastMCP(name)` turns on DNS-rebinding protection with a loopback-only `Host` allow-list, so a
+    front door calling `http://chemclaw-connector-molfp:8080/mcp` got `421 Misdirected Request` on
+    every call — measured on a kind cluster, every bundle unreachable on every turn while the probes
+    stayed green. The connector now also admits the address `connector_urls` gives it, and still
+    refuses a `Host` it was never configured at (the rebinding case the guard exists for).
+    """
+    from fastapi.testclient import TestClient
+
+    from chemclaw.connectors.server import connector_app
+
+    monkeypatch.setattr("chemclaw.connectors.server._declared_bearer_env", lambda name: None)
+    monkeypatch.setattr(
+        settings, "connector_urls", {"probe": "http://chemclaw-connector-probe:8080/mcp"}
+    )
+    with TestClient(connector_app(FastMCP("probe"), name="probe")) as client:
+        for host in ("chemclaw-connector-probe:8080", "127.0.0.1:8080", "localhost:8811"):
+            assert client.post("/mcp", json={}, headers={"Host": host}).status_code != 421, host
+        assert (
+            client.post("/mcp", json={}, headers={"Host": "attacker.example:8080"}).status_code
+            == 421
+        )

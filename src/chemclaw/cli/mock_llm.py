@@ -844,6 +844,11 @@ def catalogue(name: str) -> list[Behaviour]:
 def main(argv: list[str] | None = None) -> int:
     """Serve one behaviour catalogue until killed."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    # **The bind address is a flag because a pod cannot use the default.** Loopback is right for the
+    # live lane, where every caller shares this machine; in a cluster (`deploy/kind/`) the callers
+    # are other pods, and a mock bound to 127.0.0.1 answers none of them. The default stays
+    # loopback so nothing that already starts this mock changes what it exposes.
+    parser.add_argument("--host", default=MOCK_HOST)
     parser.add_argument("--port", type=int, default=MOCK_PORT)
     parser.add_argument(
         "--catalogue",
@@ -861,9 +866,9 @@ def main(argv: list[str] | None = None) -> int:
     mock = MockLlm(behaviours)
     print(
         f"mock LLM serving {len(behaviours)} {args.catalogue} behaviour(s) on "
-        f"http://{MOCK_HOST}:{args.port}/v1"
+        f"http://{args.host}:{args.port}/v1"
     )
-    uvicorn.run(build_app(mock), host=MOCK_HOST, port=args.port, log_level="warning")
+    uvicorn.run(build_app(mock), host=args.host, port=args.port, log_level="warning")
     return 0
 
 

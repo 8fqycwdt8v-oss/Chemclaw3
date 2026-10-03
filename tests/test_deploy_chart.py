@@ -2835,6 +2835,12 @@ def _makefile_renders() -> list[list[str]]:
     Replaces a pair of `len(...) == 2` assertions. The count was the *point* of those tests — every
     render must pay the escape hatch — and pinning it as a literal meant that adding a third render
     failed them for the one reason that is not a defect. The invariant is "each", not "two".
+
+    **Renders of the shipped defaults only.** A render that passes a values file (`-f`) is
+    rendering *that* file's postures — `kind-validate`'s `deploy/kind/values-kind.yaml` states its
+    egress, retention and namespace in the file — so demanding the `--set` escape hatches of it
+    would demand a second, contradicting statement. What such a file states is
+    `tests/test_kind_deploy.py`'s to check, and it renders the file itself.
     """
     lines = (DEPLOY.parent / "Makefile").read_text().splitlines()
     renders: list[list[str]] = []
@@ -2846,7 +2852,8 @@ def _makefile_renders() -> list[list[str]]:
         while lines[cursor].rstrip().endswith("\\"):
             cursor += 1
             block.append(lines[cursor])
-        renders.append(block)
+        if not any(" -f " in part for part in block):
+            renders.append(block)
     return renders
 
 
@@ -4769,6 +4776,57 @@ def _pod_specs(rendered: str) -> list[tuple[str, dict[str, Any]]]:
             continue
         specs.append((doc["metadata"]["name"], doc["spec"]["template"]["spec"]))
     return specs
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+def test_a_connector_server_that_declares_its_own_sizing_gets_it_and_no_other_does() -> None:
+    """`connectors.<name>.serverResources` reaches that bundle's server pod and only that one.
+
+    The shared `resources.connector` budget OOM-killed the `bo` server on every start (measured
+    864 MiB peak against a 512Mi limit), so `bo` declares its own sizing — and a knob that rendered
+    nothing would leave the crash loop in place while the values file read as fixed.
+    """
+    result = _render()
+    assert result.returncode == 0, result.stderr
+    values = _values()
+    sized = {
+        f"chemclaw-connector-{name}": entry["serverResources"]
+        for name, entry in values["connectors"].items()
+        if entry.get("enabled") and entry.get("server") and entry.get("serverResources")
+    }
+    assert "chemclaw-connector-bo" in sized, "bo no longer declares its own server sizing"
+    servers = [
+        (name, spec)
+        for name, spec in _pod_specs(result.stdout)
+        if name.startswith("chemclaw-connector-") and "worker" not in name
+    ]
+    assert servers, "the render has no connector server pods"
+    for name, spec in servers:
+        expected = sized.get(name, values["resources"]["connector"])
+        assert spec["containers"][0]["resources"] == expected, name
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+@pytest.mark.parametrize("overrides", _OFF_BY_DEFAULT_RENDERS.values(), ids=_OFF_BY_DEFAULT_RENDERS)
+def test_no_pod_is_handed_its_own_front_door_s_address_as_a_setting(
+    overrides: tuple[str, ...],
+) -> None:
+    """Service links off on every pod, because this chart's Service *is* a setting's name.
+
+    Kubernetes gives every container `<SERVICE>_HOST` and `<SERVICE>_PORT=tcp://<ip>:<port>` for
+    each Service in its namespace, and the front door's Service is `chemclaw-service` — so a pod
+    restarted after the first install read `CHEMCLAW_SERVICE_PORT=tcp://10.96.x.y:8080` as
+    `Settings.service_port` and died at import. Measured on a kind cluster, where every component
+    of a fresh install crash-looped on exactly that `int_parsing` error once its first restart
+    came; on any cluster the first rollout or drain after install does the same. Asserted over every
+    pod spec of every variant, since a new template inherits the defect by omission.
+    """
+    result = _render(*overrides)
+    assert result.returncode == 0, result.stderr
+    specs = _pod_specs(result.stdout)
+    assert specs, "the render has no pod specs — this test would assert nothing"
+    linked = sorted(name for name, spec in specs if spec.get("enableServiceLinks") is not False)
+    assert not linked, f"pods still handed CHEMCLAW_SERVICE_* by service links: {linked}"
 
 
 @pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")

@@ -1,0 +1,86 @@
+# `Chemclaw3_ui`'s BFF (which also serves the built SPA), pointed at the chart's front-door Service.
+#
+# The auth mode is two things `up.sh` chooses together, so this file names neither as a literal
+# that could disagree with the other: the image (`chemclaw/ui:kind-devauth` — built with
+# ALLOW_DEV_AUTH — or `chemclaw/ui:kind` for oidc-mock) is substituted at apply time, and the
+# environment (`AUTH_MODE`, and the tenant/client/scope in oidc-mock) arrives through the
+# `chemclaw-ui-auth` ConfigMap `up.sh` writes per mode.
+#
+# Reaches the front door because values-kind.yaml's `networkPolicy.ingressNamespaces` admits this
+# namespace. `/readyz` asks the front door's own `/readyz`, so this pod is ready only when the
+# backend is.
+apiVersion: v1
+kind: Service
+metadata:
+  name: ui
+  namespace: chemclaw
+  labels:
+    app.kubernetes.io/name: ui
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: ui
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      nodePort: 30173
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ui
+  namespace: chemclaw
+  labels:
+    app.kubernetes.io/name: ui
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ui
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ui
+    spec:
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        # The image's `node` user, by number, so `runAsNonRoot` can verify it.
+        runAsUser: 1000
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: bff
+          image: chemclaw/ui:kind-devauth
+          imagePullPolicy: Never
+          env:
+            - name: PORT
+              value: "8080"
+            - name: BIND_HOST
+              value: 0.0.0.0
+            - name: CHEMCLAW_API_URL
+              value: http://chemclaw-service:8080
+            - name: APP_VERSION
+              value: kind
+          envFrom:
+            - configMapRef:
+                name: chemclaw-ui-auth
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests: {cpu: 25m, memory: 96Mi}
+            limits: {cpu: "1", memory: 512Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
