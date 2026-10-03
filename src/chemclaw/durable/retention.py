@@ -30,7 +30,8 @@ to be exhaustive, not asserted to be.
   comment: `job_records` is that record, and is refused from this sweep below for exactly that
   reason.) **One kind is the exception, in the other direction**: an artefact push (`exhibit`) is a
   notification whose source of truth is the artefact list, so it is pruned after
-  `exhibit_push_retention_hours` whether consumed or not (`_EXHIBIT_PUSHES`).
+  `exhibit_push_retention_hours` whether consumed or not (`_EXHIBIT_PUSHES`) — by its own job,
+  `prune_exhibit_pushes`, which runs whether or not a retention policy is stated.
 - `session_messages` — conversation history. Bounded by age, per the deployment's policy, **but an
   age cutoff alone cannot dispose of a conversation row** (D-145). A `tool_use` and the
   `tool_result` answering it are one indivisible unit: delete either half and the API rejects the
@@ -1529,25 +1530,6 @@ async def _sweep_once(
     outcome = RetentionOutcome(deleted={}, skipped=[])
     first_error: BaseException | None = None
     async with connection(settings.postgres_dsn) as conn:
-        # Artefact pushes first, on their own window in hours and whatever `session_events`' day
-        # window says — see `_EXHIBIT_PUSHES`. Isolated like every table below.
-        try:
-            pushes, more = await _prune_by_age(
-                conn,
-                "session_events",
-                "created_at",
-                _EXHIBIT_PUSHES,
-                settings.exhibit_push_retention_hours,
-                budget,
-                unit="hours",
-            )
-            outcome.deleted["session_events"] = pushes
-            if more:
-                outcome.rows_deferred = 1
-        except Exception as exc:  # isolated; re-raised once every table is tried
-            await conn.rollback()
-            logger.exception("retention sweep failed for artefact pushes; the tables still run")
-            first_error = exc
         # No budget check here, deliberately: a sweep that has started finishes its tables. Every
         # branch below is already capped, the budget's job is to decide whether to sweep *again*,
         # and a third place asking it is what made a pass with a tiny budget do nothing at all —
@@ -2006,5 +1988,64 @@ class RetentionWorkflow:
             heartbeat_timeout=timedelta(
                 seconds=settings.background_activity_heartbeat_timeout_seconds
             ),
+            retry_policy=BAD_DATA_RETRY,
+        )
+
+
+@durable_activity("background")
+@activity.defn
+async def prune_exhibit_pushes() -> int:
+    """Delete `exhibit` push rows older than `exhibit_push_retention_hours`; return how many went.
+
+    **Its own job, not a branch of the retention sweep, because it is not a retention policy.** It
+    used to be the sweep's first step, and the sweep is scheduled only where a deployment states a
+    window (`durable/schedules.planned_schedules`) — so on every deployment that states none, which
+    is the shipped default, the push window that "is not 0-disabled because an unbounded
+    notification queue is not a retention policy anybody chose" pruned nothing, ever, and a release
+    whose only window was the artefacts' never scheduled the sweep at all
+    (`D-2026-10-03-an-artefact-push-expires-on-its-own-schedule`). A push is a notification whose
+    source of truth is the artefact list, so it goes on age alone, consumed or not; every other
+    `session_events` kind keeps the sweep's `consumed_at` rule.
+
+    Batched and budgeted like every age cutoff here (`_prune_by_age`), and what one run leaves is
+    the next run's: the schedule fires again one window later.
+    """
+    async with connection(settings.postgres_dsn) as conn:
+        deleted, more = await _prune_by_age(
+            conn,
+            "session_events",
+            "created_at",
+            _EXHIBIT_PUSHES,
+            settings.exhibit_push_retention_hours,
+            _Budget(),
+            unit="hours",
+        )
+    log_event(
+        logger,
+        "retention.exhibit_pushes",
+        "pruned %d artefact push rows older than %d hours%s",
+        deleted,
+        settings.exhibit_push_retention_hours,
+        "; more remain for the next run" if more else "",
+        deleted=deleted,
+    )
+    return deleted
+
+
+# Parks rather than fails on a bug in workflow code, as `RetentionWorkflow` does: Schedule-only,
+# idempotent, and nothing reads the run — a parked run costs notification rows a tab refetches
+# past, never an answer (`tests/test_workflow_registry.py::_MAY_PARK`).
+@durable_workflow("background")
+@workflow.defn
+class ExhibitPushPruneWorkflow:
+    """Expire artefact push notifications on their own window (`prune_exhibit_pushes`)."""
+
+    @workflow.run
+    async def run(self) -> int:
+        """Run one prune of expired artefact pushes and return how many rows went."""
+        return await workflow.execute_activity(
+            prune_exhibit_pushes,
+            start_to_close_timeout=timedelta(seconds=settings.retention_timeout_seconds),
+            schedule_to_start_timeout=queue_wait_timeout(),
             retry_policy=BAD_DATA_RETRY,
         )
