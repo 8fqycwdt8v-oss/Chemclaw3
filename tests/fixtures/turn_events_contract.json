@@ -56,9 +56,18 @@
       "author": "str",
       "author_kind": "Literal['agent', 'human']",
       "exhibit_id": "str",
-      "kind": "Literal['document', 'table', 'structures', 'chart', 'result', 'link']",
+      "kind": "Literal['document', 'table', 'structures', 'chart', 'result', 'link', 'geometry']",
       "op": "Literal['created', 'revised']",
       "revision": "int",
+      "title": "str"
+    },
+    "exhibit_draft": {
+      "call_id": "str",
+      "done": "bool",
+      "exhibit_id": "str",
+      "kind": "Literal['document', '']",
+      "markdown": "str",
+      "op": "Literal['create', 'revise']",
       "title": "str"
     },
     "handoff": {

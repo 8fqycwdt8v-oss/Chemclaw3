@@ -11,7 +11,7 @@ frontend built in parallel — names and shapes exactly as frozen.
       (`tests/test_compaction.py`) — stop if the warm arm would fail.
 - [x] **2. `GET /calc-artifacts/content?ref=`** — any authenticated caller; 404 unknown, 413 above
       `calc_artifact_max_download_bytes`, stored media type, sanitised `Content-Disposition`.
-- [ ] **3. `exhibit_draft` event** — derived from `create_exhibit`/`revise_exhibit` tool-call chunks
+- [x] **3. `exhibit_draft` event** — derived from `create_exhibit`/`revise_exhibit` tool-call chunks
       in the graph stream; partial JSON; document only; throttled by
       `exhibit_draft_min_interval_ms`, growth only, capped by `exhibit_max_spec_bytes`; Event union,
       OpenAPI, dev page, contract fixture; test through the real graph stream with a chunking model.

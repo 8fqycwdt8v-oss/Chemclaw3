@@ -732,6 +732,35 @@ class ExhibitEvent(BaseModel):
     author: str
 
 
+class ExhibitDraftEvent(BaseModel):
+    """A `document` artefact while the model is still writing it — a preview, never the artefact.
+
+    Read off the arguments of a `create_exhibit`/`revise_exhibit` call the model is still
+    generating (`api/exhibit_drafts.py`), so a chemist watches a long report appear rather than a
+    spinner for the minute it takes to write. `markdown` is the **whole** text so far, not a delta,
+    so a dropped frame costs nothing; frames are at least `exhibit_draft_min_interval_ms` apart,
+    sent only when the text grew, and stop past `exhibit_max_spec_bytes`. `done` marks the frame
+    sent when the model finished the call's arguments, if the text grew after the last throttled
+    frame — still not the artefact: the tool may refuse it. The authoritative state is the
+    `exhibit` event that follows the call's result; a surface replaces the draft with it (by
+    `call_id` → that turn's next `exhibit`, or by `exhibit_id` for a revision) and discards a draft
+    no `exhibit` followed when the turn ends.
+
+    Turn stream only: never persisted, never on `GET /sessions/{id}/events`. `kind` is `""` while
+    the spec has a `markdown` and no `kind` yet; `exhibit_id` is `""` on a create; `title` is the
+    create's title and `""` on a revision, which takes none. A revision by `edits` streams nothing.
+    """
+
+    type: Literal["exhibit_draft"] = "exhibit_draft"
+    call_id: str
+    op: Literal["create", "revise"]
+    exhibit_id: str = ""
+    kind: Literal["document", ""] = ""
+    title: str = ""
+    markdown: str
+    done: bool = False
+
+
 # The closed set of events a turn can emit. New surfaces switch on `type`; adding an event is a new
 # class here plus one branch in the runner and the UI — never a bespoke per-surface stream.
 Event = (
@@ -754,6 +783,7 @@ Event = (
     | EvidenceSourceEvent
     | HandoffEvent
     | ExhibitEvent
+    | ExhibitDraftEvent
     | ErrorEvent
 )
 

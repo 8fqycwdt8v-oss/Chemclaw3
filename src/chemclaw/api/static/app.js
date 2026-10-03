@@ -71,6 +71,9 @@ function agentTag(evt) {
   return evt.agent ? `[${evt.agent}] ` : "";
 }
 
+// The one trace line each drafted artefact rewrites, by the tool call that is writing it.
+const draftLines = new Map();
+
 function applyEvent(evt, answerEl) {
   switch (evt.type) {
     case "queued":
@@ -193,6 +196,16 @@ function applyEvent(evt, answerEl) {
       // surface that renders it. This page has no pane, so it names what was written and where.
       add("trace", `\u25a4 artefact ${evt.op} \u2014 ${evt.title} (${evt.kind}, rev ${evt.revision}, ${evt.exhibit_id})`);
       return answerEl;
+    case "exhibit_draft": {
+      // A preview of a document artefact the model is still writing; every frame carries the
+      // whole text so far, so one trace line per call is rewritten in place rather than appended
+      // to, and the `exhibit` event that follows the call is what says the artefact exists.
+      const line = draftLines.get(evt.call_id) || add("trace", "");
+      draftLines.set(evt.call_id, line);
+      line.textContent = `\u270e drafting artefact ${evt.title || evt.exhibit_id} \u2014 ` +
+        `${evt.markdown.length} characters${evt.done ? ", written" : "\u2026"}`;
+      return answerEl;
+    }
     case "handoff":
       // The boundary rather than the speaker: what a reader needs is that the prose after this
       // line comes from an agent with a different surface and a different brief. `reason` is the
