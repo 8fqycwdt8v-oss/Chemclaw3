@@ -49,7 +49,12 @@ from chemclaw.api.deps import CurrentSession, CurrentUser, _resolve_session, req
 from chemclaw.api.detach import DetachableTurn
 from chemclaw.api.events import TURN_EVENT_REF, ErrorEvent, QueuedEvent, sse_frame
 from chemclaw.api.middleware import AT_CAPACITY
-from chemclaw.api.runner import failure_event, run_turn, settle_interrupted_turns
+from chemclaw.api.runner import (
+    failure_event,
+    run_turn,
+    settle_interrupted_turns,
+    transcript_settled,
+)
 from chemclaw.api.schemas import MessageIn, QueuedMessageOut, SessionQueueOut, session_title
 from chemclaw.api.state import (
     SessionTurns,
@@ -761,12 +766,19 @@ async def post_message(
                 # than leave the message behind it waiting one lease for a waiter that is gone.
                 await _leave_line(queue, session_id, ticket)
                 _left_line()
-            if slot is not None:
-                _release_turn_slot(active_turns, session_id, slot)
-                if holder is not None and claims is not None:
-                    await _release_turn_claim(claims, session_id, holder)
-            # Whatever ended — a turn, or a place in line — the next message may now be up.
-            signal.notify()
+            try:
+                # **The turn's question is settled before its claim is given up**, so the next
+                # message in the line can never find it still `running` under its own claim and
+                # call it interrupted (`runner.transcript_settled`). A Stop settles it on a task of
+                # its own; this is where the turn waits for that task to land.
+                await transcript_settled(session_id)
+            finally:
+                if slot is not None:
+                    _release_turn_slot(active_turns, session_id, slot)
+                    if holder is not None and claims is not None:
+                        await _release_turn_claim(claims, session_id, holder)
+                # Whatever ended — a turn, or a place in line — the next message may now be up.
+                signal.notify()
 
     handed_off = False
     try:

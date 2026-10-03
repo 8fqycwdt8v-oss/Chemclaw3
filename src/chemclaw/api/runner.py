@@ -60,6 +60,7 @@ from chemclaw.agent.profiles import get_profile
 from chemclaw.agent.scratchpad import memory_store
 from chemclaw.agent.session import TurnSession
 from chemclaw.agent.session_events import claim_unconsumed
+from chemclaw.agent.session_store import InterruptedTurn
 from chemclaw.agent.skill_fingerprint import skill_fingerprint
 from chemclaw.agent.spend_cap import spend_hit_cap, turn_billed_tokens
 from chemclaw.agent.state import turn_config
@@ -2877,8 +2878,9 @@ async def _settle_transcript_turn(
         )
 
 
-#: Teardown settlements still in flight, held so the task cannot be collected mid-write.
-_PENDING_SETTLES: set["asyncio.Task[None]"] = set()
+#: Teardown settlements still in flight, per session, held so a task cannot be collected mid-write
+#: and so the turn's own route can wait for them (`transcript_settled`).
+_PENDING_SETTLES: dict[str, set["asyncio.Task[None]"]] = {}
 
 
 def _settle_after_teardown(
@@ -2888,17 +2890,47 @@ def _settle_after_teardown(
 
     The same contract as `agent/turn_cost.record_turn_cost` and `plan_gate.spend_approval_after_
     teardown`: synchronous, the write on its own task, its failure its own (the settle degrades
-    rather than raises), and the task held until it finishes.
+    rather than raises), and the task held until it finishes — **and held under its session**, so
+    the route that owns the turn's claim can wait for it before giving the claim up.
     """
+    session_id = session.session_id
     try:
         task = asyncio.get_running_loop().create_task(
             _settle_transcript_turn(history, session, turn, status)
         )
     except RuntimeError:  # no running loop — a synchronous caller has nowhere to schedule
-        logger.warning("no event loop to settle session %s's question", session.session_id)
+        logger.warning("no event loop to settle session %s's question", session_id)
         return
-    _PENDING_SETTLES.add(task)
-    task.add_done_callback(_PENDING_SETTLES.discard)
+    _PENDING_SETTLES.setdefault(session_id, set()).add(task)
+
+    def _done(finished: "asyncio.Task[None]") -> None:
+        pending = _PENDING_SETTLES.get(session_id)
+        if pending is not None:
+            pending.discard(finished)
+            if not pending:
+                del _PENDING_SETTLES[session_id]
+
+    task.add_done_callback(_done)
+
+
+async def transcript_settled(session_id: str) -> None:
+    """Wait until every torn-down turn of this session has settled its question.
+
+    **The ordering a teardown's settle needs, and the one caller that can give it.** A stopped turn
+    settles its question `stopped` on a task of its own (`_settle_after_teardown`), because its
+    teardown may not `await`. The claim the turn holds is released afterwards, by the route's pump
+    (`routes/turns.post_message`), and the moment it is, the next message in the session's line
+    may take it and ask `settle_interrupted_turns` — which finds the stopped turn's question still
+    `running` under a successor's claim if the settle has not landed, marks it `interrupted`, and
+    books a second outcome beside the one the turn booked itself. So the route waits here first.
+
+    Shielded, because the caller is a `finally` running *because* its task was cancelled, and the
+    settle must not be cancelled with it. A settle that fails has already degraded on its own; this
+    only waits.
+    """
+    pending = list(_PENDING_SETTLES.get(session_id, ()))
+    if pending:
+        await asyncio.shield(asyncio.gather(*pending, return_exceptions=True))
 
 
 async def settle_interrupted_turns(
@@ -2928,7 +2960,7 @@ async def settle_interrupted_turns(
     if mark is None:
         return 0
     try:
-        interrupted: list[tuple[str, str | None]] = await mark(session_id, state=state)
+        interrupted: list[InterruptedTurn] = await mark(session_id, state=state)
     except (ConnectionError, psycopg.Error) as exc:
         degraded(
             logger,
@@ -2938,17 +2970,29 @@ async def settle_interrupted_turns(
             exc,
         )
         return 0
-    for correlation_id, actor in interrupted:
-        _book_interrupted(session_id, correlation_id, actor)
+    for turn in interrupted:
+        _book_interrupted(session_id, turn)
     return len(interrupted)
 
 
-def _book_interrupted(session_id: str, correlation_id: str, actor: str | None) -> None:
+def _book_interrupted(session_id: str, turn: InterruptedTurn) -> None:
     """The record of one interrupted turn: its counter, its log record and its `turn_costs` row.
 
     Called once per turn `mark_interrupted` returned, which is once across every process — see
-    `settle_interrupted_turns`.
+    `settle_interrupted_turns`. **Not at all for a turn already booked**: its own process wrote an
+    outcome and then could not settle its question (a store that refused the settle, or a process
+    that died between the two writes), and a second outcome would count one turn twice on the
+    ledger and on `chemclaw_turns_finished_total`. Its question is still marked; that is all.
     """
+    correlation_id, actor = turn.correlation_id, turn.actor
+    if turn.booked:
+        logger.info(
+            "session %s's turn %s had no settled question and is marked interrupted; its outcome "
+            "was already booked by its own process, so none is booked here",
+            session_id,
+            correlation_id,
+        )
+        return
     METRICS.increment("chemclaw_turns_finished_total", labels={"outcome": INTERRUPTED})
     log_event(
         logger,

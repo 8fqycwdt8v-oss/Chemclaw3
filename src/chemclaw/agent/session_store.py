@@ -63,7 +63,7 @@ from collections.abc import AsyncIterator, Iterable, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import datetime
 from functools import cache
-from typing import Any, Literal, get_args
+from typing import Any, Literal, NamedTuple, get_args
 
 import psycopg
 from langchain_core.messages import (
@@ -161,6 +161,17 @@ def stored_authorship(message: BaseMessage) -> Authorship | None:
 #: live owner (`PostgresHistoryProvider.mark_interrupted`). See
 #: `D-2026-10-03-a-turn-is-written-ahead-and-an-interrupted-one-says-so`.
 TurnStatus = Literal["running", "done", "failed", "stopped", "interrupted"]
+
+
+class InterruptedTurn(NamedTuple):
+    """One turn `mark_interrupted` just marked: whose it was, and whether it is already booked."""
+
+    correlation_id: str
+    actor: str | None
+    #: The turn already has a `turn_costs` row — its own process booked an outcome and then failed
+    #: to settle its question. Marked so the transcript says the turn is over; not booked again.
+    booked: bool
+
 
 #: Where a stored message carries its turn's status, stamped as the correlation id is.
 STORED_TURN_STATUS = "chemclaw_turn_status"
@@ -456,7 +467,13 @@ _MARK_INTERRUPTED = (
     "WHERE m.session_id = %s AND m.turn_status = 'running' "
     "AND NOT EXISTS (SELECT 1 FROM session_turns t WHERE t.session_id = m.session_id "
     "AND t.expires_at > now() AND t.claimed_at <= m.created_at) "
-    "RETURNING m.correlation_id, m.actor"
+    "RETURNING m.correlation_id, m.actor, "
+    # Whether the turn already has an outcome of its own on the ledger — a turn whose process was
+    # alive to book one, and whose settle then failed (the store refused it, or the process died
+    # between the two writes). Its question is still marked, because the transcript should say the
+    # turn is over; its outcome is not booked a second time.
+    "EXISTS (SELECT 1 FROM turn_costs c "
+    "WHERE c.correlation_id = m.correlation_id AND m.correlation_id <> '') AS booked"
 )
 # The newest turn's status, for the reattach route's "what happened to the turn I was following".
 _LATEST_TURN_STATUS = (
@@ -1115,14 +1132,14 @@ class PostgresHistoryProvider:
 
     async def mark_interrupted(
         self, session_id: str | None, *, state: dict[str, Any] | None = None
-    ) -> list[tuple[str, str | None]]:
+    ) -> list[InterruptedTurn]:
         """Mark this session's turns whose owner is gone `interrupted`; return the ones marked now.
 
-        Each is `(correlation_id, actor)`, and a turn is returned by **exactly one** call across
-        every process (`_MARK_INTERRUPTED`), so the caller can book its outcome without a second
-        writer ever booking it again. Asked by whoever touches the session next — its next turn, a
-        reattach, a transcript read — because the process that would have settled it is the one
-        that died.
+        A turn is returned by **exactly one** call across every process (`_MARK_INTERRUPTED`), so
+        the caller can book its outcome without a second writer ever booking it again — and
+        `booked` says whether the turn's own process already did, in which case nobody books it.
+        Asked by whoever touches the session next — its next turn, a reattach, a transcript read —
+        because the process that would have settled it is the one that died.
         """
         if not session_id:
             return []
@@ -1131,7 +1148,7 @@ class PostgresHistoryProvider:
                 await cur.execute(_MARK_INTERRUPTED, (session_id,))
                 rows = await cur.fetchall()
             await conn.commit()
-        return [(str(row[0] or ""), row[1]) for row in rows]
+        return [InterruptedTurn(str(row[0] or ""), row[1], bool(row[2])) for row in rows]
 
     async def latest_turn_status(
         self, session_id: str | None, *, state: dict[str, Any] | None = None
@@ -1641,7 +1658,7 @@ class InMemoryHistoryProvider:
 
     async def mark_interrupted(
         self, session_id: str | None, *, state: dict[str, Any] | None = None
-    ) -> list[tuple[str, str | None]]:
+    ) -> list[InterruptedTurn]:
         """Nothing, ever: an in-memory transcript dies with the process whose turn it would mark."""
         return []
 
