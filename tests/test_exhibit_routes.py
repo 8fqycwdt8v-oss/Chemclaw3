@@ -653,6 +653,16 @@ def test_create_exhibits_description_drops_html_where_the_kind_is_off(
     assert "html" not in off.description and off.args_schema is bound.args_schema
     assert HTML_CLAUSE in bound.description, "the shared, cached tool was edited in place"
 
+    # And it is what a compiled graph binds, not only what the function returns.
+    from chemclaw.agent.audit import NullAuditSink
+    from chemclaw.agent.langgraph_agent import build_langgraph_agent
+    from tests.fakes_langgraph import ScriptedChatModel
+    from tests.test_context_floor import _bound_tools
+
+    graph = build_langgraph_agent(ScriptedChatModel(["ok"]), audit_sink=NullAuditSink())
+    [compiled] = [tool for tool in _bound_tools(graph) if tool.name == "create_exhibit"]
+    assert "html" not in compiled.description
+
 
 def test_the_agent_creates_a_page_and_is_refused_one_when_html_is_off(
     monkeypatch: pytest.MonkeyPatch,
