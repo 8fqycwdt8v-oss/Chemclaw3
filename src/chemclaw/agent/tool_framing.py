@@ -139,7 +139,7 @@ from chemclaw.agent.tool_result_size import (
 from chemclaw.connectors.transport import SERVED_BY
 from chemclaw.core.config import settings
 from chemclaw.core.result_handle import handle_line, handles_resolve
-from chemclaw.exhibits.models import EXHIBIT_TOOLS
+from chemclaw.exhibits.evidence import is_evidence
 
 #: What `defanged_payload` preserves: a payload comes back as the type it went in as.
 _Payload = TypeVar("_Payload")
@@ -735,13 +735,14 @@ async def stamp_result_handles(request: Any, handler: Callable[[Any], Any]) -> A
 
     **Nor where no binding could resolve it.** Two cases, each a handle that would be refused: a
     deployment whose bindings cannot read the store (`core.result_handle.handles_resolve`), and an
-    artefact tool's own result (`exhibits.models.EXHIBIT_TOOLS`), which `exhibits.bindings` never
-    binds to — a `read_exhibit` readout is the agent's own transcription handed back.
+    result that is not evidence (`exhibits.evidence.is_evidence` — a `read_exhibit` readout, a
+    helper's report, a scratchpad file), which `exhibits.bindings` never binds to: it is the
+    agent's own text handed back.
 
     Nothing re-bounds after this, and that is the cost the decision record states: a stamped result
     is its batch's share of the ceiling plus one line of `len(handle_line(ref))` characters.
     """
-    stamp = handles_resolve() and str(request.tool_call["name"]) not in EXHIBIT_TOOLS
+    stamp = handles_resolve() and is_evidence(str(request.tool_call["name"]))
     return rewritten_tool_messages(
         await handler(request), lambda message: _with_handle(message, stamp=stamp)
     )

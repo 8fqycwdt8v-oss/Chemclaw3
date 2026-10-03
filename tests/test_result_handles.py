@@ -155,11 +155,12 @@ def test_no_handle_is_stamped_where_no_binding_could_resolve_it(
 
     Two cases. Under the in-memory session store the result store still keeps the result (the
     transcript opens it), but `exhibits.bindings` cannot resolve one — before, every result there
-    carried a handle and every `$bind` naming it was refused. And an artefact tool's own result is
-    stored and never bindable (`exhibits.models.EXHIBIT_TOOLS`), so it carries none either.
+    carried a handle and every `$bind` naming it was refused. And a result that is not evidence — an
+    artefact readout, a helper's report, a scratchpad file (`exhibits.evidence`) — is stored and
+    never bindable, so it carries none either.
     """
     ref = content_address(_PAYLOAD)
-    for name in sorted(EXHIBIT_TOOLS):
+    for name in sorted({*EXHIBIT_TOOLS, "task", "read_file", "write_todos", "transfer_to_x"}):
         message = _chain(_PAYLOAD, name=name)
         assert stored_result_ref(message) == ref, "still stored: the transcript opens it"
         assert message_text(message) == _PAYLOAD

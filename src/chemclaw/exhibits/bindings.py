@@ -41,8 +41,8 @@ from typing import Any, Literal
 from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.core.result_handle import handles_resolve
+from chemclaw.exhibits.evidence import evidence_params, evidence_predicate
 from chemclaw.exhibits.models import (
-    EXHIBIT_TOOLS,
     ExhibitBinding,
     ExhibitView,
     GeometrySpec,
@@ -57,31 +57,31 @@ from chemclaw.exhibits.sources import resolved_geometry
 #: What each bound position accepts, by the name a refusal uses for it.
 Expect = Literal["cell", "prop", "smiles", "x", "y", "rows"]
 
-# **An artefact tool's own result is never bindable** (`models.EXHIBIT_TOOLS`): a `read_exhibit`
-# readout is the agent's own transcription handed back, and a value bound to it would carry the
-# provenance marker of a tool result while being exactly the transcription a binding exists to
-# replace. Every query here carries the same predicate, so a ref into one resolves to nothing — the
-# "not a tool result of this conversation" refusal on a write, `ok: false` on a read.
+# **Only evidence is bindable** (`exhibits.evidence`): a `read_exhibit` readout, a helper's report
+# or a scratchpad file is the agent's own transcription handed back, and a value bound to it would
+# carry the provenance marker of a tool result while being exactly the transcription a binding
+# exists to replace. Every query here carries the same predicate, so a ref into one resolves to
+# nothing — the "not a tool result of this conversation" refusal on a write, `ok: false` on a read.
+_EVIDENCE = evidence_predicate("tool")
+
 _SESSION_LINKS = (
-    "SELECT content_hash, tool FROM tool_result_links WHERE session_id = %s AND tool <> ALL(%s)"
+    f"SELECT content_hash, tool FROM tool_result_links WHERE session_id = %s AND {_EVIDENCE}"
 )
 
 # A read names exact refs, so it asks only for those — served by the links' primary key
 # `(session_id, content_hash)` — rather than for every result the session ever stored.
 _LINKS_FOR = (
     "SELECT content_hash, tool FROM tool_result_links "
-    "WHERE session_id = %s AND content_hash = ANY(%s) AND tool <> ALL(%s)"
+    f"WHERE session_id = %s AND content_hash = ANY(%s) AND {_EVIDENCE}"
 )
 
-_BLOBS = """
+_BLOBS = f"""
 SELECT l.content_hash, b.data
 FROM tool_result_links l
 JOIN tool_result_blobs b ON b.content_hash = l.content_hash
-WHERE l.session_id = %s AND l.content_hash = ANY(%s) AND l.tool <> ALL(%s)
+WHERE l.session_id = %s AND l.content_hash = ANY(%s) AND {evidence_predicate("l.tool")}
 """
 
-#: The tools whose stored results no binding may read, as the list the queries above take.
-_NOT_BINDABLE = sorted(EXHIBIT_TOOLS)
 
 #: Parsed result documents, by content hash, most recently used last, each with its stored size.
 #:
@@ -181,9 +181,9 @@ async def _links(session_id: str, refs: Collection[str] | None = None) -> dict[s
     async with db.connection(settings.postgres_dsn) as conn:
         async with conn.cursor() as cur:
             if refs is None:
-                await cur.execute(_SESSION_LINKS, (session_id, _NOT_BINDABLE))
+                await cur.execute(_SESSION_LINKS, (session_id, *evidence_params()))
             else:
-                await cur.execute(_LINKS_FOR, (session_id, list(refs), _NOT_BINDABLE))
+                await cur.execute(_LINKS_FOR, (session_id, list(refs), *evidence_params()))
             rows = await cur.fetchall()
     return {str(row[0]): str(row[1]) for row in rows}
 
@@ -194,7 +194,7 @@ async def _blobs(session_id: str, refs: list[str]) -> dict[str, bytes]:
         return {}
     async with db.connection(settings.postgres_dsn) as conn:
         async with conn.cursor() as cur:
-            await cur.execute(_BLOBS, (session_id, refs, _NOT_BINDABLE))
+            await cur.execute(_BLOBS, (session_id, refs, *evidence_params()))
             rows = await cur.fetchall()
     return {str(row[0]): bytes(row[1]) for row in rows}
 

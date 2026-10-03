@@ -406,3 +406,44 @@ async def test_an_agent_write_is_an_exhibit_event_and_counted_and_so_is_a_refusa
     assert 'chemclaw_exhibit_refusals_total{reason="stale_revision"}' in exposition
     assert 'chemclaw_exhibit_refusals_total{reason="invalid"}' in exposition
     assert session
+
+
+async def test_a_helpers_report_of_the_artefact_neither_grounds_its_figures_nor_lends_a_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A `task` helper that read the artefact and reported back is the agent's own text too.
+
+    After `read_exhibit` was excluded, the same figures came back through a helper: its report is
+    stored and linked under `task`, quoting the artefact, and the next revision found `9.95`
+    "returned by a tool". The evidence rule (`exhibits.evidence`) excludes every non-capability
+    result, so it stays flagged and a `$bind` into the report is refused.
+    """
+    await migrated_db_or_skip()
+    monkeypatch.setattr(settings, "session_store", "postgres")
+    monkeypatch.setattr(exhibit_tools, "record_exhibit", lambda signal: None)
+    session = uuid4().hex
+    session_token = set_current_session_id(session)
+    identity = set_current_identity("oid-ana", frozenset())
+    try:
+        rows = [{"solvent": "phenol", "pka": 9.95}]
+        xid = json.loads(await create_exhibit("pKa", {**_TABLE, "rows": rows}))["exhibit_id"]
+        report = json.dumps({"summary": "the artefact lists phenol", "pka": 9.95})
+        for tool in ("task", "read_file", "write_todos"):
+            await store_tool_result(
+                session_id=session, correlation_id="c", tool=tool, text=f"{tool}: {report}"
+            )
+        ref = await store_tool_result(
+            session_id=session, correlation_id="c", tool="task", text=report
+        )
+        await revise_exhibit(xid, 1, "same", spec={**_TABLE, "rows": rows})
+        head = await default_exhibit_store().view(session, xid)
+        assert head is not None and head.unverified_figures == ["9.95"]
+
+        bound = {"$bind": {"result": f"r:{ref[:12]}", "pointer": "/pka"}}
+        with pytest.raises(ChemclawError, match="not a tool result of this conversation"):
+            await revise_exhibit(
+                xid, 2, "bind", spec={**_TABLE, "rows": [{"solvent": "phenol", "pka": bound}]}
+            )
+    finally:
+        reset_current_identity(identity)
+        reset_current_session_id(session_token)
