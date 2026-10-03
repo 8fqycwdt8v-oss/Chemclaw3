@@ -213,9 +213,11 @@ it out works in principle; the steps below were faster both times.
    `/healthz` answers. That is a kubelet that stopped probing during the storm, and a fresh pod clears it.
 3. **Bring the workers back two at a time**, waiting for each pair's `rollout status`. Measured: 41–151 s
    per pair.
-4. **Clear a stuck release record** if Helm left one (`helm history` shows `pending-upgrade` or
-   `pending-rollback` as the newest revision):
-   `kubectl -n chemclaw delete secret sh.helm.release.v1.chemclaw.v<N>`.
+4. **Clear a stuck release record**, as a last resort, only if Helm left one and nothing is still
+   upgrading: `helm --kube-context kind-chemclaw -n chemclaw history chemclaw` shows
+   `pending-upgrade` or `pending-rollback` as the newest revision `<N>`. Delete that one record (it
+   is Helm's release metadata, not a running resource):
+   `kubectl --context kind-chemclaw -n chemclaw delete secret sh.helm.release.v1.chemclaw.v<N>`.
 5. **Re-run `up.sh up`** with the same auth mode. It finds the pods ready, completes the release with
    its hooks, and runs the smoke.
 
