@@ -23,7 +23,7 @@ Make one with `create_exhibit` when the chemist will **reread, edit or export** 
 - a set of structures (a series of analogues, the species of a mechanism);
 - a series to plot (a temperature profile, a campaign's best-so-far);
 - one 3D structure — the `geometry` kind: cite the calculation that produced it as `source`
-  (`calc_key`, the calculation key, and the artifact `name` `list_artifacts` lists) rather than
+  (`calc_key`, the calculation key, and the `name` of the stored by-product) rather than
   retyping its coordinates; give an inline `xyz` block only for a structure no stored
   calculation holds.
 
