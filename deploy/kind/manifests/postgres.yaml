@@ -102,16 +102,25 @@ spec:
           ports:
             - name: postgres
               containerPort: 5432
+          # **Timeouts sized for a saturated node, and the liveness one above all.** Kubernetes'
+          # default exec-probe timeout is 1 s; measured during a `helm upgrade` that restarted every
+          # core pod at once (node at 1000-1200 % CPU), `pg_isready` took longer than that, the
+          # liveness probe failed four times and the kubelet killed a healthy Postgres — which took
+          # every component with it. A database restart is the most expensive remedy on the node,
+          # so it is reserved for a Postgres that has not answered for over two minutes.
           readinessProbe:
             exec:
               command: ["pg_isready", "-U", "chemclaw", "-d", "chemclaw"]
             periodSeconds: 5
+            timeoutSeconds: 5
             failureThreshold: 6
           livenessProbe:
             exec:
               command: ["pg_isready", "-U", "chemclaw", "-d", "chemclaw"]
             initialDelaySeconds: 30
             periodSeconds: 20
+            timeoutSeconds: 10
+            failureThreshold: 6
           resources:
             requests: {cpu: 100m, memory: 256Mi}
             limits: {cpu: "2", memory: 1536Mi}

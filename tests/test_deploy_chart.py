@@ -4557,9 +4557,21 @@ def test_the_pre_install_hook_reads_a_configuration_that_exists_when_it_runs() -
         "the pre-install migrate Job reads objects the manifest creates after it runs, so a fresh "
         "`helm install` has no ConfigMap or ServiceAccount for it"
     )
+    migrate_annotations = hooks["chemclaw-migrate"]["metadata"]["annotations"]
+    migrate_events = set(migrate_annotations["helm.sh/hook"].split(","))
     for name in (pre_sa, pre_config):
         assert name in hooks, f"the migrate Job reads {name!r}, which is neither a hook nor tracked"
-        assert hooks[name]["metadata"]["annotations"]["helm.sh/hook"] == "pre-install,pre-upgrade"
+        # **Every event the Job runs on, not a subset.** The copies are `hook-succeeded`, so none
+        # outlives the release that created it; an event that runs the Job without them hands it
+        # objects that do not exist. Pinned as `pre-install,pre-upgrade` here, this test held the
+        # defect in place: measured, `helm rollback` ran the Job on `pre-rollback`, its pod was
+        # refused (`error looking up service account`) and the rollback failed.
+        events = set(hooks[name]["metadata"]["annotations"]["helm.sh/hook"].split(","))
+        assert events == migrate_events, (
+            f"{name} is a hook on {sorted(events)} but the migrate Job that reads it runs on "
+            f"{sorted(migrate_events)}: on {sorted(migrate_events - events)} the Job's pod cannot "
+            "start"
+        )
         weight = int(hooks[name]["metadata"]["annotations"]["helm.sh/hook-weight"])
         assert weight < int(
             hooks["chemclaw-migrate"]["metadata"]["annotations"]["helm.sh/hook-weight"]

@@ -339,6 +339,19 @@ class ServiceSettings(BaseSettings):
     # cap and `service_turn_timeout_seconds`, and a deployment that prefers cost over completion
     # turns this off and gets the old posture exactly.
     service_turn_survives_disconnect: bool = True
+    # How long a stop sent *by a page that is unloading*
+    # (`POST /sessions/{id}/turn/stop?reason=unload`) waits before it cancels the turn, so a
+    # reload — which the browser cannot tell from a close at unload time — can reattach
+    # (`GET /sessions/{id}/turn/stream`) and keep the turn
+    # (`D-2026-10-03-an-unload-stop-waits-for-a-reload`). Long enough for a reload to finish booting
+    # and reattach on a slow network; short enough that a chemist who really left frees the turn's
+    # capacity soon after. One window per stop: a second unload stop while one is pending does not
+    # move its deadline. 0 turns the deferral off, and every unload stop is immediate, as before.
+    service_turn_unload_grace_seconds: float = Field(default=20.0, ge=0, le=300)
+    # How many unload stops one turn may defer. Each reattach cancels the pending stop, so without
+    # a bound a reload loop would restart the window indefinitely; past this, an unload stop is
+    # immediate. (The turn's own `service_turn_timeout_seconds` still bounds it either way.)
+    service_turn_unload_grace_max_deferrals: int = Field(default=3, ge=1)
     # Turn/token budgets — the runaway-cost guard (service.budget). A single turn is already
     # iteration-capped (`harness_max_loop_iterations`), but nothing caps the *number*
     # of turns, so a client or an automated push-back loop could accumulate unbounded LLM spend.
