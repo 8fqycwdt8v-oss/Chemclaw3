@@ -189,6 +189,50 @@ Fixed in core, with tests, because each one breaks any Kubernetes install and no
 - **A re-run converges.** `helm upgrade` runs with `--force-conflicts`, so a field changed by hand
   while debugging does not block the next `up`.
 
+## Operator notes
+
+### Recovering from an upgrade storm
+
+A `helm upgrade` that changes every pod template (a new core image, a changed ConfigMap) starts two
+generations of about twenty Python processes on one node at once. Measured twice on an 8-CPU
+Docker Desktop node: load average 90–120, the API server unreachable for 30–40 minutes
+(`TLS handshake timeout`, `etcdserver: request timed out`, transient `RBAC: clusterrole … not found`),
+Helm failing while Kubernetes was still converging, and the release left `pending-upgrade`. Waiting
+it out works in principle; the steps below were faster both times.
+
+1. **Take the workers off the node.** They are the slowest importers and the least urgent:
+
+   ```console
+   $ for d in $(kubectl --context kind-chemclaw -n chemclaw get deploy -o name | grep worker); do
+       kubectl --context kind-chemclaw -n chemclaw scale "$d" --replicas=0; done
+   ```
+
+   Repeat any command that times out; the API server answers again within minutes once the load drops.
+2. **Let everything else settle**: front door, connector servers, fleet, UI, all Ready. Force-delete
+   pods left `Terminating`, and delete a pod that stays Running but unready while its own
+   `/healthz` answers. That is a kubelet that stopped probing during the storm, and a fresh pod clears it.
+3. **Bring the workers back two at a time**, waiting for each pair's `rollout status`. Measured: 41–151 s
+   per pair.
+4. **Clear a stuck release record** if Helm left one (`helm history` shows `pending-upgrade` or
+   `pending-rollback` as the newest revision):
+   `kubectl -n chemclaw delete secret sh.helm.release.v1.chemclaw.v<N>`.
+5. **Re-run `up.sh up`** with the same auth mode. It finds the pods ready, completes the release with
+   its hooks, and runs the smoke.
+
+### Reclaiming node disk
+
+`kind load` imports each image under an `import-<date>@sha256:…` reference. An image replaced by a
+newer load keeps its layers until that reference and the content it holds are removed. Inside the node:
+
+```console
+$ docker exec chemclaw-control-plane ctr -n k8s.io content prune references
+```
+
+This removes the content blobs that no image reference holds; measured, it freed 6 GB. Afterwards
+`ctr images check` lists the remaining images as `incomplete`, because their compressed layers are
+gone. Their unpacked snapshots remain, so pods still start (verified by restarting one). What is
+lost is only the ability to re-export an image from the node.
+
 ## CI
 
 `make kind-validate` runs in the `chart` job: it renders the chart with `values-kind.yaml`, renders the
