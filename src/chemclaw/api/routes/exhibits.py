@@ -37,6 +37,7 @@ from chemclaw.core.config import settings
 from chemclaw.core.identity_context import get_current_correlation_id
 from chemclaw.core.logging import log_event
 from chemclaw.core.metrics_bridge import degraded
+from chemclaw.exhibits.bindings import bind_for_write, resolved_view
 from chemclaw.exhibits.diff import diff_specs
 from chemclaw.exhibits.export import MEDIA_TYPES, export_filename, resolve_export
 from chemclaw.exhibits.models import (
@@ -54,6 +55,7 @@ from chemclaw.exhibits.models import (
     StaleRevision,
     UnknownExhibit,
     parse_spec,
+    require_creatable,
     require_writable,
 )
 from chemclaw.exhibits.sources import require_source_stored
@@ -67,9 +69,10 @@ ExhibitId = Annotated[str, Path(pattern=EXHIBIT_ID.pattern)]
 
 
 class ExhibitListOut(BaseModel):
-    """A session's artefacts, and whether this deployment offers artefacts at all."""
+    """A session's artefacts, and whether this deployment offers artefacts and html ones at all."""
 
     enabled: bool
+    html_enabled: bool
     exhibits: list[ExhibitHeader] = Field(default_factory=list)
 
 
@@ -111,10 +114,13 @@ async def list_exhibits(session_id: str, live: CurrentSession) -> ExhibitListOut
 
     `enabled` is `agent_exhibits_enabled`: off, the agent holds no artefact tools and a surface
     hides the pane. What a session already holds is still listed, because switching the agent's
-    tools off is not a reason to hide what a chemist pinned.
+    tools off is not a reason to hide what a chemist pinned. `html_enabled` is
+    `agent_html_artefacts_enabled`, under the same rule: off refuses a new html artefact and still
+    lists the ones the session holds.
     """
     return ExhibitListOut(
         enabled=settings.agent_exhibits_enabled,
+        html_enabled=settings.agent_html_artefacts_enabled,
         exhibits=await default_exhibit_store().headers(session_id),
     )
 
@@ -125,9 +131,10 @@ async def create_exhibit_route(
     """Create an artefact as a person — revision 1, `author_kind` human.
 
     A `result` artefact pins a stored tool result: its `result_ref` must be one this session can
-    fetch, so a person cannot pin bytes another conversation produced.
+    fetch, so a person cannot pin bytes another conversation produced — the rule a binding is held
+    to as well (`exhibits.bindings`).
     """
-    spec = await _parsed(body.spec, title=body.title, change_note="")
+    spec = await _parsed(session_id, body.spec, title=body.title, change_note="", creating=True)
     if spec.kind != body.kind:
         raise HTTPException(
             status_code=422, detail=f"kind is {body.kind!r} and the spec is a {spec.kind!r}"
@@ -147,17 +154,17 @@ async def create_exhibit_route(
             status_code=409, detail={"code": "exhibit_limit", "message": str(exc)}
         ) from exc
     await _announce(view, "created")
-    return view
+    return await resolved_view(view)
 
 
 async def get_exhibit(
     session_id: str, exhibit_id: ExhibitId, live: CurrentSession, revision: int = 0
 ) -> ExhibitView:
-    """One revision of an artefact — the head for `revision=0`."""
+    """One revision of an artefact — the head for `revision=0` — with every binding resolved."""
     view = await default_exhibit_store().view(session_id, exhibit_id, revision)
     if view is None:
         raise HTTPException(status_code=404, detail=_missing(exhibit_id, revision))
-    return view
+    return await resolved_view(view)
 
 
 async def list_revisions(
@@ -177,7 +184,11 @@ async def get_exhibit_diff(
     from_revision: int = Query(default=0, alias="from", ge=0),
     to_revision: int = Query(default=0, alias="to", ge=0),
 ) -> ExhibitDiff:
-    """What changed between two revisions; `to=0` is the head, `from=0` its parent."""
+    """What changed between two revisions; `to=0` is the head, `from=0` its parent.
+
+    Between the *stored* specs, bindings and all (`exhibits.diff`): the store's views are not
+    resolved, so a binding whose result has since been swept reads as unchanged here.
+    """
     store = default_exhibit_store()
     after = await store.view(session_id, exhibit_id, to_revision)
     if after is None:
@@ -210,7 +221,7 @@ async def post_exhibit_revision(
     if current is None:
         raise HTTPException(status_code=404, detail=_missing(exhibit_id, 0))
     title = current.title if body.title is None else body.title
-    spec = await _parsed(body.spec, title=title, change_note=body.change_note)
+    spec = await _parsed(session_id, body.spec, title=title, change_note=body.change_note)
     await _require_session_result(session_id, spec)
     try:
         view = await store.append(
@@ -237,7 +248,7 @@ async def post_exhibit_revision(
             status_code=409, detail={"code": "exhibit_limit", "message": str(exc)}
         ) from exc
     await _announce(view, "revised")
-    return view
+    return await resolved_view(view)
 
 
 async def export_exhibit(
@@ -250,12 +261,15 @@ async def export_exhibit(
     """The artefact as a file; a format its kind does not offer is a 404, not a wrong file.
 
     So is a geometry whose cited calculation artifact has been evicted since it was written: the
-    artefact still reads, and the file it pointed at is not there to give.
+    artefact still reads, and the file it pointed at is not there to give. A bound value is
+    exported as what it resolves to; one whose result is gone is an empty cell. An html page is
+    exported as `text/plain` (`exhibits.export.MEDIA_TYPES`): this server never answers
+    `text/html` for an artefact.
     """
     view = await default_exhibit_store().view(session_id, exhibit_id, revision)
     if view is None:
         raise HTTPException(status_code=404, detail=_missing(exhibit_id, revision))
-    body = await resolve_export(view.spec, fmt)
+    body = await resolve_export((await resolved_view(view)).spec, fmt)
     if body is None:
         raise HTTPException(
             status_code=404, detail=f"a {view.kind} artefact has no {fmt!r} export here"
@@ -282,15 +296,30 @@ async def list_my_exhibits(
     )
 
 
-async def _parsed(raw: dict[str, Any], *, title: str, change_note: str) -> Spec:
-    """The typed, write-checked spec, or the 422 that names what is wrong with it."""
+async def _parsed(
+    session_id: str,
+    raw: dict[str, Any],
+    *,
+    title: str,
+    change_note: str,
+    creating: bool = False,
+) -> Spec:
+    """The spec to store, write-checked with its bindings resolved, or the 422 naming the fault.
+
+    A person's spec may keep any binding whose result this session holds — one copied from
+    `raw_spec` — or replace it with a literal; a ref outside the session's results is refused, so
+    nobody can bind bytes the conversation never produced (`exhibits.bindings`).
+    """
     try:
         spec = parse_spec(raw)
-        require_writable(spec, title=title, change_note=change_note)
+        if creating:
+            require_creatable(spec)
+        bound = await bind_for_write(session_id, spec)
+        require_writable(bound.resolved, title=title, change_note=change_note, stored=bound.stored)
         await require_source_stored(spec)
     except InvalidExhibit as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return spec
+    return bound.stored
 
 
 async def _require_session_result(session_id: str, spec: Spec) -> None:

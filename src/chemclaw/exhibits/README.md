@@ -1,12 +1,14 @@
 # `chemclaw.exhibits` — artefacts beside the chat
 
 **Responsibility:** the versioned working documents a session shows beside its chat — a plan or
-report draft, a table, a set of structures, a chart, one 3D geometry, a pinned tool result, a link
-to a protocol, note or job. The agent writes them with three tools (`agent/exhibit_tools.py`); a chemist reads,
+report draft, a table, a set of structures, a chart, one 3D geometry, an html page, a pinned tool
+result, a link to a protocol, note or job. The agent writes them with three tools (`agent/exhibit_tools.py`); a chemist reads,
 edits, pins and exports them over `api/routes/exhibits.py`. Named `exhibit` because `artifact` is
 the calculation store's word here (D-124); every surface a chemist reads says "Artefacts".
 
-The decision record is `D-2026-10-02-an-artefact-is-part-of-the-answer-not-an-effect`; the wire
+The decision record is `D-2026-10-02-an-artefact-is-part-of-the-answer-not-an-effect`, with wave 3's
+`D-2026-10-03-an-artefact-binds-a-value-to-the-result-it-came-from` and
+`D-2026-10-03-model-written-html-runs-in-an-opaque-origin-the-backend-never-serves`; the wire
 contract `Chemclaw3_ui` builds against is the shapes in `models.py` and the routes.
 
 ## The one thing to internalize
@@ -22,19 +24,19 @@ the tools that already do those writes.
 
 | Module | What it owns |
 | --- | --- |
-| `models.py` | The seven spec kinds (`document`, `table`, `structures`, `chart`, `result`, `link`, `geometry`) as a discriminated union with `extra="forbid"`; `parse_spec` (shape — including a geometry's XYZ layout — on every read and write) and `require_writable` (the caps and the SMILES parse, writes only); the API shapes `ExhibitHeader`, `ExhibitView`, `ExhibitRevision`, `ExhibitDiff`; the four errors a write can meet. |
+| `models.py` | The eight spec kinds (`document`, `table`, `structures`, `chart`, `result`, `link`, `geometry`, `html`) as a discriminated union with `extra="forbid"`, and the `$bind`/`rows_from` shapes where a value may be bound; `parse_spec` (shape — including a geometry's XYZ layout — on every read and write), `require_creatable` (the html switch) and `require_writable` (the caps, the SMILES parse and no literal `null` where only a vanished binding may leave one, writes only); the API shapes `ExhibitHeader`, `ExhibitView` (resolved `spec`, stored `raw_spec`, `bindings`), `ExhibitRevision`, `ExhibitDiff`; the four errors a write can meet. |
 | `store.py` | `ExhibitStore` with an in-memory and a Postgres backend (`115_session_exhibits.sql`). Append-only revisions under a header row lock; a stale base is `StaleRevision`; every read is session-scoped, so another session's id answers as an unknown one. A caller-chosen id makes `create` a create-or-return, which is how a durable writer (a development report's activity) stays idempotent across retries. |
-| `diff.py` | A revision diff in `protocols.diff.FieldChange`'s shape, so one UI component renders both: line hunks for a document, cells for a table, item fields for structures, points for a chart, whole fields for a geometry. |
-| `export.py` | `md`, `csv`, `smi` and `xyz` files; every CSV cell goes through `protocols.export.csv_cell`, the one formula-injection guard. `resolve_export` reads a cited geometry's bytes; `safe_filename` is the one `Content-Disposition` sanitiser. |
+| `bindings.py` | Resolves a spec's bindings against the session's stored tool results (`tool_result_links`, the session is the scope): RFC 6901 pointers, a handle's prefix to exactly one ref, type and cap checks. A write is refused unless every binding resolves and is stored with the full ref; a read fills the values in and reads a swept result as `null`, `ok: false`. |
+| `diff.py` | A revision diff in `protocols.diff.FieldChange`'s shape, so one UI component renders both: line hunks for a document, cells for a table, item fields for structures, points for a chart, whole fields for a geometry. Over stored specs, so a binding is the value compared. |
+| `export.py` | `md`, `csv`, `smi`, `xyz` and `html` files (the last as `text/plain`, never `text/html`), from the resolved spec; every CSV cell goes through `protocols.export.csv_cell`, the one formula-injection guard. `resolve_export` reads a cited geometry's bytes; `safe_filename` is the one `Content-Disposition` sanitiser. |
 | `sources.py` | What a geometry's `source` names in the calculation artifact store (D-124): refused on write unless stored, read for its export and for `GET /calc-artifacts/content` (`D-2026-10-03-a-geometry-artefact-cites-the-calc-store-it-does-not-copy`). |
-| `grounding.py` | The figures an agent-written revision states that no stored tool result of the session accounts for — **unchecked, not wrong** — stored on the revision at write time. |
+| `grounding.py` | The figures an agent-written revision states that no stored tool result of the session accounts for — **unchecked, not wrong** — stored on the revision at write time. A bound value states none; an html page is read for its text (`html_text`). |
 
 ## What is deliberately not here
 
-- **Bindings into the tool-result store** (a cell that *is* a tool value rather than a copy of
-  one). Deferred by the ADR on a measurement: tables are 2.7% of what answers spend, so the token
-  argument for them did not hold, and the cost is a handle in every tool result's shape.
-- **Artefacts that run code** — model-authored HTML or JavaScript. Declined in the ADR, with its
+- **Serving an html page as HTML.** A page is stored and exported as text; it runs only in
+  `Chemclaw3_ui`'s separate sandbox origin, in an opaque-origin frame with no network.
+- **A tool that fetches a result back by its handle** — declined in the bindings ADR, with its
   `Revisit when:`.
 - **Rendering.** Structures are drawn by the UI's RDKit worker, charts by its own SVG and a geometry
   by its 3D viewer; no server path produces an image for an artefact.

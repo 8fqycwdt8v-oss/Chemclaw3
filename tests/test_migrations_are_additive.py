@@ -252,6 +252,12 @@ _REVIEWED_REPLAY_BREAKS: dict[str, tuple[str, tuple[str, ...], str]] = {
 # an exempted migration still fails — an exemption is granted to statements somebody read, not to a
 # filename.
 _REVIEWED_ROLLBACK_BREAKS: dict[str, tuple[str, tuple[str, ...]]] = {
+    "117_exhibit_html_kind.sql": (
+        # 116's shape again: a widening of the same kind CHECK. The previous image loses reading
+        # an `html` revision (and a revision that binds a value), which the runbook says.
+        "D-2026-10-03-model-written-html-runs-in-an-opaque-origin-the-backend-never-serves",
+        ("ALTER TABLE session_exhibits DROP CONSTRAINT",),
+    ),
     "116_exhibit_geometry_kind.sql": (
         # 058's shape: the drop-and-re-add *widens* the kind CHECK, and the previous image writes
         # only kinds the new constraint still admits. What it loses is reading a `geometry`

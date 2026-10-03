@@ -10,22 +10,33 @@ artefact routes only.
 import asyncio
 import csv
 import io
+import json
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
 from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.routing import Route
 
+from chemclaw.agent import exhibit_tools
 from chemclaw.agent import session_members as members_module
+from chemclaw.agent.exhibit_tools import create_exhibit
 from chemclaw.agent.session_events import claim_unconsumed
 from chemclaw.api import app as front_door
 from chemclaw.api.app import create_app
 from chemclaw.api.auth import Principal, require_principal
 from chemclaw.api.routes import exhibits as routes
 from chemclaw.api.routes.streams import _exhibit_event
+from chemclaw.api.tool_results import content_address, store_tool_result
 from chemclaw.core.config import settings
 from chemclaw.core.db import connect
+from chemclaw.core.errors import ChemclawError
+from chemclaw.core.identity_context import reset_current_identity, set_current_identity
+from chemclaw.core.session_context import reset_current_session_id, set_current_session_id
+from chemclaw.exhibits import bindings
+from chemclaw.exhibits.export import MEDIA_TYPES
+from chemclaw.exhibits.grounding import html_text, stated_figures
 from chemclaw.exhibits.models import PUSH_KIND, parse_spec
 from chemclaw.exhibits.store import InMemoryExhibitStore, PostgresExhibitStore
 from tests.fakes_turn import Piece, ScriptedTurn
@@ -238,6 +249,7 @@ def test_the_listing_says_when_artefacts_are_off(app: Any, monkeypatch: pytest.M
     session = _shared(app)
     assert _as(app, _ANA).get(f"/sessions/{session}/exhibits").json() == {
         "enabled": False,
+        "html_enabled": True,
         "exhibits": [],
     }
 
@@ -511,3 +523,207 @@ def test_the_published_job_route_declares_its_reading_session(app: Any) -> None:
     parameters = app.openapi()["paths"]["/jobs/{job_id}"]["get"]["parameters"]
     named = {parameter["name"]: parameter for parameter in parameters}
     assert "session_id" in named and named["session_id"]["required"] is False
+
+
+# --- wave 3: the `html` kind and bound values over HTTP -------------------------------------------
+#
+# `D-2026-10-03-model-written-html-runs-in-an-opaque-origin-the-backend-never-serves` and
+# `D-2026-10-03-an-artefact-binds-a-value-to-the-result-it-came-from`. The property this block
+# exists for above all is a negative one — **no route answers `text/html` for an artefact** — and
+# it is asserted by walking the routes the app serves rather than a list written here, so a new
+# export format or artefact route is covered the day it lands.
+
+_PAGE = (
+    "<!doctype html><style>.bar{width:100%}</style><h1>Screen</h1><p>THF gave 76.5 %.</p>"
+    "<script>const points = [12.25, 40];</script>"
+)
+_HTML = {"kind": "html", "html": _PAGE, "height": 320}
+
+
+def test_an_html_page_reads_back_and_exports_as_text_never_as_html(app: Any) -> None:
+    """Created by a person, read as JSON, saved as a `.html` attachment served as plain text."""
+    session = _shared(app)
+    made = _create(app, _ANA, session, {"kind": "html", "title": "Screen page", "spec": _HTML})
+    assert made.status_code == 201, made.text
+    xid = made.json()["exhibit_id"]
+    assert made.json()["spec"] == _HTML and made.json()["raw_spec"] == _HTML
+    assert made.json()["bindings"] == []
+
+    exported = _as(app, _BEN).get(f"/sessions/{session}/exhibits/{xid}/export.html")
+    assert exported.status_code == 200
+    assert exported.headers["content-type"] == "text/plain; charset=utf-8"
+    disposition = exported.headers["content-disposition"]
+    assert disposition.startswith('attachment; filename="Screen-page-') and disposition.endswith(
+        '.html"'
+    )
+    assert exported.text == _PAGE + "\n"
+
+
+def test_no_route_answers_text_html_for_artefact_content(app: Any) -> None:
+    """Every GET route under an artefact, every export format, on an html artefact and a table."""
+    session = _shared(app)
+    xids = [
+        _create(app, _ANA, session, {"kind": kind, "title": "t", "spec": spec}).json()["exhibit_id"]
+        for kind, spec in (
+            ("html", _HTML),
+            ("table", {"kind": "table", "columns": [{"key": "a", "label": "A"}], "rows": []}),
+        )
+    ]
+    assert "text/html" not in " ".join(MEDIA_TYPES.values())
+    routes = [
+        route.path
+        for route in app.routes
+        if isinstance(route, Route)
+        and "GET" in (route.methods or set())
+        and "exhibit" in route.path
+    ]
+    assert any("export" in path for path in routes), routes
+    answered = 0
+    for xid in xids:
+        for path in routes:
+            formats = [*MEDIA_TYPES, "htm", "xhtml"] if "{fmt}" in path else [""]
+            for fmt in formats:
+                url = (
+                    path.replace("{session_id}", session)
+                    .replace("{exhibit_id}", xid)
+                    .replace("{fmt}", fmt)
+                )
+                response = _as(app, _ANA).get(url)
+                answered += response.status_code == 200
+                assert not response.headers.get("content-type", "").startswith("text/html"), (
+                    f"{url} answered {response.headers['content-type']}"
+                )
+    assert answered >= 10, "the walk reached too few routes to mean anything"
+
+
+def test_switching_html_off_refuses_a_new_page_and_keeps_the_ones_held(
+    app: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Off: a create is 422 and the listing says so; an existing page still reads and revises."""
+    session = _shared(app)
+    xid = _create(app, _ANA, session, {"kind": "html", "title": "p", "spec": _HTML}).json()[
+        "exhibit_id"
+    ]
+    monkeypatch.setattr(settings, "agent_html_artefacts_enabled", False)
+    refused = _create(app, _ANA, session, {"kind": "html", "title": "p", "spec": _HTML})
+    assert refused.status_code == 422 and "switched off" in refused.text
+    listed = _as(app, _ANA).get(f"/sessions/{session}/exhibits").json()
+    assert listed["html_enabled"] is False and [h["exhibit_id"] for h in listed["exhibits"]] == [
+        xid
+    ]
+    assert _as(app, _ANA).get(f"/sessions/{session}/exhibits/{xid}").status_code == 200
+    revised = _as(app, _ANA).post(
+        f"/sessions/{session}/exhibits/{xid}/revisions",
+        json={"parent_revision": 1, "spec": {**_HTML, "height": 400}},
+    )
+    assert revised.status_code == 201, revised.text
+
+
+def test_the_page_cap_is_its_own_bytes(app: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`exhibit_max_html_bytes` refuses a page past it, naming the cap."""
+    monkeypatch.setattr(settings, "exhibit_max_html_bytes", 10)
+    session = _shared(app)
+    refused = _create(app, _ANA, session, {"kind": "html", "title": "p", "spec": _HTML})
+    assert refused.status_code == 422 and "10-byte cap" in refused.text
+
+
+def test_a_pages_figures_are_read_from_its_text_and_scripts_but_not_its_styles() -> None:
+    """`width:100%` is layout; the paragraph's figure and the script's data are stated figures."""
+    assert "100" not in html_text(_PAGE) and "76.5" in html_text(_PAGE)
+    assert stated_figures(parse_spec(_HTML)) == ["76.5", "12.25", "40"]
+
+
+def test_the_agent_creates_a_page_and_is_refused_one_when_html_is_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`create_exhibit` lists the kind; off, the refusal says what to do instead."""
+    monkeypatch.setattr(settings, "session_store", "memory")
+    monkeypatch.setattr(exhibit_tools, "record_exhibit", lambda signal: None)
+    session_token = set_current_session_id(uuid4().hex)
+    identity = set_current_identity("oid-ana", frozenset())
+    try:
+        made = json.loads(asyncio.run(create_exhibit("Page", _HTML)))
+        assert made["revision"] == 1
+        monkeypatch.setattr(settings, "agent_html_artefacts_enabled", False)
+        with pytest.raises(ChemclawError, match="switched off"):
+            asyncio.run(create_exhibit("Page", _HTML))
+    finally:
+        reset_current_identity(identity)
+        reset_current_session_id(session_token)
+    assert "html" in (create_exhibit.__doc__ or "")
+
+
+# --- a person and bound values --------------------------------------------------------------------
+
+_RESULT = json.dumps({"rows": [{"name": "THF", "yield": 76.5}]})
+_REF = content_address(_RESULT)
+_COLUMNS = [{"key": "solvent", "label": "Solvent"}, {"key": "y", "label": "Yield", "unit": "%"}]
+
+
+def _bound_table(result: str = f"r:{_REF[:12]}") -> dict[str, Any]:
+    """A table whose yield cell is bound to the stored result."""
+    bound = {"$bind": {"result": result, "pointer": "/rows/0/yield"}}
+    return {"kind": "table", "columns": _COLUMNS, "rows": [{"solvent": "THF", "y": bound}]}
+
+
+def test_a_person_keeps_or_detaches_a_binding_and_cannot_invent_one(
+    app: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Served resolved with `raw_spec` and `bindings`; a kept binding is no change, a detach is one.
+
+    The app runs on the in-memory session layer, so the deployment check is opened by hand and the
+    results are stored in the real database the binding reads.
+    """
+    asyncio.run(migrated_db_or_skip())
+    monkeypatch.setattr(bindings, "_available", lambda: True)
+    session = _shared(app)
+    asyncio.run(
+        store_tool_result(session_id=session, correlation_id="c", tool="screen", text=_RESULT)
+    )
+    made = _create(app, _ANA, session, {"kind": "table", "title": "S", "spec": _bound_table()})
+    assert made.status_code == 201, made.text
+    view, xid = made.json(), made.json()["exhibit_id"]
+    assert view["spec"]["rows"] == [{"solvent": "THF", "y": 76.5}]
+    assert view["raw_spec"]["rows"][0]["y"]["$bind"]["result"] == _REF
+    assert view["bindings"] == [
+        {
+            "path": "rows[0].y",
+            "result_ref": _REF,
+            "tool": "screen",
+            "pointer": "/rows/0/yield",
+            "ok": True,
+            "error": "",
+        }
+    ]
+    exported = _as(app, _ANA).get(f"/sessions/{session}/exhibits/{xid}/export.csv")
+    assert exported.text.splitlines()[1] == "THF,76.5"
+
+    revisions = f"/sessions/{session}/exhibits/{xid}/revisions"
+    kept = _as(app, _BEN).post(
+        revisions, json={"parent_revision": 1, "spec": view["raw_spec"], "change_note": "same"}
+    )
+    assert kept.status_code == 201, kept.text
+    diff = _as(app, _ANA).get(f"/sessions/{session}/exhibits/{xid}/diff?from=1&to=2").json()
+    assert diff["changes"] == []
+
+    detached = {**view["raw_spec"], "rows": [{"solvent": "THF", "y": 76.5}]}
+    moved = _as(app, _ANA).post(revisions, json={"parent_revision": 2, "spec": detached})
+    assert moved.status_code == 201 and moved.json()["bindings"] == []
+    diff = _as(app, _ANA).get(f"/sessions/{session}/exhibits/{xid}/diff?from=2&to=3").json()
+    assert [change["path"] for change in diff["changes"]] == ["rows[0].y"]
+
+    elsewhere = content_address("another conversation's bytes")
+    asyncio.run(
+        store_tool_result(
+            session_id=uuid4().hex,
+            correlation_id="c",
+            tool="t",
+            text="another conversation's bytes",
+        )
+    )
+    invented = _as(app, _ANA).post(
+        revisions, json={"parent_revision": 3, "spec": _bound_table(elsewhere)}
+    )
+    assert invented.status_code == 422 and "not a tool result of this conversation" in (
+        invented.text
+    )
