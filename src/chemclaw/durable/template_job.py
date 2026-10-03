@@ -477,11 +477,12 @@ class TemplateWorkflow:
         return TemplateRunResult(template=run.template.name, steps=results, result=results[last])
 
     async def _resume(self, run: TemplateRunInput) -> dict[str, Any]:
-        """The steps a previous failed attempt at this id already finished.
+        """The steps a previous failed or cancelled attempt at this id already finished.
 
-        **A run is retried, not resumed, without this.** `ALLOW_DUPLICATE_FAILED_ONLY` means the
-        only way to re-execute an id is after a failure, and `scope`/`results` were rebuilt empty
-        every time — so a five-step procedure that died at step four redid all four, while its own
+        **A run is retried, not resumed, without this.** `ALLOW_DUPLICATE_FAILED_ONLY` lets an id
+        re-execute only after a run that did not complete (failed, cancelled, terminated or timed
+        out all count), and `scope`/`results` were rebuilt empty every time — so a five-step
+        procedure that died at step four redid all four, while its own
         `job_records` row held their results with a docstring explaining why they were worth
         keeping.
 

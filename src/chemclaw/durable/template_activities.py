@@ -609,10 +609,19 @@ class ResumeRequest(BaseModel):
     fingerprint: str = Field(min_length=1)
 
 
+#: The recorded ends a relaunch may resume from. `cancelled` beside `failed` because a cancelled
+#: run's completed steps are as real as a failed one's (D-011: a persisted result is not
+#: recomputed), and `TemplateWorkflow` launches under `ALLOW_DUPLICATE_FAILED_ONLY`, which lets the
+#: same id start again after a cancel. Until the cancelled state existed a cancel was recorded as
+#: `failed` and resumed; recording it truthfully must not quietly turn that into a rerun from step
+#: one. A terminate or an execution timeout runs no workflow code and so writes no row to read.
+_RESUMABLE = frozenset({"failed", "cancelled"})
+
+
 @durable_activity("background")
 @activity.defn
 async def completed_steps(request: ResumeRequest) -> dict[str, Any]:
-    """The steps a previous failed run of `request.job_id` already finished, or `{}`.
+    """The steps a previous failed or cancelled run of `request.job_id` already finished, or `{}`.
 
     **The work was always kept and never read.** `failed_template_record` writes
     `result={"steps": completed}` and says why in as many words — *"A five-step procedure that died
@@ -626,10 +635,11 @@ async def completed_steps(request: ResumeRequest) -> dict[str, Any]:
     shapes how many commands a workflow issues is captured once, not re-read).
 
     **Three conditions, and each of them is a way this could be wrong rather than merely absent.**
-    The row must exist; it must be a *failure*, because `job_records` is upserted on `job_id` and a
-    completed run's row would otherwise be replayed as a resume of itself; and its fingerprint must
-    match, because the run id is a hash of the template *name* and its inputs, so editing the
-    file's steps produces a different procedure under the same id.
+    The row must exist; it must be a *failure or a cancellation* (`_RESUMABLE`), because
+    `job_records` is upserted on `job_id` and a completed run's row would otherwise be replayed as
+    a resume of itself; and its fingerprint must match, because the run id is a hash of the
+    template *name* and its inputs, so editing the file's steps produces a different procedure
+    under the same id.
 
     Best-effort in the same sense `_record_run` is: a resume that cannot be read is a slower run,
     and failing a run because its optional shortcut was unavailable would trade a real outcome for
@@ -648,7 +658,7 @@ async def completed_steps(request: ResumeRequest) -> dict[str, Any]:
     except Exception:
         logger.warning("could not read %s to resume it; starting over", request.job_id)
         return {}
-    if record is None or record.state != "failed":
+    if record is None or record.state not in _RESUMABLE:
         return {}
     result = record.result if isinstance(record.result, dict) else {}
     if result.get("template_fingerprint") != request.fingerprint:

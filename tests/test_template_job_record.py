@@ -398,6 +398,106 @@ def test_a_cancelled_template_run_is_listed_as_cancelled_not_failed() -> None:
     assert "write" in written[0].failure_reason
 
 
+def test_a_relaunch_after_a_cancel_resumes_the_steps_that_finished() -> None:
+    """Cancel after step one finished, relaunch the same id: step one is not run again.
+
+    Recording a cancel as `cancelled` rather than `failed` must not turn a relaunch into a rerun
+    from step one: `completed_steps` gated resume on `state == "failed"`, so it would have — and a
+    finished step's result is not recomputed (D-011). Driven end to end on a real-time dev server:
+    the record the cancelled run writes is the one the relaunch's real `completed_steps` reads.
+    """
+    import asyncio
+    from datetime import timedelta
+    from unittest import mock
+
+    from temporalio import activity
+    from temporalio.client import WorkflowFailureError
+    from temporalio.common import WorkflowIDReusePolicy
+    from temporalio.worker import Worker
+
+    from chemclaw.core.config import settings
+    from chemclaw.durable.template_activities import completed_steps
+    from chemclaw.durable.template_job import TemplateWorkflow
+    from tests.temporal_env import pydantic_client, start_local_env_or_skip
+
+    written: list[JobRecord] = []
+    ran: list[str] = []
+    second_launch = asyncio.Event()
+
+    @activity.defn(name="record_job")
+    async def _capture(record: JobRecord) -> None:
+        written.append(record)
+
+    async def _lookup(job_id: str) -> JobRecord | None:
+        return next((r for r in reversed(written) if r.job_id == job_id), None)
+
+    @activity.defn(name="run_agent_step")
+    async def _agent(step: Any) -> str:
+        prompt = str(step)
+        if "first" in prompt:
+            ran.append("one")
+            return "step one's result"
+        ran.append("two")
+        if not second_launch.is_set():
+            await asyncio.sleep(3600)  # only the cancel ends the first launch
+        return "step two's result"
+
+    template = Template.model_validate(
+        {
+            "name": "resumable",
+            "summary": "Two chained agent steps.",
+            "inputs": [],
+            "steps": [
+                {"id": "one", "kind": "agent", "purpose": "first", "prompt": "first"},
+                {
+                    "id": "two",
+                    "kind": "agent",
+                    "purpose": "second",
+                    "prompt": "second, after ${steps.one.result}",
+                },
+            ],
+        }
+    )
+    job_id = "template-resume-after-cancel"
+
+    async def _run() -> Any:
+        async with await start_local_env_or_skip() as env:
+            client = pydantic_client(env)
+            with mock.patch("chemclaw.durable.job_record.lookup_job_record", _lookup):
+                async with Worker(
+                    client,
+                    task_queue=settings.background_task_queue,
+                    workflows=[TemplateWorkflow],
+                    activities=[_capture, _agent, completed_steps],
+                ):
+                    launch: dict[str, Any] = {
+                        "id": job_id,
+                        "task_queue": settings.background_task_queue,
+                        "execution_timeout": timedelta(seconds=120),
+                        "id_reuse_policy": WorkflowIDReusePolicy.ALLOW_DUPLICATE_FAILED_ONLY,
+                    }
+                    run = TemplateRunInput(template=template, requested_by="tester")
+                    handle = await client.start_workflow(TemplateWorkflow.run, run, **launch)
+                    loop = asyncio.get_running_loop()
+                    deadline = loop.time() + 30
+                    while "two" not in ran:
+                        assert loop.time() < deadline, "step two never started"
+                        await asyncio.sleep(0.2)
+                    await handle.cancel()
+                    with pytest.raises(WorkflowFailureError):
+                        await handle.result()
+                    second_launch.set()
+                    return await client.execute_workflow(TemplateWorkflow.run, run, **launch)
+
+    result = asyncio.run(_run())
+    assert written[0].state == "cancelled"
+    assert written[0].result["steps"] == {"one": "step one's result"}
+    # Step one ran once, on the first launch; the relaunch ran only step two.
+    assert ran == ["one", "two", "two"], ran
+    assert result.steps["one"] == "step one's result"
+    assert written[-1].state == "completed"
+
+
 # --- what the resume read will and will not hand back --------------------------------------------
 
 
@@ -440,6 +540,11 @@ async def test_the_resume_read_answers_only_for_a_failed_run_of_the_same_templat
     await record_job(failed)
 
     assert await completed_steps(ResumeRequest(job_id=job_id, fingerprint="fp-1")) == steps
+    # A cancelled run's finished steps are as real as a failed one's, and the id relaunches after
+    # a cancel too (`ALLOW_DUPLICATE_FAILED_ONLY`).
+    await record_job(failed.model_copy(update={"state": "cancelled"}))
+    assert await completed_steps(ResumeRequest(job_id=job_id, fingerprint="fp-1")) == steps
+    await record_job(failed)
     # A different definition under the same id.
     assert await completed_steps(ResumeRequest(job_id=job_id, fingerprint="fp-2")) == {}
     # An id nothing has ever recorded.
