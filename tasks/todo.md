@@ -1,3 +1,31 @@
+# Artefacts, wave 2 — geometry, drafts, report artefacts, fork, push pruning
+
+Contract: "Wave 2 additions (frozen 2026-10-03)" of the artefacts wire contract, shared with the
+frontend built in parallel — names and shapes exactly as frozen.
+
+- [x] **1. `geometry` kind.** `GeometrySpec` (xyz XOR source, label, energy_hartree,
+      highlight_atoms); XYZ validated on write (count line, known elements, finite coordinates,
+      `exhibit_max_atoms`); `source` must exist in the calc `ArtifactStore` at write time; migration
+      116 widens the kind CHECK; export `xyz`; diff `xyz`/`source`/`label`; `create_exhibit`
+      docstring names it; re-measure the prefix (`tests/test_context_floor.py`) and the warm arm
+      (`tests/test_compaction.py`) — stop if the warm arm would fail.
+- [x] **2. `GET /calc-artifacts/content?ref=`** — any authenticated caller; 404 unknown, 413 above
+      `calc_artifact_max_download_bytes`, stored media type, sanitised `Content-Disposition`.
+- [ ] **3. `exhibit_draft` event** — derived from `create_exhibit`/`revise_exhibit` tool-call chunks
+      in the graph stream; partial JSON; document only; throttled by
+      `exhibit_draft_min_interval_ms`, growth only, capped by `exhibit_max_spec_bytes`; Event union,
+      OpenAPI, dev page, contract fixture; test through the real graph stream with a chunking model.
+- [ ] **4. Report → artefact** — optional session/requester on the workflow input; an activity
+      creates the `document` with id `xb-` + sha256(workflow_id)[:16], idempotent on retry;
+      `job_completed.summary.exhibit_id`; `exhibit` pushed on `/events`; a deleted session skips.
+- [ ] **5. Fork copies artefacts** (head only, new ids, `forked from <xid> r<n>`).
+- [ ] **6. `exhibit_refs` 422 carries `detail.code = "invalid_exhibit_ref"`.**
+- [ ] **7. Retention prunes `exhibit` push rows** older than `exhibit_push_retention_hours`.
+- [ ] **8. Mock LLM scenario** creating a document artefact — only if the mock's design fits.
+- [ ] Verify: lint, type, skill/prose-validate, the targeted test files (Postgres up, helm on PATH).
+
+---
+
 # Artefacts, phase 0 — measure, then decide
 
 Concept: the "Exhibits" concept doc (UI label "Artefacts"; code name `exhibit` because `artifact` is

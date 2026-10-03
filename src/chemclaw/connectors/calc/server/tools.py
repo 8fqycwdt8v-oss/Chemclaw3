@@ -47,6 +47,7 @@ from chemclaw.core.chem import canonical_smiles, require_canonical_smiles, subst
 from chemclaw.core.config import settings
 from chemclaw.core.ids import stable_hash
 from chemclaw.core.units import reconcile
+from chemclaw.science.calc.artifacts import split_ref
 from chemclaw.science.calc.calibration import (
     Calibration,
     ObservedConsensus,
@@ -665,12 +666,13 @@ async def fetch_artifact(artifact_ref: str, max_chars: int = 0) -> ArtifactConte
     Returns:
         The artifact's text with its type and full size, and whether the text is all of it.
     """
-    calc_key, separator, name = artifact_ref.rpartition("#")
-    if not separator or not name:
+    parts = split_ref(artifact_ref)
+    if parts is None:
         raise ValueError(
             f"{artifact_ref!r} is not an artifact reference "
             "(expected '<calculation key>#<name>', as list_artifacts returns)"
         )
+    calc_key, name = parts
     store = default_artifact_store()
     stored = {ref.name: ref for ref in await store.list_for(calc_key)}
     ref = stored.get(name)

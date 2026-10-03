@@ -1,9 +1,11 @@
-"""An artefact as a file a chemist can keep: Markdown, CSV or a SMILES list.
+"""An artefact as a file a chemist can keep: Markdown, CSV, a SMILES list or an XYZ geometry.
 
 **Which formats a kind offers is decided in one function**, `render_export`, and the route asks it:
 a kind/format pair it does not render is a 404 rather than a file that is the wrong shape.
 SDF and SVG are produced on the client from what it already draws (RDKit WASM, the chart's own DOM),
-so the server takes no new rendering path and an export is always plain text.
+so the server takes no new rendering path and an export is always plain text. A geometry that cites
+a calculation artifact is the one export whose bytes are not in the spec, so `resolve_export` is the
+async entry the route calls and `render_export` the pure half every other kind is.
 
 **Every CSV cell goes through `protocols.export.csv_cell`**, the one formula-injection guard this
 system has: a cell that opens with `=`, `+`, `-`, `@`, a tab or a CR is prefixed so a spreadsheet
@@ -18,7 +20,15 @@ import io
 import re
 from collections.abc import Iterable, Sequence
 
-from chemclaw.exhibits.models import ChartSpec, DocumentSpec, Spec, StructuresSpec, TableSpec
+from chemclaw.exhibits.models import (
+    ChartSpec,
+    DocumentSpec,
+    GeometrySpec,
+    Spec,
+    StructuresSpec,
+    TableSpec,
+)
+from chemclaw.exhibits.sources import geometry_xyz
 from chemclaw.protocols.export import csv_cell
 
 #: The media type each format is served as.
@@ -26,6 +36,7 @@ MEDIA_TYPES: dict[str, str] = {
     "md": "text/markdown; charset=utf-8",
     "csv": "text/csv; charset=utf-8",
     "smi": "chemical/x-daylight-smiles; charset=utf-8",
+    "xyz": "chemical/x-xyz; charset=utf-8",
 }
 
 #: What a filename may carry of a title; everything else becomes `-`, because the name reaches a
@@ -38,10 +49,13 @@ def render_export(spec: Spec, fmt: str) -> str | None:
 
     Offered: a document as `md`; a table as `csv` or `md`; a structures panel as `smi` or `csv`; a
     chart as `csv`. A pinned result and a link have no file of their own — the pane opens what they
-    point at — so every format answers `None` for them.
+    point at — so every format answers `None` for them. A geometry is `xyz` when it carries its
+    block inline; one citing a calculation artifact needs a read, which is `resolve_export`'s.
     """
+    if isinstance(spec, GeometrySpec) and fmt == "xyz" and spec.xyz is not None:
+        return _with_newline(spec.xyz)
     if isinstance(spec, DocumentSpec) and fmt == "md":
-        return spec.markdown if spec.markdown.endswith("\n") else spec.markdown + "\n"
+        return _with_newline(spec.markdown)
     if isinstance(spec, TableSpec):
         header = [_with_unit(column.label or column.key, column.unit) for column in spec.columns]
         cells = [[row.get(column.key) for column in spec.columns] for row in spec.rows]
@@ -73,10 +87,30 @@ def render_export(spec: Spec, fmt: str) -> str | None:
     return None
 
 
+async def resolve_export(spec: Spec, fmt: str) -> str | None:
+    """`render_export`, plus the one format whose text is read from the calc artifact store.
+
+    `None` both when the kind does not offer `fmt` and when a geometry's source has been evicted
+    since it was written — the route answers 404 to either, because neither has a file to give.
+    """
+    if isinstance(spec, GeometrySpec) and fmt == "xyz" and spec.source is not None:
+        text = await geometry_xyz(spec)
+        return None if text is None else _with_newline(text)
+    return render_export(spec, fmt)
+
+
 def export_filename(title: str, exhibit_id: str, revision: int, fmt: str) -> str:
     """The saved file's name: the title, the revision, and the id that makes it unique."""
-    stem = _FILENAME_SAFE.sub("-", title).strip("-.")[:60] or "artefact"
-    return f"{stem}-{exhibit_id}-r{revision}.{fmt}"
+    return f"{safe_filename(title, 'artefact')}-{exhibit_id}-r{revision}.{fmt}"
+
+
+def safe_filename(text: str, fallback: str) -> str:
+    """`text` cut to what a `Content-Disposition` filename may carry, or `fallback` if nothing is.
+
+    Every run of characters outside `[A-Za-z0-9._-]` becomes one `-`, and leading or trailing dots
+    and dashes go, so neither a quote nor a line break nor a path separator reaches the header.
+    """
+    return _FILENAME_SAFE.sub("-", text).strip("-.")[:60] or fallback
 
 
 def _csv(header: Sequence[object], rows: Iterable[Sequence[object]]) -> str:
@@ -87,6 +121,11 @@ def _csv(header: Sequence[object], rows: Iterable[Sequence[object]]) -> str:
     for row in rows:
         writer.writerow([csv_cell(value) for value in row])
     return buffer.getvalue()
+
+
+def _with_newline(text: str) -> str:
+    """`text` ending in exactly the line break a text file is expected to end in."""
+    return text if text.endswith("\n") else text + "\n"
 
 
 def _with_unit(label: str, unit: str) -> str:

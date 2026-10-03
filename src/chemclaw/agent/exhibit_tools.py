@@ -50,6 +50,7 @@ from chemclaw.exhibits.models import (
     require_writable,
     spec_json,
 )
+from chemclaw.exhibits.sources import require_source_stored
 from chemclaw.exhibits.store import ExhibitStore, default_exhibit_store
 
 logger = logging.getLogger(__name__)
@@ -105,7 +106,8 @@ async def create_exhibit(title: str, spec: dict[str, Any]) -> str:
     Revise it later rather than copying it. Figures no tool returned are flagged unchecked.
     `spec` fields by `kind`: document `markdown`; table `columns` [{key,label,unit}], `rows`;
     structures `items` [{smiles,label,props}]; chart `chart` (line|scatter|bar), `x_label`,
-    `y_label`, `series` [{name,x,y}]; link `target` (protocol|note|job), `id`.
+    `y_label`, `series` [{name,x,y}]; geometry `xyz` or `source` {calc_key,name}, `label`; link
+    `target` (protocol|note|job), `id`.
 
     Returns:
         JSON with `exhibit_id` and `revision`.
@@ -118,6 +120,7 @@ async def create_exhibit(title: str, spec: dict[str, Any]) -> str:
             "values as a table, or say which result to pin"
         )
     require_writable(parsed, title=title, change_note="")
+    await require_source_stored(parsed)
     author = require_actor()
     view = await _store().create(
         session_id,
@@ -163,6 +166,7 @@ async def revise_exhibit(
         raise ChemclawError(_stale(exhibit_id, current.head_revision, base_revision))
     revised = _revised_spec(current, edits, spec)
     require_writable(revised, title=current.title, change_note=note)
+    await require_source_stored(revised)
     chemist = await chemist_figures(store, session_id, exhibit_id)
     try:
         view = await store.append(

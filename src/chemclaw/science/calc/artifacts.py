@@ -146,6 +146,29 @@ class ArtifactStore(Protocol):
         ...
 
 
+async def find_link(store: ArtifactStore, calc_key: str, name: str) -> ArtifactRef | None:
+    """The stored `(calc_key, name)` link, or `None` — the one lookup by name the store offers.
+
+    Through `list_for` because that is the protocol's read by calculation, and a calculation keeps
+    a handful of by-products, so filtering them here costs nothing a dedicated query would save.
+    Shared by `fetch_artifact` and the artefact surfaces, which all address an artifact by its
+    `<calc_key>#<name>` reference rather than by content hash.
+    """
+    return next((ref for ref in await store.list_for(calc_key) if ref.name == name), None)
+
+
+def split_ref(text: str) -> tuple[str, str] | None:
+    """`<calc_key>#<name>` as its two halves, or `None` when it is not one.
+
+    `rpartition` because a calculation key is `calc_type@version:input_hash:params_hash` and holds
+    no `#`, while the name is the producer's filename — the last `#` is the separator.
+    """
+    calc_key, separator, name = text.rpartition("#")
+    if not separator or not calc_key or not name:
+        return None
+    return calc_key, name
+
+
 def too_large(byte_size: int) -> bool:
     """Whether `byte_size` exceeds the per-artifact cap (0 disables the cap)."""
     cap = settings.artifact_max_bytes

@@ -36,6 +36,7 @@ from chemclaw.core.quantities import returned_values, stated_numerals, ungrounde
 from chemclaw.exhibits.models import (
     ChartSpec,
     DocumentSpec,
+    GeometrySpec,
     Number,
     Spec,
     StructuresSpec,
@@ -57,9 +58,11 @@ ORDER BY l.created_at DESC
 def stated_figures(spec: Spec) -> list[str]:
     """Every figure a spec states as a value, as written, deduplicated in first-seen order.
 
-    Values, not names: a table's cells, a structure's property values, a chart's points and a
-    document's prose. Titles, column labels, units, structure labels and SMILES are names, and a
-    "Compound 12" or a ring-closure digit is not a figure anybody transcribed.
+    Values, not names: a table's cells, a structure's property values, a chart's points, a
+    geometry's energy and a document's prose. Titles, column labels, units, structure labels and
+    SMILES are names, and a "Compound 12" or a ring-closure digit is not a figure anybody
+    transcribed. A geometry's coordinates are not figures either: they are a structure, read by a
+    viewer rather than quoted, and three per atom would bury the one figure a chemist does quote.
     """
     seen: dict[str, None] = {}
     for figure in _figures(spec):
@@ -83,6 +86,8 @@ def _figures(spec: Spec) -> Iterator[str]:
         for series in spec.series:
             for value in [*series.x, *series.y]:
                 yield from _of_value(value)
+    elif isinstance(spec, GeometrySpec):
+        yield from _of_value(spec.energy_hartree)
 
 
 def _of_value(value: Number | str | None) -> Iterator[str]:

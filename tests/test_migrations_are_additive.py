@@ -252,6 +252,13 @@ _REVIEWED_REPLAY_BREAKS: dict[str, tuple[str, tuple[str, ...], str]] = {
 # an exempted migration still fails — an exemption is granted to statements somebody read, not to a
 # filename.
 _REVIEWED_ROLLBACK_BREAKS: dict[str, tuple[str, tuple[str, ...]]] = {
+    "116_exhibit_geometry_kind.sql": (
+        # 058's shape: the drop-and-re-add *widens* the kind CHECK, and the previous image writes
+        # only kinds the new constraint still admits. What it loses is reading a `geometry`
+        # revision, which the runbook's rollback table states and no statement pattern carries.
+        "D-2026-10-03-a-geometry-artefact-cites-the-calc-store-it-does-not-copy",
+        ("ALTER TABLE session_exhibits DROP CONSTRAINT",),
+    ),
     "106_drop_the_index_nobodys_query_uses.sql": (
         # The over-flag the `DROP INDEX` comment above predicts, and the first one in this tree.
         # `_BREAKS_PREVIOUS_IMAGE` cannot tell a unique index (whose drop breaks `ON CONFLICT`'s

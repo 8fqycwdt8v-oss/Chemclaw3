@@ -8,15 +8,18 @@ refusal is worded the same way for both.
 
 **Shape and caps are two checks, on purpose.** `parse_spec` is the shape — the closed set of kinds,
 `extra="forbid"` everywhere, literal values only — and it is what a read runs too, so a stored
-revision always comes back typed. `require_writable` is the caps (bytes, rows, structures, points)
-and the RDKit parse of every SMILES, and only a *write* runs it: a deployment that lowers a cap must
-not make the artefacts it already holds unreadable, and re-parsing two hundred molecules on every
-read would pay for a check whose answer cannot have changed.
+revision always comes back typed. `require_writable` is the caps (bytes, rows, structures, points,
+atoms) and the RDKit parse of every SMILES, and only a *write* runs it: a deployment that lowers a
+cap must not make the artefacts it already holds unreadable, and re-parsing two hundred molecules on
+every read would pay for a check whose answer cannot have changed. The one write-time check that is
+not here is whether a geometry's `source` is stored — it is a database read, so it is async and
+lives in `exhibits.sources` beside the store it asks.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import re
 import secrets
 from collections.abc import Iterator
@@ -28,9 +31,11 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    SerializerFunctionWrapHandler,
     Strict,
     TypeAdapter,
     ValidationError,
+    model_serializer,
     model_validator,
 )
 
@@ -40,8 +45,9 @@ from chemclaw.core.errors import ChemclawError
 from chemclaw.protocols.diff import FieldChange
 from chemclaw.protocols.models import AuthorKind
 
-#: Every kind an artefact can be. The migration's CHECK constraint names the same six.
-ExhibitKind = Literal["document", "table", "structures", "chart", "result", "link"]
+#: Every kind an artefact can be. The CHECK constraint (`116_exhibit_geometry_kind.sql`) names the
+#: same seven.
+ExhibitKind = Literal["document", "table", "structures", "chart", "result", "link", "geometry"]
 
 #: The `session_events` kind a person's create or revision is pushed under, for
 #: `GET /sessions/{id}/events` to claim and render as the turn stream's `exhibit` event.
@@ -169,8 +175,123 @@ class LinkSpec(_Spec):
     id: str = Field(min_length=1)
 
 
+#: Every element symbol an XYZ line may name, H to Og, in the spelling RDKit's periodic table uses.
+#: A literal set rather than an RDKit lookup: this package parses SMILES through `core.chem` and
+#: imports no toolkit of its own, and the table does not change.
+ELEMENTS: frozenset[str] = frozenset(
+    """
+    H He Li Be B C N O F Ne Na Mg Al Si P S Cl Ar K Ca Sc Ti V Cr Mn Fe Co Ni Cu Zn Ga Ge As Se Br
+    Kr Rb Sr Y Zr Nb Mo Tc Ru Rh Pd Ag Cd In Sn Sb Te I Xe Cs Ba La Ce Pr Nd Pm Sm Eu Gd Tb Dy Ho
+    Er Tm Yb Lu Hf Ta W Re Os Ir Pt Au Hg Tl Pb Bi Po At Rn Fr Ra Ac Th Pa U Np Pu Am Cm Bk Cf Es
+    Fm Md No Lr Rf Db Sg Bh Hs Mt Ds Rg Cn Nh Fl Mc Lv Ts Og
+    """.split()
+)
+
+
+def xyz_atom_count(xyz: str) -> int:
+    """How many atoms one standard XYZ block holds, having checked every line of it.
+
+    The layout is the one every program writes: an atom count, a comment line (which may be
+    empty), then exactly that many `El x y z` lines in ångström. Trailing blank lines are allowed;
+    anything else after the atoms — a second frame, a stray line — is refused, because an artefact
+    shows one structure and a silently dropped frame is a geometry nobody asked for. The element is
+    matched case-insensitively (`CL` is chlorine) against `ELEMENTS`, and every coordinate must be
+    a finite number.
+
+    Raises:
+        ValueError: naming the line and what is wrong with it.
+    """
+    lines = xyz.rstrip().splitlines()
+    try:
+        count = int(lines[0].strip()) if lines else -1
+    except ValueError:
+        raise ValueError("xyz: the first line must be the atom count") from None
+    if count < 1:
+        raise ValueError("xyz: the first line must be the atom count, at least 1")
+    atoms = lines[2:]
+    if len(atoms) != count:
+        raise ValueError(
+            f"xyz: the count line says {count} atoms and the block has {len(atoms)} atom lines "
+            "(one structure: the count, a comment line, then one `El x y z` line per atom)"
+        )
+    for number, line in enumerate(atoms, start=3):
+        fields = line.split()
+        if len(fields) != 4:
+            raise ValueError(f"xyz line {number}: expected `El x y z`, got {len(fields)} fields")
+        symbol = fields[0][:1].upper() + fields[0][1:].lower()
+        if symbol not in ELEMENTS:
+            raise ValueError(f"xyz line {number}: {fields[0]!r} is not an element symbol")
+        try:
+            coordinates = [float(value) for value in fields[1:]]
+        except ValueError:
+            raise ValueError(f"xyz line {number}: a coordinate is not a number") from None
+        if not all(math.isfinite(value) for value in coordinates):
+            raise ValueError(f"xyz line {number}: a coordinate is not finite")
+    return count
+
+
+class GeometrySource(_Spec):
+    """A calculation by-product a geometry is read from: `science.calc.artifacts.ArtifactRef`'s key.
+
+    Only the two fields that address a stored artifact — which calculation, and the file's role —
+    so the reference is the one `fetch_artifact` and a note's `artifact_refs` already spell as
+    `<calc_key>#<name>`. Whether it exists is checked when it is written (`exhibits.sources`).
+    """
+
+    calc_key: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+
+    def as_ref(self) -> str:
+        """The flat `<calc_key>#<name>` form, as `ArtifactRef.as_str` writes it."""
+        return f"{self.calc_key}#{self.name}"
+
+
+class GeometrySpec(_Spec):
+    """One 3D structure, inline as an XYZ block or named as a stored calculation artifact.
+
+    Exactly one of `xyz` and `source`. `highlight_atoms` are **0-based** indices into the atom
+    lines, held inside the inline block's atom count (a `source` is not read to check them — its
+    bytes are the calc store's, and an eviction may take them). `energy_hartree` is a label the
+    viewer shows, not a figure anything here computes.
+    """
+
+    kind: Literal["geometry"]
+    format: Literal["xyz"] = "xyz"
+    xyz: str | None = None
+    source: GeometrySource | None = None
+    label: str = ""
+    energy_hartree: Number | None = None
+    highlight_atoms: list[Annotated[int, Strict(), Field(ge=0)]] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _one_structure(self) -> GeometrySpec:
+        """Exactly one of `xyz` and `source`, an inline block that parses, highlights inside it."""
+        if (self.xyz is None) == (self.source is None):
+            raise ValueError("a geometry takes exactly one of `xyz` (inline) or `source`")
+        if self.xyz is not None:
+            count = xyz_atom_count(self.xyz)
+            if outside := sorted({index for index in self.highlight_atoms if index >= count}):
+                raise ValueError(
+                    f"highlight_atoms {outside} are not atoms of a {count}-atom block (0-based)"
+                )
+        return self
+
+    @model_serializer(mode="wrap")
+    def _without_absent(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        """The stored and served object omits an optional field that was not given.
+
+        `xyz?`, `source?` and `energy_hartree?` are *absent* in the wire contract, not `null`, so a
+        client testing `"source" in spec` reads the same answer it would from the writer's object.
+        """
+        dumped: dict[str, Any] = handler(self)
+        for name in ("xyz", "source", "energy_hartree"):
+            if dumped.get(name) is None:
+                dumped.pop(name, None)
+        return dumped
+
+
 Spec = Annotated[
-    DocumentSpec | TableSpec | StructuresSpec | ChartSpec | ResultSpec | LinkSpec,
+    DocumentSpec | TableSpec | StructuresSpec | ChartSpec | ResultSpec | LinkSpec | GeometrySpec,
     Field(discriminator="kind"),
 ]
 _SPEC: TypeAdapter[Spec] = TypeAdapter(Spec)
@@ -200,7 +321,7 @@ class ExhibitLimit(ChemclawError):
 
 
 def parse_spec(raw: object) -> Spec:
-    """The typed spec for `raw`, refusing anything that is not one of the six shapes.
+    """The typed spec for `raw`, refusing anything that is not one of the seven shapes.
 
     Raises:
         InvalidExhibit: `raw` is not an object, names no known `kind`, or does not fit its kind —
@@ -285,6 +406,12 @@ def _require_within_counts(spec: Spec) -> None:
         if points > settings.exhibit_max_points:
             raise InvalidExhibit(
                 f"the chart has {points} points, over the {settings.exhibit_max_points}-point cap"
+            )
+    if isinstance(spec, GeometrySpec) and spec.xyz is not None:
+        atoms = xyz_atom_count(spec.xyz)
+        if atoms > settings.exhibit_max_atoms:
+            raise InvalidExhibit(
+                f"the geometry has {atoms} atoms, over the {settings.exhibit_max_atoms}-atom cap"
             )
 
 
