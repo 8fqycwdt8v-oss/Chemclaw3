@@ -36,7 +36,7 @@ All in one namespace, `chemclaw` (the fleet's NetworkPolicies admit callers by a
 | Temporal + Temporal UI | `manifests/temporal.yaml` | `temporalio/auto-setup:1.25.2`, namespace `chemclaw` registered at start |
 | The MCP fleet, one Deployment + Service + NetworkPolicy per server | `Chemclaw3-mcp/servers/<name>/deploy/*.yaml` via `render-fleet.sh` | the fleet's own files, with image, replicas, bearer and requests patched by kustomize |
 | Mock ELN/ORD/Entra app and the mock vendor MCP | `manifests/mock.yaml` | the ELN/ORD exports land on a claim the background worker mounts read-only |
-| Scripted mock LLM (`python -m chemclaw.cli.mock_llm`) | `manifests/mock-llm.yaml` | the default model gateway |
+| Scripted mock LLM (`python -m chemclaw.cli.mock_llm --catalogue e2e`) | `manifests/mock-llm.yaml` | the default model gateway; its markers are below |
 | UI | `manifests/ui.yaml` | |
 | Front-door relay | `manifests/front-door.yaml` | why it exists is below |
 
@@ -88,6 +88,44 @@ the pods whose environment or certificates changed. A fresh cluster gets the ten
 `kind-config.yaml` (30443 → 18443); a cluster created before that mapping existed cannot gain one, so
 `up.sh` serves the same address with a supervised `kubectl port-forward` (restarted whenever it
 exits, stopped by `down` and by switching back to devauth).
+
+## The scripted model's markers
+
+The mock serves `--catalogue e2e`: the storm's behaviours (`cli/storm_behaviours.py` — `a-cheap`,
+`a-retrieval`, `d-collide`, `f-slow`, the fault injections …) followed by the browser suite's
+scripted workflows (`cli/e2e_behaviours.py`). A turn picks one with `[[name]]` in the user message.
+**The newest marked user message decides**: a later marker replaces an earlier one, and an unmarked
+follow-up continues the last one (so the UI's "Go ahead with the approved plan." continues a plan,
+and a message queued in a shared session inherits the slow turn it queued behind). Until this rule
+the *first* marker in the resent thread won, so a conversation could never change behaviour.
+
+| Marker | What the mock does | What a browser test can then assert |
+| --- | --- | --- |
+| `[[e2e:plan]]` | turn 1: `write_todos`, one step declaring `compute_reaction_energy`, then "Nothing runs until you approve it"; any later turn of the conversation: calls `compute_reaction_energy` (fixed N2 + 3 H2 → 2 NH3, `quick`), then says it ran — or that the plan gate refused it | the plan card, Approve → Continue → a result preview; Decline → the gate's refusal on the trace. Under the `computation` profile (`plan_only`) |
+| `[[e2e:remember]]` | `remember_preference(key="forbidden_solvent_dcm", value="Never use dichloromethane (DCM) …")` | "Arguments to remember_preference" contains DCM |
+| `[[e2e:conditions]]` | no tool; answers amide-coupling conditions that begin `Standing preferences received: <entries>.` when the system message carried the section (or `No standing preferences reached me.`), and uses the first of DCM, DMF, acetonitrile, 2-MeTHF that no entry names | the plumbing (the opening sentence) and the respect (no DCM recommendation) — in a *new* conversation after `[[e2e:remember]]` |
+| `[[e2e:cite]]` | `gather_evidence` with an amide-coupling reaction anchor (or `expand_note` on a `reaction-…` id written in the message, or the first `a>>b` SMILES in it) plus `find_notes("amide coupling")`; then cites the first `reaction-<source>.<id>` and the first knowledge-note id the tools returned, or says none came back | a `reaction-…` chip and a `failure-…`/`playbook-…` chip in the answer text, each opening its note |
+| `[[e2e:long-job]]` | `start_optimization_campaign` on the `measured` objective, which suspends on a person after its seed batch; the seed is derived from the message, so a distinct message is a distinct job; then quotes the `bo-start_optimization_campaign-…` id the launcher returned | the job is `running` in the registry and can be cancelled |
+| `[[e2e:slow]]` | no tool; streams its answer over 20 s | Stop is visible for 20 s; another participant can queue, watch and withdraw |
+
+What the UI suite should send on the mock lane (`say(mock, real)` in `Chemclaw3_ui`
+`e2e/kind/lane.ts`), with a run tag wherever a scenario needs its own job or conversation:
+
+- plan gate (`03`, `06` "bob's plan"): `[[e2e:plan]] <tag> compute the ammonia reaction energy`, then
+  the card's own Continue, or `Go ahead and run it now.` after a decline.
+- preferences (`07`): `[[e2e:remember]] <tag> never use DCM`, then in a new conversation
+  `[[e2e:conditions]] <tag> EDC/HOBt amide coupling`; assert the answer starts
+  `Standing preferences received:`.
+- citations (`02`, `09`): `[[e2e:cite]] <tag> EDC amide couplings` for a record and a note;
+  `[[e2e:cite]] reaction-eln-ord.suzuki-flow-hte-04620` for the citation-only record.
+- cancel (`04`): `[[e2e:long-job]] <tag> start a measured campaign` — the run tag is what makes
+  the job new (a payload already launched rejoins its run, D-011).
+- shared session (`06`): open with `[[e2e:slow]] <tag> shared start`, or send it as alice's
+  running turn.
+
+What a green run on these markers proves is the plumbing — the card, the gate, the store, the
+section, the chip, the registry, the queue — never that a model would decide to do any of it; that
+stays `CHEMCLAW_KIND_LLM=live`'s question.
 
 ## What running it found in the chart and core
 

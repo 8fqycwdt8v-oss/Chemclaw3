@@ -44,6 +44,31 @@ the first thing in this suite to drive a turn through this mock at all — a fra
 `_chat_stream` was caught by nothing before it. The general rule it leaves behind: **a mock may be
 narrower than the endpoint it stands in for, never more forgiving** — an omission costs coverage
 loudly, and a kindness costs it silently.
+
+**Selection: the latest marked message wins, not the first marker in the thread.** A behaviour is
+chosen by a `[[name]]` marker, and the scan used to read the whole serialized request in catalogue
+order. Chat completions resends the whole thread on every call, so the *opening* marker stayed in
+every later request and a conversation could never change behaviour: measured by the UI's kind
+suite, an `[[f-slow]]` asked after an `[[a-cheap]]` answered in 0.4 s as `a-cheap`. `MockLlm.select`
+now reads the user messages newest first and takes the first one that carries a marker (by position
+within it), so a later marker overrides an earlier one while an *unmarked* follow-up still inherits
+the conversation's last behaviour — which is what a shared session's "queue behind a slow turn" and
+a plan's "Go ahead with the approved plan." rely on. Only when no user message carries a marker does
+the old whole-request scan run, so a request whose marker sits elsewhere is served as before.
+`already_has_tool_results` moved with it for the same reason: it reads the tool results *of this
+turn* (after the latest user message), so turn two of a conversation calls its tools instead of
+inheriting turn one's results and answering blind.
+
+**Some behaviours read the request — the `e2e:*` family, and only it.** A `Behaviour` is still a
+plan rather than an improvisation, but five browser workflows cannot be planned without the request:
+an answer that cites the record a search *returned*, a job id the launcher *minted*, the standing
+preferences the system message *carried*, and a plan that is proposed on one turn and executed on
+the next. Such a behaviour carries a `script` (`Script`) that is handed a `Conversation` — the
+request, normalized across both protocols — and returns the concrete pass. Its `calls` are then
+*templates*: validated at startup exactly as before, and a scripted pass may only emit a call whose
+tool and argument names a template declared (`_within_declared`), so the LOAD-1 guard still holds
+over everything a script can produce. The catalogue is `cli/e2e_behaviours.py`, served with the
+storm's under `--catalogue e2e`; its markers are documented there and in `deploy/kind/README.md`.
 """
 
 from __future__ import annotations
@@ -52,9 +77,10 @@ import argparse
 import asyncio
 import json
 import logging
+import re
 import time
 import uuid
-from collections.abc import AsyncIterator, Iterable
+from collections.abc import AsyncIterator, Callable, Iterable
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -177,10 +203,171 @@ class Behaviour:
     # case `agent/model_calls._demote_cut_off_calls` exists to catch. Empty means the natural
     # value: `tool_calls` when there are calls, `stop` otherwise.
     finish_reason: str = ""
+    # Seconds over which the answer's text frames are spread, after `think_seconds`. A turn that
+    # *streams* for a while is a different thing from one that thinks and then dumps its answer:
+    # the Stop button, a second participant watching the stream and a message queued behind it all
+    # need the turn to be visibly producing tokens, not silent. 0 sends the text at once.
+    stream_seconds: float = 0.0
+    # Reads the request and returns the concrete pass (see the module docstring). `None` for every
+    # behaviour that is a fixed plan, which is all of them outside `cli/e2e_behaviours.py`.
+    script: Script | None = None
+
+
+@dataclass(frozen=True)
+class Message:
+    """One message of a request, normalized across the two protocols this mock speaks.
+
+    `role` is the chat-completions spelling (`system`, `user`, `assistant`, `tool`); a Responses
+    `developer` item and `instructions` read as `system`. `tool_calls` names the calls an assistant
+    message made — the names only, because what a script asks of a past call is whether it happened.
+    """
+
+    role: str
+    text: str
+    tool_calls: tuple[str, ...] = ()
+
+
+def _text_of(content: Any) -> str:
+    """The text of a message's `content`, whichever of the two shapes it has.
+
+    A string is itself; a list of parts contributes every part's `text` (chat completions' `text`,
+    the Responses API's `input_text`/`output_text`). Anything else contributes nothing rather than
+    its repr, so a marker can only ever be found where a person or a tool wrote text.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(str(part.get("text", "")) for part in content if isinstance(part, dict))
+    return ""
+
+
+@dataclass(frozen=True)
+class Conversation:
+    """The request a behaviour is answering, as the messages it holds — both protocols, one shape.
+
+    Built from the request alone, never from per-session state, for the reason
+    `already_has_tool_results` gives: the mock stays stateless, so concurrent turns cannot see each
+    other. A Responses continuation carries only the new `function_call_output` items, so its view
+    holds no user message at all and every tool result in it is this turn's — which is exactly what
+    that continuation means.
+    """
+
+    messages: tuple[Message, ...]
+
+    @classmethod
+    def of(cls, payload: dict[str, Any]) -> Conversation:
+        """Normalize a `/v1/chat/completions` or `/v1/responses` body into one message list."""
+        found: list[Message] = []
+        instructions = payload.get("instructions")
+        if isinstance(instructions, str) and instructions:
+            found.append(Message("system", instructions))
+        for item in _items(payload):
+            role = item.get("role")
+            kind = item.get("type")
+            if kind == "function_call":
+                found.append(Message("assistant", "", (str(item.get("name", "")),)))
+            elif kind == "function_call_output":
+                found.append(Message("tool", _text_of(item.get("output"))))
+            elif role in {"system", "developer"}:
+                found.append(Message("system", _text_of(item.get("content"))))
+            elif role in {"user", "assistant", "tool"}:
+                calls = tuple(
+                    str((call.get("function") or {}).get("name", ""))
+                    for call in item.get("tool_calls") or []
+                    if isinstance(call, dict)
+                )
+                found.append(Message(str(role), _text_of(item.get("content")), calls))
+        return cls(tuple(found))
+
+    def _last_user_index(self) -> int:
+        """The index of the newest user message, or -1 when the request holds none."""
+        for index in range(len(self.messages) - 1, -1, -1):
+            if self.messages[index].role == "user":
+                return index
+        return -1
+
+    @property
+    def system_text(self) -> str:
+        """Every system message's text, joined — the instructions as the model received them."""
+        return "\n\n".join(m.text for m in self.messages if m.role == "system")
+
+    @property
+    def tool_results(self) -> tuple[str, ...]:
+        """The tool results of *this* turn: every tool message after the newest user message."""
+        return tuple(
+            m.text for m in self.messages[self._last_user_index() + 1 :] if m.role == "tool"
+        )
+
+    def marker(self, known: Iterable[str]) -> str | None:
+        """The behaviour the newest marked user message names, or `None` when none names one.
+
+        Newest message first, and within one message the marker that comes first in its text — so
+        a later marker overrides an earlier one, and an unmarked follow-up inherits the last one.
+        """
+        names = set(known)
+        for message in reversed(self.messages):
+            if message.role != "user":
+                continue
+            for name in _MARKER.findall(message.text):
+                if name in names:
+                    return str(name)
+        return None
+
+    def marked_index(self, name: str) -> int:
+        """The index of the newest user message carrying `[[name]]`, or -1."""
+        for index in range(len(self.messages) - 1, -1, -1):
+            message = self.messages[index]
+            if message.role == "user" and f"[[{name}]]" in message.text:
+                return index
+        return -1
+
+    def marked_text(self, name: str) -> str:
+        """What the newest message carrying `[[name]]` says besides the marker, stripped."""
+        index = self.marked_index(name)
+        if index < 0:
+            return ""
+        return " ".join(self.messages[index].text.replace(f"[[{name}]]", " ").split())
+
+    def called_since_marker(self, name: str) -> set[str]:
+        """Tools called after the message carrying `[[name]]` and before this turn's message.
+
+        What a behaviour that spans turns reads to know which turn it is on: a call made in an
+        earlier turn *of this behaviour* — not one from before the marker, which belongs to a
+        different behaviour, and not one from this turn, which is the turn being answered.
+        """
+        start = self.marked_index(name)
+        end = self._last_user_index()
+        if start < 0:
+            return set()
+        return {call for m in self.messages[start + 1 : end] for call in m.tool_calls}
+
+
+# A behaviour marker: `[[name]]`, the name free of brackets. Read per user message by
+# `Conversation.marker`, so the name space is whatever the catalogue serves.
+_MARKER = re.compile(r"\[\[([^\[\]\s]+)\]\]")
+
+# What a script is: the catalogue's behaviour and the request in, the pass to serve out.
+Script = Callable[[Behaviour, Conversation], Behaviour]
+
+
+def _items(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """The request's message items: `messages` (chat completions) then `input` (Responses).
+
+    Both, in that order, because the contract test sends one body to both routes; a real client
+    sends exactly one of the two. A bare-string `input` is one user message.
+    """
+    items: list[dict[str, Any]] = []
+    for key in ("messages", "input"):
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            items.append({"role": "user", "content": value})
+        elif isinstance(value, list):
+            items.extend(item for item in value if isinstance(item, dict))
+    return items
 
 
 def already_has_tool_results(payload: dict[str, Any]) -> bool:
-    """Whether this request already carries the output of a previous tool call.
+    """Whether this request already carries the output of a tool call made *in this turn*.
 
     **A model that always calls a tool never finishes.** The agent re-invokes the model after each
     tool result, so a mock that replays its behaviour verbatim each time drives the agent round its
@@ -196,17 +383,13 @@ def already_has_tool_results(payload: dict[str, Any]) -> bool:
     a `function_call_output` item in `input`; chat completions carries a `role: "tool"` message in
     `messages`. Reading only the first would drive the chat-completions route round the loop until
     the iteration cap — the same runaway this function was written to stop, one protocol over.
+
+    **This turn's, not the thread's.** Chat completions resends the whole conversation, so a scan
+    of every message found turn one's tool result in every later request and turn two answered
+    without calling anything — a conversation could call a tool once in its life. Only tool
+    results after the newest user message count (`Conversation.tool_results`).
     """
-    payload_input = payload.get("input")
-    if isinstance(payload_input, list) and any(
-        isinstance(item, dict) and item.get("type") == "function_call_output"
-        for item in payload_input
-    ):
-        return True
-    messages = payload.get("messages")
-    return isinstance(messages, list) and any(
-        isinstance(item, dict) and item.get("role") == "tool" for item in messages
-    )
+    return bool(Conversation.of(payload).tool_results)
 
 
 def _validate(behaviour: Behaviour) -> None:
@@ -261,6 +444,37 @@ def _validate(behaviour: Behaviour) -> None:
             )
 
 
+def _within_declared(declared: Behaviour, served: Behaviour) -> Behaviour:
+    """`served`, once every call in it is shown to be one `declared`'s templates allow.
+
+    The LOAD-1 guard for a scripted behaviour. `_validate` checks the templates against the live
+    tool surface at startup, but a script chooses argument *values* at request time — so what keeps
+    a script from emitting a tool or an argument nobody validated is this: each served call must
+    name a templated tool and pass only argument names that template declared. A breach is a defect
+    in the catalogue, not in the system under test, so it raises rather than serving a call the
+    run would then report as having happened.
+
+    Raises:
+        ValueError: A served call names a tool, or an argument, no template of `declared` holds.
+    """
+    allowed: dict[str, set[str]] = {}
+    for template in declared.calls:
+        allowed.setdefault(template.tool, set()).update(template.arguments)
+    for call in served.calls:
+        if call.tool not in allowed:
+            raise ValueError(
+                f"scripted behaviour {declared.name!r} emitted {call.tool!r}, which none of its "
+                f"templates declares ({sorted(allowed)})"
+            )
+        extra = set(call.arguments) - allowed[call.tool]
+        if extra or call.raw_arguments is not None:
+            raise ValueError(
+                f"scripted behaviour {declared.name!r} passed {sorted(extra) or 'raw arguments'} "
+                f"to {call.tool!r}, which its template does not declare"
+            )
+    return served
+
+
 class MockLlm:
     """The scripted endpoint: a queue of behaviours, plus a count of what was actually asked of it.
 
@@ -300,12 +514,20 @@ class MockLlm:
         every call, so the user message carrying the marker is present on the second pass and the
         marker scan below finds it unaided. The chain exists only because the Responses API drops
         everything but the tool output on continuation.
+
+        **The newest marked user message decides, and the whole-request scan is only the fallback**
+        (see the module docstring for the measurement). Within the fallback the old rule stands —
+        catalogue order over the serialized request — so a request whose marker sits outside any
+        user message is served exactly as it was.
         """
         previous = payload.get("previous_response_id")
         if isinstance(previous, str):
             name = self._chain.get(previous)
             if name is not None:
                 return self._by_name[name]
+        marked = Conversation.of(payload).marker(self._by_name)
+        if marked is not None:
+            return self._by_name[marked]
         text = json.dumps([payload.get("input", ""), payload.get("messages", "")])
         for name, behaviour in self._by_name.items():
             if f"[[{name}]]" in text:
@@ -434,7 +656,14 @@ def decide_turn(mock: MockLlm, payload: dict[str, Any]) -> DecidedTurn | JSONRes
     # here quietly defeated the scenarios whose whole point is a turn that writes nothing:
     # `f-no-text` reported `answered=True` on its first run, because this line had helpfully
     # invented an answer for it.
-    if behaviour.calls and already_has_tool_results(payload):
+    #
+    # A scripted behaviour decides its own passes — it is handed this turn's tool results — so the
+    # collapse is the script's, and what it returns is held to the calls its templates declared.
+    if behaviour.script is not None:
+        behaviour = _within_declared(
+            behaviour, behaviour.script(behaviour, Conversation.of(payload))
+        )
+    elif behaviour.calls and already_has_tool_results(payload):
         behaviour = replace(behaviour, calls=[])
     mock.record(behaviour)
     if behaviour.http_status != 200:
@@ -482,6 +711,21 @@ def _response_object(
             "total_tokens": billed_input + behaviour.output_tokens,
         },
     }
+
+
+async def _paced(behaviour: Behaviour) -> AsyncIterator[str]:
+    """The answer's text in 40-character frames, spread over `stream_seconds` when it names any.
+
+    One generator for both encoders, so a slow-streaming turn is the same turn on either wire. The
+    pause comes *before* each frame after the first, so the text starts arriving at once and the
+    last frame lands `stream_seconds` later — the shape of a model writing, not of one stalling.
+    """
+    chunks = [behaviour.text[i : i + 40] for i in range(0, len(behaviour.text), 40)]
+    pause = behaviour.stream_seconds / max(len(chunks) - 1, 1) if behaviour.stream_seconds else 0.0
+    for index, chunk in enumerate(chunks):
+        if index and pause:
+            await asyncio.sleep(pause)
+        yield chunk
 
 
 async def _stream(
@@ -559,7 +803,7 @@ async def _stream(
 
     if behaviour.text:
         text_index = len(behaviour.calls)
-        for chunk in (behaviour.text[i : i + 40] for i in range(0, len(behaviour.text), 40)):
+        async for chunk in _paced(behaviour):
             yield frame(
                 ResponseTextDeltaEvent(
                     type="response.output_text.delta",
@@ -667,7 +911,7 @@ async def _chat_stream(
                 await asyncio.sleep(behaviour.think_seconds / max(call.fragments, 1))
 
     if behaviour.text:
-        for chunk_text in (behaviour.text[i : i + 40] for i in range(0, len(behaviour.text), 40)):
+        async for chunk_text in _paced(behaviour):
             yield frame({"delta": {"content": chunk_text}})
 
     # Usage rides the final frame — measured 2026-09-07 against the gateway, which puts it on the
@@ -818,11 +1062,19 @@ def build_app(mock: MockLlm) -> FastAPI:
 def catalogue(name: str) -> list[Behaviour]:
     """The named behaviour set this process serves.
 
-    Two catalogues, and they may not be served together. `MockLlm.select` falls back to the *first*
+    Independent catalogues may not be served together. `MockLlm.select` falls back to the *first*
     entry of whatever it was given when a request carries no marker, so a union would silently hand
     one lane's default to the other — and a marker collision between two independently edited files
     would be invisible until a report read wrong. One lane, one catalogue, named on the command
     line.
+
+    **`e2e` is the one deliberate union, and it is built so neither hazard applies.** The browser
+    suite on the kind cluster drives the storm's markers (`a-retrieval`, `f-slow`, `d-collide`, the
+    fault injections) *and* the scripted workflows of `cli/e2e_behaviours.py`, against one mock. The
+    storm's list comes first, so the unmarked default is the storm's own; and every `e2e` entry is
+    namespaced `e2e:`, a prefix no storm name carries, which
+    `tests/test_mock_llm_e2e.py::test_the_e2e_catalogue_extends_the_storms_without_a_collision`
+    holds rather than this sentence.
 
     Imported here rather than at module scope because each catalogue validates itself against the
     live tool surface, which builds the connector registry: a process that serves one must not pay
@@ -833,9 +1085,14 @@ def catalogue(name: str) -> list[Behaviour]:
             typo would otherwise serve a measurement the wrong script and report it as a result.
     """
     from chemclaw.cli.delegation_behaviours import DELEGATION_BEHAVIOURS
+    from chemclaw.cli.e2e_behaviours import E2E_BEHAVIOURS
     from chemclaw.cli.storm_behaviours import BEHAVIOURS
 
-    catalogues = {"storm": BEHAVIOURS, "delegation": DELEGATION_BEHAVIOURS}
+    catalogues = {
+        "storm": BEHAVIOURS,
+        "delegation": DELEGATION_BEHAVIOURS,
+        "e2e": [*BEHAVIOURS, *E2E_BEHAVIOURS],
+    }
     if name not in catalogues:
         raise KeyError(f"no behaviour catalogue called {name!r}; known: {sorted(catalogues)}")
     return catalogues[name]
@@ -853,8 +1110,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--catalogue",
         default="storm",
-        choices=["storm", "delegation"],
-        help="which behaviour set to serve (default: the storm's)",
+        choices=["storm", "delegation", "e2e"],
+        help="which behaviour set to serve (default: the storm's; the kind cluster serves e2e)",
     )
     args = parser.parse_args(argv)
 
