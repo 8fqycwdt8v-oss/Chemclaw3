@@ -943,7 +943,7 @@ SERVED_ELSEWHERE = frozenset({"chem", "rxnpredict", "safety"})
 #: Chemclaw3-mcp#152 then narrowed `chem`'s descriptions to their rules: measured against that
 #: branch, **9,192 over 22 tools** (`chem` 4,776 / 13, `rxnpredict` 2,784 / 6, `safety` 1,632 / 3).
 #: 10,250 is 11.5% over it, the headroom this was first set with; the fleet ratchets `chem`'s own
-#: surface now too (`servers/chem/tests/test_prompt_cost.py` there).
+#: surface now too (`Chemclaw3-mcp:servers/chem/tests/test_prompt_cost.py`).
 #: `D-2026-10-03-the-fleet-narrowed-and-the-thread-and-the-cap-come-back`.
 SERVED_ELSEWHERE_ALLOWANCE = 10_250
 

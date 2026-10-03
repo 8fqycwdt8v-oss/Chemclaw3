@@ -14,7 +14,7 @@ narrow `chem` as well. Chemclaw3-mcp#155 (closing #152) cut each `chem` docstrin
 units, what the tool is not, which index to pass, the bound by name, every refusal — and moved
 the anecdotes to the tests that hold them. Measured through this repository's own conversion
 path: `chem` 7,600 → 4,776 tokens, the three bundles **9,192**. That PR also ratchets `chem`'s
-published surface on its own side (`servers/chem/tests/test_prompt_cost.py`), so growth there is
+published surface on its own side (`Chemclaw3-mcp:servers/chem/tests/test_prompt_cost.py`), so growth there is
 red before it reaches this repository's CI.
 
 ## Options
@@ -41,7 +41,7 @@ red before it reaches this repository's CI.
 
 Revisit when: `test_the_shipped_budget_leaves_the_thread_what_its_derivation_claims` goes red on
 the warm floor, or the fleet raises `PUBLISHED_SURFACE_MAX_CHARS` in
-`servers/chem/tests/test_prompt_cost.py` — either means the prefix grew into the thread again.
+`Chemclaw3-mcp:servers/chem/tests/test_prompt_cost.py` — either means the prefix grew into the thread again.
 
 ## What keeps it true
 
