@@ -360,7 +360,7 @@ def test_cite_searches_the_store_before_it_cites_anything(served: MockLlm) -> No
     assert first.text == ""
 
 
-#: `uspto-amide-coupling-1` as the mock seeds it (`Chemclaw3_mock` `app/eln/fixtures_data.py`, the
+#: `uspto-amide-coupling-1` as the mock seeds it (the sibling Chemclaw3_mock's ELN fixtures, the
 #: `amide-coupling` archetype through `uspto_style_records`): the JSON-export shape, structure only.
 #: Copied rather than imported because the mock is a separate repository; what matters to the
 #: fingerprint is the species and their roles, and those are what is pinned.
