@@ -258,6 +258,8 @@ def test_a_message_referencing_an_unknown_artefact_is_422_before_any_turn(app: A
         json={"message": "explain it", "exhibit_refs": [{"exhibit_id": "xb-0000000000000000"}]},
     )
     assert refused.status_code == 422 and "xb-0000000000000000" in refused.text
+    assert refused.json()["detail"]["code"] == "invalid_exhibit_ref"
+    assert "xb-0000000000000000" in refused.json()["detail"]["message"]
     too_many = [{"exhibit_id": f"xb-{i:016x}"} for i in range(settings.exhibit_max_refs + 1)]
     assert (
         _as(app, _ANA)
@@ -408,6 +410,7 @@ def test_exhibit_refs_while_artefacts_are_off_are_refused_not_dropped(
         json={"message": "explain it", "exhibit_refs": [{"exhibit_id": xid}]},
     )
     assert refused.status_code == 422 and "switched off" in refused.text
+    assert refused.json()["detail"]["code"] == "invalid_exhibit_ref"
 
 
 def test_a_persons_write_is_recorded_with_who_and_which_request(

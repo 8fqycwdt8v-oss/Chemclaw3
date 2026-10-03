@@ -143,6 +143,16 @@ def _retry_after_hint() -> str:
     return str(max(1, math.ceil(base + random.random() * base)))
 
 
+def _invalid_exhibit_ref(message: str) -> dict[str, str]:
+    """The 422 detail for an `exhibit_refs` this turn cannot resolve: a `code` and the sentence.
+
+    `_queue_refusal`'s shape and reason: the code is what a surface acts on (it greys out the
+    reference chip), the sentence what a person reads, and matching the sentence is the coupling
+    the code exists to remove.
+    """
+    return {"code": "invalid_exhibit_ref", "message": message}
+
+
 def _queue_refusal(reason: Refusal) -> dict[str, str]:
     """The 409 detail for a line that cannot take this message: a `code` and the sentence.
 
@@ -283,19 +293,24 @@ async def post_message(
     # to an artefact the session does not hold is a 422 here rather than a turn that quietly runs
     # without it — the chemist pressed "Ask about this" on something specific — and resolving it
     # first means a refusal holds no slot, no claim and no permit.
+    #
+    # Both refusals carry `detail.code = "invalid_exhibit_ref"` beside the sentence, so a surface
+    # keys its "this reference no longer resolves" state on a code rather than on wording.
     if body.exhibit_refs and not settings.agent_exhibits_enabled:
         # Refused rather than validated and dropped: with artefacts off the turn note is not
         # composed, so a reference would be checked here and then reach nobody.
         raise HTTPException(
             status_code=422,
-            detail="artefacts are switched off in this deployment; send the message without "
-            "exhibit_refs",
+            detail=_invalid_exhibit_ref(
+                "artefacts are switched off in this deployment; send the message without "
+                "exhibit_refs"
+            ),
         )
     if body.exhibit_refs:
         try:
             await resolve_exhibit_refs(session_id, body.exhibit_refs)
         except UnknownExhibit as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
+            raise HTTPException(status_code=422, detail=_invalid_exhibit_ref(str(exc))) from exc
     actor_cap = settings.service_max_concurrent_turns_per_actor
     front_waiters = front.queue_waiters
     held = (
