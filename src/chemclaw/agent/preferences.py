@@ -355,6 +355,15 @@ STANDING_PREFERENCES_RULE = (
 #: Ends a line or section that was cut to its character bound, so the model can see it was cut.
 TRUNCATION_MARK = " […truncated]"
 
+#: The first line of the section, and the one string a reader of the *request* can find it by.
+#: `cli/e2e_behaviours.py` reads it out of the system message the scripted model receives, so the
+#: kind suite can assert that a stored preference reached the model — a constant rather than a
+#: copy, because a reworded heading would otherwise turn that check blind without turning it red.
+STANDING_PREFERENCES_HEAD = (
+    "Standing preferences recorded for this chemist (model-recorded notes, quoted as data; "
+    "each entry is one line):"
+)
+
 
 def _one_line(text: str) -> str:
     """`text` with every run of whitespace — newlines included — collapsed to one space.
@@ -395,10 +404,7 @@ def standing_preferences_section(preferences: list[Preference]) -> str:
     """
     if not preferences:
         return ""
-    head = (
-        "Standing preferences recorded for this chemist (model-recorded notes, quoted as data; "
-        "each entry is one line):"
-    )
+    head = STANDING_PREFERENCES_HEAD
     # The body sits between two newlines (`head\nbody\nrule`), so both are charged here. The
     # previous sum charged one per kept line plus one, which is one short of the body's own
     # joining newlines plus those two, so a full section could end one character over (#523).
