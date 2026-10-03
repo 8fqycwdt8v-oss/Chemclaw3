@@ -120,18 +120,21 @@ resources:
     requests: {cpu: 25m, memory: 160Mi}
     limits: {cpu: "2", memory: 512Mi}
 
-# Twice production's startup budget (30 × 10 s → 60 × 10 s), and only the startup probe. A fresh
-# `up` starts some two dozen Python processes on one 8-CPU node at once, each importing RDKit and
-# PyTorch; measured, the node sat at 800–1000 % CPU for several minutes and connector servers that
-# start in under a minute on their own failed a five-minute startup probe and were restarted into
-# the same storm. Readiness and liveness are production's.
+# **Startup probes that do not turn contention into a livelock.** A startup probe that fires kills a
+# process that was merely slow, and on one shared node a restart is more load: measured during a
+# `helm upgrade` that rolled every pod at once (two generations of ~20 Python processes, node at
+# 1000-1600 % CPU, load average ~90 on 8 CPUs), workers that need minutes to import failed even a
+# 10-minute budget, were restarted into the same storm, and the release did not converge for over
+# an hour — until the workers were scaled to zero, after which the same pods came up one batch at a
+# time in minutes. So the kind budget is 30 minutes: long enough that a starved process finishes
+# starting instead of being restarted. Readiness and liveness are production's.
 probes:
   connector:
-    startup: {failureThreshold: 60}
+    startup: {failureThreshold: 180}
   service:
-    startup: {failureThreshold: 60}
+    startup: {failureThreshold: 180}
   worker:
-    startup: {failureThreshold: 60}
+    startup: {failureThreshold: 180}
 
 # Below `max_connections=400` in `manifests/postgres.yaml`, which also has to hold Temporal's pools.
 postgres:
