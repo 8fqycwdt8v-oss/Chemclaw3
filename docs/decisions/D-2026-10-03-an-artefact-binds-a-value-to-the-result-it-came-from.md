@@ -24,7 +24,11 @@ states what that costs and how it is bounded, since the deferral's whole case wa
    write it already made, `D-2026-09-27-a-cut-result-is-kept-for-the-chemist-not-the-model`) and
    stamps the ref on `response_metadata` (`RESULT_REF_KEY`); `stamp_result_handles`, the outermost
    pass that rewrites a result, appends the line. It lies **outside** the envelope and the defang:
-   it is this system's line, and nothing a tool returned can reach or forge the position it sits in.
+   it is this system's line. Its position alone does not stop a tool writing a handle-shaped line of
+   its own — one naming another result of the same conversation — so every `⟨r:` run in a result's
+   text is escaped before the stamp is appended, and the stamp is the only bracketed handle the
+   model reads. A bare `r:<hex>` a tool writes is not escaped; it binds only within the session, as
+   any handle does.
    A failure, an empty result, a result over `stream_max_result_bytes`, and every turn on a driver
    with no sink (the CLI, a template step) carry **no** handle, because a handle that names bytes
    nobody kept is an address a binding would be refused on.

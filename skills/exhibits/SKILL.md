@@ -74,9 +74,11 @@ of it in the chat.
 ## An html page
 
 The `html` kind is a self-contained page — `{"kind": "html", "html": "<!doctype html>…",
-"height": 480}` — for what the other kinds cannot show: an interactive comparison, a small custom
-plot. It runs in a sandbox with **no network at all**: no CDN, no `fetch`, no external font or
-image; inline everything (data as a JS literal, images as `data:` URIs). Prefer a table, chart or
+"height": 480}` — for what the other kinds cannot show: a small custom plot, a laid-out comparison.
+It is shown **without its scripts** until the chemist chooses to run them, so draw what matters
+with markup and inline SVG rather than with script, and let a script only add interaction. It has
+**no network at all**: no CDN, no `fetch`, no external font or image; inline everything (data as a
+literal, images as `data:` URIs). Prefer a table, chart or
 structures artefact whenever one fits — they are editable by the chemist and their values can be
 bound; a page's figures are only ever transcribed, and are checked like any other.
 
