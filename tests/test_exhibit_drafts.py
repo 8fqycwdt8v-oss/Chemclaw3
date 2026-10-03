@@ -249,8 +249,16 @@ def test_a_draft_past_the_spec_cap_stops_and_a_kind_in_progress_does_not(
     unkinded = json.dumps(
         {"title": "T", "spec": {"markdown": "# hi there " * 20, "kind": "document"}}
     )
+    # The throttle must not decide which frames exist: with the size-scaled interval at its real
+    # rate, a slow runner let a frame through after `kind` arrived (CI), a fast one did not. So the
+    # interval is driven to zero and the rule is asserted as it is — frames sent before `kind` is
+    # known draft as `""`, and any after it say `document`.
+    monkeypatch.setattr(settings, "exhibit_draft_bytes_per_ms", 10**9)
     frames = [f for f in _feed(DraftStream(), "create_exhibit", unkinded, size=5) if not f.done]
-    assert frames and {frame.kind for frame in frames} == {""}
+    assert frames and frames[0].kind == ""
+    assert {frame.kind for frame in frames} <= {"", "document"}
+    kinded_from = next((i for i, f in enumerate(frames) if f.kind), len(frames))
+    assert all(frame.kind == "document" for frame in frames[kinded_from:])
     table = json.dumps({"title": "T", "spec": {"kind": "table", "markdown": "# not a doc"}})
     assert _feed(DraftStream(), "create_exhibit", table, size=5) == []
 
