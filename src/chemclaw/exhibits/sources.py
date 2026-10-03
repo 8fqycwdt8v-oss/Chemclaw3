@@ -266,3 +266,18 @@ async def resolved_geometry(view: ExhibitView) -> ExhibitView:
         return view.model_copy(update={"spec": raw, "bindings": [*view.bindings, missing]})
     shown = raw.model_copy(update={"xyz": structure_xyz(structure), "structure_id": None})
     return view.model_copy(update={"spec": shown})
+
+
+def spec_for_model(view: ExhibitView) -> Spec:
+    """The spec a model is shown of a resolved `view`: a cited structure as its address.
+
+    A geometry citing a `structure_id` is resolved to XYZ for a reader (`resolved_geometry`), and
+    its coordinates are a viewer's input — about fifty characters an atom of nothing the model can
+    act on, and an invitation to transcribe them back as an inline block. So `read_exhibit` and the
+    turn note that carries a referenced artefact both show the address the model holds and writes
+    back; every other spec is shown resolved.
+    """
+    raw = view.raw_spec
+    if isinstance(raw, GeometrySpec) and raw.structure_id is not None:
+        return raw
+    return view.spec

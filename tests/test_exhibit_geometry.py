@@ -486,3 +486,22 @@ async def test_a_structure_cited_must_be_one_this_conversation_was_shown(
     xid = json.loads(await create_exhibit("Water", spec))["exhibit_id"]
     relabelled = {**spec, "label": "water, GFN2-xTB"}
     assert json.loads(await revise_exhibit(xid, 1, "label", spec=relabelled))["revision"] == 2
+
+
+async def test_a_referenced_geometry_reaches_the_turn_note_as_its_address(
+    turn: str, structures: InMemoryStructureStore
+) -> None:
+    """Asking about a cited geometry shows the model its id, not the resolved coordinates.
+
+    The turn note resolved every referenced artefact for the model, so a cited structure arrived as
+    an XYZ block — fifty characters an atom, and an invitation to transcribe it back inline.
+    """
+    from chemclaw.agent.exhibit_notes import exhibit_turn_note
+    from chemclaw.exhibits.models import ExhibitRef
+
+    sid = _WATER_STRUCTURE.structure_id
+    await structures.put([_WATER_STRUCTURE])
+    xid = json.loads(await create_exhibit("Water", _geometry(structure_id=sid)))["exhibit_id"]
+    note = await exhibit_turn_note(turn, [ExhibitRef(exhibit_id=xid)])
+    assert sid in note.text
+    assert "0.1170" not in note.text and '"xyz":' not in note.text
