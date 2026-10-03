@@ -560,3 +560,20 @@ async def test_a_durable_run_with_no_memo_is_attributed_to_the_service_identity(
             )
 
     assert seen == [(settings.service_actor_id, "")]
+
+
+def test_a_summary_names_the_items_the_clock_stopped_apart_from_the_refused_ones() -> None:
+    """The remedy differs (a smaller job or a larger budget), so the line people read says which."""
+    from chemclaw.connectors.calc.activities import _not_computed
+    from chemclaw.science.calc.models import FailedMedium
+
+    failed = [
+        FailedMedium(solvent="dmso", reason="stopped", cause="time_budget"),
+        FailedMedium(solvent="water", reason="refused"),
+    ]
+    assert _not_computed(failed, "media") == (
+        "; 2 of the media could not be computed, 1 stopped by the time budget (see failed)"
+    )
+    refused_only = "; 1 of the media could not be computed (see failed)"
+    assert _not_computed(failed[1:], "media") == refused_only
+    assert _not_computed([], "media") == ""

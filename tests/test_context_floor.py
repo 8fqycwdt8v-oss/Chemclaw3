@@ -940,10 +940,12 @@ SERVED_ELSEWHERE = frozenset({"chem", "rxnpredict", "safety"})
 #: 7,604 tokens and took the three to 12,020, so the allowance followed it and
 #: `agent_max_tool_result_chars` paid for the thread
 #: (`D-2026-10-02-the-allowance-follows-the-fleet-and-the-result-cap-pays-for-it`).
-#: Chemclaw3-mcp#152 then narrowed `chem`'s descriptions to their rules: measured against that
-#: branch, **9,192 over 22 tools** (`chem` 4,776 / 13, `rxnpredict` 2,784 / 6, `safety` 1,632 / 3).
-#: 10,250 is 11.5% over it, the headroom this was first set with; the fleet ratchets `chem`'s own
-#: surface now too (`Chemclaw3-mcp:servers/chem/tests/test_prompt_cost.py`).
+#: Chemclaw3-mcp#155 (closing #152) then narrowed `chem`'s descriptions to their rules: 9,192 over
+#: 22 tools (`chem` 4,776 / 13, `rxnpredict` 2,784 / 6, `safety` 1,632 / 3), 10,250 being 11.5% over
+#: it. A review of that narrowing restored refusals and units it had dropped, and `chem` measures
+#: **5,028** after it — **9,444** in all, so the headroom is ~8.5%, held there rather than raised
+#: because the warm floor in `tests/test_compaction.py` clears by ~1,000. The fleet ratchets
+#: `chem`'s own surface now too (`Chemclaw3-mcp:servers/chem/tests/test_prompt_cost.py`).
 #: `D-2026-10-03-the-fleet-narrowed-and-the-thread-and-the-cap-come-back`.
 SERVED_ELSEWHERE_ALLOWANCE = 10_250
 

@@ -1454,6 +1454,84 @@ def test_a_screen_that_compared_one_medium_publishes_no_spread_and_no_winner() -
     assert not published & {"solvent_spread", "best_solvent"}
 
 
+def test_a_partial_solvent_screen_publishes_no_spread_and_no_winner() -> None:
+    """Two media computed and one stopped: the spread is a lower bound and the winner may be wrong.
+
+    `weakest_bond`'s rule, held for the screens it was not applied to: a query for "best solvent =
+    thf" reads the fact without the `medium_not_computed` flag beside it.
+    """
+    stopped = FailedMedium(solvent="dmso", reason="stopped", cause="time_budget")
+    _, _, _, extra = projection.PAYLOAD_PROJECTORS["SolventComparisonResult"](
+        _screen(failed=[stopped])
+    )
+    published = {fact.property for fact in extra["properties"]}
+    assert not published & {"solvent_spread", "best_solvent"}
+    assert any(flag.flag == "medium_not_computed" for flag in extra["flags"])
+
+    _, _, _, whole = projection.PAYLOAD_PROJECTORS["SolventComparisonResult"](_screen())
+    assert {"solvent_spread", "best_solvent"} <= {fact.property for fact in whole["properties"]}
+
+
+def test_a_partial_species_screen_publishes_no_swing() -> None:
+    """The largest swing over the media computed is a lower bound on the screen's."""
+    from chemclaw.publish.project import records_from_species_solvent_screen
+
+    ranked = [
+        RankedSpecies(
+            smiles="CC(=O)CC(C)=O",
+            label="keto",
+            relative_kcal=0.0,
+            population=0.8,
+            electronic_energy_hartree=-267.3,
+        ),
+        RankedSpecies(
+            smiles="CC(=O)C=C(C)O",
+            label="enol",
+            relative_kcal=1.0,
+            population=0.2,
+            electronic_energy_hartree=-267.2,
+        ),
+    ]
+
+    def _screen_of(failed: list[FailedMedium]) -> list[Any]:
+        distributions = [
+            SpeciesDistribution(
+                kind="tautomers",
+                method="GFN2-xTB",
+                solvent=solvent,
+                temperature_k=298.15,
+                level="standard",
+                species=ranked,
+                enumerated=2,
+                uncertainty_kcal=3.0,
+            )
+            for solvent in (None, "water")
+        ]
+        screen = SpeciesSolventComparison(
+            kind="tautomers",
+            method="GFN2-xTB",
+            temperature_k=298.15,
+            level="standard",
+            distributions=distributions,
+            responses=[],
+            dominance_changes=False,
+            largest_swing_kcal=0.4,
+            uncertainty_kcal=3.0,
+            failed=failed,
+        )
+        return records_from_species_solvent_screen(
+            calc_ref="screen-10",
+            payload=screen.model_dump(mode="json"),
+            calc_type="calc.rank_species_across_solvents",
+        )
+
+    def _swing(records: list[Any]) -> bool:
+        return any(fact.property == "solvent_swing" for fact in records[0].properties)
+
+    assert _swing(_screen_of([])), "the probe is vacuous: a whole screen publishes its swing"
+    assert not _swing(_screen_of([FailedMedium(solvent="toluene", reason="refused")]))
+
+
 def test_a_partial_bond_survey_publishes_its_bonds_but_no_weakest_bond() -> None:
     """The weakest computed bond is not the molecule's weakest, and a query reads the fact bare."""
     survey = BondDissociationSurvey(
