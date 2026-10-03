@@ -313,6 +313,11 @@ def test_every_turn_cost_reader_has_the_surface_that_asks_it() -> None:
       would measure the wrong thing through a ratio `agent/context_budget.py` has twice found to be
       content-dependent.
 
+    - `agent/session_store.py` — `PostgresHistoryProvider.mark_interrupted`, which asks only whether
+      a turn it is marking interrupted *already has* a row, so that the outcome a turn's own process
+      booked is never booked a second time (`api/runner.settle_interrupted_turns`). Its askers are
+      the session's next turn, a reattach that finds nothing running, and a transcript read.
+
     Note what the count never protected: `evidence_pack.py` has always read `audit_events`,
     `job_records`, `effects` and `plan_approvals` with its own SQL, so "operations/activity.py is
     the only reader" was never true of this system's tables generally — only of this one.
@@ -327,6 +332,7 @@ def test_every_turn_cost_reader_has_the_surface_that_asks_it() -> None:
         if "FROM turn_costs" in path.read_text(encoding="utf-8")
     )
     assert readers == [
+        "agent/session_store.py",
         "cli/distill.py",
         "cli/explain.py",
         "cli/live_turn_cost.py",
