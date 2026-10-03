@@ -107,6 +107,7 @@ the *first* marker in the resent thread won, so a conversation could never chang
 | `[[e2e:cite]]` | `gather_evidence` with an amide-coupling reaction anchor (or `expand_note` on a `reaction-…` id written in the message, or the first `a>>b` SMILES in it) plus `find_notes("amide coupling")`; then cites the first `reaction-<source>.<id>` and the first knowledge-note id the tools returned, or says none came back | a `reaction-…` chip and a `failure-…`/`playbook-…` chip in the answer text, each opening its note |
 | `[[e2e:long-job]]` | `start_optimization_campaign` on the `measured` objective, which suspends on a person after its seed batch; the seed is derived from the message, so a distinct message is a distinct job; then quotes the `bo-start_optimization_campaign-…` id the launcher returned | the job is `running` in the registry and can be cancelled |
 | `[[e2e:slow]]` | no tool; streams its answer over 20 s | Stop is visible for 20 s; another participant can queue, watch and withdraw |
+| `[[e2e:artefact]]` | `create_exhibit` with a `document` ("Amide coupling plan"), its arguments streamed in 40 pieces over about a second; then one line pointing at the artefact | the Artefacts pane fills in from `exhibit_draft` frames and then shows the stored artefact the `exhibit` event names |
 
 What the UI suite should send on the mock lane (`say(mock, real)` in `Chemclaw3_ui`
 `e2e/kind/lane.ts`), with a run tag wherever a scenario needs its own job or conversation:
@@ -122,6 +123,8 @@ What the UI suite should send on the mock lane (`say(mock, real)` in `Chemclaw3_
   the job new (a payload already launched rejoins its run, D-011).
 - shared session (`06`): open with `[[e2e:slow]] <tag> shared start`, or send it as alice's
   running turn.
+- artefacts: `[[e2e:artefact]] <tag> draft the amide coupling plan`; assert the pane opens on
+  `Amide coupling plan` and its text matches what the drafts showed.
 
 What a green run on these markers proves is the plumbing — the card, the gate, the store, the
 section, the chip, the registry, the queue — never that a model would decide to do any of it; that

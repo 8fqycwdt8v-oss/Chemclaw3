@@ -40,6 +40,11 @@ and the copy is what makes restamping *possible*: there is a row of the child's 
    default on a fork would *widen* the tool surface — the child of a narrowed session would be able
    to do more than its parent. `_rehydrate_session` makes the same argument for the same reason.
 
+**The artefacts go with it, as they stand** (`exhibits.store.fork_exhibits`): each head revision
+becomes revision 1 of a new artefact in the child, noted "forked from <xid> r<n>". The ids are new
+because an artefact id names one artefact in one session, and the history stays with the parent
+because it is the record of how the parent got there.
+
 **And one table deliberately left behind: `session_events`.** Those are job push-backs waiting to be
 consumed, and a copy would deliver each one twice — once to the parent and once to the child — for a
 job that ran once. They are a *queue*, not history: `claim_unconsumed` takes them, so the correct
@@ -74,6 +79,7 @@ from chemclaw.agent.checkpointer import CHECKPOINT_TABLES
 # `session_owners` gains a column, and nothing would say so.
 from chemclaw.agent.session_store import _OWNER_INSERT, _session_connection, _session_dsn
 from chemclaw.core.errors import ChemclawError
+from chemclaw.exhibits.store import fork_exhibits
 
 logger = logging.getLogger(__name__)
 
@@ -240,6 +246,8 @@ async def fork_session(parent_id: str, owner: str | None, profile: str | None) -
             await cur.execute(_RESTAMP_NEWEST, (child_id, child_id))
             await cur.execute(_COPY_MESSAGES, (child_id, parent_id, parent_id))
             await cur.execute(_COPY_TOOL_RESULT_LINKS, (child_id, parent_id))
+            # The artefacts beside the conversation, head revisions only, under new ids.
+            await fork_exhibits(cur, parent_id, child_id)
             # **The ownership row is written here, inside the same transaction**, and the first
             # version of this module wrote it afterwards on a separate round trip. The reasoning
             # then was about ordering — "written first, a failed copy would leave a session that

@@ -1,3 +1,45 @@
+# Artefacts, wave 2 — geometry, drafts, report artefacts, fork, push pruning
+
+Contract: "Wave 2 additions (frozen 2026-10-03)" of the artefacts wire contract, shared with the
+frontend built in parallel — names and shapes exactly as frozen.
+
+- [x] **1. `geometry` kind.** `GeometrySpec` (xyz XOR source, label, energy_hartree,
+      highlight_atoms); XYZ validated on write (count line, known elements, finite coordinates,
+      `exhibit_max_atoms`); `source` must exist in the calc `ArtifactStore` at write time; migration
+      116 widens the kind CHECK; export `xyz`; diff `xyz`/`source`/`label`; `create_exhibit`
+      docstring names it; re-measure the prefix (`tests/test_context_floor.py`) and the warm arm
+      (`tests/test_compaction.py`) — stop if the warm arm would fail.
+- [x] **2. `GET /calc-artifacts/content?ref=`** — any authenticated caller; 404 unknown, 413 above
+      `calc_artifact_max_download_bytes`, stored media type, sanitised `Content-Disposition`.
+- [x] **3. `exhibit_draft` event** — derived from `create_exhibit`/`revise_exhibit` tool-call chunks
+      in the graph stream; partial JSON; document only; throttled by
+      `exhibit_draft_min_interval_ms`, growth only, capped by `exhibit_max_spec_bytes`; Event union,
+      OpenAPI, dev page, contract fixture; test through the real graph stream with a chunking model.
+- [x] **4. Report → artefact** — optional session/requester on the workflow input; an activity
+      creates the `document` with id `xb-` + sha256(workflow_id)[:16], idempotent on retry;
+      `job_completed.summary.exhibit_id`; `exhibit` pushed on `/events`; a deleted session skips.
+- [x] **5. Fork copies artefacts** (head only, new ids, `forked from <xid> r<n>`).
+- [x] **6. `exhibit_refs` 422 carries `detail.code = "invalid_exhibit_ref"`.**
+- [x] **7. Retention prunes `exhibit` push rows** older than `exhibit_push_retention_hours`.
+- [x] **8. Mock LLM scenario** creating a document artefact — only if the mock's design fits.
+- [x] Verify: lint, type, skill/prose-validate, the targeted test files (Postgres up, helm on PATH).
+
+## Review (wave 2)
+
+- Prefix: `create_exhibit` naming the geometry kind costs +15 tokens (default 73,012 -> 73,027
+  under the 73,450 ceiling); no ceiling or budget moved.
+- Two ADRs: the geometry source is a citation checked on write and not pinned (with migration
+  116's rollback reading), and the draft is read off the streamed call arguments for a preview only.
+- The report push is new: a report never pushed `job_completed` before, so the payload is
+  `{job_id, job: "report", summary, note_id, note_ref, exhibit_id?}` — `exhibit_id` omitted when
+  the artefact was skipped. A second session rejoining the same report run gets no artefact.
+- Interpretations to confirm with the frontend: `highlight_atoms` are 0-based; the geometry diff
+  also names `energy_hartree`/`highlight_atoms`/`format`; a `done: true` draft frame closes a call
+  when the text grew after the last throttled frame; FastAPI's own 422 for too many
+  `exhibit_refs` keeps its list-shaped `detail`.
+
+---
+
 # Artefacts, phase 0 — measure, then decide
 
 Concept: the "Exhibits" concept doc (UI label "Artefacts"; code name `exhibit` because `artifact` is

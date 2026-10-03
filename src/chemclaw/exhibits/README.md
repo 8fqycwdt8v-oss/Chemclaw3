@@ -1,8 +1,8 @@
 # `chemclaw.exhibits` — artefacts beside the chat
 
 **Responsibility:** the versioned working documents a session shows beside its chat — a plan or
-report draft, a table, a set of structures, a chart, a pinned tool result, a link to a protocol,
-note or job. The agent writes them with three tools (`agent/exhibit_tools.py`); a chemist reads,
+report draft, a table, a set of structures, a chart, one 3D geometry, a pinned tool result, a link
+to a protocol, note or job. The agent writes them with three tools (`agent/exhibit_tools.py`); a chemist reads,
 edits, pins and exports them over `api/routes/exhibits.py`. Named `exhibit` because `artifact` is
 the calculation store's word here (D-124); every surface a chemist reads says "Artefacts".
 
@@ -22,10 +22,11 @@ the tools that already do those writes.
 
 | Module | What it owns |
 | --- | --- |
-| `models.py` | The six spec kinds (`document`, `table`, `structures`, `chart`, `result`, `link`) as a discriminated union with `extra="forbid"`; `parse_spec` (shape, every read and write) and `require_writable` (the caps and the SMILES parse, writes only); the API shapes `ExhibitHeader`, `ExhibitView`, `ExhibitRevision`, `ExhibitDiff`; the four errors a write can meet. |
-| `store.py` | `ExhibitStore` with an in-memory and a Postgres backend (`115_session_exhibits.sql`). Append-only revisions under a header row lock; a stale base is `StaleRevision`; every read is session-scoped, so another session's id answers as an unknown one. |
-| `diff.py` | A revision diff in `protocols.diff.FieldChange`'s shape, so one UI component renders both: line hunks for a document, cells for a table, item fields for structures, points for a chart. |
-| `export.py` | `md`, `csv` and `smi` files; every CSV cell goes through `protocols.export.csv_cell`, the one formula-injection guard. |
+| `models.py` | The seven spec kinds (`document`, `table`, `structures`, `chart`, `result`, `link`, `geometry`) as a discriminated union with `extra="forbid"`; `parse_spec` (shape — including a geometry's XYZ layout — on every read and write) and `require_writable` (the caps and the SMILES parse, writes only); the API shapes `ExhibitHeader`, `ExhibitView`, `ExhibitRevision`, `ExhibitDiff`; the four errors a write can meet. |
+| `store.py` | `ExhibitStore` with an in-memory and a Postgres backend (`115_session_exhibits.sql`). Append-only revisions under a header row lock; a stale base is `StaleRevision`; every read is session-scoped, so another session's id answers as an unknown one. A caller-chosen id makes `create` a create-or-return, which is how a durable writer (a development report's activity) stays idempotent across retries. |
+| `diff.py` | A revision diff in `protocols.diff.FieldChange`'s shape, so one UI component renders both: line hunks for a document, cells for a table, item fields for structures, points for a chart, whole fields for a geometry. |
+| `export.py` | `md`, `csv`, `smi` and `xyz` files; every CSV cell goes through `protocols.export.csv_cell`, the one formula-injection guard. `resolve_export` reads a cited geometry's bytes; `safe_filename` is the one `Content-Disposition` sanitiser. |
+| `sources.py` | What a geometry's `source` names in the calculation artifact store (D-124): refused on write unless stored, read for its export and for `GET /calc-artifacts/content` (`D-2026-10-03-a-geometry-artefact-cites-the-calc-store-it-does-not-copy`). |
 | `grounding.py` | The figures an agent-written revision states that no stored tool result of the session accounts for — **unchecked, not wrong** — stored on the revision at write time. |
 
 ## What is deliberately not here
@@ -35,8 +36,8 @@ the tools that already do those writes.
   argument for them did not hold, and the cost is a handle in every tool result's shape.
 - **Artefacts that run code** — model-authored HTML or JavaScript. Declined in the ADR, with its
   `Revisit when:`.
-- **Rendering.** Structures are drawn by the UI's RDKit worker and charts by its own SVG; no server
-  path produces an image for an artefact.
+- **Rendering.** Structures are drawn by the UI's RDKit worker, charts by its own SVG and a geometry
+  by its 3D viewer; no server path produces an image for an artefact.
 
 ## Lifecycle
 
@@ -44,3 +45,14 @@ Session-owned and conversation-tier: deleting the session deletes its artefacts,
 those of the leaver's sessions (`agent/leaver.py`), and `retention_session_exhibits_days` ages them
 out (`durable/retention.py`). The revisions table is INSERT-only by grant and goes only behind its
 header, by cascade.
+
+## A development report as an artefact, and its one limitation
+
+A report requested from a conversation is also written there as a `document` artefact by the
+report's own activity (`durable/report_workflow.record_report_exhibit`), with an id derived from
+the workflow so a retry writes nothing twice. **The run is shared, the artefact is not**: the
+report's job id leaves the session out on purpose (`agent/durable_tools._report_id`), so a second
+session asking for the same report rejoins the first run and gets the note but **no artefact of
+its own**, and a status read there omits `exhibit_id` rather than name an artefact it cannot open
+(`agent/durable_tools.readable_in_this_session`). Copying the artefact into every session that
+rejoins would need the run to learn who rejoined it, which nothing records today.

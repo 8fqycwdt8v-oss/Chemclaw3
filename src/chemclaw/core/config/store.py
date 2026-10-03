@@ -207,6 +207,10 @@ class StoreSettings(BaseSettings):
     # An artifact over the cap is *skipped with a warning*, never an error: capturing a
     # by-product must not be able to fail the calculation it is a by-product of. 0 disables.
     artifact_max_bytes: int = Field(default=33_554_432, ge=0)
+    # The largest stored by-product `GET /calc-artifacts/content` serves; above it the route
+    # answers 413 before reading the blob, because the read decompresses the whole of it into
+    # memory. The store's own write cap by default, so whatever was kept can be downloaded.
+    calc_artifact_max_download_bytes: int = Field(default=33_554_432, ge=1)
     # zlib level for stored artifacts; 0 stores raw. 6 is zlib's own default — the knee of the
     # ratio/CPU curve on the text formats these artifacts actually are.
     artifact_compression_level: int = Field(default=6, ge=0, le=9)

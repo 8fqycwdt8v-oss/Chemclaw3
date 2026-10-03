@@ -134,6 +134,12 @@ class MemorySettings(BaseSettings):
     # window here — and while it is 0, a session holding one is never forgotten by the ownership
     # sweep either (`durable/retention._OWNERSHIP_DEPENDENCIES`).
     retention_session_exhibits_days: int = Field(default=0, ge=0)
+    # Hours an `exhibit` push row on `session_events` is kept, **consumed or not**. Unlike a job's
+    # push-back, which carries a result nobody else holds and so outlives the window until it is
+    # delivered, an artefact push is a notification: the list route is the source of truth, and a
+    # tab that missed one refetches on focus. Not 0-disabled like the day windows above, because
+    # an unbounded notification queue is not a retention policy anybody chose.
+    exhibit_push_retention_hours: int = Field(default=24, ge=1)
     # Stored tool results (`api/tool_results.py`, migration 042) — the highest-volume table this
     # sweep touches, at up to one row per tool call.
     #

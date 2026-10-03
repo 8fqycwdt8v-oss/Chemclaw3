@@ -38,7 +38,7 @@ from chemclaw.core.identity_context import get_current_correlation_id
 from chemclaw.core.logging import log_event
 from chemclaw.core.metrics_bridge import degraded
 from chemclaw.exhibits.diff import diff_specs
-from chemclaw.exhibits.export import MEDIA_TYPES, export_filename, render_export
+from chemclaw.exhibits.export import MEDIA_TYPES, export_filename, resolve_export
 from chemclaw.exhibits.models import (
     EXHIBIT_ID,
     PUSH_KIND,
@@ -56,6 +56,7 @@ from chemclaw.exhibits.models import (
     parse_spec,
     require_writable,
 )
+from chemclaw.exhibits.sources import require_source_stored
 from chemclaw.exhibits.store import default_exhibit_store
 
 logger = logging.getLogger(__name__)
@@ -126,7 +127,7 @@ async def create_exhibit_route(
     A `result` artefact pins a stored tool result: its `result_ref` must be one this session can
     fetch, so a person cannot pin bytes another conversation produced.
     """
-    spec = _parsed(body.spec, title=body.title, change_note="")
+    spec = await _parsed(body.spec, title=body.title, change_note="")
     if spec.kind != body.kind:
         raise HTTPException(
             status_code=422, detail=f"kind is {body.kind!r} and the spec is a {spec.kind!r}"
@@ -209,7 +210,7 @@ async def post_exhibit_revision(
     if current is None:
         raise HTTPException(status_code=404, detail=_missing(exhibit_id, 0))
     title = current.title if body.title is None else body.title
-    spec = _parsed(body.spec, title=title, change_note=body.change_note)
+    spec = await _parsed(body.spec, title=title, change_note=body.change_note)
     await _require_session_result(session_id, spec)
     try:
         view = await store.append(
@@ -246,13 +247,19 @@ async def export_exhibit(
     live: CurrentSession,
     revision: int = 0,
 ) -> Response:
-    """The artefact as a file; a format its kind does not offer is a 404, not a wrong file."""
+    """The artefact as a file; a format its kind does not offer is a 404, not a wrong file.
+
+    So is a geometry whose cited calculation artifact has been evicted since it was written: the
+    artefact still reads, and the file it pointed at is not there to give.
+    """
     view = await default_exhibit_store().view(session_id, exhibit_id, revision)
     if view is None:
         raise HTTPException(status_code=404, detail=_missing(exhibit_id, revision))
-    body = render_export(view.spec, fmt)
+    body = await resolve_export(view.spec, fmt)
     if body is None:
-        raise HTTPException(status_code=404, detail=f"a {view.kind} artefact has no {fmt!r} export")
+        raise HTTPException(
+            status_code=404, detail=f"a {view.kind} artefact has no {fmt!r} export here"
+        )
     filename = export_filename(view.title, view.exhibit_id, view.revision, fmt)
     return Response(
         content=body,
@@ -275,11 +282,12 @@ async def list_my_exhibits(
     )
 
 
-def _parsed(raw: dict[str, Any], *, title: str, change_note: str) -> Spec:
+async def _parsed(raw: dict[str, Any], *, title: str, change_note: str) -> Spec:
     """The typed, write-checked spec, or the 422 that names what is wrong with it."""
     try:
         spec = parse_spec(raw)
         require_writable(spec, title=title, change_note=change_note)
+        await require_source_stored(spec)
     except InvalidExhibit as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return spec

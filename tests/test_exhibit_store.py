@@ -177,6 +177,40 @@ async def test_a_session_at_its_cap_is_refused_another(
 
 
 @pytest.mark.parametrize("backend", _BACKENDS)
+async def test_a_chosen_id_makes_create_a_create_or_return(backend: str) -> None:
+    """The same id twice is one artefact; another session's id and a malformed one are refused.
+
+    What a durable writer's retry relies on (`durable/report_workflow.record_report_exhibit`):
+    the second call returns revision 1 and writes nothing, even with a different spec.
+    """
+    store = await _backend(backend)
+    session = _session()
+    chosen = f"xb-{uuid4().hex[:16]}"
+    first = await store.create(
+        session, title="r", spec=_doc("one"), author_kind="agent", author="x", exhibit_id=chosen
+    )
+    again = await store.create(
+        session, title="r2", spec=_doc("two"), author_kind="agent", author="x", exhibit_id=chosen
+    )
+    assert first.exhibit_id == again.exhibit_id == chosen
+    assert (again.revision, again.title, again.spec) == (1, "r", _doc("one"))
+    assert [header.exhibit_id for header in await store.headers(session)] == [chosen]
+    with pytest.raises(InvalidExhibit, match="another conversation"):
+        await store.create(
+            _session(),
+            title="r",
+            spec=_doc("x"),
+            author_kind="agent",
+            author="x",
+            exhibit_id=chosen,
+        )
+    with pytest.raises(InvalidExhibit, match="not an artefact id"):
+        await store.create(
+            session, title="r", spec=_doc("x"), author_kind="agent", author="x", exhibit_id="xb-1"
+        )
+
+
+@pytest.mark.parametrize("backend", _BACKENDS)
 async def test_the_agents_read_mark_follows_its_writes_and_never_moves_back(backend: str) -> None:
     """What the turn note reads: an agent write moves the mark, a person's does not."""
     store = await _backend(backend)

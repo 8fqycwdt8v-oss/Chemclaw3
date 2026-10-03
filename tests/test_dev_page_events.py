@@ -73,3 +73,17 @@ def test_dev_page_has_no_case_for_a_type_that_does_not_exist() -> None:
         "the dev page handles events that no turn can emit: "
         + ", ".join(sorted(handled - _event_types()))
     )
+
+
+def test_the_draft_lines_are_forgotten_when_a_turn_starts() -> None:
+    """`draftLines` is a page-lifetime `Map`; a turn clears it before it sends, so it cannot grow.
+
+    A draft no `exhibit` settled — a refused tool, a failed turn — would otherwise stay in the map
+    for as long as the page is open, one trace element per call. Read as text, like every assertion
+    in this file: the clear must sit in `sendMessage`, ahead of the request that starts the turn.
+    """
+    source = _APP_JS.read_text(encoding="utf-8")
+    body = source[source.index("async function sendMessage") :]
+    body = body[: body.index("\n}\n")]
+    assert "draftLines.clear()" in body, "sendMessage never clears the drafted-artefact lines"
+    assert body.index("draftLines.clear()") < body.index("fetch("), "cleared after the turn began"

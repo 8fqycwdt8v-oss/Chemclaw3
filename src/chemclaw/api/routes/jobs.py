@@ -7,11 +7,13 @@ the suite patches them there (`chemclaw.agent.durable_tools.job_status` and frie
 `chemclaw/api/routes/README.md`.
 """
 
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 
 from chemclaw.agent.durable_tools import DurableJobStatus
 from chemclaw.api import app as front_door
-from chemclaw.api.deps import CurrentUser, _is_reviewer
+from chemclaw.api.auth import Principal
+from chemclaw.api.deps import CurrentUser, _is_reviewer, _resolve_session
+from chemclaw.core.session_context import reset_current_session_id, set_current_session_id
 from chemclaw.durable.job_record import JobRecordSummary
 
 # Where the next page's cursor is returned, because the body cannot carry it — the same header
@@ -79,6 +81,12 @@ async def list_jobs(
 async def get_job(
     job_id: str,
     principal: CurrentUser,
+    request: Request,
+    session_id: str | None = Query(
+        default=None,
+        description="The conversation reading this job; a report's `exhibit_id` is kept only "
+        "when the caller can read that session and the run's artefact lives there.",
+    ),
 ) -> DurableJobStatus:
     """One job's status and, once finished, its result.
 
@@ -88,11 +96,41 @@ async def get_job(
     what survives it (D-157). An open run reads `running`, or `queued` when nothing has started it
     yet — a queued tool call waiting for a slot, or a run on a queue no worker polls — with the
     reason as `summary`.
+
+    **`session_id` is a reading context, not a filter, and it never refuses.** A development report
+    run is shared by every session that asks for it and its artefact lives in the one that started
+    it, so `exhibit_id` is kept only for a reader of that session
+    (`agent/durable_tools.readable_in_this_session`). The session is resolved through the session
+    gate — owner or member — and a session the caller cannot read is treated exactly as no session:
+    the id is stripped and the answer is otherwise the same, so the parameter is no oracle for
+    which sessions exist. Without it the id is always stripped; this route has no session of its
+    own.
     """
+    readable = session_id is not None and await _can_read(request, session_id, principal)
+    token = set_current_session_id(session_id) if readable and session_id else None
     try:
         return await front_door.job_status(job_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail="no such job") from exc
+    finally:
+        if token is not None:
+            reset_current_session_id(token)
+
+
+async def _can_read(request: Request, session_id: str, principal: Principal) -> bool:
+    """Whether `principal` may read `session_id` — the session gate's answer, as a boolean.
+
+    The gate answers a stranger and an unknown id with the same 404 (`_resolve_session`), which is
+    exactly the indistinguishability this route needs; a 403 is a member asking for an owner's act
+    and cannot arise from a read. Anything else — the session store unreachable — propagates.
+    """
+    try:
+        await _resolve_session(request, session_id, principal)
+    except HTTPException as exc:
+        if exc.status_code in (403, 404):
+            return False
+        raise
+    return True
 
 
 async def cancel_durable_job(

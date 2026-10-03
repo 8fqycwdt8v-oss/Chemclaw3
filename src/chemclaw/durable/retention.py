@@ -28,7 +28,9 @@ to be exhaustive, not asserted to be.
   waiting on it, and its age says nothing about whether it has. (Not "the only record that
   something finished", which an earlier wording claimed while moving this argument up from a code
   comment: `job_records` is that record, and is refused from this sweep below for exactly that
-  reason.)
+  reason.) **One kind is the exception, in the other direction**: an artefact push (`exhibit`) is a
+  notification whose source of truth is the artefact list, so it is pruned after
+  `exhibit_push_retention_hours` whether consumed or not (`_EXHIBIT_PUSHES`).
 - `session_messages` — conversation history. Bounded by age, per the deployment's policy, **but an
   age cutoff alone cannot dispose of a conversation row** (D-145). A `tool_use` and the
   `tool_result` answering it are one indivisible unit: delete either half and the API rejects the
@@ -228,6 +230,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import timedelta
 from time import monotonic
+from typing import Literal
 
 from pydantic import BaseModel
 from temporalio import activity, workflow
@@ -245,6 +248,7 @@ with workflow.unsafe.imports_passed_through():
     from chemclaw.core.metrics_bridge import record_metric
     from chemclaw.durable.heartbeat import beating
     from chemclaw.durable.registry import durable_activity, durable_workflow
+    from chemclaw.exhibits.models import PUSH_KIND as EXHIBIT_PUSH_KIND
 
 from chemclaw.durable.publish import BAD_DATA_RETRY, queue_wait_timeout
 
@@ -267,6 +271,14 @@ logger = logging.getLogger(__name__)
 # the pair describes — `_prune_checkpoints` handles it and the pair records only that the table is
 # in scope and what dates a row. It has no timestamp column at all: the checkpoint payload carries
 # its own `ts`, which is what the expression names.
+# **The one `session_events` row consumption does not decide**: an artefact push (`exhibit`) is a
+# notification — the artefact list is the source of truth and a tab that missed one refetches on
+# focus — so it goes on age alone, after `exhibit_push_retention_hours`, consumed or not. Every
+# other kind keeps the `consumed_at` rule above, because an unconsumed `job_completed` is the only
+# thing that will wake the stream waiting on it. Its own pass rather than a row of this map: the
+# map is keyed by table, and the two rules share one.
+_EXHIBIT_PUSHES = f"kind = '{EXHIBIT_PUSH_KIND}'"
+
 _PRUNABLE: dict[str, tuple[str, str]] = {
     "session_events": ("created_at", "consumed_at IS NOT NULL"),
     "session_messages": ("created_at", "TRUE"),
@@ -1517,6 +1529,25 @@ async def _sweep_once(
     outcome = RetentionOutcome(deleted={}, skipped=[])
     first_error: BaseException | None = None
     async with connection(settings.postgres_dsn) as conn:
+        # Artefact pushes first, on their own window in hours and whatever `session_events`' day
+        # window says — see `_EXHIBIT_PUSHES`. Isolated like every table below.
+        try:
+            pushes, more = await _prune_by_age(
+                conn,
+                "session_events",
+                "created_at",
+                _EXHIBIT_PUSHES,
+                settings.exhibit_push_retention_hours,
+                budget,
+                unit="hours",
+            )
+            outcome.deleted["session_events"] = pushes
+            if more:
+                outcome.rows_deferred = 1
+        except Exception as exc:  # isolated; re-raised once every table is tried
+            await conn.rollback()
+            logger.exception("retention sweep failed for artefact pushes; the tables still run")
+            first_error = exc
         # No budget check here, deliberately: a sweep that has started finishes its tables. Every
         # branch below is already capped, the budget's job is to decide whether to sweep *again*,
         # and a third place asking it is what made a pass with a tiny budget do nothing at all —
@@ -1558,7 +1589,7 @@ async def _sweep_once(
                     outcome.threads_deferred = deferred
                     continue
                 deleted, more = await _prune_by_age(conn, table, column, disposable, days, budget)
-                outcome.deleted[table] = deleted
+                outcome.deleted[table] = outcome.deleted.get(table, 0) + deleted
                 if more:
                     outcome.rows_deferred = 1
             except Exception as exc:  # isolated per table; re-raised once every table is tried
@@ -1579,8 +1610,10 @@ async def _prune_by_age(
     table: str,
     column: str,
     disposable: str,
-    days: int,
+    window: int,
     budget: _Budget,
+    *,
+    unit: Literal["days", "hours"] = "days",
 ) -> tuple[int, bool]:
     """Delete `table`'s expired rows in committed batches. Returns `(deleted, more may remain)`.
 
@@ -1617,9 +1650,11 @@ async def _prune_by_age(
             interpolation below safe. The bound value is the window.
         column: That table's dating column or expression, from the same map.
         disposable: The extra predicate deciding whether a row of this table may go at all.
-        days: The retention window; rows older than it are candidates.
+        window: The retention window, in `unit`; rows older than it are candidates.
         budget: The pass's clock. Batches stop when another one as slow as the slowest so far
             would not land inside it.
+        unit: What `window` counts — days for every table window, hours for the artefact
+            pushes, whose window is a notification's rather than a record's.
 
     Returns:
         `(rows deleted, whether a full batch came back)`. The second is the same 0/1 probe the
@@ -1638,9 +1673,9 @@ async def _prune_by_age(
                 await cur.execute(
                     f"DELETE FROM {table} WHERE ctid = ANY(ARRAY("
                     f"SELECT ctid FROM {table} "
-                    f"WHERE {disposable} AND {column} < now() - make_interval(days => %s) "
+                    f"WHERE {disposable} AND {column} < now() - make_interval({unit} => %s) "
                     f"LIMIT %s))",
-                    (days, batch_size),
+                    (window, batch_size),
                 )
                 await conn.commit()
             batch = cur.rowcount

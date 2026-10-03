@@ -533,3 +533,90 @@ def test_a_plan_proposed_through_the_graph_lands_in_the_todo_state(
     assert result["todos"][0]["tools"] == ["compute_reaction_energy"]
     assert _final_text(result) == e2e.PLAN_PROPOSED
     json.dumps(result["todos"])  # what the plan route and the stream serialize
+
+
+def test_the_artefact_turn_drafts_a_document_and_then_answers(served: MockLlm) -> None:
+    """`create_exhibit` with the plan, streamed in fragments; once it answered, the pointer line."""
+    ask = _user("[[e2e:artefact]] draft the amide coupling plan")
+    first = _decide(served, _body(ask))
+    assert [(c.tool, c.fragments) for c in first.calls] == [
+        ("create_exhibit", e2e.ARTEFACT_FRAGMENTS)
+    ]
+    assert first.calls[0].arguments["spec"] == {
+        "kind": "document",
+        "markdown": e2e.ARTEFACT_MARKDOWN,
+    }
+    second = _decide(served, _body(ask, _called("create_exhibit"), _tool('{"revision": 1}')))
+    assert second.calls == [] and second.text == e2e.ARTEFACT_ANSWER
+
+
+def test_the_artefact_turn_streams_drafts_through_the_real_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A real `ChatOpenAI` against the mock, through `graph_events`: drafts, then the artefact.
+
+    The wire is the mock's, so the fragments arrive in the chunk shape a provider's do — the one
+    `api/exhibit_drafts.py` has to reassemble — rather than the shape a test fake chose.
+    """
+    from langchain_openai import ChatOpenAI
+
+    from chemclaw.agent.audit import NullAuditSink
+    from chemclaw.agent.langgraph_agent import build_langgraph_agent
+    from chemclaw.api.events import ExhibitDraftEvent, ExhibitEvent
+    from chemclaw.api.graph_stream import graph_events
+    from chemclaw.api.runner_trace import ToolCallTrace
+    from chemclaw.core.config import settings
+    from chemclaw.core.identity_context import reset_current_identity, set_current_identity
+    from chemclaw.core.session_context import reset_current_session_id, set_current_session_id
+
+    monkeypatch.setattr(settings, "session_store", "memory")
+    monkeypatch.setattr(settings, "exhibit_draft_min_interval_ms", 0)
+    app = build_app(MockLlm([replace(b, think_seconds=0) for b in e2e.E2E_BEHAVIOURS]))
+
+    class _Usage:
+        def add(self, usage: Any) -> None:
+            """Accept and ignore one update's usage."""
+
+    async def run() -> list[Any]:
+        session = set_current_session_id("e2e-artefact-session")
+        identity = set_current_identity("oid-ana", frozenset())
+        try:
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://mock"
+            ) as client:
+                model = ChatOpenAI(
+                    model="mock",
+                    base_url="http://mock/v1",
+                    api_key=SecretStr("unused"),
+                    http_async_client=client,
+                    max_retries=0,
+                    streaming=True,
+                )
+                graph = build_langgraph_agent(model, audit_sink=NullAuditSink())
+                return [
+                    event
+                    async for event in graph_events(
+                        graph,
+                        "[[e2e:artefact]] draft the amide coupling plan",
+                        config={"configurable": {"thread_id": "e2e-artefact-session"}},
+                        trace=ToolCallTrace(),
+                        on_signal=lambda signal: None,
+                        usage=_Usage(),
+                    )
+                ]
+        finally:
+            reset_current_identity(identity)
+            reset_current_session_id(session)
+
+    events = asyncio.run(run())
+    kinds = [event.type for event in events]
+    drafts = [event for event in events if isinstance(event, ExhibitDraftEvent)]
+    assert len(drafts) > 1, kinds
+    assert kinds.index("tool_call") > kinds.index("exhibit_draft")
+    assert drafts[-1].markdown == e2e.ARTEFACT_MARKDOWN
+    assert {draft.title for draft in drafts} == {e2e.ARTEFACT_TITLE}
+    assert {draft.call_id for draft in drafts} == {drafts[0].call_id} and drafts[0].call_id
+    exhibit = next(event for event in events if isinstance(event, ExhibitEvent))
+    assert (exhibit.kind, exhibit.title, exhibit.op) == ("document", e2e.ARTEFACT_TITLE, "created")
+    assert exhibit.call_id == drafts[0].call_id
+    assert kinds[-1] == "token"

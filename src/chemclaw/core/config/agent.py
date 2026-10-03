@@ -1039,6 +1039,21 @@ class AgentSettings(BaseSettings):
     exhibit_max_rows: int = Field(default=2_000, ge=1)
     exhibit_max_structures: int = Field(default=200, ge=1)
     exhibit_max_points: int = Field(default=5_000, ge=1)
+    # Atoms one inline `geometry` XYZ block may hold — a viewer's bound, not a chemistry one: a
+    # drug-sized substrate with a catalyst is under a hundred, and five hundred is a small protein
+    # pocket. A `source` geometry is the calc store's bytes and is not counted here.
+    exhibit_max_atoms: int = Field(default=500, ge=1)
+    # The fewest milliseconds between two `exhibit_draft` frames of one tool call on the turn
+    # stream. Each frame carries the whole document so far, so the frame rate times the document's
+    # size is the bandwidth a drafted artefact costs; a quarter second reads as live typing.
+    exhibit_draft_min_interval_ms: int = Field(default=250, ge=0)
+    # The draft rate per call, in bytes of document per millisecond of interval: a frame of N
+    # bytes is followed by the next no sooner than N / this. Each frame is the whole document, so
+    # a fixed interval makes a draft's bytes quadratic in its size — measured, a 200 kB document
+    # written over five minutes at 250 ms was ~1,200 frames averaging ~100 kB, ~120 MB per viewer.
+    # At 100 (100 kB/s) the same document costs ~150 frames and ~15 MB, and a short one still
+    # streams at the floor above.
+    exhibit_draft_bytes_per_ms: int = Field(default=100, ge=1)
     # Artefacts one session may hold; the next create is refused (409 `exhibit_limit` over REST, a
     # worded refusal to the model) rather than evicting one somebody may still be reading.
     exhibit_max_per_session: int = Field(default=100, ge=1)
