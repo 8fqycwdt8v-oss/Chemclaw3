@@ -28,6 +28,7 @@ from chemclaw.core import db
 from chemclaw.core.config import settings
 from chemclaw.core.jsonb import json_column
 from chemclaw.exhibits.models import (
+    EXHIBIT_ID,
     ExhibitHeader,
     ExhibitKind,
     ExhibitLimit,
@@ -61,11 +62,18 @@ class ExhibitStore(Protocol):
         change_note: str = "",
         correlation_id: str = "",
         unverified_figures: list[str] | None = None,
+        exhibit_id: str | None = None,
     ) -> ExhibitView:
         """Store revision 1 of a new artefact, refusing at the session's cap.
 
+        `exhibit_id` is for a writer that must be idempotent across retries — a durable activity
+        deriving the id from its workflow — and makes the call a create-or-return: when this
+        session already holds that id, its revision 1 comes back and nothing is written. Every
+        other writer leaves it `None` and gets a fresh random id.
+
         Raises:
             ExhibitLimit: the session already holds `exhibit_max_per_session` artefacts.
+            InvalidExhibit: `exhibit_id` is malformed, or another session holds it.
         """
         ...
 
@@ -184,12 +192,19 @@ class InMemoryExhibitStore:
         change_note: str = "",
         correlation_id: str = "",
         unverified_figures: list[str] | None = None,
+        exhibit_id: str | None = None,
     ) -> ExhibitView:
         """Store revision 1 of a new artefact, refusing at the session's cap."""
+        if exhibit_id is not None:
+            _require_mintable(exhibit_id)
+            if exhibit_id in self._entries:
+                return _same_session(
+                    exhibit_id, session_id, await self.view(session_id, exhibit_id, 1)
+                )
         held = sum(1 for entry in self._entries.values() if entry.session_id == session_id)
         if held >= settings.exhibit_max_per_session:
             raise ExhibitLimit(_limit_message(held))
-        exhibit_id = new_exhibit_id()
+        exhibit_id = exhibit_id or new_exhibit_id()
         now = datetime.now(UTC)
         entry = _Entry(
             session_id=session_id,
@@ -363,6 +378,23 @@ def _header_fields(head: ExhibitView) -> dict[str, Any]:
     return {name: getattr(head, name) for name in ExhibitHeader.model_fields}
 
 
+def _require_mintable(exhibit_id: str) -> None:
+    """Refuse a caller-chosen id that is not in the shape a minted one takes."""
+    if not EXHIBIT_ID.fullmatch(exhibit_id):
+        raise InvalidExhibit(f"{exhibit_id!r} is not an artefact id (`xb-` and 16 hex digits)")
+
+
+def _same_session(exhibit_id: str, session_id: str, existing: ExhibitView | None) -> ExhibitView:
+    """The existing revision 1 a create-or-return hands back, or a refusal when it is not ours.
+
+    `None` means the id is held by another session: a deterministic id colliding across sessions
+    is not a retry, and handing back somebody else's artefact would be a leak.
+    """
+    if existing is None:
+        raise InvalidExhibit(f"{exhibit_id} belongs to another conversation")
+    return existing
+
+
 def _limit_message(held: int) -> str:
     """The refusal a full session gets, naming the cap and the way out."""
     return (
@@ -418,6 +450,7 @@ WHERE exhibit_id = %(exhibit_id)s
 # the count. Keyed by session rather than table-wide: creates in different sessions never contend.
 _SESSION_LOCK = "SELECT pg_advisory_xact_lock(hashtextextended('session_exhibits:' || %s, 0))"
 _COUNT = "SELECT count(*) FROM session_exhibits WHERE session_id = %s"
+_HELD_BY = "SELECT session_id FROM session_exhibits WHERE exhibit_id = %s"
 
 _SELECT_VIEW = f"""
 SELECT {_HEADER_COLUMNS}, r.revision, r.parent_revision, r.author_kind, r.author, r.change_note,
@@ -501,9 +534,27 @@ class PostgresExhibitStore:
         change_note: str = "",
         correlation_id: str = "",
         unverified_figures: list[str] | None = None,
+        exhibit_id: str | None = None,
     ) -> ExhibitView:
-        """Store revision 1 of a new artefact, refusing at the session's cap."""
-        exhibit_id = new_exhibit_id()
+        """Store revision 1 of a new artefact, refusing at the session's cap.
+
+        A caller-chosen id is looked up first; a retry that raced the attempt it repeats past that
+        look-up lands on the header's primary key instead, and the backstop below turns that into
+        the same create-or-return answer.
+        """
+        if exhibit_id is not None:
+            _require_mintable(exhibit_id)
+            async with self._connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(_HELD_BY, (exhibit_id,))
+                    held_by = await cur.fetchone()
+            if held_by is not None:
+                return _same_session(
+                    exhibit_id, session_id, await self.view(session_id, exhibit_id, 1)
+                )
+        chosen = exhibit_id is not None
+        exhibit_id = exhibit_id or new_exhibit_id()
+        raced = False
         async with self._connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(_SESSION_LOCK, (session_id,))
@@ -512,31 +563,42 @@ class PostgresExhibitStore:
                 held = int(counted[0]) if counted else 0
                 if held >= settings.exhibit_max_per_session:
                     raise ExhibitLimit(_limit_message(held))
-                await cur.execute(
-                    _INSERT_HEADER,
-                    {
-                        "exhibit_id": exhibit_id,
-                        "session_id": session_id,
-                        "kind": spec.kind,
-                        "title": title,
-                        "author_kind": author_kind,
-                        "author": author,
-                        "seen": 1 if author_kind == "agent" else 0,
-                        "correlation_id": correlation_id,
-                    },
-                )
-                await self._insert_revision(
-                    cur,
-                    exhibit_id,
-                    spec,
-                    1,
-                    author_kind,
-                    author,
-                    change_note,
-                    correlation_id,
-                    unverified_figures,
-                )
-            await conn.commit()
+                try:
+                    await cur.execute(
+                        _INSERT_HEADER,
+                        {
+                            "exhibit_id": exhibit_id,
+                            "session_id": session_id,
+                            "kind": spec.kind,
+                            "title": title,
+                            "author_kind": author_kind,
+                            "author": author,
+                            "seen": 1 if author_kind == "agent" else 0,
+                            "correlation_id": correlation_id,
+                        },
+                    )
+                except psycopg.errors.UniqueViolation:
+                    if not chosen:
+                        raise
+                    raced = True
+                if not raced:
+                    await self._insert_revision(
+                        cur,
+                        exhibit_id,
+                        spec,
+                        1,
+                        author_kind,
+                        author,
+                        change_note,
+                        correlation_id,
+                        unverified_figures,
+                    )
+            if raced:
+                await conn.rollback()
+            else:
+                await conn.commit()
+        if raced:
+            return _same_session(exhibit_id, session_id, await self.view(session_id, exhibit_id, 1))
         return await self._require_view(session_id, exhibit_id, 1)
 
     async def append(

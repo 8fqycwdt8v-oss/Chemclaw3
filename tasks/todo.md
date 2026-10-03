@@ -15,7 +15,7 @@ frontend built in parallel — names and shapes exactly as frozen.
       in the graph stream; partial JSON; document only; throttled by
       `exhibit_draft_min_interval_ms`, growth only, capped by `exhibit_max_spec_bytes`; Event union,
       OpenAPI, dev page, contract fixture; test through the real graph stream with a chunking model.
-- [ ] **4. Report → artefact** — optional session/requester on the workflow input; an activity
+- [x] **4. Report → artefact** — optional session/requester on the workflow input; an activity
       creates the `document` with id `xb-` + sha256(workflow_id)[:16], idempotent on retry;
       `job_completed.summary.exhibit_id`; `exhibit` pushed on `/events`; a deleted session skips.
 - [ ] **5. Fork copies artefacts** (head only, new ids, `forked from <xid> r<n>`).

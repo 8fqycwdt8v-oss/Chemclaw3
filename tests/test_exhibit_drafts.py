@@ -30,13 +30,17 @@ from chemclaw.core.identity_context import reset_current_identity, set_current_i
 from chemclaw.core.session_context import reset_current_session_id, set_current_session_id
 from tests.fakes_langgraph import ScriptedChatModel
 
+#: How many characters of a call's JSON arguments each streamed fragment carries.
+_FRAGMENT_CHARS = 12
 _REPORT = "# Plan\n\nStep one: dry the THF.\n\nStep two: add the base slowly.\n"
 
 
 class _FragmentingModel(ScriptedChatModel):
     """A scripted model whose tool call arrives as many argument fragments, like a provider's."""
 
-    fragment_chars: int = 12
+    def __init__(self, script: list[Any]) -> None:
+        """Declared so the pydantic plugin types the constructor as the parent's script form."""
+        super().__init__(script)
 
     def _stream(
         self,
@@ -54,8 +58,7 @@ class _FragmentingModel(ScriptedChatModel):
         call = message.tool_calls[0]
         arguments = json.dumps(call["args"])
         pieces = [
-            arguments[i : i + self.fragment_chars]
-            for i in range(0, len(arguments), self.fragment_chars)
+            arguments[i : i + _FRAGMENT_CHARS] for i in range(0, len(arguments), _FRAGMENT_CHARS)
         ]
         for position, piece in enumerate(pieces):
             first = position == 0

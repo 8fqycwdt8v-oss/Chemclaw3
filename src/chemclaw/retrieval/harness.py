@@ -74,6 +74,13 @@ class ReportRequest(BaseModel):
     # entitlement, and folding the turn into it would give the same chemist a second full research
     # run for every turn they re-ask in.
     correlation_id: str = ""
+    # The conversation that asked, so the finished draft also lands there as a `document` artefact
+    # and the completion is pushed to it (`durable/report_workflow.record_report_exhibit`). Empty
+    # for a launch outside a session — and for every history started before the field existed,
+    # which is what keeps an in-flight run's command sequence unchanged: the new commands are
+    # issued only for a request that names a session. Not part of `_report_id` either, for
+    # `correlation_id`'s reason: a second session asking for the same report rejoins the run.
+    session_id: str = ""
 
 
 class SectionRequest(BaseModel):

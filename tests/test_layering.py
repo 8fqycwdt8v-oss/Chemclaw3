@@ -429,6 +429,10 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
     # (`D-2026-10-03-a-geometry-artefact-cites-the-calc-store-it-does-not-copy`), so `sources.py`
     # reads the calc artifact store — the one module that does, and only for existence and bytes.
     ("chemclaw.exhibits", "chemclaw.science"),
+    # A development report requested from a conversation lands there as a `document` artefact,
+    # written by the report's own activity (`durable/report_workflow.record_report_exhibit`)
+    # through the one store every artefact writer uses.
+    ("chemclaw.durable", "chemclaw.exhibits"),
     ("chemclaw.agent", "chemclaw.exhibits"),
     ("chemclaw.api", "chemclaw.exhibits"),
     # The narrowest package in the tree, and deliberately: `analytical` reads `core.units` and

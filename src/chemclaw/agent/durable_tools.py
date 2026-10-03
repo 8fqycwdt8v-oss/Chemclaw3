@@ -222,6 +222,8 @@ async def request_development_report(title: str, sections: list[ReportSection]) 
         # `or ""` rather than a minted id: a launch outside a turn is unjoined, and saying so is
         # the point (`D-2026-08-27-a-step-runs-under-the-correlation-id-it-was-launched-with`).
         correlation_id=get_current_correlation_id() or "",
+        # The conversation the finished draft is shown in, as a document artefact.
+        session_id=get_current_session_id() or "",
     )
     client = await connect()
     workflow_id = _report_id(request)
