@@ -829,6 +829,45 @@ def test_a_failed_fetch_is_remembered_rather_than_repeated_per_request(
     assert len(hits) == 1, f"{name}: {len(hits)} fetches reached the tenant for 20 requests"
 
 
+def test_a_remembered_failure_keeps_no_caller_s_frames_alive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The memory holds a message, not the first failing request's stack.
+
+    It used to store the raised instance itself, whose traceback grows through every frame it
+    passes — `_signing_key`'s, holding the raw bearer token, among them — and kept it for as long
+    as the memory lasted. A local standing in for that token must not be reachable from the
+    remembered failure, nor from the one a later request is answered with.
+    """
+    monkeypatch.setattr(settings, "entra_jwks_failure_backoff_seconds", 60.0)
+    secret = "eyJ.a-bearer-token-stand-in"
+
+    def a_request(client: Any) -> BaseException:
+        token = secret  # noqa: F841 - the local the remembered failure must not hold
+        with pytest.raises(auth.IdentityProviderUnavailable) as raised:
+            client.fetch_data()
+        return raised.value
+
+    def reachable_locals(exc: BaseException | None) -> list[Any]:
+        found: list[Any] = []
+        while exc is not None:
+            tb = exc.__traceback__
+            while tb is not None:
+                found.extend(tb.tb_frame.f_locals.values())
+                tb = tb.tb_next
+            exc = exc.__cause__ or exc.__context__
+        return found
+
+    with _counting_jwks_server(500, "{}") as (url, _hits):
+        client = auth._HttpxJwkClient(url, timeout=5.0)
+        first = a_request(client)
+        later = a_request(client)
+    assert secret in reachable_locals(first), "the probe is vacuous: the first raise lost its frame"
+    assert client._outcome is not first
+    assert secret not in reachable_locals(client._outcome)
+    assert secret not in reachable_locals(later.__cause__)
+
+
 def test_a_remembered_failure_is_asked_about_again_once_the_backoff_passes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

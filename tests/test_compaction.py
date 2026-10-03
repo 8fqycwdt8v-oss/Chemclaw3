@@ -1184,13 +1184,13 @@ def test_the_overrun_indicator_can_fire_at_the_shipped_budget_with_no_window(
 #: `chem` growth, and on the same argument: `PREFIX_BOUND` rose, the window did not, and the pair
 #: stays one claim. This is the first entry here whose prefix grew in another repository.
 #:
-#: **Both drop 600 for the three artefact tools**, the ceiling's raise to 73,450
-#: (`D-2026-10-02-an-artefact-is-part-of-the-answer-not-an-effect`), by the same arithmetic: the
-#: prefix grew, the trigger and the window were held.
+#: **This one drops 600 for the three artefact tools** (the budget's is held — see below), the
+#: ceiling's raise to 73,450 (`D-2026-10-02-an-artefact-is-part-of-the-answer-not-an-effect`), by
+#: the same arithmetic: the prefix grew, the trigger and the window were held.
 #:
 #: **Both gain 2,950 back when `SERVED_ELSEWHERE_ALLOWANCE` falls to 10,250**, after
-#: Chemclaw3-mcp#152 narrowed `chem` to its rules: the first entry here whose prefix *shrank* in
-#: another repository, and the 2,200 above is refunded with interest
+#: Chemclaw3-mcp#155 (closing #152) narrowed `chem` to its rules: the first entry here whose prefix
+#: *shrank* in another repository, and the 2,200 above is refunded with interest
 #: (`D-2026-10-03-the-fleet-narrowed-and-the-thread-and-the-cap-come-back`).
 CLEAR_TRIGGER_THREAD_ALLOWANCE = 27_900
 
@@ -1257,7 +1257,7 @@ CLEAR_TRIGGER_THREAD_ALLOWANCE = 27_900
 #: maximal tool batch occupies — the warm arm below — even after #533 lowered that batch.
 #:
 #: **35,600 since 2026-10-03**, up 2,950 because `SERVED_ELSEWHERE_ALLOWANCE` fell by that once the
-#: fleet narrowed `chem`; the warm arm then clears a 60,000-character batch by ~1,225, so the cap
+#: fleet narrowed `chem`; the warm arm then clears a 60,000-character batch again, so the cap
 #: #533 lowered is restored in the same commit
 #: (`D-2026-10-03-the-fleet-narrowed-and-the-thread-and-the-cap-come-back`).
 BUDGET_THREAD_ALLOWANCE = 35_600

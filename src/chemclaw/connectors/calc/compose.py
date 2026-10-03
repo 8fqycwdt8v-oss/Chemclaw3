@@ -29,18 +29,21 @@ a locally-derived version would be *well-formed*, match zero calibration rows, a
 """
 
 import asyncio
+import logging
 import math
 from collections import Counter
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any, Literal, NamedTuple, Protocol, TypeVar
 
 import numpy as np
+from pydantic import ValidationError
 from rdkit import Chem
 
 from chemclaw.connectors.calc.remote import CalcTimeBudgetError, cached_remote, remote_call
 from chemclaw.core.chem import require_canonical_smiles, require_molecule, torsion_handle
 from chemclaw.core.config import settings
 from chemclaw.core.config.calculators import PkaCalibration
+from chemclaw.core.errors import ChemclawError
 from chemclaw.science.calc.artifacts import (
     HESSIAN_ARRAYS,
     ArrayOffloadingStore,
@@ -134,6 +137,8 @@ _REFINED_COVERAGE_WARNING = 0.9
 # and the only one that is not a claim about which attack was meant.
 _DEFAULT_FUKUI_MODE = "radical"
 _FUKUI_FIELD = {"electrophilic": "f_minus", "nucleophilic": "f_plus", "radical": "f_zero"}
+
+logger = logging.getLogger(__name__)
 
 _Result = TypeVar("_Result")
 # The shape a server answer arrives in, before it is validated into a model. Its own variable
@@ -1397,10 +1402,23 @@ async def _attempt(awaitable: Awaitable[_Result]) -> _Result | ValueError:
     (`D-2026-10-01-a-stop-by-the-clock-is-named-not-retried`). A refused credential and a contract
     skew arrive as `CalcToolError` too, but those fail every item alike and reach the caller as the
     all-failed refusal.
+
+    **A payload that does not validate is not an item's refusal, and it propagates.** pydantic's
+    `ValidationError` is a `ValueError`, so a server answer that the client's model rejects — a
+    contract skew that only some inputs reach — would otherwise be recorded as one medium
+    "refused" and the job would complete; before the per-item boundary the same skew failed the
+    job loudly, and that is what it does again (`ValidationError` is registered non-retryable in
+    `durable/publish.py`). A plain `ValueError` that is not a `ChemclawError` is still one item's
+    answer, because many domain refusals here are plain `ValueError`, but it is logged with its
+    traceback, since a data-dependent bug arrives in exactly that shape.
     """
     try:
         return await awaitable
+    except ValidationError:
+        raise
     except ValueError as refusal:
+        if not isinstance(refusal, ChemclawError):
+            logger.warning("calc.item_refused_by_plain_value_error", exc_info=refusal)
         return refusal
 
 

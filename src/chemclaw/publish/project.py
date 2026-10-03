@@ -561,8 +561,14 @@ def _solvent_screen(
     # the solvent does not matter" with a screen that compared nothing — which a screen reduced to
     # one medium by failures, or asked for one solvent over ions, is. Both are read either way, so
     # the field guard sees them consumed.
+    #
+    # **And a partial screen publishes neither**, for `weakest_bond`'s reason: the spread over the
+    # media that were computed is only a lower bound on the screen's, and a medium that failed may
+    # be the best one. Both are calculation-scope facts a query reads without the
+    # `medium_not_computed` flags beside it — "best solvent = toluene" would find a screen whose
+    # DMSO the clock stopped.
     spread, best = payload.get("spread_kcal"), payload.get("best_solvent")
-    compared = len(payload.get("effects") or []) >= 2
+    compared = len(payload.get("effects") or []) >= 2 and not payload.get("failed")
     facts = _kept(
         _fact(
             "solvent_spread",
@@ -633,12 +639,14 @@ def _species_solvent_screen(
         engine="xtb",
         treatment=payload.get("level") or "",
     )
-    # The swing is a comparison's finding, so one medium publishes none: `_solvent_screen`'s reason.
+    # The swing is a comparison's finding, so one medium publishes none, and a partial screen none
+    # either — over the media computed it is a lower bound: `_solvent_screen`'s two reasons.
     swing = payload.get("largest_swing_kcal")
+    compared = len(distributions) >= 2 and not payload.get("failed")
     facts = _kept(
         _fact(
             "solvent_swing",
-            swing if len(distributions) >= 2 else None,
+            swing if compared else None,
             "kcal/mol",
             uncertainty=payload.get("uncertainty_kcal"),
             uncertainty_kind="reported",

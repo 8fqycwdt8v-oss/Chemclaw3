@@ -171,13 +171,16 @@ class _HttpxJwkClient(PyJWKClient):
                         raise IdentityProviderUnavailable(str(outcome)) from outcome
                     return outcome
             try:
-                outcome = self._fetch()
+                keys = self._fetch()
             except IdentityProviderUnavailable as unavailable:
-                outcome = unavailable
-            self._outcome, self._fetched_at = outcome, time.monotonic()
-            if isinstance(outcome, IdentityProviderUnavailable):
-                raise outcome
-            return outcome
+                # What is remembered is a copy with no traceback. The raised instance's grows up
+                # through the first caller's frames — `_signing_key`'s among them, holding the
+                # raw bearer token — and the memory would keep those alive until the next fetch.
+                self._outcome = IdentityProviderUnavailable(str(unavailable))
+                self._fetched_at = time.monotonic()
+                raise
+            self._outcome, self._fetched_at = keys, time.monotonic()
+            return keys
 
     def _fetch(self) -> Any:
         """The tenant's key set, fetched off the environment's proxy and mapped onto our split.
@@ -373,8 +376,8 @@ def _forced_refresh_allowed(endpoint: str, now: float) -> bool:
     pays the fetch and every later caller reads the refreshed cache.
     """
     # Locked, because the validation pool runs this concurrently and a check-then-set would grant
-    # two callers the same refresh. The fetch they would both make is also coalesced by the
-    # client's own lock, so this is about the gate saying what it means rather than about cost.
+    # two callers the same refresh. Upstream's client lock would serialise the two refreshes, but
+    # the second would still fetch again — so without this lock the gate grants two fetches.
     with _forced_refresh_lock:
         last = _last_forced_refresh.get(endpoint)
         if last is not None and now - last < settings.entra_jwks_refresh_cooldown_seconds:

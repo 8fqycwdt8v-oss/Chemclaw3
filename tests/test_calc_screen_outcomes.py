@@ -252,6 +252,37 @@ def test_an_outage_in_one_medium_fails_the_screen_rather_than_the_medium(
         )
 
 
+def test_a_payload_the_client_cannot_validate_fails_the_screen_rather_than_one_medium(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A contract skew only some inputs reach is the server's bug, not a medium the server refused.
+
+    pydantic's `ValidationError` is a `ValueError`, so the per-item boundary used to record it as
+    one medium "refused" — the job completed, and the server's defect sat in a chemistry column.
+    """
+    from pydantic import ValidationError
+
+    server = install(monkeypatch, FakeCalcServer())
+    answer = server._relax_structure
+    in_toluene = _relaxing(solvent="toluene")
+
+    def skewed(arguments: dict[str, Any]) -> dict[str, Any]:
+        result: dict[str, Any] = answer(arguments)
+        return {"unexpected": True} if in_toluene(arguments) else result
+
+    server.overrides["relax_structure"] = skewed
+
+    with pytest.raises(ValidationError):
+        _run(
+            compose.solvent_comparison(
+                InMemoryStore(),
+                *_ESTERIFICATION,
+                ["water", "toluene"],
+                symmetry_numbers=_ESTER_SIGMAS,
+            )
+        )
+
+
 # --- the species ranking and its solvent screen -------------------------------------------------
 
 

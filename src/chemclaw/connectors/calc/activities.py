@@ -37,7 +37,7 @@ core's queue, and a connector's queue is the connector's own business. Core owns
 (D-006, and `durable/registry.py` says so ten files away); this said "two".
 """
 
-from collections.abc import Awaitable, Iterator
+from collections.abc import Awaitable, Iterator, Sequence
 from contextlib import contextmanager
 from typing import TypeVar
 
@@ -72,7 +72,13 @@ from chemclaw.core.identity_context import (
 )
 from chemclaw.durable.heartbeat import beating
 from chemclaw.durable.registry import durable_activity
-from chemclaw.science.calc.models import RotationProfile, Structure, Torsion
+from chemclaw.science.calc.models import (
+    FailedBond,
+    FailedMedium,
+    RotationProfile,
+    Structure,
+    Torsion,
+)
 from chemclaw.science.calc.postgres_store import default_store
 from chemclaw.science.calc.postgres_structures import default_structure_store
 from chemclaw.science.calc.structures import require_structure
@@ -242,7 +248,7 @@ async def _dispatch(spec: XtbJobSpec) -> XtbJobResult:
         )
         return XtbJobResult(
             kind=spec.kind,
-            summary=finding + _not_computed(len(comparison.failed), "media"),
+            summary=finding + _not_computed(comparison.failed, "media"),
             solvents=comparison,
         )
     if isinstance(spec, ScanJobSpec):
@@ -466,7 +472,7 @@ async def _dispatch(spec: XtbJobSpec) -> XtbJobResult:
         )
         return XtbJobResult(
             kind=spec.kind,
-            summary=finding + _not_computed(len(screen.failed), "media"),
+            summary=finding + _not_computed(screen.failed, "media"),
             species_solvents=screen,
         )
     if isinstance(spec, BondSurveyJobSpec):
@@ -489,21 +495,27 @@ async def _dispatch(spec: XtbJobSpec) -> XtbJobResult:
             summary=(
                 f"{spec.smiles}: weakest of {len(survey.bonds)} bonds is {weakest.bond} at "
                 f"{weakest.dissociation_energy_kcal:.0f} ± {survey.uncertainty_kcal:.0f} kcal/mol"
-                + _not_computed(len(survey.failed), "bonds")
+                + _not_computed(survey.failed, "bonds")
             ),
             bonds=survey,
         )
     raise ValueError(f"unsupported xTB job kind: {spec!r}")
 
 
-def _not_computed(count: int, what: str) -> str:
+def _not_computed(failed: Sequence[FailedMedium | FailedBond], what: str) -> str:
     """The clause a screen's summary carries when some of its items could not be computed.
 
     The summary is the one line a completion push-back and a job listing show, so a screen that
     lost items must say so there: "weakest of 5 bonds" over a survey asked for 7 is the silent drop
     the per-item outcome exists to prevent, moved from the payload into the sentence people read.
+    A stop by the server's clock is named apart, because its remedy (a smaller calculation or a
+    larger budget) is not a refused input's.
     """
-    return f"; {count} of the {what} could not be computed (see failed)" if count else ""
+    if not failed:
+        return ""
+    stopped = sum(1 for item in failed if item.cause == "time_budget")
+    clocked = f", {stopped} stopped by the time budget" if stopped else ""
+    return f"; {len(failed)} of the {what} could not be computed{clocked} (see failed)"
 
 
 def _rotation_summary(rotation: RotationProfile) -> str:
