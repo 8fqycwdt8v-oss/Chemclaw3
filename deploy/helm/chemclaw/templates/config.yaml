@@ -124,6 +124,16 @@
 {{- fail (printf "retention.artifactStore: %q is not an artifact-eviction bound, so it would render into the ConfigMap and be read by nothing — a release that states an artifact posture and evicts nothing. Use one of: %s (the sweep's cadence is CHEMCLAW_ARTIFACT_EVICTION_SCHEDULE_MINUTES and belongs in `config`, because it is not a bound)." $key (join ", " $artifactSettings)) }}
 {{- end }}
 {{- end }}
+{{- /* **The hook copies run on every hook event the migrate Job runs on, `pre-rollback` included.**
+       They are deleted when the hooks that created them succeed (`hook-succeeded`), so nothing of
+       theirs survives an upgrade: a hook event that runs the Job without also creating them hands
+       it a ServiceAccount and a ConfigMap that do not exist. That was `pre-rollback` — measured on
+       a kind cluster, `helm rollback` created the migrate Job, the Job's pod was refused with
+       `error looking up service account chemclaw/chemclaw-hooks`, the Job hit its deadline and the
+       rollback failed with the release left `pending-rollback`. The Secret below is deliberately
+       not on `pre-rollback`: it is `before-hook-creation` only, so it persists from install, and
+       re-running it would overwrite every key with its placeholder.
+       `tests/test_deploy_chart.py` holds the set equality. */}}
 {{- /* **This file renders the configuration twice, and the duplication is the fix.**
 
        All of it used to be a single `pre-install,pre-upgrade` hook. Helm does not record hook
@@ -344,7 +354,7 @@ metadata:
   labels:
     {{- include "chemclaw.labels" . | nindent 4 }}
   annotations:
-    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook": pre-install,pre-upgrade,pre-rollback
     "helm.sh/hook-weight": "-10"
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 data:
@@ -386,7 +396,7 @@ metadata:
   labels:
     {{- include "chemclaw.labels" . | nindent 4 }}
   annotations:
-    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook": pre-install,pre-upgrade,pre-rollback
     "helm.sh/hook-weight": "-10"
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
     {{- with .Values.serviceAccount.annotations }}
