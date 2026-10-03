@@ -31,12 +31,13 @@ controls that do hold rather than by the click.
    `data:`/`blob:`-only images and fonts; the app's `frame-src` naming the sandbox origin alone; the
    `ready` handshake (contract item 3) so the app sends a page only to its own armed shell; the RTC
    prelude as defence in depth.
-3. **The browser policy is the control for WebRTC, and the runbook makes it a deployment step**:
-   `WebRtcIPHandling=disable_non_proxied_udp` on Chrome and Edge, `media.peerconnection.enabled=false`
-   on Firefox. Production here is air-gapped as well, so even an open channel reaches no host
-   outside the cluster.
-4. **The residual risk, stated.** Where the browser policy is not applied, a page the model wrote
-   can send what it holds — its own HTML and what the model put in it, never the session, the
+3. **The browser policy is what narrows WebRTC, and the runbook makes it a deployment step**:
+   `media.peerconnection.enabled=false` on Firefox removes WebRTC;
+   `WebRtcIPHandling=disable_non_proxied_udp` on Chrome and Edge *reduces* it — a page can still
+   relay over TURN/TCP through a proxy (`Chemclaw3_ui`'s README states the measurement). Production
+   here is air-gapped as well, so even an open channel reaches no host outside the cluster.
+4. **The residual risk, stated.** Where the browser policy is not applied — or on Chrome and Edge
+   through a proxy's TURN relay even where it is — a page the model wrote can send what it holds — its own HTML and what the model put in it, never the session, the
    transcript or another artefact — over WebRTC, without anybody clicking; it can write the
    clipboard after a click; and it can navigate its own frame, bounded by `frame-src`. What it can
    reach is unchanged; what changed is that no click precedes it.

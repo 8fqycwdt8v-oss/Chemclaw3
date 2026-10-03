@@ -61,6 +61,14 @@ would otherwise keep the front door unready):
 - `chemclaw/mcp-<name>:<CHEMCLAW_KIND_TAG>` for every `Chemclaw3-mcp/servers/<name>` with a `deploy/`
 - `chemclaw/mock:<tag>`, and `chemclaw/ui:<tag>-devauth` (built with `ALLOW_DEV_AUTH=true`) for the devauth mode
 
+**The UI image must be built from `Chemclaw3_ui` at #138 or later** (artefacts wave 3): that is the
+release that renders bound values with their provenance (`raw_spec`, `bindings`) and html artefacts in
+its sandbox origin, which `manifests/ui.yaml` configures. An older image does not render either kind
+of content this backend now serves. **HTML
+artefacts run their scripts by default** (`HTML_SCRIPTS_DEFAULT=on`, the owner's decision of
+2026-10-03, `docs/decisions/D-2026-10-03-model-written-html-runs-its-scripts-by-default.md`); set
+`HTML_SCRIPTS_DEFAULT=off` on the UI container in `manifests/ui.yaml` to render them without.
+
 `imagePullPolicy: Never` throughout, so an image that was not loaded fails as `ErrImageNeverPull`
 naming it rather than as a pull back-off against a registry.
 

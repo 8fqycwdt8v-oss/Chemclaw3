@@ -8,7 +8,10 @@
 //   2. `Chemclaw3` core, which *dials* it — under `CHEMCLAW_CONNECTORS_REQUIRED=true` an
 //      unreachable connector is a hard startup failure of the front door, so the reverse order
 //      turns a rollout into a crash-loop that reads as a core defect, then
-//   3. `Chemclaw3_ui`, which is useless before the API it proxies answers.
+//   3. `Chemclaw3_ui`, which is useless before the API it proxies answers — and, for a release
+//      that changes a wire shape the UI reads (artefacts: `structure_id`, `tool_failed.call_id`),
+//      wrong before it: the core helm release runs its migrations as a pre-upgrade hook, so the
+//      backend and its schema are always in place before the UI that depends on them rolls.
 //
 // `Chemclaw3_mock` is deliberately absent from every environment above `dev`: it is a test double
 // (a stand-in HPC launcher, ELN source, Entra tenant and vendor MCP tool), and deploying it beside

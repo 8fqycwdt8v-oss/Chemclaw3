@@ -3861,17 +3861,21 @@ def _render_windows(*keys: str) -> subprocess.CompletedProcess[str]:
     escape hatch is overridden back to `false` rather than dropped: `--set` is last-wins, which
     leaves exactly one posture stated — the one under test.
 
+    `exhibitsGrowthAccepted=true` likewise, unless the artefacts' own window is among `keys`.
     `artifactGrowthAccepted=true` is here because stating a window is what makes the artifact-store
     posture mandatory: the nine `CHEMCLAW_RETENTION_*` windows bound nine tables and none of them
     is `artifact_blobs`, so a release that says "I bound my growth" is asked the second half.
     Only on this arm — `_render`'s `unboundedGrowthAccepted` already covers that table by saying
     everything grows.
     """
+    exhibits = "CHEMCLAW_RETENTION_SESSION_EXHIBITS_DAYS"
+    accepted = () if exhibits in keys else ("--set", "retention.exhibitsGrowthAccepted=true")
     return _render(
         "--set",
         "retention.unboundedGrowthAccepted=false",
         "--set",
         "retention.artifactGrowthAccepted=true",
+        *accepted,
         *(arg for key in keys for arg in ("--set", f"retention.windows.{key}=30")),
     )
 
@@ -4110,6 +4114,8 @@ def test_stating_retention_windows_also_requires_an_artifact_store_posture() -> 
         "retention.windows.CHEMCLAW_RETENTION_SESSION_EVENTS_DAYS=30",
         "--set",
         "retention.artifactStore.CHEMCLAW_ARTIFACT_STORE_MAX_BYTES=53687091200",
+        "--set",
+        "retention.exhibitsGrowthAccepted=true",
     )
     assert evicting.returncode == 0, evicting.stderr
     assert 'CHEMCLAW_ARTIFACT_STORE_MAX_BYTES: "53687091200"' in evicting.stdout, (
@@ -4144,6 +4150,45 @@ def test_stating_retention_windows_also_requires_an_artifact_store_posture() -> 
     )
     assert quoted.returncode != 0, quoted.stdout[:2000]
     assert "must be a boolean" in quoted.stderr, quoted.stderr
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+def test_stating_retention_windows_also_requires_an_artefact_posture() -> None:
+    """Windows without the artefacts' window, or an accepted growth, refuse; either one renders.
+
+    `windows` is free-form, so a release could state a policy, leave
+    CHEMCLAW_RETENTION_SESSION_EXHIBITS_DAYS out and keep every artefact — and every session that
+    made one, which the ownership sweep then holds back — for its lifetime. Mirrors the artifact
+    store's gate above: exactly one, and a real boolean.
+    """
+    base = (
+        "--set",
+        "retention.unboundedGrowthAccepted=false",
+        "--set",
+        "retention.artifactGrowthAccepted=true",
+        "--set",
+        "retention.windows.CHEMCLAW_RETENTION_SESSION_EVENTS_DAYS=30",
+    )
+    silent = _render(*base)
+    assert silent.returncode != 0, silent.stdout[:2000]
+    assert "CHEMCLAW_RETENTION_SESSION_EXHIBITS_DAYS" in silent.stderr, silent.stderr
+
+    window = ("--set", "retention.windows.CHEMCLAW_RETENTION_SESSION_EXHIBITS_DAYS=90")
+    kept = _render(*base, *window)
+    assert kept.returncode == 0, kept.stderr
+    assert 'CHEMCLAW_RETENTION_SESSION_EXHIBITS_DAYS: "90"' in kept.stdout
+
+    accepted = _render(*base, "--set", "retention.exhibitsGrowthAccepted=true")
+    assert accepted.returncode == 0, accepted.stderr
+
+    both = _render(*base, *window, "--set", "retention.exhibitsGrowthAccepted=true")
+    assert both.returncode != 0 and "Neither is set, or both are" in both.stderr, both.stderr
+
+    quoted = _render(*base, "--set-string", "retention.exhibitsGrowthAccepted=false")
+    assert quoted.returncode != 0 and "must be a boolean" in quoted.stderr, quoted.stderr
+
+    # The shipped posture is unchanged: unbounded growth accepted asks nothing further.
+    assert _render().returncode == 0
 
 
 # What a switch needs *besides itself* to render the branch it gates. The only literal here, and it

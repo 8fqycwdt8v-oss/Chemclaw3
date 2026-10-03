@@ -24,6 +24,11 @@ default, and set only what differs. Four that every environment must state:
 - `retention.windows` (or `retention.unboundedGrowthAccepted: true`) — the same guard on the other
   half of that decision: every `CHEMCLAW_RETENTION_*` window defaults to disabled, so a release that
   never states a posture runs with every durable table growing for the deployment's lifetime.
+  Stating windows then asks two more halves, each `exactly one of`: the artifact store
+  (`retention.artifactStore` or `retention.artifactGrowthAccepted: true`) and the artefacts
+  (`retention.windows.CHEMCLAW_RETENTION_SESSION_EXHIBITS_DAYS` or
+  `retention.exhibitsGrowthAccepted: true`) — keep `CHEMCLAW_RETENTION_TOOL_RESULTS_DAYS` at least the
+  artefacts' window if a bound value must stay readable (runbook, "(xvi-c) Artefacts").
 - `temporal.namespace` — the chart refuses to render without it and ships **no** default, because
   this one is a value rather than a posture: `CHEMCLAW_TEMPORAL_ADDRESS` names a broker in the
   cluster-shared `temporal` namespace, so a constant put every environment on one namespace, one

@@ -358,6 +358,7 @@ helm-validate:  ## Render the Helm chart and validate it against the Kubernetes 
 	  helm template chemclaw deploy/helm/chemclaw \
 	    --set networkPolicy.allowAnyDestination=true \
 	    --set retention.windows.CHEMCLAW_RETENTION_SESSION_MESSAGES_DAYS=365 \
+	    --set retention.windows.CHEMCLAW_RETENTION_SESSION_EXHIBITS_DAYS=365 \
 	    --set retention.artifactGrowthAccepted=true \
 	    --set temporal.namespace=chemclaw \
 	    > "$$work/render.yaml"; \

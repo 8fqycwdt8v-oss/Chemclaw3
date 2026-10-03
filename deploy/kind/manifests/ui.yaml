@@ -12,7 +12,9 @@
 # *and* port, so a different origin and a different site. `*.localhost` resolves to loopback in
 # every current browser with no hosts-file entry; kind's port mapping cannot route by hostname, so
 # the port differs too. `APP_ORIGIN` is exact: a chemist who opens the app as `localhost:15173`
-# instead sees a blank artefact frame, because the shell takes content only from `APP_ORIGIN`.
+# instead sees the artefact as escaped source with a notice naming both origins, because the shell
+# takes content only from `APP_ORIGIN`. Scripts run by default (`HTML_SCRIPTS_DEFAULT`, unset here,
+# is `on`); set it to `off` on this container to render pages without them.
 #
 # Reaches the front door because values-kind.yaml's `networkPolicy.ingressNamespaces` admits this
 # namespace. `/readyz` asks the front door's own `/readyz`, so this pod is ready only when the
