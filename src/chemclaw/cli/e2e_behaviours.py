@@ -181,10 +181,19 @@ def _conditions(behaviour: Behaviour, conversation: Conversation) -> Behaviour:
 
 CITE = "e2e:cite"
 
-#: The structural anchor when the message names none: benzoic acid + benzylamine to the amide. The
-#: fingerprint search is nearest-neighbour with no threshold, so any indexed ELN/ORD run comes back
-#: ranked — the anchor decides which, not whether.
-CITE_ANCHOR = "OC(=O)c1ccccc1.NCc1ccccc1>>O=C(NCc1ccccc1)c1ccccc1"
+#: The structural anchor when the message names none: benzoic acid + aniline to N-phenylbenzamide,
+#: the transformation of the mock's seeded `uspto-amide-coupling-1/2` records.
+#:
+#: **The anchor decides whether, not only which.** `find_similar_reactions` drops every hit below
+#: `fingerprint_similarity_threshold` (0.3), so an anchor the corpus does not hold returns nothing
+#: and leaves no `reaction-…` id to cite. This used to be benzoic acid + *benzylamine*, on the
+#: belief that the search had no threshold: measured on the kind cluster, its nearest seeded
+#: reaction scored 0.168, the fingerprint leg returned 0 chunks, and the answer cited a note alone.
+#: This anchor scores 0.387 against the seeded records (whose reaction keeps EDC and HOBt on the
+#: left, which is why it is not 1.0). `tests/test_mock_llm_e2e.py` recomputes both scores offline
+#: against that record's shape, so a change of anchor, threshold or fingerprint cannot quietly
+#: return the lane to citing nothing.
+CITE_ANCHOR = "O=C(O)c1ccccc1.Nc1ccccc1>>O=C(Nc1ccccc1)c1ccccc1"
 CITE_QUERY = "amide coupling"
 _CITE_TEMPLATES = [
     ToolCall(

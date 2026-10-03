@@ -360,6 +360,102 @@ def test_cite_searches_the_store_before_it_cites_anything(served: MockLlm) -> No
     assert first.text == ""
 
 
+#: `uspto-amide-coupling-1` as the mock seeds it (the sibling Chemclaw3_mock's ELN fixtures, the
+#: `amide-coupling` archetype through `uspto_style_records`): the JSON-export shape, structure only.
+#: Copied rather than imported because the mock is a separate repository; what matters to the
+#: fingerprint is the species and their roles, and those are what is pinned.
+_SEEDED_AMIDE_COUPLING = {
+    "id": "uspto-amide-coupling-1",
+    "reactants": [
+        {"smiles": "O=C(O)c1ccccc1", "role": "reactant", "mass_mg": 610.0, "amount_mmol": 5.0},
+        {"smiles": "Nc1ccccc1", "role": "reactant", "mass_mg": 466.0, "amount_mmol": 5.0},
+        {"smiles": "CCN=C=NCCCN(C)C", "role": "reagent", "mass_mg": 1053.0, "amount_mmol": 5.5},
+        {"smiles": "On1nnc2ccccc21", "role": "reagent", "mass_mg": 743.0, "amount_mmol": 5.5},
+    ],
+    "products": [{"smiles": "O=C(Nc1ccccc1)c1ccccc1", "yield_percent": 82.5}],
+    "procedure": "1. The acid and the amine were stirred with EDC and HOBt in dichloromethane.",
+}
+
+
+def _similarity_to_seeded_amide(reaction_smiles: str) -> float:
+    """Tanimoto of `reaction_smiles` against the seeded record, as the fingerprint index holds it.
+
+    Through the same steps ingestion takes — `JsonExportAdapter` to an `OrdReaction`, its
+    `transformation_smiles()` (reagents kept, solvent and catalyst dropped), `drfp_bitstring` — and
+    the same `tanimoto` the in-memory store ranks with, so this is the score the search compares
+    with `fingerprint_similarity_threshold`, computed without a database.
+    """
+    from datetime import UTC, datetime
+
+    from chemclaw.ingest.eln.adapter import RawEntry
+    from chemclaw.ingest.eln.json_adapter import JsonExportAdapter
+    from chemclaw.science.fingerprints.rxnfp.fingerprint import drfp_bitstring
+    from chemclaw.science.fingerprints.store import tanimoto
+
+    raw = RawEntry(
+        entry_id="uspto-amide-coupling-1",
+        created_at=datetime(2024, 1, 8, 9, 0, tzinfo=UTC),
+        payload=_SEEDED_AMIDE_COUPLING,
+    )
+    stored = JsonExportAdapter().map_to_ord(raw).transformation_smiles()
+    return tanimoto(drfp_bitstring(stored), drfp_bitstring(reaction_smiles))
+
+
+def test_cite_anchor_clears_the_similarity_threshold_against_the_seeded_corpus() -> None:
+    """The default anchor finds a seeded record, or the lane has nothing to cite.
+
+    `find_similar_reactions` drops hits below `fingerprint_similarity_threshold`. The previous
+    anchor (benzoic acid + benzylamine) scored 0.168 against the nearest seeded reaction on the
+    kind cluster, so the fingerprint leg returned 0 chunks and the cited answer named a note alone.
+    Both halves are asserted, so the test is shown to discriminate rather than merely pass.
+    """
+    from chemclaw.core.config import settings
+
+    threshold = settings.fingerprint_similarity_threshold
+    assert _similarity_to_seeded_amide(e2e.CITE_ANCHOR) >= threshold
+    retired = "OC(=O)c1ccccc1.NCc1ccccc1>>O=C(NCc1ccccc1)c1ccccc1"
+    assert _similarity_to_seeded_amide(retired) < threshold
+
+
+def test_cite_anchor_finds_a_record_in_the_mock_s_own_seed() -> None:
+    """The same property against what `Chemclaw3_mock` actually seeds, read from the sibling.
+
+    The test above pins one record's shape so it runs anywhere; this one reads every free-text
+    record the mock serves (`uspto_style_records`), so a seed that drops or reshapes the amide
+    coupling fails here rather than on the kind lane, the place the old anchor was found wanting.
+    """
+    import importlib.util
+    from datetime import UTC, datetime
+
+    from chemclaw.core.config import settings
+    from chemclaw.ingest.eln.adapter import RawEntry
+    from chemclaw.ingest.eln.json_adapter import JsonExportAdapter
+    from chemclaw.science.fingerprints.rxnfp.fingerprint import drfp_bitstring
+    from chemclaw.science.fingerprints.store import tanimoto
+    from tests.siblings import SIBLING_SKIP, sibling_root
+
+    checkout, reason = sibling_root("CHEMCLAW_MOCK_REPO", "Chemclaw3_mock")
+    if checkout is None:
+        pytest.skip(f"{SIBLING_SKIP} {reason}; the cite anchor is NOT checked against the seed")
+    source = checkout / "app" / "eln" / "fixtures_data.py"
+    assert source.is_file(), f"{checkout} holds no app/eln/fixtures_data.py to read the seed from"
+    spec = importlib.util.spec_from_file_location("_mock_eln_fixtures", source)
+    assert spec is not None and spec.loader is not None
+    fixtures = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fixtures)
+
+    anchor = drfp_bitstring(e2e.CITE_ANCHOR)
+    scores = {}
+    for payload in fixtures.uspto_style_records():
+        raw = RawEntry(
+            entry_id=payload["id"], created_at=datetime(2024, 1, 8, tzinfo=UTC), payload=payload
+        )
+        stored = JsonExportAdapter().map_to_ord(raw).transformation_smiles()
+        scores[payload["id"]] = tanimoto(drfp_bitstring(stored), anchor)
+    hits = {k for k, v in scores.items() if v >= settings.fingerprint_similarity_threshold}
+    assert {"uspto-amide-coupling-1", "uspto-amide-coupling-2"} <= hits, scores
+
+
 def test_cite_takes_a_named_record_or_an_anchor_from_the_message(served: MockLlm) -> None:
     named = _decide(served, _body(_user("[[e2e:cite]] reaction-eln-ord.suzuki-flow-hte-04620")))
     assert named.calls[0].tool == "expand_note"

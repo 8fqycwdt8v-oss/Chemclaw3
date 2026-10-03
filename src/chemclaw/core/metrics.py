@@ -958,8 +958,8 @@ _COUNTERS: dict[str, str] = {
     # zero first-party lines and moved no metric. `chemclaw_jobs_started_total` had no counterpart
     # of any kind, so a connector whose every job failed was indistinguishable from an idle one.
     "chemclaw_jobs_finished_total": (
-        "Durable jobs that ended, by connector and outcome (completed / failed) — the counterpart "
-        "`chemclaw_jobs_started_total` never had."
+        "Durable jobs that ended, by connector and outcome (completed / failed / cancelled) — the "
+        "counterpart `chemclaw_jobs_started_total` never had."
     ),
     "chemclaw_activity_failures_total": (
         "Temporal activity attempts that failed, by activity — one row per attempt, so a retry "

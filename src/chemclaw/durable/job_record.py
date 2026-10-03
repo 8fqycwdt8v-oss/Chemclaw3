@@ -101,7 +101,8 @@ class JobRecord(BaseModel):
     # and `<connector>.<job>` is a route rather than a shape. Empty means the run did not say,
     # which is every row written before this column and which the projector reads as "infer".
     payload_kind: str = ""
-    # How the run ended: `completed` or `failed` (D-2026-08-27-a-job-that-fails-leaves-no-row).
+    # How the run ended: `completed`, `failed` or `cancelled` (D-2026-08-27-a-job-that-fails-leaves-
+    # no-row; `cancelled` because a stopped run listed as `failed` contradicted `GET /jobs/{id}`).
     #
     # This table used to be reachable only from `ConnectorJobWorkflow._finish`, and a failing job
     # raises before it — so a failed run wrote no row at all and the only durable trace of it was

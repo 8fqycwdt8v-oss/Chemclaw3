@@ -50,7 +50,12 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from temporalio import activity, workflow
 from temporalio.common import RetryPolicy, WorkflowIDReusePolicy
-from temporalio.exceptions import ActivityError, ApplicationError, ChildWorkflowError
+from temporalio.exceptions import (
+    ActivityError,
+    ApplicationError,
+    ChildWorkflowError,
+    is_cancelled_exception,
+)
 from temporalio.workflow import ParentClosePolicy
 
 with workflow.unsafe.imports_passed_through():
@@ -89,6 +94,23 @@ logger = logging.getLogger(__name__)
 # `outcome.reason` at, and for the same reason: this is a sentence for a person, and the first
 # 500 characters of one carry what the remainder cannot add.
 _REASON_MAX_CHARS = 500
+
+
+def ended_state(exc: BaseException) -> str:
+    """How a run that did not complete ended, as `job_records.state` spells it.
+
+    `cancelled` when the exception is a cancellation — the workflow's own `CancelledError`, or a
+    child or activity error whose cause is one; `is_cancelled_exception` is the SDK's predicate, so
+    nothing here re-derives the chain — and `failed` for everything else.
+
+    **Its own word rather than `failed`, because the two surfaces disagreed.** The failure path
+    hard-coded `failed`, so a run stopped from the registry (`DELETE /jobs/{id}`) was stored as
+    failed: measured on the kind cluster, `GET /jobs/{id}` (Temporal: CANCELED) answered
+    `cancelled` while `GET /jobs` — read from `job_records` — listed the same run as `failed`, and
+    once Temporal's history aged out the run was a failure forever. A cancellation is a decision
+    somebody made, not a defect in the job, and the failure counters must not count it as one.
+    """
+    return "cancelled" if is_cancelled_exception(exc) else "failed"
 
 
 def failure_reason(exc: BaseException) -> str:
@@ -413,6 +435,8 @@ def failed_job_record(
     job: ConnectorJobInput,
     reason: str,
     runtime_seconds: float,
+    *,
+    state: str = "failed",
 ) -> JobRecord:
     """The durable record of a run that ended badly — what was asked for, and why it broke.
 
@@ -431,6 +455,10 @@ def failed_job_record(
     `summary` stays empty and the reason goes in `failure_reason`, deliberately: `summary` is the
     one line a listing shows for what a run produced, and a listing that cannot tell a result from
     a failure is the ambiguity the pair of columns exists to remove.
+
+    `state` is `failed` or `cancelled`, and the caller derives it with `ended_state(exc)` rather
+    than leaving it at the default: a cancelled run stored as `failed` is a listing that
+    contradicts `GET /jobs/{id}` for the same run.
     """
     return JobRecord(
         job_id=job_id,
@@ -444,7 +472,7 @@ def failed_job_record(
         plan_hash=job.plan_hash,
         payload=job.payload,
         runtime_seconds=runtime_seconds,
-        state="failed",
+        state=state,
         failure_reason=reason,
     )
 
@@ -805,6 +833,7 @@ class ConnectorJobWorkflow:
                         job,
                         failure_reason(exc),
                         (workflow.now() - started_at).total_seconds(),
+                        state=ended_state(exc),
                     )
                 )
             await self._notify_failure(job, exc)
