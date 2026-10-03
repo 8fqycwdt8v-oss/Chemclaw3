@@ -381,6 +381,7 @@ def test_arguments_longer_than_any_storable_spec_stop_the_call(
     monkeypatch.setattr(settings, "exhibit_max_spec_bytes", 1_000)
     monkeypatch.setattr(settings, "exhibit_max_title_chars", 10)
     monkeypatch.setattr(settings, "exhibit_max_note_chars", 10)
+    monkeypatch.setattr(settings, "exhibit_draft_argument_slack_chars", 500)
     from chemclaw.api import exhibit_drafts
 
     parses: list[int] = []
@@ -393,7 +394,30 @@ def test_arguments_longer_than_any_storable_spec_stop_the_call(
     monkeypatch.setattr(exhibit_drafts, "parse_partial_json", _counting)
     table = {"columns": [{"key": "v", "label": "V"}], "rows": [{"v": n} for n in range(2_000)]}
     _feed(DraftStream(), "create_exhibit", json.dumps({"title": "T", "spec": table}), size=50)
-    assert parses and max(parses) <= 1_000 + 6 * 20 + 1_024
+    assert parses and max(parses) <= 1_000 + 6 * 20 + 500
+
+    # And the bound is the setting's: a stream fed past it stops within one fragment of it.
+    stream = DraftStream()
+    arguments = json.dumps({"title": "T", "spec": table})
+    for start in range(0, len(arguments), 50):
+        stream.feed(
+            AIMessageChunk(
+                content="",
+                id="m",
+                tool_call_chunks=[
+                    {
+                        "name": "create_exhibit" if start == 0 else None,
+                        "args": arguments[start : start + 50],
+                        "id": "c1" if start == 0 else None,
+                        "index": 0,
+                        "type": "tool_call_chunk",
+                    }
+                ],
+            )
+        )
+    [call] = stream._calls.values()
+    bound = 1_000 + 6 * 20 + 500
+    assert call.stopped and bound < len(call.arguments) <= bound + 50
 
 
 def test_a_refused_call_names_the_draft_it_leaves_unsettled(

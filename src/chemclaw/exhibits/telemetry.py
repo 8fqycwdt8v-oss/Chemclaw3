@@ -17,16 +17,18 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Literal
 
+from chemclaw.core.errors import ChemclawError
 from chemclaw.core.logging import log_event
 from chemclaw.core.metrics_bridge import record_metric
-from chemclaw.exhibits.models import ExhibitLimit, ExhibitView, InvalidExhibit, StaleRevision
+from chemclaw.exhibits.models import ExhibitLimit, ExhibitView, StaleRevision, UnknownExhibit
 
 logger = logging.getLogger(__name__)
 
 #: What a write did to the artefact — the `exhibit` event's own `op`.
 WriteOp = Literal["created", "revised"]
-#: Why a write was refused: the 422 family, a stale base, or a cap on how many.
-RefusalReason = Literal["invalid", "stale_revision", "exhibit_limit"]
+#: Why a write was refused: the 422 family (and every other worded refusal a writer can correct),
+#: a stale base, a cap on how many, or an artefact the session does not hold.
+RefusalReason = Literal["invalid", "stale_revision", "exhibit_limit", "not_found"]
 
 
 def record_write(view: ExhibitView, op: WriteOp) -> None:
@@ -74,6 +76,12 @@ def refusals_counted() -> Iterator[None]:
     except ExhibitLimit:
         record_refusal("exhibit_limit")
         raise
-    except InvalidExhibit:
+    except UnknownExhibit:
+        record_refusal("not_found")
+        raise
+    except ChemclawError:
+        # `InvalidExhibit` and the tools' own worded refusals — a pinned result the agent may not
+        # create or revise, `edits` on something not a document, an `old` that does not occur
+        # once: each a write the writer can correct, which is what `invalid` counts.
         record_refusal("invalid")
         raise

@@ -150,20 +150,20 @@ def _interval_seconds(sent_bytes: int) -> float:
 def _argument_bound() -> int:
     """The longest a call's arguments may be and still hold a spec under `exhibit_max_spec_bytes`.
 
-    The spec cap plus everything else a call carries: the title and the note at their caps, each
-    character escaped at worst as a six-character unicode escape, and the keys, an artefact id and a
-    revision number, which `_KEYS_SLACK` covers. Characters against bytes is the safe direction:
-    the cap is on the spec's compact JSON with non-ASCII escaped, which is never shorter than the
-    characters the model wrote for it — so a call over this would be refused by the tool.
+    The spec cap, plus the title and the note at their caps with every character escaped at worst
+    (`_WORST_ESCAPE`), plus `exhibit_draft_argument_slack_chars` for the keys, an artefact id, a
+    revision number and whatever whitespace the model puts between them. Characters against bytes
+    is the safe direction: the cap is on the spec's compact JSON with non-ASCII escaped, which is
+    never shorter than the characters the model wrote for it — so a call over this would be refused
+    by the tool.
     """
-    escaped = 6 * (settings.exhibit_max_title_chars + settings.exhibit_max_note_chars)
-    return settings.exhibit_max_spec_bytes + escaped + _KEYS_SLACK
+    escaped = _WORST_ESCAPE * (settings.exhibit_max_title_chars + settings.exhibit_max_note_chars)
+    return settings.exhibit_max_spec_bytes + escaped + settings.exhibit_draft_argument_slack_chars
 
 
-#: The characters a draft-able call spends on anything but its spec, title and note: the key names,
-#: punctuation, an `xb-` id and a base revision — a few hundred, rounded up so whitespace between
-#: them never stops a call the tool would accept.
-_KEYS_SLACK = 1_024
+#: The most characters JSON spends on one character of a string: a `\uXXXX` escape is six. A
+#: property of the format rather than a threshold anybody tunes, so a constant, not a setting.
+_WORST_ESCAPE = 6
 
 
 def _frame(call: _Call, op: Literal["create", "revise"], *, done: bool) -> ExhibitDraftEvent | None:

@@ -47,6 +47,7 @@ from chemclaw.exhibits.models import (
     ExhibitView,
     Spec,
     StaleRevision,
+    UnknownExhibit,
     parse_spec,
     require_creatable,
     require_writable,
@@ -177,13 +178,15 @@ async def revise_exhibit(
     """
     session_id = _session()
     store = _store()
-    current = await store.view(session_id, exhibit_id)
-    if current is None:
-        raise ChemclawError(f"no artefact {exhibit_id!r} in this conversation")
-    if current.kind in _CHEMIST_ONLY_KINDS:
-        raise ChemclawError(f"{exhibit_id} is a result the chemist pinned; it is not revisable")
     try:
         with refusals_counted():
+            current = await store.view(session_id, exhibit_id)
+            if current is None:
+                raise UnknownExhibit(f"no artefact {exhibit_id!r} in this conversation")
+            if current.kind in _CHEMIST_ONLY_KINDS:
+                raise ChemclawError(
+                    f"{exhibit_id} is a result the chemist pinned; it is not revisable"
+                )
             if base_revision != current.head_revision:
                 raise StaleRevision(exhibit_id, current.head_revision, base_revision)
             revised = _revised_spec(current, edits, spec)

@@ -447,3 +447,31 @@ async def test_a_helpers_report_of_the_artefact_neither_grounds_its_figures_nor_
     finally:
         reset_current_identity(identity)
         reset_current_session_id(session_token)
+
+
+async def test_every_refusal_a_tool_words_is_counted_by_a_closed_reason(
+    turn: tuple[str, list[ExhibitSignal]],
+) -> None:
+    """The tools' own worded refusals reach `chemclaw_exhibit_refusals_total` too.
+
+    Before, only `InvalidExhibit`, `StaleRevision` and `ExhibitLimit` were counted, so a pinned
+    result the agent tried to create or revise, `edits` on a table, an `old` that does not occur
+    once and an unknown id were refusals no series saw.
+    """
+    from chemclaw.core.metrics import METRICS
+
+    def _count(reason: str) -> int:
+        line = f'chemclaw_exhibit_refusals_total{{reason="{reason}"}} '
+        found = [row for row in METRICS.render().splitlines() if row.startswith(line)]
+        return int(float(found[0].split()[-1])) if found else 0
+
+    before = {reason: _count(reason) for reason in ("invalid", "not_found")}
+    with pytest.raises(ChemclawError, match="pinned by the chemist"):
+        await create_exhibit("pinned", {"kind": "result", "result_ref": "a" * 64})
+    xid = json.loads(await create_exhibit("t", _TABLE))["exhibit_id"]
+    with pytest.raises(ChemclawError, match="applies to a document"):
+        await revise_exhibit(xid, 1, "n", edits=[{"old": "water", "new": "THF"}])
+    with pytest.raises(ChemclawError, match="no artefact"):
+        await revise_exhibit("xb-00000000000000ff", 1, "n", spec=_TABLE)
+    assert _count("invalid") == before["invalid"] + 2
+    assert _count("not_found") == before["not_found"] + 1

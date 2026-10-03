@@ -114,7 +114,8 @@ async def list_exhibits(session_id: str, live: CurrentSession) -> ExhibitListOut
     """The session's artefacts, most recently updated first, and whether the feature is on.
 
     `enabled` is `agent_exhibits_enabled`: off, the agent holds no artefact tools and a surface
-    hides the pane. What a session already holds is still listed, because switching the agent's
+    shows the pane read-only, offering no new artefact. What a session already holds is still
+    listed, because switching the agent's
     tools off is not a reason to hide what a chemist pinned. `html_enabled` is
     `agent_html_artefacts_enabled`, under the same rule: off refuses a new html artefact and still
     lists the ones the session holds.
@@ -252,6 +253,7 @@ async def post_exhibit_revision(
             status_code=409, detail={"code": "stale_revision", "head_revision": exc.head}
         ) from exc
     except UnknownExhibit as exc:
+        record_refusal("not_found")
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except InvalidExhibit as exc:
         record_refusal("invalid")

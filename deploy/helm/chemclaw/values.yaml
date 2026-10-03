@@ -1346,7 +1346,8 @@ config:
   # **Artefacts** — the versioned working documents beside the chat (`src/chemclaw/exhibits/`,
   # `docs/guides/runbook.md` "(xvi-c) Artefacts"). All on by default in code; stated here when a
   # release decides otherwise. Off, `CHEMCLAW_AGENT_EXHIBITS_ENABLED` unbinds the three tools and
-  # the UI hides the pane (what a session holds still reads, read-only); off,
+  # the UI shows the pane read-only where a session already holds artefacts (no new-artefact UI,
+  # and none at all where it holds none); off,
   # `CHEMCLAW_AGENT_HTML_ARTEFACTS_ENABLED` refuses a *new* html artefact, while the UI's own
   # `HTML_SCRIPTS_DEFAULT=off` is the switch for whether a page's scripts run. A person's push to
   # the session's other tabs expires after `CHEMCLAW_EXHIBIT_PUSH_RETENTION_HOURS`, on its own

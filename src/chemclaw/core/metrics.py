@@ -911,9 +911,11 @@ _COUNTERS: dict[str, str] = {
     ),
     "chemclaw_exhibit_refusals_total": (
         "Artefact writes refused, by reason: `invalid` (a spec, binding, citation or cap the write "
-        "broke — a 422, or a worded refusal to the model), `stale_revision` (written against "
-        "anything but the head) and `exhibit_limit` (the session's or the artefact's cap). A "
-        "climbing `invalid` with flat writes is a model that cannot write the shape it is offered."
+        "broke, or any other refusal the writer can correct — a 422, or a worded refusal to the "
+        "model), `stale_revision` (written against anything but the head), `exhibit_limit` (the "
+        "session's or the artefact's cap) and `not_found` (an artefact the session does not "
+        "hold). A climbing `invalid` with flat writes is a model that cannot write the shape it is "
+        "offered."
     ),
     "chemclaw_behaviour_proposals_total": (
         "Proposed changes to what the agent does, by kind and by what became of them. The only "
@@ -1374,7 +1376,7 @@ _COUNTER_LABELS: dict[str, tuple[str, ...]] = {
     "chemclaw_behaviour_proposals_total": ("kind", "outcome"),
     "chemclaw_skill_loads_total": ("skill",),
     # Both closed sets fixed in source (`exhibits/telemetry.py`'s `WriteOp`, `RefusalReason` and the
-    # store's `AuthorKind`): four write series and three refusal series, never a caller's string —
+    # store's `AuthorKind`): four write series and four refusal series, never a caller's string —
     # an artefact id or a session would be unbounded, and both are on the `exhibit.*` log line.
     "chemclaw_exhibit_writes_total": ("author_kind", "op"),
     "chemclaw_exhibit_refusals_total": ("reason",),

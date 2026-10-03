@@ -2661,7 +2661,10 @@ memory** and are worth sizing the pod for:
 
 **5. Retention.** State `retention.windows.CHEMCLAW_RETENTION_SESSION_EXHIBITS_DAYS` — the chart
 refuses windows that leave it out unless `retention.exhibitsGrowthAccepted: true` says artefacts are
-kept for the deployment's lifetime. While it is 0 a session holding an artefact is never forgotten
+kept for the deployment's lifetime. **Upgrade step: a release whose values set `retention.windows`
+without the exhibits window or `retention.exhibitsGrowthAccepted` now refuses to render** —
+`helm upgrade` stops on "retention: this release states retention windows and must say how long
+artefacts are kept"; add one of the two to the values file before upgrading. While it is 0 a session holding an artefact is never forgotten
 by the ownership sweep either. **Keep `CHEMCLAW_RETENTION_TOOL_RESULTS_DAYS` at least as long if a
 bound value must stay readable**: a `$bind` cell reads its stored tool result on every read, and
 once that window sweeps the result the cell reads empty. A person's push to the session's other
