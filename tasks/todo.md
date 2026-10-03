@@ -31,12 +31,17 @@ this repository's). Owner decisions 2026-10-03: html sandbox on, html scripts on
 
 ## Review (hardening)
 
+- Second review: one evidence rule (`exhibits/evidence.py`) for grounding, bindings and the stamp;
+  `structure_id` session-scoped on write (ADR, 4.5–46 ms measured); turn note shows the address;
+  count-line-first atom cap; every worded tool refusal counted; draft slack a setting.
+
 - Measured: draft parses before the first frame 6,306 → 14 (table, kind last) and 6,341 → 2 (string
   spec) on ~75 kB of arguments, 27 s / 15 s of loop CPU → 0.3 s / 0.4 s; chemist-figures read
   1.27 s → 0.37 s for 100 human revisions of a 2,000-row table (0.74 s at the 500-revision cap);
   prefix 73,122 → 73,121 against the 73,450 ceiling with `structure_id` advertised.
 - Choices recorded: G1 as its own schedule (ADR), html scripts on by default (owner ADR). #4 took the
-  owner's preferred stored form (migration 119); pre-119 rows count as no figures (can only flag).
+  owner's preferred stored form (migration 119); a pre-119 person's row is derived the old way,
+  and a fork records the union (second review).
 - #7 resolved by not stamping where bindings cannot resolve (`handles_resolve`), not by opening
   resolution under the in-memory session store: grounding/bindings there would need Postgres on a
   deployment that may have none.
