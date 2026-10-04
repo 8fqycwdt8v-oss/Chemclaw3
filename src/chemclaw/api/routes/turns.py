@@ -37,6 +37,7 @@ from starlette.types import Receive, Scope, Send
 
 from chemclaw.agent.exhibit_notes import resolve_exhibit_refs
 from chemclaw.agent.session_queue import QueueRefused, Refusal, TurnQueue
+from chemclaw.agent.turn_remotes import Holding
 from chemclaw.api.auth import (
     DEV_PRINCIPAL_OID,
     AuthError,
@@ -57,6 +58,8 @@ from chemclaw.api.runner import (
 )
 from chemclaw.api.schemas import MessageIn, QueuedMessageOut, SessionQueueOut, session_title
 from chemclaw.api.state import (
+    FrontDoorState,
+    LiveSession,
     SessionTurns,
     TurnLease,
     _actor_turns_in_flight,
@@ -464,7 +467,7 @@ async def post_message(
             return False
         try:
             if claims is not None and not await claims.claim(
-                session_id, claim_holder(taken), lease
+                session_id, claim_holder(taken), lease, actor=principal.oid
             ):
                 _release_turn_slot(active_turns, session_id, taken)
                 return False
@@ -811,7 +814,7 @@ async def post_message(
         # already running on another replica is not a refusal any more: this message joins the
         # line below, behind it.
         if slot is not None and claims is not None:
-            if await claims.claim(session_id, claim_holder(slot), lease):
+            if await claims.claim(session_id, claim_holder(slot), lease, actor=principal.oid):
                 holder = claim_holder(slot)
             else:
                 _release_turn_slot(active_turns, session_id, slot)
@@ -944,9 +947,14 @@ async def stop_turn(
 
     404 when no turn is running rather than a silent 200: "there was nothing to stop" and
     "stopped" are different facts, and a client that raced the turn's own completion should know
-    which happened. Only this process's turns are stoppable — the pump lives here — so on a
-    multi-replica deployment the client calls the same origin its stream was on, which it always
-    does, because the stream *is* how it knows a turn is running.
+    which happened.
+
+    **Any replica answers it** (`D-2026-10-04-a-running-turn-is-reached-through-postgres-from-any-
+    replica`). The pump lives in the process that started the turn, and a Stop arriving anywhere
+    else used to answer 404 while the turn ran on — so a Stop for a turn held elsewhere is decided
+    here, by the same rule, and then delivered to the holder as a request it polls for
+    (`_stop_elsewhere`). 503 when the holder does not answer within
+    `service_turn_relay_lease_seconds`.
 
     **`?reason=unload` defers the stop** (`D-2026-10-03-an-unload-stop-waits-for-a-reload`): the
     page sending it is being discarded, and a reload cannot be told from a close at that moment, so
@@ -958,7 +966,7 @@ async def stop_turn(
     front = state(request)
     turn = front.running_turns.get(session_id)
     if turn is None:
-        raise HTTPException(status_code=404, detail="no turn is running for this session")
+        return await _stop_elsewhere(front, session_id, principal, live, reason)
     # **In a shared session, a turn is its sender's to stop — or the owner's**
     # (`D-2026-09-27-in-a-shared-session-the-sender-governs`). The session gate admits every member,
     # and one member ending another's work in flight is not a standing a membership grants; the
@@ -990,6 +998,59 @@ async def stop_turn(
     return {"stopped": True}
 
 
+async def _held_elsewhere(front: FrontDoorState, session_id: str) -> Holding | None:
+    """The live claim on a session whose turn is not running in this process, if there is one."""
+    relay = front.turn_relay
+    if relay is None:
+        return None
+    holding = await relay.holding(session_id)
+    # The claim can name this process between its slot being taken and its turn registering (or
+    # after the turn ended and before the claim's release lands); neither is a turn elsewhere.
+    if holding is None or holding.holder in _local_holders(front, session_id):
+        return None
+    return holding
+
+
+def _local_holders(front: FrontDoorState, session_id: str) -> set[str]:
+    """The claim holder this process would name for the session's in-flight slot, if any."""
+    lease = front.active_turns.get(session_id)
+    return {claim_holder(lease.token)} if lease is not None else set()
+
+
+async def _stop_elsewhere(
+    front: FrontDoorState,
+    session_id: str,
+    principal: Principal,
+    live: LiveSession,
+    reason: Literal["unload"] | None,
+) -> dict[str, bool]:
+    """Stop a turn another replica holds: authorize here, then ask the holder and wait for it.
+
+    The sender-or-owner rule is applied from the claim's recorded sender, before anything is
+    written, so the holder only ever executes a stop that was allowed. A claim with no recorded
+    sender (taken by the previous image) is treated as somebody else's turn — owner only.
+    """
+    holding = await _held_elsewhere(front, session_id)
+    relay = front.turn_relay
+    if holding is None or relay is None:
+        raise HTTPException(status_code=404, detail="no turn is running for this session")
+    if holding.actor is None or holding.actor != principal.oid:
+        require_owner(live, principal, session_id, "stop somebody else's turn")
+    answer = await relay.stop(session_id, holding, principal.oid or "", unload=reason == "unload")
+    if answer.state is None:
+        raise HTTPException(status_code=404, detail="no turn is running for this session")
+    if answer.state == "asked":
+        raise HTTPException(
+            status_code=503,
+            detail="the replica running this turn did not answer; retry the stop",
+            headers={"Retry-After": _retry_after_hint()},
+        )
+    if answer.state == "deferred":
+        return {"stopped": False, "deferred": True}
+    logger.info("session %s's turn on another replica was stopped by request", session_id)
+    return {"stopped": True}
+
+
 async def session_queue(
     request: Request,
     session_id: str,
@@ -1004,7 +1065,10 @@ async def session_queue(
     front = state(request)
     waiting = await front.turn_queue.waiting(session_id)
     return SessionQueueOut(
-        running=front.running_turns.get(session_id) is not None,
+        running=(
+            front.running_turns.get(session_id) is not None
+            or await _held_elsewhere(front, session_id) is not None
+        ),
         waiting=[
             QueuedMessageOut(
                 ticket=entry.ticket,
@@ -1065,9 +1129,12 @@ async def watch_turn(
     turn is resolved from *this* session's entry in the registry after the session gate has admitted
     the caller, so a participant of one conversation can never be handed another's.
 
-    404 when no turn is running here — including one running on another replica, whose pump this
-    process cannot reach (the stop route's scope, for the same reason). A late joiner sees events
-    from the moment it attaches; what came earlier is in the transcript once the answer lands.
+    404 when no turn is running. **A turn running on another replica is followed from here**
+    (`D-2026-10-04-a-running-turn-is-reached-through-postgres-from-any-replica`,
+    `_watch_elsewhere`): its holder opens an ordinary view of it and relays the frames through
+    rows, polled every `service_turn_relay_poll_seconds`, so a reattach no longer depends on which
+    replica the Service picked. A late joiner sees events from the moment it attaches; what came
+    earlier is in the transcript once the answer lands.
 
     **410 `turn_interrupted` when the session's latest turn died with its process**
     (`D-2026-10-03-a-turn-is-written-ahead-and-an-interrupted-one-says-so`, `_interrupted`). A bare
@@ -1091,6 +1158,9 @@ async def watch_turn(
     front = state(request)
     turn = front.running_turns.get(session_id)
     if turn is None:
+        holding = await _held_elsewhere(front, session_id)
+        if holding is not None:
+            return await _watch_elsewhere(request, session_id, principal, holding)
         if await _interrupted(front.history, session_id, live.session.state):
             raise HTTPException(
                 status_code=410,
@@ -1141,6 +1211,70 @@ async def watch_turn(
         # page coming back after a reload needs to know the running turn is the one it sent rather
         # than another participant's that started meanwhile.
         headers={TURN_CORRELATION_HEADER: turn.correlation_id} if turn.correlation_id else None,
+    )
+
+
+async def _watch_elsewhere(
+    request: Request, session_id: str, principal: Principal, holding: Holding
+) -> EventSourceResponse:
+    """Follow a turn another replica holds, through the frames its holder relays.
+
+    The caller has passed the session gate already; the stream slot is charged here exactly as for
+    a local watch, and the watcher cap is the holder's to apply, because only the holder can count
+    every view of its turn — a refusal comes back as the same 429.
+    """
+    front = state(request)
+    relay = front.turn_relay
+    if relay is None:  # `_held_elsewhere` found a holding, so there is a relay
+        raise HTTPException(status_code=404, detail="no turn is running for this session")
+    release_slot = _take_event_stream_slot(front.event_streams, principal.oid)
+    if release_slot is None:
+        METRICS.increment("chemclaw_event_streams_rejected_total")
+        raise HTTPException(
+            status_code=429,
+            detail="too many concurrent event streams; close one and retry",
+            headers={"Retry-After": "1"},
+        )
+    try:
+        request_id, answer = await relay.follow(session_id, holding, principal.oid or "")
+    except BaseException:
+        release_slot()
+        raise
+    if answer.state != "watching":
+        release_slot()
+        if answer.state == "refused":
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    "this turn already has as many watchers as it accepts; read the answer in the "
+                    "conversation once it lands"
+                ),
+                headers={"Retry-After": _retry_after_hint()},
+            )
+        if answer.state == "asked":
+            raise HTTPException(
+                status_code=503,
+                detail="the replica running this turn did not answer; reattach in a moment",
+                headers={"Retry-After": _retry_after_hint()},
+            )
+        raise HTTPException(status_code=404, detail="no turn is running for this session")
+
+    def _release() -> None:
+        """Withdraw the follow and give back the caller's stream slot, when the socket is gone."""
+        relay.forget(request_id)
+        release_slot()
+
+    return _TurnStream(
+        _while_a_participant(
+            request, session_id, principal, relay.view(request_id, session_id, holding.holder)
+        ),
+        session_id=session_id,
+        ping=settings.service_sse_ping_seconds,
+        send_timeout=settings.service_sse_send_timeout_seconds,
+        release=_release,
+        headers=(
+            {TURN_CORRELATION_HEADER: answer.correlation_id} if answer.correlation_id else None
+        ),
     )
 
 

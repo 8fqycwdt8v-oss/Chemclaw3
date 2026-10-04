@@ -1505,6 +1505,14 @@ Break it down with
 `sum by (outcome) (rate(chemclaw_turns_finished_total[10m]))` — `errored` and `timed_out` are
 different problems — then the front-door dashboard's per-route error ratio.
 
+#### ChemclawTurnRelayFailing
+`warning`. A pod holding running turns cannot read the follows and Stops other replicas address to
+them (`chemclaw_turn_relay_poll_failures_total`; its WARNING `could not read the requests other
+replicas addressed to this process's turns` carries the exception). Its own chemists see nothing
+wrong; a chemist whose request the Service balanced to another pod gets a 503 on Stop and a reattach
+that never opens until the turn ends. It is that pod's database path — read `ChemclawPgPoolSaturated`
+beside it (D-2026-10-04-a-running-turn-is-reached-through-postgres-from-any-replica).
+
 #### ChemclawFleetAboveItsTurnCeiling
 `warning`. More front-door pods are running than the declared fleet ceiling accounts for, so the
 shared LLM endpoint can be offered more concurrent turns than its budget permits. A manual scale, an

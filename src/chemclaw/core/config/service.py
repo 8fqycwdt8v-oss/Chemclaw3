@@ -106,6 +106,19 @@ class ServiceSettings(BaseSettings):
     # this bounds how long a member removed mid-turn keeps seeing it. One lookup per watcher per
     # interval at most, and none while the turn is quiet.
     service_turn_watch_recheck_seconds: float = Field(default=5.0, gt=0)
+    # **A running turn is reached from any replica**
+    # (`D-2026-10-04-a-running-turn-is-reached-through-postgres-from-any-replica`). A reattach or a
+    # Stop that lands on a replica not holding the turn becomes a row the holder polls for
+    # (`agent/turn_remotes.py`), and a followed turn's frames come back through rows the asker polls
+    # for. This is both polls' interval: how long a Stop sent to another replica takes to reach the
+    # turn, and how coarsely a turn followed from another replica arrives. Each poll is one short
+    # statement, taken only while there is something to poll for — a turn held here, or a view of
+    # one held elsewhere.
+    service_turn_relay_poll_seconds: float = Field(default=0.25, gt=0)
+    # How long such a request lives without its asker refreshing it — the bound on how long a holder
+    # keeps relaying to a replica that died — and how long the asker waits for the holder's first
+    # answer before answering 503. Startup refuses a poll at or above it.
+    service_turn_relay_lease_seconds: float = Field(default=10.0, gt=0)
     # Max characters accepted in one chat message at the front door (SEC-4). Bounds the request
     # body at the trust boundary so an oversized POST is a clean 422, not an unbounded
     # allocation. Generous for a real message (~25k tokens); raise it for a workflow that posts

@@ -14,7 +14,8 @@ readers that lifecycle uses beside it — `runner_trace.py` (the events a tool c
 authorization gate; `events.py` the SSE envelope; `budget.py` the per-turn cost meter, with
 `budget_store.py` its Postgres-backed per-user spend window. Beside the lifecycle: `graph_stream.py`
 turns a compiled graph's stream into the turn event contract, `detach.py` lets a turn outlive its
-client (it stops only on request), `tool_results.py` stores a turn's full tool output for
+client (it stops only on request), `turn_relay.py` lets any replica follow or stop a turn another
+one holds, `tool_results.py` stores a turn's full tool output for
 `GET /sessions/{id}/tool-results/{ref}`, `exhibit_drafts.py` streams a `document` artefact while the
 model is still writing it, and `rate_limit.py` is the per-principal request budget. `mcp_face.py` is
 the read-only MCP face — this system as a tool somebody else's agent can call — and `static/` the

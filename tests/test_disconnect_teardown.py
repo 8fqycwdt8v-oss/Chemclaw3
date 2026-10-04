@@ -46,7 +46,9 @@ class _RecordingClaims:
         self.entered = 0
         self.completed = 0
 
-    async def claim(self, session_id: str, holder: str, lease_seconds: float) -> bool:
+    async def claim(
+        self, session_id: str, holder: str, lease_seconds: float, *, actor: str | None = None
+    ) -> bool:
         """Take the slot unless someone already holds it."""
         if session_id in self.held:
             return False
