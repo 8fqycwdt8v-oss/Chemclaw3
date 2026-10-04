@@ -1000,7 +1000,7 @@ async def family_h_edges() -> list[Finding]:
             observed=(
                 f"HTTP {oversize.status}, answered={oversize.answered}, error={oversize.error_code}"
             ),
-            detail="the label space is rate_limited/context_length/timeout/transport/error",
+            detail="the label space is rate_limited/context_length/timeout/transport/auth/error",
         )
     )
 
