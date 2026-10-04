@@ -35,9 +35,9 @@ from typing import Any, Literal, NamedTuple
 
 import psycopg
 from psycopg.rows import TupleRow
-from psycopg.types.json import Jsonb
 
 from chemclaw.agent.session_store import _session_connection, _session_dsn
+from chemclaw.core.jsonb import json_column
 
 #: What a request asks of the holder. `unload_stop` is a stop sent by a page being discarded, which
 #: the holder defers exactly as the local route does
@@ -218,6 +218,9 @@ class TurnRemotes:
             async with conn.cursor() as cur:
                 await cur.executemany(
                     _RELAY,
-                    [(request_id, None if frame is None else Jsonb(frame)) for frame in frames],
+                    [
+                        (request_id, None if frame is None else json_column(frame))
+                        for frame in frames
+                    ],
                 )
             await conn.commit()
