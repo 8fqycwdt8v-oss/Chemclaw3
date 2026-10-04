@@ -41,7 +41,7 @@ The chart sets `CHEMCLAW_LOG_JSON=true`: one JSON object per line with `time`, `
 | --- | --- | --- |
 | Browser → UI BFF (`Chemclaw3_ui`) | the BFF mints one per request (32 hex) | BFF access line `correlation_id`; sent upstream as `X-Chemclaw-Correlation-Id` |
 | BFF/ingress → front door | `_request_correlation_id` adopts an inbound `X-Chemclaw-Correlation-Id` matching `[A-Za-z0-9_-]{8,64}`, else mints a `uuid4().hex` | every log line's `correlation_id`; the response header `X-Chemclaw-Correlation-Id`; `audit_events.correlation_id`; a 500 body's `correlation_id`; a failed turn's SSE `error` event |
-| Front door → connector / MCP server | `turn_headers()` sends `X-Chemclaw-Actor`, `X-Chemclaw-Session`, `X-Chemclaw-Correlation-Id`, `X-Chemclaw-Dry-Run` and W3C `traceparent` | `Chemclaw3-mcp` servers: `[correlation/session]` in their log format. In-repo connector servers: the `connector <name> request: path=… actor=… session=… dry_run=…` line (actor and session only) |
+| Front door → connector / MCP server | `turn_headers()` sends `X-Chemclaw-Actor`, `X-Chemclaw-Session`, `X-Chemclaw-Correlation-Id`, `X-Chemclaw-Dry-Run` and W3C `traceparent` | `Chemclaw3-mcp` servers: `[correlation/session]` in their log format. In-repo connector servers: every line's `correlation_id`/`session_id`/`actor` — the request line `connector <name> request: path=… actor=… session=… correlation=… dry_run=…` and every line a tool body logs (`connectors/caller.py::bind_caller` binds them per request and per tool call) |
 | Front door → Temporal → worker | carried in the job input (`ConnectorJobInput.correlation_id`) and re-bound by the worker interceptor | worker log lines' `correlation_id`; `job_records` |
 | Watching an already-running turn | — | response header `X-Chemclaw-Turn-Correlation-Id` names the *turn's* id, distinct from the watch request's own |
 
@@ -64,8 +64,9 @@ FROM audit_events WHERE correlation_id = '<CID>' ORDER BY ts;
 history of the workflow) is the record for a durable job. With `CHEMCLAW_OTEL_ENABLED`, the same
 turn is one trace: `chemclaw.turn` → `chemclaw.tool` → the connector's spans.
 
-On an in-repo connector pod (`chemclaw-connector-<name>`), lines emitted inside a tool carry
-`correlation_id` `-`; join there by session id and time.
+On an in-repo connector pod (`chemclaw-connector-<name>`) the ids are the ones the caller's
+`X-Chemclaw-*` headers claimed: attribution for the log, never an identity any gate reads. A line
+carrying `-` there came from no request (startup, a probe, a call that sent no headers).
 
 ---
 
