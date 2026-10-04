@@ -2397,3 +2397,78 @@ def test_pyjwt_refetches_an_unknown_kid_at_once_when_its_own_cooldown_is_off() -
         "is holding despite `cooldown_duration=0`, so api/auth.py's configured cooldown is not "
         "the one deciding rotation latency"
     )
+
+
+async def _absorbs_a_cancellation(hops: int) -> bool:
+    """Whether psycopg's async connect wait swallowed one cancel that landed `hops` turns late.
+
+    A fake connection generator waits on one end of a socketpair; a byte lands on it and on a
+    second pair together, so the connect wakes and our own reader on the second pair fires in the
+    same loop iteration. That reader cancels the waiting task after `hops` further `call_soon`
+    turns — sweeping the few iterations in which a `wait_for`-based wait has its inner result ready
+    and has not yet resumed the outer task, which is exactly the window the defect lives in.
+    """
+    import socket
+
+    from psycopg import waiting
+
+    loop = asyncio.get_running_loop()
+    conn_r, conn_w = socket.socketpair()
+    trig_r, trig_w = socket.socketpair()
+    conn_r.setblocking(False)
+    trig_r.setblocking(False)
+
+    def connecting() -> Any:
+        yield conn_r.fileno(), waiting.WAIT_R
+        return "connected"
+
+    task = asyncio.create_task(waiting.wait_conn_async(connecting(), interval=0.1))
+    await asyncio.sleep(0)  # the task is now parked on the connection socket
+    requested: list[bool] = []
+
+    def cancel_after(remaining: int) -> None:
+        if remaining:
+            loop.call_soon(cancel_after, remaining - 1)
+        else:
+            # False once the task has already returned: a cancel that arrived too late to cancel
+            # anything is not one the wait absorbed.
+            requested.append(task.cancel())
+
+    def fired() -> None:
+        loop.remove_reader(trig_r.fileno())
+        cancel_after(hops)
+
+    loop.add_reader(trig_r.fileno(), fired)
+    conn_w.send(b"x")
+    trig_w.send(b"x")
+    try:
+        await task
+    except asyncio.CancelledError:
+        return False
+    finally:
+        loop.remove_reader(trig_r.fileno())
+        for sock in (conn_r, conn_w, trig_r, trig_w):
+            sock.close()
+    return any(requested)
+
+
+async def test_a_cancelled_connect_is_not_absorbed_by_psycopg() -> None:
+    """A `task.cancel()` that lands as the connect's socket wakes must still cancel the task.
+
+    psycopg before 3.3.6 waited through `asyncio.wait_for`, and on Python 3.11 `wait_for` returns
+    the inner result and drops the cancellation when the two coincide. Measured on a real database:
+    one connect in five absorbed the cancel and carried on — and since `core/db.connection` opens
+    one per call outside a pooled process, every database read in a turn's middleware
+    (`agent/exhibit_notes.ExhibitListing`, `agent/preferences.StandingPreferences`) was a place a
+    stopped or torn-down turn could swallow its own stop and wait on the model for ever. That was
+    `tests/test_turn_write_ahead.py` timing out one run in three. `pyproject.toml` floors psycopg
+    at the release that awaits a plain future instead; this is what fails if that ever regresses.
+    """
+    absorbed = {
+        hops: sum([await _absorbs_a_cancellation(hops) for _ in range(10)]) for hops in range(6)
+    }
+    assert not any(absorbed.values()), (
+        f"psycopg's async connect wait swallowed cancellations {absorbed} (by how many loop turns "
+        "late the cancel landed); a cancelled turn can then run on past a database read — see "
+        "pyproject.toml's psycopg floor"
+    )
