@@ -53,6 +53,9 @@ SELECTABLE = {
     # Artefacts belong to a session, so they are durable exactly when the session is.
     "InMemoryExhibitStore": "session_store",
     "InMemoryArmResultStore": "session_store",
+    # Uploads too (`D-2026-10-04-an-upload-is-session-state-not-pod-state`): an attachment is part
+    # of the conversation, so it is durable exactly when the conversation is.
+    "InMemoryAttachmentStore": "session_store",
     # Same switch, for `InMemoryPlanApprovalStore`'s reason: a membership admits somebody to a
     # session, and under `session_store="memory"` the session is a process.
     "InMemorySessionMemberStore": "session_store",
