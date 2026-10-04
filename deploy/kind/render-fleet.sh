@@ -8,17 +8,9 @@
 # context, its grace period derived from `connector.yaml`, its default-deny NetworkPolicy — and
 # `kubectl kustomize` applies only what a kind cluster has to differ in:
 #
-# - the image: the fleet's placeholder → `chemclaw/mcp-<name>:<tag>`, loaded into the node, so
-#   `imagePullPolicy: Never`. Both placeholder spellings are rewritten — the unresolvable
-#   `registry.invalid/chemclaw-mcp-<name>:unset` the fleet ships now and the older
-#   `chemclaw3/chemclaw-mcp-<name>:latest` — so either fleet revision renders; a kustomize `images:`
-#   entry naming an image the Deployment does not use is a no-op;
+# - the image: the fleet's unresolvable placeholder `registry.invalid/chemclaw-mcp-<name>:unset` →
+#   `chemclaw/mcp-<name>:<tag>`, loaded into the node, so `imagePullPolicy: Never`;
 # - one replica (the fleet's floor of two is an availability property; this is a workstation);
-# - the server's bearer, from `chemclaw-secrets` under the variable its `app.py` names as
-#   `token_env` — the same key core's pods send from, so the two halves cannot disagree. The fleet's
-#   own Deployments now carry the same entry; a strategic-merge patch keys `env` by `name`, so this
-#   one merges into it rather than duplicating it, and it is kept only so a fleet tree from before
-#   that change still renders a pod that can authenticate;
 # - `MCP_ALLOWED_HOSTS`, the Service address the server is dialled at. The MCP transport's
 #   DNS-rebinding guard admits only loopback `Host` headers by default, so without it every
 #   in-cluster call is answered `421 Misdirected Request` while `/healthz` stays green;
@@ -66,15 +58,20 @@ for name in "${servers[@]}"; do
   src="$mcp_repo/servers/$name/deploy"
   [ -f "$src/deployment.yaml" ] || die "$name: no $src/deployment.yaml"
   token_env="CHEMCLAW_$(printf '%s' "$name" | tr '[:lower:]' '[:upper:]')_TOKEN"
-  # The name the server itself verifies, read from its app rather than assumed from the pattern:
-  # a server whose `token_env` drifted from `CHEMCLAW_<NAME>_TOKEN` would otherwise boot healthy
-  # and refuse every call.
+  # The name the server itself verifies, read from its app rather than assumed from the pattern.
+  # The fleet's Deployment reads that variable from `chemclaw-secrets` under its own name, and
+  # `up.sh` provisions `CHEMCLAW_<NAME>_TOKEN` keys, so a server whose `token_env` drifted would
+  # reference a key nothing wrote and never start.
   grep -rqs "token_env=\"$token_env\"" "$mcp_repo/servers/$name/src" \
     || die "$name: its app does not declare token_env=\"$token_env\" — check servers/$name/src"
   # The Service's own port, read from the file the cluster gets, so the allowed `Host` is exactly
   # the address core dials (`http://chemclaw-mcp-<name>:<port>/mcp`).
   port="$(awk '$1 == "port:" {print $2; exit}' "$src/service.yaml")"
   [ -n "$port" ] || die "$name: no port in $src/service.yaml"
+  # The placeholder the `images:` rewrite below matches. A Deployment naming anything else would
+  # pass through unrewritten and sit in ErrImagePull, so refuse it here, by name.
+  grep -qs "image: registry.invalid/chemclaw-mcp-$name:" "$src/deployment.yaml" \
+    || die "$name: $src/deployment.yaml does not use the registry.invalid/chemclaw-mcp-$name placeholder"
   out="$work/$name"
   mkdir -p "$out"
   cp "$src/deployment.yaml" "$src/service.yaml" "$out/"
@@ -87,9 +84,6 @@ resources:
 $(for f in deployment.yaml service.yaml networkpolicy.yaml; do [ -f "$out/$f" ] && echo "  - $f"; done)
 images:
   - name: registry.invalid/chemclaw-mcp-$name
-    newName: chemclaw/mcp-$name
-    newTag: "$tag"
-  - name: chemclaw3/chemclaw-mcp-$name
     newName: chemclaw/mcp-$name
     newTag: "$tag"
 replicas:
@@ -114,11 +108,6 @@ patches:
                 env:
                   - name: MCP_ALLOWED_HOSTS
                     value: "chemclaw-mcp-$name:$port"
-                  - name: $token_env
-                    valueFrom:
-                      secretKeyRef:
-                        name: chemclaw-secrets
-                        key: $token_env
                 resources:
                   requests:
                     cpu: 25m

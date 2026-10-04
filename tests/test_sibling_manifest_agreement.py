@@ -178,48 +178,13 @@ def _comparable_mapping(mapping: dict[str, Any]) -> tuple[tuple[str, Any], ...]:
     return tuple(sorted((key, _comparable(value)) for key, value in mapping.items()))
 
 
-#: The argument for every process-development bundle's `default_enabled` divergence, written once
-#: because it is one argument: five rows used to carry five copies of it, all five stating that
-#: `infra/live/e2e-full-stack/up.sh` lets the fleet's copy win and bind — which that script's own
-#: directory order makes false. `test_the_e2e_lane_binds_no_opt_in_bundle_by_default` derives the
-#: harmlessness claim from the script instead of restating it.
-#:
-#: **Transitional, and the follow-up deletes it.** The fleet is adopting `default_enabled: false`
-#: for these five manifests (`Chemclaw3-mcp` branch `fix/fleet-placeholder-and-opt-in`), and the
-#: two repositories cannot merge in one instant: CI here reads the fleet's `main`, so until that
-#: lands the trees diverge, and after it they agree. `_TRANSITIONAL_ROWS` lets these rows pass in
-#: either state. The follow-up (`fix/fleet-followups-step3` here) deletes this constant, its five
-#: rows and `_TRANSITIONAL_ROWS` together, once the fleet's `main` carries the flag — from then on
-#: an agreement is the only accepted state, and a fleet copy that drops the flag again fails.
-_OPT_IN_ARGUMENT = (
-    "this tree declares `default_enabled: false` and the fleet's copy declares nothing, which "
-    "means True there — and the divergence is the decision rather than a drift "
-    "(`D-2026-09-20-declaring-a-capability-and-binding-it-are-different-decisions`). The flag "
-    "answers a question only this repository has: what an *empty* `connectors_enabled` should "
-    "bind, given that every bound tool's schema is charged to `PREFIX_BOUND` and through it to "
-    "both compaction defaults. The fleet publishes a capability and has no prefix to protect.\n"
-    "\n"
-    "What makes it harmless is that the flag is read only when `connectors_enabled` is empty "
-    "(`registry.enabled`), and no wiring this repository ships reads the fleet's copy there. "
-    "**Not** because this copy always wins the name: a chart release that mounts the fleet's "
-    "manifest through `extraConnectors` puts it *ahead* of the shipped bundles on "
-    "`CHEMCLAW_CONNECTORS_DIR`, and `registry._bundle_dirs` is first-directory-wins, so there the "
-    "fleet's copy is the one loaded. A chart release never reads the flag at all, though — "
-    "`chemclaw.connectorsEnabled` refuses to render an empty `CHEMCLAW_CONNECTORS_ENABLED` — so "
-    "which copy wins decides nothing there. `infra/live/e2e-full-stack/up.sh` mounts the fleet's "
-    "`manifests/` too, and it names every discovered bundle in `CHEMCLAW_CONNECTORS_ENABLED`, so "
-    "the flag is not read there either; it also puts this tree's connectors directory first, so "
-    "even with that list emptied this copy wins and binds none of these bundles. Binding one is "
-    "naming it in `CHEMCLAW_CONNECTORS_ENABLED`, which overrides the flag."
-)
-
-
 #: Bundle-level keys that legitimately differ between the two trees, keyed `(bundle, key)`, each
 #: carrying **why** and **what makes it harmless**. A divergence is therefore either caught or
 #: written down — which is the property the comparison existed to have and did not, because it only
 #: ever looked at three endpoint keys.
 #:
-#: The one row is real and was measured: every other key of every shared bundle agrees today.
+#: Every row is real and was measured: every other key of every shared bundle agrees today,
+#: `default_enabled` included — the fleet declares the five process-development bundles opt-in too.
 _ARGUED_DIVERGENCES: dict[tuple[str, str], str] = {
     ("safety", "skills"): (
         "the fleet's manifest declares no `skills:` on purpose, and says so in its own header: a "
@@ -231,8 +196,6 @@ _ARGUED_DIVERGENCES: dict[tuple[str, str], str] = {
         "that repository's README and its integration doc publish (`manifests/` first) dropped it "
         "with no error, no warning and no log line."
     ),
-    ("props", "default_enabled"): _OPT_IN_ARGUMENT,
-    ("thermalsafety", "default_enabled"): _OPT_IN_ARGUMENT,
     ("thermalsafety", "skills"): (
         "the same split `safety` above records, for the same reason and with the same remedy: the "
         "judgment about `thermalsafety`'s tools is architecture layer 3 and lives here, and that "
@@ -241,7 +204,6 @@ _ARGUED_DIVERGENCES: dict[tuple[str, str], str] = {
         "carrying the bundle's name, so `thermal-safety-assessment` is reachable in either wiring "
         "order."
     ),
-    ("kinetics", "default_enabled"): _OPT_IN_ARGUMENT,
     ("kinetics", "skills"): (
         "the same split `safety` above records, for the same reason and with the same remedy: the "
         "judgment about `kinetics`'s tools is architecture layer 3 and lives here, and that fleet "
@@ -249,7 +211,6 @@ _ARGUED_DIVERGENCES: dict[tuple[str, str], str] = {
         "carrying the bundle's name, so `kinetics-and-reactor-choice` is reachable in either "
         "wiring order."
     ),
-    ("unitops", "default_enabled"): _OPT_IN_ARGUMENT,
     ("unitops", "skills"): (
         "the same split `safety` above records, for the same reason and with the same remedy: the "
         "judgment about `unitops`'s tools is architecture layer 3 and lives here, and that fleet "
@@ -257,7 +218,6 @@ _ARGUED_DIVERGENCES: dict[tuple[str, str], str] = {
         "carrying the bundle's name, so `unit-operation-sizing` is reachable in either wiring "
         "order."
     ),
-    ("suitability", "default_enabled"): _OPT_IN_ARGUMENT,
     ("suitability", "skills"): (
         "the same split `safety` above records, for the same reason and with the same remedy: the "
         "judgment about `suitability`'s tools is architecture layer 3 and lives here, and that "
@@ -266,13 +226,6 @@ _ARGUED_DIVERGENCES: dict[tuple[str, str], str] = {
         "carrying the bundle's name, so `system-suitability` is reachable in either wiring order."
     ),
 }
-
-#: Rows of `_ARGUED_DIVERGENCES` that may *either* diverge or agree, because the two repositories
-#: are mid-way through converging on them and CI on each side reads the other's `main`. Every other
-#: row still fails the moment the trees agree. Deleted with `_OPT_IN_ARGUMENT` (see its comment).
-_TRANSITIONAL_ROWS: frozenset[tuple[str, str]] = frozenset(
-    key for key, why in _ARGUED_DIVERGENCES.items() if why is _OPT_IN_ARGUMENT
-)
 
 
 def _sibling_or_skip() -> Path:
@@ -342,8 +295,6 @@ def test_a_bundle_declared_in_both_trees_declares_the_same_surface() -> None:
             argued = _ARGUED_DIVERGENCES.get((name, field))
             agrees = _comparable(mine.get(field)) == _comparable(theirs.get(field))
             if argued is not None:
-                if (name, field) in _TRANSITIONAL_ROWS:
-                    continue
                 assert not agrees, (
                     f"`{name}`'s `{field}` is recorded as an argued divergence and the two trees "
                     f"now agree about it. Delete that row from `_ARGUED_DIVERGENCES`: a row that "
@@ -430,9 +381,9 @@ def _e2e_connectors_dir(fleet: Path) -> str:
 def _opt_in_here() -> set[str]:
     """Every bundle this tree's own manifest declares `default_enabled: false`.
 
-    Read off this repository's files rather than off `_ARGUED_DIVERGENCES`: those rows exist only
-    while the fleet's copy disagrees, and the opt-in decision is this repository's whether or not it
-    does. Deriving the set from the rows would empty it the day the fleet adopted the flag.
+    Read off this repository's files, because the opt-in decision is this repository's whatever
+    the fleet's copy says. It used to be derived from divergence rows, which existed only while the
+    fleet disagreed and would have emptied the set the day it adopted the flag — which it now has.
     """
     return {
         name
@@ -444,9 +395,10 @@ def _opt_in_here() -> set[str]:
 def test_the_e2e_lane_binds_no_opt_in_bundle_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every bundle this tree declares opt-in is unbound under `up.sh`'s own wiring.
 
-    The rows used to say the opposite — that in the four-repo lane the fleet's copy wins the name
-    and these bundles bind — and nothing checked it: `up.sh` lists this tree's connectors first and
-    discovery is first-directory-wins, so this tree's `default_enabled: false` decides there too.
+    The `default_enabled` divergence rows this file used to carry said the opposite — that in the
+    four-repo lane the fleet's copy wins the name and these bundles bind — and nothing checked it:
+    `up.sh` lists this tree's connectors first and discovery is first-directory-wins, so this
+    tree's `default_enabled: false` decides there too.
     Driven through `registry.enabled()` with the exported directory order and no enable-list — the
     lane itself now names every bundle, so this holds the claim for an operator who empties it.
     """
