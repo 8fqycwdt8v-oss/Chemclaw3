@@ -1619,6 +1619,10 @@ trustedCA:
   # Set `CHEMCLAW_ENTRA_CA_BUNDLE` to the mounted file. The front door refuses to boot if the file
   # holds no PEM certificate (`api/auth.refuse_unusable_entra_ca_bundle`).
   entra: false
+  # Set `GIT_SSL_CAINFO` to the mounted file, for a knowledge repo served behind the private CA (the
+  # knowledge-sync containers and the note writer's pushes). Like the two above, it *replaces* git's
+  # system trust store rather than adding to it, so the bundle must hold every CA git must trust.
+  git: false
 
 # The runtime ServiceAccount. The `azure.workload.identity/client-id` annotation (and the
 # `azure.workload.identity/use` pod label the templates carry) is inert scaffolding: workload

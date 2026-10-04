@@ -71,6 +71,10 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 - name: CHEMCLAW_ENTRA_CA_BUNDLE
   value: {{ include "chemclaw.trustedCAFile" . | quote }}
 {{- end }}
+{{- if .Values.trustedCA.git }}
+- name: GIT_SSL_CAINFO
+  value: {{ include "chemclaw.trustedCAFile" . | quote }}
+{{- end }}
 {{- end }}
 {{- range $configKey, $secretEnv := .Values.secrets.keys }}
 - name: {{ $secretEnv }}
@@ -596,8 +600,8 @@ readOnlyRootFilesystem: {{ .Values.securityContext.readOnlyRootFilesystem }}
 - name: trusted-ca
   mountPath: {{ .Values.trustedCA.mountPath }}
   readOnly: true
-{{- else if or .Values.trustedCA.llm .Values.trustedCA.entra -}}
-{{- fail "trustedCA.llm/entra point a setting at the mounted CA bundle, and none is mounted: set `trustedCA.configMap` or `trustedCA.secret`." -}}
+{{- else if or .Values.trustedCA.llm .Values.trustedCA.entra .Values.trustedCA.git -}}
+{{- fail "trustedCA.llm/entra/git point a setting at the mounted CA bundle, and none is mounted: set `trustedCA.configMap` or `trustedCA.secret`." -}}
 {{- end }}
 {{- end -}}
 

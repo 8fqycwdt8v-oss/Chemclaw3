@@ -435,8 +435,9 @@ Secret), set `trustedCA.configMap` (or `trustedCA.secret`) and `trustedCA.key`, 
 `sslmode=verify-full&sslrootcert=/etc/chemclaw/ca/ca.crt` (`trustedCA.mountPath`/`key`) to each
 DSN. The same file can back the LLM gateway (`trustedCA.llm: true` sets
 `CHEMCLAW_LLM_TLS_CA_BUNDLE`) and the Entra JWKS host (`trustedCA.entra: true` sets
-`CHEMCLAW_ENTRA_CA_BUNDLE`); each switch *replaces* certifi for that client, so turn one on only
-when the bundle signs that peer.
+`CHEMCLAW_ENTRA_CA_BUNDLE`), and a knowledge git host (`trustedCA.git: true` sets
+`GIT_SSL_CAINFO` for knowledge sync and note pushes); each switch *replaces* that client's trust
+store, so turn one on only when the bundle signs that peer.
 
 ### 5.3 Settings that stop the render or the boot
 

@@ -7062,6 +7062,8 @@ def test_a_private_ca_reaches_every_container_that_reads_the_settings_pointing_a
         "trustedCA.llm=true",
         "--set",
         "trustedCA.entra=true",
+        "--set",
+        "trustedCA.git=true",
     )
     assert rendered.returncode == 0, rendered.stderr
     containers = _containers(rendered.stdout)
@@ -7078,7 +7080,7 @@ def test_a_private_ca_reaches_every_container_that_reads_the_settings_pointing_a
             missing.append(f"{name}/{container['name']}: no trusted-ca mount")
         elif not mounts["trusted-ca"].get("readOnly"):
             missing.append(f"{name}/{container['name']}: trusted-ca is writable")
-        for setting in ("CHEMCLAW_LLM_TLS_CA_BUNDLE", "CHEMCLAW_ENTRA_CA_BUNDLE"):
+        for setting in ("CHEMCLAW_LLM_TLS_CA_BUNDLE", "CHEMCLAW_ENTRA_CA_BUNDLE", "GIT_SSL_CAINFO"):
             if env.get(setting) != path:
                 missing.append(f"{name}/{container['name']}: {setting}={env.get(setting)!r}")
     assert not missing, "\n".join(missing)
@@ -7096,6 +7098,7 @@ def test_a_private_ca_reaches_every_container_that_reads_the_settings_pointing_a
 
     for refused in (
         ("--set", "trustedCA.llm=true"),
+        ("--set", "trustedCA.git=true"),
         ("--set", "trustedCA.configMap=a", "--set", "trustedCA.secret=b"),
     ):
         result = _render(*refused)

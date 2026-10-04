@@ -117,9 +117,10 @@ trustedCA:
   key: ca.crt               # mounted at /etc/chemclaw/ca/ca.crt (`mountPath`/`key`)
   llm: true                 # sets CHEMCLAW_LLM_TLS_CA_BUNDLE to that file
   entra: true               # sets CHEMCLAW_ENTRA_CA_BUNDLE to that file
+  git: true                 # sets GIT_SSL_CAINFO (knowledge sync and note pushes)
 ```
 
-Both switches *replace* certifi for their client rather than adding to it, so turn one on only when
+Each switch *replaces* the trust store of its client rather than adding to it, so turn one on only when
 the bundle signs that peer. Postgres takes no switch: append
 `sslmode=verify-full&sslrootcert=/etc/chemclaw/ca/ca.crt` to each DSN in the Secret. With
 publicly-trusted certificates none of this is needed (`sslmode=require` verifies nothing;
