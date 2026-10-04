@@ -94,7 +94,7 @@ and read what is outstanding), `dialogue_tools` (`ask_clarifying_question`), `pr
 
 | Concern | Modules |
 | --- | --- |
-| What a profile advertises | `chemclaw_agent`, `profiles`, `profile_discovery`, `subagents`, `turn_graph`, `handoff` |
+| What a profile advertises | `chemclaw_agent.py`, `profiles`, `profile_discovery`, `subagents`, `turn_graph`, `handoff` |
 | The tool-call chain | `tool_authz` over `authz` (the one authorization module), `audit` + `audit_store`, `tool_framing`, `tool_result_shape`, `tool_result_size`, `repeat_guard`, `refusal_route`, `tool_invocation` (the chain with no graph driving) |
 | Plans | `plan_gate`, `plan_scope`, `plan_link`, `plan_state`, `plan_approval_store` |
 | Cost and context | `compaction`, `context_budget`, `spend_cap`, `loop_cap`, `model_calls`, `turn_usage`, `turn_cost` + `turn_cost_store` |

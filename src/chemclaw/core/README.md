@@ -75,7 +75,7 @@ exactly.
 
 It is a package of one module per domain section (the D-072 mixins), with the flat `Settings`
 class composed — and the cross-section startup rules enforced — in its `__init__.py`; see
-`config/README.md`. One settings object, one import (`from chemclaw.core.config import settings`).
+`core/config/README.md`. One settings object, one import (`from chemclaw.core.config import settings`).
 
 ## The other kernel modules
 

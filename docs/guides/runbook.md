@@ -878,41 +878,63 @@ workflow on `background-jobs`, so a stuck one is read in the Temporal UI like an
 
 The durable sync rejects an entry that fails validation (bad structure, mass-balance
 mismatch) and **advances past it** — a rejection is deterministic bad data, so re-fetching
-it unchanged would only re-reject it. Each rejection is reported in the run's
-`IngestSummary.rejected` (visible in the Temporal workflow result) and logged as a `WARNING`
-carrying the entry id, the reason, **and the entry's timestamp**.
+it unchanged would only re-reject it. Each rejection is counted in the workflow result
+(`rejected`, visible in the Temporal UI) and logged by the background worker as `eln sync rejected entry <id> (at <timestamp>): <reason>`. The one exception is an entry
+stamped further in the future than `CHEMCLAW_ELN_SYNC_FUTURE_TOLERANCE_SECONDS`: it is rejected
+*without* advancing the cursor, so a typo'd year cannot skip every later entry — fix its timestamp
+at the source and the next scheduled run picks it up.
 
-To re-ingest one after correcting its source record upstream: start the `ElnSyncWorkflow`
-with `since` set to just before that entry's timestamp (from the rejection log/summary). The
-sync re-fetches from there and re-ingests everything after it; ingestion is idempotent
-(id-keyed fingerprint upserts + a stable note branch), so the already-ingested entries in
-that window are harmless no-ops and only the corrected entry newly succeeds. There is no
-automatic re-drive by design (KISS) — re-ingestion is a deliberate, admin-triggered action.
+To re-ingest one after correcting its source record upstream, start a one-off `ElnSyncWorkflow`
+with `since` set to just before that entry's timestamp. With the Temporal CLI (from a host or
+pod that reaches the broker, with the same namespace and TLS flags as the workers):
+
+```sh
+temporal workflow start --task-queue background-jobs --type ElnSyncWorkflow \
+  --workflow-id eln-resync-$(date +%s) --input '"2026-09-30T00:00:00+00:00"'
+```
+
+or the Temporal UI's *Start Workflow* with the same three values. A manual `since` re-syncs
+**every** active ingest source from that point and leaves the stored cursors alone. Ingestion is
+idempotent (id-keyed upserts throughout), so entries already held unchanged in that window are
+counted as `skipped_existing` and only the corrected entry newly succeeds. There is no automatic
+re-drive by design — re-ingestion is a deliberate, admin-triggered action. Verify that no
+`rejected entry <id>` line recurs for it in the background worker's log during the run, and that
+the workflow result's `ingested` count moved.
 
 The **same procedure backfills a late-arriving export**: a file dropped into the export directory
-after the sync's overlap window, carrying an older payload timestamp, is filtered out permanently
-and reported as `… export file(s) arrived after the sync cursor but carry an older timestamp …`.
-Start the sync with `since` set before those entries' timestamps to pull them in.
+after the sync's overlap window (`CHEMCLAW_ELN_SYNC_OVERLAP_SECONDS`), carrying an older payload
+timestamp, is filtered out permanently and reported as `… export file(s) arrived after the sync
+cursor but carry an older timestamp …`. Start the sync with `since` set before those entries'
+timestamps to pull them in.
 
-**A steady ingest count is not proof anything landed.** `IngestSummary.ingested` counts entries
-whose note this run wrote. There is no review step to wait on any more, so the failure this
-paragraph used to describe — an entry re-proposed on every run because nobody merged its branch —
-is gone with `awaiting_merge` itself (`ingest/eln/sync.py` records why). What a steady count now
-means is a source producing
-new data. Note that an entry's *first* sync can appear here too when its export landed late — it
-sits inside the replay window, so it is written again next run, which is idempotent: a byte-
-identical re-write stages nothing and reports the unchanged tree.
+**Reading the result.** The workflow returns counters (per-entry ids are in the log): `ingested`
+is entries this run newly indexed and stored (queryable the moment the write returns — there is no
+review step); `citation_only` is the subset stored without a structure, so citable but in no
+similarity index; `skipped_existing` is entries already held byte-identical, which the overlap
+window re-fetches every run; `rejected` is above; `failed_sources` names a source whose sync
+failed outright. A steady `ingested` count means the source is producing new data.
 
 ## (vi) Change a fingerprint definition (ECFP radius/bits or DRFP bits)
 
-`CHEMCLAW_ECFP_RADIUS`/`_ECFP_BITS`/`_DRFP_BITS` define the fingerprints. A **width** change
-(`*_BITS`) also needs a matching `bit(N)` schema change (`infra/sql/002,003`) or inserts fail
-loudly. Every fingerprint row records the *definition* it was indexed under, and similarity
-search returns only rows matching the store's current definition — so after any definition
-change, previously-indexed rows fall out of search (safe: no wrong scores, just missing hits)
-until you **re-index** them (re-run the ELN sync / re-add molecules). If search comes back
-empty after a config change, that is the tell: the index predates the new definition and needs
-rebuilding.
+`CHEMCLAW_ECFP_RADIUS`/`_ECFP_BITS`/`_DRFP_BITS` define the fingerprints (defaults 2 / 2048 /
+2048). A **width** change (`*_BITS`) also needs a new migration altering every `bit(2048)` column
+it touches (`infra/sql/002`, `003`, `054`, `071`) or inserts fail loudly. Every fingerprint row
+records the *definition* it was indexed under, and similarity search returns only rows matching
+the store's current definition — so after any definition change, previously-indexed rows fall out
+of search (safe: no wrong scores, just missing hits) until you **re-index** them.
+
+**The tell.** The `molfp`/`rxnfp` servers log at startup `… fingerprint index is EMPTY: 0 records
+indexed under the current definition …` or `… is PARTIAL: N record(s) indexed under the current
+definition and M under a superseded one …`, and every similarity search answers with
+`index_partial: true` (or says it could not be answered) until the rebuild finishes.
+
+**Re-index**, once every pod runs the new setting. `make rekey-compounds` (§(vi-a)) rebuilds every
+row stored under a definition other than the current one from the label the row already holds, so
+it serves a radius or width change as well as a standardization bump: preview with
+`make rekey-compounds`, write with `APPLY=1`, then dispose of the superseded generation with
+`APPLY=1 DISPOSE=1` (as the schema owner). Rows it reports it could not rebuild need their source
+re-synced: a one-off `ElnSyncWorkflow` with `since` at the epoch (`"1970-01-01T00:00:00+00:00"`,
+the command in §(v)). Afterwards the PARTIAL line and `index_partial: true` are gone.
 
 ## (vi-a) After an upgrade that bumps `STANDARDIZATION_VERSION`
 
@@ -926,6 +948,9 @@ resolving through `expand_note`), and re-fingerprints the shelved rows of both i
 each row stores, so the full ELN re-sync below is no longer needed for a bump. It is idempotent: a
 second run reports nothing left to write. Run it where the note writer runs — it commits through
 the same dedicated checkout (`D-2026-09-27-a-compound-id-a-bump-moves-is-superseded-not-orphaned`).
+In a cluster that is the background worker, whose image has no `make`:
+`kubectl exec deploy/chemclaw-background-worker -- python -m chemclaw.cli.rekey_compounds`
+(add `--apply`, and `--dispose-superseded` for the step below).
 
 **The re-key adds the rebuilt generation and keeps the old one**, so on its own it leaves every
 similarity search reporting `index_partial: true`: since `infra/sql/094` the definition is part of
@@ -938,8 +963,11 @@ complete**: a shelved row whose label no longer parses has no current twin, so t
 the line says how many rows could not be rebuilt, and searches go on saying PARTIAL until those
 entries are re-synced from source. It is the operator statement `094`'s header names, so it runs as
 the schema owner — `CHEMCLAW_POSTGRES_MIGRATION_DSN` when the principal is split (see "Splitting the
-database principal"), the one credential otherwise — and refuses without `APPLY=1`. Idempotent: a
-second run finds nothing superseded. Afterwards `similar_reactions` and `similar_molecules` answer
+database principal"), the one credential otherwise — and refuses without `APPLY=1`. The chart
+mounts the migration DSN on the migrate Job only, so for an in-cluster disposal pass it to the one
+command (`kubectl exec … -- env CHEMCLAW_POSTGRES_MIGRATION_DSN='…' python -m
+chemclaw.cli.rekey_compounds --apply --dispose-superseded`). Idempotent: a second run finds nothing
+superseded. Afterwards `similar_reactions` and `similar_molecules` answer
 with `index_partial: false`.
 
 ## (vi-b) After an upgrade that changes what a note's indexed text is
@@ -958,8 +986,10 @@ leg answers as if it had.
 **`CHEMCLAW_EMBEDDING_MODEL` and `CHEMCLAW_LLM_BASE_URL` no longer need this**
 (D-2026-08-08-a-derived-index-must-record-what-derived-it). `note_index` records which embedding
 configuration made each row (migration 039, the column `document_chunks` already had), so the
-ordinary incremental `make reindex` — and the hourly workflow — re-embed exactly the rows a swap
-superseded. Nothing to remember and no flag to pass. What that does mean is that the *first* run
+ordinary incremental `make reindex` — and the `note-reindex` Schedule, which exists whenever
+`vector` or `lexical` is in `CHEMCLAW_DATA_SOURCES` (every `CHEMCLAW_NOTE_REINDEX_SCHEDULE_MINUTES`,
+hourly by default) — re-embed exactly the rows a swap superseded. Nothing to remember and no flag
+to pass. What that does mean is that the *first* run
 after upgrading past this re-embeds the whole corpus once: every existing row has no key recorded,
 which reads as unknown, and unknown is never treated as current. Same for `document_chunks`, whose
 keys all change because the key now names the endpoint as well as the model.
@@ -967,8 +997,8 @@ keys all change because the key now names the endpoint as well as the model.
 **A share's `chunk_chars` / `chunk_overlap_chars` now take effect, and they are not free.** The
 same migration set records which chunking cut each row (040), and both of the crawl's gates compare
 it — so changing either number re-reads and re-cuts every document of that share, off the mount,
-over the crawl's ordinary bounded passes. Before this the change was silently ignored, which was
-cheaper and wrong. The first sync after the upgrade pays it once for the same reason as above:
+over the crawl's ordinary bounded passes. The first sync after the upgrade pays it once for the
+same reason as above:
 nothing recorded what the existing rows were cut with.
 
 **Migration 041 rebuilds `document_chunks`' primary key, and that is the one migration in this set
@@ -984,19 +1014,24 @@ upgrade.
 re-embed pass is scoped to the chunkings the enabled shares currently use, so a chunk that the crawl
 is about to re-cut is not refreshed first and then thrown away. What no scoping can remove is the
 window: the re-embed drains `CHEMCLAW_DOCUMENT_REEMBED_BATCH_SIZE` chunks per activity,
-`CHEMCLAW_DOCUMENT_SYNC_MAX_ITERATIONS` times per run, so at the shipped 500 × 100 a million-chunk
-share takes on the order of **days** of six-hourly runs. Throughout it, document search compares
-queries embedded by the new model against vectors not yet refreshed — scores are degraded, results
-are not missing. Watch `re-embedded N chunk(s)` in the background worker's log to see the drain
-converge, and the `%d chunk(s) could not be re-embedded` line at ERROR for the ones it cannot fix.
-To finish faster, raise the batch size or run `python -m chemclaw.cli.sync_share <name>`, which
-drains that share's re-embed to completion before it crawls.
+`CHEMCLAW_DOCUMENT_SYNC_MAX_ITERATIONS` times per run, one run every
+`CHEMCLAW_DOCUMENT_SYNC_SCHEDULE_MINUTES` (six-hourly by default) — multiply the three for your
+share: a share of a million chunks takes **days to weeks** at the shipped values. Throughout it,
+document search compares queries embedded by the new model against vectors not yet refreshed —
+scores are degraded, results are not missing. Watch `re-embedded N chunk(s) under <key>` in the
+background worker's log to see the drain converge, and `N chunk(s) could not be re-embedded …` at
+ERROR for the ones it cannot fix. To finish faster, raise the batch size or run
+`make share-sync SHARE=<name>` (`python -m chemclaw.cli.sync_share <name>`), which drains that
+share's re-embed to completion before it crawls.
 
 ## (vii) Read eval-drift alerts
 
 The scheduled `EvalDriftWorkflow` re-scores the committed eval case-set and raises one alert per
-metric that moved past the relative noise band (`CHEMCLAW_EVAL_DRIFT_EPSILON`). Two surfaces, both
-intentional:
+metric that moved past the relative noise band (`CHEMCLAW_EVAL_DRIFT_EPSILON`, default 0.05 of the
+baseline value). **It is off unless you turn it on**: set `CHEMCLAW_EVAL_DRIFT_ENABLED=true`
+(neither the code nor the chart does), and the `eval-drift` Schedule is created by the next
+`make schedules-apply` / chart upgrade, firing every `CHEMCLAW_EVAL_DRIFT_SCHEDULE_MINUTES` (daily
+by default). Two surfaces, both intentional:
 
 - **The background worker's log** is where you meet a regression: `eval drift: metric 'f1' scored
   … vs baseline … (delta …)`, or `… disappeared from the run …` when a metric stopped being scored
@@ -1009,13 +1044,14 @@ intentional:
 
 Over the committed (deterministic) case-set this is a *deployment-consistency tripwire*: it fires
 when the deployed code, cases, and `data/evals/baseline.json` are inconsistent. After a deliberate
-metric change, refresh the committed baseline — otherwise every scheduled run re-alerts.
+metric change, refresh the committed baseline with `make eval-baseline` (it rewrites
+`data/evals/baseline.json`; commit it through review) — otherwise every scheduled run re-alerts.
 
 **You do not need the workflow (or a broker) to get this reading.** `make eval-baseline-check` runs
 the same comparison offline, prints every metric's baseline/current/delta/band, and exits non-zero
 only on a move in the *worsening* direction — so it is the one to run before refreshing the
 baseline, and the one that answers "did anything get worse?" on a laptop. It declares the case-set
-version it scored (`EVAL_CASE_SET_VERSION`) and refuses to report a number when that differs from
+version it scored (the Makefile's `EVAL_CASE_SET_VERSION`) and refuses to report a number when that differs from
 the baseline's: aggregates over two different case-sets are different quantities.
 
 ## (viii) Answer "is prompt caching paying off?"
@@ -1046,33 +1082,30 @@ implies a different action:
 reports reads, and only some report a write count at all, so a zero there is the normal reading
 rather than a fault. `cache_read` is the number that says whether caching is happening.
 
-**There is no `cache_control` to switch on any more, and that is a cost this deployment accepted.**
-A `prompt_caching_middleware` marked the static prefix with Anthropic's `cache_control` breakpoints
-on the dev provider; the collapse to one OpenAI-compatible gateway removed the second client and
-took that with it (`D-2026-09-04-a-gateway-is-the-only-provider`). The mechanism was never reachable
-from the production path anyway: `cache_control` is a vendor spelling, and the gateway client is
-the one that does not know it — `grep -rc cache_control` over the two installed packages returns
-**zero** for `langchain_openai` against dozens for `langchain_anthropic` (62 on 1.6.1, but the
-count is not the point and goes stale on the next bump; the zero is). So what changed is that the
-*dev* path lost a saving the production path never had. Whether a prefix is cached is now entirely
-the gateway's decision, and these counters are how you find out.
+**All four counters read zero if the gateway never reports usage.** They come from the usage
+chunk the endpoint sends at the end of a stream, which is requested with
+`CHEMCLAW_LLM_STREAM_USAGE=true` (the default). An endpoint that rejects `stream_options` needs it
+off — and then every turn meters zero, the budget guards included. Check that
+`chemclaw_input_tokens_total` moves on the first real turn.
 
-Two caveats that make the saving smaller than a naive prefix measurement suggests, both of which
-cost this review a wrong estimate:
+**There is no `cache_control` to switch on.** Every model call goes to one OpenAI-compatible
+gateway (`D-2026-09-04-a-gateway-is-the-only-provider`), and `cache_control` breakpoints are a
+vendor spelling that client does not send. Whether a prefix is cached is entirely the gateway's
+decision, and these counters are how you find out.
 
-- **Measure the deployment you actually run.** The ~14.6 k-token prefix figure that started REV-9
-  was measured on the removed Anthropic dev path, against a mechanism the gateway path cannot
-  reach. Re-measure before quoting it.
+Three caveats that make the saving smaller than a naive prefix measurement suggests:
+
+- **Measure the deployment you actually run.** The prefix size depends on the bound tools, skills
+  and profile; `chemclaw_connector_tool_schema_tokens{connector=…}` shows each connector's share.
 - **The system half is not cacheable as the prompt is assembled.** `deepagents.SkillsMiddleware`
   renders the skills manifest into a string with `system_prompt_template.format(...)` and appends
   it to the system message, so the half that changes least is welded to the half that changes most.
   Marking it cacheable needs a change upstream, not in Chemclaw — the same conclusion the previous
   framework's `SkillsProvider` f-string forced, reached again for the same structural reason.
 - **Measure a session that is inside its context budget.** Above
-  `CHEMCLAW_AGENT_CONTEXT_TOKEN_BUDGET` — which is a budget on the whole request, this call's
-  ~43,000-token prefix included, not on the thread alone —
-  `agent/compaction.py` rewrites the *front* of the message
-  list on every model call — clearing older tool results, then dropping the oldest conversation
+  `CHEMCLAW_AGENT_CONTEXT_TOKEN_BUDGET` — which is a budget on the whole request, the system
+  prefix and every bound tool schema included, not on the thread alone —
+  `agent/compaction.py` rewrites the *front* of the message list on every model call — clearing older tool results, then dropping the oldest conversation
   groups — so the cacheable prefix changes by construction. A `cache_read ≈ 0` measured on such a
   session is compaction doing its job, not the provider failing to cache, and chasing it would be
   chasing a saving that is not there. `chemclaw_context_compactions_total` (below) tells you which
@@ -1086,9 +1119,7 @@ chemclaw_context_reclaimed_tokens_total  # estimated prompt tokens those reducti
 ```
 
 A model call that needed no reduction increments **neither**, which is what makes the two readings
-distinguishable — and that distinction is the whole reason these exist. The policy they report on
-was absent for a phase while three settings, a config comment and a sentence in the system prompt
-all described it, and nothing could have told you.
+distinguishable — and that distinction is the whole reason these exist.
 
 | Reading | What it means | What to do |
 | --- | --- | --- |
@@ -1098,25 +1129,26 @@ all described it, and nothing could have told you.
 | rising on almost every call | The budget is below this deployment's normal turn | Raise `CHEMCLAW_AGENT_CONTEXT_TOKEN_BUDGET` toward the model's real context window. Compacting a thread that would have fit spends estimator passes and drops context for nothing. |
 | rising on **every** call, from the first one | A configured trigger is below this request's own prefix, so it floors at 1 — "reduce on every model call" | Grep the process for `context.trigger_floored`, a WARNING naming the setting, its value and the measured prefix. Both context settings are budgets on the whole *request*: the system message, the skills listing and every bound tool schema come off them before the thread gets anything, and that prefix is bounded by `tests/test_context_floor.PREFIX_BOUND` — the ratchet's ceiling for the surface this repository serves plus the allowance for the bundles served out of `Chemclaw3-mcp`. The shipped `CHEMCLAW_AGENT_TOOL_RESULT_CLEAR_TRIGGER` is derived from that bound plus a thread allowance, so it is above the prefix and a shipped deployment is **not** in this state: this row means someone lowered it. Raise it back above the bound (and keep it at or below the budget, which startup enforces). The live figures are whatever `tests/test_context_floor.py` and `tests/test_compaction.py` measure — they move with every bound tool schema, so do not copy one out of this row. |
 
-Per-model attribution for the same spend **is not on this surface, and is no longer missing**. The
-old framework emitted `gen_ai.client.token.usage` labelled by request model, response model,
-provider and token type, and it went out with the framework — nothing in `langchain`, `langgraph`
-or `langsmith` emits it. What replaced it is not a metric: `CHEMCLAW_OTEL_LLM_SPANS=true` puts one
-span per model call in the trace pipeline carrying `llm.token_count.*` and `llm.model_name`, so
-"which model, how many tokens" is a trace query and "what is this deployment spending per hour" is
-these counters. They still carry `profile` rather than model, deliberately (D-152): the `turn_costs`
-ledger already holds per-turn model attribution, and a second, lossier answer as a counter label
-would be two systems to reconcile.
+Per-model attribution for the same spend **is not on this surface**. "Which model, how many
+tokens" is a trace query — `CHEMCLAW_OTEL_LLM_SPANS=true` puts one span per model call in the trace
+pipeline carrying `llm.token_count.*` and `llm.model_name` (see "Logging & troubleshooting") — or a
+SQL one over the `turn_costs` ledger, which records each turn's `model`, tokens and outcome. "What
+is this deployment spending per hour" is these counters, which carry `profile` rather than model,
+deliberately (D-152).
 
 ## (ix) Where agent-authored knowledge goes now
 
 **There is no review queue, and that is the current design rather than a gap.**
 `D-2026-09-05-the-gate-is-deleted-not-dormant` deleted the PR-gate: an agent-authored note is
 written straight into the notes checkout, committed on the base branch and pushed, so it is
-readable by every reader the moment its bytes land. `GET /proposals`, the decision route and the
-post-merge webhook are gone with it, along with the two `CHEMCLAW_PROPOSAL_*` settings that sized
-the queue and its stored failure reasons, and the webhook secret the git host signed its
-post-merge callback with.
+readable by every reader the moment its bytes land. There is no note-review route and no
+post-merge webhook; remove any leftover `CHEMCLAW_PROPOSAL_*` variables or webhook secret from old
+configuration. (Today's `GET /proposals` is a different thing: each chemist's own queue of
+*skill* proposals, §(i).)
+
+**What it needs.** A dedicated notes clone with push rights — `CHEMCLAW_NOTE_REPO_DIR` and the
+five requirements under "Exposing the front door"; in the chart, `knowledge.sync.repoUrl` and the
+`CHEMCLAW_KNOWLEDGE_REPO_TOKEN` key in the release Secret, without which every write fails at push.
 
 **What to watch instead.** `chemclaw_notes_recorded_total` counts notes that reached the graph and
 `chemclaw_notes_publish_failures_total` counts those that could not — the ratio is the health
@@ -1132,18 +1164,19 @@ A note whose *file* must go is an ordinary commit in the notes repo by a human w
 
 **If a write fails.** The note is on disk in the checkout and uncommitted or unpushed — the writer
 fast-forwards and retries on the next write, so the usual repair is to fix the remote or the
-credential and let the next note carry it. `git -C $CHEMCLAW_NOTE_REPO_DIR status` is what tells
-you which state you are in, and the checkout must be on the base branch or the writer refuses.
-
+credential and let the next note carry it. `git -C "$CHEMCLAW_NOTE_REPO_DIR" status` (run in the pod whose
+write failed — its log names the error) is what tells you which state you are in, and the checkout must be on the
+base branch or the writer refuses.
 
 ## (ix-b) Who may change an experiment design
 
-The protocol surface (`/protocols`) has its own authorization rule, and it is deliberately not the
-proposal queue's. A design is a chemist's own experiment rather than machine-written knowledge
-entering a shared graph, so the author is not excluded from deciding — they approve their own plate.
+The protocol surface (`/protocols`) has its own authorization rule. A design is a chemist's own
+experiment rather than shared knowledge, so the author is not excluded from deciding — they approve
+their own plate.
 
-- **Reads are open to any authenticated caller.** `GET /protocols`, `GET /protocols/{id}` and the
-  diff route take no ownership check at all. A design is a shared scientific artifact: the schema
+- **Reads are open to any authenticated caller.** `GET /protocols`, `GET /protocols/{id}`,
+  `GET /protocols/{id}/diff` and `GET /protocols/{id}/run-sheet.csv` take no ownership check at
+  all. A design is a shared scientific artifact: the schema
   keeps `opened_by` through offboarding and the listing serves the deployment's designs, so the
   id's existence is not the secret.
 - **Writes need the owner *or* a reviewer.** `POST /protocols/{id}/revisions` and
@@ -1167,31 +1200,26 @@ also read.
 
 ## (x) Find out what a worker is doing (or why it stopped)
 
-Until D-2026-08-01-every-process-carries-its-own-witness the answer was "read the logs and guess".
-The workers had no HTTP surface, so nothing scraped them and no probe could contradict a pod that
-Kubernetes was reporting as `Running` with a dead Temporal poll loop. Every worker now serves three
-routes on `CHEMCLAW_WORKER_METRICS_PORT` (default 9000, the `metrics` container port):
+Every worker serves three routes on `CHEMCLAW_WORKER_METRICS_PORT` (default 9000, the `metrics`
+container port) — `/healthz`, `/readyz` and `/metrics`
+(`D-2026-08-01-every-process-carries-its-own-witness`). The worker Deployments are
+`chemclaw-background-worker`, `chemclaw-connector-worker-<bundle>` and
+`chemclaw-interactive-worker-<bundle>`:
 
 ```
 kubectl port-forward deploy/chemclaw-background-worker 9000:9000
-curl -s localhost:9000/readyz    # 200 = the worker is running AND has heard from the broker
+curl -s localhost:9000/readyz    # 200 {"status":"ready",…} = running AND has heard from the broker
 curl -s localhost:9000/metrics   # this pod's counters, gauges and histograms
+kubectl logs deploy/chemclaw-background-worker | grep 'connected:'   # what it connected to
 ```
 
-- **`/readyz` 200 does answer for the broker, and this section used to say it did not.** The
-  predicate is `worker_ready` (`durable/serve.py`): `worker.is_running` **and**
-  `broker_seen_recently()`. The lifecycle flag was the whole predicate until 2026-09-04, and a
-  lifecycle flag is true from the moment `worker.run()` is entered until shutdown — the SDK's retry
-  loop holds it true straight through a total broker outage. Measured then against a severed
-  connection: every `poll_workflow_task_queue` failing with `ConnectionRefused` while `/readyz`
-  answered `200 {"status":"ready"}` for as long as the worker was left running. The second half is
-  what closes that, and it asks nothing new of the broker: `broker_seen_recently()` reads the
-  freshness of `poll_open_jobs`, the timer already running in every worker process, and goes stale
-  after `jobs_in_flight_refresh_seconds` × 3 — 90 s on the shipped default. **So a worker cut off
-  for longer than that window now reports 503**, and a rollout cannot complete through an outage
-  the way one silently did before. What the probe still cannot tell you is *which* side broke, so
-  during a suspected incident probe the broker before restarting anything. Cold start was always
-  correct: a worker that cannot reach the broker at startup exits 1 and crash-loops.
+- **`/readyz` answers for the broker too.** The predicate is `worker_ready` (`durable/serve.py`):
+  `worker.is_running` **and** `broker_seen_recently()`, which reads the freshness of the
+  in-flight-jobs poll every worker runs and goes stale after `CHEMCLAW_JOBS_IN_FLIGHT_REFRESH_SECONDS`
+  × 3 — 90 s on the shipped default. So a worker cut off from Temporal for longer than that reports
+  503, and a rollout cannot complete through a broker outage. What the probe cannot tell you is
+  *which* side broke, so during a suspected incident probe the broker before restarting anything.
+  A worker that cannot reach the broker at startup exits 1 and crash-loops.
 - **`/readyz` is 503 but the pod is up.** Either half of the predicate: the worker object is not
   running (a shutdown that has begun, or a failure before the poll loop started), or it is running
   and has heard nothing from the broker inside the staleness window. `chemclaw_jobs_in_flight`'s
@@ -1209,13 +1237,11 @@ curl -s localhost:9000/metrics   # this pod's counters, gauges and histograms
 Two monitors collect all of this in-cluster: `servicemonitor.yaml` for anything with a Service (the
 front door, each connector's MCP server) and `podmonitor.yaml` for the workers, which have none.
 
-**`monitoring.additionalLabels` is not what decides whether they are read, and this section used to
-say it was** ("a fresh install collects nothing until an operator says where"). That is false on the
-stated target: OpenShift's user-workload monitoring selects **every** ServiceMonitor and PodMonitor
-in every user namespace, with no label selector at all, so the shipped empty default is correct
-there and adding labels changes nothing. It is true of a **self-managed Prometheus Operator**, whose
-`Prometheus` resource carries a `serviceMonitorSelector`/`podMonitorSelector` that these labels have
-to match — which is the deployment the value exists for.
+**`monitoring.additionalLabels` is not what decides whether they are read on OpenShift**:
+user-workload monitoring selects **every** ServiceMonitor and PodMonitor in every user namespace,
+with no label selector at all, so the shipped empty default is correct there. It matters for a
+**self-managed Prometheus Operator**, whose `Prometheus` resource carries a
+`serviceMonitorSelector`/`podMonitorSelector` that these labels have to match.
 
 What *does* decide it on OpenShift is a cluster-wide switch that is off by default: see
 § "Make the monitoring stack actually collect this" below. If a target is `down` rather than absent,
@@ -1225,9 +1251,8 @@ connector port and the worker probe port.
 ## (x-b) Make the monitoring stack actually collect this
 
 **Do this before believing anything above.** The chart ships a ServiceMonitor, a PodMonitor and a
-PrometheusRule (`deploy/helm/chemclaw/templates/prometheusrule.yaml` is the roster; no count is
-written here, because the one that was said thirty-five while the file held a quarter more again);
-on a stock OpenShift cluster **all three are inert custom
+PrometheusRule (`deploy/helm/chemclaw/templates/prometheusrule.yaml` is the roster of alerts, each
+with a `runbook_url` into §(x-c) below); on a stock OpenShift cluster **all three are inert custom
 resources**. `oc get servicemonitor` lists them, nothing scrapes, no rule ever loads, and there is
 no error anywhere — a deployment in this state is indistinguishable, from inside, from a healthy
 one. It is the single most likely way this system ships and observes nothing.
@@ -1249,7 +1274,8 @@ matched:
 ```bash
 oc -n openshift-user-workload-monitoring get pods
 oc -n <release-namespace> get servicemonitor,podmonitor,prometheusrule
-# and, from the console: Observe -> Targets, filtered to the release namespace
+# and, from the console: Observe -> Targets, filtered to the release namespace;
+# Observe -> Alerting -> Alerting rules, filtered by "Chemclaw", shows the rules loaded
 ```
 
 Every target should be `Up`. One `Down` is a NetworkPolicy question, not a monitoring one — see
@@ -1324,20 +1350,25 @@ oc -n openshift-config-managed get configmap -l console.openshift.io/dashboard=t
 For a self-managed Grafana instead, add its sidecar's label and leave the namespace empty:
 `--set monitoring.dashboards.labels.grafana_dashboard=1`.
 
-**What the five cover.** `Chemclaw turns` (rate, outcomes, p50/p95/p99, tokens, in-flight against
-capacity), `Chemclaw tools and model` (p95 **by tool**, refusals by reason, the provider seam),
-`Chemclaw durable jobs` (success ratio, p95 by connector, Temporal task slots and pollers),
-`Chemclaw front door` (per-route rate, error ratio and p95) and `Chemclaw data and storage` (ingest
-lag, evidence per source, cache hit ratio, the result outbox, the Postgres pool). Between them every
-metric this system declares has either a panel or an alert, and
+**What the five cover** (sources in `deploy/helm/chemclaw/dashboards/`). `Chemclaw turns` (rate,
+how turns end, duration percentiles, tokens by profile, in-flight against capacity, the per-actor
+cap), `Chemclaw tools and model` (p95 **by tool**, outcomes and refusals by reason, model calls by
+provider, context management and the judge), `Chemclaw durable jobs` (jobs in flight, success
+ratio, p95 by connector, activity failures, dropped push-backs, queued tool calls),
+`Chemclaw front door` (per-route rate, error ratio and p95, event streams) and `Chemclaw data and
+storage` (cache hit ratio, the Postgres pool, connector reachability, evidence per source, the
+result outbox, ingest lag, knowledge notes written). Between them every metric this system declares
+has either a panel or an alert, and
 `tests/test_deploy_chart.py::test_every_declared_metric_has_a_consumer` is what keeps that true.
 
-**The Temporal SDK's own metrics are off.** `monitoring.temporalSdkMetrics.enabled=true` renders a
-second worker container port and a second `podMetricsEndpoint` for the SDK's Prometheus exporter —
-task-slot occupancy, poller counts, schedule-to-start latency, the queue-side numbers no first-party
-counter can produce, and the only thing `ChemclawWorkerNotPolling` can read. Leave it off until the
-worker process actually binds that port: with nothing listening it is a permanently-down scrape
-target, which `ChemclawTargetDown` would then report forever.
+**The Temporal SDK's own metrics are off by default.** `monitoring.temporalSdkMetrics.enabled=true`
+sets `CHEMCLAW_TEMPORAL_METRICS_PORT` on every worker (`monitoring.temporalSdkMetrics.port`, default
+9001), so the SDK's Prometheus exporter binds there, and renders the matching container port,
+`podMetricsEndpoint` and NetworkPolicy ingress — task-slot occupancy, poller counts,
+schedule-to-start latency, the queue-side numbers no first-party counter can produce. It is also
+what renders `ChemclawWorkerNotPolling`, which reads them. If the exporter cannot bind (the port is
+taken), the worker runs without it and counts
+`chemclaw_degraded_total{subsystem="temporal_sdk_metrics"}`, and the target shows `Down`.
 
 ## (x-c) When an alert fires
 
@@ -1536,7 +1567,8 @@ again, exactly as before queues existed.
    mTLS material unreadable — the same fault every durable tool reports.
 2. **If the broker is fine, check the interactive workers exist.** A run that *starts* but is never
    picked up does not trip this alert; it waits, and the turn hands back a job id. Look for
-   `<release>-interactive-worker-<connector>` Deployments with ready pods.
+   `chemclaw-interactive-worker-<connector>` Deployments with ready pods
+   (`kubectl -n <ns> get deploy | grep interactive-worker`).
 
 #### ChemclawFrontDoorAtItsPermitCeiling
 `warning`, and the leading indicator for both of the above. `sum(chemclaw_turns_in_flight) /
@@ -2556,8 +2588,8 @@ rather than an oversight: a gate that fires on every LOW in a distro base is one
 disables within a week, and a finding with no released fix is not something a build can act on. A
 finding that genuinely cannot be fixed gets an entry in `.trivyignore.yaml` **with its reason and
 an expiry in the diff** — never a downgrade of the whole gate, which is how a control becomes a
-badge. Every entry there today is a package vendored inside pip's own `pip/_vendor/vendor.txt` in
-the base image's `/opt/app-root` environment; the file carries each reason and expiry.
+badge. Every entry there today is a package listed in pip's own vendored manifest (vendor.txt under
+pip's _vendor directory) in the base image's `/opt/app-root` environment; the file carries each reason and expiry.
 
 **A finding for a package you cannot find on disk is usually one of those.** The scanner reads
 pip's vendored manifest, a text file, so a `find` for a `dist-info` directory will not locate it
@@ -2724,7 +2756,7 @@ Re-run it after any upgrade — the inserts are idempotent, and a new calculator
 rather than migrations.
 
 **2. Point a sink at it.** The shipped manifest, `src/chemclaw/publish/sinks/postgres/sink.yaml`,
-addresses host `chemclaw-results`, port `5432`, database `chemclaw_results` and reads its
+addresses host `chemclaw-results`, port `5432`, database chemclaw_results (its `database:` key) and reads its
 credentials from `RESULTS_DB_USER` / `RESULTS_DB_PASSWORD`. Either make your database answer at
 that address (for example a Service of that name), or copy the folder, edit `host:`/`database:`,
 and put your copy first on the discovery path — sinks are discovered as `<dir>/<name>/sink.yaml`

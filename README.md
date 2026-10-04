@@ -89,6 +89,16 @@ The plan→approve→execute harness is on by default (`CHEMCLAW_HARNESS_ENABLED
 Entra identity is enforced when `CHEMCLAW_ENTRA_REQUIRED=true` — off in the code default for
 local dev, on in the shipped Helm chart.
 
+## Documentation for operators
+
+| Task | Read |
+| --- | --- |
+| Install the system (this repo, the MCP fleet, the UI) | [`docs/guides/deployment.md`](docs/guides/deployment.md) |
+| Run it day to day | [`docs/guides/operations.md`](docs/guides/operations.md) |
+| Something is wrong | [`docs/guides/troubleshooting.md`](docs/guides/troubleshooting.md) |
+| Every procedure and alert in depth | [`docs/guides/runbook.md`](docs/guides/runbook.md) |
+| Chart reference, values, delivery | [`deploy/README.md`](deploy/README.md) |
+
 ## Deployment
 
 `deploy/` holds the OpenShift delivery: one rootless multi-target image
