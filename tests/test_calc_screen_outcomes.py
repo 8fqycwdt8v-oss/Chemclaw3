@@ -15,6 +15,7 @@ server fault as `CalcServerError`.
 """
 
 import asyncio
+import time
 from collections.abc import Callable, Coroutine
 from typing import Any
 
@@ -281,6 +282,62 @@ def test_a_payload_the_client_cannot_validate_fails_the_screen_rather_than_one_m
                 symmetry_numbers=_ESTER_SIGMAS,
             )
         )
+
+
+def test_an_outage_in_one_medium_stops_the_others_and_is_raised_as_itself() -> None:
+    """The siblings of a failing medium are cancelled, and the error is not wrapped.
+
+    `asyncio.gather` alone leaves them running after the screen has failed; `asyncio.TaskGroup`
+    would stop them but raise an `ExceptionGroup`, which the by-name retry classification in
+    `durable/publish.py` does not recognise. Both halves are asserted.
+    """
+    stopped: list[str] = []
+
+    async def outage() -> None:
+        await asyncio.sleep(0)
+        raise CalcBusyError("0 of 4 slots free")
+
+    async def a_slow_medium(name: str) -> str:
+        try:
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            stopped.append(name)
+            raise
+        return name
+
+    stopped_when_raised: list[str] = []
+
+    async def screen() -> list[Any]:
+        try:
+            return await compose._every_medium(
+                [a_slow_medium("water"), outage(), a_slow_medium("dmso")]
+            )
+        except CalcBusyError:
+            # Read here, not after `asyncio.run` returns: shutting the loop down cancels whatever
+            # is still pending, which would make a leaking implementation look like this one.
+            stopped_when_raised.extend(stopped)
+            raise
+
+    started = time.monotonic()
+    with pytest.raises(CalcBusyError):
+        _run(screen())
+    assert time.monotonic() - started < 5, "the screen waited for media it had already lost"
+    assert sorted(stopped_when_raised) == ["dmso", "water"]
+
+
+def test_media_that_all_answer_come_back_in_the_order_they_were_asked() -> None:
+    """Order is what keeps the gas-phase reference first; the cancelling wrapper must keep it."""
+
+    async def medium(name: str, delay: float) -> str:
+        await asyncio.sleep(delay)
+        return name
+
+    async def screen() -> list[str]:
+        return await compose._every_medium(
+            [medium("gas", 0.03), medium("water", 0.0), medium("dmso", 0.01)]
+        )
+
+    assert _run(screen()) == ["gas", "water", "dmso"]
 
 
 # --- the species ranking and its solvent screen -------------------------------------------------
