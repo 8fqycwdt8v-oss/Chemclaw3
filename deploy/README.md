@@ -142,9 +142,11 @@ shipped `connectors:` block already enables `chem`, `safety` and `rxnpredict` as
    address resolves and is then dropped. Its Service name is what the URLs in `values.yaml` already
    say (`chemclaw-mcp-<name>`); its own `MCP_ALLOWED_HOSTS` must name that Service's `name:port`.
 2. Give the server the **same** bearer variable and value this release sends (the table above):
-   both ends read one variable from one Secret. Those deployment files do not wire a Secret
-   themselves; `deploy/kind/render-fleet.sh` is the worked example of patching one in from
-   `chemclaw-secrets`.
+   both ends read one variable from one Secret. Those deployment files already read it from
+   `chemclaw-secrets` under the variable's own name, and not `optional`, so the key must exist
+   before the server's pod can start. Rewrite their placeholder image
+   (`registry.invalid/chemclaw-mcp-<name>:unset`, or `chemclaw3/chemclaw-mcp-<name>:latest` in
+   older fleet revisions) to your published digest — `docs/guides/deployment.md` §6.2.
 3. Allow the dial: the host in `networkPolicy.egressDestinations` (unless you state
    `allowAnyDestination`), and its port in `networkPolicy.egressPorts` — the fleet's ports are
    already listed there.

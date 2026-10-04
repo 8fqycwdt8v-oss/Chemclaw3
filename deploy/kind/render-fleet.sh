@@ -8,11 +8,17 @@
 # context, its grace period derived from `connector.yaml`, its default-deny NetworkPolicy — and
 # `kubectl kustomize` applies only what a kind cluster has to differ in:
 #
-# - the image: `chemclaw3/chemclaw-mcp-<name>:latest` → `chemclaw/mcp-<name>:<tag>`, loaded into
-#   the node, so `imagePullPolicy: Never`;
+# - the image: the fleet's placeholder → `chemclaw/mcp-<name>:<tag>`, loaded into the node, so
+#   `imagePullPolicy: Never`. Both placeholder spellings are rewritten — the unresolvable
+#   `registry.invalid/chemclaw-mcp-<name>:unset` the fleet ships now and the older
+#   `chemclaw3/chemclaw-mcp-<name>:latest` — so either fleet revision renders; a kustomize `images:`
+#   entry naming an image the Deployment does not use is a no-op;
 # - one replica (the fleet's floor of two is an availability property; this is a workstation);
 # - the server's bearer, from `chemclaw-secrets` under the variable its `app.py` names as
-#   `token_env` — the same key core's pods send from, so the two halves cannot disagree;
+#   `token_env` — the same key core's pods send from, so the two halves cannot disagree. The fleet's
+#   own Deployments now carry the same entry; a strategic-merge patch keys `env` by `name`, so this
+#   one merges into it rather than duplicating it, and it is kept only so a fleet tree from before
+#   that change still renders a pod that can authenticate;
 # - `MCP_ALLOWED_HOSTS`, the Service address the server is dialled at. The MCP transport's
 #   DNS-rebinding guard admits only loopback `Host` headers by default, so without it every
 #   in-cluster call is answered `421 Misdirected Request` while `/healthz` stays green;
@@ -80,6 +86,9 @@ namespace: chemclaw
 resources:
 $(for f in deployment.yaml service.yaml networkpolicy.yaml; do [ -f "$out/$f" ] && echo "  - $f"; done)
 images:
+  - name: registry.invalid/chemclaw-mcp-$name
+    newName: chemclaw/mcp-$name
+    newTag: "$tag"
   - name: chemclaw3/chemclaw-mcp-$name
     newName: chemclaw/mcp-$name
     newTag: "$tag"
