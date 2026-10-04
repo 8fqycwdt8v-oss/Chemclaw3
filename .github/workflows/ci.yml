@@ -189,6 +189,16 @@ jobs:
           path: .sibling/Chemclaw3_mock
           persist-credentials: false
 
+      # The UI's OpenShift manifests, read as files only: the chart's `networkPolicy.uiPodSelector`
+      # is held against the labels on the UI's own pods, and a selector that stopped matching them
+      # would admit nothing and fail silently.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: 8fqycwdt8v-oss/Chemclaw3_ui
+          ref: main
+          path: .sibling/Chemclaw3_ui
+          persist-credentials: false
+
       - name: Install uv
         uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
@@ -280,6 +290,7 @@ jobs:
         env:
           CHEMCLAW_MCP_REPO: ${{ github.workspace }}/.sibling/Chemclaw3-mcp
           CHEMCLAW_MOCK_REPO: ${{ github.workspace }}/.sibling/Chemclaw3_mock
+          CHEMCLAW_UI_REPO: ${{ github.workspace }}/.sibling/Chemclaw3_ui
           CHEMCLAW_SIBLINGS_REQUIRED: "1"
 
       - name: Validate knowledge graph

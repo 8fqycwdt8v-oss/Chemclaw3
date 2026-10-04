@@ -182,9 +182,31 @@ def test_a_renamed_sdk_class_degrades_the_label_instead_of_raising() -> None:
 
 
 def test_an_unrecognised_failure_is_error_rather_than_a_guess() -> None:
-    """A 401 must not be laundered into an outage — the label space stays meaningful."""
-    assert classify_model_failure(_openai_error("AuthenticationError", 401, "bad key")) == "error"
+    """Anything outside the named families is `error` — the label space stays meaningful."""
+    assert classify_model_failure(_openai_error("NotFoundError", 404, "no such model")) == "error"
     assert classify_model_failure(ValueError("something else")) == "error"
+
+
+def test_a_refused_credential_is_its_own_outcome_not_an_outage_or_an_error() -> None:
+    """A 401 or a 403 from the gateway is `auth`: an operator's key, not a provider outage.
+
+    It was `error` until 2026-10-04, so the series could not tell a rotated `CHEMCLAW_LLM_API_KEY`
+    from a code fault — and it must not be laundered into `transport` either, which would send an
+    operator to the gateway's availability about a credential. `langchain_openai`'s own subclasses
+    are what a real call raises, so both spellings are driven.
+    """
+    from langchain_openai.chat_models.base import (
+        OpenAIAuthenticationError,
+        OpenAIPermissionDeniedError,
+    )
+
+    for kind, status in (("AuthenticationError", 401), ("PermissionDeniedError", 403)):
+        assert classify_model_failure(_openai_error(kind, status, "bad key")) == "auth", kind
+    request = httpx2.Request("POST", "https://internal.example/v1/chat/completions")
+    for wrapped, status in ((OpenAIAuthenticationError, 401), (OpenAIPermissionDeniedError, 403)):
+        response = httpx2.Response(status, request=request, json={"error": {"message": "no"}})
+        exc = wrapped("no", response=response, body=None)
+        assert classify_model_failure(exc) == "auth", wrapped.__name__
 
 
 def test_a_model_call_is_counted_and_timed() -> None:
@@ -237,6 +259,37 @@ def test_a_failed_model_call_is_counted_under_its_outcome_and_logged_with_its_cl
     assert "rate_limited" in caplog.text
     # The provider's own words stay out of the line — they can carry the request.
     assert "quota 12345" not in caplog.text
+
+
+def test_a_refused_credential_names_the_gateway_and_status_and_never_the_key(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The operator's line: host and HTTP status at ERROR, with neither the key nor the body.
+
+    `model.call_failed` carries the class; this is the line that says what to fix. The gateway's
+    body can quote the key it refused (OpenAI's does, abbreviated), so it stays out like every
+    other provider message does.
+    """
+    failure = _openai_error("AuthenticationError", 401, "Incorrect API key provided: sk-abc123")
+
+    async def _handler(request: ModelRequest[Any]) -> Any:
+        raise failure
+
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(type(failure)):
+            asyncio.run(
+                RecordModelCalls().awrap_model_call(
+                    _request([HumanMessage(content="hi")]), _handler
+                )
+            )
+
+    assert 'chemclaw_model_calls_total{outcome="auth"' in METRICS.render()
+    (refusal,) = [r for r in caplog.records if "refused this deployment's credential" in r.message]
+    assert refusal.levelno == logging.ERROR
+    assert "internal.example" in refusal.getMessage()
+    assert "HTTP 401" in refusal.getMessage()
+    assert "CHEMCLAW_LLM_API_KEY" in refusal.getMessage()
+    assert "sk-abc123" not in caplog.text
 
 
 def test_an_unparseable_tool_call_is_found_where_nothing_looked() -> None:

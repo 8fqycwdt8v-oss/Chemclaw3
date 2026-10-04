@@ -320,16 +320,20 @@ class CallerLogMiddleware(BaseHTTPMiddleware):
         """Log the caller, bind it for the duration of the request, then serve it unchanged."""
         actor = request.headers.get(HEADER_ACTOR, "")
         session = request.headers.get(HEADER_SESSION, "")
-        logger.info(
-            "connector %s request: path=%s actor=%s session=%s dry_run=%s",
-            self._connector,
-            request.url.path,
-            actor or "-",
-            session or "-",
-            request.headers.get(HEADER_DRY_RUN, "-"),
-        )
-        tokens = bind_caller(actor, session, request.headers.get(HEADER_CORRELATION, ""))
+        correlation = request.headers.get(HEADER_CORRELATION, "")
+        # Bound *before* the line below, so the line carries the ids as record fields as well as in
+        # its text — the one line that names the call is the one a search by correlation id finds.
+        tokens = bind_caller(actor, session, correlation)
         try:
+            logger.info(
+                "connector %s request: path=%s actor=%s session=%s correlation=%s dry_run=%s",
+                self._connector,
+                request.url.path,
+                actor or "-",
+                session or "-",
+                correlation or "-",
+                request.headers.get(HEADER_DRY_RUN, "-"),
+            )
             # Adopt the caller's trace, so this connector's spans are children of the turn that
             # called it rather than the root of an unrelated one. Note the asymmetry with the two
             # lines above: the `X-Chemclaw-*` identity headers are advisory and must never reach an

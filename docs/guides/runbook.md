@@ -1500,10 +1500,15 @@ now interleave into one session history. The session's thread is what is at risk
 `critical`, and only above `monitoring.alerts.turnsFloorPerSecond` of traffic — a ratio alone reads
 100% on a single error in an idle window, which is what this rule did before the floor existed. If
 the deployment is quieter than the floor, read `chemclaw_turns_finished_total` directly rather than
-waiting for a page that cannot come. More than one turn in ten ends in an opaque internal error.
+waiting for a page that cannot come. More than one turn in ten ends in an error event.
 Break it down with
 `sum by (outcome) (rate(chemclaw_turns_finished_total[10m]))` — `errored` and `timed_out` are
-different problems — then the front-door dashboard's per-route error ratio.
+different problems — then the front-door dashboard's per-route error ratio. **If every turn is
+failing at once, check the model gateway's credential first**: a 401/403 from
+`CHEMCLAW_LLM_BASE_URL` ends every turn `errored` with SSE code `llm_auth`, shows as
+`chemclaw_model_calls_total{outcome="auth"}`, and logs ERROR `model.gateway_refused_credential`
+naming the gateway host and status — rotate `CHEMCLAW_LLM_API_KEY`
+([troubleshooting §8](troubleshooting.md#8-model-gateway-errors)).
 
 #### ChemclawFleetAboveItsTurnCeiling
 `warning`. More front-door pods are running than the declared fleet ceiling accounts for, so the

@@ -207,6 +207,11 @@ def _classify(error: BaseException) -> tuple[ErrorCode, bool]:
     # failed, it is usually transient, ask again — which is what `llm_timeout` already says.
     if model_failure in _PROVIDER_FAILURES:
         return "llm_timeout", True
+    # A 401/403 from the gateway is a credential an operator has to fix, not a transient outage:
+    # retrying sends the chemist round a loop that cannot succeed, and `internal` hid it from the
+    # operator reading the code a chemist quoted.
+    if model_failure == "auth":
+        return "llm_auth", False
     if isinstance(error, ConnectionError):
         return "storage_unavailable", True
     if isinstance(error, TimeoutError):
@@ -2028,6 +2033,11 @@ _FAILURE_REASONS: dict[ErrorCode, str] = {
     "llm_timeout": (
         "The model provider failed to answer before the turn finished (it stopped responding, was "
         "overloaded or returned an error); this is usually temporary, so try again in a moment"
+    ),
+    # Not the chemist's to fix and not temporary, so it says both — and names who can fix it.
+    "llm_auth": (
+        "The model provider refused this deployment's credentials, so no turn can run until an "
+        "operator fixes them; asking again will not help, so please report it"
     ),
     "storage_unavailable": (
         "The turn could not be completed because its database was unavailable; try again in a "

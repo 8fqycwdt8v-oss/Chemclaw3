@@ -1049,8 +1049,8 @@ def test_every_fleet_server_has_an_egress_port_and_a_token_slot_in_the_chart() -
 
     Derived from the fleet's own manifests — `manifests/` and `manifests-internal/` both, since the
     backends (`calc`, `rxnlabel`) are dialled over the same policy — rather than from its
-    `MODULES.md` table, because the manifest is what `Chemclaw3-mcp:tests/test_fleet.py` holds the
-    port registry against, and it is the file that names the token variable.
+    `MODULES.md` table, because the manifest is what that repository's fleet test holds the port
+    registry against, and it is the file that names the token variable.
     """
     root = _sibling_or_skip()
     values = yaml.safe_load(_CHART_VALUES.read_text(encoding="utf-8"))
