@@ -116,10 +116,10 @@ and an HTML-sandbox port, plus two Routes on two hosts (`Chemclaw3_ui:deploy/ope
 | Listener | Port | Probe paths | Defined in |
 |---|---|---|---|
 | Front door | `service.port` (8080) | `/healthz` (startup, liveness), `/readyz` (readiness), `/metrics` | `templates/deployment-service.yaml` |
-| Chart connector servers | `connectorPort` (8080) | `/healthz` (all three probes), `/mcp`, `/metrics` | `templates/deployment-connectors.yaml` |
+| Chart connector servers | `connectorPort` (8080) | `/healthz` (startup, readiness), `/livez` (liveness), `/mcp`, `/metrics` | `templates/deployment-connectors.yaml` |
 | Every Temporal worker | `workerMetricsPort` (9000), port name `metrics` | `/healthz` (startup, liveness), `/readyz` (readiness), `/metrics` | `templates/_helpers.tpl` (`chemclaw.workerProbes`) |
 | Temporal SDK metrics (optional) | `monitoring.temporalSdkMetrics.port` (9001) | `/metrics` | `templates/_helpers.tpl` |
-| MCP face (optional) | 8080 | `/healthz`, `/mcp` | `templates/deployment-mcp-face.yaml` |
+| MCP face (optional) | 8080 | `/healthz` (startup, readiness), `/livez` (liveness), `/mcp` | `templates/deployment-mcp-face.yaml` |
 | Fleet servers | per `Chemclaw3-mcp:MODULES.md` | `/healthz` (readiness), `/livez` (liveness), `/mcp`, `/metrics` | `Chemclaw3-mcp:servers/<name>/deploy/deployment.yaml` |
 | UI | 8080 (`http`), 8081 (`sandbox`) | `/readyz`, `/healthz` on `http`. `/sandbox/frame` on `sandbox` (startup). | `Chemclaw3_ui:deploy/openshift/deployment.yaml` |
 | PostgreSQL / Temporal / OTLP | 5432 / 7233 / 4317 | — | `networkPolicy.egressPorts` in `values.yaml` |
@@ -391,7 +391,7 @@ From `values.yaml` `secrets:` and `templates/_helpers.tpl` (`chemclaw.env`, `che
 |---|---|---|---|
 | `keys.llmApiKey` | `CHEMCLAW_LLM_API_KEY` | every pod (**required**) | `CreateContainerConfigError` |
 | `keys.postgresDsn` | `CHEMCLAW_POSTGRES_DSN` | every pod (**required**) | `CreateContainerConfigError` |
-| `keys.knowledgeRepoToken` | the name that entry holds in `values.yaml` | every pod (**required**, may be empty) | `CreateContainerConfigError` |
+| `keys.knowledgeRepoToken` | the name that entry holds in `values.yaml` | every pod: **required** once `knowledge.sync.repoUrl` is set, `optional: true` without one | with a remote, `CreateContainerConfigError`; without, nothing (nothing pushes) |
 | `migrationKeys.postgresMigrationDsn` | `CHEMCLAW_POSTGRES_MIGRATION_DSN` | migrate Job only | migrations run as `CHEMCLAW_POSTGRES_DSN` |
 | `optionalKeys.framingEnvelopeSecret` | `CHEMCLAW_FRAMING_ENVELOPE_SECRET` | every pod | a startup warning, and prompt-injection framing breaks across replicas and restarts. **Set it.** |
 | `optionalKeys.{boMcpToken,calcMcpToken,molfpMcpToken,rxnfpMcpToken}` | `CHEMCLAW_BO_MCP_TOKEN`, `CHEMCLAW_CALC_MCP_TOKEN`, `CHEMCLAW_MOLFP_MCP_TOKEN`, `CHEMCLAW_RXNFP_MCP_TOKEN` | every pod (both ends of the chart's own connectors) | every call to that bundle is refused |
@@ -400,11 +400,10 @@ From `values.yaml` `secrets:` and `templates/_helpers.tpl` (`chemclaw.env`, `che
 | `optionalKeys.rxnlabelToken` | `CHEMCLAW_RXNLABEL_TOKEN` | every pod, plus `chemclaw-mcp-rxnlabel` | reaction labelling fails |
 | `optionalKeys.mcpFaceToken` | `CHEMCLAW_MCP_FACE_TOKEN` | only with `mcpFace.enabled` | the face answers 401 |
 | `optionalKeys.{llmFallbackApiKey,vectorStoreApiKey,temporalApiKey,sessionStoreDsn}` | `CHEMCLAW_LLM_FALLBACK_API_KEY`, `CHEMCLAW_VECTOR_STORE_API_KEY`, `CHEMCLAW_TEMPORAL_API_KEY`, `CHEMCLAW_SESSION_STORE_DSN` | every pod | that feature stays off |
+| `optionalKeys.{propsToken,thermalsafetyToken,kineticsToken,unitopsToken,suitabilityToken,pyexecToken}` | `CHEMCLAW_PROPS_TOKEN`, `CHEMCLAW_THERMALSAFETY_TOKEN`, `CHEMCLAW_KINETICS_TOKEN`, `CHEMCLAW_UNITOPS_TOKEN`, `CHEMCLAW_SUITABILITY_TOKEN`, and the name `pyexec`'s manifest gives `auth.token_env` | every pod. **The matching fleet server needs the same value.** | nothing until the bundle is enabled; then every call to it is refused |
 
-A bundle you switch on later (`props`, `kinetics`, …) needs its own `secrets.optionalKeys` entry
-named after its manifest's `auth.token_env`, for example
-`secrets.optionalKeys.propsToken: CHEMCLAW_PROPS_TOKEN`. `deploy/kind/values-kind.yaml` shows all
-five.
+A bundle you switch on later needs no Secret-plumbing edit: each fleet bundle's slot ships, named
+after its manifest's `auth.token_env`. Add the key to the Secret when you enable the bundle.
 
 Create the Secret. The command below shows the shape. In production, source each value from your
 secret store rather than your shell history. The knowledge-repo key name is read from the chart
@@ -431,9 +430,13 @@ oc -n "$NS" create secret generic chemclaw-secrets \
 ```
 
 `sslmode=require` encrypts the connection but does not verify the server. To use `verify-full`,
-the pods need a CA file at the path given in `sslrootcert=`. The chart has no value that mounts
-one. If your Postgres CA is the same CA as Temporal's, `/etc/temporal/tls/ca.crt` is already
-mounted. Otherwise add the volume with a post-render patch.
+the pods need a CA file at the path given in `sslrootcert=`: put the PEM in a ConfigMap (or
+Secret), set `trustedCA.configMap` (or `trustedCA.secret`) and `trustedCA.key`, and append
+`sslmode=verify-full&sslrootcert=/etc/chemclaw/ca/ca.crt` (`trustedCA.mountPath`/`key`) to each
+DSN. The same file can back the LLM gateway (`trustedCA.llm: true` sets
+`CHEMCLAW_LLM_TLS_CA_BUNDLE`) and the Entra JWKS host (`trustedCA.entra: true` sets
+`CHEMCLAW_ENTRA_CA_BUNDLE`); each switch *replaces* certifi for that client, so turn one on only
+when the bundle signs that peer.
 
 ### 5.3 Settings that stop the render or the boot
 
@@ -530,11 +533,11 @@ networkPolicy:
     - ipBlock: {cidr: 10.20.31.0/24}        # LLM gateway, Git remote
     - ipBlock: {cidr: 20.190.128.0/18}      # Entra (login.microsoftonline.com). Use your tenant's published ranges.
     - ipBlock: {cidr: 40.126.0.0/18}
-  # Who may open the front door. The last entry admits the UI, which runs in this namespace (§7.3).
+  # Who may open the front door. The UI in this namespace is admitted by the shipped
+  # `uiPodSelector` (§7.3), so the release namespace itself is not listed.
   ingressNamespaces:
     - network.openshift.io/policy-group: ingress
     - kubernetes.io/metadata.name: openshift-user-workload-monitoring
-    - kubernetes.io/metadata.name: chemclaw-prod
 ```
 
 More on what this file says:
@@ -545,13 +548,13 @@ More on what this file says:
 - **The connectors** are left at the chart defaults: `molfp`, `rxnfp`, `bo`, `calc` and `results`
   run in this release, and `chem`, `safety` and `rxnpredict` are dialled at the fleet's Services.
   `CHEMCLAW_CONNECTOR_URLS` is derived from that block.
-- **Turning on another fleet connector** (for example `props`) takes four things: set
-  `connectors.props.enabled: true`, add its token to `secrets.optionalKeys`, add the token to
-  `chemclaw-secrets`, and deploy that server (§6). The image already ships the manifests for every
-  fleet server listed in §1, so you do not need `extraConnectors` for them. A server whose manifest
-  the image does not ship (for example `pyexec`) also needs an `extraConnectors.bundles` entry, a
-  ConfigMap holding its `connector.yaml`, and its port in `networkPolicy.egressPorts`
-  (`deploy/README.md`, "Attaching a connector bundle this image does not ship").
+- **Turning on another fleet connector** (for example `props`) takes three things: set
+  `connectors.props.enabled: true`, add its token to `chemclaw-secrets` (the `secrets.optionalKeys`
+  slot and the `networkPolicy.egressPorts` entry already ship for every fleet server), and deploy
+  that server (§6). The image already ships the manifests for every fleet server listed in §1, so
+  you do not need `extraConnectors` for them. A server whose manifest the image does not ship (for
+  example `pyexec`) also needs an `extraConnectors.bundles` entry and a ConfigMap holding its
+  `connector.yaml` (`deploy/README.md`, "Attaching a connector bundle this image does not ship").
 - **The egress guard.** Each process also runs its own egress guard (`core/netguard.py`, plus an
   `LD_PRELOAD` layer armed by `deploy/entrypoint.sh`). The guard's allowlist is derived from the
   settings above. A host that comes only from a *manifest*, such as a warehouse ELN `connection:`
@@ -586,8 +589,8 @@ Deploy the fleet **before** the backend. The backend dials it, and the release o
 These five are the servers the shipped chart turns on. The off-by-default servers (`props` 8850,
 `thermalsafety` 8851, `kinetics` 8852, `unitops` 8853, `suitability` 8892, `pyexec` 8899) follow
 the same pattern with `CHEMCLAW_<NAME>_TOKEN`; switching one on also needs
-`connectors.<name>.enabled: true` and a `secrets.optionalKeys` slot for its token (§5), and
-`pyexec` additionally needs its manifest mounted through `extraConnectors.bundles`. The full
+`connectors.<name>.enabled: true` and its token in `chemclaw-secrets` (the slot and the egress port
+ship, §5), and `pyexec` additionally needs its manifest mounted through `extraConnectors.bundles`. The full
 per-server table, with interactive-queue sizing, is `Chemclaw3-mcp:docs/operations.md` §3.
 
 Each server's bearer variable is whatever its manifest declares as `auth.token_env`
@@ -740,9 +743,12 @@ oc -n "$NS" set image deployment/chemclaw3-ui ui="$REG/chemclaw3-ui@sha256:<ui-d
 ```
 
 - **Allowing the UI through the front-door NetworkPolicy.** The chart's `chemclaw-service-ingress`
-  policy admits only the chart's own pods and the namespaces in `networkPolicy.ingressNamespaces`.
-  The UI pod is not a chart pod, so its calls are dropped unless you list the release namespace
-  there, as `values-prod.yaml` does. `deploy/kind/values-kind.yaml` does the same.
+  policy admits the chart's own pods, the namespaces in `networkPolicy.ingressNamespaces`, and pods
+  in this namespace matching `networkPolicy.uiPodSelector` — shipped as
+  `app.kubernetes.io/name: chemclaw3-ui`, the label `Chemclaw3_ui:deploy/openshift/deployment.yaml`
+  puts on its pods. If you relabel the UI, change the selector (and set the old key to `null` in
+  the same override: Helm merges maps). The kind lane's UI carries a different label and is
+  admitted by its namespace entry instead.
 - **The UI startup check.** `Chemclaw3_ui:server/config.ts` refuses to start on a missing tenant,
   client ID, scope or malformed origin.
 - **The sandbox Route.** Nothing in front of it may authenticate or rewrite headers

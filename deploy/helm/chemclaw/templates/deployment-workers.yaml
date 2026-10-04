@@ -144,8 +144,10 @@ spec:
             {{- toYaml .Values.resources.worker | nindent 12 }}
           volumeMounts:
             {{- include "chemclaw.tlsMount" . | nindent 12 }}
+            {{- include "chemclaw.trustedCAMount" . | nindent 12 }}
             {{- include "chemclaw.knowledgeMounts" . | nindent 12 }}
             {{- include "chemclaw.extraConnectorMounts" . | nindent 12 }}
+            {{- include "chemclaw.extraSinkMounts" . | nindent 12 }}
             {{- include "chemclaw.documentShareMount" . | nindent 12 }}
         {{- include "chemclaw.knowledgeSidecar" . | nindent 8 }}
       {{- /* The clone before the publish — see `deployment-service.yaml`. */}}

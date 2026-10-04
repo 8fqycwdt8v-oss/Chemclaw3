@@ -563,10 +563,13 @@ connectorPort: 8080
 #
 #   extraConnectors:
 #     bundles:
-#       - name: props
-#         configMap: chemclaw-connector-props
 #       - name: pyexec
 #         configMap: chemclaw-connector-pyexec
+#
+# `pyexec` and not `props`, although the history above names both: this image has since gained
+# `src/chemclaw/connectors/props/` (and the four other process-development bundles), so those are
+# switched on with `connectors.<name>.enabled` alone. Mounting one here as well would shadow the
+# shipped manifest — earlier directories win — which is a deliberate override, not a requirement.
 #
 # **A bundle from here can queue its heavy tools too** — `pyexec`'s manifest queues `run_python` —
 # and its interactive worker is configured on the same `connectors:` entry that gives it its
@@ -579,12 +582,13 @@ connectorPort: 8080
 #       url: http://chemclaw-mcp-pyexec:8899/mcp
 #       interactive: {replicas: 2, maxReplicas: 6, maxConcurrentActivities: 2}
 #
-# Three things stay the operator's, exactly as they are for `connectors.chem` / `safety` /
+# Three things go with the mount, exactly as they do for `connectors.chem` / `safety` /
 # `rxnpredict` — the entry under `connectors:` above that gives the bundle its `url:` and turns it
 # on, a `networkPolicy.egressPorts` entry carrying the port that address dials, and its bearer in
-# `secrets.optionalKeys`. All three are map-valued and reach the render on their own; only the
-# manifest directory needed a value, and only the egress port needed the rule to stop hand-naming
-# its keys.
+# `secrets.optionalKeys`. For `pyexec` the last two ship (`egressPorts.pyexec`,
+# `optionalKeys.pyexecToken`); a site's own bundle adds its own. All three are map-valued and reach
+# the render on their own; only the manifest directory needed a value, and only the egress port
+# needed the rule to stop hand-naming its keys.
 extraConnectors:
   bundles: []
   # Where those ConfigMaps are assembled, and the directory prepended to CHEMCLAW_CONNECTORS_DIR.
@@ -604,6 +608,34 @@ extraConnectors:
   # rather than trusted: `tests/test_deploy_chart.py::test_the_shipped_connector_path_is_the_path_the_image_has`
   # derives it from the Containerfile and this package's own location.
   shippedPath: /app/src/chemclaw/connectors
+
+# Result-sink folders this image does not ship (`<name>/sink.yaml`, the third manifest seam beside
+# `connector.yaml` and `datasource.yaml`) — the `extraConnectors` shape, for `publish/`.
+#
+# `CHEMCLAW_RESULT_SINKS_DIR` has always been a discovery path with "earlier directories win", so a
+# site could point the shipped `postgres` sink at its own host without a code change — except from
+# this chart, which mounted nothing and set that variable nowhere, so the runbook's advice for a
+# site that cannot use the shipped address was to bake the folder into a derived image. Each entry
+# here is one ConfigMap mounted read-only at `mountPath/<name>`, whose keys are that folder's files
+# (`sink.yaml` must be one), on every pod that reads the shared ConfigMap — see
+# `chemclaw.extraSinkMounts` for why every pod and not only the drain's worker.
+#
+#   extraSinks:
+#     sinks:
+#       - name: postgres                  # shadows the shipped `postgres` sink: your host/database
+#         configMap: chemclaw-sink-postgres
+#
+# Mounting a sink does not enable it: `config.CHEMCLAW_RESULT_SINKS` names which discovered sinks
+# publish (D-018). The destination's credentials go in the Secret under `secrets.optionalKeys`, and
+# its host in `CHEMCLAW_EGRESS_ALLOW` and `networkPolicy.egressDestinations` — runbook § (xvi).
+extraSinks:
+  sinks: []
+  # Prepended to CHEMCLAW_RESULT_SINKS_DIR, so a folder here overrides a shipped sink of the same
+  # name (`publish/registry._sink_dirs`).
+  mountPath: /etc/chemclaw/sinks
+  # Where the image keeps the sinks it does ship, named again because setting the variable replaces
+  # the code default outright. Derived and checked like `extraConnectors.shippedPath`.
+  shippedPath: /app/src/chemclaw/publish/sinks
 
 # How long a process is allowed to take to come up, and how patiently it is then watched.
 #
@@ -1386,8 +1418,11 @@ secrets:
     postgresDsn: "CHEMCLAW_POSTGRES_DSN"
     # Push credential for the knowledge repo (gap DEP-2). Without it the note writer cannot push
     # the base branch, so every knowledge write fails at push in-cluster. Required like the two
-    # above: the key must exist in the Secret even when `knowledge.sync.repoUrl` is empty (an empty
-    # value is fine then), or every pod fails with `CreateContainerConfigError`.
+    # above **only when something pushes**: with `knowledge.sync.repoUrl` set (and sync enabled),
+    # an absent key is `CreateContainerConfigError` at pod creation; with no remote, no writer
+    # checkout exists, so `chemclaw.env` mounts it `optional: true` and the key may be absent.
+    # Handed to git by the image's `chemclaw-git-askpass` (`deploy/git-askpass.sh`), armed by
+    # `deploy/entrypoint.sh` for the writer's push and by `knowledge-sync.sh` for the sync.
     knowledgeRepoToken: "CHEMCLAW_KNOWLEDGE_REPO_TOKEN"
   # Secrets that are safe when unset, rendered with `optional: true` so naming a new one does not
   # take an existing release down on upgrade (see `chemclaw.env` in `_helpers.tpl`).
@@ -1448,10 +1483,22 @@ secrets:
     # per request, and unset means `MissingConnectorCredential` on the first prediction rather than
     # a degraded one.
     rxnpredictToken: "CHEMCLAW_RXNPREDICT_TOKEN"
-    # No slot ships for the five off-by-default process-development bundles (`connectors.props`,
-    # `kinetics`, `thermalsafety`, `unitops`, `suitability`). Enabling one means adding its bearer
-    # here as well, e.g. `propsToken: "CHEMCLAW_PROPS_TOKEN"` — `deploy/kind/values-kind.yaml` does
-    # exactly that — or every call to it is refused.
+    # The same kind again, for the fleet bundles that ship **off**: the five process-development
+    # bundles (`connectors.props`, `thermalsafety`, `kinetics`, `unitops`, `suitability`) and
+    # `pyexec`, which this image does not ship at all and arrives through `extraConnectors`. Each
+    # name is the one that bundle's `connector.yaml` gives `auth.token_env`. They are slotted
+    # although every one of those bundles is disabled by default, because `optional: true` makes an
+    # absent key harmless — the variable is simply unset in a pod that never dials the bundle —
+    # while a missing slot made "enable a bundle" a Secret-plumbing edit too: without it the bearer
+    # had nowhere to come from but the plaintext ConfigMap, and every call was refused
+    # `MissingConnectorCredential`. Enabling one is now `connectors.<name>.enabled: true` plus the
+    # key in the Secret.
+    propsToken: "CHEMCLAW_PROPS_TOKEN"
+    thermalsafetyToken: "CHEMCLAW_THERMALSAFETY_TOKEN"
+    kineticsToken: "CHEMCLAW_KINETICS_TOKEN"
+    unitopsToken: "CHEMCLAW_UNITOPS_TOKEN"
+    suitabilityToken: "CHEMCLAW_SUITABILITY_TOKEN"
+    pyexecToken: "CHEMCLAW_PYEXEC_TOKEN"
     # The four bundles **we** host, each authenticating its own `/mcp` (D-2026-08-20). Until they
     # declared a credential the NetworkPolicy was the only thing between any pod in the namespace
     # and a tool that starts durable expensive work — and a NetworkPolicy selects peers, not paths.
@@ -1536,6 +1583,42 @@ secrets:
     # `deploy/README.md` — the chart only names it, like every other secret here.
     secretName: "chemclaw-temporal-tls"
     mountPath: "/etc/temporal/tls"
+
+# A private CA bundle (PEM), mounted read-only into every pod this chart runs — for the three TLS
+# peers a site commonly signs with its own root: the Postgres server, the LLM gateway and the Entra
+# tenant's JWKS host (a test tenant, or a TLS-inspecting proxy re-signing
+# `login.microsoftonline.com`).
+#
+# **This replaces a documented gap.** `CHEMCLAW_LLM_TLS_CA_BUNDLE` and `CHEMCLAW_ENTRA_CA_BUNDLE`
+# are file paths and `sslrootcert=` in a DSN is one too, and the chart had no value that put a file
+# there: the workaround was to borrow the Temporal mTLS mount or post-render a volume into every
+# Deployment, Job and container by hand, and any one missed is a pod that cannot reach its database.
+#
+# Set exactly one of `configMap` or `secret` (a CA certificate is not secret; a ConfigMap is the
+# usual home, an OpenShift `config.openshift.io/inject-trusted-cabundle` ConfigMap included). Both
+# empty is off and renders nothing. The object must exist before install: the pre-install migrate
+# Job mounts it too, because it dials Postgres through the same DSN.
+#
+# **Mounting is not trusting.** The two settings below replace certifi rather than adding to it
+# (`core/config/llm.py`, `core/config/entra.py`), so pointing one at a bundle that holds only your
+# database's CA would make the public tenant or gateway unverifiable — hence one switch per setting,
+# both off. Postgres takes no switch: point the DSN at the file yourself, e.g.
+# `postgresql://…?sslmode=verify-full&sslrootcert=/etc/chemclaw/ca/ca.crt` (the path is
+# `mountPath/key`), on `CHEMCLAW_POSTGRES_DSN` and, where split, the migration and session-store
+# DSNs. A switch's env wins over the same key in `config` — it is set per container, which
+# outranks `envFrom` — so set the path in one place or the other, not both.
+trustedCA:
+  configMap: ""
+  secret: ""
+  # The key in that object holding the PEM bundle; mounted as `mountPath/key`.
+  key: ca.crt
+  mountPath: /etc/chemclaw/ca
+  # Set `CHEMCLAW_LLM_TLS_CA_BUNDLE` to the mounted file (the gateway, its fallback and any vector
+  # store that reads the same setting).
+  llm: false
+  # Set `CHEMCLAW_ENTRA_CA_BUNDLE` to the mounted file. The front door refuses to boot if the file
+  # holds no PEM certificate (`api/auth.refuse_unusable_entra_ca_bundle`).
+  entra: false
 
 # The runtime ServiceAccount. The `azure.workload.identity/client-id` annotation (and the
 # `azure.workload.identity/use` pod label the templates carry) is inert scaffolding: workload
@@ -1805,7 +1888,8 @@ securityContext:
   # their removal, and no `src/` module invokes either any more.
   #
   # The live blocker is `/tmp`, which no volume covers: `deploy/knowledge-sync.sh` writes its
-  # heartbeat and its `GIT_ASKPASS` helper there in every pod that runs the sync sidecar. So turning
+  # heartbeat there in every pod that runs the sync sidecar (its `GIT_ASKPASS` helper used to be
+  # written there too, and is now the image's own `chemclaw-git-askpass`). So turning
   # this on still trades an admission failure for a runtime one — just for a different process than
   # the comment claimed, which is why the two are worth telling apart. Flip it together with an
   # `emptyDir` mounted at `/tmp`, never on its own.
@@ -2041,6 +2125,11 @@ networkPolicy:
     kinetics: 8852
     unitops: 8853
     suitability: 8892
+    # `pyexec`, the fleet's Python sandbox, on the same terms. It has no `connectors:` entry here
+    # because this image does not ship its manifest (it arrives through `extraConnectors`), which
+    # is exactly why its port was the one missing: every other fleet server in
+    # `Chemclaw3-mcp`'s `MODULES.md` port registry already had a line above.
+    pyexec: 8899
   # WHERE those ports may be dialled. Empty renders `to: []`, which in a NetworkPolicy means
   # **any destination** — so with this unset, TCP/443 from every pod to the whole internet is
   # permitted. The addresses are deployment-specific and a chart cannot invent your Postgres CIDR,
@@ -2115,8 +2204,9 @@ networkPolicy:
   # differ by distribution: OpenShift labels its router namespace
   # `network.openshift.io/policy-group: ingress` and its user-workload monitoring namespace
   # `kubernetes.io/metadata.name: openshift-user-workload-monitoring`. "Chemclaw's own pods" means
-  # this release's pods only: a `Chemclaw3_ui` pod in the same namespace is refused until that
-  # namespace is listed here too (`kubernetes.io/metadata.name: <release namespace>`).
+  # this release's pods only; the `Chemclaw3_ui` BFF beside them is admitted by `uiPodSelector`
+  # below rather than by listing the release's own namespace here, which would admit every pod in
+  # it.
   serviceIngress:
     # Its own toggle, not `networkPolicy.enabled`: if these labels are wrong the front door is
     # unreachable, and the fix must not be "turn off network policy" — that would drop the egress
@@ -2125,6 +2215,23 @@ networkPolicy:
   ingressNamespaces:
     - network.openshift.io/policy-group: ingress
     - kubernetes.io/metadata.name: openshift-user-workload-monitoring
+  # The `Chemclaw3_ui` BFF's pod labels, admitted to the front door from **this namespace only**.
+  # The UI has no chart; it is deployed beside this release from
+  # `Chemclaw3_ui:deploy/openshift/deployment.yaml`, whose pods carry exactly this label and dial
+  # `http://chemclaw-service:8080` (its `CHEMCLAW_API_URL`). The ingress rule above admitted only
+  # this release's own pods and whole namespaces, so that call — the one the whole UI goes
+  # through — was dropped by the policy: a BFF that starts, passes its own probes and answers every
+  # `/api/*` with a connect timeout. Admitting the release's namespace instead would have worked
+  # and admitted every pod in it, which is a wider grant than the one caller that needs it.
+  #
+  # A `podSelector` with no `namespaceSelector`, so a pod carrying these labels in another
+  # namespace is not admitted by this entry. On by default because the UI is part of the system
+  # this chart describes. **`null` removes the entry, and `{}` does not**: Helm merges a map
+  # value into this default key by key, so an empty map leaves `chemclaw3-ui` in place (measured on
+  # `--set-json networkPolicy.uiPodSelector={}`). Change it if your UI Deployment carries different
+  # labels — and set the old key to `null` in the same override, for the same merge reason.
+  uiPodSelector:
+    app.kubernetes.io/name: chemclaw3-ui
   # The monitoring stack alone — a subset of the list above, and separate because it is granted
   # somewhere the router must never reach: the connector pods (whose whole ingress rule exists to
   # keep everything but Chemclaw out) and the worker pods' probe port. The front door needs the

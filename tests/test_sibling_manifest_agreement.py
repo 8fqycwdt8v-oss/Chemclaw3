@@ -997,3 +997,44 @@ def test_the_fake_calc_server_serves_exactly_the_surface_the_fleet_records() -> 
         f"record, and not {sorted(set(surface) - fake)} that it does. A fake that has drifted from "
         "the server proves the suite runs, not that the seam works."
     )
+
+
+#: `deploy/helm/chemclaw/values.yaml`, read for the two maps a fleet server needs to be reachable.
+_CHART_VALUES = Path(__file__).resolve().parents[1] / "deploy" / "helm" / "chemclaw" / "values.yaml"
+
+
+def test_every_fleet_server_has_an_egress_port_and_a_token_slot_in_the_chart() -> None:
+    """Enabling a fleet server must not need a NetworkPolicy edit or a Secret-plumbing edit.
+
+    Two things stand between this release and a `Chemclaw3-mcp` server besides its address: a
+    `networkPolicy.egressPorts` entry carrying the port it answers on (a NetworkPolicy restricts by
+    port independently of its `to:` list, so a missing port drops every packet whatever the
+    destinations say) and a `secrets.optionalKeys` slot for the variable its manifest names as
+    `auth.token_env` (without one the bearer has nowhere to come from but the plaintext ConfigMap,
+    and every call raises `MissingConnectorCredential`). Both were hand-maintained, and both had
+    holes: `pyexec`'s port 8899 was missing, and none of the five off-by-default process-development
+    bundles nor `pyexec` had a token slot — only the kind lane's values file added them.
+
+    Derived from the fleet's own manifests — `manifests/` and `manifests-internal/` both, since the
+    backends (`calc`, `rxnlabel`) are dialled over the same policy — rather than from its
+    `MODULES.md` table, because the manifest is what `tests/test_fleet.py` there holds the port
+    registry against, and it is the file that names the token variable.
+    """
+    root = _sibling_or_skip()
+    values = yaml.safe_load(_CHART_VALUES.read_text(encoding="utf-8"))
+    ports = {int(port) for port in values["networkPolicy"]["egressPorts"].values()}
+    slots = set(values["secrets"]["optionalKeys"].values())
+    manifests = sorted(root.glob("manifests/*/connector.yaml")) + sorted(
+        root.glob("manifests-internal/*/connector.yaml")
+    )
+    assert manifests, f"{root} holds no fleet manifest; the derivation is broken"
+    missing: list[str] = []
+    for path in manifests:
+        endpoint = _manifest(path)["endpoint"]
+        port = int(endpoint["url"].rsplit(":", 1)[1].split("/", 1)[0])
+        if port not in ports:
+            missing.append(f"{path.parent.name}: port {port} is not in networkPolicy.egressPorts")
+        token_env = (endpoint.get("auth") or {}).get("token_env")
+        if token_env and token_env not in slots:
+            missing.append(f"{path.parent.name}: {token_env} has no secrets.optionalKeys slot")
+    assert not missing, "\n".join(missing)

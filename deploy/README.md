@@ -90,30 +90,40 @@ The chart **names** Secrets and never fills them; populate them with an
 | --- | --- | --- |
 | `CHEMCLAW_LLM_API_KEY` | **yes** (key must exist) | the gateway's API key |
 | `CHEMCLAW_POSTGRES_DSN` | **yes** | the runtime DSN (step 2) |
-| the knowledge-repo push token (`secrets.keys.knowledgeRepoToken`) | **yes** — the key must exist even when `knowledge.sync.repoUrl` is empty (its value may then be empty) | the token `deploy/knowledge-sync.sh` and the note writer push with |
+| the knowledge-repo push token (`secrets.keys.knowledgeRepoToken`) | **yes once `knowledge.sync.repoUrl` is set**; with no remote it is mounted `optional: true` and may be absent | the token `deploy/knowledge-sync.sh` clones with and the note writer pushes with — both through the image's `chemclaw-git-askpass` helper, so it never lands in a URL, `.git/config` or argv |
 | `CHEMCLAW_POSTGRES_MIGRATION_DSN` | optional, migrate Job only | the owner's DSN when the principal is split |
 | `CHEMCLAW_FRAMING_ENVELOPE_SECRET` | optional, **set it** | HMAC key for the retrieved-content envelope; unset, each process picks its own and replicas disagree |
 | `CHEMCLAW_CHEM_TOKEN`, `CHEMCLAW_SAFETY_TOKEN`, `CHEMCLAW_RXNPREDICT_TOKEN`, `CHEMCLAW_CALC_TOKEN`, `CHEMCLAW_RXNLABEL_TOKEN` | optional to the chart, **required by the capability** | bearers this release presents to the fleet servers; unset, every call to that server is refused |
 | `CHEMCLAW_BO_MCP_TOKEN`, `CHEMCLAW_CALC_MCP_TOKEN`, `CHEMCLAW_MOLFP_MCP_TOKEN`, `CHEMCLAW_RXNFP_MCP_TOKEN` | optional to the chart, **required by the capability** | bearers for the connector servers this release runs itself (both ends read the same variable) |
-| `CHEMCLAW_PROPS_TOKEN`, `CHEMCLAW_KINETICS_TOKEN`, `CHEMCLAW_THERMALSAFETY_TOKEN`, `CHEMCLAW_UNITOPS_TOKEN`, `CHEMCLAW_SUITABILITY_TOKEN` | only when that bundle is enabled | the shipped `secrets.optionalKeys` has **no slot** for these five off-by-default bundles: add `propsToken: CHEMCLAW_PROPS_TOKEN` (and so on) under `secrets.optionalKeys` when you enable one, as `deploy/kind/values-kind.yaml` does |
+| `CHEMCLAW_PROPS_TOKEN`, `CHEMCLAW_KINETICS_TOKEN`, `CHEMCLAW_THERMALSAFETY_TOKEN`, `CHEMCLAW_UNITOPS_TOKEN`, `CHEMCLAW_SUITABILITY_TOKEN`, and `pyexec`'s (`secrets.optionalKeys.pyexecToken`) | only when that bundle is enabled | bearers for the fleet bundles that ship off; slotted already, so enabling one is the `connectors:` line plus this key |
 | `CHEMCLAW_MCP_FACE_TOKEN` | only with `mcpFace.enabled` | the read-only MCP face's bearer; unset, it answers 401 |
 | `CHEMCLAW_LLM_FALLBACK_API_KEY`, `CHEMCLAW_VECTOR_STORE_API_KEY`, `CHEMCLAW_TEMPORAL_API_KEY`, `CHEMCLAW_SESSION_STORE_DSN` | optional | the failover gateway, a non-pgvector store, Temporal Cloud, a split session database |
 
-The three required keys are mounted with a non-optional `secretKeyRef` on every pod, so a missing
-key is `CreateContainerConfigError` on the migrate Job first and the install never proceeds. Every
+The required keys are mounted with a non-optional `secretKeyRef` on every pod, so a missing key is
+`CreateContainerConfigError` on the migrate Job first and the install never proceeds — the LLM key
+and the DSN always, the push token only on a release with a knowledge remote. Every
 other key is `optional: true`, so adding one never breaks an upgrade — and "optional" says nothing
 about whether the capability works without it. The full argument for each slot is beside it in
 `values.yaml` under `secrets:`.
 
 **`chemclaw-temporal-tls`** (`secrets.temporalTls.secretName`) — step 3.
 
-**CA files are a gap in the chart.** No value mounts a private CA for Postgres (`sslrootcert=` in a
-DSN), the LLM gateway (`CHEMCLAW_LLM_TLS_CA_BUNDLE`) or the Entra JWKS host
-(`CHEMCLAW_ENTRA_CA_BUNDLE`). Either put the CA where an existing mount already is — the Temporal
-TLS Secret's `ca.crt` at `secrets.temporalTls.mountPath` is mounted on every pod, which is how the
-kind lane points `CHEMCLAW_ENTRA_CA_BUNDLE` at its cluster CA — or add a volume with a post-render
-patch. With publicly-trusted certificates none of this is needed (`sslmode=require` verifies
-nothing; `verify-full` needs the CA file).
+**A private CA** (`trustedCA`) — one PEM bundle in a ConfigMap or Secret you create, mounted
+read-only into every container, the migrate and convert hook Jobs included:
+
+```yaml
+trustedCA:
+  configMap: site-ca        # or `secret:`; exactly one
+  key: ca.crt               # mounted at /etc/chemclaw/ca/ca.crt (`mountPath`/`key`)
+  llm: true                 # sets CHEMCLAW_LLM_TLS_CA_BUNDLE to that file
+  entra: true               # sets CHEMCLAW_ENTRA_CA_BUNDLE to that file
+```
+
+Both switches *replace* certifi for their client rather than adding to it, so turn one on only when
+the bundle signs that peer. Postgres takes no switch: append
+`sslmode=verify-full&sslrootcert=/etc/chemclaw/ca/ca.crt` to each DSN in the Secret. With
+publicly-trusted certificates none of this is needed (`sslmode=require` verifies nothing;
+`verify-full` needs the CA file).
 
 Other objects you create yourself, when you turn on what needs them: one ConfigMap per
 `extraConnectors.bundles[]` entry (step 5), the `documentShare.claimName` PersistentVolumeClaim
@@ -139,8 +149,8 @@ shipped `connectors:` block already enables `chem`, `safety` and `rxnpredict` as
    already listed there.
 
 The front door's `CHEMCLAW_CONNECTOR_URLS` and `CHEMCLAW_CONNECTORS_ENABLED` are **derived** from
-the `connectors:` block; never set them in `config`. A bundle this image does not ship (`props`,
-`pyexec`, a site's own) additionally needs its manifest mounted — see "Attaching a connector bundle
+the `connectors:` block; never set them in `config`. A bundle this image does not ship (`pyexec`,
+a site's own) additionally needs its manifest mounted — see "Attaching a connector bundle
 this image does not ship". The five process-development bundles (`props`, `thermalsafety`,
 `kinetics`, `unitops`, `suitability`) ship `enabled: false`: each one enabled costs prompt prefix
 on every model call.
@@ -190,7 +200,7 @@ a pod refuses at boot or a capability is silently closed:
 | `config.CHEMCLAW_EGRESS_ALLOW` | hosts the in-process egress guard cannot derive from settings: a warehouse ELN's or result sink's database, a delivery channel, an HTTP proxy |
 | `knowledge.sync.repoUrl` | the knowledge repository (empty: serve the corpus the image ships) |
 | `route.host`, `route.ipWhitelist` | the front door's hostname (empty: OpenShift assigns one) and, optionally, the source CIDRs allowed to use it |
-| `networkPolicy.ingressNamespaces`, `networkPolicy.monitoringNamespaces` | the labels of your router and monitoring namespaces (shipped: OpenShift's). The front door admits only this release's own pods and these namespaces, so a **UI deployed in the same namespace is refused** until you add this namespace too (e.g. `kubernetes.io/metadata.name: <ns>`) |
+| `networkPolicy.ingressNamespaces`, `networkPolicy.monitoringNamespaces` | the labels of your router and monitoring namespaces (shipped: OpenShift's). The front door admits this release's own pods, these namespaces, and the `Chemclaw3_ui` BFF's pods in this namespace by `networkPolicy.uiPodSelector` (shipped: `app.kubernetes.io/name: chemclaw3-ui`, the label its OpenShift manifests carry; `null` removes it) |
 | `image.repository`, `image.digest` | step 1 |
 
 ### 7. Install
@@ -334,7 +344,7 @@ production**. There is no "test mode" that relaxes them. This lists what such a 
 | Refusal (the process exits at boot) | What a test cluster sets |
 |---|---|
 | Entra half-configured (`entra_audience` / tenant-or-issuer / tenant-or-JWKS) | `CHEMCLAW_ENTRA_AUDIENCE`, plus either `CHEMCLAW_ENTRA_TENANT_ID` or **both** `CHEMCLAW_ENTRA_ISSUER` and `CHEMCLAW_ENTRA_JWKS_URL`. For a mock tenant, use the issuer string its tokens carry, byte for byte, and its keys URL. |
-| The tenant's JWKS is served over https by a private or self-signed CA | `CHEMCLAW_ENTRA_CA_BUNDLE=<path to that CA's PEM>` on the front door. The chart has no value that mounts this file, so the deployment that needs it adds the volume itself, for example as a post-render patch (the kind lane reuses the Temporal CA mount). It *replaces* certifi for this one fetch, and verification cannot be switched off. Unset, the fetch fails its TLS handshake and every request is a 503. A path that is missing, or a file with no PEM certificate in it, stops the front door at boot. |
+| The tenant's JWKS is served over https by a private or self-signed CA | `CHEMCLAW_ENTRA_CA_BUNDLE=<path to that CA's PEM>` on the front door — in the chart, `trustedCA.configMap` (or `.secret`) plus `trustedCA.entra: true`. It *replaces* certifi for this one fetch, and verification cannot be switched off. Unset, the fetch fails its TLS handshake and every request is a 503. A path that is missing, or a file with no PEM certificate in it, stops the front door at boot. |
 | A non-loopback `CHEMCLAW_TEMPORAL_ADDRESS` with no TLS and no API key | Run the Temporal frontend with TLS and set `CHEMCLAW_TEMPORAL_TLS_CA` (server-auth TLS is enough to pass this guard; add `_CERT`/`_KEY` for mTLS). In the chart, that is `secrets.temporalTls.enabled: true` plus the `chemclaw-temporal-tls` Secret described above. |
 | A non-loopback Postgres DSN without `sslmode=require`/`verify-ca`/`verify-full` (checked on `CHEMCLAW_POSTGRES_DSN`, `CHEMCLAW_POSTGRES_MIGRATION_DSN` and `CHEMCLAW_SESSION_STORE_DSN`, each one that is set) | Give the Postgres a server certificate and append `sslmode=verify-full&sslrootcert=<ca>`, or at least `sslmode=require`, to every DSN. A DSN that names no host is refused too, so name the host. |
 | `CHEMCLAW_LLM_BASE_URL` on loopback (every process that makes model calls, in every posture) | Point it at the gateway. If the cluster really does serve the model on loopback, as a sidecar or the `chemclaw.cli.mock_llm` mock in the same pod, set `CHEMCLAW_LLM_ALLOW_LOOPBACK_GATEWAY=true` to say so. |
@@ -406,9 +416,11 @@ to a manifest something in this checkout can see, and a bundle mounted from else
 own.
 
 Plus a `networkPolicy.egressDestinations` entry for the host, on the same terms as the sibling
-servers this release already dials. A worked example, `Chemclaw3-mcp`'s `pyexec` (the five
-process-development bundles, `props` among them, ship their manifests in this image and need only
-the `connectors:` line set to `enabled: true`):
+servers this release already dials. A worked example, `Chemclaw3-mcp`'s `pyexec`, which this image
+does not ship (the five process-development bundles, `props` among them, do ship their manifests
+here and need only the `connectors:` line set to `enabled: true`). Its egress port and its token
+slot already ship in `values.yaml` (`egressPorts.pyexec`, `optionalKeys.pyexecToken`), so only the
+first two declarations are yours:
 
 ```yaml
 connectors:
@@ -417,11 +429,10 @@ extraConnectors:
   bundles:
     - name: pyexec
       configMap: chemclaw-connector-pyexec   # keys are that bundle's files; `connector.yaml` must be one
-networkPolicy:
-  egressPorts: {pyexec: 8899}
-secrets:
-  optionalKeys: {pyexecToken: <the name that bundle's manifest gives `auth.token_env`>}
 ```
+
+A site's own bundle adds the other two as well: `networkPolicy.egressPorts.<name>: <port>` and
+`secrets.optionalKeys.<name>Token: <the name its manifest gives auth.token_env>`.
 
 Two things worth knowing before you write that:
 
@@ -441,6 +452,16 @@ namespace-qualified address resolves and is then dropped on the far side.
 `tests/test_helm_chart.py::test_every_fleet_address_names_a_service_the_sibling_actually_creates`
 holds every fleet address in `values.yaml` against those manifests, and skips — naming each address
 it did not check — where no sibling checkout is present.
+
+### A result sink this image does not ship
+
+`extraSinks.sinks[]` is the same seam for `publish/`: each entry is a ConfigMap holding one sink
+folder (`sink.yaml` among its keys), mounted read-only at `extraSinks.mountPath/<name>` on every
+pod and prepended to `CHEMCLAW_RESULT_SINKS_DIR`, so a folder named `postgres` replaces the shipped
+`postgres` sink's address without a derived image. Mounting does not enable it —
+`config.CHEMCLAW_RESULT_SINKS` does — and the destination still needs its credentials in
+`secrets.optionalKeys` and its host in `CHEMCLAW_EGRESS_ALLOW` and `networkPolicy.egressDestinations`
+([runbook § (xvi)](../docs/guides/runbook.md#xvi-attach-an-external-results-database)).
 
 ## Stateful dependencies (ADR D-049, sub-decision D-A6a)
 
@@ -486,8 +507,9 @@ must live in different namespaces.
   ports in `networkPolicy.egressPorts` — Postgres 5432, Temporal 7233, HTTPS 443 (Entra, git), the
   LLM gateway 8000, OTLP 4317, each fleet server's own port — plus `connectorPort` for this
   release's own connector Services, to the **destinations you name**. Ingress rules bound which
-  *peers* may open a connection to the front door (`networkPolicy.ingressNamespaces`), the
-  connectors and the workers' probe port (`networkPolicy.monitoringNamespaces`).
+  *peers* may open a connection to the front door (`networkPolicy.ingressNamespaces`, plus the
+  `Chemclaw3_ui` BFF's pods in this namespace by `networkPolicy.uiPodSelector`), the connectors and
+  the workers' probe port (`networkPolicy.monitoringNamespaces`).
 - **The destinations are yours to state, and the chart will not render until you do.** An empty
   `networkPolicy.egressDestinations` would render `to: []`, which in a NetworkPolicy means *any*
   destination on those ports. So the chart requires exactly one of `egressDestinations` (a list of
@@ -541,8 +563,9 @@ must live in different namespaces.
 - **Probes**: the front door serves `/readyz` (readiness) and `/healthz` (liveness) on its service
   port; every Temporal worker (core's, each bundle's, each interactive worker) serves both on the
   `metrics` port (`workerMetricsPort`, `CHEMCLAW_WORKER_METRICS_PORT`, default 9000). The
-  connector servers and the MCP face serve only `/healthz` (and `/metrics`), and all three of their
-  probes use it. A worker's readiness is its own `is_running`, and its liveness is answered on its
+  connector servers and the MCP face serve `/healthz` for startup and readiness and `/livez` for
+  liveness (and `/metrics`); `/livez` consults nothing, so a readiness check can take the pod out
+  of its Service without ever becoming a reason to kill it. A worker's readiness is its own `is_running`, and its liveness is answered on its
   event loop, so a loop wedged inside an activity restarts the pod
   (D-2026-08-01-every-process-carries-its-own-witness). Every process
   also has a `startupProbe` (`probes.*.startup`, 30 × 10 s) so cold imports are not killed. The

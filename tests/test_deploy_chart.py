@@ -4999,6 +4999,56 @@ def test_a_connector_server_is_not_sigkilled_before_it_finishes_starting() -> No
     )
 
 
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+@pytest.mark.parametrize("overrides", _OFF_BY_DEFAULT_RENDERS.values(), ids=_OFF_BY_DEFAULT_RENDERS)
+def test_a_connector_app_is_killed_only_by_a_route_that_consults_nothing(
+    overrides: tuple[str, ...],
+) -> None:
+    """Liveness and readiness on one route make every readiness check a restart trigger.
+
+    Every pod served by `connectors.server.connector_app` — each bundle's server and the MCP face —
+    pointed both probes at `/healthz`. That route is static today, so nothing has been killed by
+    it; the defect is the shape, which `Chemclaw3-mcp` forbids fleet-wide after it killed a pod
+    that was merely missing an optional predictor: the first dependency anybody teaches
+    `/healthz` to check becomes, with no chart change, a reason to SIGKILL a pod a restart cannot
+    repair. `/livez` consults nothing (`tests/test_connector_identity.py::
+    test_liveness_is_its_own_route_and_consults_nothing` drives that), and is what liveness reads.
+
+    Rendered, and the containers found by the component they run rather than by template, so a
+    third `connector_app` role is covered on the day it renders. Both paths are checked against
+    the routes the app actually serves, because a probe at a path the app does not answer is a
+    crash loop that `kubeconform` passes.
+    """
+    from mcp.server.fastmcp import FastMCP
+
+    from chemclaw.connectors.server import connector_app
+
+    app = connector_app(FastMCP("p"), name="p")
+    served = {getattr(route, "path", None) for route in app.routes}
+    rendered = _render(*overrides)
+    assert rendered.returncode == 0, rendered.stderr
+    checked: list[str] = []
+    for name, spec in _pod_specs(rendered.stdout):
+        for container in spec.get("containers") or []:
+            env = {e["name"]: e.get("value") for e in container.get("env") or []}
+            component = env.get("CHEMCLAW_COMPONENT") or ""
+            if not (
+                component == "mcp-face"
+                or (component.startswith("connector-") and "worker" not in component)
+            ):
+                continue
+            liveness = container["livenessProbe"]["httpGet"]["path"]
+            readiness = container["readinessProbe"]["httpGet"]["path"]
+            assert liveness == "/livez", f"{name}: liveness probes {liveness}, not /livez"
+            assert liveness != readiness, f"{name}: liveness and readiness share {liveness}"
+            assert {liveness, readiness} <= served, (
+                f"{name} probes {sorted({liveness, readiness} - served)}, which connector_app "
+                "does not serve"
+            )
+            checked.append(name)
+    assert checked, "no connector_app container was rendered; the selection is broken"
+
+
 def test_the_front_door_gets_the_same_head_start() -> None:
     """The same gap, one process bigger: langchain, deepagents and RDKit, then a connector sweep.
 
@@ -6884,3 +6934,216 @@ def test_the_fixed_replica_count_renders_nowhere_while_the_hpa_is_on() -> None:
         "service.replicas now changes the shipped render, so the values.yaml comment saying it is "
         "read only when the HPA is off is stale"
     )
+
+
+def _containers(rendered: str) -> list[tuple[str, dict[str, Any], dict[str, Any]]]:
+    """Every container and init container in a render: `(owner, pod spec, container)`."""
+    return [
+        (name, spec, container)
+        for name, spec in _pod_specs(rendered)
+        for container in (spec.get("containers") or []) + (spec.get("initContainers") or [])
+    ]
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+def test_the_push_token_is_required_only_where_something_pushes() -> None:
+    """`secrets.keys.knowledgeRepoToken` was required on every pod of every release.
+
+    With `knowledge.sync.repoUrl` empty no writer checkout is cloned (`knowledge-sync.sh checkout`
+    exits early), so nothing can push and nothing reads the token — yet an absent key took every
+    pod into `CreateContainerConfigError`. It is now `optional: true` there and required, as
+    before, once a remote is configured, which is the release where an absent token fails every
+    note at push. Still *mounted* in both, so a release that sets it keeps it.
+    """
+    name = _values()["secrets"]["keys"]["knowledgeRepoToken"]
+
+    def _refs(rendered: str) -> list[dict[str, Any]]:
+        return [
+            env["valueFrom"]["secretKeyRef"]
+            for _, _, container in _containers(rendered)
+            for env in container.get("env") or []
+            if env["name"] == name
+        ]
+
+    without_remote = _render()
+    assert without_remote.returncode == 0, without_remote.stderr
+    refs = _refs(without_remote.stdout)
+    assert refs, f"{name} is no longer mounted at all on a release with no remote"
+    assert all(ref.get("optional") is True for ref in refs), (
+        f"{name} is required on a release with no knowledge remote, where nothing pushes"
+    )
+
+    with_remote = _render("--set", "knowledge.sync.repoUrl=https://git.example.org/notes.git")
+    assert with_remote.returncode == 0, with_remote.stderr
+    refs = _refs(with_remote.stdout)
+    assert refs and not any(ref.get("optional") for ref in refs), (
+        f"{name} is optional on a release that pushes notes, so an absent token fails every note "
+        "at push instead of failing the pod at creation"
+    )
+    # The other required keys are untouched by the rule.
+    others = set(_values()["secrets"]["keys"].values()) - {name}
+    for _, _, container in _containers(without_remote.stdout):
+        for env in container.get("env") or []:
+            if env["name"] in others:
+                assert not env["valueFrom"]["secretKeyRef"].get("optional"), env
+
+
+def _service_ingress_peers(rendered: str) -> list[dict[str, Any]]:
+    """The `from:` peers of the front door's ingress policy."""
+    for document in yaml.safe_load_all(rendered):
+        if document and document["metadata"]["name"] == "chemclaw-service-ingress":
+            peers: list[dict[str, Any]] = document["spec"]["ingress"][0]["from"]
+            return peers
+    raise AssertionError("no chemclaw-service-ingress NetworkPolicy was rendered")
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+def test_the_ui_beside_the_release_may_reach_the_front_door() -> None:
+    """The `Chemclaw3_ui` BFF dials `chemclaw-service:8080` from this namespace and was dropped.
+
+    The front door's ingress admitted this release's own pods and whole namespaces, and the UI is
+    neither — so the one call the whole UI goes through was refused by the policy unless an
+    operator admitted the entire release namespace. `networkPolicy.uiPodSelector` admits the UI's
+    pods by label, from this namespace only (a bare `podSelector`), and `null` removes it.
+
+    The labels are checked against the UI's own Deployment when that checkout is present, because
+    a selector that no longer matches the pods it names admits nothing and fails silently.
+    """
+    selector = _values()["networkPolicy"]["uiPodSelector"]
+    assert selector, "the shipped chart admits no UI pod"
+    rendered = _render()
+    assert rendered.returncode == 0, rendered.stderr
+    ui_peers = [
+        peer
+        for peer in _service_ingress_peers(rendered.stdout)
+        if peer.get("podSelector", {}).get("matchLabels") == selector
+    ]
+    assert ui_peers == [{"podSelector": {"matchLabels": selector}}], (
+        "the UI peer is missing, or carries a namespaceSelector that would widen it beyond this "
+        f"namespace: {ui_peers}"
+    )
+    removed = _render("--set", "networkPolicy.uiPodSelector=null")
+    assert removed.returncode == 0, removed.stderr
+    assert not [
+        peer
+        for peer in _service_ingress_peers(removed.stdout)
+        if peer.get("podSelector", {}).get("matchLabels") == selector
+    ], "`networkPolicy.uiPodSelector=null` did not remove the UI peer"
+
+    from tests.siblings import SIBLING_SKIP, sibling_root
+
+    checkout, reason = sibling_root("CHEMCLAW_UI_REPO", "Chemclaw3_ui")
+    if checkout is None:
+        pytest.skip(f"{SIBLING_SKIP} {reason}; the selector was NOT checked against the UI's pods")
+    deployment = yaml.safe_load(
+        (checkout / "deploy" / "openshift" / "deployment.yaml").read_text(encoding="utf-8")
+    )
+    labels = deployment["spec"]["template"]["metadata"]["labels"]
+    assert labels.items() >= selector.items(), (
+        f"networkPolicy.uiPodSelector {selector} does not match the UI's pod labels {labels}"
+    )
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+def test_a_private_ca_reaches_every_container_that_reads_the_settings_pointing_at_it() -> None:
+    """`trustedCA` mounts one PEM bundle into every container and points opted-in settings at it.
+
+    `CHEMCLAW_LLM_TLS_CA_BUNDLE`, `CHEMCLAW_ENTRA_CA_BUNDLE` and a DSN's `sslrootcert=` are file
+    paths, and the chart had no value that put a file anywhere. Asserted over every container the
+    render produces — the migrate and convert hook Jobs included, since both dial Postgres with the
+    DSN that names the file — because a container that reads the setting and lacks the mount is a
+    pod that cannot reach its database. Off, nothing renders; misconfigured, the render refuses.
+    """
+    path = "/etc/chemclaw/ca/ca.crt"
+    rendered = _render(
+        "--set",
+        "trustedCA.configMap=site-ca",
+        "--set",
+        "trustedCA.llm=true",
+        "--set",
+        "trustedCA.entra=true",
+    )
+    assert rendered.returncode == 0, rendered.stderr
+    containers = _containers(rendered.stdout)
+    assert {name for name, _, _ in containers} >= {"chemclaw-migrate", "chemclaw-convert"}
+    missing: list[str] = []
+    for name, spec, container in containers:
+        volumes = {volume["name"]: volume for volume in spec.get("volumes") or []}
+        mounts = {mount["name"]: mount for mount in container.get("volumeMounts") or []}
+        env = {e["name"]: e.get("value") for e in container.get("env") or []}
+        if (
+            "trusted-ca" not in mounts
+            or volumes.get("trusted-ca", {}).get("configMap", {}).get("name") != "site-ca"
+        ):
+            missing.append(f"{name}/{container['name']}: no trusted-ca mount")
+        elif not mounts["trusted-ca"].get("readOnly"):
+            missing.append(f"{name}/{container['name']}: trusted-ca is writable")
+        for setting in ("CHEMCLAW_LLM_TLS_CA_BUNDLE", "CHEMCLAW_ENTRA_CA_BUNDLE"):
+            if env.get(setting) != path:
+                missing.append(f"{name}/{container['name']}: {setting}={env.get(setting)!r}")
+    assert not missing, "\n".join(missing)
+
+    off = _render()
+    assert off.returncode == 0, off.stderr
+    assert "trusted-ca" not in off.stdout and "CHEMCLAW_ENTRA_CA_BUNDLE" not in off.stdout
+
+    # Mounted without opting a setting in: the file is there and no setting is redirected, which
+    # is the Postgres-only case (`sslrootcert=` in the DSN names it).
+    mount_only = _render("--set", "trustedCA.secret=site-ca")
+    assert mount_only.returncode == 0, mount_only.stderr
+    assert "CHEMCLAW_LLM_TLS_CA_BUNDLE" not in mount_only.stdout
+    assert "secretName: site-ca" in mount_only.stdout
+
+    for refused in (
+        ("--set", "trustedCA.llm=true"),
+        ("--set", "trustedCA.configMap=a", "--set", "trustedCA.secret=b"),
+    ):
+        result = _render(*refused)
+        assert result.returncode != 0 and "trustedCA" in result.stderr, refused
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+def test_a_result_sink_this_image_does_not_ship_can_be_mounted_and_discovered() -> None:
+    """`extraSinks` puts a `sink.yaml` folder on `CHEMCLAW_RESULT_SINKS_DIR` in every pod.
+
+    `result_sinks_dir` has always been a discovery path where earlier directories win, and the
+    chart could not use it: no value mounted a folder or set the variable, so a site that could not
+    use the shipped `postgres` sink's address was told to bake a derived image. Mirrors
+    `extraConnectors` and is asserted the same way — the variable once, in the shared ConfigMap,
+    and the mount on every container that reads it, the two migration hooks excepted.
+    """
+    rendered = _render(
+        "--set",
+        "extraSinks.sinks[0].name=postgres",
+        "--set",
+        "extraSinks.sinks[0].configMap=chemclaw-sink-postgres",
+    )
+    assert rendered.returncode == 0, rendered.stderr
+    values = _values()["extraSinks"]
+    config = _rendered_config(rendered.stdout)
+    assert config["CHEMCLAW_RESULT_SINKS_DIR"] == f"{values['mountPath']}:{values['shippedPath']}"
+    assert "CHEMCLAW_RESULT_SINKS_DIR" not in _rendered_config(_render().stdout), (
+        "a release that mounts no sink must not restate the image's sink directory"
+    )
+    mount = f"{values['mountPath']}/postgres"
+    exempt = {"chemclaw-migrate", "chemclaw-convert"}
+    missing = [
+        f"{name}/{container['name']}"
+        for name, _, container in _containers(rendered.stdout)
+        if name not in exempt
+        and not (container.get("command") or [""])[0].endswith("chemclaw-knowledge-sync")
+        and mount not in {m["mountPath"] for m in container.get("volumeMounts") or []}
+    ]
+    assert not missing, f"containers that read CHEMCLAW_RESULT_SINKS_DIR without {mount}: {missing}"
+
+
+def test_the_shipped_sink_path_is_the_path_the_image_has() -> None:
+    """`extraSinks.shippedPath` restates the image's layout, derived like the connector one."""
+    import chemclaw.publish.sinks
+
+    containerfile = (DEPLOY / "Containerfile").read_text(encoding="utf-8")
+    workdir = re.search(r"^WORKDIR (\S+)", containerfile, flags=re.MULTILINE)
+    assert workdir, "deploy/Containerfile declares no WORKDIR"
+    package = Path(chemclaw.publish.sinks.__file__).resolve().parent
+    expected = f"{workdir.group(1).rstrip('/')}/{package.relative_to(DEPLOY.parent)}"
+    assert _values()["extraSinks"]["shippedPath"] == expected

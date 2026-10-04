@@ -10,11 +10,13 @@ import ast
 import asyncio
 import logging
 import os
+import re
 import stat
 import subprocess
 import sys
 import time
 from datetime import date
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -873,6 +875,173 @@ def test_git_child_env_scrubs_app_secrets_but_keeps_git_credential(
     assert "CHEMCLAW_FRAMING_ENVELOPE_SECRET" not in env
     assert env["CHEMCLAW_KNOWLEDGE_REPO_TOKEN"] == "git-token-value"
     assert env["PATH"] == "/usr/bin:/bin"
+
+
+_ASKPASS = Path(__file__).resolve().parents[1] / "deploy" / "git-askpass.sh"
+_ASKPASS_IN_IMAGE = "/usr/local/bin/chemclaw-git-askpass"
+
+
+def _basic_auth_git_remote(root: Path, token: str) -> tuple[str, ThreadingHTTPServer]:
+    """Serve `root` as a smart-HTTP git remote that refuses every request without `token`.
+
+    `git http-backend` behind a Basic-auth check — the shape of a private HTTPS knowledge repo,
+    minus TLS, which is not what this asks about.
+    """
+    import base64
+    import threading
+
+    expected = "Basic " + base64.b64encode(f"x-access-token:{token}".encode()).decode()
+
+    class _Handler(BaseHTTPRequestHandler):
+        def _serve(self) -> None:
+            if self.headers.get("Authorization") != expected:
+                self.send_response(401)
+                self.send_header("WWW-Authenticate", 'Basic realm="notes"')
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            path, _, query = self.path.partition("?")
+            body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            cgi_env = {
+                **os.environ,
+                "GIT_PROJECT_ROOT": str(root),
+                "GIT_HTTP_EXPORT_ALL": "1",
+                "PATH_INFO": path,
+                "QUERY_STRING": query,
+                "REQUEST_METHOD": self.command,
+                "REMOTE_USER": "notes",
+                "CONTENT_TYPE": self.headers.get("Content-Type", ""),
+                "CONTENT_LENGTH": str(len(body)),
+            }
+            out = subprocess.run(
+                ["git", "http-backend"], input=body, env=cgi_env, capture_output=True, check=True
+            ).stdout
+            head, _, rest = out.partition(b"\r\n\r\n")
+            status, headers = 200, []
+            for line in head.split(b"\r\n"):
+                key, _, value = line.decode().partition(": ")
+                if key.lower() == "status":
+                    status = int(value.split()[0])
+                elif key:
+                    headers.append((key, value))
+            self.send_response(status)
+            for key, value in headers:
+                self.send_header(key, value)
+            self.send_header("Content-Length", str(len(rest)))
+            self.end_headers()
+            self.wfile.write(rest)
+
+        do_GET = do_POST = _serve
+
+        def log_message(self, *_args: object) -> None:
+            """Keep the test's output to its own assertions."""
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return f"http://127.0.0.1:{server.server_address[1]}/notes.git", server
+
+
+def test_the_note_writer_can_push_to_a_remote_that_needs_the_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The writer's push authenticates with the repo token, through the image's askpass helper.
+
+    `knowledge-sync.sh checkout` clones the writer's checkout *with* the token and leaves a remote
+    URL that carries none, by design. The push then runs in a different container — the front door
+    or the background worker — and the only credential path the chart had was a helper that script
+    wrote into its *own* container's `/tmp`. So the token reached `_git_child_env()` (the test above
+    asserts it survives the scrub) and nothing handed it to git: driven here against a Basic-auth
+    remote, the push is refused with the token in the environment, and succeeds once `GIT_ASKPASS`
+    names `deploy/git-askpass.sh` — which is what `deploy/entrypoint.sh` now arms in every
+    application container. The token ends up in neither the clone's config nor its remote URL.
+    """
+    if subprocess.run(["git", "http-backend"], capture_output=True, env={}).returncode == 127:
+        pytest.skip("git http-backend is not installed")
+    from chemclaw.kg.git_writer import _git_child_env
+
+    token = "notes-push-token"
+    bare = tmp_path / "notes.git"
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(bare)], check=True)
+    subprocess.run(["git", "-C", str(bare), "config", "http.receivepack", "true"], check=True)
+    url, server = _basic_auth_git_remote(tmp_path, token)
+    try:
+        seed = tmp_path / "seed"
+        subprocess.run(["git", "init", "-q", "-b", "main", str(seed)], check=True)
+        identity = ["-c", "user.name=t", "-c", "user.email=t@example.org"]
+        subprocess.run(
+            ["git", "-C", str(seed), *identity, "commit", "-q", "--allow-empty", "-m", "seed"],
+            check=True,
+        )
+        subprocess.run(["git", "-C", str(seed), "push", "-q", str(bare), "main"], check=True)
+
+        monkeypatch.setenv("CHEMCLAW_KNOWLEDGE_REPO_TOKEN", token)
+        monkeypatch.setenv("GIT_TERMINAL_PROMPT", "0")
+        monkeypatch.delenv("GIT_ASKPASS", raising=False)
+        monkeypatch.delenv("SSH_ASKPASS", raising=False)
+        clone = tmp_path / "checkout"
+        subprocess.run(
+            ["git", "clone", "-q", url, str(clone)],
+            check=True,
+            env={**os.environ, "GIT_ASKPASS": str(_ASKPASS)},
+        )
+        subprocess.run(
+            ["git", "-C", str(clone), *identity, "commit", "-q", "--allow-empty", "-m", "note"],
+            check=True,
+        )
+
+        def _push() -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                ["git", "-C", str(clone), "push", "origin", "main"],
+                env=_git_child_env(),
+                capture_output=True,
+                text=True,
+                stdin=subprocess.DEVNULL,
+            )
+
+        refused = _push()
+        assert refused.returncode != 0, "the push succeeded with no credential path; probe broken"
+        assert "Username" in refused.stderr, refused.stderr
+
+        monkeypatch.setenv("GIT_ASKPASS", str(_ASKPASS))
+        pushed = _push()
+        assert pushed.returncode == 0, pushed.stderr
+        assert token not in pushed.stderr
+    finally:
+        server.shutdown()
+    assert token not in (clone / ".git" / "config").read_text(encoding="utf-8")
+
+
+def test_every_container_that_runs_git_against_the_notes_remote_arms_the_same_askpass() -> None:
+    """One helper, at one path, armed by both scripts that start git: the push's and the sync's.
+
+    The defect the test above drives was a credential path that existed in one container and not
+    the other. So the three places that must agree are read against each other: the Containerfile
+    installs `deploy/git-askpass.sh` at the path `deploy/entrypoint.sh` arms for the application
+    components and `deploy/knowledge-sync.sh` arms for the sync containers.
+    """
+    deploy = _ASKPASS.parent
+    containerfile = (deploy / "Containerfile").read_text(encoding="utf-8")
+    assert f"COPY deploy/git-askpass.sh {_ASKPASS_IN_IMAGE}" in containerfile
+    for script in ("entrypoint.sh", "knowledge-sync.sh"):
+        text = (deploy / script).read_text(encoding="utf-8")
+        armed = rf'export GIT_ASKPASS="\$\{{[A-Z_]+:-{re.escape(_ASKPASS_IN_IMAGE)}\}}"'
+        assert re.search(armed, text), (
+            f"deploy/{script} does not arm {_ASKPASS_IN_IMAGE} as GIT_ASKPASS"
+        )
+    answers = {
+        prompt: subprocess.run(
+            ["bash", str(_ASKPASS), prompt],
+            env={"CHEMCLAW_KNOWLEDGE_REPO_TOKEN": "tok", "PATH": os.environ["PATH"]},
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        for prompt in ("Username for 'https://git.example.org': ", "Password for 'https://x': ")
+    }
+    assert answers == {
+        "Username for 'https://git.example.org': ": "x-access-token\n",
+        "Password for 'https://x': ": "tok\n",
+    }
 
 
 def test_git_subprocess_receives_the_scrubbed_env(

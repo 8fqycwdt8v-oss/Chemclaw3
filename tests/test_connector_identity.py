@@ -753,8 +753,40 @@ def test_the_probe_allowlist_survives_being_mounted_under_a_name(
     assert asyncio.run(_status("/healthz", "")) == 200, "unmounted probe"
     assert asyncio.run(_status("/molfp/healthz", "/molfp")) == 200, "mounted probe"
     assert asyncio.run(_status("/molfp/metrics", "/molfp")) == 200, "mounted scrape"
+    assert asyncio.run(_status("/molfp/livez", "/molfp")) == 200, "mounted liveness probe"
     # The exemption is the probe routes, not the prefix: everything else still needs the token.
     assert asyncio.run(_status("/molfp/mcp", "/molfp")) == 401, "mounted MCP surface"
+
+
+def test_liveness_is_its_own_route_and_consults_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`/livez` answers whenever the process serves HTTP, whatever else is wrong with it.
+
+    The chart pointed liveness and readiness at one route, `/healthz`, so a check that route ever
+    gained would have become a reason for the kubelet to kill the container — a restart that
+    repairs no dependency and discards every tool call in flight. `Chemclaw3-mcp` forbids that
+    shape fleet-wide for exactly this reason; this repository's own connector servers and the MCP
+    face now carry the same split.
+
+    Two properties, each driven: it is open without a credential even on a connector whose auth
+    could not be resolved (the fail-closed path refuses everything else), and it answers with the
+    app's lifespan never run — no MCP session manager and no Postgres pool — which is what
+    "consults nothing" means for this app.
+    """
+    from fastapi.testclient import TestClient
+
+    from chemclaw.connectors.registry import ConnectorError
+    from chemclaw.connectors.server import connector_app
+
+    def _unreadable() -> dict[str, object]:
+        raise ConnectorError("/etc/connectors/other/connector.yaml: invalid manifest")
+
+    monkeypatch.setattr("chemclaw.connectors.registry.discovered", _unreadable)
+    # No `with`: the lifespan does not run, so nothing the app depends on has been started.
+    client = TestClient(connector_app(FastMCP("probe"), name="probe"))
+    response = client.get("/livez")
+    assert response.status_code == 200, "liveness must answer with no credential and no lifespan"
+    assert response.json() == {"status": "alive", "connector": "probe"}
+    assert client.post("/mcp", json={}).status_code == 401, "the MCP surface stays refused"
 
 
 def test_the_dev_runner_mints_a_credential_only_where_both_ends_are_ours(
