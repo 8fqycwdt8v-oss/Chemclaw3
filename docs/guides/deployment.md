@@ -603,10 +603,9 @@ is the Secret this chart reads, so both ends hold one value as long as the fleet
 release's namespace. A missing key keeps the server's pod in `CreateContainerConfigError` rather
 than letting it start and refuse every call, so add the key before you apply the server.
 
-The image is a **placeholder** that you must rewrite: `registry.invalid/chemclaw-mcp-<name>:unset`
-(older fleet revisions ship `chemclaw3/chemclaw-mcp-<name>:latest`). `.invalid` is a reserved
-top-level domain, so the new placeholder can never resolve to a registry. The overlay below
-rewrites both spellings to your digest.
+The image is a **placeholder** that you must rewrite: `registry.invalid/chemclaw-mcp-<name>:unset`.
+`.invalid` is a reserved top-level domain, so the placeholder can never resolve to a registry. The
+overlay below rewrites it to your digest.
 
 `MCP_ALLOWED_HOSTS` must contain the exact `host:port` the backend dials. The shipped value is the
 Service short name. If you dial a server by any other name, such as a namespace-qualified name or
@@ -633,16 +632,11 @@ images:
   - name: registry.invalid/chemclaw-mcp-$name
     newName: $REG/chemclaw-mcp-$name
     digest: ${DIGEST[$name]}
-  - name: chemclaw3/chemclaw-mcp-$name
-    newName: $REG/chemclaw-mcp-$name
-    digest: ${DIGEST[$name]}
 EOF
   kustomize build "$dir" | oc apply -n "$NS" -f -
 done
 ```
 
-- Only one of the two `images:` entries matches, depending on the fleet revision. The other is a
-  no-op.
 - Before applying, check that the rendered image is your registry path:
   `kustomize build "$dir" | grep 'image:'`. A placeholder left in the output means the `images:`
   name did not match.
@@ -855,7 +849,7 @@ Work through these in order. Each step names what a failure there points to.
   - The rendered `chemclaw-config`, together with the Secret keys, constructs `Settings`.
   - Removing `sslmode` from the DSN makes `Settings` refuse, as §2.2 says.
   - The §6.2 overlay builds with `kubectl kustomize` (kubectl v1.29.9, kustomize v5.0.4) for all
-    five servers, against a fleet tree with either image placeholder. The output validates with
+    five servers. The output validates with
     `kubeconform -strict -ignore-missing-schemas` (30 objects, 25 valid, the 5 ServiceMonitors
     skipped), every image is the digest, and each Deployment carries exactly one bearer entry.
 - **Not proven:** nothing here was applied to a live OpenShift cluster, so the `restricted-v2`

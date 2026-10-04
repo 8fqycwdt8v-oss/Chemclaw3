@@ -145,8 +145,7 @@ shipped `connectors:` block already enables `chem`, `safety` and `rxnpredict` as
    both ends read one variable from one Secret. Those deployment files already read it from
    `chemclaw-secrets` under the variable's own name, and not `optional`, so the key must exist
    before the server's pod can start. Rewrite their placeholder image
-   (`registry.invalid/chemclaw-mcp-<name>:unset`, or `chemclaw3/chemclaw-mcp-<name>:latest` in
-   older fleet revisions) to your published digest — `docs/guides/deployment.md` §6.2.
+   (`registry.invalid/chemclaw-mcp-<name>:unset`) to your published digest — `docs/guides/deployment.md` §6.2.
 3. Allow the dial: the host in `networkPolicy.egressDestinations` (unless you state
    `allowAnyDestination`), and its port in `networkPolicy.egressPorts` — the fleet's ports are
    already listed there.
