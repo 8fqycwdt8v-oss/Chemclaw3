@@ -1422,6 +1422,29 @@ async def _attempt(awaitable: Awaitable[_Result]) -> _Result | ValueError:
         return refusal
 
 
+async def _every_medium(branches: Sequence[Awaitable[_Result]]) -> list[_Result]:
+    """Run a screen's media together, and stop the rest the moment one of them fails the screen.
+
+    Each branch already turns a refusal into a value (`_attempt`), so what escapes one is an outage
+    or a contract fault — and that fails the whole activity, which Temporal then retries. A bare
+    `asyncio.gather` re-raises the first such error but leaves every sibling running: measured on
+    the fake server, a five-solvent screen whose first medium hit a full pod went on to make five
+    more relaxations for the other media after the screen had failed, against one (already in
+    flight) with this — and a retry stacks fresh work on top of work nobody will read.
+
+    So the siblings are cancelled, and awaited, before the error is re-raised. The error itself is
+    the first one, unchanged — not an `ExceptionGroup`, which is what `asyncio.TaskGroup` would
+    raise and what `durable/publish.py`'s by-name retry classification would not recognise.
+    """
+    tasks = [asyncio.ensure_future(branch) for branch in branches]
+    try:
+        return list(await asyncio.gather(*tasks))
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
 def _cause(refusal: ValueError) -> FailureCause:
     """Whether one item's refusal was about the item, or the server's clock stopping it."""
     return "time_budget" if isinstance(refusal, CalcTimeBudgetError) else "refused"
@@ -1560,9 +1583,9 @@ async def solvent_comparison(
                 )
             )
 
-    # `gather` preserves argument order, so the gas-phase reference stays first and the ranking
+    # Results come back in argument order, so the gas-phase reference stays first and the ranking
     # below sorts from a list whose order does not depend on which branch finished first.
-    outcomes = await asyncio.gather(*(one(solvent) for solvent in media))
+    outcomes = await _every_medium([one(solvent) for solvent in media])
     failed = [
         FailedMedium(solvent=solvent, reason=str(outcome), cause=_cause(outcome))
         for solvent, outcome in zip(media, outcomes, strict=True)
@@ -2158,9 +2181,9 @@ async def species_solvent_comparison(
                 )
             )
 
-    # `gather` preserves argument order, so the gas-phase reference (when present) stays first and
-    # every `standings` list is in the order the caller can read against `media`.
-    outcomes = await asyncio.gather(*(one(solvent) for solvent in media))
+    # Results come back in argument order, so the gas-phase reference (when present) stays first
+    # and every `standings` list is in the order the caller can read against `media`.
+    outcomes = await _every_medium([one(solvent) for solvent in media])
     failed = [
         FailedMedium(solvent=solvent, reason=str(outcome), cause=_cause(outcome))
         for solvent, outcome in zip(media, outcomes, strict=True)
