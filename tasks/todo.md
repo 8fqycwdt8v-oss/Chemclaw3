@@ -1,3 +1,32 @@
+# Deep documentation pass (2026-10-04)
+
+Goal: every operator-facing document true today, nothing stale, nothing undocumented, and a reader
+who has never seen the system can **deploy** it, **operate** it routinely and **troubleshoot** it
+from the docs alone. Scope: Chemclaw3, Chemclaw3-mcp, Chemclaw3_ui (each its own PR).
+
+Method: each document is checked claim by claim against the code it describes (settings, chart
+values/templates, Make targets, CLI entry points, alert rules, metrics). A claim the code refutes is
+fixed or deleted; a user-facing knob/command/alert with no doc gets one. ADRs and `docs/archive/`
+are append-only/historical and are **not** edited.
+
+- [ ] A. Root docs: `README.md`, `ARCHITECTURE.md`, `SECURITY.md`, `infra/README.md`, `docs/README.md`, `.env.example`
+- [ ] B. Delivery docs: `deploy/README.md`, `deploy/kind/README.md`, `deploy/jenkins/README.md`, chart `NOTES.txt`/`values.yaml` comments
+- [ ] C. Runbook first half (prereqs → workers/monitoring) verified
+- [ ] D. Runbook second half (alerts ↔ `prometheusrule.yaml`, migrations, rollback, restore, release, people, sinks, artefacts)
+- [ ] E. Package READMEs under `src/chemclaw/**`, `infra/sql/README.md`, `tests/README.md`
+- [ ] F. `docs/guides/*` (non-runbook) + `docs/planning/BACKLOG.md`/`DEFERRED.md` rows already closed by the code
+- [ ] G. New `docs/guides/deployment.md`: end-to-end install of the whole family (images, Postgres, Temporal, secrets, chart, MCP fleet, UI, wiring, verification)
+- [ ] H. New `docs/guides/troubleshooting.md`: symptom → cause → fix index over the runbook + routine-operations checklist
+- [ ] I. Chemclaw3-mcp: README, `docs/integration.md`, `docs/adding-a-server.md`, `MODULES.md`, server READMEs, deploy notes
+- [ ] J. Chemclaw3_ui: README, `docs/*`, `deploy/openshift/README.md`, stale tracker docs
+- [ ] Verify: `make lint type`, doc-guard tests + full `make test` (Postgres up), mcp `make check`, ui lint/test
+- [ ] Ship: one PR per repo, merged when green
+
+## Review
+(filled in at the end)
+
+---
+
 # Artefacts — hardening + activation
 
 Contract: "Hardening + activation (frozen 2026-10-03…)" of the artefacts wire contract (items 1-2 are

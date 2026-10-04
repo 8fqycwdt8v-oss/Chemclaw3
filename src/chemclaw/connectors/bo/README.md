@@ -1,7 +1,8 @@
 # `connectors/bo` — the Bayesian-optimization bundle
 
-The reference **connector-owned durable capability**, and the only bundle that carries all four
-halves at once: a manifest, an MCP tool server, Temporal work of its own, and a worker to host it.
+The reference **connector-owned durable capability**: with `connectors/calc` it is one of the two
+bundles that carry all four halves at once — a manifest, an MCP tool server, Temporal work of its
+own, and a worker to host it.
 
 | file | what it is |
 |---|---|
@@ -12,6 +13,7 @@ halves at once: a manifest, an MCP tool server, Temporal work of its own, and a 
 | `calculators.py` | the binding that hands `science/bo` its calculator seam, which `science/` may not import |
 | `knowledge.py` | a finished campaign, written up as a `bo-candidate` note a chemist can act on |
 | `worker.py` | the process that hosts the workflow and the activities on this bundle's own queue |
+| `skills/` | the `experiment-design` `SKILL.md` — the judgment for framing and steering a campaign |
 
 The engine underneath is `science/bo` — BoFire, the problem types, the campaign record — and the
 split is the one `ARCHITECTURE.md` calls a pair rather than a duplication: pure computation there,
