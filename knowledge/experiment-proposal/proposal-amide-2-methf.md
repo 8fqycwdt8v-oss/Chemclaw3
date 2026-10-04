@@ -33,4 +33,5 @@ fitted on the same runs.
   yield difference could still be recovery.
 
 Seed content: the chemistry is illustrative, the shape is what matters — a proposal that cites the
-run it answers, states what would refute it, and waits for a human to approve it (D-005).
+run it answers, and states what would refute it. It is a proposal, not an instruction: it changes
+nothing the agent does, so it lands without pre-approval and a chemist decides whether to run it.
