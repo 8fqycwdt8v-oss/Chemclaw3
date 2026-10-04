@@ -251,7 +251,7 @@ before this chart".
 
 | Component | `CHEMCLAW_COMPONENT` | Runs | Rendered as |
 |---|---|---|---|
-| Front door | `service` | `uvicorn chemclaw.api.app:create_app --factory` behind the **Route** | Deployment + Service + HPA + PDB `chemclaw-service` |
+| Front door | `service` | `uvicorn chemclaw.api.app:create_app --factory` behind the **Route**; any replica follows or stops a turn another replica is running, through Postgres, so the UI's BFF needs no affinity to reach one (D-2026-10-04-a-running-turn-is-reached-through-postgres-from-any-replica) | Deployment + Service + HPA + PDB `chemclaw-service` |
 | Background worker | `background-worker` | `python -m chemclaw.durable.background_worker` on `background-jobs` | Deployment `chemclaw-background-worker` (one replica) |
 | Connector server | `connector-<name>` | `python -m chemclaw.connectors.server_entry <name>` — that bundle's MCP tools | Deployment + Service `chemclaw-connector-<name>`, for a bundle with `server: true` and no `url:` |
 | Connector worker | `connector-worker-<name>` | `python -m chemclaw.connectors.<name>.worker` — that bundle's durable queue | Deployment, for a bundle with `worker: true` |

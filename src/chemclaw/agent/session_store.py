@@ -530,11 +530,16 @@ _SELECT_RECENT_USER_ROWS = (
 # interleaved by another process: `ON CONFLICT … DO UPDATE … WHERE` takes the row lock, and the
 # update only fires when the incumbent claim has expired. `RETURNING` is empty exactly when a live
 # claim was left alone, which is the caller's "someone else is running a turn" answer.
+#
+# `actor` is the turn's sender, so a replica that does not hold the turn can apply the stop route's
+# rule — a member stops only their own turn — before asking the holder to stop it
+# (`agent/turn_remotes.py`, `infra/sql/121_session_turn_remotes.sql`).
 _TURN_CLAIM = (
-    "INSERT INTO session_turns (session_id, holder, expires_at) "
-    "VALUES (%s, %s, now() + make_interval(secs => %s)) "
+    "INSERT INTO session_turns (session_id, holder, expires_at, actor) "
+    "VALUES (%s, %s, now() + make_interval(secs => %s), %s) "
     "ON CONFLICT (session_id) DO UPDATE "
-    "SET holder = EXCLUDED.holder, claimed_at = now(), expires_at = EXCLUDED.expires_at "
+    "SET holder = EXCLUDED.holder, claimed_at = now(), expires_at = EXCLUDED.expires_at, "
+    "actor = EXCLUDED.actor "
     "WHERE session_turns.expires_at <= now() "
     "RETURNING holder"
 )
@@ -802,6 +807,9 @@ _SESSION_DELETE: dict[str, str] = {
     "session_members": "DELETE FROM session_members WHERE session_id = %(session_id)s",
     "plan_authors": "DELETE FROM plan_authors WHERE session_id = %(session_id)s",
     "session_turn_queue": "DELETE FROM session_turn_queue WHERE session_id = %(session_id)s",
+    # Requests other replicas addressed to the session's running turn, and the frames in transit to
+    # them (`infra/sql/121_session_turn_remotes.sql`); the frames cascade from the request.
+    "session_turn_remotes": "DELETE FROM session_turn_remotes WHERE session_id = %(session_id)s",
     "session_owners": "DELETE FROM session_owners WHERE session_id = %(session_id)s",
 }
 
@@ -1456,16 +1464,19 @@ class SessionTurnClaims:
         """Borrow a connection on this store's database (see `_session_connection`)."""
         return _session_connection(self._dsn)
 
-    async def claim(self, session_id: str, holder: str, lease_seconds: float) -> bool:
+    async def claim(
+        self, session_id: str, holder: str, lease_seconds: float, *, actor: str | None = None
+    ) -> bool:
         """Take the session's turn slot for `lease_seconds`; False if someone else holds it.
 
         One statement, so no other process can observe the gap between the check and the take —
         the same atomicity the in-process `set` got for free from having no `await` between its
-        membership test and its `add`.
+        membership test and its `add`. `actor` is who sent the turn, recorded for the replicas
+        that do not hold it (`agent/turn_remotes.py`).
         """
         async with self._connection() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(_TURN_CLAIM, (session_id, holder, lease_seconds))
+                await cur.execute(_TURN_CLAIM, (session_id, holder, lease_seconds, actor))
                 taken = await cur.fetchone() is not None
             await conn.commit()
         return taken

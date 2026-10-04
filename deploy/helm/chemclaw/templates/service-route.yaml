@@ -21,25 +21,18 @@ metadata:
   labels:
     {{- include "chemclaw.labels" . | nindent 4 }}
   annotations:
-    # Pin a browser to one front-door pod (D-121). Not a performance preference — a correctness
-    # one. The per-session turn guard is durable (`session_turns`), and since the conversation
+    # Pin a browser to one front-door pod (D-121) — now a balancing preference, not a correctness
+    # requirement. The per-session turn guard is durable (`session_turns`), and since the conversation
     # layer moved to LangGraph the turn's own state is durable too — the plan and the message
     # history live in the Postgres checkpointer, not on a live in-process handle. Uploaded
     # attachments are durable as well (`session_attachments`,
-    # D-2026-10-04-an-upload-is-session-state-not-pod-state): they used to be the reason this
-    # annotation survived, and are no longer.
-    #
-    # **What still needs it is a running turn.** Its event pump lives in the process that started
-    # it, so following it (`GET /sessions/{id}/turn/stream`) and stopping it
-    # (`POST /sessions/{id}/turn/stop`) answer 404 "no turn is running for this session" on any
-    # other pod. A browser that stays on one pod reaches its turn; one that is balanced elsewhere
-    # mid-turn loses the live view (the answer still lands in the transcript).
-    #
-    # **A caller that does not come through this Route gets none of it.** The companion UI's BFF
-    # reaches `chemclaw-service:8080`, where no cookie exists, so with more than one replica its
-    # re-attach and stop calls can land on a pod that is not running the turn. Nothing here can
-    # fix that; it is the client's to route by session, or the turn's to become reachable from
-    # any pod.
+    # D-2026-10-04-an-upload-is-session-state-not-pod-state), and a running turn — whose pump lives
+    # in the pod that started it — is followed (`GET /sessions/{id}/turn/stream`) or stopped
+    # (`POST …/turn/stop`) from any other pod through Postgres
+    # (D-2026-10-04-a-running-turn-is-reached-through-postgres-from-any-replica). Both used to be
+    # reasons for this annotation; neither is any more, which is also why the companion UI's BFF,
+    # reaching `chemclaw-service:8080` with no cookie, loses nothing. The cookie is kept as a
+    # balancing nicety and nothing depends on it.
     #
     # The haproxy router sets its balancing cookie by default, so this is written down explicitly
     # rather than left to a default that a cluster-wide change could flip silently. `leastconn`

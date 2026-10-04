@@ -721,6 +721,9 @@ async def test_the_erase_statements_are_valid_sql() -> None:
         # A place in a session's line, by sender
         # (`D-2026-10-01-a-queued-message-waits-in-its-senders-request`).
         "session_turn_queue",
+        # A request to a running turn on another replica, by asker
+        # (`D-2026-10-04-a-running-turn-is-reached-through-postgres-from-any-replica`).
+        "session_turn_remotes",
         # Artefacts follow `session_messages` (`D-2026-10-02-an-artefact-is-part-of-the-answer-not-
         # an-effect`); their revisions cascade from the header.
         "session_exhibits",

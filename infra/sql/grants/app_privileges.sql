@@ -237,6 +237,13 @@ BEGIN
     -- (UPDATE), and a ticket leaves when it runs, is withdrawn, lapses or its sender is erased
     -- (DELETE). A session's whole line also goes by cascade behind its ownership row.
     EXECUTE format('GRANT INSERT, UPDATE, DELETE ON session_turn_queue TO %I', app_role);
+    -- `session_turn_remotes` and `session_turn_frames` (`121_session_turn_remotes.sql`): a replica
+    -- asks the holder of a running turn to follow or stop it (INSERT), refreshes its request while
+    -- it waits and the holder writes its answer onto it (UPDATE), and the request is withdrawn or
+    -- swept when it ends (DELETE); the holder relays frames (INSERT) that the asker consumes by
+    -- deleting them (DELETE). Both also go by cascade behind their session's ownership row.
+    EXECUTE format('GRANT INSERT, UPDATE, DELETE ON session_turn_remotes TO %I', app_role);
+    EXECUTE format('GRANT INSERT, DELETE ON session_turn_frames TO %I', app_role);
 
     -- `budget_usage` holds all three for three distinct writes, and none of them is a retention
     -- sweep. INSERT and UPDATE are the two arms of one upsert (`api/budget_store.py::_BOOK`): a

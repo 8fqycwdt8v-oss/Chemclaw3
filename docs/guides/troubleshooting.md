@@ -240,7 +240,7 @@ error event; the server's `turn.finished` line shows the turn completed.
 | The client stopped reading | `chemclaw_turn_send_timeouts_total`, `chemclaw_event_stream_send_timeouts_total` | client side; the turn is detached and continues (`chemclaw_turns_detached_total`) |
 | Reader too slow for the event rate | SSE `stream_lagged`; `chemclaw_turn_readers_lagged_total` | re-attach to `GET /sessions/{id}/turn/stream` |
 | Pod replaced mid-turn | 410 `turn_interrupted` on re-attach; `chemclaw_turns_finished_total{outcome="interrupted"}` | expected on a rollout beyond the drain window; ask again |
-| Request landed on another replica | re-attach or Stop 404 `no turn is running for this session` while the turn is still answering | a running turn is reachable only on its own pod: the Route must keep its affinity cookie (`haproxy.router.openshift.io/disable_cookies: "false"`) and a proxy in front must pass it. A caller through the Service (the UI's BFF) has no cookie; the answer still lands in the transcript |
+| Re-attach or Stop answers 503 `the replica running this turn did not answer` | `chemclaw_turn_relay_poll_failures_total` on the holding pod; a rollout with a pre-121 image still holding turns | the holding pod polls for requests from other replicas every `CHEMCLAW_SERVICE_TURN_RELAY_POLL_SECONDS`; retry, and check that pod's database reachability. An old image never answers — the 503 ends when its turns do |
 
 The UI BFF has its own upstream pools; `no upstream connection available` (503) means its pool is
 exhausted, not the backend ([§16](#16-the-ui-cannot-reach-the-backend-or-sign-in-loops)).

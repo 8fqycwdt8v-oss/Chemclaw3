@@ -816,6 +816,18 @@ def test_deleting_a_session_clears_every_table_it_reaches_and_no_one_elses() -> 
                         "VALUES (%s, 'member', now() + interval '1 minute')",
                         (session_id,),
                     )
+                    # A request from another replica to the session's turn, with a frame in
+                    # transit (`infra/sql/121_session_turn_remotes.sql`); the frame cascades.
+                    await cur.execute(
+                        "INSERT INTO session_turn_remotes (id, session_id, holder, kind, actor, "
+                        "state, lease_until) "
+                        "VALUES (%s, %s, 'h', 'watch', 'member', 'watching', now())",
+                        (f"remote-{session_id}", session_id),
+                    )
+                    await cur.execute(
+                        "INSERT INTO session_turn_frames (remote_id, frame) VALUES (%s, NULL)",
+                        (f"remote-{session_id}",),
+                    )
                     # An artefact and a revision under it (`infra/sql/115_session_exhibits.sql`):
                     # the header is what the delete names, and the revision is what the cascade
                     # has to take with it.
@@ -886,6 +898,7 @@ def test_deleting_a_session_clears_every_table_it_reaches_and_no_one_elses() -> 
         "session_members",
         "plan_authors",
         "session_turn_queue",
+        "session_turn_remotes",
         "session_exhibits",
         "session_attachments",
         "session_owners",

@@ -26,6 +26,7 @@ route) is layered on in F4.
 """
 
 import asyncio
+import contextlib
 import logging
 import time
 from collections.abc import AsyncIterator, Callable
@@ -48,6 +49,7 @@ from chemclaw.agent.profiles import get_profile, registered_profile_names
 from chemclaw.agent.session_events import stream_new_events
 from chemclaw.agent.subagents import refuse_an_unknown_roster
 from chemclaw.agent.turn_graph import refuse_an_unknown_peer_roster
+from chemclaw.agent.turn_remotes import TurnRemotes
 from chemclaw.agent.verifier import require_verifier_capability
 from chemclaw.api.auth import refuse_unusable_entra_ca_bundle
 from chemclaw.api.budget import BudgetTracker, drain_pending
@@ -94,6 +96,7 @@ from chemclaw.api.state import (
     _LiveSessions,
 )
 from chemclaw.api.tool_results import fetchable_refs, load_tool_result
+from chemclaw.api.turn_relay import TurnRelay
 from chemclaw.connectors.health import check_connectors_at_startup, probe_connectors
 from chemclaw.connectors.registry import skills_dirs as connector_skills_dirs
 from chemclaw.core import db
@@ -319,6 +322,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     async with db.pooling():
         app.state.connector_health = await check_connectors_at_startup()
         app.state.connector_health_at = time.monotonic()
+        relay: TurnRelay | None = app.state.turn_relay
+        serving = asyncio.create_task(relay.run(), name="turn-relay") if relay else None
         try:
             yield
         finally:
@@ -326,6 +331,11 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             # its checkpoint, its transcript and its cost row through all three.
             running_turns: RunningTurns = app.state.running_turns
             await running_turns.drain(settings.service_turn_timeout_seconds)
+            # After the drain, so a Stop sent from another replica still reaches a draining turn.
+            if serving is not None:
+                serving.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await serving
             # After the turns, because a draining turn books its own spend on the way out, and
             # before the pool closes, because the booking needs it. A budget booking is scheduled
             # off the hot path (`api/budget._schedule`, which is synchronous by D-130), so without
@@ -504,6 +514,15 @@ def create_app(
     # both processes can see; None under the in-memory session store, where two processes share no
     # history to corrupt.
     app.state.turn_claims = turn_claims if turn_claims is not None else _default_turn_claims()
+    # And what lets a turn held here be followed and stopped from every other replica — and a turn
+    # held elsewhere be followed and stopped from here
+    # (`D-2026-10-04-a-running-turn-is-reached-through-postgres-from-any-replica`). Only where the
+    # claim above is durable: that is when another replica can be holding a session's turn at all.
+    app.state.turn_relay = (
+        TurnRelay(TurnRemotes(), app.state.running_turns, app.state.active_turns)
+        if app.state.turn_claims is not None and settings.session_store == "postgres"
+        else None
+    )
     # Each session's line of messages waiting for its running turn to end
     # (`D-2026-10-01-a-queued-message-waits-in-its-senders-request`), and what wakes this process's
     # waiters when a turn here ends. The line is durable exactly where the claim above is.

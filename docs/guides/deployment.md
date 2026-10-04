@@ -745,12 +745,14 @@ oc -n "$NS" set image deployment/chemclaw3-ui ui="$REG/chemclaw3-ui@sha256:<ui-d
 ### 7.4 Plain Kubernetes differences
 
 - `route.enabled: false`, then add an Ingress to `chemclaw-service:8080` (and two for the UI).
-  **Enable cookie-based session affinity.** A running turn's event stream lives in the front-door
-  pod that started it, so following it (`GET /sessions/{id}/turn/stream`) or stopping it
-  (`POST …/turn/stop`) has to reach that pod; on any other it answers 404. The OpenShift Route sets
-  this with `haproxy.router.openshift.io/disable_cookies: "false"` (`templates/service-route.yaml`).
-  Uploaded attachments do **not** need it: they are stored in Postgres (`session_attachments`) and
-  every replica reads them.
+  **Session affinity is not required.** Uploaded attachments are stored in Postgres
+  (`session_attachments`, D-2026-10-04-an-upload-is-session-state-not-pod-state) and every replica
+  reads them, and a running turn can be followed (`GET /sessions/{id}/turn/stream`) or stopped
+  (`POST …/turn/stop`) on any replica, which asks the pod holding the turn through Postgres
+  (D-2026-10-04-a-running-turn-is-reached-through-postgres-from-any-replica). The UI's BFF, which
+  reaches `chemclaw-service:8080` with no cookie, therefore keeps its uploads, its live view and its
+  Stop. The Route's affinity cookie (`templates/service-route.yaml`) is harmless and nothing
+  depends on it.
 - Replace the OpenShift selectors in `networkPolicy.ingressNamespaces` and
   `networkPolicy.monitoringNamespaces` with your ingress controller's and Prometheus's namespaces,
   for example `kubernetes.io/metadata.name: ingress-nginx`. Without Prometheus Operator, set

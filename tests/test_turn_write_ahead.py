@@ -289,7 +289,7 @@ async def test_an_answered_turn_reads_back_as_it_always_did_with_its_question_se
 
 
 async def test_a_turn_whose_process_died_is_marked_interrupted_once_and_the_next_turn_runs(
-    durable: None,
+    durable: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The K5 §1 scenario, end to end, with every noticer production code.
 
@@ -299,14 +299,21 @@ async def test_a_turn_whose_process_died_is_marked_interrupted_once_and_the_next
     outcome is booked exactly once however many readers noticed, and the next turn runs and leaves
     the model's record and the chemist's agreeing about every question asked.
     """
+    # The reattach inside the lease asks the claim's holder for a view
+    # (`D-2026-10-04-a-running-turn-is-reached-through-postgres-from-any-replica`); a short relay
+    # lease keeps its wait for a holder that will never answer short.
+    monkeypatch.setattr(settings, "service_turn_relay_poll_seconds", 0.05)
+    monkeypatch.setattr(settings, "service_turn_relay_lease_seconds", 0.5)
     session_id = await _session()
     try:
         await _a_turn_whose_process_dies(session_id, "resilience one", "wa-dead-1")
 
         async with _client(session_id) as client:
-            # Still inside the lease: a slow turn elsewhere, not a dead one.
+            # Still inside the lease: a slow turn elsewhere, not a dead one — so the reattach asks
+            # the holder, and a holder that does not answer is a retryable 503, never "gone".
             early = await client.get(f"/sessions/{session_id}/turn/stream")
-            assert early.status_code == 404, early.text
+            assert early.status_code == 503, early.text
+            assert "Retry-After" in early.headers
             listed = (await client.get(f"/sessions/{session_id}/messages")).json()
             assert [row["turn_status"] for row in listed] == ["running"], listed
 

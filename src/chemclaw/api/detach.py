@@ -114,6 +114,11 @@ _LAGGED_MESSAGE = (
 )
 
 
+def lagged_frame() -> dict[str, str]:
+    """The frame a view that fell a full buffer behind ends on — here and when relayed elsewhere."""
+    return sse_frame(ErrorEvent(message=_LAGGED_MESSAGE, code="stream_lagged", retryable=True))
+
+
 class _DraftSlot:
     """A queued `exhibit_draft` frame whose content a newer frame of the same call may replace.
 
@@ -421,9 +426,7 @@ class DetachableTurn:
                 if item is _DONE:
                     return
                 if item is _LAGGED:
-                    yield sse_frame(
-                        ErrorEvent(message=_LAGGED_MESSAGE, code="stream_lagged", retryable=True)
-                    )
+                    yield lagged_frame()
                     return
                 if isinstance(item, _DraftSlot):
                     # Taken: a later draft of this call is queued afresh, behind what came between.
@@ -617,6 +620,14 @@ class RunningTurns:
         """The session's running turn, or `None` when no turn is live."""
         turn = self._turns.get(session_id)
         return turn if turn is not None and turn.running else None
+
+    def live(self) -> list[tuple[str, DetachableTurn]]:
+        """Every session with a turn running here, and the turn — a snapshot, safe to iterate.
+
+        What `api/turn_relay.TurnRelay` polls for: the requests other replicas address to a turn
+        can only be answered by the process whose registry holds it.
+        """
+        return [(session_id, turn) for session_id, turn in self._turns.items() if turn.running]
 
     async def drain(self, timeout: float) -> int:
         """Wait up to `timeout` for every live pump to finish; report how many did not.

@@ -316,10 +316,15 @@ _ERASE: tuple[tuple[str, str], ...] = (
     # `holder` as well as the session scope: a turn lease names the actor holding it, and releasing
     # a departed person's lease is the point. The session-scoped half alone would leave a lease held
     # on a session whose ownership row had already gone in the same run.
+    #
+    # `actor` too since 121: it is the sender of the turn the lease covers, recorded so another
+    # replica can apply the stop route's sender rule
+    # (`D-2026-10-04-a-running-turn-is-reached-through-postgres-from-any-replica`).
     (
         "session_turns",
         "DELETE FROM session_turns "
-        f"WHERE holder = ANY(%(actors)s) OR session_id IN ({_SESSION_SCOPED})",
+        "WHERE holder = ANY(%(actors)s) OR actor = ANY(%(actors)s) "
+        f"OR session_id IN ({_SESSION_SCOPED})",
     ),
     ("subscriptions", "DELETE FROM subscriptions WHERE owner = ANY(%(actors)s)"),
     ("user_preferences", "DELETE FROM user_preferences WHERE owner = ANY(%(actors)s)"),
@@ -371,6 +376,14 @@ _ERASE: tuple[tuple[str, str], ...] = (
         "session_turn_queue",
         "DELETE FROM session_turn_queue "
         f"WHERE sender = ANY(%(actors)s) OR session_id IN ({_SESSION_SCOPED})",
+    ),
+    # A request to a running turn on another replica names its asker (`agent/turn_remotes.py`): a
+    # lease of seconds, but theirs, and a departed person's follow or stop must not be served. Its
+    # relayed frames go with it by cascade. `holder` names a process, not a person.
+    (
+        "session_turn_remotes",
+        "DELETE FROM session_turn_remotes "
+        f"WHERE actor = ANY(%(actors)s) OR session_id IN ({_SESSION_SCOPED})",
     ),
     ("session_owners", "DELETE FROM session_owners WHERE owner = ANY(%(actors)s)"),
 )

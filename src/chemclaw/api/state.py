@@ -23,7 +23,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from fastapi import FastAPI, Request
 
@@ -35,6 +35,9 @@ from chemclaw.connectors.health import ConnectorHealth
 from chemclaw.core.bounded import BoundedLru
 from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
+
+if TYPE_CHECKING:  # `api/turn_relay` reads this module's lease and holder identity at import
+    from chemclaw.api.turn_relay import TurnRelay
 
 logger = logging.getLogger(__name__)
 
@@ -155,8 +158,10 @@ class SessionTurns(Protocol):
     durable path and a test injects an in-memory fake.
     """
 
-    async def claim(self, session_id: str, holder: str, lease_seconds: float) -> bool:
-        """Take the session's turn slot for `lease_seconds`; False if someone else holds it."""
+    async def claim(
+        self, session_id: str, holder: str, lease_seconds: float, *, actor: str | None = None
+    ) -> bool:
+        """Take the session's turn slot for `lease_seconds`, as `actor`'s turn; False if taken."""
         ...
 
     async def refresh(self, session_id: str, holder: str, lease_seconds: float) -> bool:
@@ -722,6 +727,16 @@ class FrontDoorState:
         """The durable cross-process turn claim, or None under the in-memory session store."""
         claims: SessionTurns | None = self._app.state.turn_claims
         return claims
+
+    @property
+    def turn_relay(self) -> "TurnRelay | None":
+        """How a turn held by another replica is followed and stopped from here, and vice versa.
+
+        `None` exactly where `turn_claims` is: under the in-memory store no other replica can hold
+        a session's turn.
+        """
+        relay: TurnRelay | None = self._app.state.turn_relay
+        return relay
 
     @property
     def turn_queue(self) -> TurnQueue:

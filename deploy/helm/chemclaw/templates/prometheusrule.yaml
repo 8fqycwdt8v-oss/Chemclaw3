@@ -309,6 +309,26 @@ spec:
                leaving old and new replicas up together all push the live sum past the ceiling with
                every pod's own config still perfectly valid. Comparing the two gauges is the only
                way to see it. Self-disabling: the ceiling gauge is 0 when undeclared. */}}
+        {{- /* A pod holding turns polls for the follows and Stops other replicas address to them
+               (D-2026-10-04-a-running-turn-is-reached-through-postgres-from-any-replica). A failing
+               poll is invisible from the holding pod's own traffic: its chemists are fine, and it is
+               the chemists whose request landed on *another* replica who get a 503 on Stop and a
+               reattach that never opens. The steady-state rate is zero; the threshold is about
+               two seconds of failed polls at the shipped 0.25 s interval, so one dropped connection
+               does not page and a database path that stays broken does. */}}
+        - alert: ChemclawTurnRelayFailing
+          expr: increase(chemclaw_turn_relay_poll_failures_total[5m]) > 8
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawturnrelayfailing
+            summary: A front-door pod cannot read requests for its running turns from other replicas
+            description: >-
+              The pod holding a turn polls Postgres for the follows and Stops other replicas send
+              it, and that poll is failing. A Stop pressed on another replica answers 503 and a
+              reattach there never opens, while the turn's own sender sees nothing wrong.
+
         - alert: ChemclawFleetAboveItsTurnCeiling
           expr: >-
             max(chemclaw_fleet_turn_ceiling) > 0

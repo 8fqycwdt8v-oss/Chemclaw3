@@ -712,6 +712,16 @@ class Settings(
                 "place in line each time it asks, so at or above the lease every place lapses "
                 "between asks and every queued message reads as withdrawn."
             )
+        # The same shape one table over (`agent/turn_remotes`): a request another replica addresses
+        # to a running turn is refreshed every poll and lapses after its lease, so a poll at or
+        # above the lease lapses every follow and every Stop between two refreshes.
+        if self.service_turn_relay_poll_seconds >= self.service_turn_relay_lease_seconds:
+            raise ValueError(
+                f"service_turn_relay_poll_seconds ({self.service_turn_relay_poll_seconds:g}) must "
+                "be below service_turn_relay_lease_seconds "
+                f"({self.service_turn_relay_lease_seconds:g}): a request to a turn on another "
+                "replica is refreshed each poll, so at or above the lease it lapses between polls."
+            )
         # **A fairness cap at or above the cap it divides refuses nothing while reading as
         # protection**, and it publishes that reading on `chemclaw_turn_actor_capacity`. The chart's
         # own pair is held apart by `tests/test_deploy_chart.py`, but that test reads `values.yaml`

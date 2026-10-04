@@ -43,6 +43,9 @@ GUARDED = {
     # An artefact's spec refuses non-finite numbers in its own model, and this guard is the second
     # wall rather than the first: a revision is append-only, so a bad row could never be tidied.
     "chemclaw/exhibits/store.py",
+    # A relayed turn frame is the same event the local SSE stream sends; refusing a non-finite
+    # number at the write keeps a remote view from carrying a frame no client could parse.
+    "chemclaw/agent/turn_remotes.py",
 }
 
 #: Sites that still construct `Jsonb` directly, with the reason each is not yet converted.
