@@ -539,6 +539,13 @@ _NOT_PRUNED: dict[str, str] = {
     "swept by the next enqueue on its session, and the whole line cascades from the session's "
     "ownership row (`infra/sql/113_session_turn_queue.sql`) — never on a clock of its own, "
     "because a live row is a person waiting",
+    "session_turn_remotes": "a lease per request another replica addresses to a running turn, "
+    "withdrawn by its asker when the follow or the stop ends; a lapsed one is swept by the "
+    "holder's next poll, and the whole set cascades from the session's ownership row "
+    "(`infra/sql/121_session_turn_remotes.sql`) — never on a clock of its own, because a live row "
+    "is somebody following or stopping a turn",
+    "session_turn_frames": "frames in transit between two replicas, deleted by the asker as it "
+    "reads them and by cascade with their request (`infra/sql/121_session_turn_remotes.sql`)",
     "audit_anchors": "retired with the audit hash chain; nothing writes it and the table is empty",
     "store_vectors": "not created in this deployment — the memory store is built without an "
     "`index_config`, so `AsyncPostgresStore.setup()` never makes it",

@@ -1510,6 +1510,14 @@ failing at once, check the model gateway's credential first**: a 401/403 from
 naming the gateway host and status — rotate `CHEMCLAW_LLM_API_KEY`
 ([troubleshooting §8](troubleshooting.md#8-model-gateway-errors)).
 
+#### ChemclawTurnRelayFailing
+`warning`. A pod holding running turns cannot read the follows and Stops other replicas address to
+them (`chemclaw_turn_relay_poll_failures_total`; its WARNING `could not read the requests other
+replicas addressed to this process's turns` carries the exception). Its own chemists see nothing
+wrong; a chemist whose request the Service balanced to another pod gets a 503 on Stop and a reattach
+that never opens until the turn ends. It is that pod's database path — read `ChemclawPgPoolSaturated`
+beside it (D-2026-10-04-a-running-turn-is-reached-through-postgres-from-any-replica).
+
 #### ChemclawFleetAboveItsTurnCeiling
 `warning`. More front-door pods are running than the declared fleet ceiling accounts for, so the
 shared LLM endpoint can be offered more concurrent turns than its budget permits. A manual scale, an

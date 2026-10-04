@@ -251,6 +251,12 @@ _COUNTERS: dict[str, str] = {
     "chemclaw_turn_readers_lagged_total": (
         "Views of a running turn cut off because their reader fell a full buffer behind."
     ),
+    # The holder's poll for requests other replicas address to its turns
+    # (`D-2026-10-04-a-running-turn-is-reached-through-postgres-from-any-replica`). A failing poll
+    # is what turns a Stop sent to another replica into a 503 and a reattach there into a wait.
+    "chemclaw_turn_relay_poll_failures_total": (
+        "Polls for requests addressed to this process's turns by other replicas that failed."
+    ),
     "chemclaw_turn_timeouts_total": "Turns cancelled by the wall-clock turn timeout.",
     # A separate series from the one above, and deliberately so: this counts turns cut because the
     # *client* stopped reading (`service_sse_send_timeout_seconds`), not because the turn ran long.

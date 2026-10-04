@@ -37,6 +37,12 @@ metadata:
     #
     # So the way to remove this is to give attachments a durable home, not to change engines.
     #
+    # **A running turn is not a reason for it.** Its pump lives in the pod that started it, but
+    # following it (`GET /sessions/{id}/turn/stream`) or stopping it (`POST …/turn/stop`) on any
+    # other pod asks the holder through Postgres
+    # (D-2026-10-04-a-running-turn-is-reached-through-postgres-from-any-replica) — which is also
+    # what the companion UI's BFF needs, since it reaches `chemclaw-service:8080` with no cookie.
+    #
     # The haproxy router sets its balancing cookie by default, so this is written down explicitly
     # rather than left to a default that a cluster-wide change could flip silently. `leastconn`
     # rather than round-robin because turns are long-lived and wildly uneven in duration.

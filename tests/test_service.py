@@ -1359,7 +1359,9 @@ class _SharedTurnClaims:
     def __init__(self) -> None:
         self.holders: dict[str, str] = {}
 
-    async def claim(self, session_id: str, holder: str, lease_seconds: float) -> bool:
+    async def claim(
+        self, session_id: str, holder: str, lease_seconds: float, *, actor: str | None = None
+    ) -> bool:
         if session_id in self.holders:
             return False
         self.holders[session_id] = holder
