@@ -145,9 +145,9 @@ and an HTML-sandbox port, plus two Routes on two hosts (`Chemclaw3_ui:deploy/ope
   API that publishes `chemclaw_turns_in_flight`, which the HPA's occupancy metric uses
   (`service.autoscaling.occupancy`). Without that API the HPA falls back to CPU and
   `kubectl describe hpa` reports `FailedGetPodsMetric`.
-- **Security context.** Chart pods run as `runAsNonRoot`, with every capability dropped and no
-  fixed UID, so they admit under OpenShift `restricted-v2`. The fleet Deployments **do** pin
-  `runAsUser: 1001` and `fsGroup: 1001`, which `restricted-v2` rejects. §6.3 covers the fix.
+- **Security context.** Chart pods and the fleet Deployments both run as `runAsNonRoot`, with
+  every capability dropped and no fixed UID, so they admit under OpenShift `restricted-v2` as
+  shipped (§6.3).
 
 ### 2.2 PostgreSQL
 
@@ -597,9 +597,16 @@ per-server table, with interactive-queue sizing, is `Chemclaw3-mcp:docs/operatio
 Each server's bearer variable is whatever its manifest declares as `auth.token_env`
 (`Chemclaw3-mcp:manifests/<name>/connector.yaml`, or `Chemclaw3-mcp:manifests-internal/<name>/connector.yaml`
 for `calc` and `rxnlabel`). Each server **fails closed**: if the variable is unset, every `/mcp`
-call is refused. **The shipped fleet Deployments do not wire that variable**, and they reference a
-placeholder image `chemclaw3/chemclaw-mcp-<name>:latest`. You supply both. The overlay below does
-it.
+call is refused. **The shipped fleet Deployments already wire that variable** from the Secret
+`chemclaw-secrets`, under the key of the same name (a `secretKeyRef` that is not `optional`). That
+is the Secret this chart reads, so both ends hold one value as long as the fleet runs in the
+release's namespace. A missing key keeps the server's pod in `CreateContainerConfigError` rather
+than letting it start and refuse every call, so add the key before you apply the server.
+
+The image is a **placeholder** that you must rewrite: `registry.invalid/chemclaw-mcp-<name>:unset`
+(older fleet revisions ship `chemclaw3/chemclaw-mcp-<name>:latest`). `.invalid` is a reserved
+top-level domain, so the new placeholder can never resolve to a registry. The overlay below
+rewrites both spellings to your digest.
 
 `MCP_ALLOWED_HOSTS` must contain the exact `host:port` the backend dials. The shipped value is the
 Service short name. If you dial a server by any other name, such as a namespace-qualified name or
@@ -608,13 +615,14 @@ an ingress host, add that name too, or `/mcp` answers `421` while `/healthz` sta
 ### 6.2 Render and apply with a kustomize overlay
 
 Run this from any directory next to a `Chemclaw3-mcp` checkout. It copies each server's shipped
-manifests, pins the image by digest, and adds the bearer from `chemclaw-secrets`:
+manifests and pins the image by digest. It does not add the bearer, because the Deployment already
+reads it (§6.1). A JSON-patch `add` to `.../env/-` would append a second entry with the same name:
 
 ```sh
 MCP=../Chemclaw3-mcp; NS=chemclaw-prod; REG=registry.example.com/chemclaw
 declare -A DIGEST=( [chem]=sha256:… [safety]=sha256:… [rxnpredict]=sha256:… [calc]=sha256:… [rxnlabel]=sha256:… )
 for name in "${!DIGEST[@]}"; do
-  src="$MCP/servers/$name/deploy"; dir="fleet-overlay/$name"; token_env="CHEMCLAW_${name^^}_TOKEN"
+  src="$MCP/servers/$name/deploy"; dir="fleet-overlay/$name"
   mkdir -p "$dir"; cp "$src"/{deployment,service,networkpolicy,pdb,hpa,servicemonitor}.yaml "$dir/"
   cat >"$dir/kustomization.yaml" <<EOF
 apiVersion: kustomize.config.k8s.io/v1beta1
@@ -622,23 +630,22 @@ kind: Kustomization
 namespace: $NS
 resources: [deployment.yaml, service.yaml, networkpolicy.yaml, pdb.yaml, hpa.yaml, servicemonitor.yaml]
 images:
+  - name: registry.invalid/chemclaw-mcp-$name
+    newName: $REG/chemclaw-mcp-$name
+    digest: ${DIGEST[$name]}
   - name: chemclaw3/chemclaw-mcp-$name
     newName: $REG/chemclaw-mcp-$name
     digest: ${DIGEST[$name]}
-patches:
-  - target: {kind: Deployment, name: chemclaw-mcp-$name}
-    patch: |-
-      - op: add
-        path: /spec/template/spec/containers/0/env/-
-        value:
-          name: $token_env
-          valueFrom:
-            secretKeyRef: {name: chemclaw-secrets, key: $token_env}
 EOF
   kustomize build "$dir" | oc apply -n "$NS" -f -
 done
 ```
 
+- Only one of the two `images:` entries matches, depending on the fleet revision. The other is a
+  no-op.
+- Before applying, check that the rendered image is your registry path:
+  `kustomize build "$dir" | grep 'image:'`. A placeholder left in the output means the `images:`
+  name did not match.
 - The token naming rule `CHEMCLAW_<NAME>_TOKEN` holds for every server in the table, and
   `deploy/kind/render-fleet.sh` checks it against each server's source before relying on it.
 - Without Prometheus Operator CRDs, drop `servicemonitor.yaml` from both the `cp` and `resources`.
@@ -647,32 +654,12 @@ done
 - Resource sizing per server (replicas, requests) is in `Chemclaw3-mcp:MODULES.md`. `calc` alone
   asks for 1 CPU and 1 GiB per pod across 2 to 8 replicas.
 
-### 6.3 OpenShift: the fixed UID
+### 6.3 OpenShift: no SCC grant needed
 
-Every fleet Deployment sets `runAsUser: 1001`, `runAsGroup: 1001` and `fsGroup: 1001`. The
-`restricted-v2` SCC rejects a UID outside the namespace's range, so the ReplicaSet reports
-`unable to validate against any security context constraint`. Choose one fix:
-
-- **Grant `nonroot-v2`** (keeps the UID the images were built and tested with). The fleet pods run
-  as the `default` ServiceAccount:
-
-  ```sh
-  oc adm policy add-scc-to-user nonroot-v2 -z default -n "$NS"
-  ```
-
-- **Or strip the fixed IDs** by adding this to each overlay's `patches:` list. The pod then gets an
-  arbitrary UID, which the fleet's tests do not exercise:
-
-  ```yaml
-  - target: {kind: Deployment, name: chemclaw-mcp-<name>}
-    patch: |-
-      - op: remove
-        path: /spec/template/spec/securityContext/runAsUser
-      - op: remove
-        path: /spec/template/spec/securityContext/runAsGroup
-      - op: remove
-        path: /spec/template/spec/securityContext/fsGroup
-  ```
+The fleet Deployments set `runAsNonRoot: true` and pin no `runAsUser`, `runAsGroup` or `fsGroup`.
+`restricted-v2` assigns a UID from the namespace's range, and each server writes only to its `/tmp`
+`emptyDir`, which is writable under any UID. Apply them as shipped, with no `nonroot-v2` grant and
+no patch.
 
 ### 6.4 How the backend finds the fleet
 
@@ -765,7 +752,6 @@ oc -n "$NS" set image deployment/chemclaw3-ui ui="$REG/chemclaw3-ui@sha256:<ui-d
   `networkPolicy.monitoringNamespaces` with your ingress controller's and Prometheus's namespaces,
   for example `kubernetes.io/metadata.name: ingress-nginx`. Without Prometheus Operator, set
   `monitoring.enabled: false`. That also drops the dashboards ConfigMap.
-- Leave out the SCC step in §6.3. Pod Security `restricted` admits a fixed non-root UID.
 
 ---
 
@@ -868,9 +854,12 @@ Work through these in order. Each step names what a failure there points to.
   - The same file plus the §7.4 overrides validates with no skips.
   - The rendered `chemclaw-config`, together with the Secret keys, constructs `Settings`.
   - Removing `sslmode` from the DSN makes `Settings` refuse, as §2.2 says.
-  - The §6.2 overlay builds with kustomize 5.4.3 and validates for all five servers.
-- **Not proven:** nothing here was applied to a live OpenShift cluster, so the SCC behaviour in
-  §6.3, the Entra `aud` and `iss` behaviour in §2.4 and the `temporal` CLI flags are stated from
+  - The §6.2 overlay builds with `kubectl kustomize` (kubectl v1.29.9, kustomize v5.0.4) for all
+    five servers, against a fleet tree with either image placeholder. The output validates with
+    `kubeconform -strict -ignore-missing-schemas` (30 objects, 25 valid, the 5 ServiceMonitors
+    skipped), every image is the digest, and each Deployment carries exactly one bearer entry.
+- **Not proven:** nothing here was applied to a live OpenShift cluster, so the `restricted-v2`
+  admission in §6.3, the Entra `aud` and `iss` behaviour in §2.4 and the `temporal` CLI flags are stated from
   platform documentation rather than from a run.
 
 ---

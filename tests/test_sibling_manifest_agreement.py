@@ -183,6 +183,14 @@ def _comparable_mapping(mapping: dict[str, Any]) -> tuple[tuple[str, Any], ...]:
 #: `infra/live/e2e-full-stack/up.sh` lets the fleet's copy win and bind — which that script's own
 #: directory order makes false. `test_the_e2e_lane_binds_no_opt_in_bundle_by_default` derives the
 #: harmlessness claim from the script instead of restating it.
+#:
+#: **Transitional, and the follow-up deletes it.** The fleet is adopting `default_enabled: false`
+#: for these five manifests (`Chemclaw3-mcp` branch `fix/fleet-placeholder-and-opt-in`), and the
+#: two repositories cannot merge in one instant: CI here reads the fleet's `main`, so until that
+#: lands the trees diverge, and after it they agree. `_TRANSITIONAL_ROWS` lets these rows pass in
+#: either state. The follow-up (`fix/fleet-followups-step3` here) deletes this constant, its five
+#: rows and `_TRANSITIONAL_ROWS` together, once the fleet's `main` carries the flag — from then on
+#: an agreement is the only accepted state, and a fleet copy that drops the flag again fails.
 _OPT_IN_ARGUMENT = (
     "this tree declares `default_enabled: false` and the fleet's copy declares nothing, which "
     "means True there — and the divergence is the decision rather than a drift "
@@ -259,6 +267,13 @@ _ARGUED_DIVERGENCES: dict[tuple[str, str], str] = {
     ),
 }
 
+#: Rows of `_ARGUED_DIVERGENCES` that may *either* diverge or agree, because the two repositories
+#: are mid-way through converging on them and CI on each side reads the other's `main`. Every other
+#: row still fails the moment the trees agree. Deleted with `_OPT_IN_ARGUMENT` (see its comment).
+_TRANSITIONAL_ROWS: frozenset[tuple[str, str]] = frozenset(
+    key for key, why in _ARGUED_DIVERGENCES.items() if why is _OPT_IN_ARGUMENT
+)
+
 
 def _sibling_or_skip() -> Path:
     """The fleet checkout, or a skip naming what went unread."""
@@ -327,6 +342,8 @@ def test_a_bundle_declared_in_both_trees_declares_the_same_surface() -> None:
             argued = _ARGUED_DIVERGENCES.get((name, field))
             agrees = _comparable(mine.get(field)) == _comparable(theirs.get(field))
             if argued is not None:
+                if (name, field) in _TRANSITIONAL_ROWS:
+                    continue
                 assert not agrees, (
                     f"`{name}`'s `{field}` is recorded as an argued divergence and the two trees "
                     f"now agree about it. Delete that row from `_ARGUED_DIVERGENCES`: a row that "
@@ -380,7 +397,7 @@ def test_a_bundle_declared_in_both_trees_declares_the_same_surface() -> None:
         )
 
 
-#: The script whose directory order `_OPT_IN_ARGUMENT` makes a claim about.
+#: The script whose directory order decides which copy of an opt-in bundle's manifest is read.
 _E2E_UP = REPO_ROOT / "infra/live/e2e-full-stack/up.sh"
 
 
@@ -410,8 +427,22 @@ def _e2e_connectors_dir(fleet: Path) -> str:
     return value
 
 
+def _opt_in_here() -> set[str]:
+    """Every bundle this tree's own manifest declares `default_enabled: false`.
+
+    Read off this repository's files rather than off `_ARGUED_DIVERGENCES`: those rows exist only
+    while the fleet's copy disagrees, and the opt-in decision is this repository's whether or not it
+    does. Deriving the set from the rows would empty it the day the fleet adopted the flag.
+    """
+    return {
+        name
+        for name, path in bundles_declared_here().items()
+        if _manifest(path).get("default_enabled", True) is False
+    }
+
+
 def test_the_e2e_lane_binds_no_opt_in_bundle_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every bundle `_OPT_IN_ARGUMENT` excuses is unbound under `up.sh`'s own wiring.
+    """Every bundle this tree declares opt-in is unbound under `up.sh`'s own wiring.
 
     The rows used to say the opposite — that in the four-repo lane the fleet's copy wins the name
     and these bundles bind — and nothing checked it: `up.sh` lists this tree's connectors first and
@@ -423,15 +454,16 @@ def test_the_e2e_lane_binds_no_opt_in_bundle_by_default(monkeypatch: pytest.Monk
     from chemclaw.core.config import settings
 
     fleet = _sibling_or_skip()
-    opt_in = {bundle for (bundle, _), why in _ARGUED_DIVERGENCES.items() if why is _OPT_IN_ARGUMENT}
+    opt_in = _opt_in_here()
     monkeypatch.setattr(settings, "connectors_dir", _e2e_connectors_dir(fleet))
     monkeypatch.setattr(settings, "connectors_enabled", "")
     bound = {manifest.name for manifest in registry.enabled()}
-    assert opt_in, "no row carries `_OPT_IN_ARGUMENT`, so this test checks nothing"
+    assert opt_in, "no manifest here declares `default_enabled: false`, so this test checks nothing"
     assert not opt_in & bound, (
         f"{sorted(opt_in & bound)} bind in the e2e lane's wiring with no enable-list, so "
-        "`_OPT_IN_ARGUMENT`'s harmlessness claim — this tree's copy wins the name everywhere — is "
-        f"false. {_E2E_UP} has changed its CHEMCLAW_CONNECTORS_DIR order; rewrite the argument."
+        "the claim that this tree's copy wins the name in the lane — and with it this tree's "
+        f"`default_enabled: false` — is false. {_E2E_UP} has changed its CHEMCLAW_CONNECTORS_DIR "
+        "order."
     )
 
 
@@ -1017,8 +1049,8 @@ def test_every_fleet_server_has_an_egress_port_and_a_token_slot_in_the_chart() -
 
     Derived from the fleet's own manifests — `manifests/` and `manifests-internal/` both, since the
     backends (`calc`, `rxnlabel`) are dialled over the same policy — rather than from its
-    `MODULES.md` table, because the manifest is what `tests/test_fleet.py` there holds the port
-    registry against, and it is the file that names the token variable.
+    `MODULES.md` table, because the manifest is what `Chemclaw3-mcp:tests/test_fleet.py` holds the
+    port registry against, and it is the file that names the token variable.
     """
     root = _sibling_or_skip()
     values = yaml.safe_load(_CHART_VALUES.read_text(encoding="utf-8"))
