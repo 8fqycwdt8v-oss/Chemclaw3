@@ -13,7 +13,7 @@ alert-by-alert entries are in [runbook § (x-c)](runbook.md#x-c-when-an-alert-fi
 | 401 / 403 / 413 / 429 / 503 from the front door | [§5](#5-the-front-door-refuses-a-request) |
 | A chat never answers, `turn_timeout`, `at_capacity`, an empty answer | [§6](#6-turns-hang-time-out-or-answer-empty) |
 | The stream stops mid-answer behind a proxy | [§7](#7-the-sse-stream-drops) |
-| `llm_timeout`, `model.call_failed`, every turn `internal` | [§8](#8-model-gateway-errors) |
+| `llm_timeout`, `llm_auth`, `model.call_failed`, `model.gateway_refused_credential` | [§8](#8-model-gateway-errors) |
 | A tool fails, `connector … is unreachable`, MCP 401/421/503 | [§9](#9-tool-calls-and-connectors) |
 | Jobs never start or never finish, worker `/readyz` 503 | [§10](#10-temporal-workers-and-durable-jobs) |
 | `[calc-at-capacity]`, calculations queueing | [§11](#11-calculation-capacity) |
@@ -203,6 +203,7 @@ before admission, so **every turn-level refusal is an HTTP 200 with an `error` e
 | `at_capacity` (retryable) | no admission permit within `CHEMCLAW_SERVICE_TURN_ADMISSION_TIMEOUT_SECONDS` (5 s) | `chemclaw_turns_shed_total`, `chemclaw_turns_in_flight` / `chemclaw_turn_capacity`, HPA → alerts `ChemclawTurnsShed`, `ChemclawFrontDoorAtItsPermitCeiling` |
 | `turn_timeout` | the turn exceeded `CHEMCLAW_SERVICE_TURN_TIMEOUT_SECONDS` (600 s in the chart) | `chemclaw_turn_timeouts_total`; latency breakdown below |
 | `llm_timeout` (retryable) | model provider stalled, timed out, 429 or 5xx | [§8](#8-model-gateway-errors) |
+| `llm_auth` | model gateway answered 401/403 — the credential, not the code | [§8](#8-model-gateway-errors) |
 | `storage_unavailable` (retryable) | database unreachable mid-turn | [§12](#12-database-pool-saturation) |
 | `context_length` | thread no longer fits the model window | start a new session; check `chemclaw_context_compactions_total`, `chemclaw_context_unreducible_total` |
 | `spend_cap_reached`, `loop_cap_reached` | a cap stopped the turn | [§15](#15-budget-and-spend-cap-refusals) |
@@ -252,7 +253,7 @@ Every model call goes to `CHEMCLAW_LLM_BASE_URL` (OpenAI-compatible) with `CHEMC
 | Presents as | Cause | Diagnose → fix |
 | --- | --- | --- |
 | SSE `llm_timeout`; log `model.call_failed … the model gateway failed after <ms> ms (timeout\|rate_limited\|transport: <Exc>)` | gateway slow, overloaded, 429, 5xx, refused socket | `chemclaw_model_calls_total{outcome}`, `chemclaw_model_call_duration_seconds`. Retries: `CHEMCLAW_LLM_MAX_RETRIES` (3), per call `CHEMCLAW_LLM_TIMEOUT_SECONDS` (60). A fallback route (`CHEMCLAW_LLM_FALLBACK_BASE_URL`) shows on `chemclaw_model_fallbacks_total`. |
-| every turn `internal`; `model.call_failed … (error: AuthenticationError)` | gateway answers 401/403 — bad or missing key | rotate `secrets.keys.llmApiKey` and restart ([operations § 5.3](operations.md#53-rotating-secrets)). There is no credential preflight. |
+| every turn SSE `llm_auth` (not retryable); ERROR `model.gateway_refused_credential: the model gateway at <host> refused this deployment's credential (HTTP 401\|403)`; `model.call_failed … (auth: <Exc>)` | gateway answers 401/403 — bad, missing, rotated or under-entitled key | `chemclaw_model_calls_total{outcome="auth"}`; check the logged host is the gateway you meant (`CHEMCLAW_LLM_BASE_URL`), then rotate `secrets.keys.llmApiKey` and restart ([operations § 5.3](operations.md#53-rotating-secrets)). A 403 with a valid key means the key is not entitled to `CHEMCLAW_LLM_MODEL`. There is no credential preflight, so the first turn after a bad rotation is where it shows. |
 | `model.call_failed … (context_length: …)` | thread too long | user starts a new session |
 | `egress refused: outbound connection to '<host>'` on the first turn | gateway host not derived into the allowlist | [§14](#14-egress-refused) |
 | tokens metered as zero, `usage_unreadable: <n> usage content(s) carried no token count` | gateway changed its usage keys | alert `ChemclawUsageUnreadable`; budgets do not bind until fixed |

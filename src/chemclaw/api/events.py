@@ -586,6 +586,13 @@ ErrorCode = Literal[
     # a narrower question. Reported as `internal` until 2026-09-27, which told a chemist "internal
     # error" about the one failure a shorter thread fixes.
     "context_length",
+    # The model gateway refused this deployment's credential — HTTP 401 or 403 from
+    # `CHEMCLAW_LLM_BASE_URL` (`classify_model_failure`'s `auth`). Its own code rather than
+    # `internal` or `llm_timeout`, because the instruction differs from both: nothing in this
+    # system's code is broken, and asking again cannot work until an operator fixes
+    # `CHEMCLAW_LLM_API_KEY`. Reported as `internal` until 2026-10-04, so an operator could not
+    # tell a rotated key from a code fault by the code a chemist quoted. Never retryable.
+    "llm_auth",
     # A message that waited in the session's line and never ran: its sender withdrew it, the owner
     # did, the sender was removed from the session while it waited, or the session was deleted
     # (`D-2026-10-01-a-queued-message-waits-in-its-senders-request`). Its own code because nothing
