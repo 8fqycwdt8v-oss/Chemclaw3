@@ -237,8 +237,8 @@ Temporal tests use the time-skipping test server with no model and no database, 
 the only thing that exercises that path end to end
 (`D-2026-08-04-a-lane-that-only-runs-where-docker-runs`).
 
-**Preconditions.** A `Chemclaw3-mcp` checkout beside this one (or `CHEMCLAW_MCP_REPO` pointing
-at it) — `make live-up` starts the fleet servers from it and refuses to start without it, because
+**Preconditions.** A `Chemclaw3-mcp` checkout beside this one (elsewhere, export the path in the
+variable `make live-up`'s refusal names) — `make live-up` starts the fleet servers from it and refuses to start without it, because
 the lane runs with `CHEMCLAW_CONNECTORS_REQUIRED=true`, the posture the chart ships. `uv` on the
 path for both checkouts. A Docker daemon is optional (below).
 
@@ -291,7 +291,7 @@ all sit between the socket and the agent. `make live-storm ARGS='--help'` lists 
 
 **`make live-soak` repeats the storm for as long as you leave it and fits what drifts.** It asks the
 one question no single run can — does anything grow that should not — so it is checkpointed per
-round to `.live/soak.jsonl` and re-running it *resumes*: on a host whose container is
+round to a JSON-lines record under `.live/` and re-running it *resumes*: on a host whose container is
 reclaimed on a timer, a reclaim costs one round rather than the run. `make live-soak-report` fits
 every series.
 It deliberately runs families `BCDFGH` rather than all eight, because family A restarts the front
@@ -720,8 +720,8 @@ with `CHEMCLAW_CONNECTORS_REQUIRED=true` the front door refuses to start instead
 (`ConnectorsUnavailable: connectors_required is set but these connectors are unreachable:
 <name> (unreachable), …`). Fix order: is the server up (its own
 `/healthz`)? is the URL the one in `CHEMCLAW_CONNECTOR_URLS`? does the NetworkPolicy allow host
-*and* port? is the bearer variable set on both sides (a 401 is a missing or mismatched token)? An
-`unpolled` bundle needs its worker Deployment (`worker: true`). Verify a bundle this repository
+*and* port? is the bearer variable set on both sides (a 401 is a missing or mismatched token)? A bundle
+reported `unpolled` needs its worker Deployment (`worker: true`). Verify a bundle this repository
 serves standalone with `uv run uvicorn chemclaw.connectors.<name>.server.app:app` and check
 `/healthz`; tool *discovery* needs no database, but *invoking* a search does.
 

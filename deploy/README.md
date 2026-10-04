@@ -90,11 +90,12 @@ The chart **names** Secrets and never fills them; populate them with an
 | --- | --- | --- |
 | `CHEMCLAW_LLM_API_KEY` | **yes** (key must exist) | the gateway's API key |
 | `CHEMCLAW_POSTGRES_DSN` | **yes** | the runtime DSN (step 2) |
-| the knowledge-repo push token (`secrets.keys.knowledgeRepoToken`) | **yes** (key must exist; may be empty without a remote) | the token `deploy/knowledge-sync.sh` and the note writer push with |
+| the knowledge-repo push token (`secrets.keys.knowledgeRepoToken`) | **yes** — the key must exist even when `knowledge.sync.repoUrl` is empty (its value may then be empty) | the token `deploy/knowledge-sync.sh` and the note writer push with |
 | `CHEMCLAW_POSTGRES_MIGRATION_DSN` | optional, migrate Job only | the owner's DSN when the principal is split |
 | `CHEMCLAW_FRAMING_ENVELOPE_SECRET` | optional, **set it** | HMAC key for the retrieved-content envelope; unset, each process picks its own and replicas disagree |
 | `CHEMCLAW_CHEM_TOKEN`, `CHEMCLAW_SAFETY_TOKEN`, `CHEMCLAW_RXNPREDICT_TOKEN`, `CHEMCLAW_CALC_TOKEN`, `CHEMCLAW_RXNLABEL_TOKEN` | optional to the chart, **required by the capability** | bearers this release presents to the fleet servers; unset, every call to that server is refused |
 | `CHEMCLAW_BO_MCP_TOKEN`, `CHEMCLAW_CALC_MCP_TOKEN`, `CHEMCLAW_MOLFP_MCP_TOKEN`, `CHEMCLAW_RXNFP_MCP_TOKEN` | optional to the chart, **required by the capability** | bearers for the connector servers this release runs itself (both ends read the same variable) |
+| `CHEMCLAW_PROPS_TOKEN`, `CHEMCLAW_KINETICS_TOKEN`, `CHEMCLAW_THERMALSAFETY_TOKEN`, `CHEMCLAW_UNITOPS_TOKEN`, `CHEMCLAW_SUITABILITY_TOKEN` | only when that bundle is enabled | the shipped `secrets.optionalKeys` has **no slot** for these five off-by-default bundles: add `propsToken: CHEMCLAW_PROPS_TOKEN` (and so on) under `secrets.optionalKeys` when you enable one, as `deploy/kind/values-kind.yaml` does |
 | `CHEMCLAW_MCP_FACE_TOKEN` | only with `mcpFace.enabled` | the read-only MCP face's bearer; unset, it answers 401 |
 | `CHEMCLAW_LLM_FALLBACK_API_KEY`, `CHEMCLAW_VECTOR_STORE_API_KEY`, `CHEMCLAW_TEMPORAL_API_KEY`, `CHEMCLAW_SESSION_STORE_DSN` | optional | the failover gateway, a non-pgvector store, Temporal Cloud, a split session database |
 
@@ -105,6 +106,14 @@ about whether the capability works without it. The full argument for each slot i
 `values.yaml` under `secrets:`.
 
 **`chemclaw-temporal-tls`** (`secrets.temporalTls.secretName`) — step 3.
+
+**CA files are a gap in the chart.** No value mounts a private CA for Postgres (`sslrootcert=` in a
+DSN), the LLM gateway (`CHEMCLAW_LLM_TLS_CA_BUNDLE`) or the Entra JWKS host
+(`CHEMCLAW_ENTRA_CA_BUNDLE`). Either put the CA where an existing mount already is — the Temporal
+TLS Secret's `ca.crt` at `secrets.temporalTls.mountPath` is mounted on every pod, which is how the
+kind lane points `CHEMCLAW_ENTRA_CA_BUNDLE` at its cluster CA — or add a volume with a post-render
+patch. With publicly-trusted certificates none of this is needed (`sslmode=require` verifies
+nothing; `verify-full` needs the CA file).
 
 Other objects you create yourself, when you turn on what needs them: one ConfigMap per
 `extraConnectors.bundles[]` entry (step 5), the `documentShare.claimName` PersistentVolumeClaim
@@ -143,7 +152,7 @@ chart with Helm 3.16:
 
 | Value | What to set | Why it has no default |
 | --- | --- | --- |
-| `networkPolicy.egressDestinations` **or** `networkPolicy.allowAnyDestination: true` (exactly one) | a list of NetworkPolicyPeer objects covering Postgres, Temporal, the LLM gateway, the OTLP collector, Entra's JWKS host, the git host and each fleet server — or the explicit "any destination" statement | an empty list renders `to: []`, which a NetworkPolicy reads as *every* destination. Must be a YAML boolean, never a string (`--set-string` is refused). Not asked when `networkPolicy.enabled: false` |
+| `networkPolicy.egressDestinations` **or** `networkPolicy.allowAnyDestination: true` (exactly one) | a list of NetworkPolicyPeer objects covering **everything** a pod dials — this release's own pods (`podSelector: {matchLabels: {app.kubernetes.io/name: chemclaw}}`, for the connector Services), the fleet's pods (`podSelector: {matchLabels: {app.kubernetes.io/part-of: chemclaw3}}`), Postgres, Temporal, the LLM gateway, the OTLP collector, Entra's JWKS host and the git host — or the explicit "any destination" statement. The list replaces `to: []` for every egress port, so a peer left out is a silently dropped dependency | an empty list renders `to: []`, which a NetworkPolicy reads as *every* destination. Must be a YAML boolean, never a string (`--set-string` is refused). Not asked when `networkPolicy.enabled: false` |
 | `retention.windows` **or** `retention.unboundedGrowthAccepted: true` (exactly one) | `windows` is a map of `CHEMCLAW_RETENTION_*` day windows, e.g. `{CHEMCLAW_RETENTION_SESSION_MESSAGES_DAYS: "365", CHEMCLAW_RETENTION_CHECKPOINTS_DAYS: "30", CHEMCLAW_RETENTION_TOOL_RESULTS_DAYS: "30"}` | every window defaults to disabled, so the durable tables grow forever unless a policy is stated. Each key must be one of the retention settings the template lists (a typo is refused); `CHEMCLAW_RETENTION_ENABLED` is derived and refused if written |
 | on the `windows` arm only: `retention.artifactStore` **or** `retention.artifactGrowthAccepted: true` | `artifactStore: {CHEMCLAW_ARTIFACT_STORE_MAX_BYTES: "53687091200"}` and/or `CHEMCLAW_ARTIFACT_EVICT_IDLE_DAYS` | the calculation artifact store is swept by its own job and no retention window reaches it |
 | on the `windows` arm only: `retention.windows.CHEMCLAW_RETENTION_SESSION_EXHIBITS_DAYS` **or** `retention.exhibitsGrowthAccepted: true` | e.g. `"365"`; keep `CHEMCLAW_RETENTION_TOOL_RESULTS_DAYS` at least as long if bound artefact values must stay readable | artefacts are bounded by nothing else, and a session holding one is never forgotten |
@@ -181,7 +190,7 @@ a pod refuses at boot or a capability is silently closed:
 | `config.CHEMCLAW_EGRESS_ALLOW` | hosts the in-process egress guard cannot derive from settings: a warehouse ELN's or result sink's database, a delivery channel, an HTTP proxy |
 | `knowledge.sync.repoUrl` | the knowledge repository (empty: serve the corpus the image ships) |
 | `route.host`, `route.ipWhitelist` | the front door's hostname (empty: OpenShift assigns one) and, optionally, the source CIDRs allowed to use it |
-| `networkPolicy.ingressNamespaces`, `networkPolicy.monitoringNamespaces` | the labels of your router and monitoring namespaces (shipped: OpenShift's) |
+| `networkPolicy.ingressNamespaces`, `networkPolicy.monitoringNamespaces` | the labels of your router and monitoring namespaces (shipped: OpenShift's). The front door admits only this release's own pods and these namespaces, so a **UI deployed in the same namespace is refused** until you add this namespace too (e.g. `kubernetes.io/metadata.name: <ns>`) |
 | `image.repository`, `image.digest` | step 1 |
 
 ### 7. Install
@@ -468,6 +477,11 @@ must be reachable through `networkPolicy.egressDestinations` (HTTPS).
 
 ## Network & probes
 
+Object names: the chart's name helper is the constant `chemclaw`, so every object is
+`chemclaw-<role>` (`chemclaw-service`, `chemclaw-connector-calc`, the Route `chemclaw`) whatever
+the Helm release is called. Pods carry `app.kubernetes.io/instance=<release>`, so two releases
+must live in different namespaces.
+
 - **NetworkPolicy** (`templates/networkpolicy.yaml`): egress is allowed to DNS (53) and to the
   ports in `networkPolicy.egressPorts` — Postgres 5432, Temporal 7233, HTTPS 443 (Entra, git), the
   LLM gateway 8000, OTLP 4317, each fleet server's own port — plus `connectorPort` for this
@@ -524,11 +538,13 @@ must be reachable through `networkPolicy.egressDestinations` (HTTPS).
   `profile` label, never a session id, an actor or turn content, enforced by D-152's
   declared-label allowlist. The residual exposure is operational reconnaissance; `route.ipWhitelist`
   restricts the whole Route to a set of source CIDRs for a deployment that will not accept it.
-- **Probes**: every process exposes `/readyz` (readiness) and `/healthz` (liveness) — the front door
-  and the connector servers on their service port, the Temporal workers on the `metrics` port
-  (`workerMetricsPort`, `CHEMCLAW_WORKER_METRICS_PORT`, default 9000). A worker's readiness is its
-  own `is_running`, and its liveness is answered on its event loop, so a loop wedged inside an
-  activity restarts the pod (D-2026-08-01-every-process-carries-its-own-witness). Every process
+- **Probes**: the front door serves `/readyz` (readiness) and `/healthz` (liveness) on its service
+  port; every Temporal worker (core's, each bundle's, each interactive worker) serves both on the
+  `metrics` port (`workerMetricsPort`, `CHEMCLAW_WORKER_METRICS_PORT`, default 9000). The
+  connector servers and the MCP face serve only `/healthz` (and `/metrics`), and all three of their
+  probes use it. A worker's readiness is its own `is_running`, and its liveness is answered on its
+  event loop, so a loop wedged inside an activity restarts the pod
+  (D-2026-08-01-every-process-carries-its-own-witness). Every process
   also has a `startupProbe` (`probes.*.startup`, 30 × 10 s) so cold imports are not killed. The
   front door's readiness timeout is derived from `CHEMCLAW_CONNECTOR_HEALTH_TIMEOUT_SECONDS` +
   `CHEMCLAW_SERVICE_READINESS_DB_TIMEOUT_SECONDS` + `probes.service.readiness.marginSeconds`.

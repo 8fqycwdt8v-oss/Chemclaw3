@@ -436,8 +436,8 @@ def configure_telemetry() -> None:
 
     **Traces only, deliberately, and the other two signals have homes.** Metrics are
     `core/metrics.py`'s Prometheus text surface, scraped per pod, because a trace is sampled and
-    per-request and cannot answer "what is p95 right now" for an alert; logs are JSON on stdout
-    (`JsonFormatter`), collected by the cluster's log stack. Installing OTLP pipelines for either
+    per-request and cannot answer "what is p95 right now" for an alert; logs go to stderr, as JSON
+    (`JsonFormatter`) when `CHEMCLAW_LOG_JSON` is set, collected by the cluster's log stack. Installing OTLP pipelines for either
     would be a second, unread copy of a signal that already has a collector.
 
     **So "on" also installs the no-op meter provider**, not just "off" — see

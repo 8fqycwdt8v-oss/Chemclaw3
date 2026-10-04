@@ -20,7 +20,7 @@
 #                            from `chemclaw-live-env.sh` beside the checkouts (macOS Keychain), whose
 #                            key goes straight into the cluster Secret and is never printed or written.
 #   CHEMCLAW_KIND_SKIP_SMOKE `true` to stop after the rollout.
-#   CHEMCLAW_MCP_REPO / CHEMCLAW_MOCK_REPO   sibling checkouts (default: beside this checkout).
+#   CHEMCLAW_MCP_REPO   the Chemclaw3-mcp sibling checkout (default: beside this checkout).
 set -euo pipefail
 
 readonly KIND_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

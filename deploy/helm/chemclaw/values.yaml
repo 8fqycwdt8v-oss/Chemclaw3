@@ -1385,7 +1385,9 @@ secrets:
     llmApiKey: "CHEMCLAW_LLM_API_KEY"
     postgresDsn: "CHEMCLAW_POSTGRES_DSN"
     # Push credential for the knowledge repo (gap DEP-2). Without it the note writer cannot push
-    # the base branch, so every knowledge write fails at push in-cluster.
+    # the base branch, so every knowledge write fails at push in-cluster. Required like the two
+    # above: the key must exist in the Secret even when `knowledge.sync.repoUrl` is empty (an empty
+    # value is fine then), or every pod fails with `CreateContainerConfigError`.
     knowledgeRepoToken: "CHEMCLAW_KNOWLEDGE_REPO_TOKEN"
   # Secrets that are safe when unset, rendered with `optional: true` so naming a new one does not
   # take an existing release down on upgrade (see `chemclaw.env` in `_helpers.tpl`).
@@ -1446,6 +1448,10 @@ secrets:
     # per request, and unset means `MissingConnectorCredential` on the first prediction rather than
     # a degraded one.
     rxnpredictToken: "CHEMCLAW_RXNPREDICT_TOKEN"
+    # No slot ships for the five off-by-default process-development bundles (`connectors.props`,
+    # `kinetics`, `thermalsafety`, `unitops`, `suitability`). Enabling one means adding its bearer
+    # here as well, e.g. `propsToken: "CHEMCLAW_PROPS_TOKEN"` — `deploy/kind/values-kind.yaml` does
+    # exactly that — or every call to it is refused.
     # The four bundles **we** host, each authenticating its own `/mcp` (D-2026-08-20). Until they
     # declared a credential the NetworkPolicy was the only thing between any pod in the namespace
     # and a tool that starts durable expensive work — and a NetworkPolicy selects peers, not paths.
@@ -1770,20 +1776,12 @@ monitoring:
   # counts, schedule-to-start latency: the queue-side numbers no first-party counter can produce,
   # because they are the SDK's view of the broker.
   #
-  # **Off until the worker process actually binds the port.** Turning it on renders a second
-  # container port and a second `podMetricsEndpoint`; with nothing listening, every worker gains a
-  # permanently-down scrape target — which `ChemclawTargetDown` would then report forever. Flip
-  # this to `true` in the same change that adds the `TelemetryConfig(metrics=PrometheusConfig(...))`
-  # bind in `durable/serve.py`.
-  #
-  # That change owns the dashboard panels too. `chemclaw-durable.json` shipped a "Temporal worker
-  # task slots" and a "Temporal pollers" panel *unconditionally*, over series nothing in this system
-  # emits — two graphs that could never draw, which on a dashboard is indistinguishable from two
-  # graphs saying nothing is happening. `ChemclawWorkerNotPolling` was already gated on this flag
-  # for exactly that reason; the panels were not. They are deleted rather than gated, because a
-  # panel for a producer that does not exist is a "for later" stub, and
-  # `tests/test_deploy_chart.py::test_no_dashboard_panel_queries_a_series_nothing_produces` refuses
-  # the next one.
+  # **Off by default; turning it on is complete.** `core/temporal_client.py` binds the SDK's
+  # `PrometheusConfig` exporter whenever `CHEMCLAW_TEMPORAL_METRICS_PORT` is non-zero, and enabling
+  # this sets that variable on every worker, renders the second container port and
+  # `podMetricsEndpoint`, opens the port in the NetworkPolicy and adds `ChemclawWorkerNotPolling`.
+  # No dashboard panel reads these series
+  # (`tests/test_deploy_chart.py::test_no_dashboard_panel_queries_a_series_nothing_produces`).
   temporalSdkMetrics:
     enabled: false
     # The port that exporter binds. Distinct from `workerMetricsPort`: the SDK's exporter is a Rust
@@ -2081,7 +2079,12 @@ networkPolicy:
   # the address. Enumerating every peer below does not bound it. That case is refused at boot by
   # `netguard.refuse_proxied_egress` instead, and there is no layer under that one.
   #
-  # Entries are NetworkPolicyPeer objects, passed through verbatim:
+  # Entries are NetworkPolicyPeer objects, passed through verbatim. **This one list is the `to:` of
+  # every egress port**, in-cluster pod-to-pod traffic included, so it must name this release's own
+  # pods (the front door and workers dial the `chemclaw-connector-*` Services) and the
+  # `Chemclaw3-mcp` fleet's pods in this namespace, or those calls are dropped silently:
+  #   - podSelector: {matchLabels: {app.kubernetes.io/name: chemclaw}}    # this release's pods
+  #   - podSelector: {matchLabels: {app.kubernetes.io/part-of: chemclaw3}} # the MCP fleet
   #   - ipBlock: {cidr: 10.0.1.0/24}                     # the database subnet
   #   - namespaceSelector: {matchLabels: {name: temporal}}
   #   - namespaceSelector: {matchLabels: {name: llm-serving}}
@@ -2111,7 +2114,9 @@ networkPolicy:
   # `route.ipWhitelist`). It used to say it was. Labels
   # differ by distribution: OpenShift labels its router namespace
   # `network.openshift.io/policy-group: ingress` and its user-workload monitoring namespace
-  # `kubernetes.io/metadata.name: openshift-user-workload-monitoring`.
+  # `kubernetes.io/metadata.name: openshift-user-workload-monitoring`. "Chemclaw's own pods" means
+  # this release's pods only: a `Chemclaw3_ui` pod in the same namespace is refused until that
+  # namespace is listed here too (`kubernetes.io/metadata.name: <release namespace>`).
   serviceIngress:
     # Its own toggle, not `networkPolicy.enabled`: if these labels are wrong the front door is
     # unreachable, and the fix must not be "turn off network policy" — that would drop the egress

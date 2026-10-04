@@ -1,7 +1,7 @@
 // Delivery for the ChemClaw3 core: build the one multi-role image, publish it, and roll it out.
 //
 // **This pipeline does not gate the change.** `.github/workflows/ci.yml` runs `make lint type cov`
-// against a real Postgres plus the eleven validators, and `image.yml` proves the image builds and
+// against a real Postgres plus every validator the `ci` target names, and `image.yml` proves the image builds and
 // every component imports as a non-root UID. Reproducing that here would be a second answer to the
 // same question, maintained by hand, in a second language. What Jenkins adds is the half GitHub
 // Actions has never had: a registry to push to and a cluster to reach
