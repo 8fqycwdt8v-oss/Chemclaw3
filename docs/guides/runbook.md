@@ -2776,8 +2776,9 @@ RESULTS_DB_USER=... RESULTS_DB_PASSWORD=...       # the target's own credentials
 ```
 
 On the chart: `CHEMCLAW_RESULT_SINKS` goes in `config:`; the two credentials go in your Secret and
-are mapped under `secrets.optionalKeys`; the chart has no value that mounts a custom sink folder,
-so a site that cannot use the shipped address bakes its folder into a derived image. **And the
+are mapped under `secrets.optionalKeys`; a site that cannot use the shipped address puts its edited
+folder in a ConfigMap and lists it under `extraSinks.sinks` (`name: postgres`, `configMap: <it>`),
+which mounts it on every pod and sets `CHEMCLAW_RESULT_SINKS_DIR` with that folder first. **And the
 destination must be allowed out**: a sink's host is manifest-supplied, so nothing derives it — add
 it to `CHEMCLAW_EGRESS_ALLOW` (bare host) and add a peer for it to
 `networkPolicy.egressDestinations` (a port other than `networkPolicy.egressPorts.postgres` needs an

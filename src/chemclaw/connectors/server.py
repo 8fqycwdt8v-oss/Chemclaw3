@@ -148,11 +148,11 @@ def _ships_a_manifest(name: str) -> bool:
 
 
 #: How much of a caller-authored path may reach a log record. Long enough for every route this
-#: transport serves (`/mcp`, `/healthz`, `/metrics`, and a dev-composite `/<bundle>` prefix),
-#: short enough that a caller cannot spend the logging lock on a redaction scan. The front door
-#: bounds its own echoed strings at the same order of magnitude and for the same measured reason
-#: (`api.middleware._MAX_LOGGED_CHARS`); the two are separate constants because a connector may
-#: not import `api`, and neither is a deployment's choice to make.
+#: transport serves (`/mcp`, `/healthz`, `/livez`, `/metrics`, and a dev-composite `/<bundle>`
+#: prefix), short enough that a caller cannot spend the logging lock on a redaction scan. The front
+#: door bounds its own echoed strings at the same order of magnitude and for the same measured
+#: reason (`api.middleware._MAX_LOGGED_CHARS`); the two are separate constants because a connector
+#: may not import `api`, and neither is a deployment's choice to make.
 _MAX_LOGGED_PATH_CHARS = 128
 
 
@@ -205,9 +205,9 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
     written as `Depends(...)` would have guarded the two routes that need it least and none of the
     surface that matters.
 
-    `/healthz` and `/metrics` stay open, matching the front door's probe allowlist: a kubelet probe
-    and a Prometheus scrape happen independently of any identity, and the exposition carries counts
-    only. The MCP surface is what the credential is for.
+    `/healthz`, `/livez` and `/metrics` stay open, matching the front door's probe allowlist: a
+    kubelet probe and a Prometheus scrape happen independently of any identity, and the exposition
+    carries counts only. The MCP surface is what the credential is for.
 
     Comparison is `compare_digest`, and a missing/short token is refused rather than compared, so a
     misconfigured deployment fails closed instead of accepting the empty string.
@@ -256,9 +256,9 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
         return self._token_env
 
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
-        """Refuse anything but `/healthz` and `/metrics` without the configured bearer token."""
+        """Refuse anything but the two probes and `/metrics` without the configured bearer token."""
         path = _app_relative_path(request)
-        if path in ("/healthz", "/metrics"):
+        if path in ("/healthz", "/livez", "/metrics"):
             return await call_next(request)
         token_env = self._declared()
         if token_env is None:
@@ -611,7 +611,8 @@ def connector_app(
             start because it could not describe itself is strictly worse than one that starts.
 
     Returns:
-        A FastAPI app exposing `GET /healthz`, `GET /metrics`, and the MCP endpoint at `/mcp`.
+        A FastAPI app exposing `GET /healthz`, `GET /livez`, `GET /metrics`, and the MCP endpoint
+        at `/mcp`.
     """
     _sanitize_tool_errors(server, name=name)
     # Outermost, so the identity a tool stamps on a durable row is bound before anything else runs.
@@ -666,14 +667,30 @@ def connector_app(
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
-        """Liveness/readiness for the core startup probe (`chemclaw.connectors.health`).
+        """Readiness, for the kubelet and for core's startup sweep (`chemclaw.connectors.health`).
 
-        One route for both, and honestly so rather than by omission: uvicorn accepts connections
-        only after the lifespan above has completed, so this route answering *is* the evidence
-        that the MCP session manager is running and the Postgres pool is open. A separate
-        `/readyz` here could only assert the same fact a second time.
+        Startup and readiness share it, honestly so rather than by omission: uvicorn accepts
+        connections only after the lifespan above has completed, so this route answering *is* the
+        evidence that the MCP session manager is running and the Postgres pool is open. A separate
+        `/readyz` here could only assert the same fact a second time. Liveness is `/livez` below,
+        which is a different question rather than the same fact.
         """
         return {"status": "ok", "connector": name}
+
+    @app.get("/livez")
+    async def livez() -> dict[str, str]:
+        """Liveness, and nothing else: answering proves the process still serves HTTP.
+
+        A route of its own although `/healthz` answers the same today, because the two answers
+        differ in what acting on them costs. A readiness failure takes the pod out of its Service
+        and is undone by the next passing probe; a liveness failure kills the container. So the
+        probe the kubelet restarts on must consult nothing a restart cannot fix — the rule
+        `Chemclaw3-mcp` holds every fleet server to, after a liveness probe pointed at a readiness
+        route killed a pod that was only missing an optional dependency. With one route serving
+        both, the first check anyone adds to `/healthz` would become a restart trigger without a
+        line of the chart changing.
+        """
+        return {"status": "alive", "connector": name}
 
     @app.get("/metrics")
     async def metrics() -> Response:

@@ -49,12 +49,42 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 - name: CHEMCLAW_TEMPORAL_TLS_CA
   value: "{{ .Values.secrets.temporalTls.mountPath }}/ca.crt"
 {{- end }}
+{{- /* The knowledge-repo push token is required only where something will use it: a release
+       with no `knowledge.sync.repoUrl`, or with `knowledge.sync.enabled: false` (which renders no
+       `note-repo-init`), clones no writer checkout (`knowledge-sync.sh checkout`
+       exits early) and so pushes nothing, and demanding the key then bought only a mandatory
+       empty Secret entry — absent, every pod failed `CreateContainerConfigError` over a credential
+       no process could have read. Still mounted in that case, `optional: true`, so a release that
+       sets the key anyway keeps it and nothing that reads `${CHEMCLAW_KNOWLEDGE_REPO_TOKEN:-}`
+       changes. With a remote it is required as before: that is the release where an absent token
+       fails every note at push. Keyed on the `secrets.keys` entry's name because that name is the
+       value's public interface; an operator who renames the env var keeps the rule. */ -}}
+{{- /* The private CA's two settings, each behind its own switch (`trustedCA` in `values.yaml`
+       says why mounting a bundle is not the same as trusting it for everything). Rendered only
+       when the file is actually mounted, so a path never names something absent. */ -}}
+{{- if include "chemclaw.trustedCAMount" . }}
+{{- if .Values.trustedCA.llm }}
+- name: CHEMCLAW_LLM_TLS_CA_BUNDLE
+  value: {{ include "chemclaw.trustedCAFile" . | quote }}
+{{- end }}
+{{- if .Values.trustedCA.entra }}
+- name: CHEMCLAW_ENTRA_CA_BUNDLE
+  value: {{ include "chemclaw.trustedCAFile" . | quote }}
+{{- end }}
+{{- if .Values.trustedCA.git }}
+- name: GIT_SSL_CAINFO
+  value: {{ include "chemclaw.trustedCAFile" . | quote }}
+{{- end }}
+{{- end }}
 {{- range $configKey, $secretEnv := .Values.secrets.keys }}
 - name: {{ $secretEnv }}
   valueFrom:
     secretKeyRef:
       name: {{ $.Values.secrets.name }}
       key: {{ $secretEnv }}
+      {{- if and (eq $configKey "knowledgeRepoToken") (not (and $.Values.knowledge.sync.enabled $.Values.knowledge.sync.repoUrl)) }}
+      optional: true
+      {{- end }}
 {{- end }}
 {{- /* `optional: true`, and a separate map rather than more entries above, because these two
        properties do not go together. A key in `secrets.keys` is *required*: absent, the pod does
@@ -459,6 +489,7 @@ readOnlyRootFilesystem: {{ .Values.securityContext.readOnlyRootFilesystem }}
     {{- toYaml .Values.resources.connector | nindent 4 }}
   volumeMounts:
     {{- include "chemclaw.knowledgeMounts" . | nindent 4 }}
+    {{- include "chemclaw.trustedCAMount" . | nindent 4 }}
 {{- end }}
 {{- end -}}
 
@@ -509,6 +540,7 @@ readOnlyRootFilesystem: {{ .Values.securityContext.readOnlyRootFilesystem }}
     {{- toYaml .Values.resources.connector | nindent 4 }}
   volumeMounts:
     {{- include "chemclaw.knowledgeMounts" . | nindent 4 }}
+    {{- include "chemclaw.trustedCAMount" . | nindent 4 }}
 {{- end }}
 {{- end -}}
 
@@ -543,6 +575,53 @@ readOnlyRootFilesystem: {{ .Values.securityContext.readOnlyRootFilesystem }}
 - name: knowledge-checkout
   emptyDir: {}
 {{- include "chemclaw.extraConnectorVolumes" . }}
+{{- include "chemclaw.extraSinkVolumes" . }}
+{{- include "chemclaw.trustedCAVolume" . }}
+{{- end -}}
+
+{{- /* The private CA bundle (`trustedCA`), as a volume and a mount every container that reads
+       `chemclaw.env` carries — the migrate and convert hook Jobs included, unlike the connector
+       bundles below, because they dial Postgres through the same DSN and a `sslrootcert=` naming
+       an absent file fails the release at its first step.
+
+       `chemclaw.trustedCAMount` renders empty when the value is off, which is what every template
+       tests to decide whether a container needs a `volumeMounts:` key at all — one predicate, not
+       a second spelling of "is a CA configured" per template. Both sources set at once is refused
+       rather than one silently winning. */ -}}
+{{- define "chemclaw.trustedCAFile" -}}
+{{ .Values.trustedCA.mountPath }}/{{ .Values.trustedCA.key }}
+{{- end -}}
+
+{{- define "chemclaw.trustedCAMount" -}}
+{{- if and .Values.trustedCA.configMap .Values.trustedCA.secret -}}
+{{- fail "trustedCA: set one of `configMap` or `secret`, not both — the bundle is mounted from exactly one object." -}}
+{{- end -}}
+{{- if or .Values.trustedCA.configMap .Values.trustedCA.secret }}
+- name: trusted-ca
+  mountPath: {{ .Values.trustedCA.mountPath }}
+  readOnly: true
+{{- else if or .Values.trustedCA.llm .Values.trustedCA.entra .Values.trustedCA.git -}}
+{{- fail "trustedCA.llm/entra/git point a setting at the mounted CA bundle, and none is mounted: set `trustedCA.configMap` or `trustedCA.secret`." -}}
+{{- end }}
+{{- end -}}
+
+{{- define "chemclaw.trustedCAVolume" -}}
+{{- if include "chemclaw.trustedCAMount" . }}
+- name: trusted-ca
+  {{- if .Values.trustedCA.configMap }}
+  configMap:
+    name: {{ .Values.trustedCA.configMap }}
+    items:
+      - key: {{ .Values.trustedCA.key }}
+        path: {{ .Values.trustedCA.key }}
+  {{- else }}
+  secret:
+    secretName: {{ .Values.trustedCA.secret }}
+    items:
+      - key: {{ .Values.trustedCA.key }}
+        path: {{ .Values.trustedCA.key }}
+  {{- end }}
+{{- end }}
 {{- end -}}
 
 {{- /* The connector bundles this image does not ship, one ConfigMap each (`extraConnectors`).
@@ -570,6 +649,31 @@ readOnlyRootFilesystem: {{ .Values.securityContext.readOnlyRootFilesystem }}
 {{- $root := .Values.extraConnectors.mountPath -}}
 {{- range .Values.extraConnectors.bundles }}
 - name: extra-connector-{{ .name }}
+  mountPath: {{ printf "%s/%s" $root .name }}
+  readOnly: true
+{{- end }}
+{{- end -}}
+
+{{- /* The result sinks this image does not ship, one ConfigMap each (`extraSinks`) — the
+       `extraConnectors` shape for the third manifest seam, and on every pod for the same reason.
+       `CHEMCLAW_RESULT_SINKS_DIR` is set once in the shared ConfigMap, and `publish.registry` is
+       read well beyond the drain: `publishing_enabled()` gates the result hooks on the front door,
+       the connector servers and the workers, and the Schedules reconciler decides from it whether
+       `result-publish` exists. A name in `CHEMCLAW_RESULT_SINKS` that no mounted directory
+       declares is refused where it is read, so a pod missing the mount fails rather than
+       publishing to one destination fewer. */ -}}
+{{- define "chemclaw.extraSinkVolumes" -}}
+{{- range .Values.extraSinks.sinks }}
+- name: extra-sink-{{ .name }}
+  configMap:
+    name: {{ .configMap }}
+{{- end }}
+{{- end -}}
+
+{{- define "chemclaw.extraSinkMounts" -}}
+{{- $root := .Values.extraSinks.mountPath -}}
+{{- range .Values.extraSinks.sinks }}
+- name: extra-sink-{{ .name }}
   mountPath: {{ printf "%s/%s" $root .name }}
   readOnly: true
 {{- end }}
@@ -607,6 +711,7 @@ readOnlyRootFilesystem: {{ .Values.securityContext.readOnlyRootFilesystem }}
     {{- toYaml .Values.resources.connector | nindent 4 }}
   volumeMounts:
     {{- include "chemclaw.noteRepoMount" . | nindent 4 }}
+    {{- include "chemclaw.trustedCAMount" . | nindent 4 }}
 {{- end }}
 {{- end -}}
 

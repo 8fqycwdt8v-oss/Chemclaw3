@@ -62,10 +62,12 @@ spec:
           {{- include "chemclaw.workerProbes" $ | nindent 10 }}
           resources:
             {{- toYaml (default $.Values.resources.worker $cfg.interactive.resources) | nindent 12 }}
-          {{- if or $.Values.secrets.temporalTls.enabled $.Values.extraConnectors.bundles }}
+          {{- if or $.Values.secrets.temporalTls.enabled $.Values.extraConnectors.bundles $.Values.extraSinks.sinks (include "chemclaw.trustedCAMount" $) }}
           volumeMounts:
             {{- include "chemclaw.tlsMount" $ | nindent 12 }}
+            {{- include "chemclaw.trustedCAMount" $ | nindent 12 }}
             {{- include "chemclaw.extraConnectorMounts" $ | nindent 12 }}
+            {{- include "chemclaw.extraSinkMounts" $ | nindent 12 }}
           {{- end }}
       volumes:
         {{- include "chemclaw.volumes" $ | nindent 8 }}

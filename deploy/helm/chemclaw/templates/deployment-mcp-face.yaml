@@ -85,7 +85,9 @@ spec:
                  `values.yaml`'s `probes:` block is written about, on the one component that had
                  escaped it. Sharing the connector budget rather than a fourth block of its own:
                  the process shape and the argument are the same, and a second set of numbers that
-                 only has to agree eventually does not. */}}
+                 only has to agree eventually does not. Liveness on `/livez` for the reason
+                 `deployment-connectors.yaml` gives: the face is served by the same
+                 `connector_app`. */}}
           startupProbe:
             httpGet:
               path: /healthz
@@ -102,7 +104,7 @@ spec:
             failureThreshold: {{ .Values.probes.connector.readiness.failureThreshold }}
           livenessProbe:
             httpGet:
-              path: /healthz
+              path: /livez
               port: http
             periodSeconds: {{ .Values.probes.connector.liveness.periodSeconds }}
             timeoutSeconds: {{ .Values.probes.connector.liveness.timeoutSeconds }}
@@ -120,8 +122,10 @@ spec:
             {{- toYaml .Values.resources.service | nindent 12 }}
           volumeMounts:
             {{- include "chemclaw.tlsMount" . | nindent 12 }}
+            {{- include "chemclaw.trustedCAMount" . | nindent 12 }}
             {{- include "chemclaw.knowledgeMounts" . | nindent 12 }}
             {{- include "chemclaw.extraConnectorMounts" . | nindent 12 }}
+            {{- include "chemclaw.extraSinkMounts" . | nindent 12 }}
         {{- include "chemclaw.knowledgeSidecar" . | nindent 8 }}
       initContainers:
         {{- include "chemclaw.knowledgeInit" . | nindent 8 }}

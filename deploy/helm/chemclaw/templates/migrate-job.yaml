@@ -102,6 +102,16 @@ spec:
             {{- include "chemclaw.hookEnvFrom" . | nindent 12 }}
           resources:
             {{- toYaml .Values.resources.connector | nindent 12 }}
+          {{- /* The private CA only: a DSN's `sslrootcert=` names that file, and this Job dials
+                 Postgres with it. Nothing else here mounts anything, so the key is conditional. */}}
+          {{- if include "chemclaw.trustedCAMount" . }}
+          volumeMounts:
+            {{- include "chemclaw.trustedCAMount" . | nindent 12 }}
+          {{- end }}
+      {{- if include "chemclaw.trustedCAMount" . }}
+      volumes:
+        {{- include "chemclaw.trustedCAVolume" . | nindent 8 }}
+      {{- end }}
 ---
 {{- /* The stored-message conversion, as a POST-install/upgrade hook
        (D-2026-08-27-a-conversion-that-cannot-be-rolled-back-is-not-a-pre-upgrade-step).
@@ -177,3 +187,13 @@ spec:
             {{- include "chemclaw.envFrom" . | nindent 12 }}
           resources:
             {{- toYaml .Values.resources.connector | nindent 12 }}
+          {{- /* The private CA only: a DSN's `sslrootcert=` names that file, and this Job dials
+                 Postgres with it. Nothing else here mounts anything, so the key is conditional. */}}
+          {{- if include "chemclaw.trustedCAMount" . }}
+          volumeMounts:
+            {{- include "chemclaw.trustedCAMount" . | nindent 12 }}
+          {{- end }}
+      {{- if include "chemclaw.trustedCAMount" . }}
+      volumes:
+        {{- include "chemclaw.trustedCAVolume" . | nindent 8 }}
+      {{- end }}

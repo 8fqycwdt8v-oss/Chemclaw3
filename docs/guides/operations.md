@@ -21,10 +21,10 @@ by `chemclaw.name` (`chemclaw`), not by the Helm release name.
 | --- | --- | --- | --- |
 | Front door | `chemclaw-service` | `/healthz`, `/readyz`, `/metrics` on `service.port` (8080) | — (starts workflows) |
 | Background worker | `chemclaw-background-worker` | `/healthz`, `/readyz`, `/metrics` on `workerMetricsPort` (9000) | `background-jobs` |
-| Connector server | `chemclaw-connector-<name>` | `/healthz`, `/metrics` on `connectorPort` (no `/readyz`; all three probes use `/healthz`) | — (serves `/mcp`) |
+| Connector server | `chemclaw-connector-<name>` | `/healthz`, `/livez`, `/metrics` on `connectorPort` (no `/readyz`; startup and readiness use `/healthz`, liveness `/livez`) | — (serves `/mcp`) |
 | Connector worker | `chemclaw-connector-worker-<name>` | as background worker (9000) | `connector-<name>` |
 | Interactive worker | `chemclaw-interactive-worker-<name>` | as background worker (9000) | `connector-<name>-interactive` |
-| Read-only MCP face | `chemclaw-mcp-face` (off by default) | `/healthz`, `/readyz` | — |
+| Read-only MCP face | `chemclaw-mcp-face` (off by default) | `/healthz` (startup, readiness), `/livez` (liveness), `/metrics` | — |
 
 Hook Jobs: `chemclaw-migrate` (`pre-install,pre-upgrade,pre-rollback`), `chemclaw-convert`
 (`post-upgrade`), `chemclaw-schedules` (`post-install,post-upgrade`).
@@ -53,7 +53,7 @@ curl -s localhost:9000/readyz        # 200 = worker running AND broker heard fro
 | --- | --- | --- |
 | front door `/readyz` | 200, `"status":"ready"` | 503 `"database unreachable"` or `"schema behind image"` (session store `postgres` only). `connectors_unhealthy` is reported, never gating. |
 | worker `/readyz` | 200 | 503: worker not running, or no broker contact for `jobs_in_flight_refresh_seconds` × 3 (90 s at the default 30 s). Not a liveness signal. |
-| `/healthz` (all) | 200 `{"status":"ok"}` | No answer = wedged event loop; the kubelet restarts the pod. |
+| `/healthz` (all) | 200 `{"status":"ok"}` | No answer = wedged event loop; the kubelet restarts the pod (on a connector server or the MCP face, `/livez` is the route it restarts on and `/healthz` only takes the pod out of its Service). |
 | `GET /schedules` (front door, authenticated) | every planned Schedule listed with `last_outcome` `COMPLETED` | a `note` saying the Schedule does not exist, `last_outcome` `FAILED`/`TIMED_OUT`, climbing `skipped_overlap` |
 
 `/schedules` returns one `ScheduleHealth` per planned Schedule (`src/chemclaw/durable/schedules.py`):
@@ -209,8 +209,10 @@ pruned. A sweep that has stopped running raises `ChemclawRetentionNotSweeping` (
 | `knowledge-sync` (sidecar) | `loop` | refreshes every `knowledge.sync.intervalSeconds` (300); a failed refresh logs `WARNING refresh failed; serving the previous snapshot` and keeps going |
 | — (sidecar liveness) | `staleness <s>` | fails when the last successful refresh is older than the budget |
 
-The repo credential is `secrets.keys.knowledgeRepoToken`, handed to git through a credential
-helper. Freshness is `chemclaw_knowledge_sync_age_seconds` (`-1` = the tree holds no note); its
+The repo credential is `secrets.keys.knowledgeRepoToken`, handed to git through the image's
+`chemclaw-git-askpass` helper — by `knowledge-sync.sh` in the sync containers and by
+`deploy/entrypoint.sh` in the front door and background worker, whose note writer pushes. Required
+only once `knowledge.sync.repoUrl` is set. Freshness is `chemclaw_knowledge_sync_age_seconds` (`-1` = the tree holds no note); its
 alert is off until `monitoring.alerts.knowledgeCorpusStaleSeconds` is non-zero.
 
 ### 4.4 Hook Jobs on every release
@@ -270,7 +272,7 @@ kubectl -n <ns> rollout restart deploy -l app.kubernetes.io/instance=<release>
 | `secrets.keys.postgresDsn` | `CHEMCLAW_POSTGRES_DSN` | all Deployments (each holds a pool) |
 | `secrets.optionalKeys.sessionStoreDsn` | `CHEMCLAW_SESSION_STORE_DSN` | all Deployments |
 | `secrets.migrationKeys.postgresMigrationDsn` | `CHEMCLAW_POSTGRES_MIGRATION_DSN` | none — read by `chemclaw-migrate` on the next release |
-| `secrets.keys.knowledgeRepoToken` | (knowledge-sync's repo token) | pods carrying the `knowledge-sync` containers |
+| `secrets.keys.knowledgeRepoToken` | (the knowledge repo's token) | the `knowledge-sync` containers and the note writer's push (front door, background worker) — restart those pods |
 | `secrets.optionalKeys.temporalApiKey` / `temporalTls` Secret | `CHEMCLAW_TEMPORAL_API_KEY` / TLS files | every worker, the front door, and KEDA's `TriggerAuthentication` reads the TLS Secret directly |
 | connector bearer tokens (`secrets.optionalKeys.*Token`) | the manifest's `token_env` | **both sides**: the MCP server pods (`Chemclaw3-mcp`) and every core pod that dials them |
 | `secrets.optionalKeys.llmFallbackApiKey` | `CHEMCLAW_LLM_FALLBACK_API_KEY` | as `llmApiKey` |
