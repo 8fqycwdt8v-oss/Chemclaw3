@@ -51,12 +51,18 @@ class ServiceSettings(BaseSettings):
     #
     # The reason is unchanged and is worth keeping. One asyncio event loop saturates one CPU, and
     # a load test measured throughput flat at ~1.18 turns/s from 10 to 50 concurrent users on a
-    # 4-CPU box, so a second process is the obvious lever — and pulling it silently breaks five
-    # per-process guarantees: the rate limiter, the budget tracker, the attachment store, the
-    # live-session LRU and the metrics registry all live in one process's memory and are invisible
-    # to a sibling worker. A chemist who uploads a file and then asks about it needs both requests
-    # on the same process, and no ingress can pin below the pod. The supported way to use more CPU
-    # is `replicas` with session affinity at the Route.
+    # 4-CPU box, so a second process is the obvious lever — and pulling it silently breaks
+    # per-process guarantees: the rate limiter, the budget tracker, the live-session LRU and the
+    # metrics registry all live in one process's memory and are invisible to a sibling worker, and
+    # so does a running turn's event pump, which only its own process can stop or re-attach to.
+    # No ingress can pin below the pod. The supported way to use more CPU is `replicas` with
+    # session affinity at the Route.
+    #
+    # The attachment store used to head that list — a chemist who uploaded a file and then asked
+    # about it needed both requests on one process. Under `session_store="postgres"` uploads are
+    # in `session_attachments` and every process reads them
+    # (D-2026-10-04-an-upload-is-session-state-not-pod-state); only the in-memory store, which
+    # `session_store="memory"` runs and which is single-process anyway, still lives in one.
     #
     # The sixth guarantee is the one that *was* fixed and is therefore no longer a reason: under
     # `session_store="postgres"` a turn takes a leased row in `session_turns`, so two turns on one

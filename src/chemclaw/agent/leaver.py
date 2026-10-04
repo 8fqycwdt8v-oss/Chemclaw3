@@ -286,6 +286,16 @@ _ERASE: tuple[tuple[str, str], ...] = (
         "session_exhibits",
         f"DELETE FROM session_exhibits WHERE session_id IN ({_SESSION_SCOPED})",
     ),
+    # **Uploads follow `session_messages`, by session and by uploader**
+    # (`120_session_attachments.sql`). A file the leaver handed to a session somebody else owns is
+    # their material, exactly as their words there are, so the second arm reaches it; and every file
+    # in a session the leaver owns goes with the conversation, whoever uploaded it, as the
+    # transcript does.
+    (
+        "session_attachments",
+        "DELETE FROM session_attachments "
+        f"WHERE session_id IN ({_SESSION_SCOPED}) OR uploaded_by = ANY(%(actors)s)",
+    ),
     *_CHECKPOINT_ERASE,
     *_MEMORY_ERASE,
     # **Two kinds of session id reach this table, and the join only ever found one of them.**

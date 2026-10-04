@@ -845,6 +845,13 @@ def test_deleting_a_session_clears_every_table_it_reaches_and_no_one_elses() -> 
                         '\'{"kind": "document", "markdown": "x"}\'::jsonb, 1, \'\')',
                         (f"xb-{session_id[-16:]}",),
                     )
+                    # An uploaded file (`infra/sql/120_session_attachments.sql`).
+                    await cur.execute(
+                        "INSERT INTO session_attachments (session_id, name, content_type, body, "
+                        "byte_size, uploaded_by) VALUES (%s, 'runs.csv', 'text/csv', 'a,b', 3, "
+                        "'member')",
+                        (session_id,),
+                    )
                 await conn.commit()
             await SessionTurnClaims().claim(session_id, f"holder-{session_id}", 60)
             # One result only this session has, and one both of them do — the same bytes under the
@@ -893,6 +900,7 @@ def test_deleting_a_session_clears_every_table_it_reaches_and_no_one_elses() -> 
         "session_turn_queue",
         "session_turn_remotes",
         "session_exhibits",
+        "session_attachments",
         "session_owners",
     ):
         assert removed[table] == 1, f"{table} kept a deleted session's row: {removed}"

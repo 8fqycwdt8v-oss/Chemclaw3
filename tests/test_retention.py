@@ -96,6 +96,9 @@ def test_only_spent_operational_rows_are_prunable() -> None:
         # An artefact beside the chat is conversation, dated by its last revision
         # (`D-2026-10-02-an-artefact-is-part-of-the-answer-not-an-effect`).
         "session_exhibits",
+        # A chemist's uploads, on the conversation's window
+        # (`D-2026-10-04-an-upload-is-session-state-not-pod-state`).
+        "session_attachments",
         "session_owners",
     }
 

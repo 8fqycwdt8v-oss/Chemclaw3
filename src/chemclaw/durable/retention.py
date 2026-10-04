@@ -51,6 +51,15 @@ to be exhaustive, not asserted to be.
   the header, so one statement disposes of the whole history and the revision table needs no DELETE
   grant. A window of its own rather than the conversation's, because an artefact is the part of a
   session a deployment is most likely to want kept longer than the chat around it.
+- `session_attachments` — the files a chemist uploaded to a conversation
+  (`D-2026-10-04-an-upload-is-session-state-not-pod-state`). Working material, not the record:
+  anything in one worth keeping becomes a note through the one write path, and what stays here is
+  the parsed text the agent reads. **On the conversation's window rather than one of its own**,
+  dated by `created_at`: an upload is a turn's input, so it is kept exactly as long as the message
+  that came with it, and a separate number could only be set equal to that one (no effect), longer
+  (a file nobody's transcript still refers to) or shorter (a transcript that refers to a file it can
+  no longer read). Dropped uploads — rows with `body` NULL that remember a name — go on the same
+  clock.
 
 - `tool_result_blobs` — the full text of what a tool returned, kept so a surface can fetch it
   (`api/tool_results.py`, migration 042). This is the table that shows what the three refusals
@@ -292,6 +301,9 @@ _PRUNABLE: dict[str, tuple[str, str]] = {
     # somebody is still editing is never aged out from under them. Revisions cascade from the header
     # (`115_session_exhibits.sql`), which is why the revision table is not listed separately.
     "session_exhibits": ("updated_at", "TRUE"),
+    # Uploads, dated by when they arrived, on the conversation's window — the module docstring
+    # carries why. Held or dropped alike: a dropped upload's row is only its name.
+    "session_attachments": ("created_at", "TRUE"),
     # **Last on purpose.** Like `session_messages` and `checkpoints` this is not pruned by the
     # plain cutoff the pair describes — `_prune_session_owners` handles it, and the pair records
     # only that the table is in scope and what dates a row. The position is the load-bearing part:
@@ -963,6 +975,7 @@ _DELETE_IDS = "DELETE FROM session_messages WHERE session_id = %s AND id = ANY(%
 _SESSION_SCOPED_ROWS: dict[str, str] = {
     "session_messages": "session_id",
     "session_exhibits": "session_id",
+    "session_attachments": "session_id",
     "session_events": "session_id",
     "tool_result_links": "session_id",
     **dict.fromkeys(CHECKPOINT_TABLES, "thread_id"),
@@ -997,6 +1010,9 @@ _OWNERSHIP_DEPENDENCIES: dict[str, tuple[str, str] | None] = {
     "session_events": None,
     "tool_result_links": ("tool_result_blobs", "CHEMCLAW_RETENTION_TOOL_RESULTS_DAYS"),
     "session_exhibits": ("session_exhibits", "CHEMCLAW_RETENTION_SESSION_EXHIBITS_DAYS"),
+    # The conversation's own window (`_window_days`), so like `session_messages` this entry can
+    # never be the advice; recorded so the map stays the same set as `_SESSION_SCOPED_ROWS`.
+    "session_attachments": ("session_attachments", "CHEMCLAW_RETENTION_SESSION_MESSAGES_DAYS"),
     **dict.fromkeys(CHECKPOINT_TABLES, ("checkpoints", "CHEMCLAW_RETENTION_CHECKPOINTS_DAYS")),
 }
 
@@ -1239,6 +1255,9 @@ def _window_days(table: str) -> int:
         "result_publications": settings.retention_result_publications_days,
         "checkpoints": settings.retention_checkpoints_days,
         "session_exhibits": settings.retention_session_exhibits_days,
+        # An upload is a turn's input and is kept as long as the conversation it came with — the
+        # module docstring argues why a knob of its own could only agree with this one or be wrong.
+        "session_attachments": settings.retention_session_messages_days,
         # **The conversation's window, deliberately, rather than a knob of its own.** An ownership
         # row is disposable only once nothing session-scoped is left (`_prune_session_owners`), so
         # a window here is a *floor* — "how long after it was created may an empty session be

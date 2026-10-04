@@ -293,9 +293,18 @@ class MemorySettings(BaseSettings):
     digest_timeout_seconds: float = Field(default=300.0, gt=0)
     # Uploaded working files (gap AGT-3). Bounded in both directions: one oversized upload must
     # not blow a pod's memory, and a chemist uploading all morning must not either. Attachments
-    # are session-scoped working material, so they are lost with the pod by design.
+    # are session-scoped working material. Where sessions are durable they are stored in
+    # `session_attachments` and readable from every front-door replica, kept on the conversation's
+    # retention window (D-2026-10-04-an-upload-is-session-state-not-pod-state); otherwise they live
+    # in the pod's memory and are lost with it.
     attachment_max_bytes: int = Field(default=2_000_000, gt=0)
     attachment_max_per_session: int = Field(default=10, ge=1)
+    # **Two bounds in one number, and which applies depends on the store.** In both stores it is
+    # the per-session byte bound: past it a session's oldest uploads are dropped
+    # (`agent/attachments._uploads_to_drop`), counted as resident bytes in memory and as stored
+    # UTF-8 bytes in Postgres. Only the in-memory store also reads it as the cross-session budget
+    # argued below — a bound on a pod's memory, which the durable store does not spend.
+    #
     # ...and in the third direction, which the two above do not cover: what every live session's
     # attachments cost *together*. The store's other bound is `service_max_live_sessions` (1000),
     # a count — and a count of entries that each hold up to `attachment_max_per_session` parsed
@@ -318,7 +327,7 @@ class MemorySettings(BaseSettings):
     # parsed upload may weigh: that ceiling is sized against the *parse*, which happens twice
     # concurrently at most, while this one is sized against what is *retained* for every live
     # session at once. The consequence — a single attachment can outweigh the whole store — is held
-    # by `AttachmentStore.add`, which drops that session's older files first, and by
+    # by `InMemoryAttachmentStore.add`, which drops that session's older files first, and by
     # `core/bounded.py`, which no longer empties the map for an entry that cannot fit it.
     attachment_store_max_bytes: int = Field(default=64_000_000, gt=0)
     # Parsing an upload is CPU-bound work over untrusted bytes in third-party libraries, so it runs

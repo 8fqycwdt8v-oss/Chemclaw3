@@ -727,6 +727,9 @@ async def test_the_erase_statements_are_valid_sql() -> None:
         # Artefacts follow `session_messages` (`D-2026-10-02-an-artefact-is-part-of-the-answer-not-
         # an-effect`); their revisions cascade from the header.
         "session_exhibits",
+        # Uploads, by session and by uploader
+        # (`D-2026-10-04-an-upload-is-session-state-not-pod-state`).
+        "session_attachments",
         "session_owners",
     }
 

@@ -218,6 +218,12 @@ BEGIN
     -- artefact is conversation — a session delete, an erasure and the retention sweep remove it
     -- with the transcript, and its revisions follow by cascade.
     EXECUTE format('GRANT INSERT, UPDATE, DELETE ON session_exhibits TO %I', app_role);
+    -- A session's uploaded working files (`120_session_attachments.sql`): INSERT on upload, UPDATE
+    -- because the per-session bound drops the oldest by clearing its text and stamping `evicted_at`
+    -- (the name stays, so the tools can say the file was dropped rather than never sent), and DELETE
+    -- because an upload is conversation — a session delete, an erasure and the retention sweep
+    -- remove it with the transcript.
+    EXECUTE format('GRANT INSERT, UPDATE, DELETE ON session_attachments TO %I', app_role);
 
     -- A shared session's two tables (`110_shared_sessions.sql`). `session_members` takes INSERT and
     -- DELETE and no UPDATE: the owner admits and removes somebody, and a membership has nothing to
