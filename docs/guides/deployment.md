@@ -583,6 +583,13 @@ Deploy the fleet **before** the backend. The backend dials it, and the release o
 | `calc` | `Chemclaw3-mcp:servers/calc/deploy/*.yaml` | `CHEMCLAW_CALC_TOKEN` | `chemclaw-mcp-calc:8860` |
 | `rxnlabel` | `Chemclaw3-mcp:servers/rxnlabel/deploy/*.yaml` | `CHEMCLAW_RXNLABEL_TOKEN` | `chemclaw-mcp-rxnlabel:8865` |
 
+These five are the servers the shipped chart turns on. The off-by-default servers (`props` 8850,
+`thermalsafety` 8851, `kinetics` 8852, `unitops` 8853, `suitability` 8892, `pyexec` 8899) follow
+the same pattern with `CHEMCLAW_<NAME>_TOKEN`; switching one on also needs
+`connectors.<name>.enabled: true` and a `secrets.optionalKeys` slot for its token (§5), and
+`pyexec` additionally needs its manifest mounted through `extraConnectors.bundles`. The full
+per-server table, with interactive-queue sizing, is `Chemclaw3-mcp:docs/operations.md` §3.
+
 Each server's bearer variable is whatever its manifest declares as `auth.token_env`
 (`Chemclaw3-mcp:manifests/<name>/connector.yaml`, or `Chemclaw3-mcp:manifests-internal/<name>/connector.yaml`
 for `calc` and `rxnlabel`). Each server **fails closed**: if the variable is unset, every `/mcp`

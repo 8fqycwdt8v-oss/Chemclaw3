@@ -9,21 +9,44 @@ values/templates, Make targets, CLI entry points, alert rules, metrics). A claim
 fixed or deleted; a user-facing knob/command/alert with no doc gets one. ADRs and `docs/archive/`
 are append-only/historical and are **not** edited.
 
-- [ ] A. Root docs: `README.md`, `ARCHITECTURE.md`, `SECURITY.md`, `infra/README.md`, `docs/README.md`, `.env.example`
-- [ ] B. Delivery docs: `deploy/README.md`, `deploy/kind/README.md`, `deploy/jenkins/README.md`, chart `NOTES.txt`/`values.yaml` comments
-- [ ] C. Runbook first half (prereqs → workers/monitoring) verified
-- [ ] D. Runbook second half (alerts ↔ `prometheusrule.yaml`, migrations, rollback, restore, release, people, sinks, artefacts)
-- [ ] E. Package READMEs under `src/chemclaw/**`, `infra/sql/README.md`, `tests/README.md`
-- [ ] F. `docs/guides/*` (non-runbook) + `docs/planning/BACKLOG.md`/`DEFERRED.md` rows already closed by the code
-- [ ] G. New `docs/guides/deployment.md`: end-to-end install of the whole family (images, Postgres, Temporal, secrets, chart, MCP fleet, UI, wiring, verification)
-- [ ] H. New `docs/guides/troubleshooting.md`: symptom → cause → fix index over the runbook + routine-operations checklist
-- [ ] I. Chemclaw3-mcp: README, `docs/integration.md`, `docs/adding-a-server.md`, `MODULES.md`, server READMEs, deploy notes
-- [ ] J. Chemclaw3_ui: README, `docs/*`, `deploy/openshift/README.md`, stale tracker docs
-- [ ] Verify: `make lint type`, doc-guard tests + full `make test` (Postgres up), mcp `make check`, ui lint/test
-- [ ] Ship: one PR per repo, merged when green
+- [x] A. Root docs: `README.md`, `ARCHITECTURE.md`, `SECURITY.md`, `infra/README.md`, `docs/README.md`, `.env.example`
+- [x] B. Delivery docs: `deploy/README.md`, `deploy/kind/README.md`, `deploy/jenkins/README.md`, chart `NOTES.txt`/`values.yaml` comments
+- [x] C. Runbook first half (prereqs → workers/monitoring) verified
+- [x] D. Runbook second half (alerts ↔ `prometheusrule.yaml`, migrations, rollback, restore, release, people, sinks, artefacts)
+- [x] E. Package READMEs under `src/chemclaw/**`, `infra/sql/README.md`, `tests/README.md`
+- [x] F. `docs/guides/*` (non-runbook) + `docs/planning/BACKLOG.md`/`DEFERRED.md` rows already closed by the code
+- [x] G. New `docs/guides/deployment.md`: end-to-end install of the whole family (images, Postgres, Temporal, secrets, chart, MCP fleet, UI, wiring, verification)
+- [x] H. New `docs/guides/troubleshooting.md`: symptom → cause → fix index over the runbook + routine-operations checklist
+- [x] I. Chemclaw3-mcp: README, `docs/integration.md`, `docs/adding-a-server.md`, `MODULES.md`, server READMEs, deploy notes
+- [x] J. Chemclaw3_ui: README, `docs/*`, `deploy/openshift/README.md`, stale tracker docs
+- [x] Verify: `make lint type`, doc-guard tests + full `make test` (Postgres up), mcp `make check`, ui lint/test
+- [x] Ship: one PR per repo, merged when green
 
 ## Review
-(filled in at the end)
+
+Ten parallel audits, each owning disjoint files, checked every operator-facing claim against
+code, chart renders and settings; ADRs and `docs/archive/` untouched.
+
+- **New:** `docs/guides/deployment.md` (end-to-end install; its example values render with helm
+  3.16 and pass kubeconform), `docs/guides/operations.md`, `docs/guides/troubleshooting.md`;
+  Chemclaw3-mcp `docs/operations.md`; Chemclaw3_ui `docs/operations.md`. README and docs index route
+  to them.
+- **Wrong instructions fixed (examples):** README worker commands collided on metrics port 9000;
+  README claimed the harness must be switched on (it is on by default); workload-identity
+  federation still described; `deploy/README` component commands, probe paths, header name, broken
+  workflow-versioning link; runbook `make explain` usage, a `helm upgrade` block broken by inline
+  comments, missing `store_setup` step, wrong profile dir; `workflow-versioning.md` named a
+  workflow that does not exist and said no CI guard exists; UI quick start built an image that
+  refuses every page.
+- **Gaps documented, not fixed (code/chart follow-ups):** fleet Deployments do not wire the bearer
+  Secret and pin UIDs that OpenShift `restricted-v2` rejects; chart has no `optionalKeys` slots for
+  off-by-default fleet bundles and no CA-file mount; same-namespace UI blocked by the front-door
+  NetworkPolicy unless `ingressNamespaces` lists it; in-repo connector servers do not put the
+  correlation id on log lines; uploads held in one backend pod's memory are unreachable through the
+  UI's Service with >1 replica; note pushes from app containers may lack a git credential (reasoned,
+  not run).
+- **Verify:** lint, mypy, `helm-validate` (with promtool), `kind-validate`, `prose-validate` green;
+  full suites below.
 
 ---
 
