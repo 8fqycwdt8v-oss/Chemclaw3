@@ -11,6 +11,6 @@
 name: eln-json
 description: >-
   An electronic lab notebook exporting free-text JSON entries. Ingested and mapped to ORD
-  reactions, which become knowledge-graph note proposals.
+  reactions, which are stored as `reaction_records` rows.
 
 ingest: chemclaw.ingest.eln.json_adapter:JsonExportAdapter

@@ -1,12 +1,14 @@
 # `infra/` — local dev infrastructure
 
-**Responsibility:** the developer-facing stack definition. `docker-compose.yml`
-brings up a self-hosted Temporal dev server (frontend + web UI on :8081) and a
-pgvector-enabled Postgres, started via `make up` / stopped via `make down`.
+**Responsibility:** the developer-facing stack definition and this system's own
+SQL migrations. `docker-compose.yml` brings up a pgvector-enabled Postgres (:5432),
+a self-hosted Temporal server (`temporalio/auto-setup`, frontend gRPC on :7233,
+persisting to that Postgres) and the Temporal web UI (:8081), started via `make up`
+/ stopped via `make down`.
 
-Ports and credentials mirror `.env.example` and `chemclaw/config.py`, so a fresh
-checkout connects with no extra setup. This is a **dev** topology only — not a
-production deployment (plan step 0.5).
+Ports and credentials mirror `.env.example` and `src/chemclaw/core/config/`, so a
+fresh checkout connects with no extra setup. This is a **dev** topology only — the
+production delivery is `deploy/` (image + Helm chart).
 
 `docker-compose.observability.yml` is a **second, separate stack**: one Phoenix
 container (UI + REST on :6006, OTLP/gRPC on :4317), started via `make phoenix-up`.
@@ -25,8 +27,10 @@ containers — so a lane that adopted the shared spine refuses to tear it down.
 `processes.sh` starts and stops the connectors, the Temporal workers, the mock
 gateway and the front door with readiness polls rather than sleeps. `soak.sh`
 drives the lane in rounds, and `siblings.sh` is the one place that resolves a
-sibling checkout's path for both lanes. All are reached through `make live-*`;
-the procedure is in `docs/guides/runbook.md`.
+sibling checkout's path for both lanes. `e2e-full-stack/` is the four-repo lane
+(this backend plus `Chemclaw3-mcp`, `Chemclaw3_mock` and `Chemclaw3_ui`, `make
+live-e2e-full-stack`). All are reached through `make live-*`; the procedure is in
+`docs/guides/runbook.md`.
 
 **No lane here carries the compiled egress layer, and that is a real gap rather
 than a detail.** `src/chemclaw/core/netguard_preload.c` is built in exactly one
@@ -41,12 +45,9 @@ allowlist the way a pod does. What *does* exercise it is
 recipe and drives real clients through it; a green live lane is evidence about
 the Python layer only (`D-2026-09-12-the-layer-that-binds-grpc-is-libc-not-socket-py`).
 
-**Neither the script count nor the process list is written out here**, and the
-count was wrong within one commit of being written — it said "the two scripts"
-over four. What each process is called and which port it holds is a thing the
-lane *knows at runtime* and prose does not: `bootstrap.sh status` prints it, and
-`.live/run/<name>.port` is the authority for a port
-(`D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose`).
+Which process holds which port is something the lane knows at runtime:
+`make live-status` lists the processes, and `.live/run/<name>.port` is the
+authority for a port (`D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose`).
 
 `sql/` is the migration set `make db-migrate` applies, in filename order, against
 a ledger with per-file checksums. The schema is forward-only and additive

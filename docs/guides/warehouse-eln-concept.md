@@ -1,6 +1,8 @@
-# Concept: attaching a warehouse ELN whose schema nobody knows yet
+# Attaching a warehouse ELN whose schema nobody knows yet
 
-**Status:** implemented offline; the live connection waits on a tenant. The decisions are
+**Status:** **built** and proven offline against a fake warehouse (`ingest/eln/warehouse/`,
+`ingest/sources/eln-databricks/`, shipped disabled); the live connection waits on a tenant. §7 is the
+operator procedure. The decisions are
 `docs/decisions/D-2026-08-04-the-schema-is-a-file.md` and, for the connection block itself,
 `docs/decisions/D-2026-08-26-the-driver-s-signature-is-the-schema.md`.
 **Scope:** how ChemClaw connects to a corporate ELN held in a SQL warehouse — reaction records,
@@ -92,19 +94,19 @@ does; a second, YAML-driven segmenter would be that logic twice.
 
 `OrdReaction` will never have a field for every column a corporate ELN carries — a lot number, an
 equivalents figure, an assay, a vessel id, whichever tables the site keeps. Under the obvious design
-each newly-interesting column costs an edit to the model, to the note renderer, and to their tests.
+each newly-interesting column costs an edit to the model, to the record renderer, and to their tests.
 
 So the canonical record gained one bounded field: `attributes`, a bag of strings, on the reaction and
 on each component. `attributes:` in the binding decides what lands there — named columns, or
-everything the row held that no field already took. It is rendered at the end of the note body, and
-it is capped, because a wide view would otherwise put a hundred unmodelled lines into every note and
-push the actual chemistry out of the retrieval excerpt.
+everything the row held that no field already took. It is rendered at the end of the stored
+transcription (`ingest/eln/record.py`), and it is capped, because a wide view would otherwise put a
+hundred unmodelled lines into every record and push the actual chemistry out of what a reader sees.
 
 Three properties make it safe rather than a second untyped schema:
 
 - **Strings, not values.** These are unmodelled by definition, so there is no type to validate and no
-  unit to normalise to. Stringifying also keeps the note body deterministic, which the sync's
-  amendment detection depends on — it compares merged note bodies byte-for-byte.
+  unit to normalise to. Stringifying also keeps the transcription deterministic, so re-ingesting an
+  unchanged entry rewrites an identical record.
 - **Never chemistry.** `reaction_smiles`, `transformation_smiles` and both fingerprint paths ignore
   it entirely. A structure reaching the corpus through an unvalidated bag of strings is exactly the
   failure the typed fields exist to prevent, and a test pins it.
@@ -125,20 +127,22 @@ wrong altitude: `src/chemclaw/retrieval/retrievers.py` drops any hit whose note 
 which is every warehouse row. `src/chemclaw/retrieval/evidence.py` says the same thing from the other
 side — a new source is a new retriever behind that interface, never a change to core.
 
-**It cites the row, not a note.** There is no note id for a reaction that was never proposed as one,
+**It cites the row, not a note.** There is no record id for a warehouse row that was never ingested,
 and inventing one would be a citation that resolves to nothing. `src/chemclaw/ingest/sources/vendored_dataset.py`
 made the same call for the same reason: a citation has to resolve to something a reader can check.
 
 ### Why this ELN carries both halves when the others carry one
 
-`src/chemclaw/ingest/sources/README.md` states the rule: an ELN whose records become notes does not
-also carry a retriever, or every ingested reaction is surfaced twice. That rule is about
+`src/chemclaw/ingest/sources/README.md` states the rule: an ELN whose records are ingested into the
+corpus does not also carry a retriever, or every ingested reaction is surfaced twice. (Since
+D-2026-08-25 an ingested run is a `reaction_records` row, not a knowledge-graph note.) That rule is about
 double-counting, not about ELNs — and a file-drop ELN ingests everything it sees, so for it the two
 are the same thing.
 
 A warehouse ELN ingests a curated slice of something much larger, and the rest has no other way in.
-`suppress_ingested` keeps the rule intact by dropping exactly the hits that did become notes. What
-reaches the agent is reviewed knowledge for the curated part, raw rows for the rest, and never both
+`suppress_ingested` (default `true`) keeps the rule intact by dropping exactly the hits the record
+store already holds (`retriever.py::_ingested_keys`, one query per result set). What reaches the
+agent is the ingested record for the curated part, raw warehouse rows for the rest, and never both
 for one reaction — which matters because a duplicate would read as two sources agreeing.
 
 ## 6. Why this is provable now, with no tenant
@@ -166,7 +170,7 @@ the client is not a dependency of this repository and should not become one befo
    driver for is one more step and no different in kind: write a module exposing a callable that
    satisfies `chemclaw.ingest.eln.warehouse.driver.Warehouse`, name it in `connection.driver:`, and
    write that callable's own keyword arguments underneath it.
-2. Put that directory first in `CHEMCLAW_DATA_SOURCES_DIR` — it is an OS-pathsep search path where
+2. Put that directory first in `CHEMCLAW_DATA_SOURCES_DIR` — it is an `os.pathsep` search path where
    the earlier entry wins, so the site's schema is never a change to this repository.
 3. Set the environment variables the `connection:` block names.
 4. `make datasource-validate`, then the same command with `--construct`, which builds the halves and
@@ -180,9 +184,9 @@ and the site's real binding are the whole remaining list.
 ## 8. What is still open
 
 **Per-user reads.** Everything here connects as a service identity, so warehouse-side row access
-control sees one principal. An on-behalf-of exchange is what that would need; it was built,
-never wired, and deleted in D-2026-08-15 — so this is
-dormant; wiring it needs a real tenant on both sides. Until then, the deployment's answer to "who may
+control sees one principal. An on-behalf-of exchange is what that would need; one was built, never
+wired, and deleted in D-2026-08-15, so re-introducing it is a new decision plus a real tenant on both
+sides (`docs/planning/DEFERRED.md`, "Per-user reads from the warehouse ELN"). Until then, the deployment's answer to "who may
 see which reactions" is the view named in the binding.
 
 **Child tables cost a query each.** One `IN (...)` per block per chunk is the mitigation, and it is

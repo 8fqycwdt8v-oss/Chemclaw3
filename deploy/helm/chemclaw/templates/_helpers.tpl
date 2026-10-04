@@ -422,7 +422,7 @@ checksum/config: {{ include (print $.Template.BasePath "/config.yaml") . | sha25
        the namespace's range, and pinning one fights the SCC rather than satisfying it.
 
        `readOnlyRootFilesystem` is deliberately NOT here. It is not part of the restricted profile,
-       and the calculation workers shell out to xtb/crest, which need writable scratch — asserting
+       and the workers write scratch files (the knowledge checkout, document parsing, temp dirs) — asserting
        it would trade a real admission failure for a real runtime failure. It is a value
        (`securityContext.readOnlyRootFilesystem`) so a deployment that has provisioned the scratch
        mounts can turn it on deliberately. */ -}}

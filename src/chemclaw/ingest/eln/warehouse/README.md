@@ -66,10 +66,9 @@ halves and so validates the binding itself rather than just its keyword name.
 
 ## The similarity search is the driver's, not the engine's
 
-`placeholder` was always on the connection, because parameter style is a dialect fact. The
-similarity *call* is one too, and until D-2026-08-25 it was not treated as one: one vendor's
-function names and its `?::VECTOR(FLOAT, n)` cast sat in `sql.py`. Both now come from
-`Warehouse.vector_dialect`, and a driver that offers none cannot serve a `vector:` block — it says
+`placeholder` is on the connection, because parameter style is a dialect fact. The similarity
+*call* is one too: the function names and the cast come from `Warehouse.vector_dialect`, not from
+`sql.py`, and a driver that offers none cannot serve a `vector:` block — it says
 so, naming itself, rather than emitting SQL another server will reject.
 
 The sharper half is how a query vector is *bound*, not what the function is called. A warehouse with
@@ -109,7 +108,7 @@ safe to keep in a repository. The names are deliberately not `CHEMCLAW_`-prefixe
 warehouse client's own credentials, not settings of this application.
 
 **Unmapped columns survive.** `attributes:` carries whatever the row held that no field took, into
-`OrdReaction.attributes` and the end of the note body. That is what makes a column added next
+`OrdReaction.attributes` and the record's rendered text. That is what makes a column added next
 quarter visible without anyone editing this package — and it is bounded, because a wide view would
 otherwise put a hundred unmodelled lines into every note.
 
@@ -119,14 +118,15 @@ otherwise put a hundred unmodelled lines into every note.
 file-drop ELN ingests everything it sees, so carrying a retriever as well would surface every
 reaction twice.
 
-A warehouse ELN is a different shape. It ingests a curated slice — the reactions worth a reviewed,
-merged note — of something much larger, and the rest has no other way in. It also already holds an
+A warehouse ELN is a different shape. It ingests a curated slice — the reactions worth a
+transcribed record — of something much larger, and the rest has no other way in. It also already holds an
 embedding per reaction, so searching it in place costs one query, while copying those vectors into
 this system's index would mean re-embedding a bigger corpus and keeping the copy fresh forever.
 
-The original rule survives intact through `suppress_ingested`, which drops a hit whose reaction
-already became a note. What reaches the agent is: reviewed knowledge for the curated part, raw
-warehouse rows for the rest, and never both for the same reaction.
+The original rule survives intact through `suppress_ingested`, which drops a hit whose reaction the
+ELN corpus already holds as a reaction record (one query over `reaction_records`). What reaches the
+agent is: the transcribed record for the curated part, raw warehouse rows for the rest, and never
+both for the same reaction.
 
 ## Testing without a warehouse
 

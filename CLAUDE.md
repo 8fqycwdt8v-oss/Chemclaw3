@@ -411,10 +411,11 @@ after each cluster of steps before moving on.
   of deleting is exactly how the file grew nine sections describing each other, three of them false
   and five rows describing shipped work (D-154). `tests/test_deferred_register.py` enforces what a
   machine can see of this.
-- `docs/decisions/` — architecture decisions with rationale, one file per ADR (`D-NNN-<slug>.md`).
+- `docs/decisions/` — architecture decisions with rationale, one file per ADR
+  (`D-YYYY-MM-DD-<slug>.md`; the frozen `D-NNN-<slug>.md` files keep their names).
   Never edit a merged ADR; a decision that has changed gets a new ADR that supersedes it.
-- `docs/decisions/README.md` — the `D-NNN` allocation ledger, one row per number. **Every session that
-  writes an ADR must reserve its number here** (see below).
+- `docs/decisions/README.md` — the ledger, one row per ADR file. **Every session that writes an ADR
+  adds its row here** (see below).
 - `tasks/lessons.md` — self-improvement log. Review it at session start; after **any**
   correction from the user, add the pattern here and write a rule for yourself that prevents
   the same mistake. Iterate ruthlessly until the mistake rate drops.

@@ -10,13 +10,9 @@ from the warehouse ELN binding, where the site's schema is the manifest.
 
 ## The second shipped driver has no shipped manifest, and this is how it is named
 
-`publish/drivers/http.py` is the other driver this repository ships, and
-`D-2026-08-27-a-hold-nothing-can-open-is-not-a-hold` keeps it under the rule "a thing no
-*configuration* can reach is dead, a thing a *deployment* selects is not". That rule was being
-asserted rather than met: the `module:callable` a site has to write —
-`chemclaw.publish.drivers.http:HttpResultSink` — appeared in no manifest, README or document in
-this tree, so selecting it meant reading the driver's `__init__` signature out of the source. A
-driver a deployment cannot name is not one a deployment selects.
+`publish/drivers/http.py` is the other driver this repository ships, kept under the rule "a thing a
+*deployment* selects is not dead" (`D-2026-08-27-a-hold-nothing-can-open-is-not-a-hold`). The
+`module:callable` a site writes is `chemclaw.publish.drivers.http:HttpResultSink`.
 
 It ships no folder of its own **because it has nothing to ship**: `url` is required and has
 deliberately no default, so a manifest here would carry a fabricated endpoint that

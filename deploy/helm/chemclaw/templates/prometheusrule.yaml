@@ -908,7 +908,7 @@ spec:
               all stopped, silently, because none of them emits a counter when it is not running.
               This Deployment uses `Recreate`, so the old pod is already gone. `absent()` is 1 only
               when *no series matches*, so the cause is a pod that never became a scrape target at
-              all: unschedulable, `workerReplicas: 0`, a selector that stopped matching, or the
+              all: unschedulable, `workers.background.replicas: 0`, a selector that stopped matching, or the
               PodMonitor not selecting it. An image that will not pull and a container that exits
               are `ChemclawTargetDown`'s — the kubelet assigns a PodIP before either happens, so the
               target exists and reports `up == 0`, which is a present series rather than an absent

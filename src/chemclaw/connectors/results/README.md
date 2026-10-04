@@ -34,5 +34,9 @@ python -m chemclaw.cli.backfill_publications --dry-run
 python -m chemclaw.cli.backfill_publications --requeue
 ```
 
-The workflow calls that module rather than reimplementing it: an operator and a chemist must cover
-exactly the same rows, and two walks that agreed today would diverge on the next table.
+Both routes call `chemclaw.publish.backfill` rather than reimplementing it: an operator and a
+chemist must cover exactly the same rows, and two walks that agreed today would diverge on the next
+table.
+
+`connector.yaml` declares the job, `workflows.py` holds `RepublishResultsWorkflow`, `specs.py` its
+typed input, and `worker.py` the process that polls `connector-results`.

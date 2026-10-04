@@ -49,7 +49,7 @@ Only the dense half. The catalogue — `document_files`, the chunk text, the fin
 mark-and-sweep, the `embedding_key` that makes a model swap self-healing, and the lexical leg —
 stays in Postgres. A vector database has no joins to resolve a citation with, no clock for a sweep
 to measure against, and no `ts_rank`. `ingest/documents/external_index.py` is the composition, and
-it is a *subclass* of the Postgres index precisely because five of the ten `DocumentIndex` methods
+it is a *subclass* of the Postgres index precisely because five of the eleven `DocumentIndex` methods
 are unchanged.
 
 **Two corpora use it, and both keep their catalogue in Postgres.**

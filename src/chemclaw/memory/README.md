@@ -23,7 +23,7 @@ new infrastructure, by design.
 `observations.py` and `observation_mining.py` are the ungated tier (D-161), and they are the
 exception that proves the rule below: an observation is stored in **Postgres, not Git**, because it
 is explicitly not truth. "This transformation has gone badly in three projects" is worth noticing
-and is not worth a reviewer's PR — and it is something the graph will never hold, since a playbook
+and is not yet a claim — and it is something the graph will never hold, since a playbook
 may only be distilled from successes.
 
 The threshold is what separates the two tiers, and since

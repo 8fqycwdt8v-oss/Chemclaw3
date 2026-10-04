@@ -1,6 +1,11 @@
-# Chemclaw Helm values (plan F6). Every endpoint / CA / queue / model name is one value here that
+# Chemclaw Helm values. Every endpoint / CA / queue / model name is one value here that
 # becomes one CHEMCLAW_-prefixed env var on the pods — the single pydantic Settings is the only
 # config source in-cluster (no second config system). Secrets are referenced, never inlined.
+#
+# Three values have no usable default and the chart refuses to render until a release states them:
+# `networkPolicy.egressDestinations` (or `allowAnyDestination: true`), `retention.windows` (or
+# `unboundedGrowthAccepted: true`) and `temporal.namespace`. `deploy/README.md` § "Install, step by
+# step" lists every render-time guard, the Secrets the chart expects and the order to set them up in.
 
 # How many extra pods of one Deployment a rolling update may run beside the old generation.
 #
@@ -35,7 +40,7 @@ image:
   # one. A list of `{name: <secret>}`, passed through verbatim.
   pullSecrets: []
 
-# The front-door OIDC Route (F6-T2). host empty = let OpenShift assign one.
+# The front door's Route (sign-in is Entra, enforced by the app). host empty = let OpenShift assign one.
 route:
   enabled: true
   host: ""
@@ -151,8 +156,6 @@ service:
       # new pod costs before it can take its first turn.
       targetPercent: 60
 
-# Core's own Temporal worker. Only one: every expensive workflow belongs to a connector bundle
-# below, each sized for its own work on its own queue (D-118).
 # Core's read-only MCP face — this system reachable as a tool by another agent
 # (`CHEMCLAW_COMPONENT=mcp-face`, D-2026-08-29-a-digest-nobody-receives-is-not-delivered).
 #
@@ -184,6 +187,8 @@ mcpFace:
   # deliberately unauthenticated `/healthz` and `/metrics`.
   ingressNamespaces: []
 
+# Core's own Temporal worker. Only one: every expensive workflow belongs to a connector bundle
+# below, each sized for its own work on its own queue (D-118).
 workers:
   background:
     # Keep at 1 — and **the reason is now that nobody has driven two, not that two are known to
@@ -341,9 +346,10 @@ knowledge:
 #   * give it a credential. A bundle reached across the network with `auth: mode: none` in its
 #     manifest is refused at load — see `chemclaw/connectors/manifest.py`.
 #
-# **`chem` was the first bundle to set it**, and `safety` is the second: the capability is
-# `Chemclaw3-mcp`'s, this release declares it and dials it. Every other bundle below is still ours,
-# served from this release's own image.
+# Every bundle below with a `url:` (`chem`, `safety`, `rxnpredict` and the five process-development
+# bundles) is `Chemclaw3-mcp`'s: this release declares it and dials it, and that server is deployed
+# from the sibling repository into this namespace. The bundles without one (`molfp`, `rxnfp`, `calc`,
+# `bo`, `results`) are served from this release's own image.
 connectors:
   molfp:
     enabled: true
@@ -830,7 +836,8 @@ postgres:
   # declaration can only add a firing condition.
   sessionStoreMaxConnections: 0
 
-# The pre-install/pre-upgrade migration hook (D-034).
+# The migration hook Job (`pre-install,pre-upgrade,pre-rollback`, D-034): migrations, the store's
+# own tables, then the runtime role's grants (`infra/sql/grants/`), before any app pod changes.
 migrateJob:
   # Four attempts. A migration failure is usually a lock it could not get within
   # CHEMCLAW_PG_MIGRATION_LOCK_TIMEOUT_SECONDS — transient by nature, and retrying is the intended
@@ -942,15 +949,15 @@ resources:
   # Also used by the knowledge-sync init/sidecar containers: both are small, single-purpose
   # processes, and giving them one shared budget is why this key is not named per-component.
   connector:
-    # The limit is 2 CPUs rather than 500m because the `chem` and `calc` connectors are where the
-    # synchronous RDKit work lives (depiction, embedding, descriptors) and it now runs in worker
+    # The limit is 2 CPUs rather than 500m because this release's own connector servers (`calc`,
+    # `molfp`, `rxnfp`) do synchronous RDKit work (embedding, descriptors, fingerprints) in worker
     # threads — which buys nothing under a half-CPU limit. The request is unchanged: the
     # knowledge-sync containers that share this key are still tiny, and a limit they never
     # approach costs nothing.
     requests: { cpu: "100m", memory: "256Mi" }
     limits: { cpu: "2", memory: "512Mi" }
 
-# Non-secret config → ConfigMap → CHEMCLAW_* env. Keys mirror chemclaw/config.Settings exactly.
+# Non-secret config → ConfigMap → CHEMCLAW_* env. Keys mirror `chemclaw.core.config.Settings` exactly.
 config:
   # The one model destination. **Stated rather than left to the code default**, for the reason
   # `CHEMCLAW_CALC_SERVER_URL` below is: the default is the local dev mock on loopback, and a pod
@@ -1360,12 +1367,15 @@ config:
   #   CHEMCLAW_EXHIBIT_PUSH_RETENTION_HOURS: "24"
   #   CHEMCLAW_CALC_ARTIFACT_MAX_DOWNLOAD_BYTES: "33554432"
 
-# Secret refs (F6-T6). This list is the whole of what is at rest: nothing else here is a
-# credential, and no component mints an outbound Entra token of its own (the workload-federation
-# and OBO exchanges were deleted, having never acquired a caller). So each entry below is an
-# architecture decision (D-047) with its own argument, written beside it. `tests/test_helm_chart.py` pins the exact set, so a seventh cannot arrive
-# unnoticed. This comment used to say "the THREE documented plain secrets" and went stale twice
-# without anyone noticing, which is why the count now lives in the test rather than in prose.
+# Secret refs. This list is the whole of what is at rest: nothing else here is a credential, and no
+# component mints an outbound Entra token of its own (the workload-federation and OBO exchanges were
+# deleted, having never acquired a caller). So each entry below is an architecture decision (D-047)
+# with its own argument, written beside it. `tests/test_helm_chart.py` pins the exact set, so a new
+# one cannot arrive unnoticed; the count lives in that test rather than in prose.
+#
+# Every entry names a key in ONE Secret, `name` below, and the key is the environment variable it
+# becomes. `keys` are mounted non-optionally on every pod — the key must exist in the Secret (it may
+# be empty) or the migrate hook Job, and then every pod, fails with `CreateContainerConfigError`.
 # Populate via an ExternalSecret/SealedSecret; the chart only names them.
 secrets:
   # Name of a pre-existing Secret with these keys, or let the chart template a placeholder.
@@ -1375,7 +1385,9 @@ secrets:
     llmApiKey: "CHEMCLAW_LLM_API_KEY"
     postgresDsn: "CHEMCLAW_POSTGRES_DSN"
     # Push credential for the knowledge repo (gap DEP-2). Without it the note writer cannot push
-    # the base branch, so every knowledge write fails at push in-cluster.
+    # the base branch, so every knowledge write fails at push in-cluster. Required like the two
+    # above: the key must exist in the Secret even when `knowledge.sync.repoUrl` is empty (an empty
+    # value is fine then), or every pod fails with `CreateContainerConfigError`.
     knowledgeRepoToken: "CHEMCLAW_KNOWLEDGE_REPO_TOKEN"
   # Secrets that are safe when unset, rendered with `optional: true` so naming a new one does not
   # take an existing release down on upgrade (see `chemclaw.env` in `_helpers.tpl`).
@@ -1436,6 +1448,10 @@ secrets:
     # per request, and unset means `MissingConnectorCredential` on the first prediction rather than
     # a degraded one.
     rxnpredictToken: "CHEMCLAW_RXNPREDICT_TOKEN"
+    # No slot ships for the five off-by-default process-development bundles (`connectors.props`,
+    # `kinetics`, `thermalsafety`, `unitops`, `suitability`). Enabling one means adding its bearer
+    # here as well, e.g. `propsToken: "CHEMCLAW_PROPS_TOKEN"` — `deploy/kind/values-kind.yaml` does
+    # exactly that — or every call to it is refused.
     # The four bundles **we** host, each authenticating its own `/mcp` (D-2026-08-20). Until they
     # declared a credential the NetworkPolicy was the only thing between any pod in the namespace
     # and a tool that starts durable expensive work — and a NetworkPolicy selects peers, not paths.
@@ -1521,8 +1537,11 @@ secrets:
     secretName: "chemclaw-temporal-tls"
     mountPath: "/etc/temporal/tls"
 
-# Workload Identity Federation: the ServiceAccount is annotated so the pod's projected SA token can
-# be exchanged for an Entra token (F4-T2). No client secret is stored.
+# The runtime ServiceAccount. The `azure.workload.identity/client-id` annotation (and the
+# `azure.workload.identity/use` pod label the templates carry) is inert scaffolding: workload
+# identity federation was deleted (`D-2026-08-15`) and nothing under `src/` reads a projected token,
+# so no Entra token is exchanged from it. It is kept only so a site that wires the Azure webhook
+# itself is one values file away from that path.
 serviceAccount:
   name: "chemclaw"
   annotations:
@@ -1530,17 +1549,10 @@ serviceAccount:
   # No component calls the Kubernetes API (there is no in-cluster client anywhere in `src/`), so the
   # projected API token every pod would otherwise mount is pure attack surface: a compromised pod
   # could present it to the API server with whatever this SA is granted. Off by default; a release
-  # that genuinely needs the token (a future in-cluster reader) sets this true deliberately. Entra
-  # workload identity uses a *federated* token from the annotation above, not this mount, so turning
-  # it off does not touch identity.
+  # that genuinely needs the token (a future in-cluster reader) sets this true deliberately. Nothing
+  # in this system's identity path reads this mount, so turning it off does not touch sign-in.
   automountServiceAccountToken: false
 
-# NetworkPolicy egress **port** allow-list (F6-T2). It bounds the ports, never the destinations —
-# `egressDestinations` below is what bounds those, and the chart refuses to render until a release
-# states one posture or the other. This line said "the app talks only to these, nothing else leaves
-# the pod", which was the same claim `deploy/README.md` made and the object did not keep.
-# Includes the internal LLM (8000) and OTLP collector (4317) — both plain HTTP on non-443 ports, so
-# they must be listed explicitly or the agent cannot reach its model / ship traces.
 # Metrics collection (REV-2). The `/metrics` route has existed since DEP-4 and nothing scraped it,
 # so every counter in the system was exposed and uncollected — an observability story that fails
 # quietly, because the endpoint answers and no dashboard has ever had a data point.
@@ -1764,20 +1776,12 @@ monitoring:
   # counts, schedule-to-start latency: the queue-side numbers no first-party counter can produce,
   # because they are the SDK's view of the broker.
   #
-  # **Off until the worker process actually binds the port.** Turning it on renders a second
-  # container port and a second `podMetricsEndpoint`; with nothing listening, every worker gains a
-  # permanently-down scrape target — which `ChemclawTargetDown` would then report forever. Flip
-  # this to `true` in the same change that adds the `TelemetryConfig(metrics=PrometheusConfig(...))`
-  # bind in `durable/serve.py`.
-  #
-  # That change owns the dashboard panels too. `chemclaw-durable.json` shipped a "Temporal worker
-  # task slots" and a "Temporal pollers" panel *unconditionally*, over series nothing in this system
-  # emits — two graphs that could never draw, which on a dashboard is indistinguishable from two
-  # graphs saying nothing is happening. `ChemclawWorkerNotPolling` was already gated on this flag
-  # for exactly that reason; the panels were not. They are deleted rather than gated, because a
-  # panel for a producer that does not exist is a "for later" stub, and
-  # `tests/test_deploy_chart.py::test_no_dashboard_panel_queries_a_series_nothing_produces` refuses
-  # the next one.
+  # **Off by default; turning it on is complete.** `core/temporal_client.py` binds the SDK's
+  # `PrometheusConfig` exporter whenever `CHEMCLAW_TEMPORAL_METRICS_PORT` is non-zero, and enabling
+  # this sets that variable on every worker, renders the second container port and
+  # `podMetricsEndpoint`, opens the port in the NetworkPolicy and adds `ChemclawWorkerNotPolling`.
+  # No dashboard panel reads these series
+  # (`tests/test_deploy_chart.py::test_no_dashboard_panel_queries_a_series_nothing_produces`).
   temporalSdkMetrics:
     enabled: false
     # The port that exporter binds. Distinct from `workerMetricsPort`: the SDK's exporter is a Rust
@@ -1987,6 +1991,11 @@ retention:
   # reason.
   exhibitsGrowthAccepted: false
 
+# NetworkPolicy. `egressPorts` is a **port** allow-list (plus DNS, which the template always
+# permits): it bounds the ports, never the destinations — `egressDestinations` is what bounds those,
+# and the chart refuses to render until a release states one posture or the other. The internal LLM
+# (8000) and the OTLP collector (4317) are plain HTTP on non-443 ports, so they are listed
+# explicitly. `enabled: false` renders no policy at all, and then asks for neither posture.
 networkPolicy:
   enabled: true
   egressPorts:
@@ -2070,7 +2079,12 @@ networkPolicy:
   # the address. Enumerating every peer below does not bound it. That case is refused at boot by
   # `netguard.refuse_proxied_egress` instead, and there is no layer under that one.
   #
-  # Entries are NetworkPolicyPeer objects, passed through verbatim:
+  # Entries are NetworkPolicyPeer objects, passed through verbatim. **This one list is the `to:` of
+  # every egress port**, in-cluster pod-to-pod traffic included, so it must name this release's own
+  # pods (the front door and workers dial the `chemclaw-connector-*` Services) and the
+  # `Chemclaw3-mcp` fleet's pods in this namespace, or those calls are dropped silently:
+  #   - podSelector: {matchLabels: {app.kubernetes.io/name: chemclaw}}    # this release's pods
+  #   - podSelector: {matchLabels: {app.kubernetes.io/part-of: chemclaw3}} # the MCP fleet
   #   - ipBlock: {cidr: 10.0.1.0/24}                     # the database subnet
   #   - namespaceSelector: {matchLabels: {name: temporal}}
   #   - namespaceSelector: {matchLabels: {name: llm-serving}}
@@ -2090,7 +2104,7 @@ networkPolicy:
   #
   # It is `false` here so that a release inherits no permission it did not write down. `helm
   # template` on these defaults therefore needs `--set networkPolicy.allowAnyDestination=true` —
-  # which `make helm-validate`'s two renders and the runbook's deploy example both pass, and
+  # which every render in `make helm-validate` and the runbook's deploy example pass, and
   # `deploy/README.md` documents.
   allowAnyDestination: false
   # Namespaces allowed to reach the front door, beyond Chemclaw's own pods. The router needs it for
@@ -2100,7 +2114,9 @@ networkPolicy:
   # `route.ipWhitelist`). It used to say it was. Labels
   # differ by distribution: OpenShift labels its router namespace
   # `network.openshift.io/policy-group: ingress` and its user-workload monitoring namespace
-  # `kubernetes.io/metadata.name: openshift-user-workload-monitoring`.
+  # `kubernetes.io/metadata.name: openshift-user-workload-monitoring`. "Chemclaw's own pods" means
+  # this release's pods only: a `Chemclaw3_ui` pod in the same namespace is refused until that
+  # namespace is listed here too (`kubernetes.io/metadata.name: <release namespace>`).
   serviceIngress:
     # Its own toggle, not `networkPolicy.enabled`: if these labels are wrong the front door is
     # unreachable, and the fix must not be "turn off network policy" — that would drop the egress

@@ -11,11 +11,9 @@ turn's state and no job's (D-2026-08-10 §3).
 One core task queue (its name comes from `chemclaw.core.config`): `background-jobs`
 (D-006). See `docs/reference/architektur.md` §2, §15.
 
-**The workflows and the worker are one package** (D-148). They were `workflows/`
-and `workers/` — two top-level packages, the second holding a single 60-line
-module whose entire job was to serve what the first declared. Splitting them said
-nothing a reader could use, and `workers/` was easy to confuse with the per-bundle
-`connectors/<name>/worker.py`, which is a genuinely different thing.
+**The workflows and the worker are one package** (D-148): `background_worker.py` hosts what this
+package declares; a bundle's own `connectors/<name>/worker.py` is a different process on a
+different queue.
 
 **Which queue is a property of the capability, not of the deployment**, so it is
 declared where the capability is defined rather than in the worker: put
@@ -50,3 +48,15 @@ must resume from event history without re-running completed activities. For the
 xTB jobs specifically, resumption is nearly free for a second reason — every
 optimization and Hessian inside one is content-addressed in the calculation
 store, so a retry walks straight through the work it already did.
+
+## Module index
+
+| Concern | Modules |
+| --- | --- |
+| The worker and its plumbing | `background_worker`, `serve` (run a worker so a pod termination drains rather than loses work), `registry`, `interceptor` (every activity says it ran and how it ended), `heartbeat`, `job_metrics`, `schedules` (the Temporal Schedules `make schedules-apply` writes) |
+| Connector jobs | `connector_job`, `governed_launch` (a launch through the same governed chain a turn's goes through), `job_record` + `job_record_store`, `orchestrator` (child-workflow fan-out) |
+| Ingest and indexes | `eln_sync`, `document_sync`, `corpus_sync`, `label_sync`, `commitment_sync`, `note_index` |
+| Knowledge and memory | `publish` (the durable note write), `memory_jobs`, `observation_jobs`, `hypothesis_tournament` |
+| Reports and templates | `report_workflow`, `template_job`, `template_activities` |
+| Waiting on people | `awaiting` + `pending_store` (a held-open question), `orphaned_waits`, `check_in`, `notify` (session push-back), `digest`, `deliver_message` |
+| Outbound and housekeeping | `publish_results` (drain the result outbox to enabled sinks), `effect_ledger`, `retention` (bounded growth for the durable stores), `artifact_eviction`, `eval_drift` |

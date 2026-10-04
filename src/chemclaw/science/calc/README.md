@@ -12,8 +12,9 @@ What stayed is what a stateless server cannot hold:
   ever, and concurrent misses on one key in one process share one computation.
 - `calibration.py` — the prediction ledger, keyed exactly on `(calc_type, calc_version,
   input_hash)`; nothing here derives a version.
-- `artifacts.py`, `postgres_artifacts.py`, `structures.py` — the content-addressed store for a run's
-  by-products, and the structures a job was asked about.
+- `artifacts.py`, `postgres_artifacts.py` — the content-addressed store for a run's by-products.
+- `structures.py`, `postgres_structures.py` — the geometry store: a computed geometry addressed by
+  its `structure_id` rather than carried as a payload (D-2026-08-21).
 - `models.py` — every shape the cache reconstructs and the Temporal wire carries.
 - `thermo.py`, `uncertainty.py`, `logd.py` — the arithmetic that depends on something the expensive
   half never saw (a temperature, a pH), which is exactly why its composites were decomposed.

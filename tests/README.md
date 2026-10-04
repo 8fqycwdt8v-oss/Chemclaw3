@@ -2,8 +2,8 @@
 
 Run it with `make test`, one file with `pytest tests/test_x.py::test_name`, one pattern with
 `pytest -k "substring"`. `make check` adds lint and `mypy --strict`; `make cov` adds the coverage
-floor — `fail_under` in `pyproject.toml` is the one place that number lives. It is not restated
-here, because it moved once already and two documents went on quoting the old value.
+floor — `fail_under` in `pyproject.toml` is the one place that number lives, so it is not restated
+here.
 CI runs exactly these targets, so a green `make` locally is a green CI.
 
 `conftest.py` holds the shared fixtures, `pg.py` and `temporal_env.py` the optional Postgres and
@@ -18,6 +18,15 @@ calls and answers, for tests that drive a compiled graph directly; `fakes_turn.p
 — the seam a turn is driven through, so a test never needs a model credential; `legacy_rows.py`
 holds the stored-message payloads the previous framework wrote, frozen as literals because they are
 historical data a production table still contains.
+
+The other non-test modules are narrower harnesses: `middleware.py` drives one `wrap_tool_call`
+middleware without compiling a graph, `signals.py` captures what code publishes on the stream
+writer, `surface.py` reads what one profile advertises without building an agent, `bo_harness.py`
+is the BO ask/tell loop `src/` deliberately does not ship, `calc_server_fake.py` and
+`warehouse_fake.py` stand in for the calculation server and a warehouse, `document_fixtures.py`,
+`parse_stalls.py` and `egress_probe.py` serve the document-parsing tests, `recorded_tool_results.py`
+and `recorded_workflow_histories.py` hold recorded payloads and the Temporal replay check, and
+`siblings.py` locates the companion checkouts.
 
 ## What is checked here that is not a behaviour
 
@@ -42,14 +51,14 @@ repository rather than of a function, and that no type checker can see:
 | `test_metric_declarations.py` | every metric name a call site uses is declared |
 | `test_docstring_paths.py` | every module path a docstring or comment points at is a file that exists |
 | `test_prose_contract.py` | the agent's prose names only capability the agent actually has |
+| `test_dead_vocabulary.py` | a superseded ADR's vocabulary is not used as current in the record |
+| `test_claude_md_figures.py` | `CLAUDE.md`'s "today" section states no figure a symbol should hold |
 
 ## A structural test must be shown failing
 
 These have a specific failure mode: they break by **finding nothing** rather than by raising. An
 empty `glob` and an empty discovery loop both read as success, so a test that iterates a now-empty
-set reports green while asserting nothing. It has happened twice —
-`test_image_ships_every_first_party_package` went vacuous when D-148 left no root packages to
-discover, and `make db-migrate` globbed a moved directory and applied zero migrations in silence.
+set reports green while asserting nothing.
 
 So: after writing or moving one of these, **break it on purpose and watch it fail** before trusting
 the green. Each of the modules above pins itself against emptiness explicitly — either a count floor
@@ -58,9 +67,8 @@ observed fails as loudly as an observation with no row. That is the cheap versio
 discipline, and adding a module to this table means giving it one.
 
 **A count floor is not always enough, and `test_migrations_are_additive.py` is the worked example.**
-Its history check compared all 42 migrations on a `--depth=1` checkout — a healthy-looking count —
-while every comparison was a file against itself, because the graft commit *is* `HEAD` there. What
-it counts now is comparisons that span a commit. If a check reads the environment rather than only
+On a `--depth=1` checkout its history check would compare every file against itself — a
+healthy-looking count — so what it counts is comparisons that span a commit. If a check reads the environment rather than only
 the tree, ask what the environment can take away without changing the count.
 
 ## Running on a loaded machine: `PYTEST_TIMEOUT_SCALE`
@@ -78,11 +86,10 @@ PYTEST_TIMEOUT_SCALE=4 make test    # ~4x slack, every cap, same relative tightn
 
 Reach for it when you see the `timeouts — these assertions never ran` section in the output. That
 section exists because a timed-out test is **not evidence about the code**: its assertions never
-ran, and reading one as a numerical failure has already cost this repository a wrong baseline that
-six agents worked against for hours. `tests/test_suite_timeouts.py` pins both the scaling and that
+ran. `tests/test_suite_timeouts.py` pins both the scaling and that
 section.
 
 CI does not set it — a dedicated runner has the whole machine, and no committed probe measures
-how long the gate takes there, so no duration is claimed here (the "~5 minutes" this line used to
-give was nobody's to maintain; the Actions run page is the live figure). It is for a developer
+how long the gate takes there, so no duration is claimed here (the Actions run page is the live
+figure). It is for a developer
 machine or a sandbox running several jobs at once.

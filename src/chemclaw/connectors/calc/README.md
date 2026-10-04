@@ -11,7 +11,9 @@ Everything a chemist asks of GFN2-xTB and CREST, as durable jobs. There is **no 
 | `compose.py` | composition over the server's primitives, so every nested step is separately cached |
 | `activities.py` / `workflows.py` | `CalcJobWorkflow` and the activities it runs |
 | `specs.py`, `results.py` | the typed job inputs and the projection of what comes back |
-| `server/` | the inline MCP tools beside the durable jobs |
+| `server/` | the inline MCP tools beside the durable jobs — the D-011 cache, composition and the calibration ledger's read side |
+| `worker.py` | the process that polls `connector-calc` and hosts the workflow and activities |
+| `skills/` | the `calculation-selection` `SKILL.md` — which calculation answers which question |
 
 The cache, the calibration ledger and the statistical mechanics stayed one layer down in
 `science/calc`, because a cache and an engine want to live on opposite sides of a wire. When a

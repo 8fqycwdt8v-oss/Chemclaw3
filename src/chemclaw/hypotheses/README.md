@@ -11,6 +11,7 @@ is the arithmetic between those calls. Same split as `science/bo` against the `b
 | `pairing.py` | Swiss pairing — pure functions over explicit state, so a workflow replay reproduces it. |
 | `screen.py` | The two mechanical rules that may remove a candidate. Nothing else may. |
 | `report.py` | The chemist-facing summary, the proposal body, the field note. |
+| `dispatch.py` | Whether a `computable` check can be run without inventing anything: the model may only *select* a tool and a subject note, never write an argument. |
 
 ## Three decisions worth knowing before changing anything here
 
@@ -34,8 +35,11 @@ objections enter the tournament as evidence and cost a rating.
 critic empowered to change what shipped scored zero against a null control, and eight of its ten
 "improvements" were deletions.
 
-## What is not here
+## How a `computable` check runs
 
-Dispatching a `computable` check onto a real calculator. `run_computable_check` returns `not-run`
-with its reason, because turning a free-text check into validated tool arguments means inventing
-them. See the `BACKLOG.md` row.
+`durable/hypothesis_tournament.run_computable_check` settles one with the tools this system holds:
+the structure is read off a resolved `compound` note, every other argument is left at the tool's own
+default, and the call goes through `agent/tool_invocation.invoke_governed`, so it is audited and
+authorized exactly as a chemist's would be. Anything `dispatch.py` refuses — an unresolvable subject,
+a tool that would need an invented argument or whose default is wrong for the molecule — comes back
+as a `not-run` outcome carrying its code, and the tournament continues.

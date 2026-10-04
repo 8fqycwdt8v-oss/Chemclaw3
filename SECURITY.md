@@ -1,9 +1,10 @@
 # Security posture
 
 This documents what Chemclaw enforces today, what is gated on live infrastructure, and how to
-deploy it safely. It reflects the **F4 identity/RBAC** foundation (Entra everywhere); it is not the
-pre-Phase-6 "no auth" world. For the design rationale see `docs/reference/architektur.md` §7/§8 and
-`docs/decisions/` D-042…D-047, D-052.
+deploy it safely. For the design rationale see `docs/decisions/` D-043, D-044, D-047, D-052 and
+`D-2026-08-20-a-tenant-is-a-jwks-document-and-an-issuer-string`; D-045 and D-046 designed the
+outbound workload-identity and On-Behalf-Of exchanges, which were later deleted (see "Transport
+identity" below).
 
 ## What is enforced
 
@@ -24,7 +25,7 @@ pre-Phase-6 "no auth" world. For the design rationale see `docs/reference/archit
   outside a bundle. This holds even when the harness plans
   autonomously — an autonomously-planned todo cannot launch a job outside the requesting user's
   entitlements.
-- **Role-scoped skills.** `agent/skill_access.py::RoleScopedSkillsSource` hides a gated skill
+- **Role-scoped skills.** `agent/skill_access.py::RoleScopedSkills` hides a gated skill
   (`skill_role_gates`: skill → allowed roles) from a caller holding none of its roles (D-052).
 - **Ambient identity, one carrier.** The runner stamps the validated identity into
   `src/chemclaw/core/identity_context.py` (a task-local `contextvar`); audit, the authz gate, job attribution,
@@ -63,6 +64,12 @@ pre-Phase-6 "no auth" world. For the design rationale see `docs/reference/archit
   F4-T2/F4-T4 were deleted, having never acquired a caller. What that guarantee rested on holds
   anyway and more simply — there is no client secret at rest because there is no outbound token
   exchange at all.
+- **The read-only MCP face** (`CHEMCLAW_COMPONENT=mcp-face`, `api/mcp_face.py`) exposes this
+  system as a tool to another agent. It is **off by default** in the chart (`mcpFace.enabled`), its
+  whole authorization is one bearer token named by `mcp_face_token_env` (an unset variable refuses
+  every call), and it advertises only tools derived from `agent.authz.READ_ONLY_TOOLS`, so nothing
+  reachable through it can launch a job, write a note or settle a wait. Publishing it outside the
+  cluster is a separate opt-in from the front door's Route.
 
 ## Data handling & logging (PII in the audit trail)
 
@@ -111,10 +118,14 @@ data-exposure decision belongs where a reviewer looks for one.
   entitlements, is not in `job_records` at all and its workflow id is keyed on the actor and their
   roles, so it can be neither listed nor derived by anyone else.
 
-- **`GET /readyz` and `GET /metrics` are unauthenticated** (a kubelet and a scrape have no
-  identity). Both are counts and status only: `/readyz` reports how many connectors are
-  unreachable and never which, and `/metrics` carries a declared label allowlist with no session
-  id, user or turn content.
+- **`GET /healthz`, `GET /readyz` and `GET /metrics` are unauthenticated** (a kubelet and a scrape
+  have no identity). `/readyz` reports how many connectors are unhealthy and never which;
+  `/metrics` carries a declared label allowlist — it does name which connector is unhealthy
+  (`chemclaw_connector_unhealthy`), and carries no session id, user or turn content. The front
+  door's `/metrics` is on the same port as the chat API, so the Route publishes it on the external
+  host; a NetworkPolicy selects peers, not paths, and cannot hide it. The residual exposure is
+  operational reconnaissance, and `route.ipWhitelist` is the control for a deployment that will not
+  accept it.
 
 ## Front-door hardening
 
@@ -123,8 +134,7 @@ The browser-facing run service sets `Content-Security-Policy`, `X-Content-Type-O
 each chat message (`service_max_message_chars`) and the live-session cache
 (`service_max_live_sessions`); and **refuses to start** if it would run unauthenticated
 (`entra_required=false`) on a non-loopback bind — `service_allow_insecure=true` is the explicit,
-named opt-out. That combination used to warn and boot, which left a network-exposed deployment with
-every authorization gate open one missed log line away (SEC-2). It does not serve an OpenAPI schema,
+named opt-out (SEC-2). It does not serve an OpenAPI schema,
 Swagger or ReDoc page: all three are plain routes no dependency can gate, and the schema alone
 documents every route, parameter and model the service has.
 See `docs/archive/audit/` for the audit that added these.
@@ -145,14 +155,18 @@ key (the model call is not a user-scoped resource), not a per-user token.
 
 ## Live edges still open
 
-The code paths exist and are unit-tested against local keys/fakes, but the following need real
-infrastructure to exercise end to end and must be validated in a staging tenant/cluster before
-production (tracked in `docs/planning/BACKLOG.md`):
+The enforced identity chain has run end to end: token validation against a real JWKS document and
+issuer (the `Chemclaw3_mock` tenant, `D-2026-08-20-a-tenant-is-a-jwks-document-and-an-issuer-string`),
+and on a local kind cluster (`make kind-up` in its `oidc-mock` auth mode, `deploy/kind/README.md`)
+sign-in enforced over https, Postgres TLS, Temporal mTLS against a self-hosted broker, and the
+chart's NetworkPolicies on a CNI that enforces them. What still needs a real environment, and must be
+validated in a staging tenant/cluster before production (`docs/planning/DEFERRED.md`, "Gated on
+infrastructure this environment does not have"):
 
-- Real Entra token validation against a live tenant JWKS.
-- Temporal broker mTLS/API-key transport against real endpoints.
-- Live-cluster delivery: `helm`/`kubeconform` render, the NetworkPolicy ingress gate, and durability
-  under a self-hosted Temporal.
+- Browser sign-in against a real Entra tenant (the one unproven hop is browser → tenant).
+- A real OpenShift cluster: the Route, the security context constraints and the cluster's own
+  monitoring stack.
+- A shared Temporal broker or a Temporal Cloud API key, rather than the lane's own broker.
 
 ## Autonomy note
 

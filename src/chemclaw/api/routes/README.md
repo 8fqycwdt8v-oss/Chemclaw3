@@ -1,10 +1,7 @@
 # `chemclaw.api.routes` — the front door's routes, one module per resource
 
-`create_app` (`api/app.py`) was one long closure holding every route; this package is those
-routes split by resource (R3.2). **No count is written here** — the live number is whatever
-`tests/test_route_auth_coverage.py` walks on the built app, and the figure this line used to state
-was stale by eleven routes, which is exactly what a reviewer enumerating the attack surface from a
-table would have missed. The split is behavior-preserving, and the seam that makes it safe
+The front door's routes, split by resource (R3.2). **No count is written here** — the live number
+is whatever `tests/test_route_auth_coverage.py` walks on the built app. The split is behavior-preserving, and the seam that makes it safe
 is **`app.state`, not lexical capture**: every route reads the process's live structures through
 `chemclaw.api.state.state(request)`, so nothing observable moved when the handlers left the
 factory. `create_app` remains the only factory — each module exposes plain handlers plus one
@@ -19,8 +16,8 @@ disables `app.dependency_overrides`.)
 | `ops.py` | `GET /healthz`, `GET /readyz`, `GET /metrics` (the three deliberately unauthenticated probes), plus `GET /schedules` — operator surfaces, not chemist ones |
 | `sessions.py` | `POST/GET /sessions`, `GET /sessions/{id}/messages`, `DELETE /sessions/{id}`, `POST /sessions/{id}/fork`, `POST /sessions/{id}/attachments`, `GET /profiles` — creating, listing, reading, branching and deleting conversations |
 | `members.py` | `GET /sessions/{id}/members`, `PUT/DELETE /sessions/{id}/members/{actor}`, `GET /sessions/shared` — who besides its owner may reach a session (`D-2026-09-27-in-a-shared-session-the-sender-governs`). Admitting is the owner's, removing is the owner's or a member leaving, and a member's turns run as the member. **Answers 403 to a member asking for an owner's act**, beside the session gate's 404 for a stranger, because a member already knows the session exists |
-| `turns.py` | `POST /sessions/{id}/messages` — the SSE turn stream, the one route with real concurrency machinery (admission, leases, budget) — and `POST /sessions/{id}/turn/stop`, which is how a chemist ends one |
-| `streams.py` | `GET /sessions/{id}/events` — the job push-back stream and its per-user/per-pod caps — and `GET /digests`, the same machinery over the cross-session digest feed |
+| `turns.py` | `POST /sessions/{id}/messages` — the SSE turn stream, the one route with real concurrency machinery (admission, leases, budget) — `POST /sessions/{id}/turn/stop`, which is how a chemist ends one, and `GET /sessions/{id}/queue` / `DELETE /sessions/{id}/queue/{ticket}`, the line of messages waiting for the running turn (`agent/session_queue.py`) |
+| `streams.py` | `GET /sessions/{id}/events` — the job push-back stream and its per-user/per-pod caps — `GET /digests`, the same machinery over the cross-session digest feed, and `GET /check-ins`, the caller's own blocked work as the check-in sweep left it |
 | `results.py` | `GET /sessions/{id}/tool-results/{ref}` — the full text of what one tool returned, which the 200-character `ToolResultEvent.preview` cannot carry. Session-scoped so it reuses `resolve_session` rather than inventing an auth story for a bare `/tool-results/{ref}` |
 | `plan.py` | `GET/POST /sessions/{id}/plan[...]` — the pre-execution harness-plan gate (D-137/D-167) — plus `GET /plans/pending`, the cross-session inbox of plans nobody has decided, which is the only one of the three not addressed by a session id because it is what finds the session |
 | `pending.py` | `GET /pending`, `POST /pending/{id}/answer` — the questions an agent asked a chemist and is waiting on, addressed by request rather than by session for the same reason `/plans/pending` is |
@@ -31,6 +28,7 @@ disables `app.dependency_overrides`.)
 | `jobs.py` | `GET/DELETE /jobs[...]` — the durable-run surface over `job_records` |
 | `workflows.py` | `GET /workflows`, `GET/DELETE /workflows/{name}`, `POST /workflows/{name}/approval` — a chemist's own composed workflows, and the standing approval that lets one launch durable jobs. **Routes and deliberately not agent tools**, for `plan.py`'s reason: a model must never authorize its own plan, and the guarantee is obtained by not building the tool. Owner-scoped, so somebody else's name is a 404 rather than a 403 |
 | `skills.py` | `GET/POST /skills/mine`, `GET/DELETE /skills/mine/{name}` — a chemist's own skills: judgment that reshapes their turns and nobody else's. **Routes and deliberately not agent tools**, for `plan.py`'s and `workflows.py`'s reason and one stronger: a skill is injected into the prompt with no citation trail, so `agent/skill_backend.SkillsReadOnlyRefusal` refuses every write a turn could attempt and this is the only way in. Owner-scoped by construction — no parameter names whose tier is touched, so there is no authorization decision here to get wrong — and a 503 rather than an empty list when the deployment keeps no store |
+| `org_skills.py` | `GET/POST /skills/org`, `GET/DELETE /skills/org/{name}`, `GET /skills/org/{name}/versions`, `POST /skills/org/{name}/revert` — the organisation's tier (`agent/org_skills.py`). **Open to read, closed to change**: the reads take any authenticated caller, because the people a shared tier acts on must be able to see it; the writes take the privileged role, and a refusal is a 403 plus `record_refusal`. A revert names a body the store already holds |
 | `proposals.py` | `GET /proposals`, `POST /proposals/{kind}/{name}` — the human gate on a change to what the agent *does*. The agent proposes with `propose_skill`; nothing it can call decides, which is `plan.py`'s reason and `skills.py`'s. Owner-scoped by construction. A decision binds to the `content_hash` the person was shown, so a proposal superseded between the read and the click is a 404 rather than a decision about a document nobody read — the control `plan_approvals` gets from keying on `plan_hash`. Accepting writes the skill inside the decision, and refuses with the same 409 `POST /skills/mine` gives at `agent_local_skills_max`, leaving the proposal open |
 
 `caching.py` holds no route. It is the conditional-GET policy the two *read* routes above share —

@@ -14,7 +14,7 @@
 //      backend and its schema are always in place before the UI that depends on them rolls.
 //
 // `Chemclaw3_mock` is deliberately absent from every environment above `dev`: it is a test double
-// (a stand-in HPC launcher, ELN source, Entra tenant and vendor MCP tool), and deploying it beside
+// (a stand-in ELN source, Entra tenant and vendor MCP tool), and deploying it beside
 // the real integrations would give the system two answers to the same question. Its pipeline gates
 // it and the dev-environment e2e lane runs it; nothing promotes it.
 //

@@ -353,6 +353,12 @@ _NON_SETTINGS_ENV = frozenset(
         # field with no Python reader is the shape D-2026-08-20-a-ui-that-cannot-authenticate-is-
         # not-a-fallback just deleted three of.
         "CHEMCLAW_LIVE_ENTRA_TOKEN_URL",
+        # The knowledge-sync credential: a chart-required Secret key read by
+        # `deploy/knowledge-sync.sh` (and redacted by `core/logging.py`), never by Settings.
+        "CHEMCLAW_KNOWLEDGE_REPO_TOKEN",
+        # The UI's backend address, set on the Chemclaw3_ui Deployment; the deployment guide has
+        # to name it to wire the two together.
+        "CHEMCLAW_API_URL",
         # Documented *as removed*, so the prose naming them is correct and must stay readable.
         "CHEMCLAW_ENTRA_CLIENT_ID",
         "CHEMCLAW_MCP_SERVERS",

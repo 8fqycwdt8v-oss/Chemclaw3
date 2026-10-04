@@ -27,11 +27,10 @@ needs no file in the bundle — one manifest block and one chart entry
 (`connectors.<name>.interactive`) — and it applies to a server somebody else runs as well
 (`D-2026-09-30-a-heavy-tool-call-waits-in-a-queue-rather-than-being-refused`).
 
-**The variance is information.** `calc` has workflows, activities and a worker; `molfp` has only a
-server. That says which capabilities own long-running work, so do not flatten it into a uniform
-template. (`chem` used to be the second half of that sentence and is now the *next* paragraph's
-example instead: its server moved to `Chemclaw3-mcp` wholesale, so the bundle here has neither
-`server/` file — which is a third shape, not a smaller version of the second.)
+**The variance is information.** `bo` and `calc` have workflows, activities and a worker; `molfp`
+and `rxnfp` have only a server; `results` has jobs and no server; `chem`, `safety`, `rxnpredict` and
+the five process-development bundles have neither `server/` file. That says which capabilities own
+long-running work and which are served elsewhere, so do not flatten it into a uniform template.
 
 **A bundle whose server somebody else runs has neither `server/` file.** It declares an `endpoint:`
 like any other, and the deployment says the address is not ours to render
@@ -63,19 +62,10 @@ still read by CI on a checkout that never binds it.
 A bundle is a *surface*, not an implementation. The computation lives in `chemclaw.science`
 (`bo`, `calc`, `fingerprints`, `labels`) which imports no Temporal, no MCP and no FastAPI, and is
 therefore testable without any of them. That list is checked against the tree
-(`tests/test_repo_map.py`): it named `safety`, deleted when
-`D-2026-08-15-safety-is-a-tool-not-a-gate` made the hazard screen an ordinary MCP server, and
-omitted `labels`, so it was wrong in both directions at once. `connectors/calc/` and
-`science/calc/` are a pair, not a duplicate: merging them would put orchestration imports inside
-the physics, which is the layering rule `tests/test_layering.py` guards.
-
-Since D-156 this holds without exception — `molfp` and `rxnfp` were the last bundles whose code
-lived somewhere else (`chemclaw.mcp`), and their engines are now `science/fingerprints/`.
-
-`chemclaw.mcp` could not simply be called `mcp` at the top level: that name belongs to the
-installed MCP SDK (`from mcp.server.fastmcp import FastMCP`) and a sibling package shadows it
-(D-016). As a submodule of `chemclaw` it never conflicted — which is why the package spent its
-last months named `mcp` under a README insisting the name was impossible.
+(`tests/test_repo_map.py`). `connectors/calc/` and `science/calc/` are a pair, not a duplicate:
+merging them would put orchestration imports inside the physics, which is the layering rule
+`tests/test_layering.py` guards. `molfp` and `rxnfp` follow the same split, with their engines in
+`science/fingerprints/` (D-156).
 
 ## Why the manifest is checked, and the incident that says so
 
@@ -83,16 +73,25 @@ last months named `mcp` under a README insisting the name was impossible.
 against the live code. Nothing else can: they are strings, so `mypy` cannot see them and a stale
 one fails in a production worker rather than in CI.
 
-The matching hazard is prose. `mcp_servers/calc/` was a third fingerprint-era server duplicating
-this bundle's tool surface — two live definitions of `predict_pka`, differing in one of them.
-D-113 decided to delete it; it was **actually** deleted in D-117, and the gap is the point: a
-README asserted the deletion across four ADRs while the file was still tracked, still built into
-the image by `deploy/Containerfile`, and still dispatchable as `CHEMCLAW_COMPONENT=mcp-calc`.
+The matching hazard is prose: a third, fingerprint-era `calc` server outlived the ADR that deleted
+it — still tracked, still built into the image, still dispatchable — while a README asserted it was
+gone (D-113, D-117). **A README is not a gate.** `tests/test_deploy_chart.py` asserts the
+chart↔entrypoint correspondence in both directions, which is what would have caught it.
 
-**A README is not a gate.** `tests/test_deploy_chart.py` now asserts the chart↔entrypoint
-correspondence in both directions, which is what would have caught it. D-156 found the same shape
-once more, in `deploy/README.md`, which was still listing an `mcp-molfp`/`mcp-rxnfp` component that
-neither the entrypoint nor the chart has known about for months.
+## The core modules beside the bundles
+
+| Module | What it is |
+| --- | --- |
+| `manifest.py` | the `connector.yaml` model — one validated contract for everything a bundle contributes |
+| `registry.py` | discover bundles, validate them, and build what the agent advertises |
+| `transport.py` | how a connector is reached, so an unreachable one degrades instead of failing the turn |
+| `health.py`, `reachability.py` | the startup probe behind `/readyz` and `/metrics`, and what this process last learned about each connector |
+| `jobs.py` | one generated agent tool per declared job |
+| `queues.py` | the one spelling of a bundle's `connector-<name>` queue |
+| `queued.py`, `queued_workflow.py`, `queued_call.py`, `interactive_worker.py` | the interactive queue above |
+| `identity.py`, `caller.py` | the connector's own credential, and the advisory caller identity a tool can read |
+| `server.py`, `server_entry.py` | wrap a `FastMCP` capability as the FastAPI app a bundle serves, and run one as a process |
+| `worker.py` | run one bundle's own Temporal worker |
 
 ## Capability, not judgment
 

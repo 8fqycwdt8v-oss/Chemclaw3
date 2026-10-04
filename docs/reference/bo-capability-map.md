@@ -30,7 +30,7 @@ measurements in that register changed a wave below, and one reversed a refusal.
 
 Exactly one module imports BoFire — `science/bo/engine.py`, and `tests/test_connector_isolation.py`
 plus `tests/test_workflow_registry.py` keep `bofire`/`botorch`/`torch` out of every core process.
-`bofire[optimization,cheminfo]>=0.4.1` is declared (`pyproject.toml:15`), so both heavy extras are
+`bofire[optimization,cheminfo]>=0.4.1` is declared (`pyproject.toml`, `[project].dependencies`), so both heavy extras are
 installed: the BoTorch strategies are now substantially in use, the RDKit/Mordred featurisers are
 deliberately not (`science/bo/featurize.py` uses cached GFN2-xTB descriptors instead, so a
 suggestion can cite the calculations behind its search space — see the `DEFERRED.md` row).
@@ -80,7 +80,7 @@ statement about *why* it proposed a point reaches the note a human signs.
 | 3.2 | feed a result back and get the next conditions, across bench sessions | `SERVED` | `resume_campaign(campaign_id)` over the content-addressed campaign record |
 | 4.3 | which reagents/catalysts should go in the campaign | `SERVED` for the electronic axis | `featurize.py`'s xTB descriptors let the surrogate speak about a ligand nobody has run. **No steric axis** — two ligands differing mainly in bulk look alike |
 | 2.3 / 4.4 | a screening plan; the full grid or a smarter reduced one | `SERVED` | `generate_screening_design` — full grid or a fractional design whose `resolution` and `summary` state what was confounded, over categorical **and** continuous factors (the latter held at their two bounds and named as such), plus centre points, replication and seeded run-order randomisation (W2) |
-| — | pick the best molecule from a library without evaluating all of it | `SERVED` | a `CampaignSpec` whose categorical parameter is the library (levels = canonical SMILES) paired with the registered `solubility_max` objective, which reads its candidate from `params[MOLECULE_KEY]` — candidate-set BO by exhaustive discrete acquisition. This cell used to cite `objectives.molecule_library_problem`, a builder for that shape with **zero** `src/` callers, which made a `SERVED` verdict rest on a function no configuration reached; it moved to `tests/bo_harness.py` on 2026-09-07 (`D-2026-09-07-a-driver-with-no-caller-is-not-a-capability`) and the capability did not move with it |
+| — | pick the best molecule from a library without evaluating all of it | `SERVED` | a `CampaignSpec` whose categorical parameter is the library (levels = canonical SMILES) paired with the registered `solubility_max` objective, which reads its candidate from `params[MOLECULE_KEY]` — candidate-set BO by exhaustive discrete acquisition. The builder for that shape lives in `tests/bo_harness.py`, not in `src/` (`D-2026-09-07-a-driver-with-no-caller-is-not-a-capability`) |
 | 3.4 | explain why it suggests these conditions (exploring vs exploiting) | `SERVED` | `ExperimentSuggestion.scale` gives what the objective spans in the runs supplied, and its `summary` reads each candidate's `predicted_sd` against that spread in three bands, naming a missing sd as a seed point rather than as confidence (W1). `predict_outcome` extends the same reading to a point the *chemist* named, with the cross-validated fit quality of the surrogate behind it (W5). That score is reported to two decimals because that is all it repeats to — the GP's hyperparameter fit is not deterministic, and measured over twelve identical calls R² spanned 0.906–0.969 and MAE 1.16–1.80 (D-2026-08-05-a-score-reported-more-precisely-than-it-repeats) |
 | 3.3 | set up a BO from natural language: ranges, **constraints**, one **or more** objectives | `SERVED` | `objectives` is a list; `MoboStrategy` searches the trade-off and `ExperimentSuggestion.front` returns the non-dominated subset of the runs supplied, `best_of` raising rather than picking an axis (W3). An optional `assay_noise` draws that front at the chemist's own reproducibility, so two runs the assay cannot separate both stay on it. `constraints` carries a linear limit over continuous parameters (`<=`/`>=`/`==`, so a mixture summing to 1 comes free) or an exclusion forbidding a pairing of categorical options; both the seeding and the proposing strategy honour them, and a screen refuses them (W4) |
 | 3.5 | has this optimization plateaued | `SERVED` | `campaign_progress(problem, observations, assay_noise, window)` — evaluations since a gain beyond the noise, the recent window's spread, a plateau verdict, and a summary stating the limit. `assay_noise` is required with no default, which is what stops `op-13`'s fabrication recurring with a tool behind it (W1). The gain is measured from the **last real gain**, not from the running best, so a campaign creeping upward in sub-noise steps is not called a plateau once the climb accumulates past the noise (D-2026-08-05, which found the first version reporting +20.9 against a ±2 assay as plateaued). `op-13`'s other half — is there an unexplored corner — is a posterior question, answered by predicting at corners and comparing sds (W5) |
@@ -129,12 +129,12 @@ is hand-written so `problem.py` stays importable in the agent process, and hyper
 (`Increasing`/`Decreasing`/`Peak`/`InRange`), `ConstrainedCategoricalObjective`, non-unit weights.
 `REFUSED` for now: a scalarisation the chemist cannot audit, where a Pareto front is the honest
 answer. `TargetObjective` ("hit exactly this") is the one with a real future case — an analytical
-method target — and it is blocked on the missing `method` note type, not on BoFire.
+method target — and it is blocked on a method record with performance fields (the `analytical-method` note type is
+prose only), not on BoFire.
 
 **Design of experiments** — `DoEStrategy` with D/A/E/G/K/I-optimality and `SpaceFillingCriterion`
 (model-based optimal design, and the only route to a real LHS): `REFUSED` — because **no story asks
-for one**, not because of a dependency. This line used to read "it needs cyipopt + SCIP", which is
-false and was carried into `DEFERRED.md` too: SCIP already ships transitively with
+for one**, not because of a dependency: SCIP already ships transitively with
 `bofire[optimization]`, cyipopt is optional with a `scipy.minimize` fallback, and measured on
 2026-08-17 with cyipopt absent both criteria returned a design on a *constrained continuous* domain.
 Three of the four unused `FractionalFactorialStrategy` knobs — `n_center`, `n_repetitions`,
@@ -173,14 +173,15 @@ thing and a roadmap that calls them all "missing" is useless.
 | **Campaign health & transparency** | nothing computes numbers the system already asserts in prose. **No BoFire involvement at all** | `S` | W1 |
 | **DoE / HTE screening** | a refusal in *our* code (`factorial_design` rejects continuous parameters) — and, measured, that refusal is what makes three of the four unused knobs inert | `S` | W2 |
 | **Reaction / process optimisation** | the type model: one objective, no constraints. The responses already exist on `OrdReaction`; nothing has to be ingested or migrated | `M`+`M` | W3, W4 |
-| **Analytical method development** | **not BO.** There is no `method` note type in `KNOWN_NOTE_TYPES` (`kg/note.py`) and no retention, resolution, tailing or RSD field anywhere in the schema — the story audit's grep counts `mobile phase` 0, `C18` 0, `system suitability` 0, `reversed-phase` 0 | `M` (schema) | not scheduled here |
+| **Analytical method development** | **not BO.** An `analytical-method` note type now exists (`kg/note.py`, `D-2026-09-15-a-relation-with-no-legal-target-is-a-question-nobody-can-answer`), but it is prose: no retention, resolution, tailing or RSD field exists in any record schema, so a method run still cannot seed or score a campaign. System-suitability *arithmetic* exists as the `suitability` connector | `M` (schema) | not scheduled here |
 
 **On analytical method development, stated plainly because it is the largest family by story count
 (24 across §7/§8) and the one most likely to be mis-scheduled.** A method-development BO campaign
 today has neither factors nor responses to sit on: nothing can record "we ran this gradient on this
 column and it resolved these peaks", so there is nothing to seed a campaign from and nothing to
-optimise toward. Shipping BO features for it first would be building on air. The prerequisite is a
-`method` note type carrying performance fields — a schema addition of the same shape as the
+optimise toward. Shipping BO features for it first would be building on air. The `analytical-method`
+note type records *how* a measurement was made; the prerequisite still missing is a method record
+carrying performance fields — a schema addition of the same shape as the
 `reaction` note that already exists, which `user-story-capability-map.md` scores as unblocking
 **eight** stories on its own. Once it lands, three things become immediately useful and are already
 named above: `TargetObjective` / `CloseToTargetObjective` for a stated spec ("resolution ≥ 2.0, run
@@ -335,16 +336,19 @@ this system cannot caveat well enough, and it has no second caller.
   cases* are verdicted from the code and from `tasks/story-audit-optimization.md`. In the 190-probe
   live run, `suggest_next_experiment` was selected **zero** times — a skill-routing defect that has
   since been fixed and **not re-tested live**. A capability nothing routes to is not a served story.
-- **The durable campaign has never run a real optimization.** `objectives.py` holds exactly two
-  entries: a RandomForest emulator over vendored Reizman data, and a solubility maximiser. Neither
-  is an optimization a chemist runs, so nothing in §5 is validated against a real automated loop.
+- **The durable campaign has never run a real optimization.** `objectives.py`'s registry holds two
+  simulated entries — a RandomForest emulator over vendored Reizman data, and a solubility
+  maximiser. A chemist's own campaign is expressible as the `measured` objective, which is not in
+  the registry: the workflow proposes a batch and suspends on a wait (`durable/awaiting.py`) until
+  the results are reported. No deployment has run one, so nothing in §5 is validated against a real
+  loop.
   What *is* now proven against a real Temporal server is the loop's own bookkeeping rather than its
   chemistry: `test_a_running_campaign_records_each_round_not_only_its_ending` drives the workflow
   and asserts one campaign-record row per completed round, so a campaign that is cancelled or
   killed keeps every evaluation it already paid for
   (`D-2026-08-27-a-bound-that-multiplies-and-a-record-that-survives-the-cancel`). That closes the
-  durability question and leaves this one exactly where it was — the objective registry is still
-  two entries, and a loop nobody points at a real objective is still unvalidated as chemistry.
+  durability question and leaves this one exactly where it was — a loop nobody has pointed at a
+  real campaign is still unvalidated as chemistry.
 - **The BO loop is still open at one end.** Nothing decides that an ingested `reaction` note *is*
   the execution of a proposed candidate. That needs a matching rule over conditions with tolerances
   on parameters an ELN records inconsistently, and getting it wrong attributes a result to an

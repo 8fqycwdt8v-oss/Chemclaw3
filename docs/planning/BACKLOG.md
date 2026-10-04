@@ -22,40 +22,18 @@ what this queue held when that was measured. §5 is the first thing here that is
 repository found in itself, and none of its rows is in the archive at all. The overlap is real
 and unmeasurable by `grep`, which is why neither number is a difference.
 
-Both counts *were* written here, and both were wrong — 223 against 221, and 41 against 45 — each
-printed beside the command that disproves it, which is the whole argument of
-`D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose`. A number nobody re-derives is a claim
-about its author's afternoon; `tests/test_backlog_register.py` keeps one from coming back.
+A number nobody re-derives is a claim about its author's afternoon
+(`D-2026-08-01-the-count-lives-in-the-test-not-in-the-prose`); `tests/test_backlog_register.py`
+keeps one from coming back.
 
 **A row must name an anchor in the tree** — a module, a line, a manifest key — so any row can be
 checked with one `grep` instead of an argument. A row that cannot name one is not ready to be
 queued.
 
-**A row is a claim about the code, and claims go stale.** A 2026-08-17 pass opened every anchor this
-file then held and found seventeen rows not workable as written: four described code that a merged
-decision had already deleted or fixed, eight were misstated in a way that would have sent someone to
-the wrong function, and three carried their own deferral trigger and belonged in `DEFERRED.md`. Two
-stated the opposite of what the tree does — one pointed at a `DEFERRED.md` row that does not exist,
-and one said a data-subject erasure route was missing while `make user-erase` implements it across
-**twelve** tables with a dry run and per-table counts
-(`python -c "from chemclaw.agent.leaver import _ERASE; print(len(_ERASE))"` → 12: seven always,
-plus the checkpointer's three and the store's two, each skipped when the deployment has not created
-it). **Before working a row, check it against `HEAD`**; if it is wrong, the fix is to correct or
-delete the row, and that is as much a contribution as the code would have been.
-
-Ten further rows arrived from concurrent reviews while that pass ran and are carried here unedited —
-they postdate it and have not been re-verified against `HEAD` by anyone but their author, which is
-exactly the state the paragraph above is about.
-
-**And the pass that wrote the two paragraphs above is not exempt from them.** An audit later the
-same day found its own numbers stale in the way it was written to catch: it said "nine tables" for
-an erasure that clears twelve; it filed a hazard as unpinned that
-`tests/test_connector_registry.py::test_the_health_probe_follows_an_override_that_moves_the_path_too`
-had already pinned; and five of the anchors it wrote no
-longer resolved to the construct they named by the time the branch was audited, four of them off by
-a handful of lines. None of that is neglect — it is a measurement taken hours before the tree moved
-under it, which is the failure mode this file has rather than an exception to it. Re-measure on the
-way past; a row you had to correct before you could work it is a row that was worth opening.
+**A row is a claim about the code, and claims go stale.** Rows here have repeatedly been found
+describing code a merged decision had already deleted or fixed, or pointing at the wrong function.
+**Before working a row, check it against `HEAD`**; if it is wrong, the fix is to correct or delete
+the row, and that is as much a contribution as the code would have been.
 
 Related registers: [`DEFERRED.md`](DEFERRED.md) (postponed with the trigger that would revisit each),
 [`docs/decisions/`](../decisions/) (why the system is the way it is; its README indexes the record by
@@ -182,7 +160,7 @@ topic).
       artefact; it is not one). `retrieval_recall` is the gated retrieval metric and rank is the
       diagnostic, so the leg stays.
 
-      **And "correlated" is not "redundant", which this row used to imply.** Under `hash` the dense
+      **And "correlated" is not "redundant".** Under `hash` the dense
       leg is a differently weighted term ranker — token-count hashing with a cosine, against
       BM25-lite and substring — reaching gold notes the other two never return. Measured over eight
       free-text questions it contributes 27 of 98 delivered chunks and reorders 7 of 8.
@@ -199,17 +177,7 @@ topic).
 
 ## 3 — Work that is lost, dropped or invisible
 
-- [ ] **A failed JWKS fetch is not cached, so every request during an IdP fault pays an outbound
-      fetch** — [S], opened 2026-10-01 by the post-merge audit of PR #494. `api/auth.py`'s
-      `_HttpxJwkClient` caches only a key set that parsed, so while the tenant is unreachable — or,
-      since PyJWT 2.15, answers 200 with a body that is not a key set (`JWKSetCache.put` now raises
-      before storing; 2.13 cached the raw dict for the cache lifespan) — every request carrying any
-      `kid`, an unauthenticated one included, triggers a fetch. Measured: 20 requests, 20 fetches,
-      every one a 503. `_forced_refresh_allowed` bounds only the *unknown-kid* path, and it is an
-      unlocked check-then-set; the cache-expiry fetch in `get_signing_keys` is outside any lock too.
-      The candidates are a short negative cache on a failed fetch, and one lock around both refresh
-      paths. Anchors: `api/auth.py::_HttpxJwkClient.fetch_data`, `api/auth.py::_signing_key`,
-      `api/auth.py::_forced_refresh_allowed`.
+*No open row.*
 
 ## 4 — Operating it
 
@@ -325,7 +293,7 @@ only holds defects can only ever restore the system to what it already intended 
 
 - [ ] **A routing corpus where the right profile is not inferable from the question's surface**
       — [M]. Seven profiles ship and genuinely narrow (`evidence` reaches zero side-effecting tools,
-      `safety` one, `default` all of them — `authz.side_effecting_tools()` answers 54 as of 2026-09-22, where this row said 49); what `D-2026-08-15` deleted is automatic routing between
+      `safety` one, `default` all of them — `authz.side_effecting_tools()` is the set); what `D-2026-08-15` deleted is automatic routing between
       them. Re-opening it needs a corpus the retired one did not contain: cases where the profile a
       question *needs* differs from the profile its wording suggests, compared on **answers** rather
       than on which specialist was picked. Until that corpus exists a router is a guess with a
@@ -340,10 +308,10 @@ why the Temporal LangGraph plugin sat five weeks old and reached no list here. T
 than a test, deliberately: what is being watched is judgement, and a test cannot hold one.
 
 Pinned when the standings below were derived: `temporalio` 1.31.0 · `langchain` 1.3.15 ·
-`langgraph` 1.2.11 · `langchain-core` 1.5.5 · `deepagents` 0.7.6. **Installed on 2026-08-29:
-`langchain` 1.3.16, `langchain-core` 1.6.0, `deepagents` 0.7.8** — the other two unmoved. Three
-bumps have landed since, and nobody has re-read the release notes against the middle column, which
-is the one job this table asks for. Re-derive it with
+`langgraph` 1.2.11 · `langchain-core` 1.5.5 · `deepagents` 0.7.6. **Installed (re-checked 2026-10-04):
+`langchain` 1.3.16, `langchain-core` 1.6.0, `deepagents` 0.7.8** — the other two unmoved. Nobody has
+re-read those three bumps' release notes against the middle column, which is the one job this table
+asks for. Re-derive it with
 `uv run python -c "from importlib.metadata import version; ..."` rather than trusting this line:
 it is provenance for the standings, not a claim that they are current.
 
@@ -410,7 +378,7 @@ proposals came back wrong on contact with the code.
 | `httpx-sse`, `pathspec`, `charset-normalizer`, `pint`, `tiktoken` (prefix only), `bisect`, `networkx.utils.UnionFind`, `psycopg` `class_row`/`executemany`, `rdkit.rdSubstructLibrary`, numpy+scipy clustering | **adopted**, `D-2026-09-16-a-library-already-in-the-closure-is-a-declaration-not-a-dependency`. Most were already resolved in `uv.lock` through a *runtime* requirer, so the cost was a declaration line. **Resolved is not the same as in the image**, which this row first got wrong: `deploy/Containerfile` installs `uv sync --frozen --no-dev`, and `pathspec` arrived only through `mypy`, a dev-group tool — so it, like `pint`, is a new install in every shipped image. `uv export --frozen --no-dev` is what answers that, per package, for whatever the lock says today |
 | ruff `TID253` as a second layering belt | **declined here, adopted in `Chemclaw3-mcp`**, `D-2026-09-16-a-flat-ban-cannot-express-a-matrix` — this repository's policy is a `(package, stack)` matrix and `TID253` is one rule code over one global list, so `per-file-ignores` cannot narrow it per edge at all; it also sees one of the three import scopes the policy distinguishes |
 | deleting the second lexical ranker | **declined on measurement.** The duplication is real and *inverted* — the Postgres leg strictly dominates — but `note_reindex_effective` makes the index conditional on sources the default does not enable, so the survivor is unreachable. `graph` meaning "the leg that reads the index" is a `data_sources` decision, not a retriever edit |
-| fifteen libraries — listed with their reasons directly below, because a pointer is not a record | **declined.** This row used to say "each with a measurement, in the audit report and the ADR above", and neither held any of them: the ADR names none, and the audit report was a scratch file the next branch overwrites. A register whose whole purpose is that re-proposing one is a detectable failure cannot rest on a document that does not survive, so the reasons are written out here |
+| fifteen libraries — listed with their reasons directly below, because a pointer is not a record | **declined.** The ADR above names none of them and the audit's report did not survive, so the reasons are written out here — a register whose purpose is that re-proposing one is a detectable failure cannot rest on a document that is gone |
 
 **The fifteen declined, one line each.** Where the audit recorded a measurement it is here; where it
 did not, this says so rather than inventing one, because "declined, measurement not recorded" is a
@@ -465,19 +433,13 @@ re-proposal a future session can settle in an afternoon and a fabricated number 
 
 The long-form findings live in [`docs/archive/findings-2026-08.md`](../archive/findings-2026-08.md),
 grouped by the review that found them, with their full measurements. **That file is a record and
-not a second queue**, which its own header says and this paragraph used to contradict: it carried
-the reviews run between 2026-07-24 and 2026-08-15, and a share of them name a subsystem that no
-longer exists — the Microsoft Agent Framework, the HPC/Nextflow/Seqera tier, the PR-gate, the GxP
-hash chain, the specialist team. A finding there is **provenance to promote from**, not work
-somebody is waiting on: read it for what was measured, on what date, by which pass, and with what
-evidence, then write the row here from the tree as it stands today. Nothing there is scheduled and
-nothing there is a commitment; its findings are plain bullets rather than checkboxes for that
-reason, and there is deliberately no `grep` that counts them — a record's length is not a number
-anybody has to act on.
-
-Promotion **restates** a finding rather than moving it, so this queue and that record overlap
-rather than partition — the header's "~185 further" was a subtraction nobody could reproduce, and
-matching the two by title matched a small minority of what this queue then held.
+not a second queue**: it carries the reviews run between 2026-07-24 and 2026-08-15, and a share of
+them name a subsystem that no longer exists — the Microsoft Agent Framework, the HPC/Nextflow/Seqera
+tier, the PR-gate, the GxP hash chain, the specialist team. A finding there is **provenance to
+promote from**, not work somebody is waiting on: read it for what was measured, on what date and
+with what evidence, then write the row here from the tree as it stands today. Promotion
+**restates** a finding rather than moving it, so this queue and that record overlap rather than
+partition.
 
 The large multi-item programmes that used to be tracked here as sections are records now, not
 plans: the F0–F9 foundation build, the F10 parity pass, the F11 gap closure, the BO capability

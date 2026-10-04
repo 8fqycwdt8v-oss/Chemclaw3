@@ -14,7 +14,8 @@ trivial names and abbreviations chemists actually write (`DIPEA`, `Cs2CO3`, `mCP
 **first-party content, hand-authored in this repository**, not a third-party corpus. That is
 deliberate for a first cut: it exercises every part of the mechanism — manifest, checksum, licence,
 retrieval — while carrying no licensing question at all, and it is independently useful, since
-`chemclaw/reagents.py` is a hand-maintained table and the hard ceiling on `resolve_compound`.
+`src/chemclaw/core/reagents.py` is a hand-maintained table and the ceiling on what name resolution
+in this repository recognises.
 
 **No external dataset has been vendored yet.** Doing so is a build-pipeline step plus a licence
 review, and both belong to whoever adds one — see below.
@@ -24,15 +25,14 @@ review, and both belong to whoever adds one — see below.
 1. Put `records.csv` and `dataset.json` in a directory under this one, or wherever the build
    installs it (`CHEMCLAW_VENDORED_DATASET_DIR`).
 2. `dataset.json` must carry `name`, `version`, `licence`, `retrieved_from`, `description`,
-   `mirrored`, `sha256` and `text_column`. Every field is required: a corpus with no recorded
+   `mirrored`, `sha256` and `text_column` (`smiles_column` is optional). Every one of those is
+   required: a corpus with no recorded
    licence is a legal question nobody can answer later, and one with no checksum cannot be shown to
    be what the review approved. `retrieved_from` is documentation of where a human obtained the
    file — nothing reads it as an address and nothing can fetch it.
 3. **If `mirrored` is `true`, add `refresh_owner` and `refresh_cadence`**, and the load refuses
    without them. A copy of somebody else's corpus has an upstream that moves while the copy does
-   not, and nothing in this system can tell — the fleet's `MODULES.md` states the rule as an open
-   question and enforcement is what was missing on both sides: *"a stale patent index that nobody
-   knows is stale is worse than no patent index"*
+   not, and nothing in this system can tell
    (`D-2026-09-14-a-mirror-with-no-owner-goes-stale-in-silence`). The refusal runs the other way
    too: first-party content naming a refresh owner is a claim about an upstream that does not
    exist, and the next reader goes looking for it. The corpus shipped here is `mirrored: false` and

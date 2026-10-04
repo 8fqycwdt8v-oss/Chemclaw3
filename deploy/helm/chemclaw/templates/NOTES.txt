@@ -1,7 +1,46 @@
 Chemclaw {{ .Chart.AppVersion }} is installed as release {{ .Release.Name }} in {{ .Release.Namespace }}.
+Temporal namespace: {{ .Values.temporal.namespace }} (it must be registered on the broker, and no other release may use it).
 
+VERIFY THE INSTALL
+==================
+
+  # the release is "deployed", and no hook Job is left: migrate (before the rollout), convert and
+  # schedules (after it) are deleted when they succeed, so a Job still listed failed or is running
+  helm status {{ .Release.Name }} -n {{ .Release.Namespace }}
+  oc get jobs -n {{ .Release.Namespace }} -l app.kubernetes.io/instance={{ .Release.Name }}
+
+  # every pod Ready; a pod that exits at once is a boot refusal and its log names the setting
   oc get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/instance={{ .Release.Name }}
-  oc get route -n {{ .Release.Namespace }} {{ include "chemclaw.name" . }}
+{{- if .Values.route.enabled }}
+
+  # the front door: /healthz is liveness; /readyz is 503 when Postgres is unreachable or behind
+  # this image's schema, and reports "connectors_unhealthy", which must be 0
+  host=$(oc get route -n {{ .Release.Namespace }} {{ include "chemclaw.name" . }} -o jsonpath='{.spec.host}')
+  curl -fsS "https://${host}/healthz" && curl -fsS "https://${host}/readyz"
+{{- end }}
+
+Secrets this release reads (the chart creates none of them):
+  {{ .Values.secrets.name }}: {{ range $k, $v := .Values.secrets.keys }}{{ $v }} {{ end }}(required keys), plus the optional bearer tokens in values.yaml `secrets.optionalKeys`
+{{- if .Values.secrets.temporalTls.enabled }}
+  {{ .Values.secrets.temporalTls.secretName }}: tls.crt, tls.key, ca.crt
+{{- end }}
+{{- if not (get .Values.config "CHEMCLAW_ENTRA_PRIVILEGED_ROLES") }}
+
+WARNING: config.CHEMCLAW_ENTRA_PRIVILEGED_ROLES is empty, so every expensive job (conformer
+searches, optimization campaigns, ...) is refused for EVERY user while the pods look healthy.
+Set it to the Entra app roles your chemists hold (deploy/README.md, "The setting that does not
+block boot").
+{{- end }}
+{{- if and .Values.networkPolicy.enabled .Values.networkPolicy.allowAnyDestination }}
+
+NOTE: networkPolicy.allowAnyDestination is true — pods may dial any destination on the allowed
+ports. List networkPolicy.egressDestinations instead once the destinations are known.
+{{- end }}
+{{- if .Values.retention.unboundedGrowthAccepted }}
+
+NOTE: retention.unboundedGrowthAccepted is true — no conversation, checkpoint or artifact history
+is ever deleted. State retention.windows to bound it.
+{{- end }}
 {{ if .Values.monitoring.enabled }}
 MONITORING: TWO CLUSTER SWITCHES DECIDE WHETHER ANY OF THIS DOES ANYTHING
 ===========================================================================

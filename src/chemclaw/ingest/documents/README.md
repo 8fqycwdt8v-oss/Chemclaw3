@@ -20,6 +20,9 @@ operator-facing guide is `docs/guides/sharedrive-concept.md`.
 | `chunk.py` | cutting a parsed document while keeping its page/slide/sheet coordinate | no |
 | `index.py` | `DocumentIndex` + the in-memory reference and the pgvector backend | no |
 | `retriever.py` | `ShareDocumentRetriever` — the retrieve half, and the entitlement gate | **no** |
+| `external_index.py` | the document index with its dense vectors in an external store and its catalogue in Postgres | no |
+| `reassemble.py` | putting a document's chunks back together, saying what is missing | no |
+| `isolate.py` | one parse in a killable forkserver child, so a runaway parse cannot wedge its caller | via `parse` |
 | `parse.py` | the parsers themselves (`pypdf`, `python-docx`, `python-pptx`, `openpyxl`) | yes |
 | `sync.py` | the crawl→diff→parse→embed→sweep loop | via `parse` |
 
@@ -40,7 +43,7 @@ knowledge graph. These documents are pre-existing human-authored records, so the
 retrieved with a citation, rather than notes.
 `chemclaw.cli.backfill_corpus` is the other choice — one committed note per document — and it is
 right only for a small curated folder someone wants *in* the graph. At 500k files it would be
-500k pull requests.
+500k notes.
 
 **A vector is only good for the model that made it.** Every stored chunk records the embedding
 configuration that produced its vector (`embedding_key`, migration 038). Changing the model does
@@ -52,10 +55,9 @@ is down.
 
 **And a chunk is only good for the chunking that cut it.** The same argument one step out
 (`chunking_key`, migration 040): `chunk_chars` and `chunk_overlap_chars` decide what text each
-vector describes, and until D-2026-08-08 neither of the crawl's two gates could see them change —
-so re-tuning them re-chunked *nothing*, and when a re-chunk did happen for another reason it left
-the finer cutting's higher ordinals stranded, which `reembed_stale` then adopted as current. Both
-gates now compare it, and a document's chunks are replaced rather than merged.
+vector describes, so both of the crawl's gates compare it, and a document's chunks are replaced
+rather than merged — a merge would strand a finer cutting's higher ordinals for `reembed_stale` to
+adopt as current.
 
 **Identity is the content, not the path.** `doc_id` is the hash of the parsed text, so the same
 report in four project folders is one set of chunks and one embedding call, and a rename is free.
