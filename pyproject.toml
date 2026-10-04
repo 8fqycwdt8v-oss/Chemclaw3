@@ -166,7 +166,14 @@ dependencies = [
     "pint>=0.25.3",
     "pandas>=2.2",
     "psycopg-pool>=3.2",
-    "psycopg[binary]>=3.2",
+    # 3.3.6 is a floor for correctness, not for a feature: before it, `wait_async` and
+    # `wait_conn_async` waited through `asyncio.wait_for`, which on Python 3.11 returns the inner
+    # result and drops the cancellation when the socket wakes in the same tick the task is
+    # cancelled. Measured: one connect in five absorbed a `task.cancel()` and carried on, so a
+    # stopped or torn-down turn kept running past a database read in a middleware and hung on the
+    # model call. 3.3.6 awaits a plain future, which a cancellation reaches
+    # (`tests/test_upstream_surface.py::test_a_cancelled_connect_is_not_absorbed_by_psycopg`).
+    "psycopg[binary]>=3.3.6",
     "pydantic-settings>=2.5",
     "pyjwt[crypto]>=2.15",
     # Gitwildmatch path matching for the mounted share's `exclude:` globs
