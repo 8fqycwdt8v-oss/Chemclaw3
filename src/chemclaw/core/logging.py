@@ -35,6 +35,7 @@ import logging
 import os
 import re
 from collections.abc import Mapping
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any
@@ -1501,6 +1502,13 @@ class SecretRedactingFilter(logging.Filter):
                 redacted = redact_secrets(value, self._connector_token_envs)
                 if redacted != value:
                     setattr(record, key, redacted)
+        # The identity fields, when a caller's header supplied them (`_CLAIMED_MARK`). Excluded
+        # from the sweep above for cost, which is safe only for values this process bound itself.
+        if record.__dict__.get(_CLAIMED_MARK):
+            for key in _IDENTITY_FIELDS:
+                value = record.__dict__.get(key)
+                if isinstance(value, str):
+                    record.__dict__[key] = redact_secrets(value, self._connector_token_envs)
         record.__dict__[_REDACTED_MARK] = True
 
 
@@ -1554,6 +1562,41 @@ _LOGRECORD_RESERVED = frozenset(
 # for and which must not become a leak because this optimisation exists.
 _REDACTED_MARK = "_chemclaw_redacted"
 
+# Set by `ContextFilter` on a record whose identity fields were filled from a *claimed* caller
+# (below), and read by the redaction filter and the JSON formatter, which sweep those three fields
+# only then. They are skipped otherwise because a value this process bound itself is a uuid hex, an
+# oid or a session id; a value copied off a request header is whatever the sender wrote.
+_CLAIMED_MARK = "_chemclaw_claimed_caller"
+
+_IDENTITY_FIELDS = ("correlation_id", "actor", "session_id")
+
+_claimed_caller: ContextVar[tuple[str, str, str] | None] = ContextVar(
+    "chemclaw_log_claimed_caller", default=None
+)
+
+
+def bind_claimed_caller(actor: str, session_id: str, correlation_id: str) -> object:
+    """Make a caller's *claimed* identity the log attribution for this context; returns a token.
+
+    A connector pod (`connectors/server.py`) learns who it is serving from `X-Chemclaw-*` headers,
+    and until this existed it bound them only into `connectors/caller.py`'s own contextvars, which
+    `ContextFilter` never read: every record a `chemclaw-connector-<name>` pod wrote carried
+    `correlation_id=- session_id=- actor=-`, so a turn could not be followed by id across the one
+    hop where its expensive work happens.
+
+    **A separate variable rather than the core identity ones, and that is the point of it.**
+    `get_current_actor` is "the one reader every gate shares" and the session id scopes what a tool
+    may read; binding an unauthenticated header there would make it an identity to any in-process
+    gate — and the read-only MCP face runs core's own tools behind this same transport. The claimed
+    caller is read by the log filter and by nothing else, so the header stays advisory.
+    """
+    return _claimed_caller.set((actor, session_id, correlation_id))
+
+
+def reset_claimed_caller(token: object) -> None:
+    """Undo the matching `bind_claimed_caller`."""
+    _claimed_caller.reset(token)  # type: ignore[arg-type]
+
 
 def structured_fields(record: logging.LogRecord) -> dict[str, object]:
     """The fields a caller attached with `extra=`, and nothing `logging` put there itself.
@@ -1595,6 +1638,7 @@ class ContextFilter(logging.Filter):
         self._actor = get_current_actor
         self._correlation_id = get_current_correlation_id
         self._session_id = get_current_session_id
+        self._claimed = _claimed_caller.get
 
     def filter(self, record: logging.LogRecord) -> bool:
         """Stamp the ambient identity onto the record, without overwriting an explicit one.
@@ -1606,10 +1650,20 @@ class ContextFilter(logging.Filter):
         unconditional assignment replaced the id of the turn the record is about with `"-"`.
         Measured before this change: that record — the one line in the tree designed to be
         alerted on — carried `correlation_id: "-"`.
+
+        An identity this process bound itself wins; a connector's claimed caller
+        (`bind_claimed_caller`) fills only what is still absent, and marks the record so the
+        redaction filter sweeps what it filled.
         """
-        record.__dict__.setdefault("correlation_id", self._correlation_id() or "-")
-        record.__dict__.setdefault("actor", self._actor() or "-")
-        record.__dict__.setdefault("session_id", self._session_id() or "-")
+        claimed = self._claimed()
+        actor, session_id, correlation_id = claimed or ("", "", "")
+        record.__dict__.setdefault(
+            "correlation_id", self._correlation_id() or correlation_id or "-"
+        )
+        record.__dict__.setdefault("actor", self._actor() or actor or "-")
+        record.__dict__.setdefault("session_id", self._session_id() or session_id or "-")
+        if claimed is not None:
+            record.__dict__[_CLAIMED_MARK] = True
         return True
 
 
@@ -1708,10 +1762,13 @@ class JsonFormatter(logging.Formatter):
             "process": record.process,
             "thread": record.threadName,
             "message": message if swept else redact_secrets(message),
-            "correlation_id": getattr(record, "correlation_id", "-"),
-            "actor": getattr(record, "actor", "-"),
-            "session_id": getattr(record, "session_id", "-"),
         }
+        # A claimed caller's identity is scrubbed here too when no filter swept the record — the
+        # same no-filter fallback `message` gets, for a field a request header could set.
+        scrub = not swept and record.__dict__.get(_CLAIMED_MARK, False)
+        for key in _IDENTITY_FIELDS:
+            value = getattr(record, key, "-")
+            payload[key] = redact_secrets(value) if scrub and isinstance(value, str) else value
         # The caller's own fields. Until this existed the formatter built a fixed seven-key payload
         # and never read `record.__dict__`, so **every** `extra=` was silently discarded — which is
         # why there was exactly one `extra=` logging call in the tree, and why its `event` marker

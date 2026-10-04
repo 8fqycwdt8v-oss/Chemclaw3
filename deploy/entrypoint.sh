@@ -75,6 +75,20 @@ if [ "${chemclaw_egress_posture%% *}" = "enabled" ]; then
   export LD_PRELOAD="/app/lib/libchemclaw_netguard.so${LD_PRELOAD:+:${LD_PRELOAD}}"
 fi
 
+# The knowledge repo's push credential, for the note writer (`kg/git_writer.py`), which fetches and
+# pushes the writer checkout from the front door and the background worker. That checkout is cloned
+# by `knowledge-sync.sh checkout` with the token, but its remote URL carries none — deliberately, so
+# the token is in no `.git/config` — and nothing gave *these* containers a way to answer git's
+# prompt: every note write against a private HTTPS remote failed at push with `could not read
+# Username`. `chemclaw-git-askpass` (`deploy/git-askpass.sh`) reads the token from the environment
+# when git asks. Set only when the token is, so a remote that needs none is unchanged; and
+# `GIT_TERMINAL_PROMPT=0` so a missing or rejected credential fails at once rather than waiting out
+# `git_command_timeout_seconds` on a prompt no terminal will answer.
+if [ -n "${CHEMCLAW_KNOWLEDGE_REPO_TOKEN:-}" ]; then
+  export GIT_ASKPASS="${GIT_ASKPASS:-/usr/local/bin/chemclaw-git-askpass}"
+fi
+export GIT_TERMINAL_PROMPT="${GIT_TERMINAL_PROMPT:-0}"
+
 component="${CHEMCLAW_COMPONENT:-service}"
 
 case "${component}" in

@@ -274,6 +274,12 @@
   {{- if .Values.extraConnectors.bundles }}
   CHEMCLAW_CONNECTORS_DIR: {{ printf "%s:%s" .Values.extraConnectors.mountPath .Values.extraConnectors.shippedPath | quote }}
   {{- end }}
+  {{- /* The same, for result sinks (`extraSinks`): `result_sinks_dir` is a plain pathsep list
+         too, so the shipped directory is named again after the mounted one, and only when a sink
+         is mounted at all. */}}
+  {{- if .Values.extraSinks.sinks }}
+  CHEMCLAW_RESULT_SINKS_DIR: {{ printf "%s:%s" .Values.extraSinks.mountPath .Values.extraSinks.shippedPath | quote }}
+  {{- end }}
   {{- /* Derived from the autoscaling block rather than hand-written in `config`, and for the
          sharpest version of the same reason: the admission cap is per-process, so the load the
          shared LLM endpoint really sees is `this × uvicorn workers × the cap`. Written by hand it

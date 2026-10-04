@@ -1500,10 +1500,15 @@ now interleave into one session history. The session's thread is what is at risk
 `critical`, and only above `monitoring.alerts.turnsFloorPerSecond` of traffic — a ratio alone reads
 100% on a single error in an idle window, which is what this rule did before the floor existed. If
 the deployment is quieter than the floor, read `chemclaw_turns_finished_total` directly rather than
-waiting for a page that cannot come. More than one turn in ten ends in an opaque internal error.
+waiting for a page that cannot come. More than one turn in ten ends in an error event.
 Break it down with
 `sum by (outcome) (rate(chemclaw_turns_finished_total[10m]))` — `errored` and `timed_out` are
-different problems — then the front-door dashboard's per-route error ratio.
+different problems — then the front-door dashboard's per-route error ratio. **If every turn is
+failing at once, check the model gateway's credential first**: a 401/403 from
+`CHEMCLAW_LLM_BASE_URL` ends every turn `errored` with SSE code `llm_auth`, shows as
+`chemclaw_model_calls_total{outcome="auth"}`, and logs ERROR `model.gateway_refused_credential`
+naming the gateway host and status — rotate `CHEMCLAW_LLM_API_KEY`
+([troubleshooting §8](troubleshooting.md#8-model-gateway-errors)).
 
 #### ChemclawTurnRelayFailing
 `warning`. A pod holding running turns cannot read the follows and Stops other replicas address to
@@ -2779,8 +2784,9 @@ RESULTS_DB_USER=... RESULTS_DB_PASSWORD=...       # the target's own credentials
 ```
 
 On the chart: `CHEMCLAW_RESULT_SINKS` goes in `config:`; the two credentials go in your Secret and
-are mapped under `secrets.optionalKeys`; the chart has no value that mounts a custom sink folder,
-so a site that cannot use the shipped address bakes its folder into a derived image. **And the
+are mapped under `secrets.optionalKeys`; a site that cannot use the shipped address puts its edited
+folder in a ConfigMap and lists it under `extraSinks.sinks` (`name: postgres`, `configMap: <it>`),
+which mounts it on every pod and sets `CHEMCLAW_RESULT_SINKS_DIR` with that folder first. **And the
 destination must be allowed out**: a sink's host is manifest-supplied, so nothing derives it — add
 it to `CHEMCLAW_EGRESS_ALLOW` (bare host) and add a peer for it to
 `networkPolicy.egressDestinations` (a port other than `networkPolicy.egressPorts.postgres` needs an

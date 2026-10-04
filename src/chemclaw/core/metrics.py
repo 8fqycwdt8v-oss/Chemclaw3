@@ -860,7 +860,8 @@ _COUNTERS: dict[str, str] = {
     # did every call cost"; this one answers "how is the graph's own model traffic behaving".
     "chemclaw_model_calls_total": (
         "Model calls **made from a graph node**, by outcome (ok / rate_limited / context_length / "
-        "timeout / transport / error). Calls made outside the graph are not here — the verifier's "
+        "timeout / transport / auth / error) — `auth` is the gateway refusing the credential "
+        "(401/403). Calls made outside the graph are not here — the verifier's "
         "judge and any call a tool body makes — so this is not the gateway's whole request rate; "
         "`chemclaw_tokens_total` is metered on the callback seam and does see all of them. There "
         "is no `provider` label: every call goes to one gateway "

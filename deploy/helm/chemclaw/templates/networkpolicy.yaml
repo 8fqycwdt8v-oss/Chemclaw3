@@ -144,6 +144,15 @@ spec:
         - podSelector:
             matchLabels:
               {{- include "chemclaw.selectorLabels" . | nindent 14 }}
+        {{- /* The `Chemclaw3_ui` BFF in this namespace, by its own pod labels — a peer that is
+               neither this release's pod nor a whole namespace, which is why the two entries
+               around it could not express it (`networkPolicy.uiPodSelector` says why it is not
+               the release namespace instead). Same-namespace only: no `namespaceSelector`. */}}
+        {{- with .Values.networkPolicy.uiPodSelector }}
+        - podSelector:
+            matchLabels:
+              {{- toYaml . | nindent 14 }}
+        {{- end }}
         {{- range .Values.networkPolicy.ingressNamespaces }}
         - namespaceSelector:
             matchLabels:

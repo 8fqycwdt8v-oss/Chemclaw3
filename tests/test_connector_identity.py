@@ -753,8 +753,40 @@ def test_the_probe_allowlist_survives_being_mounted_under_a_name(
     assert asyncio.run(_status("/healthz", "")) == 200, "unmounted probe"
     assert asyncio.run(_status("/molfp/healthz", "/molfp")) == 200, "mounted probe"
     assert asyncio.run(_status("/molfp/metrics", "/molfp")) == 200, "mounted scrape"
+    assert asyncio.run(_status("/molfp/livez", "/molfp")) == 200, "mounted liveness probe"
     # The exemption is the probe routes, not the prefix: everything else still needs the token.
     assert asyncio.run(_status("/molfp/mcp", "/molfp")) == 401, "mounted MCP surface"
+
+
+def test_liveness_is_its_own_route_and_consults_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`/livez` answers whenever the process serves HTTP, whatever else is wrong with it.
+
+    The chart pointed liveness and readiness at one route, `/healthz`, so a check that route ever
+    gained would have become a reason for the kubelet to kill the container — a restart that
+    repairs no dependency and discards every tool call in flight. `Chemclaw3-mcp` forbids that
+    shape fleet-wide for exactly this reason; this repository's own connector servers and the MCP
+    face now carry the same split.
+
+    Two properties, each driven: it is open without a credential even on a connector whose auth
+    could not be resolved (the fail-closed path refuses everything else), and it answers with the
+    app's lifespan never run — no MCP session manager and no Postgres pool — which is what
+    "consults nothing" means for this app.
+    """
+    from fastapi.testclient import TestClient
+
+    from chemclaw.connectors.registry import ConnectorError
+    from chemclaw.connectors.server import connector_app
+
+    def _unreadable() -> dict[str, object]:
+        raise ConnectorError("/etc/connectors/other/connector.yaml: invalid manifest")
+
+    monkeypatch.setattr("chemclaw.connectors.registry.discovered", _unreadable)
+    # No `with`: the lifespan does not run, so nothing the app depends on has been started.
+    client = TestClient(connector_app(FastMCP("probe"), name="probe"))
+    response = client.get("/livez")
+    assert response.status_code == 200, "liveness must answer with no credential and no lifespan"
+    assert response.json() == {"status": "alive", "connector": "probe"}
+    assert client.post("/mcp", json={}).status_code == 401, "the MCP surface stays refused"
 
 
 def test_the_dev_runner_mints_a_credential_only_where_both_ends_are_ours(
@@ -981,3 +1013,198 @@ def test_a_connector_answers_the_address_it_is_configured_at_and_refuses_others(
             client.post("/mcp", json={}, headers={"Host": "attacker.example:8080"}).status_code
             == 421
         )
+
+
+def test_a_connector_pod_logs_the_caller_it_is_serving(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every record a connector writes carries the caller's correlation id, session and actor.
+
+    `connectors/caller.py` bound the `X-Chemclaw-*` headers into its own contextvars and
+    `core.logging.ContextFilter` never read them, so in a `chemclaw-connector-<name>` pod every line
+    — the middleware's own request line and anything a tool body logged — carried
+    `correlation_id=- session_id=- actor=-`, and the request line's text omitted the id outright.
+    Measured before the fix through exactly this drive: all four records below said `-`.
+
+    Driven over the real transport rather than by calling `bind_caller`, because the half that
+    mattered is the tool body, which runs in the MCP session-manager task and not the ASGI one.
+    The handler carries the pair `configure_logging` installs, in its order, so the redaction half
+    is the one production runs: a header value holding a credential this process knows is scrubbed
+    from the identity fields in both the `%`-format and the JSON rendering.
+    """
+    import logging
+
+    from fastapi.testclient import TestClient
+
+    from chemclaw.connectors.server import connector_app
+    from chemclaw.core import logging as core_logging
+    from chemclaw.core.logging import ContextFilter, JsonFormatter, SecretRedactingFilter
+
+    secret = "s3cr3t-value-that-must-not-print"
+    monkeypatch.setenv("CHEMCLAW_TEST_CLAIMED_SECRET", secret)
+    monkeypatch.setattr(core_logging, "_RUNTIME_SECRET_ENVS", {"CHEMCLAW_TEST_CLAIMED_SECRET"})
+
+    records: list[logging.LogRecord] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    capture = _Capture()
+    capture.addFilter(ContextFilter())
+    capture.addFilter(SecretRedactingFilter())
+    tool_logger = logging.getLogger("tests.connector_probe_tool")
+    # An earlier test in the same process may have quietened or disabled these loggers, so they are
+    # opened here and restored after. `setLevel` rather than assigning `level`: only the method
+    # clears `logging`'s per-logger `isEnabledFor` cache, and a stale cached "INFO is off" from an
+    # earlier test is exactly what dropped the request line when this ran after the bearer tests.
+    root = logging.getLogger()
+    opened_loggers = [
+        logging.getLogger(name)
+        for name in ("chemclaw", "chemclaw.connectors", "chemclaw.connectors.server")
+    ]
+    saved = [(lg, lg.level, lg.disabled) for lg in (root, *opened_loggers, tool_logger)]
+    for lg in (*opened_loggers, tool_logger):
+        lg.disabled = False
+        lg.setLevel(logging.NOTSET)
+    root.setLevel(logging.INFO)
+    root.addHandler(capture)
+    server = FastMCP("logprobe")
+
+    @server.tool()
+    def ping() -> str:
+        """Log one line from inside the tool body."""
+        tool_logger.info("inside the tool")
+        return "ok"
+
+    mcp_headers = {
+        "Accept": "application/json, text/event-stream",
+        "Content-Type": "application/json",
+    }
+
+    def who(correlation: str) -> dict[str, str]:
+        return {
+            **mcp_headers,
+            HEADER_ACTOR: "oid-alice",
+            HEADER_SESSION: "sess-alice",
+            HEADER_CORRELATION: correlation,
+        }
+
+    def call(client: TestClient, session_id: str, headers: dict[str, str], rid: int) -> None:
+        client.post(
+            "/mcp",
+            json={
+                "jsonrpc": "2.0",
+                "id": rid,
+                "method": "tools/call",
+                "params": {"name": "ping", "arguments": {}},
+            },
+            headers={**headers, "mcp-session-id": session_id},
+        )
+
+    try:
+        with TestClient(
+            connector_app(server, name="logprobe"), base_url="http://127.0.0.1:8000"
+        ) as client:
+            opened = client.post(
+                "/mcp",
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2025-03-26",
+                        "capabilities": {},
+                        "clientInfo": {"name": "logprobe", "version": "1"},
+                    },
+                },
+                headers=who("corr-handshake"),
+            )
+            session_id = opened.headers["mcp-session-id"]
+            client.post(
+                "/mcp",
+                json={"jsonrpc": "2.0", "method": "notifications/initialized"},
+                headers={**who("corr-handshake"), "mcp-session-id": session_id},
+            )
+            records.clear()
+            call(client, session_id, who("corr-call"), 2)
+            identified = list(records)
+            records.clear()
+            call(client, session_id, mcp_headers, 3)
+            anonymous = list(records)
+            records.clear()
+            call(client, session_id, who(f"corr-{secret}"), 4)
+            leaky = list(records)
+    finally:
+        root.removeHandler(capture)
+        for lg, level, disabled in saved:
+            lg.disabled = disabled
+            lg.setLevel(level)
+
+    def ours(batch: list[logging.LogRecord]) -> list[logging.LogRecord]:
+        names = {"chemclaw.connectors.server", tool_logger.name}
+        return [record for record in batch if record.name in names]
+
+    def ids(record: logging.LogRecord) -> tuple[str, str, str]:
+        return (record.correlation_id, record.session_id, record.actor)  # type: ignore[attr-defined]
+
+    served = ours(identified)
+    assert {record.name for record in served} == {"chemclaw.connectors.server", tool_logger.name}
+    # The tool call's own id, not the handshake's: the per-tool-call binding is what the tool
+    # body's line reads, and that is the hop where the earlier defect also froze attribution.
+    assert {ids(record) for record in served} == {("corr-call", "sess-alice", "oid-alice")}
+    request_line = next(r for r in served if r.name == "chemclaw.connectors.server")
+    assert "correlation=corr-call" in request_line.getMessage()
+
+    unattributed = ours(anonymous)
+    assert unattributed, "the header-less call logged nothing to check"
+    assert {ids(record) for record in unattributed} == {("-", "-", "-")}
+    assert (
+        "correlation=-"
+        in next(r for r in unattributed if r.name == "chemclaw.connectors.server").getMessage()
+    )
+
+    scrubbed = ours(leaky)
+    assert scrubbed
+    text = logging.Formatter(settings.log_format)
+    json_formatter = JsonFormatter()
+    for record in scrubbed:
+        assert secret not in record.correlation_id  # type: ignore[attr-defined]
+        assert secret not in text.format(record)
+        assert secret not in json_formatter.format(record)
+
+
+def test_a_claimed_caller_is_log_attribution_and_never_an_identity() -> None:
+    """The headers reach the log context and stay out of the identity every gate reads.
+
+    The log fix could have bound the `X-Chemclaw-*` values into `core.identity_context` and
+    `core.session_context` directly — and the read-only MCP face runs core's own tools behind this
+    same transport, where `get_current_actor` is the reader every authorization gate shares. So the
+    claimed caller has its own variable, and an identity this process bound itself still wins the
+    record's fields.
+    """
+    import logging
+
+    from chemclaw.connectors.caller import bind_caller, reset_caller
+    from chemclaw.core.identity_context import get_current_actor, get_current_correlation_id
+    from chemclaw.core.logging import ContextFilter
+    from chemclaw.core.session_context import get_current_session_id
+
+    tokens = bind_caller("oid-claimed", "sess-claimed", "corr-claimed")
+    try:
+        assert (get_current_actor(), get_current_session_id(), get_current_correlation_id()) == (
+            None,
+            None,
+            None,
+        )
+        bound = set_current_correlation_id("corr-own")
+        try:
+            record = logging.LogRecord("t", logging.INFO, __file__, 1, "m", None, None)
+            ContextFilter().filter(record)
+        finally:
+            reset_current_correlation_id(bound)
+    finally:
+        reset_caller(tokens)
+    assert (record.correlation_id, record.session_id, record.actor) == (  # type: ignore[attr-defined]
+        "corr-own",
+        "sess-claimed",
+        "oid-claimed",
+    )

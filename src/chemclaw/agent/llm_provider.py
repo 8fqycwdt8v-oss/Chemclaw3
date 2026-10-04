@@ -226,6 +226,11 @@ def _failure_families() -> tuple[tuple[str, tuple[type[BaseException], ...]], ..
     return (
         ("timeout", _openai_exceptions("APITimeoutError")),
         ("rate_limited", _openai_exceptions("RateLimitError")),
+        # The gateway refused *this deployment's credential* — a 401 or a 403. Neither a provider
+        # outage nor a malformed request: the remedy is an operator's (`CHEMCLAW_LLM_API_KEY`), and
+        # it was `error` until 2026-10-04, so the chemist read "internal error" and the series
+        # could not tell a rotated key from a code fault.
+        ("auth", _openai_exceptions("AuthenticationError", "PermissionDeniedError")),
         # The failover set *is* the transport family — the same sentence read for a different
         # purpose, which is why it is imported rather than restated.
         ("transport", _failover_exceptions()),
@@ -235,10 +240,11 @@ def _failure_families() -> tuple[tuple[str, tuple[type[BaseException], ...]], ..
 def classify_model_failure(exc: BaseException) -> str:
     """What kind of provider failure this is: the outcome label a model call is counted under.
 
-    One of `rate_limited`, `context_length`, `timeout`, `transport` or `error` — the label space
-    `chemclaw_model_calls_total` declares beside `ok`. Anything unrecognised is `error` rather than
-    a guess, because the point of the series is that a deployment can tell these apart, and a
-    mislabelled 401 would put an operator on the wrong runbook.
+    One of `rate_limited`, `context_length`, `timeout`, `transport`, `auth` or `error` — the label
+    space `chemclaw_model_calls_total` declares beside `ok`. Anything unrecognised is `error` rather
+    than a guess, because the point of the series is that a deployment can tell these apart, and a
+    mislabelled 401 would put an operator on the wrong runbook — which is why a 401/403 is `auth`,
+    its own label, rather than either `error` or an outage.
 
     `context_length` is tested first: it arrives as a `BadRequestError`, so any test of the request
     families would have to run after it anyway, and it is the one label with a specific remedy —

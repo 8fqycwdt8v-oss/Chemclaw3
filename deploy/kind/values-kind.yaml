@@ -170,16 +170,6 @@ config:
 secrets:
   create: false
   name: chemclaw-secrets
-  # The bearer slots for the fleet bundles production's defaults leave unbound. Same variable names
-  # each bundle's manifest declares as `auth.token_env`; `up.sh` generates one random value per
-  # server and gives it to both halves (the server that verifies it, the client that sends it).
-  optionalKeys:
-    propsToken: CHEMCLAW_PROPS_TOKEN
-    kineticsToken: CHEMCLAW_KINETICS_TOKEN
-    thermalsafetyToken: CHEMCLAW_THERMALSAFETY_TOKEN
-    unitopsToken: CHEMCLAW_UNITOPS_TOKEN
-    suitabilityToken: CHEMCLAW_SUITABILITY_TOKEN
-    pyexecToken: CHEMCLAW_PYEXEC_TOKEN
   # Plaintext gRPC to the in-cluster broker — the README's dev-cluster setting.
   temporalTls:
     enabled: false
@@ -213,10 +203,12 @@ networkPolicy:
     mockLlm: 8820
     mockEln: 8090
     mockVendor: 8091
-    pyexec: 8899
     rxnlabel: 8865
   # The front door admits this namespace, which holds the UI's BFF and the kind-only front-door
   # proxy; the OpenShift ingress and monitoring namespaces it admits in production do not exist here.
+  # The chart's own `uiPodSelector` does not match this lane's UI (`manifests/ui.yaml` labels it
+  # `app.kubernetes.io/name: ui`, not the production manifests' `chemclaw3-ui`), and the namespace
+  # entry is what admits it here, with the proxy.
   ingressNamespaces:
     - kubernetes.io/metadata.name: chemclaw
   monitoringNamespaces: []
