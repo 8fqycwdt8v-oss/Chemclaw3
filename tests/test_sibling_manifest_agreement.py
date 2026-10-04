@@ -227,6 +227,13 @@ _ARGUED_DIVERGENCES: dict[tuple[str, str], str] = {
     ),
 }
 
+#: Rows of `_ARGUED_DIVERGENCES` that may *either* diverge or agree, because the two repositories
+#: are mid-way through converging on them and CI on each side reads the other's `main`. Every other
+#: row still fails the moment the trees agree. Deleted with `_OPT_IN_ARGUMENT` (see its comment).
+_TRANSITIONAL_ROWS: frozenset[tuple[str, str]] = frozenset(
+    key for key, why in _ARGUED_DIVERGENCES.items() if why is _OPT_IN_ARGUMENT
+)
+
 
 def _sibling_or_skip() -> Path:
     """The fleet checkout, or a skip naming what went unread."""
@@ -295,6 +302,8 @@ def test_a_bundle_declared_in_both_trees_declares_the_same_surface() -> None:
             argued = _ARGUED_DIVERGENCES.get((name, field))
             agrees = _comparable(mine.get(field)) == _comparable(theirs.get(field))
             if argued is not None:
+                if (name, field) in _TRANSITIONAL_ROWS:
+                    continue
                 assert not agrees, (
                     f"`{name}`'s `{field}` is recorded as an argued divergence and the two trees "
                     f"now agree about it. Delete that row from `_ARGUED_DIVERGENCES`: a row that "
@@ -1001,8 +1010,8 @@ def test_every_fleet_server_has_an_egress_port_and_a_token_slot_in_the_chart() -
 
     Derived from the fleet's own manifests — `manifests/` and `manifests-internal/` both, since the
     backends (`calc`, `rxnlabel`) are dialled over the same policy — rather than from its
-    `MODULES.md` table, because the manifest is what `Chemclaw3-mcp:tests/test_fleet.py` holds the
-    port registry against, and it is the file that names the token variable.
+    `MODULES.md` table, because the manifest is what that repository's fleet test holds the port
+    registry against, and it is the file that names the token variable.
     """
     root = _sibling_or_skip()
     values = yaml.safe_load(_CHART_VALUES.read_text(encoding="utf-8"))

@@ -197,6 +197,33 @@ def _record_failure(exc: BaseException, seconds: float) -> None:
         exception=type(exc).__name__,
         duration_ms=round(seconds * 1000.0, 1),
     )
+    if outcome == "auth":
+        _log_credential_refusal(exc)
+
+
+def _log_credential_refusal(exc: BaseException) -> None:
+    """Name the gateway and the status that refused this deployment's credential, at ERROR.
+
+    The one model failure whose remedy is an operator's and never the chemist's: a rotated, revoked
+    or unset `CHEMCLAW_LLM_API_KEY`, or a key the gateway does not entitle to the model. So it gets
+    a line of its own an operator can grep for, carrying the host the request went to and the HTTP
+    status — both read off the SDK's exception, which records the request it sent. **Never the
+    credential and never the response body**: the key is the secret, and the body can quote it.
+    """
+    request = getattr(exc, "request", None)
+    host = getattr(getattr(request, "url", None), "host", None) or "an unknown host"
+    status = getattr(exc, "status_code", None)
+    log_event(
+        logger,
+        "model.gateway_refused_credential",
+        "the model gateway at %s refused this deployment's credential (HTTP %s); check "
+        "CHEMCLAW_LLM_API_KEY",
+        host,
+        status,
+        level=logging.ERROR,
+        gateway_host=host,
+        status=status,
+    )
 
 
 class RecordModelCalls(AgentMiddleware[Any, Any, Any]):

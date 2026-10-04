@@ -312,19 +312,52 @@ def test_a_model_gateway_failure_is_the_provider_retryable_not_an_internal_error
 
 
 def test_a_request_the_provider_refused_as_wrong_is_not_called_transient() -> None:
-    """A 401 or a 404 is about the request (a key, a model name), not a provider outage.
+    """A 404 is about the request (a model name), not a provider outage.
 
     It stays `internal, do not retry`: telling a chemist to try again in a moment about a
-    misconfigured credential would send them round a loop that cannot succeed.
+    misconfigured deployment would send them round a loop that cannot succeed.
     """
     import httpx2
     import openai
 
     request = httpx2.Request("POST", "https://gateway.example/v1/chat/completions")
-    for status, kind in ((401, openai.AuthenticationError), (404, openai.NotFoundError)):
+    response = httpx2.Response(404, request=request, json={"error": {"message": "no"}})
+    exc = openai.NotFoundError("Error code: 404", response=response, body=None)
+    assert _classify(exc) == ("internal", False)
+
+
+def test_a_refused_credential_is_llm_auth_not_internal_and_not_retryable() -> None:
+    """A 401 or 403 from the gateway is a credential an operator fixes: `llm_auth`, final.
+
+    Reproduced against a stub gateway answering 401 and 403 through a real `ChatOpenAI`: the turn
+    reported `internal` beside `model.call_failed … (error: OpenAIAuthenticationError)`, so the code
+    a chemist quoted could not tell a rotated key from a code fault. Not retryable, because asking
+    again sends the same key, and the sentence says who can fix it rather than "internal error".
+    """
+    import httpx2
+    import openai
+    from langchain_openai.chat_models.base import (
+        OpenAIAuthenticationError,
+        OpenAIPermissionDeniedError,
+    )
+
+    from chemclaw.api.runner import failure_event
+
+    request = httpx2.Request("POST", "https://gateway.example/v1/chat/completions")
+    kinds: tuple[tuple[type[openai.APIStatusError], int], ...] = (
+        (openai.AuthenticationError, 401),
+        (openai.PermissionDeniedError, 403),
+        (OpenAIAuthenticationError, 401),
+        (OpenAIPermissionDeniedError, 403),
+    )
+    for kind, status in kinds:
         response = httpx2.Response(status, request=request, json={"error": {"message": "no"}})
         exc = kind(f"Error code: {status}", response=response, body=None)
-        assert _classify(exc) == ("internal", False), status
+        assert _classify(exc) == ("llm_auth", False), kind.__name__
+        event = failure_event(exc, "s-1", "c-1")
+        assert event.code == "llm_auth"
+        assert "internal error" not in event.message
+        assert "credential" in event.message and "operator" in event.message
 
 
 def test_only_an_unclassified_failure_is_called_an_internal_error() -> None:
