@@ -11,8 +11,7 @@ FastAPI, so it is importable and testable without an orchestration stack.
 
 This package keeps the name `science/` while being infrastructure by this repository's own rule, and
 that is on the record: retrieval, memory and ELN ingest import it **in process**, which is what
-makes it infrastructure rather than an exception. `science/safety` used to sit beside it on the same
-grounds until the gate that made the claim true was retired.
+makes it infrastructure rather than an exception.
 
 Capability, not judgment: this package computes a similarity; whether a similarity counts as
 precedent is the `reaction-search` skill's call (gate G6).

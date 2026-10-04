@@ -31,7 +31,7 @@ archives it:
 ```json
 {
   "environment": "staging",
-  "order": ["mcp-props", "mcp-calc", "core", "ui"],
+  "order": ["mcp-props", "core", "ui"],
   "components": {
     "mcp-props": {"kind": "deployment", "deployment": "chemclaw-mcp-props", "container": "server",
                   "image": "registry/chemclaw-mcp-props", "digest": "sha256:…"},
@@ -62,6 +62,36 @@ Only `Chemclaw3` ships a chart. `Chemclaw3_ui` and each `Chemclaw3-mcp` server h
 NetworkPolicy and no chart, so the honest minimum is `oc set image` against a Deployment an operator
 created — it changes the bytes and claims nothing else. Charts for those two are a `BACKLOG.md` row.
 
+## Parameters, and what each pipeline needs from the environment values file
+
+The chart refuses to render until a release states its egress posture, its retention posture and its
+Temporal namespace (`deploy/README.md` § "Install, step by step" lists every render-time guard).
+`targets/openshift.sh` reads the environment values file first and adds a `--set` only for what that
+file does not state, refusing — with a sentence naming the missing value — when neither says it.
+
+| Parameter | `Jenkinsfile` | `Jenkinsfile.release` | Effect |
+| --- | --- | --- | --- |
+| `DRY_RUN` | default `true` | default `true` | render and `helm upgrade --dry-run`; nothing in the cluster changes |
+| `DEPLOY_TARGET` | `none`/`openshift`/`databricks` | `openshift`/`databricks` | which target script applies the descriptor |
+| `ENVIRONMENT` | `dev`/`staging`/`prod` | same | selects `environments/<env>.yaml` as the chart's values file |
+| `ALLOW_ANY_EGRESS_DESTINATION` | yes | yes | adds `--set networkPolicy.allowAnyDestination=true` when the values file lists no `egressDestinations` |
+| `ACCEPT_UNBOUNDED_GROWTH` | yes | **no** | adds `--set retention.unboundedGrowthAccepted=true` when the values file states no `retention.windows` |
+| `TEMPORAL_NAMESPACE` | yes, no default | **no** | adds `--set temporal.namespace=<value>` when the values file names none |
+| `RUN_GATE` | default `false` | — | runs `make db-migrate` and `make ci` on the agent first, for a Jenkins-only estate; needs a real Postgres in `CHEMCLAW_POSTGRES_DSN`, or the Postgres-backed tests skip and still print green |
+| `IMAGE_REGISTRY`, `IMAGE_NAME`, `BASE_IMAGE`, `IMAGE_BUILDER` | yes | `IMAGE_REGISTRY` | where to push; `BASE_IMAGE` pins the base by digest (runbook §(xiv)); empty registry = build and verify only |
+| `CORE_DIGEST`, `UI_DIGEST`, `MCP_DIGESTS` | — | yes | the digests to promote (`server=sha256:…` per line for the fleet) |
+| `NAMESPACE`, `CLUSTER_API` | yes | yes | the OpenShift target |
+| `DATABRICKS_HOST` | yes | yes | the Databricks target |
+
+**So a `Jenkinsfile.release` run needs an environment values file that states `retention.windows`
+(or `retention.unboundedGrowthAccepted: true`) and `temporal.namespace`**: that pipeline has no
+parameter for either, and the target refuses without them. That file is the better answer for every
+pipeline anyway — a parameter states a posture outside the reviewed release descriptor.
+
+**What the agent needs installed:** `git`, `helm`, `kubeconform`, `oc`, `jq`, `curl`, one image
+builder (`buildah`, `podman`, `kaniko` or `docker` — OpenShift agents get no Docker socket), and
+`uv`/`make` for `RUN_GATE`; `databricks` for that target.
+
 ## The two targets
 
 They read the **same** descriptor and each skips what the other owns, because a real environment is
@@ -86,8 +116,10 @@ compute) plus whatever workspace assets a release owns.
 Written and **unrun**: there is no cluster, no registry and no workspace in this repository's
 environment, and a pipeline is not evidence about someone else's infrastructure. What *is* checked
 offline is the part that can be: `tests/test_jenkins_delivery.py` asserts every `make` target these
-files invoke exists, that the deploy path passes a digest and a stated egress posture, and that
-`DRY_RUN` defaults to true. The first real run against a namespace is the acceptance test, and
+files invoke exists, that the deploy path passes a digest and stated postures, that the fleet
+Deployment and container names a descriptor patches exist in `Chemclaw3-mcp`, and that `DRY_RUN`
+defaults to true; `tests/test_deploy_chart.py` drives the posture helpers in
+`targets/openshift.sh` against real values files. The first real run against a namespace is the acceptance test, and
 `DRY_RUN=true` is what makes it safe to take.
 
 ## Credentials

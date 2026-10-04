@@ -23,6 +23,7 @@ multi-compound systems, reactions and conformer ensembles alike.
 | `project.py` | The one module that knows both vocabularies: a calculator's result model in, a `ResultRecord` out. |
 | `dialect.py` | A record's rows, per table, and the upserts that write them. |
 | `outbox.py` | The durable queue between a finished calculation and its destination. |
+| `backfill.py` | Walking the stored corpus and queueing what has not been published yet — `cli/backfill_publications.py` and the `results` bundle's job both call it. |
 | `hooks.py` | The third publish hook: a **tool** composite, which no cache row and no job envelope can reach. |
 | `manifest.py` / `registry.py` | The `sink.yaml` seam: discovery, enablement, late-bound driver construction. |
 | `connect.py` | Building a driver's connection, with credentials named rather than carried. |
@@ -52,9 +53,8 @@ a `ChemclawError` (not) — that split is the retry contract, not a taxonomy pre
 
 ## What deliberately does not publish
 
-Two things reach a publish hook and are dropped on purpose. Both are written down here because the
-alternative — a hook that stays silent — is indistinguishable from the defect this package spent two
-changes fixing.
+Two things reach a publish hook and are dropped on purpose. Both are written down here because a
+hook that drops silently is otherwise indistinguishable from a defect.
 
 **A BO campaign.** `connectors/bo/workflows.py` stamps `payload_kind="CampaignResult"`, and no
 projector reads it. That is the decision, not an omission: a `CampaignResult` is a `best` and a

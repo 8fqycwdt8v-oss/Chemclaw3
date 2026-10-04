@@ -37,8 +37,11 @@ written once. A second "HTE campaign" type would have duplicated all five.
 | `layout.py` | Plate arithmetic: formats, well labels, placement, run order. No chemistry. |
 | `diff.py` | What changed between two revisions, as dotted paths. |
 | `render.py` | The receipt a tool returns, the run sheet, and the Markdown a chemist reads. |
-| `export.py` | The run sheet as CSV, plus the one spelling of its filename and its address. **The sentence above listed this among the five things written once for two months while nothing produced it** — `grep -rn "csv" src/chemclaw/protocols/` returned three prose hits and no executable line. It is written through `csv.writer` rather than by joining commas, because a reagent called "toluene, anhydrous" otherwise shifts every column after it. |
+| `export.py` | The run sheet as CSV, plus the one spelling of its filename and its address. It is written through `csv.writer` rather than by joining commas, because a reagent called "toluene, anhydrous" otherwise shifts every column after it. |
 | `store.py` | `experiment_protocols` + its two append-only tables: the revision history, and the sign-offs that name the revision each was made on. |
+| `results.py`, `result_store.py` | What a designed arm produced — the join between the prescriptive tier and the numbers — kept in memory or in `experiment_arm_results`. |
+| `rescale.py` | Scaling a protocol's charges to a new basis, and naming everything that did not scale. |
+| `from_bo.py` | Turning an optimisation design space and the points it suggests into factors and arms. |
 
 ## What is deliberately not here
 
@@ -76,7 +79,8 @@ What the two rules share is that neither permits the inference to be silent.
 `experiment_protocols` (one row per design: identity, status, head revision),
 `experiment_protocol_revisions` (append-only; `document`, `checks`, `parent_revision`,
 `author_kind`) and `experiment_protocol_status_events` (append-only; which revision somebody
-approved, ran or abandoned, who they were, and their reason). Migrations `073` and `077`. The two
+approved, ran or abandoned, who they were, and their reason). Migrations `073` and `077`; an arm's
+outcomes are `experiment_arm_results` (`107`, `108`). The two
 append-only tables have `INSERT` and no `UPDATE` by grant, not by convention — a revision is what an
 expert's correction *is*, and a status event is what a sign-off *is*, so a credential that could
 rewrite either could erase the signal the table exists to keep, or forge one.

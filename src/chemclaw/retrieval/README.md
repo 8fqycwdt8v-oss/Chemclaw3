@@ -7,12 +7,14 @@ contract:
   FTS, structural similarity), `hybrid.py` (Reciprocal Rank Fusion across them), `vector_index.py`
   (the derived dense + lexical index over notes, in-memory or Postgres), `external_note_index.py`
   (the same index with its dense half in a vector store — see below), and `vectors/` (the seam that
-  lets those vectors live outside Postgres at all).
-- **Condensation** — `condense.py`, for the case where retrieval returns more whole protocols
+  lets those vectors live outside Postgres at all). `fanout.py` sweeps every evidence source as its
+  own graph branch, so one slow or failing source cannot sink the sweep.
+- **Condensation** lives in the agent layer (`agent/condense.py`), for the case where retrieval returns more whole protocols
   than fit one model call. A protocol is atomic and is never split; the comparison is
   `memory/comparison.py`'s table (the same one `optimization_campaign_note` renders, so the
   turn-time artifact and the recorded note cannot disagree), and the only model call is over the
-  half of a record that is prose. `agent/protocol_tools.py` resolves the citations and exposes it.
+  half of a record that is prose. `agent/protocol_tools.py` resolves the citations and exposes it;
+nothing in this package imports it.
 - **The report harness** — `harness.py`, the deep-research pattern turned inward: decompose →
   fan-out → verify → cite → synthesize, over internal notes instead of the web. `evidence.py` is
   the contract joining the two: an `EvidenceChunk` **must** carry a back-reference to its source
@@ -38,9 +40,8 @@ does not leave every row claiming a vector the new store has never held. Still s
 document twin: a note is embedded whole, so the point id *is* the note id and there is no citation
 to resolve.
 
-**`reindex_notes` retires notes deleted from disk** (D-2026-08-25). It did not use to, on the
-argument that a stale row is harmless — true while every vector sat in a Postgres table nobody bills
-per row, and false once the dense half can live in a store that no other sweep reaches. The prune
+**`reindex_notes` retires notes deleted from disk** (D-2026-08-25), because the dense half can live
+in a store that no other sweep reaches. The prune
 runs before the "nothing changed" exit, because a run whose only news is a deletion has nothing to
 embed and must still act.
 
@@ -48,8 +49,7 @@ embed and must still act.
 
 `memory/` is next door and stays there. Retrieval answers *"what do we have on this?"* against the
 graph; memory answers *"what did past work teach us?"* — campaign chains, failure modes, distilled
-playbooks, superseded findings. The two sound alike and are not: merging them would put eleven
-modules a level deeper to save a word. Recorded in D-156 so it does not get "tidied" later.
+playbooks, superseded findings. The two sound alike and are not. Recorded in D-156 so it does not get "tidied" later.
 
 ## Not layer 1
 

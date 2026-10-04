@@ -22,12 +22,15 @@ make db-migrate         # apply infra/sql migrations
 make check              # fast inner loop: lint + mypy --strict + tests
 ```
 
-`make check` is the inner loop, not the gate: it skips coverage and the validators
-(`kg-validate`, `eln-validate`, `skill-validate`, `connector-validate`, `datasource-validate`,
-`sink-validate`, `channel-validate`, `template-validate`, `prose-validate`, `helm-validate`, `kind-validate` — no count, because the one
-written here said eight while `make ci` ran nine, and `tests/test_repo_map.py` now derives the list
-from the `ci` target). Run `make ci` before
-pushing — it is exactly what CI runs and is what `pre-commit` does not cover.
+`make check` is the inner loop, not the gate: it skips the coverage floor, the evals, the
+dependency audit and the validators (`kg-validate`, `eln-validate`, `skill-validate`,
+`connector-validate`, `datasource-validate`, `sink-validate`, `channel-validate`,
+`template-validate`, `prose-validate`, `helm-validate`, `kind-validate`;
+`tests/test_repo_map.py` derives the list from the `ci` target). Run `make ci` before pushing — it
+is exactly what CI runs and is what `pre-commit` does not cover. `make help` lists every target.
+
+Postgres-backed tests skip when no database is reachable, and the run's closing summary says how
+many did — a green `make check` without `make up` is not evidence about the durable layer.
 
 `make up` binds Postgres on `5432`, the Temporal frontend gRPC on `7233`, and the Temporal Web UI
 on `8081` (see `infra/docker-compose.yml`).
@@ -58,15 +61,18 @@ CHEMCLAW_SERVICE_HOST=127.0.0.1 CHEMCLAW_LLM_ALLOW_LOOPBACK_GATEWAY=true \
 
 # Durable workers (separate processes; need Temporal + Postgres from `make up`). The
 # background worker takes agent turns inside an activity, so it asks the same gateway
-# question; the two connector workers reach no model and do not. Every worker binds no
+# question; the connector workers reach no model and do not. Every worker binds no
 # request surface, so the loopback-bind exemption above means nothing to it: with no
 # identity provider configured it refuses to boot until the unauthenticated posture is
-# stated (`src/chemclaw/durable/serve.py`).
+# stated (`src/chemclaw/durable/serve.py`). Each worker also serves `/healthz`, `/readyz`
+# and `/metrics` on `CHEMCLAW_WORKER_METRICS_PORT` (default 9000), so two workers on one
+# machine need distinct ports (or 0 to disable the surface).
 export CHEMCLAW_WORKER_ALLOW_UNAUTHENTICATED=true
-CHEMCLAW_LLM_ALLOW_LOOPBACK_GATEWAY=true \
+CHEMCLAW_LLM_ALLOW_LOOPBACK_GATEWAY=true CHEMCLAW_WORKER_METRICS_PORT=9000 \
   python -m chemclaw.durable.background_worker  # background-jobs (ELN sync, reports, memory)
-python -m chemclaw.connectors.calc.worker       # connector-calc (the expensive xTB calculations)
-python -m chemclaw.connectors.bo.worker         # connector-bo (optimization campaigns)
+CHEMCLAW_WORKER_METRICS_PORT=9001 python -m chemclaw.connectors.calc.worker     # connector-calc
+CHEMCLAW_WORKER_METRICS_PORT=9002 python -m chemclaw.connectors.bo.worker       # connector-bo
+CHEMCLAW_WORKER_METRICS_PORT=9004 python -m chemclaw.connectors.results.worker  # connector-results (result publication)
 ```
 
 `make live-up` starts all of these together, readiness-polled, and `make live-jobs` then runs a
@@ -78,9 +84,10 @@ Every model call goes to one OpenAI-compatible gateway, `CHEMCLAW_LLM_BASE_URL`
 (one generic credential, not Entra). There is no provider selection — which vendor
 answers behind that address is the gateway's business. The default is the local
 mock (`python -m chemclaw.cli.mock_llm`), so a fresh checkout needs no credential.
-Set `CHEMCLAW_HARNESS_ENABLED=true` for the autonomous
-plan→approve→execute harness. Entra identity is enforced when
-`CHEMCLAW_ENTRA_REQUIRED=true` (off in dev).
+The plan→approve→execute harness is on by default (`CHEMCLAW_HARNESS_ENABLED`), starting in
+`plan_only` mode so a plan is approved before anything runs (`CHEMCLAW_HARNESS_AUTONOMY`).
+Entra identity is enforced when `CHEMCLAW_ENTRA_REQUIRED=true` — off in the code default for
+local dev, on in the shipped Helm chart.
 
 ## Deployment
 
@@ -88,9 +95,12 @@ plan→approve→execute harness. Entra identity is enforced when
 (`deploy/Containerfile`, role chosen by `CHEMCLAW_COMPONENT`) and a Helm chart
 (`deploy/helm/chemclaw/`). See `deploy/README.md` for the topology (front-door
 Route behind OIDC, the background worker plus one Temporal worker per connector
-bundle that owns durable work, the connector servers, workload identity
-federation, and the plain secrets `values.yaml` declares). The build order and
-per-phase status live in `docs/archive/plans/implementation-tickets.md`.
+bundle that owns durable work, the connector servers, the migration and schedule
+hook Jobs, and the plain secrets `values.yaml` declares). Every outbound credential
+is a mounted secret: no component exchanges a workload-identity or On-Behalf-Of token.
+The operational procedures — bring-up, upgrades, live lanes, troubleshooting — are
+in `docs/guides/runbook.md`; `make kind-up` runs the same image and chart on a local
+kind cluster (`deploy/kind/README.md`).
 
 ## Security
 

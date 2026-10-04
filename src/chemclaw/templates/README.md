@@ -58,12 +58,10 @@ and its execution; a template already has that human — the file is authored by
 to git and reviewed. Asking an `agent` step to get its plan approved would be asking for approval of
 a plan nobody wrote, and there is no session to approve it in.
 
-**The premise that used to carry that sentence was "nothing at run time can produce one", and it is
-false**: `agent/workflow_tools.compose_workflow` produces one. What restores the exemption is
-`templates/composed.py::authored_problems` — an agent-authored document may name no side-effecting
-tool and no `write_tools`, so it never reaches the question the gate answers. See "A workflow the
-agent composed" below; that section is the whole argument, and this one is no longer allowed to
-stand without it.
+An agent *can* write a template at run time (`agent/workflow_tools.compose_workflow`), and what
+keeps the exemption true for it is `templates/composed.py::authored_problems`: an agent-authored
+document may name no side-effecting tool and no `write_tools`, so it never reaches the question the
+gate answers. See "A workflow the agent composed" below.
 
 **So the step is narrowed instead.** Its agent is built with every state-changing tool removed from
 both halves of its surface — the in-process tools *and* every connector's allow-list — unless the
@@ -103,18 +101,15 @@ YAML.
 Steps that do not read each other run at the same time. There is no `parallel:` key and there is
 nothing to opt into: a `${steps.<id>.result}` reference **is** a dependency edge, the validators
 above refuse a forward reference, so the declared order is already a topological order of a DAG and
-`templates/schedule.py` reads the waves straight off it. Two of the nine shipped templates —
-`degradant-triage` and `hazard-briefing` — turned out to be shaped this way and had been running
-one step after another for no reason anybody had written down.
+`templates/schedule.py` reads the waves straight off it. Of the shipped templates,
+`degradant-triage` and `hazard-briefing` are shaped this way.
 
 **How many actually run together is bounded, and it is the same number the ceiling is checked
 against.** A wave is dispatched in batches of `orchestrator_max_parallel_children`, pinned into the
 run at launch as `TemplateRunInput.max_parallel_steps`, and `run_ceiling_problems` sizes a wave as
 `ceil(width / limit)` slow steps. Sizing it at one slow step however wide it is was optimistic in a
-way no worker makes true — an agent-authored document of 501 independent steps passed the run
-ceiling as though the whole procedure cost 900 s
-(`D-2026-09-16-a-wave-costs-its-slowest-member-once-per-batch`). The two shipped templates with a
-concurrent wave are two steps wide, so nothing about them changes.
+way no worker makes true (`D-2026-09-16-a-wave-costs-its-slowest-member-once-per-batch`). The two
+shipped templates with a concurrent wave are two steps wide.
 
 **This is not the fan-out `D-2026-08-25-the-loop-is-a-composite-not-a-template` declined.** That
 decision is about a *loop*: ranking N microstates, where N is known only once an earlier step has
@@ -153,17 +148,15 @@ A step's prompt is cut to `agent_max_tool_result_chars` at the model's edge
 system's own marked words. The chat path's cap does not reach here — `bound_tool_results` is an
 entry of `tool_call_middleware`, and a `tool` step runs through `invoke_governed`, which folds the
 governance chain without the three entries that exist to serve a model. So a `${steps.<id>.result}`
-reference to an oversized result used to arrive whole: measured, 245,700 characters against a
-60,000 ceiling, and unreclaimable, because compaction's two edits are for history and a step has
-none. Reference a *field* of a large result (`${steps.ranking.result.smiles}`) rather than all of
+reference to an oversized result would otherwise arrive whole, and unreclaimable, because
+compaction's two edits are for history and a step has none. Reference a *field* of a large result (`${steps.ranking.result.smiles}`) rather than all of
 it when you can — `chemclaw_template_prompt_truncated_total` names the template when you have not.
 
 ## A failed run resumes
 
 A run's id is `hash([name, inputs])` under `ALLOW_DUPLICATE_FAILED_ONLY`, so the only way to
 re-execute one is after a failure — and the steps that *had* finished were already recorded
-(`failed_template_record`) and were not read, so the next attempt redid them. It does not now: the
-sequencer asks `completed_steps` what the previous attempt finished, folds those results into
+(`failed_template_record`), so the sequencer asks `completed_steps` what the previous attempt finished, folds those results into
 scope, and dispatches only what is left.
 
 Three conditions, each of them a way this could be *wrong* rather than merely absent: the row must
@@ -193,6 +186,12 @@ must not be able to approve itself, which is `routes/plan.py::decide_plan`'s rul
 
 An approval lifts the `job` step and nothing else. A job is a call the approver read in the
 document; `write_tools` is a permission a model spends later on a call nobody has seen.
+
+## The modules
+
+`manifest.py` is the `Template` contract and its validators, `resolve.py` the `${…}` substitution,
+`schedule.py` the derived waves, `registry.py` discovery, the `run_<name>` launchers and the launch
+refusals, and `composed.py` the rules for a workflow the agent composed.
 
 ## Versioning
 

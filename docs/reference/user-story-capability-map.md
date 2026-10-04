@@ -232,8 +232,28 @@ no record of what an audit is worth.
 | Reduced (fractional) screening designs | D-2026-08-02-the-fraction-lives-where-bofire-will-fractionate | 4.1, 4.4 |
 | A warehouse ELN attachable by configuration rather than by an adapter, carrying both halves: curated reactions ingested through the PR-gate, and similarity search run inside the warehouse over its own embedding column, so the whole ELN is reachable as evidence and not only the ingested slice | D-2026-08-04-the-schema-is-a-file | 1.1 |
 
-**Two things did not change, and they are the two that matter most.** `project`, `method`,
-`document` and `near-miss` are still not entities, so the 30 `MISSING-ENTITY` rows are still 30.
-And the honesty work is **argued, not re-measured** — the 46% has not been re-run with the shape
-gate on, and the gate now ships on by default, so that figure describes a configuration nobody runs
-(`docs/planning/BACKLOG.md`).
+### Later changes the verdict tables do not show (re-checked 2026-10-04)
+
+The tables above stay as the audit wrote them; these later changes bear on them and have not been
+re-audited story by story, so they are listed by section rather than as moved verdicts.
+
+- **§7 / §8 — the `method` entity exists**, as the `analytical-method` note type
+  (`kg/note.py`; `D-2026-09-15-a-relation-with-no-legal-target-is-a-question-nobody-can-answer`):
+  a method a chemist ran can be recorded, cited and targeted by a `measured-by` edge. It records a
+  method somebody ran; nothing devises one. System-suitability arithmetic (`suitability` connector:
+  plate count, resolution, symmetry, precision, permitted adjustments) is also agent-reachable.
+- **§11 — engineering models exist as arithmetic connectors**: `unitops` (agitation scale-up,
+  heat-transfer time constant, distillation, crystallisation yield, filtration and drying time) and
+  `kinetics` (rate at temperature, batch/continuous conversion, semibatch accumulation).
+- **§10 — thermal-safety arithmetic** is a connector (`thermalsafety`: adiabatic rise, MTSR,
+  TMRad, Stoessel class, Semenov), beside `safety`'s screens, which moved to `Chemclaw3-mcp`
+  (`D-2026-08-15-safety-is-a-tool-not-a-gate`).
+- **§17.2 — the PR-gate no longer exists** (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`).
+  Knowledge notes are written directly, carry `created_by: agent`, and are corrected rather than
+  pre-approved; what is gated by a human is *behaviour* — a plan's side-effecting steps
+  (`agent/plan_gate.py`) and skills. The rows above that say "through the PR-gate" describe the
+  mechanism of their date.
+
+**What still has not changed.** `project`, `document` and `near-miss` are still not entities. And
+the honesty work is **argued, not re-measured** — the 46% has not been re-run with the shape gate on,
+and the gate now ships on by default, so that figure describes a configuration nobody runs.

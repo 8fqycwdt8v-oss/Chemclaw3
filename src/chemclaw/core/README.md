@@ -5,16 +5,14 @@ configuration (`config`), the database pool (`db`), the HTTP client (`http`), id
 (`ids`), structured logging (`logging`), the error taxonomy (`errors`), embeddings, reagent and
 molecule helpers (`chem`, `reagents`), and the Temporal client factory.
 
-Four **ambient-turn primitives** live here too, and their common property is why: each is a
-`contextvar` (or a name-keyed dict) over plain values, importing nothing but the standard library,
-and each is read from several sibling packages at once — a count worth measuring when it matters
-(an AST or grep pass over `src/`) rather than pinning here, since it moves every time a capability
-grows and a stale range is exactly the kind of claim this file exists to not make. The turn's
-identity (`identity_context`), its session id
-(`session_context`), the side-channel a tool records job launches and recorded notes on
-(`turn_signals`), and the in-process capability-tool registry (`tool_registry`). They sat in
-`chemclaw.agent` until R2 and were the single import that made three sibling edges — including one
-whole `kg <-> agent` cycle — exist at all.
+Several **ambient-turn primitives** live here too, and their common property is why: each is a
+`contextvar` (or a name-keyed dict) over plain values, importing no sibling package — mostly
+nothing but the standard library (`turn_signals` writes through LangGraph's stream writer) — and each is read from several sibling packages at once. The turn's identity (`identity_context`),
+its session id (`session_context`), the side-channel a tool records job launches and recorded notes
+on (`turn_signals`), the in-process capability-tool registry (`tool_registry`), the turn's boolean
+flags (`turn_flags`), the chemist's own words in the thread (`turn_text`) and the plan step a tool
+call is linked to (`plan_context`). Keeping them out of `chemclaw.agent` is what removed the sibling
+edges — including a whole `kg <-> agent` cycle — they used to create.
 
 `fulltext` is here for a narrower version of the same reason: it holds the *one* lexical boolean
 rule — the widened tsquery both durable indexes join against, and the tokenizer both their offline
@@ -24,16 +22,10 @@ rule has been written twice the two copies have disagreed silently. `db` holds t
 the same story: `apply_vector_recall_settings` is the pgvector recall parameters *both* dense
 searches run under.
 
-`markdown` is the same argument at a third scale, and the one where writing it twice was already
-wrong. Twenty sites across `agent`, `cli`, `evals`, `memory` and `protocols` rendered a Markdown
-table by hand, and **seventeen of them escaped nothing** — so a cell carrying a literal `|` added a
-column, which a connector's own tool result reaches: driven through `cli.live_jobs.report`, an
-`observed` of `result[0]='a | b'` rendered four cells under a header declaring three. The value here
-is not the grid, which is trivial; it is the three rules a generic table library would push back out
-to twenty callers — a `|` cannot add a cell, absence has exactly one spelling, and whether a
-zero-row table renders at all belongs to the caller, because only the caller knows whether "nothing
-came back" or "nothing was asked" is the true statement. `core` is the only package all five
-importers already depend on, and the module imports nothing but `collections.abc`.
+`markdown` is the same argument at a third scale: one Markdown table renderer for every package
+that emits one, holding the three rules a hand-rolled table gets wrong — a `|` cannot add a cell,
+absence has exactly one spelling, and whether a zero-row table renders at all belongs to the caller.
+It imports nothing but `collections.abc`.
 
 `authorship` is the one answer to "who wrote this" (`D-2026-09-27-an-author-is-a-person-and-an-agent`):
 the person it was written for and the agent that wrote it, which a knowledge note, an audit row and a
@@ -82,8 +74,24 @@ config system anywhere, including in-cluster: the Helm `ConfigMap` keys mirror t
 exactly.
 
 It is a package of one module per domain section (the D-072 mixins), with the flat `Settings`
-class composed — and the cross-section startup rules enforced — in its `__init__.py`. D-156
-declined to fold that split into a restructure that was otherwise a set of moves, and noted it was
-cheap whenever wanted because the import seam does not move; it was taken later, on exactly that
-argument. One settings object, one import (`from chemclaw.core.config import settings`) — the seam
-every call site uses, unchanged from the single-file era.
+class composed — and the cross-section startup rules enforced — in its `__init__.py`; see
+`config/README.md`. One settings object, one import (`from chemclaw.core.config import settings`).
+
+## The other kernel modules
+
+| Module | What it is |
+| --- | --- |
+| `aio`, `executor` | async primitives that survive several event loops in one process; the one sized thread pool every `asyncio.to_thread` shares |
+| `asgi`, `worker_http` | shared pure-ASGI middleware; the scrape and probe surface for a process that is not the front door |
+| `bounded` | the one bounded LRU map for every cache keyed by an unbounded identity |
+| `call_identity`, `mcp_session` | the turn's identity as outbound headers for one origin; the one outbound MCP client session |
+| `temporal_client` | the one place a Temporal client is opened |
+| `checkout` | whether a path is the git checkout this process runs from |
+| `egress`, `netguard`, `netguard_preload` (+ `netguard_preload.c`) | the LangSmith content-egress decision, and the in-process and compiled egress guards |
+| `migrate`, `grants` | apply `infra/sql/` migrations (`make db-migrate`) and reconcile the runtime principal's privileges (`make db-grants`) |
+| `jsonb`, `manifest_io` | the one `jsonb` write wrapper; the one manifest reader and its rule for fields that execute |
+| `metrics_bridge`, `tracing` | metric updates that cannot break their caller; first-party spans and their cross-process propagation |
+| `model_prose` | the marker a module-level string carries when a model is sent it |
+| `units`, `quantities` | the one restricted unit registry and `Measurement`; matching the numbers a prose answer states against a payload's |
+| `result_handle` | the handle at the foot of a tool result, and how readers of numbers skip it |
+| `turn_cost` | the shape of one turn's spend record |

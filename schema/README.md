@@ -20,6 +20,10 @@ python -m chemclaw.cli.sink_schema --seed    # the registry rows it needs to be 
 python -m chemclaw.cli.sink_schema --all     # both, in the order they must be applied
 ```
 
+**Apply both.** The directory holds the DDL (`result-store/NNN_*.sql`, in order) and no registry
+rows, and a sink refuses to deliver to a store whose `property_definition` is empty rather than leave
+calculations with no facts behind a foreign key.
+
 **The seed is generated, not stored.** It comes from `chemclaw.publish.properties` and
 `chemclaw.publish.solvents`, which is also what the writer canonicalizes against — a checked-in
 seed file that drifted from them would build a database whose foreign keys reject rows this system
@@ -27,15 +31,16 @@ considers valid.
 
 ### How it is versioned
 
-Forward-only and additive, under the same rule `tests/test_migrations_are_additive.py` enforces for
-`infra/sql/`: a new column arrives nullable with a default, so an older ChemClaw keeps writing
-unchanged and a newer one reads the absence as "not recorded".
+Forward-only, and additive except where a file argues otherwise in its header —
+`002_structure_loses_the_columns_no_writer_fills.sql` drops two columns no writer ever filled, and
+says why that is safe. A new column arrives nullable with a default, so an older ChemClaw keeps
+writing unchanged and a newer one reads the absence as "not recorded".
 
 Three tiers, in order of how often each applies:
 
-1. **A new property is no DDL at all** — it is a row in `property_definition`, and the publisher
-   upserts the shipped registry on startup. This is the majority case, and the whole point of the
-   registry: a new calculator ships rows, not migrations.
+1. **A new property is no DDL at all** — it is a row in `property_definition`, delivered by
+   re-applying `sink_schema --seed` (idempotent, `ON CONFLICT DO NOTHING`). This is the majority
+   case, and the whole point of the registry: a new calculator ships rows, not migrations.
 2. **A new column** is `ADD COLUMN IF NOT EXISTS … NOT NULL DEFAULT ''`.
 3. **A new table** is `CREATE TABLE IF NOT EXISTS`, unreferenced by the older image.
 

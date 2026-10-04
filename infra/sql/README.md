@@ -5,7 +5,15 @@
 schema is **forward-only and additive** — no migration may drop, rename, truncate or delete
 (D-2026-08-04-the-schema-only-goes-forward, enforced per file by
 `tests/test_migrations_are_additive.py`). New SQL is a new numbered file; an applied file is never
-edited, because the ledger flags the changed checksum as drift.
+edited, because the ledger flags the changed checksum as drift (`MigrationError`).
+
+**Adding one.** Write `NNN_<what>.sql` with the next free number (`ls infra/sql | tail`), apply it
+with `make db-migrate`, and add or extend its table's row below in the same commit —
+`tests/test_schema_inventory.py` fails otherwise. `make db-migrate` runs `python -m
+chemclaw.core.migrate` (every not-yet-applied file, in filename order, in one transaction, under an
+advisory lock, as `CHEMCLAW_POSTGRES_MIGRATION_DSN` or else the runtime DSN) and then `python -m
+chemclaw.agent.message_migration`, the stored-message conversion that lives in layer 1. Then
+`make db-grants`.
 
 That check asks **three** questions, because destroying data, ending the rollback and being
 replayable are different things with different answers
@@ -22,10 +30,8 @@ probe guards (the form `108` uses, which a replay leaves validated), since it ab
 rather than a rollback (`_REVIEWED_REPLAY_BREAKS`).
 
 **All three are listed at the foot of this file**, and `tests/test_schema_inventory.py` checks those
-lists against the registers in both directions. No count is given with them: the count is what went
-stale, twice. This paragraph said "exactly one" while the set held four, then "four" while it held
-five — and the one it omitted was `088_turn_cost_identity.sql`, the newest and the only one bearing
-on a rollback of the current release, under a sentence claiming the list was "derived from that set".
+lists against the registers in both directions. No count is given with them, because a count is what
+went stale.
 
 `grants/` is not part of that set and is invisible to the runner's non-recursive glob by
 construction. See the note at the bottom.
@@ -36,22 +42,17 @@ One row per table. **Written by** names the module that owns its writes — the 
 caller. **Disposal** is what bounds its growth, and a blank there means nothing does. The register
 of record is `durable/retention.py`'s `_NOT_PRUNED`, which names **every** table in this schema and
 what bounds it — including, in its own words, the ones where nothing does and no decision is on
-file. (This sentence used to delegate to a `docs/planning/BACKLOG.md` row instead. That row was
-closed and deleted, as the rules for that file require, and the delegation outlived it — so the
-column an operator reads before writing a cleanup script pointed at nothing.)
+file.
 
 `tests/test_schema_inventory.py` checks this table against the SQL on disk, because an inventory
-nobody verifies is read, believed, and wrong — the only other table inventory in this repository
-sits in `docs/archive/` and is seventeen migrations stale. It checks the **set** of tables in both
-directions, and the **Migration** column against the statements that name each table. That second
-check is newer than this paragraph, and it was added because the column was itself the example:
-four of twenty-seven rows named only the migration that created the table and omitted a later one
-that added a column to it. **Written by** and **Disposal** stay unchecked on purpose — they are
+nobody verifies is read, believed, and wrong. It checks the **set** of tables in both directions,
+and the **Migration** column against the statements that name each table. **Written by** and **Disposal** stay unchecked on purpose — they are
 judgements, and a test for them would be a second copy of the answer.
 
 A cell lists **every** migration that touches the table, oldest first, so a row answers "when did
 this last change shape". Two files may share a number — `037` is both `037_bo_suggestion_provenance.sql`
-and `037_document_index.sql` — and the cell says `037` once; the ledger tracks whole filenames, so
+and `037_document_index.sql`, and `043` both `043_session_listing.sql` and
+`043_session_message_shape.sql` — and the cell says the number once; the ledger tracks whole filenames, so
 the pair applies in filename order and neither shadows the other.
 
 | Table | Migration | Written by | Disposal |
@@ -90,7 +91,7 @@ the pair applies in filename order and neither shadows the other.
 | `commitments` | 074 | `ingest/commitments/store.py` | **refused**: a mirror that converges rather than accumulating (upserted on `(source, external_id)`), bounded by the size of the portfolio it reflects. A clock cutoff would delete the delivered rows that make "what did we ship last quarter" answerable; staleness is reported by `observed_at`, not pruned |
 | `effects` | 075, 078 | `durable/effect_ledger.py` | **refused**: what this system changed in a system it does *not* own, and who approved it when the change could not be undone. The change is still standing on the far side and outlives any window this could be pruned on. Bounded by how often this system acts outside itself — which no job in this repository does at all |
 | `observations` | 025 (+062 index) | `memory/observations.py` | stale rows retired by status, not deleted |
-| `note_proposals` | 027 (+036, +058) | `kg/proposal_store.py` | refused: kept through erasure |
+| `note_proposals` | 027 (+036, +058) | — (retired with the PR-gate, `D-2026-09-05-the-gate-follows-behaviour-not-knowledge`; nothing writes it) | refused: kept through erasure, as the record of what was proposed and who decided it |
 | `measurements` | 030 (+093 key) | `science/calc/calibration.py` | — |
 | `bo_campaigns` | 031 | `science/bo/campaign_record_store.py` | refused: kept through erasure |
 | `bo_suggestions` | 031 (+037) | `science/bo/campaign_record_store.py` | cascades from `bo_campaigns` |
@@ -137,13 +138,14 @@ existence, and `tests/test_database_privileges.py` derives the same set from the
 distributions so a table upstream adds in a minor bump fails the check instead of inheriting
 `GRANT SELECT` and being found as a write outage.
 
-**There are three foreign keys in the whole schema** (`calculation_artifacts` → `artifact_blobs`,
-`bo_suggestions` → `bo_campaigns`, `tool_result_links` → `tool_result_blobs`), each one where a
-cascade is load-bearing — a link row outliving its bytes would hand a caller a reference to
-nothing. Everything else is
-associated by a shared id with no constraint — including the four `session_*` tables, which is why
-pruning one of them does not touch the others and why the **Disposal** column has to be read per
-row rather than per subsystem.
+**Foreign keys are few, and each is an `ON DELETE CASCADE` where the cascade is load-bearing**:
+`calculation_artifacts` → `artifact_blobs`, `bo_suggestions` → `bo_campaigns`, `tool_result_links`
+→ `tool_result_blobs`, `experiment_protocol_revisions`/`experiment_protocol_status_events`/
+`experiment_arm_results` → `experiment_protocols`, `session_members`/`plan_authors`/
+`session_turn_queue` → `session_owners`, and `session_exhibit_revisions` → `session_exhibits`.
+Everything else is associated by a shared id with no constraint — including `session_messages`,
+`session_events`, `session_turns` and `session_exhibits` — which is why pruning one of them does not
+touch the others and why the **Disposal** column has to be read per row rather than per subsystem.
 
 **`grants/` is applied by `make db-grants`, not by `make db-migrate`.** The migration set runs each
 file exactly once, tracked by checksum, which is right for a schema change and wrong for a grant: a
@@ -287,8 +289,7 @@ Re-running the whole set is how a restored database whose `schema_migrations` le
 its tables is recovered. Two files abort that run — the runner sends everything in one transaction,
 so nothing after the failure applies either. Apply the recipe first; both were verified end to end,
 after which every tracked file replays clean against a fully populated database. A count is
-not written here: it was verified at 90 files and read 94 four waves later, and the sentence
-is about the two recipes, not about how many files there happen to be.
+not written here: the sentence is about the two recipes, not about how many files there are.
 
 - `046_review_hardening_indexes.sql` — `ADD CONSTRAINT session_messages_shape_known` with no drop
   above it, so a replay aborts with `DuplicateObject: constraint "session_messages_shape_known" for

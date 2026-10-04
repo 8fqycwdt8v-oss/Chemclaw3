@@ -280,9 +280,9 @@ Requirements:
 - **A driver that offers no `vector_dialect` cannot serve a `vector:` block at all** and says so,
   naming itself, rather than emitting SQL another server will reject
   (`ingest/eln/warehouse/driver.py`).
-- `suppress_ingested: true` drops a hit whose reaction already became a note. For a corpus that is
-  never ingested, leave it `false`: every check would be a wasted probe, and an id colliding with an
-  ELN one would silently hide a legitimate hit.
+- `suppress_ingested: true` drops a hit whose reaction the ELN record store already holds
+  (`reaction_records`). For a corpus that is never ingested, leave it `false`: every check would be
+  a wasted probe, and an id colliding with an ELN one would silently hide a legitimate hit.
 
 The scan evaluates a similarity function **per row, on every query**. That is right for an ELN and
 wrong for a corpus of millions.

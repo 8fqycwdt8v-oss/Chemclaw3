@@ -15,8 +15,7 @@ Every ELN-specific quirk is confined to an adapter behind the `ElnAdapter` contr
 | `validate.py`, `compound.py` | structure handling and the checks a transcription has to survive |
 
 **A transcription is data, not a claim.** `record_from_ord_reaction` infers nothing, so it hands a
-reviewer nothing to decide, and an entry is readable the moment it is ingested — the gate that used
-to stand here cost 202 ms of serialized git per entry and was deleted with its whole mechanism.
+reviewer nothing to decide, and an entry is readable the moment it is ingested.
 
 **A record has a tier, and a structure is never invented to avoid the lower one.** A species the
 source names without a structure — a paper's shorthand the reagent table cannot resolve — is carried

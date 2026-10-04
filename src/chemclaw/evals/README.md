@@ -22,6 +22,13 @@ measurement behind `D-2026-10-02-an-artefact-is-part-of-the-answer-not-an-effect
 decision's `Revisit when:` lines is a re-run of it (`python -m chemclaw.evals.answer_shape
 tasks/live-*`).
 
+The live lane: `probe.py` is the live-probe declaration (one question and how to tell whether the
+answer served it), `live.py` asks a running front door those questions and records what it did,
+`live_judge.py` grades an answer against its probe's `direction` with a model as judge,
+`tool_utility.py` turns two graded answers into the tool-utility A/B, `delegation_run.py` is the run
+half of the delegation experiment, and `phoenix.py` publishes an archived probe run to Phoenix.
+`autonomy.py` scores whether the *harness* behaved over a scripted transcript.
+
 ## Code here, cases in `data/evals/`
 
 This package holds no test case. The versioned case-set, the retrieval corpus and the committed

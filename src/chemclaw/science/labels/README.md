@@ -8,6 +8,19 @@ This is not the record of truth. For an ELN reaction that is its `reaction_recor
 upstream it was transcribed from; for a patent corpus it is the source table. Both tables can be
 dropped and refilled, and the only thing lost is the time it takes.
 
+## The modules
+
+| Module | What it is |
+| --- | --- |
+| `records.py` | the two rows of the index, and what each phase of writing them may set |
+| `store.py` | the index itself — the derived, rebuildable view, and the staleness scan |
+| `vocabulary.py` | `Role` and the recorded-role strings |
+| `policy.py` | what one data source declares about its labels — the `labels:` manifest block |
+| `facets.py` | one facet query, and the honest denominator every answer over it carries |
+| `search.py` | the precedent questions, as thin shapings of one facet query |
+| `molecules.py`, `reactions.py` | `corpus_molecules` and `corpus_reactions`: similarity and substructure over the corpus |
+| `pattern.py` | an RDKit pattern fingerprint stored as set-bit indices, the screen substructure search uses |
+
 ## The two-phase row, and why
 
 | Phase | Written by | Columns |
@@ -40,5 +53,6 @@ superseded labeller. Both are found by one indexed scan, so "which entries are m
 * **A widened `Role`.** See `vocabulary.py` — `Role` decides which side of the fingerprint
   boundary a species lands on and is writable from a tenant's YAML binding, so a sixth member is
   an arithmetic change, not a vocabulary change.
-* **`ingest` imports.** `science/` may import `chemclaw.core` and nothing else. The recorded-role
+* **`ingest` imports.** `science/` may import `chemclaw.core` and nothing else at module scope (its
+  one declared lazy edge is `calc`'s best-effort hand-off to `publish`). The recorded-role
   strings are named here as strings and pinned to `Role` by `tests/test_label_vocabulary.py`.

@@ -15,6 +15,21 @@ $ make kind-down      # delete the cluster (and everything in it)
 $ make kind-validate  # offline: render the chart with these values + the fleet, schema-check all of it
 ```
 
+**Prerequisites.** `kind`, `kubectl`, **Helm 4** (`up.sh` passes `--force-conflicts`, which Helm 3
+does not have; `make kind-validate` only renders and works with either), `docker` (with the daemon running), `openssl`,
+`curl` and `python3` on `PATH` — `up.sh` checks each and names the one missing — plus a
+`Chemclaw3-mcp` checkout beside this one (or `CHEMCLAW_MCP_REPO` pointing at it) and the images
+below built locally. The whole system needs about 8 CPU and 12.5 GB of memory on the node.
+
+| Knob (environment) | Default | Effect |
+| --- | --- | --- |
+| `CHEMCLAW_KIND_AUTH` | `devauth` | `devauth` or `oidc-mock` — see "Modes" |
+| `CHEMCLAW_KIND_LLM` | `mock` | `mock` or `live` — see "Modes" |
+| `CHEMCLAW_KIND_CORE_TAG` | `kind` | tag of `chemclaw/core` (the chart, the hooks and the mock LLM) |
+| `CHEMCLAW_KIND_TAG` | `kind` | tag of every other image (`chemclaw/mcp-*`, `chemclaw/mock`, `chemclaw/ui`) |
+| `CHEMCLAW_KIND_SKIP_SMOKE` | `false` | `true` stops after the rollout |
+| `CHEMCLAW_MCP_REPO` | beside this checkout | the `Chemclaw3-mcp` checkout the fleet is rendered from |
+
 | Host URL (127.0.0.1 only) | What |
 | --- | --- |
 | http://127.0.0.1:15173 | the UI (BFF + SPA) — open it at exactly this address (it is the BFF's `APP_ORIGIN`) |
@@ -189,13 +204,14 @@ Fixed in core, with tests, because each one breaks any Kubernetes install and no
   below keep the pods from restart-looping meanwhile. Measured in the K5 resilience run.
 - **Requests are sized to a workstation** (the whole system on 8 CPU / 12.5 GB); limits are
   production's. Replicas are one per role and the HPA is off (it scales on a Prometheus metric this
-  cluster has no adapter for). The startup probes get twice production's budget: a fresh `up`
-  starts some two dozen Python processes at once and the node sits at 800–1000 % CPU for minutes.
+  cluster has no adapter for). The startup probes get six times production's budget (180 × 10 s
+  rather than 30 × 10 s, `values-kind.yaml`): a fresh `up` starts some two dozen Python processes
+  at once and the node sits at 800–1000 % CPU for minutes.
 - **Certificates are issued once per cluster.** Should one of the TLS Secrets go missing, `up.sh`
   issues a new CA and every certificate, and restarts the pods that read them at start — Postgres,
   Temporal, the mock, the UI, and every pod of the release (the Temporal client certificate).
-- **A re-run converges.** `helm upgrade` runs with `--force-conflicts`, so a field changed by hand
-  while debugging does not block the next `up`.
+- **A re-run converges.** `helm upgrade` runs with `--force-conflicts` (Helm 4's server-side
+  apply), so a field changed by hand while debugging does not block the next `up`.
 
 ## Operator notes
 

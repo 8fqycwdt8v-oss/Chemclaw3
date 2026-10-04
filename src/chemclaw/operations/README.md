@@ -8,16 +8,10 @@ ran, what the agent wrote into the knowledge graph, and where the turns and toke
 
 ## Why it exists
 
-The tables it reads have all been written since the system was built and none of them could be read
-*across*. (First written here as "none of them had a reader", which is false — `cli/explain.py`,
-`publish/backfill.py`, `durable/job_record_store.py`, `kg/record.py` and
-`agent/plan_approval_store.py` all read one, and only `turn_costs` had none. The second attempt
-called them all point lookups, which is false too: two are searches and one is a full sweep. What
-none of them does is **aggregate**, and that is the whole of it.)
-`chemclaw.agent.audit_store.PostgresAuditSink` exposes `record` and `flush`; the grant matrix hands
-the runtime principal `SELECT` on every table and no code used it on this one. So the trail proved
-*that* something happened and could not answer a question *about* it — and a set of questions a
-group leader asks routinely ("is this playbook actually used", "how did our hazard flags trend last
+The tables it reads have all been written since the system was built, and every existing reader
+does a point lookup, a search or a sweep — none of them **aggregates**. So the audit trail proved
+*that* something happened and could not answer a question *about* it, and the questions a group
+leader asks routinely ("is this playbook actually used", "how did our hazard flags trend last
 quarter", "how much of that note did this system write") were unanswerable from data already
 stamped.
 

@@ -83,9 +83,10 @@ arm of the union and a new branch in core (D-076 → D-120).
 
 ## What is *not* a data source
 
-**Anything that writes to the knowledge graph.** Notes enter through the PR-gate, where a human
-signs off before a merge — that is the review line. `graph` is retrieve-only for this reason, not by
-omission, and a source cannot acquire a write path by declaring one.
+**Anything that writes to the knowledge graph.** Notes enter through `kg/record.py`, the one write
+path, carrying their provenance (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`). `graph` is
+retrieve-only for this reason, not by omission, and a source cannot acquire a write path by
+declaring one.
 
 **Anywhere this system's *own* results go.** A source supplies a corpus; sending computed values
 outward is the opposite direction and has its own seam, `src/chemclaw/publish/`
@@ -94,6 +95,16 @@ outward is the opposite direction and has its own seam, `src/chemclaw/publish/`
 way the data moves and therefore what may go wrong. This one reads, so its failure is a missing
 answer; that one writes, so its failure is a record nobody has.
 
-**An ELN's retrieve half, when its records already become notes.** `eln-json` and `eln-ord` are
-ingest-only: reactions flow in and become graph notes, which the `graph` source then retrieves.
-Carrying a retriever as well would surface every ingested reaction twice.
+**An ELN's retrieve half, when its records are already searchable.** `eln-json` and `eln-ord` are
+ingest-only: reactions flow in as `reaction_records` rows (`ingest/eln/records.py`), which the
+evidence sweep already reaches through the reaction-fingerprint retriever. Carrying a retriever as
+well would surface every ingested reaction twice.
+
+## The modules here
+
+`base.py` re-exports the half protocols, `manifest.py` is the `datasource.yaml` model, and
+`registry.py` discovers manifests on `CHEMCLAW_DATA_SOURCES_DIR` and builds enabled halves.
+`vendored_dataset.py` is the retrieve half over the vendored, checksummed dataset under
+`data/vendored/`. The shipped manifests are one folder each: `graph`, `vector`, `lexical`,
+`eln-json`, `eln-ord`, `eln-databricks`, `sharedrive`, `commitments-json`, `pistachio` and
+`vendored`.

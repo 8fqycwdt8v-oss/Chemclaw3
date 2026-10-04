@@ -1,5 +1,8 @@
 # Making a classical file share answerable
 
+> **Built.** This is the operator guide for a shipped source (`ingest/sources/sharedrive/`), not a
+> proposal; the filename keeps its old "concept" suffix only so links resolve.
+
 How to attach an on-prem SMB/CIFS share — the shared drive full of reports, decks, spreadsheets and
 PDFs — so ChemClaw3 answers questions from it with a citation to the file and page. The decision
 record is `docs/decisions/D-2026-08-06-a-share-is-mounted-not-called.md`; the code is
@@ -42,7 +45,8 @@ never degrade to "the share is empty".
 ## 2. Describe the share
 
 Copy `src/chemclaw/ingest/sources/sharedrive/datasource.yaml` into a folder you mount, and put that
-folder **first** on `CHEMCLAW_DATA_SOURCES_DIR`. Your site's layout is then not a change to this
+folder **first** on `CHEMCLAW_DATA_SOURCES_DIR` (an `os.pathsep`-separated list, like `PATH`; the
+first directory holding a name wins). Your site's layout is then not a change to this
 repository at all.
 
 ```yaml
@@ -70,9 +74,8 @@ config:
 What each part buys:
 
 - **`required_roles`** is mandatory, and so is its opposite. A binding must set either
-  `required_roles` or `public: true`; omitting both is refused at load. Empty used to mean ungated,
-  so a hand-authored manifest that simply forgot the field served the whole AD-gated drive to every
-  authenticated user, with nothing to distinguish it from a correctly gated one.
+  `required_roles` or `public: true`; omitting both is refused at load, so a manifest that forgot the
+  field cannot silently serve an AD-gated drive to every authenticated user.
 - **`roots`** is your staged-rollout control. Start with one folder. Roots may not overlap and may
   not be combined with `.`; the crawl refuses at load rather than indexing a file twice under two
   tag sets.
@@ -123,7 +126,7 @@ For anything real:
 ```
 CHEMCLAW_EMBEDDING_PROVIDER=openai_compatible
 CHEMCLAW_EMBEDDING_MODEL=<your model>
-CHEMCLAW_EMBEDDING_DIM=1536      # must equal the vector(N) column in infra/sql/037
+CHEMCLAW_EMBEDDING_DIM=1536      # must equal the vector(N) column (infra/sql/037_document_index.sql)
 ```
 
 It reuses the LLM base URL, credential and private-CA transport — there is no second endpoint to
@@ -145,7 +148,8 @@ By default the embeddings live in `document_chunks.embedding` and a search is on
 ranks, filters and resolves the citation together. That is the fastest arrangement and needs no
 extra infrastructure.
 
-For a dedicated vector database:
+For a dedicated vector database (the shipped adapters are `pgvector`, the default, `qdrant` and
+`databricks` — Mosaic AI Vector Search, which also needs `CHEMCLAW_VECTOR_STORE_ENDPOINT_NAME`):
 
 ```
 CHEMCLAW_VECTOR_STORE_PROVIDER=qdrant
@@ -247,9 +251,11 @@ is logged. An unreachable share and an empty one look identical from the inside,
 possible mistakes re-indexing is recoverable and deleting is not. Expect this to be the log line you
 see if the CIFS mount flaps.
 
-**A gated share contributes nothing to scheduled reports.** `durable/report_workflow.py` runs with
-no user identity, so the entitlement cannot be checked and the source correctly declines. Right by
-construction, and tracked in `docs/planning/BACKLOG.md` for identity propagation.
+**A gated share contributes nothing to durable reports.** `durable/report_workflow.py::retrieve_section`
+binds the requester as the actor but with an **empty** role set — a workflow payload is relayed data,
+not a verified claim, so roles do not cross the durable boundary unsigned — and the source therefore
+declines. A scheduled report has no requester at all. Fail-closed by construction; lifting it needs
+a signed identity payload, the same blocker as `docs/planning/DEFERRED.md`'s template-step row.
 
 **A stale vector is fixed before a missing document is found.** Each run drains re-embedding
 before it crawls: a vector made by a superseded model is wrong *now*, being compared against

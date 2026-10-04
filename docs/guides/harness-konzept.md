@@ -4,7 +4,7 @@
 > `D-2026-09-13-the-default-is-the-posture-every-deployment-already-runs`; davor `false`, während
 > der Helm-Chart ihn einschaltete). Dieses Dokument
 > beschreibt, was der Harness *heute ist* — nicht mehr, was er einmal werden sollte. Es ist eine
-> Ergänzung zu [`architektur.md`](./architektur.md) §1, **keine** Revision der Vier-Schichten-
+> Ergänzung zu [`architektur.md`](../reference/architektur.md) §1, **keine** Revision der Vier-Schichten-
 > Trennung. Abschnittsverweise ohne Doku-Namen beziehen sich auf `architektur.md`.
 >
 > Der Harness wurde ursprünglich auf dem Microsoft Agent Framework entworfen und gebaut
@@ -40,7 +40,7 @@ zustandsbehaftete Liste — und was nicht sichtbar ist, kann niemand vor der Aus
 2. **Dynamische Zerlegung** — der Agent bestimmt Schrittzahl und Reihenfolge selbst, statt dass
    jeder Ablauf vorverdrahtet wird.
 3. **Autonome Abarbeitung mit Zwischenstand** — mehrstufige Untersuchungen laufen ohne ständiges
-   Nachfragen durch, melden aber Fortschritt und halten am PR-Gate an.
+   Nachfragen durch, melden aber Fortschritt und halten am Freigabe-Gate an.
 
 **Nicht-Ziele:**
 - **Kein zweites Durability-System.** Der Harness ist keine Ausführungs-Engine für lange Jobs.
@@ -49,8 +49,8 @@ zustandsbehaftete Liste — und was nicht sichtbar ist, kann niemand vor der Aus
   (D-2026-08-10 §3).
 - **Kein Ersatz der festen Pipelines.** Der Report-Pfad (5b, D-020) bleibt ein deterministischer
   Temporal-Fluss; der Harness ist für das *offene* Terrain (§11).
-- **Keine Aufweichung des PR-Gates.** Mehr Autonomie heißt *mehr*, nicht weniger menschliche
-  Freigabe (§6).
+- **Keine Aufweichung der Freigabe.** Mehr Autonomie heißt *mehr*, nicht weniger menschliche
+  Freigabe vor einer Wirkung (§6).
 
 ## 2. Woraus der Harness besteht
 
@@ -62,8 +62,8 @@ unverändert der ist, der er ohne Harness war.
 | Baustein | Was er tut |
 |---|---|
 | **`TodoListMiddleware`** (LangChain) | Stellt dem Modell `write_todos` bereit und besitzt das Feld `todos` im Graph-State. Ein `Todo` ist `{content, status}` — **ohne** Beschreibungsfeld, was in §4 wichtig wird. |
-| **`ChemclawState`** (`agent/state.py`) | Erweitert `PlanningState` um zwei Felder: `model_calls` (der Zähler der Runaway-Bremse) und `loop_capped` (ob sie gefeuert hat). Felder kommen mit der Phase, die sie liest — ein deklariertes Feld, das niemand konsultiert, ist derselbe Stub wie eine Funktion, die niemand aufruft. Ein drittes, `awaiting_jobs`, stand hier, bis auffiel, dass es nie jemand geschrieben oder gelesen hat (§4). `turn_input` setzt beide Felder beim Turn-Start zurück — der Checkpointer hält den Thread, also ist ein Feld ohne Reset **pro Session** und nicht pro Turn. |
-| **`enforce_loop_cap`** (`agent/loop_cap.py`) | Ein `@before_model`-Hook, der die Modellaufrufe dieses Turns zählt und den Lauf bei `harness_max_loop_iterations` mit `{"jump_to": "end", "loop_capped": True}` beendet. Er *erzwingt* die Grenze und *protokolliert* sie in einem Zug; `loop_capped(state)` liest die Tatsache zurück — ein Flag, keine Zahl: der stoppende Zweig zählt nicht hoch, also endet ein gedeckelter Turn bei genau derselben Zahl wie einer, der seinen letzten erlaubten Aufruf verbraucht und dann geantwortet hat. |
+| **`ChemclawState`** (`agent/state.py`) | Erweitert `PlanningState` um die Zähler-/Flag-Paare der beiden Bremsen: `model_calls`/`loop_capped` (Runaway-Bremse) und `billed_tokens`/`spend_capped` (Ausgaben-Deckel, `agent/spend_cap.py`), dazu das private `loop_wrap_up` (siehe `enforce_loop_cap`). Felder kommen mit der Phase, die sie liest — ein deklariertes Feld, das niemand konsultiert, ist derselbe Stub wie eine Funktion, die niemand aufruft. Die Zähler sind **untracked** Kanäle (`TurnTotal`/`TurnFlag`): der Checkpointer persistiert sie nie, also beginnt jeder Lauf des Graphen bei 0 — pro Turn, ohne dass irgendwer zurücksetzen muss, und ein Fan-out auf Helfer teilt sich ein Budget. |
+| **`enforce_loop_cap`** (`agent/loop_cap.py`) | Ein `@before_model`-Hook, der die Modellaufrufe dieses Turns zählt. Bei `harness_max_loop_iterations` setzt er `loop_capped` und gewährt **genau einen** weiteren Aufruf ohne Tools, der die Antwort aus dem Vorhandenen schreibt (`answer_at_the_cap`); erst die zweite Ankunft beendet den Graphen mit `jump_to: end`. Er *erzwingt* die Grenze und *protokolliert* sie in einem Zug; `loop_capped(state)` liest die Tatsache aus dem Endzustand, `loop_hit_cap()` aus einer Contextvar für den Streaming-Runner, der den Endzustand nie zurückbekommt. |
 | **`enforce_plan_approval`** (`agent/plan_gate.py`) | Ein `@wrap_tool_call`-Gate, das jeden zustandsändernden Aufruf ablehnt, solange für den *aktuellen* Plan keine lebende menschliche Freigabe vorliegt. |
 
 **Warum der Deckel ein eigener Zähler ist und nicht `ModelCallLimitMiddleware`.** Die
@@ -150,7 +150,7 @@ Beschreibungsfeld mehr, in das die Konvention zurückkriechen könnte.
 Plan:  1. Graph nach Verbindung X + ähnlichen Substraten durchsuchen  [find_notes/expand_note]
        2. Schnellen xTB-Screen der Regioselektivität rechnen           [compute_xtb_energy]
        3. NUR bei enger Energiedifferenz das Konformerensemble suchen   [durable calc-Job → awaiting]
-       4. Ergebnis als Note vorschlagen                                 [record_knowledge_note → PR]
+       4. Ergebnis als Note festhalten                                  [record_knowledge_note]
 ```
 Schritt 3 ist *bedingt und agenten-entschieden* — genau die Dynamik, die ein vorverdrahteter Fluss
 nicht ausdrückt. Das Tiering-Prinzip (§2: erst der Einzelpunkt, die teure Suche nur bei Bedarf)
@@ -168,14 +168,17 @@ sichtbar macht — vorher war eine Quelle mit null Treffern nicht von einer nich
 unterscheiden.
 
 **(d) Plan-Modus als Human-in-the-Loop-Punkt.** Der Plan-Modus ist die natürliche Stelle, an
-der „der Agent schlägt vor, ein Mensch entscheidet" *vor* der Ausführung greift — komplementär zum PR-Gate,
-das *nach* der Wissensproduktion greift (§6).
+der „der Agent schlägt vor, ein Mensch entscheidet" *vor* der Ausführung greift. Für Wissen gibt es
+kein nachgelagertes Gate mehr (§6).
 
 ## 6. Governance-Verzahnung (mehr Autonomie ⇒ mehr Gates, nicht weniger)
 
-- **PR-Gate bleibt terminal (D-005).** Egal wie autonom abgearbeitet wird: jede
-  `created_by: agent`-Note geht über Branch → PR → menschliche Freigabe. Autonomie erzeugt
-  *Vorschläge*, keine gemergte Wahrheit.
+- **Wissen wird direkt geschrieben und korrigiert, nicht vorab freigegeben**
+  (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`). Das PR-Gate (D-005) ist gelöscht:
+  eine `created_by: agent`-Note landet über `kg/record.py` direkt in `knowledge/`, und was sie
+  sicher macht, sind Provenienz, die Zitate, die ein Chemiker am Ort der Nutzung prüft, und
+  Widerspruch/Supersession. Das Freigabe-Gate dieses Harness gilt **Wirkungen** (zustandsändernde
+  Tool-Aufrufe), nicht Wissen; ein `SKILL.md` schreibt kein Agentenpfad.
 - **Die Freigabe gilt dem Akt, nicht der Sitzung.** `enforce_plan_approval` hängt am
   Tool-Aufruf-Rand, weil die Einheit, die eine Freigabe autorisiert, eine *Handlung* ist — dieselbe
   Begründung, die `agent/tool_authz.py` für die Per-Tool-RBAC führt. Eine Prüfung beim Turn-Start
@@ -195,8 +198,8 @@ das *nach* der Wissensproduktion greift (§6).
   in der einen Autorisierungs-Middleware, die *innerhalb* des Audit-Rings und *vor* dem
   Tool-Körper läuft — der Harness umgeht das nicht.
 - **Audit-Trail pro Aktion.** Der Entra-`oid` des Nutzers wird nicht nur am Job, sondern an jedem
-  auslösenden Tool-Aufruf mitgeführt; läuft ein Spezialist (§7), nennt die Zeile ihn **neben** dem
-  Menschen, in einer eigenen Spalte — „der Agent" als Verursacher wäre in einem regulierten System
+  auslösenden Tool-Aufruf mitgeführt; läuft ein Helfer (`task`, §7), nennt die Zeile dessen
+  Profilnamen **neben** dem Menschen, in der eigenen Spalte `agent` (`agent/audit.py`) — „der Agent" als Verursacher wäre in einem regulierten System
   ein wertloser Trail.
 
 ## 7. Interaktion mit den bestehenden Schichten
@@ -214,13 +217,15 @@ das *nach* der Wissensproduktion greift (§6).
   bewertet u. a. die Runaway-Rate; seit der Deckel ein gelesener Zähler statt einer Schlussfolgerung
   ist, kann diese Metrik „abgebrochener Schritt" von „korrekt an einen durable Job übergeben"
   unterscheiden, was sie aus Residuen allein nie konnte.
-- **Spezialisten-Team — entfernt (D-2026-08-15).** Ein Supervisor mit fünf Spezialisten war gebaut
-  und blieb per Default aus; die Messung, die über das Default entscheiden sollte, war mit diesem
-  Korpus nicht durchführbar. Die Regel überlebt den Code und bindet jeden künftigen Subagenten: seine
-  Werkzeugmenge ist eine *Abschwächung* der des Aufrufers, und `safety` lässt sich nicht
-  wegnarrowen.
+- **Spezialisten-Team — entfernt (D-2026-08-15); Helfer — gebaut.** Ein Supervisor mit fünf
+  Spezialisten war gebaut und blieb per Default aus. Heute liefert deepagents' `task` auf jedem
+  Turn einen benannten Helfer-Roster (`agent_helper_roster`, Profile in `data/profiles/`), und die
+  Regel bindet jeden davon: seine Werkzeugmenge ist eine *Abschwächung* der des Aufrufers — minus
+  `authz.side_effecting_tools()` — (`D-2026-08-10-a-subagent-is-an-attenuation-not-a-new-actor`).
+  Ein Helfer kann also nichts auslösen, was das Freigabe-Gate bräuchte. Handoffs zwischen Peers
+  (`agent_peer_roster`, `agent/turn_graph.py`) sind gebaut und per Default aus.
 - **Gedächtnis.** Ein abgeschlossener, vom Chemiker bestätigter Plan ist selbst eine episodische
-  `interaction`-Note — dieselbe Note, dasselbe Gate. Das System lernt aus seinen eigenen
+  `interaction`-Note — derselbe Schreibpfad (`kg/record.py`) wie jede andere Note. Das System lernt aus seinen eigenen
   erfolgreichen Plänen, ohne neuen Mechanismus.
 
 ## 8. Config & Leitplanken (keine Magic Numbers, G3)
@@ -233,10 +238,9 @@ Implementiert sind bewusst nur die *tatsächlich konsumierten* Felder:
 | `harness_enabled` | Master-Schalter (Fallback: klassischer Agent ohne Todo-Liste und ohne Deckel) | `true` |
 | `harness_autonomy` | `plan_only` (Freigabe-Gate aktiv) \| `execute` | `plan_only` |
 | `harness_max_loop_iterations` | Runaway-Bremse; als Modellaufruf-Zähler in `ChemclawState` geführt | `25` |
-| `agent_teams_enabled` | Supervisor + fünf Spezialisten statt eines Agenten (§7) | `false` |
 
 Beide Harness-Dimensionen sind **pro Profil überschreibbar**, und beide werden über *einen*
-Resolver gelesen (`harness_mode.harness_enabled_for` / `.autonomy_for`). Das ist kein Stilpunkt:
+Resolver gelesen (`agent/plan_gate.py`: `harness_enabled_for` / `autonomy_for`; ob das Gate hängt, entscheidet `gate_applies`). Das ist kein Stilpunkt:
 die Regel war einmal an drei Stellen ausgeschrieben, und ein Profil mit `plan_only` unter einem
 globalen `execute` bekam das Gate angehängt, ohne dass seine Freigabe je verbraucht wurde — eine
 Entscheidung autorisierte damit jeden weiteren Turn.
@@ -245,19 +249,22 @@ Entscheidung autorisierte damit jeden weiteren Turn.
 zurück. Der Deckel ist **abgelesen, nicht erschlossen**: `enforce_loop_cap` beendet den Lauf und
 hinterlässt die Zahl in `model_calls`, `loop_capped(state)` liest sie, und damit ist auch der Fall
 `harness_max_loop_iterations == 1` beantwortbar — die frühere Schlussfolgerung war dort blind, weil
-die Schleife bei einem Deckel von 1 nie nach ihrer Fortsetzung gefragt wurde. **Offen** ist die
-Verdrahtung dieser Lesung in den Turn-Runner: `chemclaw.api.runner` sendet
-`ErrorEvent(code="loop_cap_reached")` und zählt `chemclaw_turn_loop_caps_total` noch aus dem alten
-Contextvar-Signal, das der Graph-Pfad nicht setzt (§13).
+die Schleife bei einem Deckel von 1 nie nach ihrer Fortsetzung gefragt wurde. Der Turn-Runner
+liest den Deckel über `loop_hit_cap()` (die Contextvar, die `enforce_loop_cap` beim Feuern setzt),
+sendet `ErrorEvent(code="loop_cap_reached")` vor der Antwort und zählt
+`chemclaw_turn_loop_caps_total` (`api/runner.py::_loop_cap_event`). Der Turn schlägt dadurch nicht
+fehl: die Antwort aus dem werkzeuglosen Abschlussaufruf geht trotzdem raus und wird als *partiell*
+markierbar.
 
-**Governance-Härtung.** Generische Batterien — File Memory, File Access, Shell, Web Search — sind
-**nicht** angeschlossen, aus demselben Grund, aus dem sie beim Vorgänger-Framework abgeschaltet
-waren: Chemclaws Fähigkeit ist ihr *expliziter* Tool-/Skill-Satz, kein generischer Datei- oder
-Shell-Zugriff (§6, G6). Das kostet genau eine Handvoll Zeilen: statt deepagents'
-`FilesystemMiddleware` (die `read`, `write`, `edit`, `glob`, `grep` und `execute` mitbrächte, für
-die dann die Prompt-Verträge, die Rollen-Gates und die Sicherheits-Rubrik geradestehen müssten)
-hängt genau **ein** handgeschriebenes `read_file` am verengten Skills-Backend. Progressive
-Disclosure braucht ein Verb.
+**Governance-Härtung.** Shell und Web Search sind **nicht** angeschlossen: Chemclaws Fähigkeit ist
+ihr *expliziter* Tool-/Skill-Satz (§6, G6). Das Dateisystem ist deepagents'
+`FilesystemMiddleware` über einem `CompositeBackend` (`agent/scratchpad.py`) mit drei Routen —
+`/scratch/` (Graph-State, pro Thread), `/skills/` (das verengte, schreibgeschützte Skills-Backend)
+und `/memories/` (Postgres-Store, pro Akteur, nur wenn das Deployment es einschaltet). `execute` und
+`delete` werden zurückgehalten. Jede Datei-Operation ist ein Tool-Aufruf und läuft damit durch
+dieselbe `wrap_tool_call`-Kette wie jeder andere: auditiert, autorisiert, im Dry-Run abgelehnt, und
+ein Schreiben unter `/memories/` zählt für das Freigabe-Gate als Wirkung
+(`authz.side_effecting_call` liest den `file_path`).
 
 ## 9. Risiken
 
@@ -319,7 +326,7 @@ dritter, komplementärer Baustein.**
 |---|---|---|
 | **Temporal-Workflows** | Durable, lang laufende, deterministisch wiederholbare Ausführung | **Bleibt.** Teure/lange Schritte gehen unverändert fire-and-forget dorthin. Keine Überschneidung. |
 | **Report-Pipeline** (D-020) | *Fester*, deterministischer Synthese-Fluss (decompose → retrieve → verify → cite) mit erzwungener Zitat-Treue | **Bleibt.** Die Pipeline garantiert reproduzierbare Struktur und Belegpflicht; der Harness plant *offene*, vorab unbekannte Schrittfolgen. Ein dynamischer Plan erzwingt die Provenienz-/Zitatstruktur nur per Instruktion, nicht *strukturell* — schwächer für den Audit. |
-| **Spezialisten-Team** (§7) | Aufteilung *einer* Anfrage auf mehrere schmal geschnittene Agenten | Orthogonal: das Team ändert, *wer* einen Schritt ausführt, nicht *ob* geplant und freigegeben wird. Beide Gates gelten eine Ebene tiefer unverändert. |
+| **Helfer (`task`) und Peer-Handoff** (§7) | Aufteilung *einer* Anfrage auf schmal geschnittene Agenten | Orthogonal: sie ändern, *wer* einen Schritt ausführt, nicht *ob* geplant und freigegeben wird. Ein Helfer erreicht keine zustandsändernden Tools; ein Peer erbt höchstens die Fläche des Wurzel-Agenten. |
 
 **Empfehlung:** Die Pipeline für die feste Berichts-/Provenienz-Struktur behalten und den Harness
 für die offene Recherche nutzen — sauber getrennt, nicht das eine durch das andere ersetzen.
@@ -338,12 +345,11 @@ für die offene Recherche nutzen — sauber getrennt, nicht das eine durch das a
 
 ## 13. Offene Punkte
 
-1. **`loop_cap_reached` auf dem Graph-Pfad.** `loop_capped(state)` ist die richtige Lesung, aber
-   der Turn-Runner liest noch das alte Contextvar-Signal — auf dem Graph-Pfad wird das Ereignis
-   damit nicht gesendet und `chemclaw_turn_loop_caps_total` nicht gezählt (§8).
-2. **Mid-Turn-Resume** eines Turns, der auf einen durable Job wartet, ist auf dem Graph-Pfad noch
-   nicht scharf geschaltet und braucht eine eigene Entscheidung.
-3. **Plan-/Loop-Metriken** für die Eval-Schicht ausbauen: Plan-Qualität (nötige vs. geplante
+1. **Mid-Turn-Resume** — einen Turn, der durable Jobs gestartet hat, mit deren Ergebnissen
+   fortsetzen — ist gebaut (`api/runner.py::_resume_on_job_results`), aber per Default aus
+   (`mid_turn_resume_enabled=false`, begrenzt durch `mid_turn_resume_timeout_seconds`). Ein
+   Deployment, das es einschaltet, entscheidet das bewusst.
+2. **Plan-/Loop-Metriken** für die Eval-Schicht ausbauen: Plan-Qualität (nötige vs. geplante
    Schritte) und ein A/B „hat die Loop geholfen" je Aufgabentyp.
-4. **Team-Routing messen** (Genauigkeit, Token-Kosten pro Spezialist), bevor `agent_teams_enabled`
-   irgendwo der Default wird.
+3. **Delegation lohnt sich gemessen nicht** (`D-2026-09-27-delegation-does-not-pay-on-the-measured-gateway-model`,
+   `make live-delegation`); der Trigger dieses ADR sagt, wann die Frage wieder aufgeht.

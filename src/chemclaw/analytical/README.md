@@ -41,11 +41,9 @@ distinction `core/units.Measurement.uncertainty` already makes.
 
 ## Where `Measurement.compare` fits
 
-This package is the caller that method was written for and did not have. Its docstring said the
-refusal across dimensions is the point because "a specification check written that way passes a
-batch that is out of limits" — a present-tense claim about a check that existed nowhere in `src/`,
-which is the shape `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution` names.
-`tests/test_specification.py` holds the caller in place with an absence test, because every
+This package is the caller that method was written for: its refusal across dimensions is what keeps
+a specification check from passing a batch that is out of limits. `tests/test_specification.py`
+holds the caller in place with an absence test, because every
 behavioural test here would still pass if `_score` were rewritten to compare floats itself — and the
 claim would be false again, silently.
 

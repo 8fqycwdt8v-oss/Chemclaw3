@@ -4,9 +4,12 @@ Companion to `docs/archive/plans/xtb-tools-proposal.md` (the *how*, archived) an
 *why*). This is the **skill** layer: every piece of chemical judgment worth writing down,
 across the whole xTB capability ladder, whether or not the tools exist yet.
 
-Purpose: stop the skill set from drifting toward whatever happened to be built first. The
-shipped skills are currently weighted toward pKa and descriptor reading, which is a small
-corner of what xTB is worth. This catalogue is the map; §8 says what ships now.
+Purpose: stop the skill set from drifting toward whatever happened to be built first. This
+catalogue is the map; **§8 says what ships today**. The *Tier* columns in §1–§6 record the capability
+phase each skill was gated on when the catalogue was written (X3 geometry/thermochemistry, X4
+reaction composites, …); X3, X4, X6 and X11 have since shipped, so read §8 rather than a Tier cell for
+current status. The calculations themselves run in `Chemclaw3-mcp`'s `servers/calc` (GFN2-xTB and
+CREST); there is no DFT tier to escalate to.
 
 **Ship rule.** A skill may only declare tools that exist — `make skill-validate` checks the
 frontmatter against the live registry (D-081). So a skill for an unbuilt capability stays in
@@ -104,8 +107,8 @@ geometry. The skill can ship as electronic-only with that limit stated, and gets
 |---|---|---|---|
 | **`ionization-and-partitioning`** | Extraction pH, salt selection, ionization state | pKa | **Shipped** |
 | **`salt-and-cocrystal-screening`** | Which counterion or coformer, and will the salt be stable? | pKa for **bases** (U2) | U2 |
-| **`thermal-hazard-triage`** | Which compounds go to calorimetry first? | X4 decomposition energetics | X4 |
-| **`crystallization-solvent-selection`** | Which solvent for the crystallization, which anti-solvent? | Non-aqueous solubility (not built) | — |
+| **`thermal-hazard-triage`** | Which compounds go to calorimetry first? | X4 decomposition energetics | covered by `thermal-safety-assessment` (`connectors/thermalsafety/skills/`) |
+| **`crystallization-solvent-selection`** | Which solvent for the crystallization, which anti-solvent? | `predict_solubility`, `crystallisation_yield` | covered by `crystallisation-design` (`skills/`) |
 
 **Guardrail, repeated because this family is where over-trust does damage.**
 `thermal-hazard-triage` may only ever *order a queue for calorimetry*. It may never appear as
@@ -118,12 +121,12 @@ computation, and any skill in this family inherits it.
 
 | Skill | Holds | Status |
 |---|---|---|
-| **`computational-evidence`** | Compute vs. retrieve; combining both; recording via the PR-gate | **Shipped** |
-| **`calculation-selection`** | Which calculator for which question; the escalation boundary | **Shipped** |
+| **`computational-evidence`** | Compute vs. retrieve; combining both; recording the result as a note | **Shipped** |
+| **`calculation-selection`** | Which calculator for which question, and where the semiempirical tier stops | **Shipped** (`connectors/calc/skills/`) |
 | **`reactivity-descriptors`** | Reading Fukui rankings and frontier orbitals honestly | **Shipped** |
-| **`relative-energy-comparisons`** | What a semiempirical energy difference does and does not support | **Now** |
+| **`relative-energy-comparisons`** | What a semiempirical energy difference does and does not support | **Shipped** |
 | **`descriptor-featurization`** | When to featurize a categorical BO space, and what the descriptors miss | folded into `experiment-design` |
-| **`computed-spectra-comparison`** | Comparing a computed IR spectrum to a measured one | X3 |
+| **`computed-spectra-comparison`** | Comparing a computed IR spectrum to a measured one | **Shipped** |
 
 ---
 
@@ -147,53 +150,34 @@ written about them.
 
 ---
 
-## 8. What ships now, and what it is gated on
+## 8. What ships today, and what is still unwritten
 
-> **Status update (X3/X4 shipped, D-098).** The distribution below was the argument for
-> building the capability, and the capability is now built: geometry optimization,
-> Hessians with IR intensities, RRHO thermochemistry, relaxed scans, balanced reaction
-> energies and solvent comparisons. Six of the gated skills have shipped —
-> `reaction-thermodynamics`, `conformational-analysis` (absorbing `conformer-hygiene`),
-> `atropisomer-assessment`, `computed-spectra-comparison` (absorbing
-> `structure-elucidation-support`), `solvent-selection`, and `bond-strength-and-radicals`
-> (absorbing `radical-and-HAT-selectivity`). What is still genuinely missing at the model
-> level is a **transition-state search**: `barrier-and-selectivity-estimates` and
-> `mechanism-hypothesis-testing` need one, and a relaxed-scan maximum is a sketch of a
-> barrier rather than a barrier. `tautomer-analysis`, `hydrolytic-liability`,
-> `protecting-group-strategy` and `thermal-hazard-triage` are now unblocked by capability
-> and simply not yet written.
+Read off the tree (`ls skills/ src/chemclaw/connectors/*/skills/`), not off this list, when it
+matters — `make skill-validate` holds each shipped skill's `tools:` against the live registry.
 
+**Shipped from this catalogue:** `product-prediction`, `relative-energy-comparisons`,
+`degradation-liabilities`, `reactivity-descriptors`, `computational-evidence`,
+`ionization-and-partitioning`, `reaction-thermodynamics`, `conformational-analysis` (absorbing
+`conformer-hygiene`), `atropisomer-assessment`, `computed-spectra-comparison` (absorbing
+`structure-elucidation-support`), `solvent-selection`, `bond-strength-and-radicals` (absorbing
+`radical-and-HAT-selectivity`), `tautomer-analysis`, `molecular-association`,
+`ensemble-workflows`, plus `calculation-selection` and `experiment-design` in their connector
+bundles. `thermal-hazard-triage` and `crystallization-solvent-selection` are covered by
+`thermal-safety-assessment` and `crystallisation-design`.
 
-**Shipping in this change** — the three that need no new capability and cover the questions
-asked most often:
+**Still missing at the model level: a transition-state search.** `barrier-and-selectivity-estimates`
+and `mechanism-hypothesis-testing` need one, and a relaxed-scan maximum is a sketch of a barrier
+rather than a barrier.
 
-1. **`product-prediction`** — from reactants to a ranked set of credible products, with
-   regioisomers as the core case. Fukui for the site, precedent for everything else, and an
-   explicit account of what the ranking cannot see.
-2. **`relative-energy-comparisons`** — governs the tool an agent will otherwise misuse: what an
-   xTB energy difference supports (orderings of related structures) and what it does not
-   (magnitudes, absolutes, anything conformationally flexible).
-3. **`degradation-liabilities`** — where a molecule is likely to oxidize or hydrolyse, and how
-   to turn that into a forced-degradation study design rather than a prediction.
+**Unblocked by capability and not yet written:** `hydrolytic-liability`,
+`protecting-group-strategy`, `oxidative-stability`, `chemoselectivity`, `regioisomer-ranking` (as a
+standalone skill; `product-prediction` carries the core case), `impurity-structure-hypotheses`,
+`catalyst-ligand-selection`, `redox-and-electrochemistry`, `stereochemical-outcome`, plus the CREST
+family in §9.
 
-**Gated on U2 (pKa for bases):** `salt-and-cocrystal-screening`, `acid-base-and-speciation`.
-
-**Gated on X3 (geometry + thermochemistry):** `tautomer-analysis`, `conformational-analysis`,
-`atropisomer-assessment`, `barrier-and-selectivity-estimates`, `structure-elucidation-support`,
-`computed-spectra-comparison`, `conformer-hygiene` as a standalone skill.
-
-**Gated on X4 (reaction composites):** `oxidative-stability`, `hydrolytic-liability`,
-`radical-and-HAT-selectivity`, `solvent-selection`, `mechanism-hypothesis-testing`,
-`protecting-group-strategy`, `thermal-hazard-triage`.
-
-**Gated on X5/X6:** `redox-and-electrochemistry`, `stereochemical-outcome`,
-`conformational-polymorph-risk`.
-
-The distribution is the argument: **most of the skills listed in this section are gated on X3 or
-X4** — count the two lists above rather than trusting a figure here, which is what this sentence
-used to carry and never matched any partition of its own enumeration. The judgment layer is not what
-is missing — the capability under it is.
-
+**Still gated on accuracy rather than capability:** `salt-and-cocrystal-screening` and
+`acid-base-and-speciation` for aliphatic-amine bases, whose pKa error is the continuum solvent's
+(`docs/guides/xtb-use-cases.md`).
 
 ---
 

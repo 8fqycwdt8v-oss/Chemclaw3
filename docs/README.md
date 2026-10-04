@@ -4,10 +4,10 @@ Which of these are true today, and which are not, is the point of the layout.
 
 | Directory | Maintained? | What is in it |
 | --- | --- | --- |
-| `decisions/` | **yes** — append-only | One file per architecture decision, `D-NNN-<slug>.md`, plus the allocation ledger in its `README.md`. This is the authoritative record of *why* the system is the way it is. A merged ADR is never edited; a decision that changed gets a new ADR. |
-| `planning/` | **yes** | Two living documents and no more: `BACKLOG.md` (the forty things worth doing next, deleted from the file when done) and `DEFERRED.md` (postponed, each with the reason it is not now and the trigger that would revisit it). Nothing else belongs here — see below. |
-| `guides/` | **yes** | Operational how-to: the runbook, workflow versioning, the xTB catalogues, attaching a warehouse ELN or a mounted file share, and `feeder-pipelines/` — the recurring jobs that keep a corpus fresh, which run **outside** this system and whose whole contract with it is a relation (`D-2026-08-28-a-feeder-writes-a-table-and-nothing-else`). |
-| `reference/` | partly | `architektur.md` — the original four-layer design. Right about the layers, **silent on connectors**, which now carry every tool, job and skill (D-118). Read it for intent, not for detail. `user-story-capability-map.md` — **maintained**: every requirement story verdicted against the code, with what serves it or what is missing. Re-audit it when a note type, connector or data source lands. `bo-capability-map.md` — **maintained**: the Bayesian-optimization layer against the use cases it serves, what BoFire ships that we do not use, and the roadmap out of the gap. Every claim it makes about BoFire's runtime behaviour is measured, so a `bofire` version bump invalidates it. |
+| `decisions/` | **yes** — append-only | One file per architecture decision, `D-YYYY-MM-DD-<slug>.md` (the older numbered `D-NNN-<slug>.md` files keep their names), plus the ledger in its `README.md`, one row per file. This is the authoritative record of *why* the system is the way it is. A merged ADR is never edited; a decision that changed gets a new ADR. |
+| `planning/` | **yes** | Two living documents and no more: `BACKLOG.md` (the open queue, a row deleted from the file when done) and `DEFERRED.md` (postponed, each with the reason it is not now and the trigger that would revisit it). Nothing else belongs here — see below. |
+| `guides/` | **yes** | Operational how-to: `runbook.md` (bring-up, configuration, monitoring and alerts, upgrades and rollback, restores, onboarding and offboarding, troubleshooting — start here to operate the system), workflow versioning, the xTB catalogues, the harness concept, attaching a warehouse ELN or a mounted file share, and `feeder-pipelines/` — the recurring jobs that keep a corpus fresh, which run **outside** this system and whose whole contract with it is a relation (`D-2026-08-28-a-feeder-writes-a-table-and-nothing-else`). |
+| `reference/` | partly | `architektur.md` — the original four-layer design. Right about the layers; it knows the connector seam, which now carries every tool, job and skill (D-118), only through notes retrofitted into it, and its HPC/SLURM/Nextflow and DFT prose describes a design retracted in full. Read it for intent, not for detail. `user-story-capability-map.md` — **maintained**: every requirement story verdicted against the code, with what serves it or what is missing. Re-audit it when a note type, connector or data source lands. `bo-capability-map.md` — **maintained**: the Bayesian-optimization layer against the use cases it serves, what BoFire ships that we do not use, and the roadmap out of the gap. Every claim it makes about BoFire's runtime behaviour is measured, so a `bofire` version bump invalidates it. |
 | `archive/` | **no** | Point-in-time documents: audits, load tests, reviews, assessments, and in `plans/` the build plans whose work is finished. Accurate as of their date and deliberately not updated. Do not treat any of these as current. |
 
 **Why `archive/plans/` exists.** A completed plan reads exactly like a current one — same
@@ -32,13 +32,10 @@ a record.
 changed, and a row leaves them by being deleted. Everything that is finished, dated or descriptive
 of a past state is `archive/`, and is never updated again.
 
-**The long-form findings live in `docs/archive/findings-2026-08.md`.** `BACKLOG.md` had grown to 4,717
-lines and 237 open rows across ~40 dated `Open — Left by the <review>` sections, gaining roughly
-three lines for every line removed — at which size nobody read it, so nothing was closed out of it,
-so it grew. The queue is now grouped by what its rows ask for rather than by the review that found
-them, and how many there are is `grep -c '^- \[ \]' docs/planning/BACKLOG.md` — this sentence said
-"forty" through two different true answers. Every finding's full measurement, and the review that
-produced it, is in the archive.
+**The long-form findings live in `docs/archive/findings-2026-08.md`.** `BACKLOG.md` is grouped
+by what its rows ask for rather than by the review that found them; how many rows are open is
+`grep -c '^- \[ \]' docs/planning/BACKLOG.md`. Every finding's full measurement, and the review
+that produced it, is in the archive.
 
 For what the *code* directories are, see `ARCHITECTURE.md` at the repository root.
 

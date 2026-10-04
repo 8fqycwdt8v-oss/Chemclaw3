@@ -2,11 +2,8 @@
 
 **What a programme has committed to, mirrored in from the system that owns it.**
 
-Measured 2026-08-29 against the then-current corpus: nine of the nineteen `manager` bucket-C probes
-in `data/evals/probes/` needed one object this schema did not have — a unit of committed work. (That
-denominator is a fact about that commit and is not maintained; the corpus has since been rebucketed
-and holds fewer. The argument is what the nine wanted, not the ratio.) Eighty-odd migrations in, and
-`project` was still a nullable text tag on `reaction_records` — a facet on a row, not an entity.
+A unit of committed work — a milestone, a deliverable — is an entity with a lifecycle, not a facet
+on a row, and a programme manager's questions need it as one.
 
 ## A mirror, not a plan
 
@@ -25,9 +22,8 @@ portfolio tool already holds and holds better.
 so the seam composes them rather than merging them into one fat interface. A commitments half is the
 third such capability — its own Protocol, its own DTO, `commitments:` in the manifest.
 
-The 2026-08-28 audit found the source seam *corpus-shaped* (records become chunks, notes,
-fingerprints) and a portfolio export not a corpus but typed entities with lifecycles. Both are true;
-the conclusion is not a new seam. Adding a half costs a field, where a fourth seam would cost a
+The source seam is *corpus-shaped* (records become chunks, notes, fingerprints) and a portfolio
+export is not a corpus but typed entities with lifecycles. The conclusion is still not a new seam. Adding a half costs a field, where a fourth seam would cost a
 manifest, a registry, a validator and a discovery path an operator has to learn.
 
 ## Four rules

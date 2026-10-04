@@ -1,7 +1,9 @@
 # `connectors/chem` — a declaration this release does not run
 
 A manifest and nothing else: **an `endpoint:` with no `server/`.** The capability — structure
-rendering, compound resolution, stoichiometry — is `Chemclaw3-mcp`'s, served from its own pod, and
+rendering, compound resolution, stoichiometry and green metrics, and the species enumerations
+(tautomers, protonation states, stereoisomers, degradants, bond cleavages, substitutions, torsions)
+— is `Chemclaw3-mcp`'s, served from its own pod, and
 what stays here is the `connector.yaml` that four validators resolve tool names through plus the
 chart's `connectors.chem.url` saying where to dial it (D-2026-08-09).
 

@@ -2,8 +2,11 @@
 
 Companion to `docs/archive/plans/xtb-tools-proposal.md` (the *how*, archived once its build was done). This is the *why*: the concrete
 process-R&D questions xTB can answer, what each is worth, and which build phase unlocks
-it. It exists to drive phase priority from user value rather than from what is
-technically adjacent.
+it. It was written to drive phase priority from user value rather than from what is
+technically adjacent, and that build is now done: X3 (optimization + Hessian/RRHO), X4 (reaction
+composites, solvent comparison), X6/X11 (CREST ensembles, tautomers, NCI) and the BO featurization
+all ship, computed by `Chemclaw3-mcp`'s `servers/calc` behind this repository's cache. §7 says what
+is still open. The tiers below are kept because the value judgement per use case still holds.
 
 **Framing.** ChemClaw is a pharmaceutical/chemical **process** R&D assistant, not a
 computational chemistry workbench. The bar for a use case here is not "xTB can compute
@@ -16,9 +19,9 @@ does well fail that bar and are listed in §5 rather than dressed up.
 
 | Tier | Meaning |
 |---|---|
-| **Now** | Answerable today with the five shipped calculators |
+| **Now** | Answerable with the original single-point calculators (shipped first) |
 | **X3** | Needs geometry optimization + Hessian/thermochemistry |
-| **X4–X6** | Needs reaction composites, the `xtb`/`crest` binaries, conformer ensembles |
+| **X4–X6** | Needs reaction composites, the `xtb`/`crest` binaries, conformer ensembles (all shipped) |
 
 Value is judged by *decision impact* — does it change what goes in the flask, the
 report, or the next campaign — not by how interesting the number is.
@@ -75,9 +78,10 @@ LC-MS time chasing it.
 
 ---
 
-## 3. Tier X3+ — what the next phases unlock
+## 3. Tier X3+ — what the later phases unlocked
 
-Ordered by decision impact, which is how X3's scope should be cut.
+Ordered by decision impact, which is how X3's scope was cut. Everything here is built except a real
+barrier (item 6): there is no transition-state search, so a relaxed-scan maximum is a sketch.
 
 | # | Use case | Needs | Value |
 |---|---|---|---|
@@ -147,8 +151,10 @@ semiempirical number will plausibly-looking answer.
   a DSC, an ARC, or a hazard evaluation. It may *triage* which compounds get sent for
   calorimetry; it may never appear in an answer as reassurance. `safety-screening`'s
   rule — the screen flags, it never clears — extends to computation unchanged.
-- **Any reportable number without human review.** Computed values enter the
-  knowledge graph through the PR-gate like everything else agent-generated.
+- **Any reportable number without its provenance.** A computed value enters the knowledge graph
+  as a note citing its `calc_ref`, written directly and correctable rather than pre-approved
+  (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`) — so the citation is what a chemist
+  checks at the point of use.
 - **Absolute pKa, logP, or solubility for a specification.** Ranking, not values (§4).
 - **Yields, rates, selectivity ratios.** xTB gives orderings and energy differences, not
   kinetics. A barrier estimate is a hypothesis, not a predicted product distribution.
@@ -171,8 +177,10 @@ it. None is a new calculator; each is a connection between layers.
 2. **Descriptors as BO featurization.** BoFire campaigns currently treat ligand/base/solvent
    as *categorical* — the model cannot generalize to an option never tried. Replacing the
    category with computed electronic descriptors lets it interpolate across the space.
-   This is probably the single highest-value integration in this document and it needs
-   no new xTB capability, only wiring into `bo/`. **Available now; not built.**
+   This is probably the single highest-value integration in this document. **Built**
+   (D-096, `science/bo/featurize.py`): a molecular categorical is featurised through cached GFN2-xTB
+   descriptors that carry `calc_refs` into the note. Electronic only — sterics (cone angle, buried
+   volume) are the stated limit.
 3. **Enriching ELN-ingested structures.** Compute descriptors once per ingested substrate
    so the knowledge graph becomes searchable by electronic character, not just by
    substructure. Cheap (cached forever), and it makes retrieval smarter. **Available now.**
@@ -186,18 +194,16 @@ it. None is a new calculator; each is a connection between layers.
 
 ---
 
-## 7. Recommended priority
+## 7. Status of the original priority list
 
-1. **Wire the descriptors into BO featurization** (§6.2) — largest value per unit of work,
-   needs no new xTB capability.
-2. **Extend pKa to bases / N-H acids** (§4) — unlocks the most common pharma pKa question;
-   a calibration and domain problem, not a new capability.
-3. **X3, scoped as optimization *plus* thermochemistry** (§3) — the two top-value entries
-   both need free energies, not just geometries.
-4. **X4 reaction energies and solvent screening** — the first outputs that go into a report
-   unedited, and they connect to eval cases that already exist.
-5. **X5/X6** — gated on the licensing and image-size decisions in the proposal's §14, which
-   are the user's call rather than engineering's.
+1. **Descriptors into BO featurization** (§6.2) — built (D-096).
+2. **pKa for bases** (§4) — aromatic/aryl nitrogen built (D-104); aliphatic amines declined for
+   a solvation reason; N-H acids out of scope.
+3. **X3, optimization *plus* thermochemistry** (§3) — built.
+4. **X4 reaction energies and solvent screening** — built.
+5. **X5/X6** — CREST ensembles, tautomer and NCI searches built (X6/X11). What remains open is a
+   transition-state search, and explicit-solvent treatment for the aliphatic-amine residual
+   (`docs/planning/DEFERRED.md`, "CREST's other run types" and "ML interatomic potentials").
 
 ---
 
@@ -205,9 +211,9 @@ it. None is a new calculator; each is a connection between layers.
 
 | Skill | Holds |
 |---|---|
-| `calculation-selection` | Which calculator answers which question; the escalation boundary |
+| `calculation-selection` | Which calculator answers which question; where the semiempirical tier stops |
 | `reactivity-descriptors` | Reading Fukui rankings and frontier orbitals without over-claiming |
 | `ionization-and-partitioning` | pKa for ranking, never for a pH; the amine gap; the amphoteric trap |
-| `computational-evidence` | Compute vs. retrieve; combining both into one cited answer; recording through the PR-gate |
+| `computational-evidence` | Compute vs. retrieve; combining both into one cited answer; recording it as a note |
 | `safety-screening` | Unchanged rule, extended: computation never clears a hazard either |
 | `experiment-design` | Descriptor pre-ranking before a campaign is framed |

@@ -1,15 +1,13 @@
 # ChemBench subset — the first external benchmark this system has been scored on
 
-Everything in `make eval` is first-party: 15 case files, a 7-document retrieval corpus, a 39-note
-knowledge graph. It is honest and it is not comparable to anything. This corpus is the other kind of
+Everything in `make eval` is first-party: the case files in `data/evals/cases/`, the retrieval
+corpus beside them, the seed knowledge graph. It is honest and it is not comparable to anything. This corpus is the other kind of
 number — one somebody else can also produce.
 
 **What it is.** 100 questions from [ChemBench](https://huggingface.co/datasets/jablonkagroup/ChemBench)
 (MIT, expert-generated), across eight categories — the per-category split is `dataset.json`'s
-`categories`, and it is not even: the 100-question trim cut `toxicity_and_safety` short. This
-paragraph said "13 from each of eight" for as long as the manifest beside it said otherwise, which
-is why the split is recorded once, as data, where
-`tests/test_live_benchmark.py` checks it against the corpus. Only items whose `target_scores` name exactly one correct
+`categories`, and it is not even: the 100-question trim cut `toxicity_and_safety` short. The split is recorded once, as data,
+where `tests/test_live_benchmark.py` checks it against the corpus. Only items whose `target_scores` name exactly one correct
 option are kept: every other item type in ChemBench needs a scorer this repository does not have,
 and a benchmark half-scored is worse than one not run.
 

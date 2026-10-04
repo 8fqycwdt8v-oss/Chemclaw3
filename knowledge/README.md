@@ -12,12 +12,10 @@ prompt with no citation trail, so no agent path may write one at all
 
 ## What is here, and what it is for
 
-This directory once held only `.gitkeep` — `make kg-validate` passed because there was nothing to
-validate, and every retrieval, crosslink and conflict property was measured against fixtures in
-`evals/retrieval_corpus/`. Correct for pinned eval numbers, and no substitute for a corpus with
-real shape (STO-10).
+Pinned eval numbers are measured against fixtures in `data/evals/retrieval_corpus/`; this corpus
+is what gives retrieval, crosslink and conflict properties something with real shape (STO-10).
 
-These notes are that corpus. They are **seed content, not a record of real experiments**: the
+These notes are **seed content, not a record of real experiments**: the
 chemistry is textbook-ordinary and the numbers and dates are illustrative — **except where a note
 says otherwise.** The corpus is seeded, not sealed: agent-authored notes now land in it directly,
 and a note whose `source:` names a real citation carries real knowledge rather than illustration.
@@ -39,7 +37,7 @@ cases have instances rather than descriptions:
   (`reagent-in` and `solvent-for` `rxn-aspirin-acetylation`: the neat anhydride is both the
   reagent and the medium), which is the case `note.cited_links` dedupes on the *pair* for.
 
-## Relationship to `evals/retrieval_corpus/`
+## Relationship to `data/evals/retrieval_corpus/`
 
 They are separate on purpose and must stay separate. That directory's README states why: keeping
 the gold corpus outside `knowledge_dir` is what makes recall/precision reproducible and independent
@@ -48,19 +46,16 @@ files. A change here does not move a pinned eval number, and it should not.
 
 ## What a deployment actually serves
 
-These notes ship *in the image*, and `deploy/knowledge-sync.sh` publishes into the directory the
-app reads with `rsync -a --delete`. So:
+These notes ship *in the image*. With `knowledge.sync.repoUrl` empty (the chart default) a pod
+serves this corpus, which is what makes a dev or demo deployment useful: a graph with real shape
+rather than one that validates because it is empty.
 
-- **`knowledge.sync.repoUrl` empty** (the chart default) — a pod serves this corpus. That is what
-  makes a dev or demo deployment useful now: a graph with real shape rather than one that validates
-  because it is empty.
-- **`repoUrl` set** — the sidecar publishes the remote branch's `knowledge/` subtree, which
-  **replaces** this corpus on the first sync. A deployment that wants to keep these notes has to
-  commit them into its own knowledge repository.
-
-The second case is the right default — the remote is the source of truth, and a pod quietly merging
-image content into a curated corpus would be worse — but `--delete` makes it silent, so it is worth
-knowing before it happens rather than after.
+With `repoUrl` set, `deploy/knowledge-sync.sh` provisions a checkout of that repository and the
+app reads its `knowledge/` subtree, so the remote's corpus **replaces** this one — a deployment that
+wants to keep these notes has to commit them into its own knowledge repository. Where a pod records
+notes, the refresh is a fast-forward of the writer's own clone (`git fetch` + `merge --ff-only`), so
+a locally committed note whose push failed survives; a pod that records nothing gets a shallow read
+replica published with `rsync --delete`.
 
 ## Authoring a note
 
@@ -114,8 +109,7 @@ that id passes here and is refused, loudly, at read time
 (`D-2026-09-13-a-citation-names-the-source-it-was-found-in`). Both spellings resolve: the bare form
 is what every citation committed so far uses, and the qualified one is what a search now writes,
 because two sites may legitimately use one entry id and a bare citation then names neither run.
-**It does not screen chemistry.** The hazard gate it once ran was retired with
-`D-2026-08-15-safety-is-a-tool-not-a-gate`, and that ADR's remaining answer — "a human reviews every
-note at the PR-gate" — has since gone too, so do not read it as one. What stands is the `safety` MCP
+**It does not screen chemistry** (`D-2026-08-15-safety-is-a-tool-not-a-gate`), and no human
+reviews a note before it lands. What stands is the `safety` MCP
 server as a tool the agent is told to reach for before proposing chemistry, and the chemist reading
 the note where it is cited. The system flags; it never certifies.

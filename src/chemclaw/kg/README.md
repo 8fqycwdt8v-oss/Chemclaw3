@@ -5,37 +5,28 @@ for the structured, queryable half; a Markdown body whose `[[wikilinks]]` are th
 The reasoning path is graph traversal rather than top-k vector similarity, and that is the
 *default* rather than the whole capability: since D-062 a deployment can also enter the graph
 through a dense or lexical index (`retrieval_mode`, default `graph`). Those are entry points into
-the traversal, never a replacement for it — but the sentence here used to state the absolute, and
-an absolute with an unnamed condition is how a README stops being true without changing.
+the traversal, never a replacement for it.
 
 `note.py` is the schema and parser, `graph.py` the NetworkX indexer, `search.py` what a note's text
 *is* for a substring search, `relations.py` and `crosslink.py` the link semantics, `validate.py`
 the schema/link checker behind `make kg-validate`, `analytics.py` the derived views, `conflicts.py`
-the contradiction detector.
+the contradiction detector, `render.py` a `Note` back to Markdown-with-frontmatter, and
+`premise.py` whether the knowledge a held-open question rests on still holds (read by the durable
+wait when it is asked and when it is answered). `crosslink.cited_calculations` is the one
+definition of which calculations a note rests on, counting those it cites only through an artifact.
 
 ## Declared but unwired
 
-Two capabilities here are complete, tested, and called by nothing in `src/`. They are named
-because a reader who finds them will otherwise assume one of the two wrong things — that they are
-dead, or that something depends on them:
-
-- `graph.related(graph, id, rel, as_of=)` — the *directed, one-relation, date-scoped* query D-134
-  exists to make possible ("which of this compound's precursors held on that date"). No agent tool,
-  route or retriever exposes it. What is no longer unwired is the edge data underneath it: since
-  `D-2026-08-16-a-cache-that-lets-every-caller-miss-together`, `agent.graph_tools.expand_note`
-  reports each neighbour's typed edges in both directions, so a `contradicts` or `supersedes`
-  neighbour is legible to the model as one. `related` remains the precise form of the same
-  question, and remains uncalled.
-- `crosslink.calc_ref_index` / `crosslink.notes_for_calculation` — the reverse lookup from a
-  calculation to the notes resting on it (STO-7), for the day a stale calculation needs its
-  dependents found.
-
-Both are kept rather than deleted: each is the only read path for a capability a merged ADR
-claims, and deleting one deletes the claim with it.
+`graph.related(graph, id, rel, as_of=)` — the *directed, one-relation, date-scoped* query D-134
+exists to make possible ("which of this compound's precursors held on that date") — is complete,
+tested, and called by nothing in `src/`. No agent tool, route or retriever exposes it;
+`agent.graph_tools.expand_note` reports each neighbour's typed edges in both directions, which is
+the same question in a less precise form. It is kept as the only read path for a capability a
+merged ADR claims.
 
 ## One note per id, and one parse per corpus
 
-Two properties of `graph.py` that readers depend on without being able to see them from a call
+Three properties of `graph.py` that readers depend on without being able to see them from a call
 site, both established in `D-2026-08-16-a-cache-that-lets-every-caller-miss-together`:
 
 - **A duplicate note id resolves to the first file in path order**, in `_parse_notes` and in
@@ -68,14 +59,14 @@ reused everywhere — job results, reports, distilled playbooks — rather than 
 feature.
 
 **There is no review step, and that is a decision rather than an omission**
-(`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`). D-005's PR-gate stood here until the
-premise it was written under was removed; what replaced it is provenance plus correction. A note
+(`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`): what stands in for review is provenance
+plus correction. A note
 carries `created_by: agent`, is served beside its own citations, and is refuted by a `contradicts`
 edge or retired by `supersede` — so a wrong machine-written claim is *visible where it is used and
 reversible*, which is a different guarantee from one that was checked before it landed. Say the
 second thing about this package only if you mean it.
 
-**The write order is part of the contract.** A PR merged every file at once, so no reader saw half
-a unit; a direct write can be read mid-flight. `_build_write` therefore writes dependencies, then
+**The write order is part of the contract.** A direct write can be read mid-flight, so no reader
+may see a note before what it cites. `_build_write` therefore writes dependencies, then
 the subject, then the retirements — each cites the one before it — and its docstring states the
 window that ordering accepts.

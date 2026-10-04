@@ -21,12 +21,10 @@ several of these graphs, and a `transfer_to_<peer>` tool moves the conversation 
 `Command(goto=…, graph=Command.PARENT)`. A peer is not a helper — it keeps the acting tools and
 answers the chemist directly — and its surface is the *root's* surface intersected with its own
 profile, so a chain of any length is bounded by the agent that opened the turn. The roster is empty
-by default, `build_turn_graph` returns `None`, and the single agent above is what a turn runs on. The Microsoft Agent Framework this layer
-was first built on is gone
-(`docs/decisions/D-2026-08-10-langgraph-rebuild-of-the-conversation-layer.md`) — replaced
-for defect load rather than capability. `api/events.py` was the conformance boundary the two
-engines were scored against — additive changes only, and only after the comparison was made
-(M9/M10 add `HandoffEvent`, `EvidenceSourceEvent` and an `agent` field).
+by default, `build_turn_graph` returns `None`, and the single agent above is what a turn runs on. The Microsoft
+Agent Framework this layer was first built on is gone
+(`docs/decisions/D-2026-08-10-langgraph-rebuild-of-the-conversation-layer.md`); `api/events.py` is
+the event contract both engines were held to.
 
 **Responsibility:** conversation orchestration and short reasoning steps. Agents
 advertise tools, load Skills on demand, and
@@ -46,13 +44,10 @@ report launcher plus the one status tool every durable job is collected with
 rides on every model request and the per-turn note announcing a chemist's edit in
 `exhibit_notes`). Calculators and optimization campaigns are the `calc` bundle and the `bo` bundle
 now, advertised out of `connectors/` — including their durable launchers, which are generated from
-each bundle's manifest rather than hand-written here (D-118). There is no QM/DFT job: the whole
-HPC/DFT tier was deleted by `D-2026-08-26-semiempirical-is-the-whole-tier`, and this sentence still
-advertised it three weeks later, which is why `tests/test_repo_map.py` now resolves every bundle
-name these documents write. Structural fingerprint search is reached over the MCP capability
+each bundle's manifest rather than hand-written here (D-118). There is no QM/DFT job
+(`D-2026-08-26-semiempirical-is-the-whole-tier`). Structural fingerprint search is reached over the MCP capability
 servers, and **only** over them: the
-in-process `search_tools` wrapper that shadowed them is gone, along with the "keep the two in
-sync" obligation it had already broken (D-2026-08-05). Every tool call is recorded by the one audit
+in-process wrapper that shadowed them is gone (D-2026-08-05). Every tool call is recorded by the one audit
 middleware (`audit`), and retrieved third-party content is framed as data before it reaches the
 model. That framing has two halves and one implementation (`framing`): the in-process channels —
 a note body, an ELN procedure, an uploaded attachment, a job summary, a recalled statement —
@@ -85,3 +80,24 @@ a contextvar carrying the turn's live framework session object, because the plan
 awaiting-job bookkeeping hung off that object rather than off the id — went with the framework:
 both are declared fields of `state.py` now, so the gate reads the plan from the state the graph is
 running and there is no second place for it to be.
+
+## Module index
+
+The tools a model calls, beside the ones named above: `analytical_tools` (does a result meet a
+specification), `commitment_tools` (what a programme committed to), `evidence_tools` (how a piece of
+work came to be), `operations_tools` (the operational read model), `pending_tools` (raise a question
+and read what is outstanding), `dialogue_tools` (`ask_clarifying_question`), `protocol_design_tools`
+(write a protocol), `workflow_tools` (compose and run a reusable workflow), `proposal_tools`
+(`propose_skill` — a proposal, never a skill), `subscriptions` (standing queries) and
+`attachments` (a file a chemist hands over). `tool_modules` imports them all, which registers them;
+`tool_schema` derives one `StructuredTool` per capability function per process.
+
+| Concern | Modules |
+| --- | --- |
+| What a profile advertises | `chemclaw_agent`, `profiles`, `profile_discovery`, `subagents`, `turn_graph`, `handoff` |
+| The tool-call chain | `tool_authz` over `authz` (the one authorization module), `audit` + `audit_store`, `tool_framing`, `tool_result_shape`, `tool_result_size`, `repeat_guard`, `refusal_route`, `tool_invocation` (the chain with no graph driving) |
+| Plans | `plan_gate`, `plan_scope`, `plan_link`, `plan_state`, `plan_approval_store` |
+| Cost and context | `compaction`, `context_budget`, `spend_cap`, `loop_cap`, `model_calls`, `turn_usage`, `turn_cost` + `turn_cost_store` |
+| Sessions | `session` (the handle a turn runs against), `session_store`, `session_events`, `session_queue`, `session_members`, `session_fork`, `message_pairing`, `message_migration` (the one stored-shape converter), `turn_ambient` (the per-turn ambients a driver opens), `job_results` (wait in-turn for jobs this turn started) |
+| Skills | `skill_access`, `skill_backend`, `skill_manifest`, `skill_store`, `skill_fingerprint`, `stored_skill_tools`, `org_skills`, `local_skills`, `behaviour_proposals`, `distiller` |
+| The rest | `llm_provider` (the one chat-model import), `scratchpad` (the filesystem without `execute`/`delete`), `preferences`, `verifier`, `template_surface`, `leaver` (erase a departed person's conversational data), `store_setup` |
