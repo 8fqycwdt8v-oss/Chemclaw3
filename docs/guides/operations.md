@@ -198,6 +198,13 @@ them from `retention.windows` and derives `CHEMCLAW_RETENTION_ENABLED`; it refus
 pruned. A sweep that has stopped running raises `ChemclawRetentionNotSweeping` (absence of
 `chemclaw_table_bytes`).
 
+Uploaded attachments (`session_attachments`) have no window of their own: they are swept on
+`retention_session_messages_days`, dated by upload, and go with their session on a delete or an
+erasure. Each session holds at most `CHEMCLAW_ATTACHMENT_MAX_PER_SESSION` files and
+`CHEMCLAW_ATTACHMENT_STORE_MAX_BYTES` of parsed text; past either the oldest file's text is cleared
+and its name kept, so the agent can say it was dropped. What the table costs is
+`SELECT pg_size_pretty(pg_total_relation_size('session_attachments'))` on the session database.
+
 ### 4.3 Knowledge sync
 
 `deploy/knowledge-sync.sh` keeps each pod's copy of the knowledge repo current:

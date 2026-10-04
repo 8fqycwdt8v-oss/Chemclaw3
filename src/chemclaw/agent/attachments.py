@@ -16,12 +16,18 @@ model uses, the session-scoped store, and — because parsing untrusted bytes is
 front door runs one uvicorn worker — the bounded worker-thread wrapper the route parses through
 (`parse_attachment_off_loop`).
 
-Attachments are **session-scoped and in-memory**: they are working material for a conversation, not
-knowledge. Anything worth keeping goes through `record_knowledge_note` like every
-other machine-written note — routing uploads straight into the graph would bypass the one write
-path that stamps `created_by`, renders the note and checks its links (`kg/record.py`). That clause
-read "would bypass the review line" until `D-2026-09-05-the-gate-follows-behaviour-not-knowledge`
-deleted the line.
+Attachments are **session-scoped**, and where sessions are durable they are **in Postgres**
+(`session_attachments`, `D-2026-10-04-an-upload-is-session-state-not-pod-state`). They used to be
+held in the memory of the pod that took the upload, which made a file invisible to every other
+front-door replica: measured with two processes on one database, the second resolved the session
+(200) and answered `read_attachment("runs.csv")` with "no attachment named 'runs.csv' in this
+conversation". The in-memory store is still what a deployment without durable sessions runs.
+
+They are working material for a conversation, not knowledge. Anything worth keeping goes through
+`record_knowledge_note` like every other machine-written note — routing uploads straight into the
+graph would bypass the one write path that stamps `created_by`, renders the note and checks its
+links (`kg/record.py`). That clause read "would bypass the review line" until
+`D-2026-09-05-the-gate-follows-behaviour-not-knowledge` deleted the line.
 """
 
 import asyncio
@@ -29,12 +35,17 @@ import logging
 import re
 import sys
 from collections import deque
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable, Sequence
+from contextlib import asynccontextmanager
 from functools import partial
+from typing import Any, Protocol, runtime_checkable
 
+import psycopg
+from psycopg.rows import TupleRow
 from pydantic import BaseModel, Field, computed_field
 
 from chemclaw.agent.framing import frame_untrusted
+from chemclaw.core import db
 from chemclaw.core.bounded import BoundedLru
 from chemclaw.core.config import settings
 from chemclaw.core.metrics import METRICS
@@ -64,8 +75,11 @@ __all__ = [
     "AttachmentStore",
     "AttachmentSummary",
     "AttachmentUnavailable",
+    "InMemoryAttachmentStore",
+    "PostgresAttachmentStore",
     "SessionAttachments",
     "content_type_for",
+    "default_attachment_store",
     "list_attachments",
     "parse_attachment",
     "parse_attachment_isolated",
@@ -327,8 +341,8 @@ class _ParseSlots:
             future.exception()
 
 
-# One ledger per process, mirroring the attachment store beside it: the bound is a property of the
-# pod's CPU, not of a session.
+# One ledger per process: the bound is a property of the pod's CPU, not of a session — which is why
+# it stays per process while the files it parses are stored where every replica can read them.
 _PARSE_SLOTS = _ParseSlots()
 
 
@@ -417,9 +431,9 @@ async def parse_attachment_off_loop(
 #: How many dropped file names one session remembers. A module constant rather than a `Settings`
 #: field, for the reason `ingest/rejections._MAX_ROWS_PER_SOURCE` is one: `core/config/` is the
 #: operator-facing deployment surface, and how many names a refusal message may list is not a
-#: deployment decision anybody tunes. Bounded at all because the names ride in a store whose whole
-#: purpose is a memory bound, and because they go into the model's context — twenty short names is
-#: a sentence, five hundred is a page. The count is kept beyond it (`evicted_total`), so a session
+#: deployment decision anybody tunes. Bounded at all because the in-memory store's whole purpose
+#: is a memory bound, and because the names go into the model's context — twenty short names is a
+#: sentence, five hundred is a page. The count is kept beyond it (`evicted_total`), so a session
 #: that has dropped more than this still says how many.
 _EVICTED_NAMES_REMEMBERED = 20
 
@@ -439,11 +453,11 @@ class SessionAttachments(BaseModel):
     fields rather than one for the rule this repository applies to every other bounded list: a
     truncated list with nothing saying so reads as a complete one.
 
-    **The residual is named rather than papered over.** A session evicted from the map entirely
-    (the LRU's own count and byte bounds) takes this record with it, so a conversation whose whole
-    entry was evicted looks like one that never uploaded anything. Nothing here can see that: the
-    bound it is evicted by belongs to the map, and remembering evicted sessions forever is the
-    growth the map exists to stop.
+    **The residual is named rather than papered over.** In the in-memory store, a session evicted
+    from the map entirely (the LRU's own count and byte bounds) takes this record with it, so a
+    conversation whose whole entry was evicted looks like one that never uploaded anything. Nothing
+    here can see that: the bound it is evicted by belongs to the map, and remembering evicted
+    sessions forever is the growth the map exists to stop. The durable store has no such map.
     """
 
     items: list[Attachment] = Field(default_factory=list)
@@ -451,8 +465,8 @@ class SessionAttachments(BaseModel):
     evicted_total: int = Field(default=0, ge=0)
 
 
-def _resident_bytes(items: list[Attachment]) -> int:
-    """What a session's parsed text costs the pod, in bytes rather than in characters.
+def _resident_bytes(item: Attachment) -> int:
+    """What one upload's parsed text costs the pod, in bytes rather than in characters.
 
     `attachment_store_max_bytes` is a *memory* bound — its own comment reasons in percentages of the
     pod's 1 GiB limit — and `len(str)` counts codepoints, which is the same number only for ASCII.
@@ -466,7 +480,7 @@ def _resident_bytes(items: list[Attachment]) -> int:
     of text on every upload just to measure it. The per-object header it includes is tens of bytes
     against a budget of tens of megabytes, and it errs the safe way.
     """
-    return sum(sys.getsizeof(item.text) for item in items)
+    return sys.getsizeof(item.text)
 
 
 def _entry_bytes(held: SessionAttachments) -> int:
@@ -476,12 +490,109 @@ def _entry_bytes(held: SessionAttachments) -> int:
     and charging it against a budget sized in tens of megabytes would let a session's own record of
     what it lost evict another conversation's working material.
     """
-    return _resident_bytes(held.items)
+    return sum(_resident_bytes(item) for item in held.items)
 
 
-class AttachmentStore:
-    """Session-scoped attachments, bounded per session, in sessions and in bytes.
+def _uploads_to_drop(sizes: list[int]) -> int:
+    """How many of a session's oldest uploads its bounds drop, given each one's size oldest-first.
 
+    The per-session rule, written once for both backends so they cannot drift: past
+    `attachment_max_per_session` files, or past `attachment_store_max_bytes` in total, the oldest
+    go — **and never the upload just made**, so the loop stops at one file whatever that file
+    weighs. What a "size" is differs by backend and is the caller's: bytes resident in this process
+    for the in-memory store (`_resident_bytes`), bytes stored for the Postgres one
+    (`octet_length`). That qualifier is the correction an earlier comment needed: the *count* half
+    drops as many as it takes to reach the cap however small the files are; only the *byte* half is
+    bounded to "at most the one upload just made" in excess.
+
+    A single attachment whose parsed text alone exceeds the budget is kept, because silently
+    discarding the file a chemist just uploaded is the worse failure and its size is bounded by
+    `document_max_expanded_bytes` — one document, not a session's worth.
+    """
+    held, total, dropped = len(sizes), sum(sizes), 0
+    while held - dropped > settings.attachment_max_per_session or (
+        held - dropped > 1 and total > settings.attachment_store_max_bytes
+    ):
+        total -= sizes[dropped]
+        dropped += 1
+    return dropped
+
+
+def _report_drops(session_id: str, dropped: list[str]) -> None:
+    """Tell the operator — the only reader who can raise the bound — that uploads were dropped.
+
+    **Every drop is recorded, because the alternative was a false statement rather than a missing
+    detail.** Measured at the shipped cap: thirteen uploads left ten, and
+    `read_attachment("plate-00.csv")` answered "no attachment named 'plate-00.csv' in this
+    conversation" — about a file uploaded to that very conversation — with no log line and no
+    counter anywhere in the process. The name stays on the session (`SessionAttachments.evicted`)
+    so the tools can say it; this is the operator's half.
+    """
+    logger.warning(
+        "dropped %d attachment(s) from session %s past the per-session bound "
+        "(%d files / %d bytes): %s",
+        len(dropped),
+        session_id,
+        settings.attachment_max_per_session,
+        settings.attachment_store_max_bytes,
+        ", ".join(dropped),
+    )
+    # Unlabelled deliberately: the only candidate label is a session id, which is unbounded
+    # cardinality. The rate is what an operator wants — a deployment dropping uploads steadily is
+    # one whose per-session bound is too low for how chemists work.
+    METRICS.increment("chemclaw_attachment_evictions_total", len(dropped))
+
+
+def _excerpted(attachment: Attachment, excerpt_chars: int | None) -> Attachment:
+    """`attachment` with its text cut to `excerpt_chars`, or whole when that is `None`."""
+    if excerpt_chars is None:
+        return attachment.model_copy()
+    return attachment.model_copy(update={"text": attachment.text[:excerpt_chars]})
+
+
+@runtime_checkable
+class AttachmentStore(Protocol):
+    """Where a session's uploads live: the operations the upload route and the two tools need.
+
+    Shaped as `exhibits.store` is and for the same reason — an in-memory backend for a deployment
+    without Postgres (and for tests), and a Postgres one for every deployment whose sessions are
+    durable, chosen by `default_attachment_store` on the same switch. **The Postgres one is what
+    makes an upload visible to every front-door replica**
+    (`D-2026-10-04-an-upload-is-session-state-not-pod-state`): the in-memory store answered only in
+    the process that took the upload, so a turn served by a sibling pod — which is any turn the
+    companion UI sends, since its BFF reaches this service through the ClusterIP Service where the
+    Route's affinity cookie does not exist — told the chemist their file had never been sent.
+
+    **Every read is scoped to the session the caller already resolved.** The session id is never a
+    client's claim at this layer: the route takes it from `resolve_session` (the participant gate,
+    404 to anybody else) and the tools from the turn's bound session. An attachment of another
+    session answers exactly as an absent one does.
+    """
+
+    async def add(self, session_id: str, attachment: Attachment, *, uploaded_by: str) -> None:
+        """Keep an upload for `session_id`, dropping the session's oldest past its bounds."""
+        ...
+
+    async def snapshot(
+        self, session_id: str, *, excerpt_chars: int | None = None
+    ) -> SessionAttachments:
+        """Everything a session holds and everything it lost, oldest first.
+
+        `excerpt_chars` cuts each held file's text to that many characters — what a listing needs —
+        so the durable backend does not read a session's whole working set to show twenty lines.
+        """
+        ...
+
+    async def find(self, session_id: str, name: str) -> Attachment | None:
+        """The oldest held upload of that name in the session, in full, or `None`."""
+        ...
+
+
+class InMemoryAttachmentStore:
+    """Session-scoped attachments in this process, bounded per session, in sessions and in bytes.
+
+    What a deployment without durable sessions runs, and **only** that: a store in one process's
+    memory is invisible to every other replica, which is the defect the Postgres backend exists for.
     Working material for a conversation, never the record — anything worth keeping goes through
     the one write path like every other machine-touched knowledge write.
     """
@@ -504,48 +615,27 @@ class AttachmentStore:
             max_weight=lambda: settings.attachment_store_max_bytes,
         )
 
-    def add(self, session_id: str, attachment: Attachment) -> None:
+    async def add(self, session_id: str, attachment: Attachment, *, uploaded_by: str) -> None:
         """Attach a file to a session, evicting the least-recently-used sessions past either bound.
 
-        Both map bounds apply: too many sessions, or too many bytes across all of them.
+        Both map bounds apply: too many sessions, or too many bytes across all of them. The
+        session's own list is bounded by `_uploads_to_drop`, and the byte half of that is what
+        keeps one session from exceeding the whole map's budget: `attachment_max_bytes` bounds the
+        *compressed upload*, while the text stored here is the parsed expansion, bounded only by
+        `document_max_expanded_bytes` (64 MiB) — larger than `attachment_store_max_bytes` — so two
+        or three legal spreadsheet uploads used to make one entry heavier than the entire store.
 
-        **The session's own list is bounded in both units too, and the byte half is what keeps one
-        session from exceeding the whole map's budget.** `attachment_max_bytes` (2 MB) bounds the
-        *compressed upload*; the text stored here is the parsed expansion, bounded only by
-        `document_max_expanded_bytes` (64 MiB) — which is larger than
-        `attachment_store_max_bytes` — so two or three legal spreadsheet uploads used to make one
-        entry heavier than the entire store. Nothing else can be evicted to make room for an entry
-        like that, so the map simply held it (`core/bounded.py` explains why it no longer empties
-        itself trying). Dropping this session's oldest attachments instead keeps the excess to at
-        most the one upload just made **in bytes** — the same "the newest is never the victim" rule
-        the map applies to entries, applied to one entry's contents. That qualifier is the
-        correction: this comment used to state it of the loop as a whole, and it is false of the
-        count bound one line above, which drops as many as it takes to reach
-        `attachment_max_per_session` however small the files are. The residual is bounded and
-        named: a *single* attachment whose parsed text alone exceeds the budget is kept, because
-        silently discarding the file a chemist just uploaded is the worse failure and its size is
-        bounded by `document_max_expanded_bytes` — one document, not a session's worth.
-
-        **Every drop is recorded, because the alternative was a false statement rather than a
-        missing detail.** Measured at the shipped cap: thirteen uploads left ten, and
-        `read_attachment("plate-00.csv")` answered "no attachment named 'plate-00.csv' in this
-        conversation" — about a file uploaded to that very conversation — with no log line and no
-        counter anywhere in the process. The name goes onto the entry (`SessionAttachments`) so the
-        tools can say it, and a WARNING goes to the operator, who is the only reader who can raise
-        the bound.
+        `uploaded_by` is not kept: nothing in one process's memory outlives an erasure, which is
+        what the durable backend records it for.
         """
+        del uploaded_by
         held = self._by_session.get(session_id)  # an upload marks the session recently active
         if held is None:
             held = SessionAttachments()
         held.items.append(attachment)
-        # Per-session bounds: a chemist who uploads all morning must not fill the pod's memory,
-        # in either unit. Oldest first, and never down past the upload just made.
-        dropped: list[str] = []
-        while len(held.items) > settings.attachment_max_per_session or (
-            len(held.items) > 1
-            and _resident_bytes(held.items) > settings.attachment_store_max_bytes
-        ):
-            dropped.append(held.items.pop(0).name)
+        drop = _uploads_to_drop([_resident_bytes(item) for item in held.items])
+        dropped = [item.name for item in held.items[:drop]]
+        del held.items[:drop]
         if dropped:
             held.evicted_total += len(dropped)
             # `deque(maxlen=…)` rather than a slice, so the bound is on the structure rather than
@@ -554,22 +644,12 @@ class AttachmentStore:
             names = deque(held.evicted, maxlen=_EVICTED_NAMES_REMEMBERED)
             names.extend(dropped)
             held.evicted = list(names)
-            logger.warning(
-                "dropped %d attachment(s) from session %s past the per-session bound "
-                "(%d files / %d bytes): %s",
-                len(dropped),
-                session_id,
-                settings.attachment_max_per_session,
-                settings.attachment_store_max_bytes,
-                ", ".join(dropped),
-            )
-            # Unlabelled deliberately: the only candidate label is a session id, which is
-            # unbounded cardinality. The rate is what an operator wants — a deployment dropping
-            # uploads steadily is one whose per-session bound is too low for how chemists work.
-            METRICS.increment("chemclaw_attachment_evictions_total", len(dropped))
+            _report_drops(session_id, dropped)
         self._by_session.put(session_id, held)  # inserting evicts the LRU session past the cap
 
-    def snapshot(self, session_id: str) -> SessionAttachments:
+    async def snapshot(
+        self, session_id: str, *, excerpt_chars: int | None = None
+    ) -> SessionAttachments:
         """Everything a session holds and everything it lost, oldest first.
 
         `peek`, not `get`: reading a session's files is not the recency signal the eviction bound
@@ -579,21 +659,163 @@ class AttachmentStore:
         live one would see a later upload's evictions appear in an answer already written.
         """
         held = self._by_session.peek(session_id)
-        return held.model_copy(deep=True) if held else SessionAttachments()
+        if held is None:
+            return SessionAttachments()
+        return SessionAttachments(
+            items=[_excerpted(item, excerpt_chars) for item in held.items],
+            evicted=list(held.evicted),
+            evicted_total=held.evicted_total,
+        )
 
-    def for_session(self, session_id: str) -> list[Attachment]:
-        """Everything attached to a session, oldest first — the files alone.
+    async def find(self, session_id: str, name: str) -> Attachment | None:
+        """The oldest held upload of that name in the session, or `None`."""
+        held = self._by_session.peek(session_id)
+        for item in held.items if held else []:
+            if item.name == name:
+                return item.model_copy()
+        return None
 
-        Kept beside `snapshot` because most callers want exactly this and a `.items` at every call
-        site reads worse. What it must never be used for is deciding that a session has nothing:
-        that question is `snapshot`'s, and answering it from a bare list is the defect above.
+
+# Serialized per session, because the eviction pass reads the session's live rows and decides from
+# them: two uploads racing without it would each count the other's row as absent and both keep it,
+# leaving the session one file over its bound. An advisory lock rather than `FOR UPDATE`, because a
+# session's *first* upload has no row to lock — the shape `exhibits.store._SESSION_LOCK` uses.
+_SESSION_LOCK = "SELECT pg_advisory_xact_lock(hashtextextended('session_attachments:' || %s, 0))"
+# The text is bound once and measured by the database, so a 64 MiB parse is sent once rather than
+# twice and `byte_size` is the stored UTF-8 length rather than a Python estimate of it.
+_INSERT = """
+INSERT INTO session_attachments
+    (session_id, name, content_type, row_count, body, byte_size, uploaded_by)
+SELECT %(session)s, %(name)s, %(content_type)s, %(rows)s, b.body, octet_length(b.body), %(by)s
+FROM (SELECT %(body)s::text AS body) b
+"""
+_LIVE = (
+    "SELECT attachment_id, name, byte_size FROM session_attachments "
+    "WHERE session_id = %s AND evicted_at IS NULL ORDER BY attachment_id"
+)
+_EVICT = (
+    "UPDATE session_attachments SET body = NULL, evicted_at = now() WHERE attachment_id = ANY(%s)"
+)
+_HELD = """
+SELECT name, content_type, row_count,
+       CASE WHEN %(excerpt)s::int IS NULL THEN body ELSE left(body, %(excerpt)s::int) END
+FROM session_attachments
+WHERE session_id = %(session)s AND evicted_at IS NULL
+ORDER BY attachment_id
+"""
+# Newest first so the `LIMIT` keeps the most recent names; reversed into oldest-first by the
+# caller. `count(*) OVER ()` is computed before the `LIMIT`, so it is the whole total.
+_EVICTED = """
+SELECT name, count(*) OVER ()
+FROM session_attachments
+WHERE session_id = %s AND evicted_at IS NOT NULL
+ORDER BY attachment_id DESC
+LIMIT %s
+"""
+_FIND = """
+SELECT name, content_type, row_count, body
+FROM session_attachments
+WHERE session_id = %s AND name = %s AND evicted_at IS NULL
+ORDER BY attachment_id
+LIMIT 1
+"""
+
+
+def _attachment(row: Sequence[Any]) -> Attachment:
+    """One `session_attachments` row, as the model the tools read."""
+    return Attachment(
+        name=str(row[0]), content_type=str(row[1]), rows=int(row[2]), text=str(row[3] or "")
+    )
+
+
+class PostgresAttachmentStore:
+    """The durable store — `session_attachments` (120), readable from every replica.
+
+    A dropped upload keeps its row with `body` NULL, so `evicted` and `evicted_total` are
+    answered by whichever replica serves the next turn, exactly as the in-memory store answers them
+    in the one process it lives in. The in-memory store's cross-session byte budget has no
+    counterpart here, deliberately: it bounded a pod's *memory*, and nothing this store holds is
+    resident. What bounds the table is the per-session rule above and the conversation's retention
+    window (`durable/retention._PRUNABLE`).
+    """
+
+    @asynccontextmanager
+    async def _connection(self) -> AsyncIterator[psycopg.AsyncConnection[TupleRow]]:
+        """Borrow a connection on the *session layer's* database.
+
+        `session_store_dsn`, else `postgres_dsn` — the resolver `agent.session_store` uses — because
+        an upload is session state: `delete_session` removes it inside the same transaction as the
+        transcript, which only works if both live in one database.
         """
-        return list(self.snapshot(session_id).items)
+        async with db.connection(settings.session_store_dsn or settings.postgres_dsn) as conn:
+            yield conn
+
+    async def add(self, session_id: str, attachment: Attachment, *, uploaded_by: str) -> None:
+        """Insert the upload and drop the session's oldest past its bounds, in one transaction."""
+        async with self._connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(_SESSION_LOCK, (session_id,))
+                await cur.execute(
+                    _INSERT,
+                    {
+                        "session": session_id,
+                        "name": attachment.name,
+                        "content_type": attachment.content_type,
+                        "rows": attachment.rows,
+                        "body": attachment.text,
+                        "by": uploaded_by,
+                    },
+                )
+                await cur.execute(_LIVE, (session_id,))
+                live = await cur.fetchall()
+                drop = _uploads_to_drop([int(row[2]) for row in live])
+                if drop:
+                    await cur.execute(_EVICT, ([int(row[0]) for row in live[:drop]],))
+            await conn.commit()
+        if drop:
+            _report_drops(session_id, [str(row[1]) for row in live[:drop]])
+
+    async def snapshot(
+        self, session_id: str, *, excerpt_chars: int | None = None
+    ) -> SessionAttachments:
+        """Everything a session holds and everything it lost, oldest first."""
+        async with self._connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(_HELD, {"session": session_id, "excerpt": excerpt_chars})
+                items = [_attachment(row) for row in await cur.fetchall()]
+                await cur.execute(_EVICTED, (session_id, _EVICTED_NAMES_REMEMBERED))
+                evicted = await cur.fetchall()
+        return SessionAttachments(
+            items=items,
+            evicted=[str(row[0]) for row in reversed(evicted)],
+            evicted_total=int(evicted[0][1]) if evicted else 0,
+        )
+
+    async def find(self, session_id: str, name: str) -> Attachment | None:
+        """The oldest held upload of that name in the session, in full, or `None`."""
+        async with self._connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(_FIND, (session_id, name))
+                row = await cur.fetchone()
+        return _attachment(row) if row else None
 
 
-# One process-wide store, mirroring the front door's live-session cache: attachments belong to the
-# pod holding the conversation, and are lost with it (they are working material, not the record).
-STORE = AttachmentStore()
+# The in-memory backend, one per process: a store that forgot between two calls is not one. Read
+# through `default_attachment_store` rather than imported, so a test may swap it.
+STORE = InMemoryAttachmentStore()
+
+
+def default_attachment_store() -> AttachmentStore:
+    """The store this deployment uses — Postgres where sessions are durable, memory otherwise.
+
+    The switch `exhibits.store.default_exhibit_store` and the session store read. A deployment with
+    durable sessions is the one that can run more than one front-door replica (a session is
+    reattached from `session_owners` on any of them), so it is exactly the one whose uploads must
+    not live in a single process.
+    """
+    if settings.session_store == "postgres":
+        return PostgresAttachmentStore()
+    return STORE
 
 
 class AttachmentSummary(BaseModel):
@@ -659,7 +881,9 @@ async def list_attachments() -> AttachmentListing:
         was the one path on which an upload's text reached the model unframed (Sec-1).
     """
     session_id = get_current_session_id() or ""
-    held = STORE.snapshot(session_id)
+    held = await default_attachment_store().snapshot(
+        session_id, excerpt_chars=settings.note_excerpt_chars
+    )
     return AttachmentListing(
         attachments=[
             AttachmentSummary(
@@ -695,10 +919,13 @@ async def read_attachment(name: str) -> str:
         ValueError: No such file here — and the message says whether it was dropped or never sent.
     """
     session_id = get_current_session_id() or ""
-    held = STORE.snapshot(session_id)
-    for attachment in held.items:
-        if attachment.name == name:
-            return frame_untrusted(attachment.text, note_id=f"attachment:{attachment.name}")
+    store = default_attachment_store()
+    found = await store.find(session_id, name)
+    if found is not None:
+        return frame_untrusted(found.text, note_id=f"attachment:{found.name}")
+    # Only now the session's whole record, and without any file's text: the dropped names are what
+    # decide which of the three refusals is true.
+    held = await store.snapshot(session_id, excerpt_chars=0)
     if name in held.evicted:
         raise ValueError(
             f"{name!r} was uploaded to this conversation and was then dropped: only the newest "

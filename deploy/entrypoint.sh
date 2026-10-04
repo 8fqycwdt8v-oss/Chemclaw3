@@ -82,10 +82,11 @@ case "${component}" in
     # One asyncio event loop saturates one CPU, so a multi-CPU pod served by a single process
     # leaves the rest idle — a load test measured front-door throughput flat from 10 to 50
     # concurrent users. `CHEMCLAW_SERVICE_UVICORN_WORKERS` was the knob for that, and it is now
-    # refused above 1 by `Settings` validation: five per-process guarantees (the rate limiter, the
-    # budget tracker, the attachment store, the live-session LRU and the metrics registry) each
-    # break silently across processes, and the turn guard being durable (D-121) fixed only the
-    # sixth. Replicas plus Route affinity remain the supported way to use more CPU. No `--workers`
+    # refused above 1 by `Settings` validation: the per-process guarantees (the rate limiter, the
+    # budget tracker, the live-session LRU, the metrics registry and a running turn's event pump)
+    # each break silently across processes. The turn guard (D-121) and the attachment store
+    # (D-2026-10-04-an-upload-is-session-state-not-pod-state) are durable and are no longer among
+    # them. Replicas plus Route affinity remain the supported way to use more CPU. No `--workers`
     # flag is passed here: the setting is refused where it is read, so passing it would only turn
     # one clear startup error into N of them.
     args=(--host "${CHEMCLAW_SERVICE_HOST:-0.0.0.0}" --port "${CHEMCLAW_SERVICE_PORT:-8080}")

@@ -792,6 +792,9 @@ _SESSION_DELETE: dict[str, str] = {
     # an-effect`); its revisions go with the header by cascade, so the one statement is the whole of
     # it and the runtime role needs no DELETE on the append-only revision table.
     "session_exhibits": "DELETE FROM session_exhibits WHERE session_id = %(session_id)s",
+    # The conversation's uploaded working files (`120_session_attachments.sql`), whoever uploaded
+    # them: deleting a conversation deletes what was handed to it.
+    "session_attachments": "DELETE FROM session_attachments WHERE session_id = %(session_id)s",
     "session_events": "DELETE FROM session_events WHERE session_id = %(session_id)s",
     "session_turns": "DELETE FROM session_turns WHERE session_id = %(session_id)s",
     # Both also cascade from `session_owners` (`infra/sql/110_shared_sessions.sql`); named so the

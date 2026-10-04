@@ -11,11 +11,11 @@ import uuid
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, UploadFile
 
-from chemclaw.agent.attachments import STORE as ATTACHMENTS
 from chemclaw.agent.attachments import (
     AttachmentError,
     AttachmentSummary,
     AttachmentUnavailable,
+    default_attachment_store,
     parse_attachment_off_loop,
 )
 from chemclaw.agent.profiles import get_profile, registered_profile_names
@@ -429,6 +429,7 @@ async def delete_session(
 async def upload_attachment(
     session_id: str,
     file: UploadFile,
+    principal: CurrentUser,
 ) -> AttachmentSummary:
     """Attach a working file to a conversation (gap AGT-3).
 
@@ -436,10 +437,17 @@ async def upload_attachment(
     hand over a CSV of runs or an SOP — the highest-frequency real request for a lab
     assistant.
 
-    Session-scoped and in-memory by design: an attachment is working material for a
-    conversation, not knowledge. Anything in it worth keeping is written to the graph the way
-    every other machine-touched note is — through `kg/record.py`, carrying `created_by: agent` and
-    its citations — and routing uploads straight in would skip the step that gives them either
+    Session-scoped, and stored where every front-door replica can read it whenever sessions are
+    durable (`session_attachments`, `D-2026-10-04-an-upload-is-session-state-not-pod-state`): the
+    turn that asks about the file need not land on the pod that took it, and through the companion
+    UI's BFF it usually does not. `principal` is recorded as the uploader so an erasure reaches the
+    file in a session somebody else owns; who may *read* it is the session gate's answer, already
+    given by `resolve_session` before this handler runs.
+
+    An attachment is working material for a conversation, not knowledge. Anything in it worth
+    keeping is written to the graph the way every other machine-touched note is — through
+    `kg/record.py`, carrying `created_by: agent` and its citations — and routing uploads straight
+    in would skip the step that gives them either
     (D-2026-09-05-the-gate-follows-behaviour-not-knowledge).
 
     Unsupported formats are refused with a message naming what *is* supported (422), never
@@ -468,7 +476,7 @@ async def upload_attachment(
         # 503, not 422: nothing is wrong with the file, and the client should try again — the
         # same distinction the turn route's shed answer makes.
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    ATTACHMENTS.add(session_id, attachment)
+    await default_attachment_store().add(session_id, attachment, uploaded_by=principal.oid)
     return AttachmentSummary(
         name=attachment.name,
         content_type=attachment.content_type,

@@ -238,7 +238,7 @@ error event; the server's `turn.finished` line shows the turn completed.
 | The client stopped reading | `chemclaw_turn_send_timeouts_total`, `chemclaw_event_stream_send_timeouts_total` | client side; the turn is detached and continues (`chemclaw_turns_detached_total`) |
 | Reader too slow for the event rate | SSE `stream_lagged`; `chemclaw_turn_readers_lagged_total` | re-attach to `GET /sessions/{id}/turn/stream` |
 | Pod replaced mid-turn | 410 `turn_interrupted` on re-attach; `chemclaw_turns_finished_total{outcome="interrupted"}` | expected on a rollout beyond the drain window; ask again |
-| Request landed on another replica | attachments missing, re-attach 404 `no turn is running for this session` | the Route must keep its affinity cookie (`haproxy.router.openshift.io/disable_cookies: "false"`); a proxy in front must pass it |
+| Request landed on another replica | re-attach or Stop 404 `no turn is running for this session` while the turn is still answering | a running turn is reachable only on its own pod: the Route must keep its affinity cookie (`haproxy.router.openshift.io/disable_cookies: "false"`) and a proxy in front must pass it. A caller through the Service (the UI's BFF) has no cookie; the answer still lands in the transcript |
 
 The UI BFF has its own upstream pools; `no upstream connection available` (503) means its pool is
 exhausted, not the backend ([§16](#16-the-ui-cannot-reach-the-backend-or-sign-in-loops)).
@@ -273,6 +273,7 @@ Every model call goes to `CHEMCLAW_LLM_BASE_URL` (OpenAI-compatible) with `CHEMC
 | tool result `isError` with `Error executing tool <name>: …` | the server raised | `chemclaw_tool_calls_total{tool,outcome="error"}` → [`ChemclawToolCallsFailing`](runbook.md#chemclawtoolcallsfailing) |
 | `chemclaw_tool_refusals_total{reason}` rising | governance (role gate, dry run, unapproved plan) — not a fault | role config |
 | WARNING `queue unreachable; calling <connector>.<tool> directly` | Temporal unreachable from the front door | `chemclaw_queued_tool_calls_direct_total` → [§10](#10-temporal-workers-and-durable-jobs) |
+| `read_attachment` answers `no attachment named '<file>' in this conversation` for a file the chemist uploaded | `CHEMCLAW_SESSION_STORE=memory` with more than one process (uploads then live in one pod's memory), an image older than migration 120 after a rollback, or the conversation's retention window has swept it | `SELECT name, evicted_at, created_at FROM session_attachments WHERE session_id = '<id>'`. A row with `evicted_at` set was dropped past the per-session bound, and the tool says so instead (WARNING `dropped <n> attachment(s) from session …`, `chemclaw_attachment_evictions_total`) |
 
 ---
 

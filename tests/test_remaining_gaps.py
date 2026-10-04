@@ -28,7 +28,7 @@ import pytest
 from chemclaw.agent.attachments import (
     Attachment,
     AttachmentError,
-    AttachmentStore,
+    InMemoryAttachmentStore,
     parse_attachment,
 )
 from chemclaw.cli.backfill_corpus import note_for_document
@@ -193,6 +193,16 @@ def test_a_malicious_filename_is_reduced_to_a_safe_basename() -> None:
     assert windows.name == "sop.docx"
 
 
+def _add(store: InMemoryAttachmentStore, session_id: str, attachment: Attachment) -> None:
+    """Upload into the in-memory store from a synchronous test."""
+    asyncio.run(store.add(session_id, attachment, uploaded_by="gaps"))
+
+
+def _held(store: InMemoryAttachmentStore, session_id: str) -> list[Attachment]:
+    """A session's held files, oldest first, from a synchronous test."""
+    return asyncio.run(store.snapshot(session_id)).items
+
+
 def test_the_attachment_tools_frame_file_text_as_data() -> None:
     """Both model-facing reads of an upload arrive framed — the listing was the unframed one.
 
@@ -212,7 +222,7 @@ def test_the_attachment_tools_frame_file_text_as_data() -> None:
     )
     token = set_current_session_id("sec1-framing-session")
     try:
-        STORE.add("sec1-framing-session", attachment)
+        asyncio.run(STORE.add("sec1-framing-session", attachment, uploaded_by="sec1"))
         summaries = asyncio.run(list_attachments()).attachments
         assert summaries[-1].excerpt.startswith(f'<{ENVELOPE_TAG} id="attachment:coa.md">')
         assert "</retrieved-note>" not in summaries[-1].excerpt  # breakout defanged even here
@@ -225,10 +235,10 @@ def test_the_attachment_tools_frame_file_text_as_data() -> None:
 
 def test_attachments_are_bounded_per_session() -> None:
     """A chemist uploading all morning must not fill the pod either; oldest drops first."""
-    store = AttachmentStore()
+    store = InMemoryAttachmentStore()
     for index in range(settings.attachment_max_per_session + 3):
-        store.add("s1", parse_attachment(f"f{index}.txt", b"x", "text/plain"))
-    held = store.for_session("s1")
+        _add(store, "s1", parse_attachment(f"f{index}.txt", b"x", "text/plain"))
+    held = _held(store, "s1")
     assert len(held) == settings.attachment_max_per_session
     assert held[-1].name == f"f{settings.attachment_max_per_session + 2}.txt"
 
@@ -243,24 +253,25 @@ def test_attachments_are_bounded_in_bytes_across_sessions_not_only_in_sessions()
     budget is the bound in the unit that kills the pod, so this drives the store with a load that
     breached it (12 fully-loaded sessions, 240 MB of text uploaded) and measures what is left held.
     """
-    store = AttachmentStore()
+    store = InMemoryAttachmentStore()
     sessions = 12
     text = "x" * settings.attachment_max_bytes
     uploaded = 0
     for session in range(sessions):
         for index in range(settings.attachment_max_per_session):
-            store.add(
+            _add(
+                store,
                 f"s{session}",
                 Attachment(name=f"f{index}.csv", content_type="text/csv", text=text, rows=1),
             )
             uploaded += len(text)
-    held = sum(len(a.text) for session in range(sessions) for a in store.for_session(f"s{session}"))
+    held = sum(len(a.text) for session in range(sessions) for a in _held(store, f"s{session}"))
     # The load really is one the old bound let through, rather than a constant chosen to pass.
     assert uploaded > 3 * settings.attachment_store_max_bytes
     assert held <= settings.attachment_store_max_bytes
     # LRU, not "refuse the newest": the conversation being worked on keeps its working material.
-    assert len(store.for_session(f"s{sessions - 1}")) == settings.attachment_max_per_session
-    assert store.for_session("s0") == []
+    assert len(_held(store, f"s{sessions - 1}")) == settings.attachment_max_per_session
+    assert _held(store, "s0") == []
 
 
 def test_one_oversized_session_does_not_take_every_other_session_s_attachments() -> None:
@@ -273,9 +284,10 @@ def test_one_oversized_session_does_not_take_every_other_session_s_attachments()
     standing: measured on the LRU alone, ten entries gone and the bound breached fivefold. One
     authenticated chemist silently taking every other conversation's working material away.
     """
-    store = AttachmentStore()
+    store = InMemoryAttachmentStore()
     for session in range(5):
-        store.add(
+        _add(
+            store,
             f"s{session}",
             Attachment(name="small.csv", content_type="text/csv", text="x" * 1000, rows=1),
         )
@@ -283,17 +295,18 @@ def test_one_oversized_session_does_not_take_every_other_session_s_attachments()
     # than the whole store.
     per_file = settings.attachment_store_max_bytes // 3
     for index in range(3):
-        store.add(
+        _add(
+            store,
             "hog",
             Attachment(
                 name=f"big{index}.csv", content_type="text/csv", text="x" * per_file, rows=1
             ),
         )
 
-    assert [store.for_session(f"s{session}") != [] for session in range(5)] == [True] * 5
+    assert [_held(store, f"s{session}") != [] for session in range(5)] == [True] * 5
     # ...and the hog is bounded by the same budget rather than parked over it: its own oldest file
     # goes first, and the upload just made is never the one dropped.
-    assert [a.name for a in store.for_session("hog")] == ["big1.csv", "big2.csv"]
+    assert [a.name for a in _held(store, "hog")] == ["big1.csv", "big2.csv"]
 
 
 def test_the_attachment_budget_is_bytes_rather_than_characters() -> None:
@@ -304,22 +317,21 @@ def test_the_attachment_budget_is_bytes_rather_than_characters() -> None:
     sized at 6 % of a 1 GiB pod. Every fixture in this file is ASCII, which is exactly why nothing
     saw it.
     """
-    store = AttachmentStore()
+    store = InMemoryAttachmentStore()
     sessions = ("s1", "s2", "s3")
     codepoints = settings.attachment_store_max_bytes // 5
     for session in sessions:
-        store.add(
+        _add(
+            store,
             session,
             Attachment(name="a.csv", content_type="text/csv", text="\u4e2d" * codepoints, rows=1),
         )
 
     # Three entries of 40 % of the budget each. Counted as codepoints they read as 60 % and nothing
     # is evicted; counted as bytes they are 120 % and the least-recently-used session goes.
-    resident = sum(
-        sys.getsizeof(a.text) for session in sessions for a in store.for_session(session)
-    )
+    resident = sum(sys.getsizeof(a.text) for session in sessions for a in _held(store, session))
     assert resident <= settings.attachment_store_max_bytes
-    assert store.for_session("s1") == []
+    assert _held(store, "s1") == []
 
 
 # --- IDEA-6: corpus backfill ------------------------------------------------------------------
