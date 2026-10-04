@@ -116,10 +116,10 @@ and an HTML-sandbox port, plus two Routes on two hosts (`Chemclaw3_ui:deploy/ope
 | Listener | Port | Probe paths | Defined in |
 |---|---|---|---|
 | Front door | `service.port` (8080) | `/healthz` (startup, liveness), `/readyz` (readiness), `/metrics` | `templates/deployment-service.yaml` |
-| Chart connector servers | `connectorPort` (8080) | `/healthz` (all three probes), `/mcp`, `/metrics` | `templates/deployment-connectors.yaml` |
+| Chart connector servers | `connectorPort` (8080) | `/healthz` (startup, readiness), `/livez` (liveness), `/mcp`, `/metrics` | `templates/deployment-connectors.yaml` |
 | Every Temporal worker | `workerMetricsPort` (9000), port name `metrics` | `/healthz` (startup, liveness), `/readyz` (readiness), `/metrics` | `templates/_helpers.tpl` (`chemclaw.workerProbes`) |
 | Temporal SDK metrics (optional) | `monitoring.temporalSdkMetrics.port` (9001) | `/metrics` | `templates/_helpers.tpl` |
-| MCP face (optional) | 8080 | `/healthz`, `/mcp` | `templates/deployment-mcp-face.yaml` |
+| MCP face (optional) | 8080 | `/healthz` (startup, readiness), `/livez` (liveness), `/mcp` | `templates/deployment-mcp-face.yaml` |
 | Fleet servers | per `Chemclaw3-mcp:MODULES.md` | `/healthz` (readiness), `/livez` (liveness), `/mcp`, `/metrics` | `Chemclaw3-mcp:servers/<name>/deploy/deployment.yaml` |
 | UI | 8080 (`http`), 8081 (`sandbox`) | `/readyz`, `/healthz` on `http`. `/sandbox/frame` on `sandbox` (startup). | `Chemclaw3_ui:deploy/openshift/deployment.yaml` |
 | PostgreSQL / Temporal / OTLP | 5432 / 7233 / 4317 | — | `networkPolicy.egressPorts` in `values.yaml` |
@@ -145,9 +145,9 @@ and an HTML-sandbox port, plus two Routes on two hosts (`Chemclaw3_ui:deploy/ope
   API that publishes `chemclaw_turns_in_flight`, which the HPA's occupancy metric uses
   (`service.autoscaling.occupancy`). Without that API the HPA falls back to CPU and
   `kubectl describe hpa` reports `FailedGetPodsMetric`.
-- **Security context.** Chart pods run as `runAsNonRoot`, with every capability dropped and no
-  fixed UID, so they admit under OpenShift `restricted-v2`. The fleet Deployments **do** pin
-  `runAsUser: 1001` and `fsGroup: 1001`, which `restricted-v2` rejects. §6.3 covers the fix.
+- **Security context.** Chart pods and the fleet Deployments both run as `runAsNonRoot`, with
+  every capability dropped and no fixed UID, so they admit under OpenShift `restricted-v2` as
+  shipped (§6.3).
 
 ### 2.2 PostgreSQL
 
@@ -391,7 +391,7 @@ From `values.yaml` `secrets:` and `templates/_helpers.tpl` (`chemclaw.env`, `che
 |---|---|---|---|
 | `keys.llmApiKey` | `CHEMCLAW_LLM_API_KEY` | every pod (**required**) | `CreateContainerConfigError` |
 | `keys.postgresDsn` | `CHEMCLAW_POSTGRES_DSN` | every pod (**required**) | `CreateContainerConfigError` |
-| `keys.knowledgeRepoToken` | the name that entry holds in `values.yaml` | every pod (**required**, may be empty) | `CreateContainerConfigError` |
+| `keys.knowledgeRepoToken` | the name that entry holds in `values.yaml` | every pod: **required** once `knowledge.sync.repoUrl` is set, `optional: true` without one | with a remote, `CreateContainerConfigError`; without, nothing (nothing pushes) |
 | `migrationKeys.postgresMigrationDsn` | `CHEMCLAW_POSTGRES_MIGRATION_DSN` | migrate Job only | migrations run as `CHEMCLAW_POSTGRES_DSN` |
 | `optionalKeys.framingEnvelopeSecret` | `CHEMCLAW_FRAMING_ENVELOPE_SECRET` | every pod | a startup warning, and prompt-injection framing breaks across replicas and restarts. **Set it.** |
 | `optionalKeys.{boMcpToken,calcMcpToken,molfpMcpToken,rxnfpMcpToken}` | `CHEMCLAW_BO_MCP_TOKEN`, `CHEMCLAW_CALC_MCP_TOKEN`, `CHEMCLAW_MOLFP_MCP_TOKEN`, `CHEMCLAW_RXNFP_MCP_TOKEN` | every pod (both ends of the chart's own connectors) | every call to that bundle is refused |
@@ -400,11 +400,10 @@ From `values.yaml` `secrets:` and `templates/_helpers.tpl` (`chemclaw.env`, `che
 | `optionalKeys.rxnlabelToken` | `CHEMCLAW_RXNLABEL_TOKEN` | every pod, plus `chemclaw-mcp-rxnlabel` | reaction labelling fails |
 | `optionalKeys.mcpFaceToken` | `CHEMCLAW_MCP_FACE_TOKEN` | only with `mcpFace.enabled` | the face answers 401 |
 | `optionalKeys.{llmFallbackApiKey,vectorStoreApiKey,temporalApiKey,sessionStoreDsn}` | `CHEMCLAW_LLM_FALLBACK_API_KEY`, `CHEMCLAW_VECTOR_STORE_API_KEY`, `CHEMCLAW_TEMPORAL_API_KEY`, `CHEMCLAW_SESSION_STORE_DSN` | every pod | that feature stays off |
+| `optionalKeys.{propsToken,thermalsafetyToken,kineticsToken,unitopsToken,suitabilityToken,pyexecToken}` | `CHEMCLAW_PROPS_TOKEN`, `CHEMCLAW_THERMALSAFETY_TOKEN`, `CHEMCLAW_KINETICS_TOKEN`, `CHEMCLAW_UNITOPS_TOKEN`, `CHEMCLAW_SUITABILITY_TOKEN`, and the name `pyexec`'s manifest gives `auth.token_env` | every pod. **The matching fleet server needs the same value.** | nothing until the bundle is enabled; then every call to it is refused |
 
-A bundle you switch on later (`props`, `kinetics`, …) needs its own `secrets.optionalKeys` entry
-named after its manifest's `auth.token_env`, for example
-`secrets.optionalKeys.propsToken: CHEMCLAW_PROPS_TOKEN`. `deploy/kind/values-kind.yaml` shows all
-five.
+A bundle you switch on later needs no Secret-plumbing edit: each fleet bundle's slot ships, named
+after its manifest's `auth.token_env`. Add the key to the Secret when you enable the bundle.
 
 Create the Secret. The command below shows the shape. In production, source each value from your
 secret store rather than your shell history. The knowledge-repo key name is read from the chart
@@ -431,9 +430,14 @@ oc -n "$NS" create secret generic chemclaw-secrets \
 ```
 
 `sslmode=require` encrypts the connection but does not verify the server. To use `verify-full`,
-the pods need a CA file at the path given in `sslrootcert=`. The chart has no value that mounts
-one. If your Postgres CA is the same CA as Temporal's, `/etc/temporal/tls/ca.crt` is already
-mounted. Otherwise add the volume with a post-render patch.
+the pods need a CA file at the path given in `sslrootcert=`: put the PEM in a ConfigMap (or
+Secret), set `trustedCA.configMap` (or `trustedCA.secret`) and `trustedCA.key`, and append
+`sslmode=verify-full&sslrootcert=/etc/chemclaw/ca/ca.crt` (`trustedCA.mountPath`/`key`) to each
+DSN. The same file can back the LLM gateway (`trustedCA.llm: true` sets
+`CHEMCLAW_LLM_TLS_CA_BUNDLE`) and the Entra JWKS host (`trustedCA.entra: true` sets
+`CHEMCLAW_ENTRA_CA_BUNDLE`), and a knowledge git host (`trustedCA.git: true` sets
+`GIT_SSL_CAINFO` for knowledge sync and note pushes); each switch *replaces* that client's trust
+store, so turn one on only when the bundle signs that peer.
 
 ### 5.3 Settings that stop the render or the boot
 
@@ -530,11 +534,11 @@ networkPolicy:
     - ipBlock: {cidr: 10.20.31.0/24}        # LLM gateway, Git remote
     - ipBlock: {cidr: 20.190.128.0/18}      # Entra (login.microsoftonline.com). Use your tenant's published ranges.
     - ipBlock: {cidr: 40.126.0.0/18}
-  # Who may open the front door. The last entry admits the UI, which runs in this namespace (§7.3).
+  # Who may open the front door. The UI in this namespace is admitted by the shipped
+  # `uiPodSelector` (§7.3), so the release namespace itself is not listed.
   ingressNamespaces:
     - network.openshift.io/policy-group: ingress
     - kubernetes.io/metadata.name: openshift-user-workload-monitoring
-    - kubernetes.io/metadata.name: chemclaw-prod
 ```
 
 More on what this file says:
@@ -545,13 +549,13 @@ More on what this file says:
 - **The connectors** are left at the chart defaults: `molfp`, `rxnfp`, `bo`, `calc` and `results`
   run in this release, and `chem`, `safety` and `rxnpredict` are dialled at the fleet's Services.
   `CHEMCLAW_CONNECTOR_URLS` is derived from that block.
-- **Turning on another fleet connector** (for example `props`) takes four things: set
-  `connectors.props.enabled: true`, add its token to `secrets.optionalKeys`, add the token to
-  `chemclaw-secrets`, and deploy that server (§6). The image already ships the manifests for every
-  fleet server listed in §1, so you do not need `extraConnectors` for them. A server whose manifest
-  the image does not ship (for example `pyexec`) also needs an `extraConnectors.bundles` entry, a
-  ConfigMap holding its `connector.yaml`, and its port in `networkPolicy.egressPorts`
-  (`deploy/README.md`, "Attaching a connector bundle this image does not ship").
+- **Turning on another fleet connector** (for example `props`) takes three things: set
+  `connectors.props.enabled: true`, add its token to `chemclaw-secrets` (the `secrets.optionalKeys`
+  slot and the `networkPolicy.egressPorts` entry already ship for every fleet server), and deploy
+  that server (§6). The image already ships the manifests for every fleet server listed in §1, so
+  you do not need `extraConnectors` for them. A server whose manifest the image does not ship (for
+  example `pyexec`) also needs an `extraConnectors.bundles` entry and a ConfigMap holding its
+  `connector.yaml` (`deploy/README.md`, "Attaching a connector bundle this image does not ship").
 - **The egress guard.** Each process also runs its own egress guard (`core/netguard.py`, plus an
   `LD_PRELOAD` layer armed by `deploy/entrypoint.sh`). The guard's allowlist is derived from the
   settings above. A host that comes only from a *manifest*, such as a warehouse ELN `connection:`
@@ -586,16 +590,23 @@ Deploy the fleet **before** the backend. The backend dials it, and the release o
 These five are the servers the shipped chart turns on. The off-by-default servers (`props` 8850,
 `thermalsafety` 8851, `kinetics` 8852, `unitops` 8853, `suitability` 8892, `pyexec` 8899) follow
 the same pattern with `CHEMCLAW_<NAME>_TOKEN`; switching one on also needs
-`connectors.<name>.enabled: true` and a `secrets.optionalKeys` slot for its token (§5), and
-`pyexec` additionally needs its manifest mounted through `extraConnectors.bundles`. The full
+`connectors.<name>.enabled: true` and its token in `chemclaw-secrets` (the slot and the egress port
+ship, §5), and `pyexec` additionally needs its manifest mounted through `extraConnectors.bundles`. The full
 per-server table, with interactive-queue sizing, is `Chemclaw3-mcp:docs/operations.md` §3.
 
 Each server's bearer variable is whatever its manifest declares as `auth.token_env`
 (`Chemclaw3-mcp:manifests/<name>/connector.yaml`, or `Chemclaw3-mcp:manifests-internal/<name>/connector.yaml`
 for `calc` and `rxnlabel`). Each server **fails closed**: if the variable is unset, every `/mcp`
-call is refused. **The shipped fleet Deployments do not wire that variable**, and they reference a
-placeholder image `chemclaw3/chemclaw-mcp-<name>:latest`. You supply both. The overlay below does
-it.
+call is refused. **The shipped fleet Deployments already wire that variable** from the Secret
+`chemclaw-secrets`, under the key of the same name (a `secretKeyRef` that is not `optional`). That
+is the Secret this chart reads, so both ends hold one value as long as the fleet runs in the
+release's namespace. A missing key keeps the server's pod in `CreateContainerConfigError` rather
+than letting it start and refuse every call, so add the key before you apply the server.
+
+The image is a **placeholder** that you must rewrite: `registry.invalid/chemclaw-mcp-<name>:unset`
+(older fleet revisions ship `chemclaw3/chemclaw-mcp-<name>:latest`). `.invalid` is a reserved
+top-level domain, so the new placeholder can never resolve to a registry. The overlay below
+rewrites both spellings to your digest.
 
 `MCP_ALLOWED_HOSTS` must contain the exact `host:port` the backend dials. The shipped value is the
 Service short name. If you dial a server by any other name, such as a namespace-qualified name or
@@ -604,13 +615,14 @@ an ingress host, add that name too, or `/mcp` answers `421` while `/healthz` sta
 ### 6.2 Render and apply with a kustomize overlay
 
 Run this from any directory next to a `Chemclaw3-mcp` checkout. It copies each server's shipped
-manifests, pins the image by digest, and adds the bearer from `chemclaw-secrets`:
+manifests and pins the image by digest. It does not add the bearer, because the Deployment already
+reads it (§6.1). A JSON-patch `add` to `.../env/-` would append a second entry with the same name:
 
 ```sh
 MCP=../Chemclaw3-mcp; NS=chemclaw-prod; REG=registry.example.com/chemclaw
 declare -A DIGEST=( [chem]=sha256:… [safety]=sha256:… [rxnpredict]=sha256:… [calc]=sha256:… [rxnlabel]=sha256:… )
 for name in "${!DIGEST[@]}"; do
-  src="$MCP/servers/$name/deploy"; dir="fleet-overlay/$name"; token_env="CHEMCLAW_${name^^}_TOKEN"
+  src="$MCP/servers/$name/deploy"; dir="fleet-overlay/$name"
   mkdir -p "$dir"; cp "$src"/{deployment,service,networkpolicy,pdb,hpa,servicemonitor}.yaml "$dir/"
   cat >"$dir/kustomization.yaml" <<EOF
 apiVersion: kustomize.config.k8s.io/v1beta1
@@ -618,23 +630,22 @@ kind: Kustomization
 namespace: $NS
 resources: [deployment.yaml, service.yaml, networkpolicy.yaml, pdb.yaml, hpa.yaml, servicemonitor.yaml]
 images:
+  - name: registry.invalid/chemclaw-mcp-$name
+    newName: $REG/chemclaw-mcp-$name
+    digest: ${DIGEST[$name]}
   - name: chemclaw3/chemclaw-mcp-$name
     newName: $REG/chemclaw-mcp-$name
     digest: ${DIGEST[$name]}
-patches:
-  - target: {kind: Deployment, name: chemclaw-mcp-$name}
-    patch: |-
-      - op: add
-        path: /spec/template/spec/containers/0/env/-
-        value:
-          name: $token_env
-          valueFrom:
-            secretKeyRef: {name: chemclaw-secrets, key: $token_env}
 EOF
   kustomize build "$dir" | oc apply -n "$NS" -f -
 done
 ```
 
+- Only one of the two `images:` entries matches, depending on the fleet revision. The other is a
+  no-op.
+- Before applying, check that the rendered image is your registry path:
+  `kustomize build "$dir" | grep 'image:'`. A placeholder left in the output means the `images:`
+  name did not match.
 - The token naming rule `CHEMCLAW_<NAME>_TOKEN` holds for every server in the table, and
   `deploy/kind/render-fleet.sh` checks it against each server's source before relying on it.
 - Without Prometheus Operator CRDs, drop `servicemonitor.yaml` from both the `cp` and `resources`.
@@ -643,32 +654,12 @@ done
 - Resource sizing per server (replicas, requests) is in `Chemclaw3-mcp:MODULES.md`. `calc` alone
   asks for 1 CPU and 1 GiB per pod across 2 to 8 replicas.
 
-### 6.3 OpenShift: the fixed UID
+### 6.3 OpenShift: no SCC grant needed
 
-Every fleet Deployment sets `runAsUser: 1001`, `runAsGroup: 1001` and `fsGroup: 1001`. The
-`restricted-v2` SCC rejects a UID outside the namespace's range, so the ReplicaSet reports
-`unable to validate against any security context constraint`. Choose one fix:
-
-- **Grant `nonroot-v2`** (keeps the UID the images were built and tested with). The fleet pods run
-  as the `default` ServiceAccount:
-
-  ```sh
-  oc adm policy add-scc-to-user nonroot-v2 -z default -n "$NS"
-  ```
-
-- **Or strip the fixed IDs** by adding this to each overlay's `patches:` list. The pod then gets an
-  arbitrary UID, which the fleet's tests do not exercise:
-
-  ```yaml
-  - target: {kind: Deployment, name: chemclaw-mcp-<name>}
-    patch: |-
-      - op: remove
-        path: /spec/template/spec/securityContext/runAsUser
-      - op: remove
-        path: /spec/template/spec/securityContext/runAsGroup
-      - op: remove
-        path: /spec/template/spec/securityContext/fsGroup
-  ```
+The fleet Deployments set `runAsNonRoot: true` and pin no `runAsUser`, `runAsGroup` or `fsGroup`.
+`restricted-v2` assigns a UID from the namespace's range, and each server writes only to its `/tmp`
+`emptyDir`, which is writable under any UID. Apply them as shipped, with no `nonroot-v2` grant and
+no patch.
 
 ### 6.4 How the backend finds the fleet
 
@@ -740,9 +731,12 @@ oc -n "$NS" set image deployment/chemclaw3-ui ui="$REG/chemclaw3-ui@sha256:<ui-d
 ```
 
 - **Allowing the UI through the front-door NetworkPolicy.** The chart's `chemclaw-service-ingress`
-  policy admits only the chart's own pods and the namespaces in `networkPolicy.ingressNamespaces`.
-  The UI pod is not a chart pod, so its calls are dropped unless you list the release namespace
-  there, as `values-prod.yaml` does. `deploy/kind/values-kind.yaml` does the same.
+  policy admits the chart's own pods, the namespaces in `networkPolicy.ingressNamespaces`, and pods
+  in this namespace matching `networkPolicy.uiPodSelector` — shipped as
+  `app.kubernetes.io/name: chemclaw3-ui`, the label `Chemclaw3_ui:deploy/openshift/deployment.yaml`
+  puts on its pods. If you relabel the UI, change the selector (and set the old key to `null` in
+  the same override: Helm merges maps). The kind lane's UI carries a different label and is
+  admitted by its namespace entry instead.
 - **The UI startup check.** `Chemclaw3_ui:server/config.ts` refuses to start on a missing tenant,
   client ID, scope or malformed origin.
 - **The sandbox Route.** Nothing in front of it may authenticate or rewrite headers
@@ -761,7 +755,6 @@ oc -n "$NS" set image deployment/chemclaw3-ui ui="$REG/chemclaw3-ui@sha256:<ui-d
   `networkPolicy.monitoringNamespaces` with your ingress controller's and Prometheus's namespaces,
   for example `kubernetes.io/metadata.name: ingress-nginx`. Without Prometheus Operator, set
   `monitoring.enabled: false`. That also drops the dashboards ConfigMap.
-- Leave out the SCC step in §6.3. Pod Security `restricted` admits a fixed non-root UID.
 
 ---
 
@@ -864,9 +857,12 @@ Work through these in order. Each step names what a failure there points to.
   - The same file plus the §7.4 overrides validates with no skips.
   - The rendered `chemclaw-config`, together with the Secret keys, constructs `Settings`.
   - Removing `sslmode` from the DSN makes `Settings` refuse, as §2.2 says.
-  - The §6.2 overlay builds with kustomize 5.4.3 and validates for all five servers.
-- **Not proven:** nothing here was applied to a live OpenShift cluster, so the SCC behaviour in
-  §6.3, the Entra `aud` and `iss` behaviour in §2.4 and the `temporal` CLI flags are stated from
+  - The §6.2 overlay builds with `kubectl kustomize` (kubectl v1.29.9, kustomize v5.0.4) for all
+    five servers, against a fleet tree with either image placeholder. The output validates with
+    `kubeconform -strict -ignore-missing-schemas` (30 objects, 25 valid, the 5 ServiceMonitors
+    skipped), every image is the digest, and each Deployment carries exactly one bearer entry.
+- **Not proven:** nothing here was applied to a live OpenShift cluster, so the `restricted-v2`
+  admission in §6.3, the Entra `aud` and `iss` behaviour in §2.4 and the `temporal` CLI flags are stated from
   platform documentation rather than from a run.
 
 ---

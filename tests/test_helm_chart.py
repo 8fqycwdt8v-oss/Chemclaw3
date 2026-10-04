@@ -248,8 +248,17 @@ def test_chart_config_keys_have_a_consumer() -> None:
         if _field_for(key) not in Settings.model_fields
         and key not in _SHELL_CONSUMED_ENV
         and key not in _connector_token_envs()
+        and key not in _MOUNTED_BUNDLE_TOKENS
     }
     assert not orphans, f"chart sets env nothing reads: {sorted(orphans)}"
+
+
+#: Bearer slots for fleet bundles this image does not ship, read by a manifest that reaches a pod
+#: only through `extraConnectors`. No tree here declares the variable, so `_connector_token_envs`
+#: cannot see the reader; that the fleet's manifest names exactly this variable is asserted against
+#: the sibling checkout by `tests/test_sibling_manifest_agreement.py::
+#: test_every_fleet_server_has_an_egress_port_and_a_token_slot_in_the_chart`.
+_MOUNTED_BUNDLE_TOKENS = frozenset({"CHEMCLAW_PYEXEC_TOKEN"})
 
 
 def test_chart_config_values_load_as_settings(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -385,6 +394,16 @@ def test_chart_declares_only_the_documented_secrets() -> None:
     prediction raises `MissingConnectorCredential` rather than degrading — the same fail-closed
     direction, and the same operator obligation, as `chem` and `safety`.
 
+    The six bearers for bundles that ship **off** — the five process-development bundles and
+    `pyexec`, which arrives through `extraConnectors` — are more of that same kind, and were the
+    first to be slotted *before* anyone enables them: `optional: true` makes an absent key free, and
+    without a slot enabling a bundle meant a Secret-plumbing edit too (only the kind lane's values
+    file had one). `tests/test_sibling_manifest_agreement.py` derives this from the fleet's
+    manifests.
+
+    The knowledge-repo token stays in `keys` but is rendered required only when a remote is
+    configured (`test_the_push_token_is_required_only_where_something_pushes`).
+
     Both maps are asserted, because "which secrets does this chart name" is one question and
     splitting the answer across two values is exactly how a key comes to be in neither.
     """
@@ -409,6 +428,12 @@ def test_chart_declares_only_the_documented_secrets() -> None:
         "CHEMCLAW_TEMPORAL_API_KEY",
         "CHEMCLAW_SESSION_STORE_DSN",
         "CHEMCLAW_MCP_FACE_TOKEN",
+        "CHEMCLAW_PROPS_TOKEN",
+        "CHEMCLAW_THERMALSAFETY_TOKEN",
+        "CHEMCLAW_KINETICS_TOKEN",
+        "CHEMCLAW_UNITOPS_TOKEN",
+        "CHEMCLAW_SUITABILITY_TOKEN",
+        "CHEMCLAW_PYEXEC_TOKEN",
     }
 
 

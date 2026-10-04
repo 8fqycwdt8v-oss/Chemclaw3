@@ -171,17 +171,12 @@ if [[ -z "${repo_url}" ]]; then
   exit 0
 fi
 
-# Credential helper: prints the token on demand, so it is never persisted or echoed.
+# Credential helper: prints the token on demand, so it is never persisted or echoed. The image's
+# own `chemclaw-git-askpass` (`deploy/git-askpass.sh`) — the same program `deploy/entrypoint.sh`
+# arms for the note writer's push, rather than a copy written into this container's `/tmp`, which
+# was the one credential path the writer could not see. Overridable for a run outside the image.
 if [[ -n "${CHEMCLAW_KNOWLEDGE_REPO_TOKEN:-}" ]]; then
-  export GIT_ASKPASS=/tmp/chemclaw-askpass
-  cat >"${GIT_ASKPASS}" <<'ASKPASS'
-#!/usr/bin/env bash
-case "$1" in
-  Username*) echo "${CHEMCLAW_KNOWLEDGE_REPO_USER:-x-access-token}" ;;
-  Password*) echo "${CHEMCLAW_KNOWLEDGE_REPO_TOKEN}" ;;
-esac
-ASKPASS
-  chmod 700 "${GIT_ASKPASS}"
+  export GIT_ASKPASS="${CHEMCLAW_GIT_ASKPASS:-/usr/local/bin/chemclaw-git-askpass}"
 fi
 # Never block on an interactive prompt: a bad credential must fail fast and loudly, not hang the
 # init container until the pod's startup probe gives up.

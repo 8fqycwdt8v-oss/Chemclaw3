@@ -96,6 +96,7 @@ COPY infra ./infra
 COPY schema ./schema
 COPY deploy/entrypoint.sh /usr/local/bin/chemclaw-entrypoint
 COPY deploy/knowledge-sync.sh /usr/local/bin/chemclaw-knowledge-sync
+COPY deploy/git-askpass.sh /usr/local/bin/chemclaw-git-askpass
 
 # The compiled half of the egress guard (`src/chemclaw/core/netguard_preload.c`): an `LD_PRELOAD`
 # interposition on libc's `connect`, `getaddrinfo`, `sendto` and `sendmsg`, which is the only layer
@@ -160,6 +161,7 @@ RUN uv sync --frozen --no-dev \
     && chown -R 1001:0 /opt/tiktoken \
     && chmod -R g=u /opt/tiktoken \
     && chmod +x /usr/local/bin/chemclaw-entrypoint /usr/local/bin/chemclaw-knowledge-sync \
+       /usr/local/bin/chemclaw-git-askpass \
     && chown -R 1001:0 /app \
     && chmod -R g=u /app
 

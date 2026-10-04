@@ -294,7 +294,9 @@ spec:
             runbook_url: {{ .Values.monitoring.alerts.runbookBaseUrl }}#chemclawturnsfailing
             summary: More than 10% of turns are ending in an error
             description: >-
-              Every failure reaches a chemist as an opaque internal-error message. The rule is
+              Each failure reaches a chemist as an error event; when every turn fails, check the
+              gateway credential first (`chemclaw_model_calls_total{outcome="auth"}`, the
+              `model.gateway_refused_credential` log line, the `llm_auth` code). The rule is
               gated on `monitoring.alerts.turnsFloorPerSecond` so that one error in an idle window
               is not a 100% failure rate; a deployment quieter than that floor is one whose ratio
               cannot mean anything yet.

@@ -13,7 +13,7 @@ alert-by-alert entries are in [runbook § (x-c)](runbook.md#x-c-when-an-alert-fi
 | 401 / 403 / 413 / 429 / 503 from the front door | [§5](#5-the-front-door-refuses-a-request) |
 | A chat never answers, `turn_timeout`, `at_capacity`, an empty answer | [§6](#6-turns-hang-time-out-or-answer-empty) |
 | The stream stops mid-answer behind a proxy | [§7](#7-the-sse-stream-drops) |
-| `llm_timeout`, `model.call_failed`, every turn `internal` | [§8](#8-model-gateway-errors) |
+| `llm_timeout`, `llm_auth`, `model.call_failed`, `model.gateway_refused_credential` | [§8](#8-model-gateway-errors) |
 | A tool fails, `connector … is unreachable`, MCP 401/421/503 | [§9](#9-tool-calls-and-connectors) |
 | Jobs never start or never finish, worker `/readyz` 503 | [§10](#10-temporal-workers-and-durable-jobs) |
 | `[calc-at-capacity]`, calculations queueing | [§11](#11-calculation-capacity) |
@@ -41,7 +41,7 @@ The chart sets `CHEMCLAW_LOG_JSON=true`: one JSON object per line with `time`, `
 | --- | --- | --- |
 | Browser → UI BFF (`Chemclaw3_ui`) | the BFF mints one per request (32 hex) | BFF access line `correlation_id`; sent upstream as `X-Chemclaw-Correlation-Id` |
 | BFF/ingress → front door | `_request_correlation_id` adopts an inbound `X-Chemclaw-Correlation-Id` matching `[A-Za-z0-9_-]{8,64}`, else mints a `uuid4().hex` | every log line's `correlation_id`; the response header `X-Chemclaw-Correlation-Id`; `audit_events.correlation_id`; a 500 body's `correlation_id`; a failed turn's SSE `error` event |
-| Front door → connector / MCP server | `turn_headers()` sends `X-Chemclaw-Actor`, `X-Chemclaw-Session`, `X-Chemclaw-Correlation-Id`, `X-Chemclaw-Dry-Run` and W3C `traceparent` | `Chemclaw3-mcp` servers: `[correlation/session]` in their log format. In-repo connector servers: the `connector <name> request: path=… actor=… session=… dry_run=…` line (actor and session only) |
+| Front door → connector / MCP server | `turn_headers()` sends `X-Chemclaw-Actor`, `X-Chemclaw-Session`, `X-Chemclaw-Correlation-Id`, `X-Chemclaw-Dry-Run` and W3C `traceparent` | `Chemclaw3-mcp` servers: `[correlation/session]` in their log format. In-repo connector servers: every line's `correlation_id`/`session_id`/`actor` — the request line `connector <name> request: path=… actor=… session=… correlation=… dry_run=…` and every line a tool body logs (`connectors/caller.py::bind_caller` binds them per request and per tool call) |
 | Front door → Temporal → worker | carried in the job input (`ConnectorJobInput.correlation_id`) and re-bound by the worker interceptor | worker log lines' `correlation_id`; `job_records` |
 | Watching an already-running turn | — | response header `X-Chemclaw-Turn-Correlation-Id` names the *turn's* id, distinct from the watch request's own |
 
@@ -64,8 +64,9 @@ FROM audit_events WHERE correlation_id = '<CID>' ORDER BY ts;
 history of the workflow) is the record for a durable job. With `CHEMCLAW_OTEL_ENABLED`, the same
 turn is one trace: `chemclaw.turn` → `chemclaw.tool` → the connector's spans.
 
-On an in-repo connector pod (`chemclaw-connector-<name>`), lines emitted inside a tool carry
-`correlation_id` `-`; join there by session id and time.
+On an in-repo connector pod (`chemclaw-connector-<name>`) the ids are the ones the caller's
+`X-Chemclaw-*` headers claimed: attribution for the log, never an identity any gate reads. A line
+carrying `-` there came from no request (startup, a probe, a call that sent no headers).
 
 ---
 
@@ -85,7 +86,7 @@ Settings … Value error, <message>` before anything else runs.
 | `SECURITY: a proxy is configured in this process's environment (<proxy>) and would carry traffic to …` | any | Undeclared `HTTP(S)_PROXY`/`ALL_PROXY`. Add the proxy host to `CHEMCLAW_EGRESS_ALLOW`, add destinations to `NO_PROXY`, or unset it. Under `entra_required` an ambient proxy is refused too (`… and entra_required=true — the deployment that believes it is in the enforced posture`); `NO_PROXY=*` or declare it. |
 | `entra_audience must be set when entra_required` / `entra_tenant_id or entra_issuer must be set …` / `entra_tenant_id or entra_jwks_url must be set …` | any | Half-configured Entra. |
 | `entra_expensive_actions needs entra_privileged_roles` | any | Set `CHEMCLAW_ENTRA_PRIVILEGED_ROLES` or drop `CHEMCLAW_ENTRA_EXPENSIVE_ACTIONS`. |
-| `CHEMCLAW_ENTRA_CA_BUNDLE=<path> is not a usable CA bundle` | front door | File missing or no PEM inside; mount the tenant CA. |
+| `CHEMCLAW_ENTRA_CA_BUNDLE=<path> is not a usable CA bundle` | front door | File missing or no PEM inside; mount the tenant CA (`trustedCA.configMap`/`.secret` with `trustedCA.entra: true`, and check `trustedCA.key` names the key holding the PEM). |
 | `entra_required=true with a non-loopback temporal_address (<addr>) and no temporal_tls_cert / temporal_tls_ca / temporal_api_key` | any | Enable `secrets.temporalTls` (Secret `chemclaw-temporal-tls` with `tls.crt`, `tls.key`, `ca.crt`) or set `CHEMCLAW_TEMPORAL_API_KEY`. |
 | `MountVolume.SetUp failed … secret "chemclaw-temporal-tls" not found` (pod event) | any | `secrets.temporalTls.enabled: true` but the Secret is absent. |
 | `entra_required=true with a non-loopback <DSN> and sslmode=<mode>` / `… that names no host and no sslmode` / `… is not a connection string libpq can parse` | any | Add `sslmode=require` (or `verify-full&sslrootcert=…`) and a host to each of `CHEMCLAW_POSTGRES_DSN`, `CHEMCLAW_POSTGRES_MIGRATION_DSN`, `CHEMCLAW_SESSION_STORE_DSN`. |
@@ -203,6 +204,7 @@ before admission, so **every turn-level refusal is an HTTP 200 with an `error` e
 | `at_capacity` (retryable) | no admission permit within `CHEMCLAW_SERVICE_TURN_ADMISSION_TIMEOUT_SECONDS` (5 s) | `chemclaw_turns_shed_total`, `chemclaw_turns_in_flight` / `chemclaw_turn_capacity`, HPA → alerts `ChemclawTurnsShed`, `ChemclawFrontDoorAtItsPermitCeiling` |
 | `turn_timeout` | the turn exceeded `CHEMCLAW_SERVICE_TURN_TIMEOUT_SECONDS` (600 s in the chart) | `chemclaw_turn_timeouts_total`; latency breakdown below |
 | `llm_timeout` (retryable) | model provider stalled, timed out, 429 or 5xx | [§8](#8-model-gateway-errors) |
+| `llm_auth` | model gateway answered 401/403 — the credential, not the code | [§8](#8-model-gateway-errors) |
 | `storage_unavailable` (retryable) | database unreachable mid-turn | [§12](#12-database-pool-saturation) |
 | `context_length` | thread no longer fits the model window | start a new session; check `chemclaw_context_compactions_total`, `chemclaw_context_unreducible_total` |
 | `spend_cap_reached`, `loop_cap_reached` | a cap stopped the turn | [§15](#15-budget-and-spend-cap-refusals) |
@@ -252,7 +254,7 @@ Every model call goes to `CHEMCLAW_LLM_BASE_URL` (OpenAI-compatible) with `CHEMC
 | Presents as | Cause | Diagnose → fix |
 | --- | --- | --- |
 | SSE `llm_timeout`; log `model.call_failed … the model gateway failed after <ms> ms (timeout\|rate_limited\|transport: <Exc>)` | gateway slow, overloaded, 429, 5xx, refused socket | `chemclaw_model_calls_total{outcome}`, `chemclaw_model_call_duration_seconds`. Retries: `CHEMCLAW_LLM_MAX_RETRIES` (3), per call `CHEMCLAW_LLM_TIMEOUT_SECONDS` (60). A fallback route (`CHEMCLAW_LLM_FALLBACK_BASE_URL`) shows on `chemclaw_model_fallbacks_total`. |
-| every turn `internal`; `model.call_failed … (error: AuthenticationError)` | gateway answers 401/403 — bad or missing key | rotate `secrets.keys.llmApiKey` and restart ([operations § 5.3](operations.md#53-rotating-secrets)). There is no credential preflight. |
+| every turn SSE `llm_auth` (not retryable); ERROR `model.gateway_refused_credential: the model gateway at <host> refused this deployment's credential (HTTP 401\|403)`; `model.call_failed … (auth: <Exc>)` | gateway answers 401/403 — bad, missing, rotated or under-entitled key | `chemclaw_model_calls_total{outcome="auth"}`; check the logged host is the gateway you meant (`CHEMCLAW_LLM_BASE_URL`), then rotate `secrets.keys.llmApiKey` and restart ([operations § 5.3](operations.md#53-rotating-secrets)). A 403 with a valid key means the key is not entitled to `CHEMCLAW_LLM_MODEL`. There is no credential preflight, so the first turn after a bad rotation is where it shows. |
 | `model.call_failed … (context_length: …)` | thread too long | user starts a new session |
 | `egress refused: outbound connection to '<host>'` on the first turn | gateway host not derived into the allowlist | [§14](#14-egress-refused) |
 | tokens metered as zero, `usage_unreadable: <n> usage content(s) carried no token count` | gateway changed its usage keys | alert `ChemclawUsageUnreadable`; budgets do not bind until fixed |
@@ -266,7 +268,7 @@ Every model call goes to `CHEMCLAW_LLM_BASE_URL` (OpenAI-compatible) with `CHEMC
 | WARNING `connector <name> is unreachable (<leaf error>); its tools are unavailable this turn` | pod down, `/mcp` broken, or missing token (`MissingConnectorCredential: connector '<name>' needs a bearer token in $<VAR>, which is unset or empty`) | `chemclaw_connectors_unreachable_total{connector}`; `kubectl get pods -l app.kubernetes.io/component=connector-<name>` → [`ChemclawConnectorsDegradingTurns`](runbook.md#chemclawconnectorsdegradingturns) |
 | `connector <name> was found unreachable within the last <n>s; not dialling it this turn` | recent failure is cached | wait, or fix the cause above |
 | `chemclaw_connectors_unhealthy` > 0, `/readyz` `connectors_unhealthy` > 0 | `/healthz` sweep failed | it only sees `/healthz`; a green value does not prove `/mcp` works |
-| MCP server log `server <name> refused an unauthenticated request to /mcp` (core sees 401) | token differs between core and server, or unset on the server (fails closed) | the manifest's `token_env` must hold the same value on both sides; restart both after rotation |
+| MCP server log `server <name> refused an unauthenticated request to /mcp` (core sees 401) | token differs between core and server, or unset on the server (fails closed) | the manifest's `token_env` must hold the same value on both sides; restart both after rotation. The fleet Deployments read it from `chemclaw-secrets`, so a missing key shows as the server pod in `CreateContainerConfigError` rather than as a 401 |
 | core sees **421** from a `Chemclaw3-mcp` server, `/healthz` green | DNS-rebinding guard: the `Host` the caller sends is not allowed | add the Service `name:port` to the server's `MCP_ALLOWED_HOSTS` |
 | core sees **503** + `Retry-After` from an MCP server | its session ceiling (`MCP_MAX_SESSIONS`) is full | scale the server, or raise its memory and ceiling |
 | MCP server `/healthz` 503 with a `reason` | corpus/backend failed to load | server log; the image's data |

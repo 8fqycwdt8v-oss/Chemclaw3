@@ -112,7 +112,15 @@ spec:
                  is the right response for an MCP server: the front door's sweep marks it
                  unreachable and answers degraded (`chemclaw_connectors_unhealthy`), instead of a
                  restart discarding every in-flight tool call. Liveness is deliberately the slower
-                 and more forgiving of the two — a tool call here can legitimately hold the loop. */}}
+                 and more forgiving of the two — a tool call here can legitimately hold the loop.
+
+                 **And liveness is on its own route, `/livez`, which consults nothing.** Both
+                 probes pointed at `/healthz`, so whatever readiness ever learned to check would
+                 also have become a reason to kill the container — a restart that cannot repair a
+                 missing dependency and discards every call in flight. `/healthz` stays the
+                 startup and readiness answer (and the front door's sweep); `/livez` proves only
+                 that the process still serves HTTP, which is the fault a restart fixes. The same
+                 split `Chemclaw3-mcp` holds every fleet Deployment to. */}}
           startupProbe:
             httpGet:
               path: /healthz
@@ -129,7 +137,7 @@ spec:
             failureThreshold: {{ $.Values.probes.connector.readiness.failureThreshold }}
           livenessProbe:
             httpGet:
-              path: /healthz
+              path: /livez
               port: http
             periodSeconds: {{ $.Values.probes.connector.liveness.periodSeconds }}
             timeoutSeconds: {{ $.Values.probes.connector.liveness.timeoutSeconds }}
@@ -156,13 +164,17 @@ spec:
                  `discovered()` over `connectors_dirs` at startup, and a directory that is not
                  there is skipped in silence, so this pod would serve a smaller surface than the
                  front door advertises rather than failing. */}}
-          {{- if $.Values.extraConnectors.bundles }}
+          {{- if or $.Values.extraConnectors.bundles $.Values.extraSinks.sinks (include "chemclaw.trustedCAMount" $) }}
           volumeMounts:
             {{- include "chemclaw.extraConnectorMounts" $ | nindent 12 }}
+            {{- include "chemclaw.extraSinkMounts" $ | nindent 12 }}
+            {{- include "chemclaw.trustedCAMount" $ | nindent 12 }}
           {{- end }}
-      {{- if $.Values.extraConnectors.bundles }}
+      {{- if or $.Values.extraConnectors.bundles $.Values.extraSinks.sinks (include "chemclaw.trustedCAMount" $) }}
       volumes:
         {{- include "chemclaw.extraConnectorVolumes" $ | nindent 8 }}
+        {{- include "chemclaw.extraSinkVolumes" $ | nindent 8 }}
+        {{- include "chemclaw.trustedCAVolume" $ | nindent 8 }}
       {{- end }}
 ---
 {{- end }}
@@ -244,10 +256,12 @@ spec:
                  The bundle mounts are here for the reason `chemclaw.extraConnectorMounts` gives —
                  this pod reads the same ConfigMap and would crash-loop on a name it cannot
                  discover, not merely serve one bundle fewer. */}}
-          {{- if or $.Values.secrets.temporalTls.enabled $.Values.extraConnectors.bundles }}
+          {{- if or $.Values.secrets.temporalTls.enabled $.Values.extraConnectors.bundles $.Values.extraSinks.sinks (include "chemclaw.trustedCAMount" $) }}
           volumeMounts:
             {{- include "chemclaw.tlsMount" $ | nindent 12 }}
+            {{- include "chemclaw.trustedCAMount" $ | nindent 12 }}
             {{- include "chemclaw.extraConnectorMounts" $ | nindent 12 }}
+            {{- include "chemclaw.extraSinkMounts" $ | nindent 12 }}
           {{- end }}
       volumes:
         {{- include "chemclaw.volumes" $ | nindent 8 }}

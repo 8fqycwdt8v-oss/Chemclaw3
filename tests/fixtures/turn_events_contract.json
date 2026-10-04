@@ -6,6 +6,7 @@
     "context_length",
     "empty_answer",
     "internal",
+    "llm_auth",
     "llm_timeout",
     "loop_cap_reached",
     "queue_cancelled",
@@ -42,7 +43,7 @@
       "connectors": "list[str]"
     },
     "error": {
-      "code": "Literal['internal', 'storage_unavailable', 'llm_timeout', 'turn_timeout', 'budget_exhausted', 'at_capacity', 'loop_cap_reached', 'spend_cap_reached', 'bad_tool_arguments', 'context_length', 'queue_cancelled', 'stream_lagged', 'empty_answer']",
+      "code": "Literal['internal', 'storage_unavailable', 'llm_timeout', 'turn_timeout', 'budget_exhausted', 'at_capacity', 'loop_cap_reached', 'spend_cap_reached', 'bad_tool_arguments', 'context_length', 'llm_auth', 'queue_cancelled', 'stream_lagged', 'empty_answer']",
       "correlation_id": "str",
       "message": "str",
       "retryable": "bool"

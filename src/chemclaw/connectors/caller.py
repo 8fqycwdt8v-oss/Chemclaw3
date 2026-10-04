@@ -23,6 +23,8 @@ checkable.
 
 from contextvars import ContextVar
 
+from chemclaw.core.logging import bind_claimed_caller, reset_claimed_caller
+
 _caller_actor: ContextVar[str] = ContextVar("chemclaw_connector_caller_actor", default="")
 _caller_session: ContextVar[str] = ContextVar("chemclaw_connector_caller_session", default="")
 _caller_correlation: ContextVar[str] = ContextVar(
@@ -33,13 +35,14 @@ _caller_correlation: ContextVar[str] = ContextVar(
 class CallerTokens:
     """The reset tokens for one bound request, so binding is symmetric with unbinding."""
 
-    __slots__ = ("actor", "correlation", "session")
+    __slots__ = ("actor", "correlation", "log", "session")
 
-    def __init__(self, actor: object, session: object, correlation: object) -> None:
-        """Hold the three `ContextVar.set` tokens for `reset_caller`."""
+    def __init__(self, actor: object, session: object, correlation: object, log: object) -> None:
+        """Hold the four `ContextVar.set` tokens for `reset_caller`."""
         self.actor = actor
         self.session = session
         self.correlation = correlation
+        self.log = log
 
 
 def bind_caller(actor: str, session_id: str, correlation_id: str) -> CallerTokens:
@@ -47,11 +50,19 @@ def bind_caller(actor: str, session_id: str, correlation_id: str) -> CallerToken
 
     Called by the connector's request middleware, never by a tool — a tool that could set its own
     caller would make the attribution it is stamping meaningless.
+
+    **It also binds the log attribution**, here rather than at either call site, because there are
+    two (`CallerLogMiddleware.dispatch` in the ASGI task, `_bind_caller_per_tool_call` in the MCP
+    session-manager task) and a log line written by a tool body runs only in the second. Bound into
+    `core.logging`'s claimed-caller variable, never the core identity ones: the trust rule above.
+    Measured before: every record a connector pod wrote, its own request line included, carried
+    `correlation_id=- session_id=- actor=-`.
     """
     return CallerTokens(
         actor=_caller_actor.set(actor),
         session=_caller_session.set(session_id),
         correlation=_caller_correlation.set(correlation_id),
+        log=bind_claimed_caller(actor, session_id, correlation_id),
     )
 
 
@@ -68,6 +79,7 @@ def reset_caller(tokens: CallerTokens) -> None:
     _caller_actor.reset(tokens.actor)  # type: ignore[arg-type]
     _caller_session.reset(tokens.session)  # type: ignore[arg-type]
     _caller_correlation.reset(tokens.correlation)  # type: ignore[arg-type]
+    reset_claimed_caller(tokens.log)
 
 
 def caller_provenance() -> tuple[str, str, str]:
