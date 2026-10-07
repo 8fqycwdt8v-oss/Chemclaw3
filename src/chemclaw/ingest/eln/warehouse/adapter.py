@@ -289,8 +289,7 @@ class WarehouseElnAdapter:
             ),
             payload=bundle,
             # The site's own withdrawal, when the binding names its column. Absent means the source
-            # does not report withdrawals, never "withdrawn"
-            # (D-2026-09-13-a-withdrawal-is-a-fact-a-source-reports).
+            # does not report withdrawals, never "withdrawn".
             retracted_at=(
                 _stated_timestamp(row.get(entry.retracted_at), entry.retracted_at, key)
                 if entry.retracted_at
@@ -307,8 +306,7 @@ class WarehouseElnAdapter:
         binding = self._ingest
         # A field the source was silent about is omitted, not passed as `None`, so the model's
         # default applies and a missing `reaction_id` raises "field required". `outcome_class` is
-        # optional, so a source without a status column states no outcome
-        # (D-2026-08-26-silence-is-not-a-successful-run).
+        # optional, so a source without a status column states no outcome.
         fields = {
             name: value
             for name, field in sorted(binding.reaction.items())

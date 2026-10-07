@@ -118,10 +118,8 @@ class ExperimentSuggestion(BaseModel):
     campaign_id: str = Field(min_length=1)
     candidates: list[Candidate] = Field(default_factory=list)
     # How many were asked for, so a short batch says so. `propose_candidates` may return fewer than
-    # `n`
-    # when a finite space runs low (the durable loop stops on `space_exhausted` first, so this
-    # affects
-    # only inline answers). Zero means "not stated" and suppresses the clause.
+    # `n` when a finite space runs low (the durable loop stops on `space_exhausted` first, so this
+    # affects only inline answers). Zero means "not stated" and suppresses the clause.
     requested: int = Field(default=0, ge=0)
     calc_refs: list[str] = Field(default_factory=list)
     # What the objective spans in the runs behind these candidates, so each candidate's
@@ -129,20 +127,16 @@ class ExperimentSuggestion(BaseModel):
     scale: ObjectiveScale | None = None
     scales: list[ObjectiveScale] = Field(default_factory=list)
     # The non-dominated subset of the observations the caller supplied — the trade-off the runs
-    # show.
-    # Empty on a single-objective problem.
+    # show. Empty on a single-objective problem.
     front: list[Observation] = Field(default_factory=list)
     # The assay reproducibility the front was drawn with, or None for exact precision, so the
-    # summary
-    # can say which.
+    # summary can say which.
     front_tolerance: float | None = None
     # True when this ask opened a campaign with no prior suggestions while observations were
-    # supplied —
-    # almost always an accidental fork. A campaign id hashes its decision space, so an added option
-    # or a
-    # moved bound is a new campaign; `campaign_id_for` canonicalises away re-typing, and this
-    # reports the
-    # rest, which `record_suggestion`'s upsert would otherwise make look like a first ask.
+    # supplied — almost always an accidental fork. A campaign id hashes its decision space, so an
+    # added option or a moved bound is a new campaign; `campaign_id_for` canonicalises away
+    # re-typing, and this reports the rest, which `record_suggestion`'s upsert would otherwise make
+    # look like a first ask.
     opened_new_campaign: bool = False
 
     @computed_field  # type: ignore[prop-decorator]
@@ -158,8 +152,7 @@ class ExperimentSuggestion(BaseModel):
         readings = []
         if self.requested > len(self.candidates):
             # First, because a short batch otherwise reads as a complete answer. The cause is always
-            # a finite,
-            # all-categorical space with fewer fresh conditions than requested.
+            # a finite, all-categorical space with fewer fresh conditions than requested.
             readings.append(
                 f"You asked for {self.requested} candidate(s) and only {len(self.candidates)} "
                 "could be proposed: every other condition in this decision space has already been "
@@ -179,8 +172,7 @@ class ExperimentSuggestion(BaseModel):
             )
             if not self.scales[0].n:
                 # Cold start: the trade-off sentence below would describe an empty front, which the
-                # model would
-                # resolve by inventing one.
+                # model would resolve by inventing one.
                 readings.append(
                     f"This is a trade-off over {len(self.scales)} objectives ({named}), and no "
                     "runs were supplied, so there is no front yet: `front` is empty because "
@@ -227,13 +219,11 @@ def _require_observed_params_match(
     """Reject an observation whose parameters are not exactly the problem's declared ones.
 
     BoFire indexes experiments by the domain's input keys, so a mismatch surfaces deep in the
-    library,
-    and `chemclaw.connectors.server` forwards only `ValueError` verbatim. A missing declared
-    parameter
-    already fails in BoFire's `validate_experimental`; this adds a clearer message. An undeclared
-    extra parameter would silently succeed with the stray column ignored — this turns that wrong
-    answer into a fixable error. (A specific live `KeyError: 'base'` that prompted this was never
-    reproduced; this closes the class, not provably that instance.)
+    library, and `chemclaw.connectors.server` forwards only `ValueError` verbatim. A missing
+    declared parameter already fails in BoFire's `validate_experimental`; this adds a clearer
+    message. An undeclared extra parameter would silently succeed with the stray column ignored —
+    this turns that wrong answer into a fixable error. (A specific live `KeyError: 'base'` that
+    prompted this was never reproduced; this closes the class, not provably that instance.)
 
     Raises:
         ValueError: Naming the offending observation's index and the parameter(s) at fault.
@@ -314,11 +304,9 @@ def _recorded_provenance() -> tuple[str, str, str]:
 
     `caller_provenance` reads the actor from the unauthenticated `X-Chemclaw-Actor` header, and the
     values land in `bo_campaigns.opened_by` and `bo_suggestions.actor`. The bundle's bearer proves
-    the
-    caller holds its credential (core, in the shipped deployment), not which chemist core was
+    the caller holds its credential (core, in the shipped deployment), not which chemist core was
     serving, so the actor is recorded as `unverified:<name>`. A synchronous MCP call has no channel
-    for
-    a validated principal (the durable path reads `requested_by` off the Temporal memo instead).
+    for a validated principal (the durable path reads `requested_by` off the Temporal memo instead).
 
     An absent actor stays empty. `session_id` and `correlation_id` pass through unmarked: they are
     join keys that let an auditor recover the validated actor from core's audit trail.
@@ -336,8 +324,7 @@ def _as_list(value: object, noun: str) -> list[Any]:
 
     Models occasionally emit a large observations array as one JSON string, which schema validation
     would reject before the body runs. Decoding is more permissive, but `json.loads` accepts any
-    JSON,
-    so a non-list result is refused rather than iterated.
+    JSON, so a non-list result is refused rather than iterated.
 
     Raises:
         ValueError: When the string does not decode, or decodes to something that is not a list.
@@ -473,16 +460,13 @@ async def suggest_next_experiment(
     else:
         candidates = await asyncio.to_thread(initial_candidates, featurized.problem, count)
     # Recorded after the candidates exist; `record_suggestion` swallows its own failures so a
-    # database
-    # blip never costs the suggestion. The campaign id is a pure function of the problem, so it is
-    # returned even when the write did not land. `_recorded_provenance` marks the header-supplied
-    # actor
-    # as unverified. The fork signal comes from the write itself, so concurrent openers cannot both
-    # claim it (`RecordedSuggestion`).
+    # database blip never costs the suggestion. The campaign id is a pure function of the problem,
+    # so it is returned even when the write did not land. `_recorded_provenance` marks the
+    # header-supplied actor as unverified. The fork signal comes from the write itself, so
+    # concurrent openers cannot both claim it (`RecordedSuggestion`).
     #
     # `job_id` makes the write idempotent for replays of a killed call: a hash over the campaign,
-    # the
-    # request and the history, so identical requests over identical evidence dedupe and a new
+    # the request and the history, so identical requests over identical evidence dedupe and a new
     # observation changes the key.
     inline_key = "inline-" + stable_hash(
         [
@@ -705,8 +689,7 @@ async def generate_screening_design(
         return await asyncio.to_thread(optimal_design, problem, n_experiments, criterion, formula)
     if n_experiments:
         # A silently ignored argument is worse than an error: a factorial's size is fixed by its
-        # level
-        # counts, so a budget cannot be honoured.
+        # level counts, so a budget cannot be honoured.
         raise ValueError(
             f"a factorial's run count is the size of the grid, so n_experiments={n_experiments} "
             "cannot be honoured here. Pass a criterion that takes a budget — 'd-optimal' for "

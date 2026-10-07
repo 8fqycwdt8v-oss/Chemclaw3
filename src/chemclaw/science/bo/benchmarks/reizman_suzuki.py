@@ -1,10 +1,7 @@
 """Reizman Suzuki-Miyaura reaction-condition benchmark.
 
-Maximize coupling yield over catalyst/ligand (categorical) and residence time, temperature and
-catalyst loading. The raw data (Reizman et al. 2016, vendored from Summit — see data/NOTICE.md) is a
-discrete grid, so a RandomForest surrogate gives a continuous objective, like Summit's
-ExperimentalEmulator. `load_benchmark()` returns the problem and an async objective, registered as
-`reizman_suzuki` for durable campaigns.
+Data from Reizman et al. 2016, vendored from Summit (see data/NOTICE.md). A RandomForest surrogate
+over the discrete grid gives a continuous yield objective, registered as `reizman_suzuki`.
 """
 
 from collections.abc import Awaitable, Callable

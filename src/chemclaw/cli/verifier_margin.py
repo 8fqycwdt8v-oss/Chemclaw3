@@ -153,8 +153,7 @@ def _summary(results: list[dict[str, Any]], threshold: float) -> dict[str, Any]:
 
     `recommended_band` is the max deviation-from-median over pairs whose median lies within 0.25 of
     the threshold, rounded up to 0.05. Far-from-threshold pairs do not size the band, but their
-    spread
-    is reported.
+    spread is reported.
     """
     scored = [r for r in results if r.get("rolls")]
     near = [r for r in scored if abs(r["median"] - threshold) <= 0.25]

@@ -48,8 +48,7 @@ class LiveReport(NamedTuple):
     """The three things a run of this check has to say, kept apart on purpose.
 
     `checked` is what the run is evidence about, `problems` what it found, and `unreached` what it
-    is
-    not evidence about.
+    is not evidence about.
     """
 
     problems: list[str]
@@ -182,8 +181,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"  - {problem}")
         return EXIT_MISMATCH
     if report.unreached or not report.checked:
-        # The green line is withheld deliberately. A pass here would be a claim about steps this
-        # run never looked at — the whole point of D-2026-08-17.
+        # The green line is withheld deliberately: a pass would be a claim about steps this run
+        # never looked at.
         print(
             f"live template argument validation INCOMPLETE: {len(report.checked)} step(s) checked, "
             f"{sum(len(s) for s in report.unreached.values())} unreached "

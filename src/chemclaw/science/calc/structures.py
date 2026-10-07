@@ -1,13 +1,10 @@
-"""Where a computed geometry lives so that its address resolves
-(D-2026-08-21-a-geometry-is-an-address-not-a-payload).
+"""Where a computed geometry lives so that its address resolves.
 
-`Structure.structure_id` is a content address derived identically here and on the server; this store
-lets a reported address be passed to the next calculation. Two methods over one content-addressed
-table — not a cache and not the artifact store, whose byte- and `(calc_key, name)`-addressing would
-fork on provenance that `structure_id` deliberately ignores.
-
-Invariant: every `structure_id` the agent is shown resolves. `chemclaw.science.calc.geometry` strips
-a geometry from a payload and this module keeps it, both driven by the same walker.
+A content-addressed `structure_id` → geometry table
+(D-2026-08-21-a-geometry-is-an-address-not-a-payload), so a reported address can be passed to the
+next calculation. Not the artifact store, whose byte addressing would fork on provenance
+`structure_id` ignores. Invariant: every `structure_id` the agent is shown resolves, because
+`geometry` strips and this module keeps the same geometries.
 """
 
 import logging

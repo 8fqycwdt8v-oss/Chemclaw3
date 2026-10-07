@@ -1,9 +1,4 @@
-"""Named BO objectives.
-
-A Temporal workflow cannot carry a callable, so a durable campaign names its objective and the
-evaluate activity resolves it here. Objectives are built lazily and cached per process where
-construction is expensive (e.g. fitting a surrogate).
-"""
+"""Named BO objectives, resolved by name because a Temporal workflow cannot carry a callable."""
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -25,9 +20,8 @@ MOLECULE_KEY = "molecule"
 def solubility_objective(log_s_for: LogSFor) -> Objective:
     """A BO objective that scores a candidate molecule by cached predicted log S.
 
-    Each evaluation goes through the calculation store, so a revisited molecule is never recomputed.
-    The candidate is read from `params[MOLECULE_KEY]`, so a campaign naming this objective declares
-    a categorical of that name whose levels are SMILES.
+    Reads the SMILES from `params[MOLECULE_KEY]`, so the campaign declares a categorical of that
+    name.
     """
 
     async def evaluate(params: dict[str, ParamValue]) -> float:
@@ -47,10 +41,7 @@ def _reizman_suzuki() -> Objective:
 class RegisteredObjective:
     """A named objective a durable campaign can run: how to build it, and which way is better.
 
-    `direction` and `requires` are properties of the objective, declared here so
-    `require_campaign_startable` can refuse a mismatched direction (which would recommend the worst
-    point) or a decision space missing a parameter the function reads (which would fail hours in
-    with a `KeyError`) at launch.
+    `direction` and `requires` let `require_campaign_startable` refuse a mismatched spec at launch.
     """
 
     factory: Callable[[LogSFor], Objective]

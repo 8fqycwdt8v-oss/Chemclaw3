@@ -71,8 +71,8 @@ def _driver_problems(manifest: ResultSinkManifest) -> list[str]:
         if mismatch := signature_mismatch(nested, connection):
             problems.append(f"{manifest.name}: connection driver {reference!r} {mismatch}")
         # A `*_env` key holds the NAME of an environment variable. This seam has no model to
-        # validate it,
-        # so the gate catches a pasted value or a lower-case name before a publish fails on it.
+        # validate it, so the gate catches a pasted value or a lower-case name before a publish
+        # fails on it.
         for key, value in connection.items():
             if not key.endswith(ENV_SUFFIX):
                 continue
@@ -87,23 +87,20 @@ def problems() -> list[str]:
     """Every finding across every discovered sink, plus rule 1 over the enabled set.
 
     Discovery, not enablement: `CHEMCLAW_RESULT_SINKS` is empty in CI, so iterating it would check
-    no
-    driver at all and let a broken sink surface only on the first deployment that enables it. Rule 1
-    is a property of the enabled set, so it is computed separately. Zero discovered manifests is
-    itself a finding.
+    no driver at all and let a broken sink surface only on the first deployment that enables it.
+    Rule 1 is a property of the enabled set, so it is computed separately. Zero discovered manifests
+    is itself a finding.
     """
     try:
         manifests = discovered()
     except ResultSinkError as exc:
         # A malformed or mis-named manifest stops discovery; report it as one problem line naming
-        # the file,
-        # not a traceback.
+        # the file, not a traceback.
         return [str(exc)]
 
     if not manifests:
         # Zero discovered manifests (a typo in the `PATH`-style `CHEMCLAW_RESULT_SINKS_DIR`, or an
-        # image
-        # missing `data/publish/sinks/`) would turn all three rules off behind a green line.
+        # image missing `data/publish/sinks/`) would turn all three rules off behind a green line.
         return [
             f"no result sinks discovered under {settings.result_sinks_dir!r} — no driver, no "
             "config block and no `*_env` name would be checked, and this gate would have checked "

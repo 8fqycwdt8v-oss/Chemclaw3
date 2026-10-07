@@ -25,8 +25,7 @@ def _publish(args: argparse.Namespace) -> int:
     """
     base_url = args.base_url or settings.phoenix_base_url
     # Hand Phoenix an httpx client that ignores proxy env vars: Phoenix runs on loopback, and a
-    # proxy
-    # would divert transcripts to an undeclared host.
+    # proxy would divert transcripts to an undeclared host.
     client = Client(base_url=base_url, http_client=httpx.Client(trust_env=False))
     directory = Path(args.directory)
     name = args.name or directory.name

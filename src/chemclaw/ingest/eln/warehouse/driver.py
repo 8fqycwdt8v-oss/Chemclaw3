@@ -77,8 +77,7 @@ class WarehouseCursor(Protocol):
 class BatchingCursor(Protocol):
     """A cursor that can run one statement over many parameter sets in one go.
 
-    A separate Protocol because sites bring their own drivers
-    (D-2026-08-26-the-driver-s-signature-is-the-schema): requiring `executemany` on
+    A separate Protocol because sites bring their own drivers: requiring `executemany` on
     `WarehouseCursor` would break every two-method driver for an optimisation. Probed by
     `execute_many`. psycopg runs the sets in pipeline mode, one round trip for N statements.
     """

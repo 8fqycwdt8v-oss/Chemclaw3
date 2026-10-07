@@ -45,8 +45,7 @@ def _check_half(name: str, field: str, reference: str, config: dict[str, object]
     Bound against exactly what the registry passes for every half: the manifest's `config:` plus
     `name=<the manifest's name>`. Binding config alone would fail a half that correctly requires
     `name` and pass one that refuses it. `tests/test_datasource_seam.py` asserts the gate and the
-    build
-    agree.
+    build agree.
     """
     try:
         factory = resolve_half(reference)

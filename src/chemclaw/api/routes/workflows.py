@@ -1,14 +1,10 @@
 """A person's standing approval for the durable jobs one composed workflow may launch.
 
 A `job` step in an agent-composed workflow needs a human approval, and a template run has no session
-to ask in, so these routes are where the human approves. Routes, not agent tools: a model must never
-authorize its own plan (`tests/test_api_workflows.py` asserts no such tool exists). Owner-scoped: a
-workflow is keyed `(owner, name)` and every route resolves against the caller's own rows, so another
-person's workflow is simply not found.
-
-The GET returns the steps, the job-launching subset and the fingerprint to post, so an approval
-names what it authorizes; the POST answers 409 to a fingerprint that is not the document's current
-one. The DELETE lets an owner at `MAX_PER_OWNER` make room.
+to ask in, so the human approves here. Routes, never agent tools (`tests/test_api_workflows.py`): a
+model must not authorize its own plan. Owner-scoped: every route resolves `(owner, name)` against
+the caller's own rows. The GET shows the steps and the fingerprint to post; the POST answers 409 to
+a stale fingerprint; the DELETE frees a slot under `MAX_PER_OWNER`.
 """
 
 import logging
@@ -82,17 +78,8 @@ async def list_workflows(principal: CurrentUser) -> WorkflowListOut:
 
 
 async def get_workflow(name: str, principal: CurrentUser) -> WorkflowApprovalOut:
-    """What approving this workflow would authorize, for the person about to decide.
-
-    Args:
-        name: The workflow's name, in the caller's own namespace.
-        principal: The authenticated person. Their oid is the owner this resolves against.
-
-    Returns:
-        The steps, the ones that launch jobs, and the fingerprint to post back.
-
-    Raises:
-        HTTPException: 404 when this caller has no workflow of that name.
+    """What approving this workflow would authorize: its steps, the job steps, and the fingerprint to
+    post back. 404 when this caller has no workflow of that name.
     """
     workflow = await default_composed_store().get(principal.oid, name)
     if workflow is None:
@@ -119,21 +106,10 @@ async def get_workflow(name: str, principal: CurrentUser) -> WorkflowApprovalOut
 async def approve_workflow(name: str, body: WorkflowApprovalIn, principal: CurrentUser) -> Response:
     """Record that this person approved this exact version's durable job launches.
 
-    Keyed on the document's fingerprint, so re-composing lapses the approval automatically.
-    Idempotent and not spent by a run: unlike a plan approval, which authorizes one turn, a composed
-    workflow is a procedure a person keeps and may run repeatedly.
-
-    Args:
-        name: The workflow, in the caller's own namespace.
-        body: The fingerprint the caller was shown.
-        principal: The authenticated person, recorded as the approver.
-
-    Returns:
-        204 on success.
-
-    Raises:
-        HTTPException: 404 when this caller has no such workflow; 409 when the posted fingerprint
-            is not the document's current one, which means it changed after it was shown.
+    Keyed on the document's fingerprint, so re-composing lapses the approval. Idempotent and not
+    spent by a run: a composed workflow is a procedure a person keeps, unlike a plan approval, which
+    authorizes one turn. 404 for an unknown workflow; 409 when the posted fingerprint is not the
+    current one.
     """
     store = default_composed_store()
     workflow = await store.get(principal.oid, name)
@@ -154,20 +130,8 @@ async def approve_workflow(name: str, body: WorkflowApprovalIn, principal: Curre
 
 
 async def forget_workflow(name: str, principal: CurrentUser) -> Response:
-    """Delete one of this caller's composed workflows.
-
-    A real delete, not a tombstone; without it the only way under `MAX_PER_OWNER` was re-composing
-    over a name. Owner scoping is the authorization.
-
-    Args:
-        name: The workflow, in the caller's own namespace.
-        principal: The authenticated person. Their oid is the owner this resolves against.
-
-    Returns:
-        204 on success.
-
-    Raises:
-        HTTPException: 404 when this caller has no workflow of that name.
+    """Delete one of this caller's composed workflows (a real delete; owner scoping is the
+    authorization). 404 when this caller has no workflow of that name.
     """
     if not await default_composed_store().forget(principal.oid, name):
         raise HTTPException(status_code=404, detail=f"no composed workflow called {name!r}")

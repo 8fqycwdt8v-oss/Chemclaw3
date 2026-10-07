@@ -24,8 +24,8 @@ from chemclaw.operations.activity import safe_tool_name
 #: the output is a record for a person to judge, not an automatic change.
 MIN_SHARED_TURNS = 3
 
-#: The most tools a proposed profile names. A profile that named everything would be `default`
-#: under another name, which is `D-2026-08-12`'s identical-menu defect one layer over.
+#: The most tools a proposed profile names; a profile naming everything would be `default` under
+#: another name.
 MAX_TOOLS = 12
 
 
@@ -70,8 +70,7 @@ def document(actor: str, cluster: list[tuple[str, int]]) -> str:
     """The profile YAML a cluster proposes — deterministic, for the queue's content key.
 
     Named after the cluster, never the person: a profile is a role. Tools are sorted so two runs
-    over
-    one corpus produce one proposal.
+    over one corpus produce one proposal.
     """
     tools = sorted(tool for tool, _ in cluster)
     header = (
@@ -102,9 +101,8 @@ async def _turns() -> list[tuple[str, frozenset[str]]]:
     """Each turn's actor and the tools it called, from the audit trail.
 
     `audit_events` records every call, including ones a transcript does not carry. Only calls that
-    ran
-    (`ok` or `empty`) under identifier-shaped names (`operations.activity.safe_tool_name`) count;
-    hallucinated, refused and failed calls are not a working set.
+    ran (`ok` or `empty`) under identifier-shaped names (`operations.activity.safe_tool_name`)
+    count; hallucinated, refused and failed calls are not a working set.
     """
     from chemclaw.core import db
     from chemclaw.core.config import settings

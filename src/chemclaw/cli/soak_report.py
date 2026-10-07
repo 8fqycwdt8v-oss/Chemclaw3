@@ -176,8 +176,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         rounds = read_rounds(args.record)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         # `infra/live/soak.sh` writes the record line by line, so a truncated file from a killed run
-        # is
-        # expected input: name the file in one line rather than raising a traceback.
+        # is expected input: name the file in one line rather than raising a traceback.
         print(f"cannot read the soak record at {args.record}: {exc}")
         return 1
     print(report(rounds))

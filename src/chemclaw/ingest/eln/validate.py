@@ -103,8 +103,8 @@ def main() -> int:
     invalid, and also if nothing was checked (no enabled ingest source, or a source offering no
     entries); exit 0 means the gate ran.
 
-    Asks the registry which adapters are attached, so a manifest-attached ELN (D-120) is covered.
-    Failures are labelled with the source's name, and sources are resolved one at a time through
+    Asks the registry which adapters are attached, so a manifest-attached ELN is covered. Failures
+    are labelled with the source's name, and sources are resolved one at a time through
     `make_data_source` so rejections are never attributed to the wrong source.
     """
     from chemclaw.ingest.sources.registry import active_ingest_source_names, make_data_source

@@ -105,7 +105,7 @@ _STEP_KEYWORDS: tuple[tuple[StepKind, tuple[str, ...]], ...] = (
 
 
 class ElnFormatError(ElnMappingError):
-    """A raw entry did not match this ELN's expected JSON shape (G4)."""
+    """A raw entry did not match this ELN's expected JSON shape."""
 
 
 class JsonExportAdapter:
@@ -325,8 +325,8 @@ def _require_list(payload: dict[str, Any], key: str) -> list[Any]:
 def _component(item: Any, default_role: Role) -> Component:
     """Build a `Component` from one JSON species (role defaults if unstated)."""
     if not isinstance(item, dict):
-        # A bare string (["CCO"]) would AttributeError on .get and crash the sync
-        # instead of being rejected as one bad entry (G4).
+        # A bare string (["CCO"]) would raise AttributeError on .get and crash the sync instead of
+        # rejecting one bad entry.
         raise ElnFormatError(f"component is not an object: {item!r}")
     smiles = item.get("smiles")
     if not smiles:
@@ -345,8 +345,8 @@ def _number(payload: dict[str, Any], key: str) -> float | None:
 
     Never a regex over the procedure, whose first match is typically the addition temperature or
     time rather than the reaction's; a missing number is a smaller harm than a wrong one stored as
-    fact (D-2026-08-26-a-transcription-may-not-infer-a-setpoint). Prose numbers are kept on each
-    `ReactionStep`. A structured `0` is real, so the check is `is not None`.
+    fact. Prose numbers are kept on each `ReactionStep`. A structured `0` is real, so the check is
+    `is not None`.
     """
     value = payload.get(key)
     return float(value) if value is not None else None

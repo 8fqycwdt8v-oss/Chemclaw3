@@ -1,14 +1,9 @@
 """Terminal CLI for driving the Chemclaw agent locally — the testing front door.
 
-Builds the same `build_langgraph_agent` graph the front door builds, opens the MCP connectors for
-the session, and runs a turn-taking chat (or one scripted question) against a live model.
-
-Identity is the one difference: there is no browser OIDC token here, so the CLI runs only in
-explicit admin mode (`--admin`). That bypasses authentication and stamps the ambient identity
-(`chemclaw.core.identity_context`) with `settings.cli_admin_actor` and `settings.cli_admin_roles`
-(empty by default). It does not bypass authorization: the tool and expensive-trigger gates still
-apply, so a full-access local seam requires populating `cli_admin_roles` deliberately.
-`resolve_identity` fails loudly without `--admin`.
+Builds the front door's graph, opens the MCP connectors, and runs a chat (or one `-m` question)
+against a live model. With no OIDC token to validate, it runs only with `--admin`, which bypasses
+authentication and stamps `settings.cli_admin_actor` with `settings.cli_admin_roles` (empty by
+default) as the ambient identity. Authorization still applies.
 
 Run: `make chat`, `uv run chemclaw --admin`, or one-shot `uv run chemclaw --admin -m "…"`.
 """
@@ -91,15 +86,9 @@ def turn_notice(state: Mapping[str, Any], answer: str) -> str:
 def resolve_identity(*, admin: bool, actor: str | None) -> tuple[str, frozenset[str]]:
     """Resolve the caller's audit actor and ambient roles — the CLI's identity seam.
 
-    Returns `(actor, roles)`, stamped as the ambient identity for the whole session for audit,
-    authorization and role-scoped skill visibility. There is no OIDC token to validate, so it runs
-    only in admin mode. Roles come from `settings.cli_admin_roles` (empty by default), so `--admin`
-    confers identity, not entitlement.
-
-    Args:
-        admin: Run in admin testing mode, bypassing Entra *authentication* (this CLI has no token
-            to check). Authorization still applies.
-        actor: Override the audit actor label; defaults to `settings.cli_admin_actor`.
+    Returns `(actor, roles)`, stamped for the whole session. Refuses unless `admin`; roles come from
+    `settings.cli_admin_roles`, so `--admin` confers identity, not entitlement. `actor` overrides
+    `settings.cli_admin_actor`.
     """
     if not admin:
         raise SystemExit(
@@ -207,16 +196,11 @@ async def _run(args: argparse.Namespace) -> int:
 async def _repl(agent: Any, actor: str, saver: Any) -> None:
     """Read a question, print the answer, repeat — until EOF, Ctrl-C, or an exit word.
 
-    Prompts and errors go to stderr so a redirected stdout carries only answers. `saver` is the
-    checkpointer the graph was built on, so `/plan` reads the store the turns wrote to rather than
-    the configured one. All arguments are required; `actor` is recorded as who approved, so it must
-    never default.
-
-    `/plan` and `/approve` mirror the front door's plan routes, typed by a person because the model
-    must not approve its own plan. Note that `enforce_plan_approval` skips when no session id is
-    set, and nothing here sets one, so the plan gate does not apply to this REPL. What governs a
-    write typed here is who holds the terminal: `resolve_identity` makes this a single-user admin
-    surface running with the process's credentials.
+    Prompts and errors go to stderr, answers to stdout. `saver` is the graph's own checkpointer, so
+    `/plan` reads what the turns wrote; `actor` is recorded as approver and must never default. The
+    plan gate skips session-less calls and this REPL sets no session id, so `/plan` and `/approve`
+    record decisions nothing here enforces; this surface is single-user admin running with the
+    process's credentials.
     """
     # Every operator command is named, since there is no `/help`.
     print(
@@ -259,26 +243,13 @@ async def _repl(agent: Any, actor: str, saver: Any) -> None:
 
 
 async def _workflow_command(prompt: str, actor: str) -> str:
-    """Run `/workflows` or `/approve-workflow <name>`, returning the line to show the operator.
+    """Run `/workflows`, `/approve-workflow <name> [<fingerprint>]` or `/forget-workflow <name>`.
 
-    The terminal's half of an approval only a person may give: a composed workflow's durable `job`
-    steps run only once somebody approves that exact document, and it is never an agent tool. The
-    CLI needs its own approver because workflows are keyed on the ambient actor, which differs
-    between surfaces in a dev deployment.
-
-    `/approve-workflow` is read-then-approve: the first line prints the whole procedure (every
-    step's call and arguments) and a fingerprint, and the second must type that fingerprint back.
-    The agent acts in this terminal too and may re-compose the workflow between the two commands, so
-    the approval binds to what was shown. `/workflows` lists names and counts for choosing one.
-    `/forget-workflow <name>` frees a slot under `MAX_PER_OWNER`.
-
-    Args:
-        prompt: The typed line — `/workflows`, `/approve-workflow <name> [<fingerprint>]`, or
-            `/forget-workflow <name>`.
-        actor: This session's ambient actor, recorded as who approved; never defaulted.
-
-    Returns:
-        The lines to print on stderr.
+    The terminal's approver for composed workflows (keyed on the ambient actor, which differs
+    between surfaces in a dev deployment). Approval is read-then-approve: the first call prints
+    every step's call and arguments plus a fingerprint, and the second must type it back, since the
+    agent can re-compose the workflow in between. `actor` is recorded as approver and never
+    defaulted. Returns the lines to print on stderr.
     """
     from chemclaw.durable.template_job import template_fingerprint
     from chemclaw.templates.composed import (

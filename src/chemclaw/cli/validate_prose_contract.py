@@ -75,8 +75,7 @@ _BARE = re.compile(r"(?<![\w`/.,(-])([a-z][a-z0-9]*(?:_[a-z0-9]+)+)(?![\w(])")
 # because there the known-tool set filters the matches.
 _TICKED = re.compile(r"`([a-z][a-z0-9]*(?:_[a-z0-9]+)+)`")
 # ``type `x` `` / ``types `x` ``: the one phrasing that means "write a note of this kind", anchored
-# on
-# the word so backticked tools and fields do not match. The convention is stated in
+# on the word so backticked tools and fields do not match. The convention is stated in
 # `skills/README.md`.
 _NOTE_TYPE = re.compile(r"\btypes?\s+`([a-z][a-z0-9-]*)`")
 
@@ -192,8 +191,7 @@ _NON_SETTINGS_ENV = frozenset(
         "CHEMCLAW_REVISION",  # a Containerfile build ARG, exported as CHEMCLAW_DEPLOYMENT_REVISION
         # Read only by `infra/live/processes.sh`: the issuer the live lane derives `entra_issuer`,
         # `entra_jwks_url` and `entra_audience` from. Not a Settings field because nothing in Python
-        # reads
-        # it.
+        # reads it.
         "CHEMCLAW_LIVE_ENTRA_TOKEN_URL",
         # The knowledge-sync credential: a chart-required Secret key read by
         # `deploy/knowledge-sync.sh` (and redacted by `core/logging.py`), never by Settings.
@@ -260,8 +258,7 @@ def _marked_sites(path: Path) -> tuple[list[str], list[int]]:
     """The module-level names `path` marks, and the lines of any marker a loader cannot reach.
 
     A marker is reachable as the value of a module-level assignment or inside one (a mapping value,
-    a
-    tuple member). Anywhere else it is evaluated only when code runs, so it would guard nothing.
+    a tuple member). Anywhere else it is evaluated only when code runs, so it would guard nothing.
     """
     tree = ast.parse(path.read_text(encoding="utf-8"))
     names: list[str] = []
@@ -300,9 +297,8 @@ def marked_prose() -> dict[str, str]:
     """Every string a module marks as model-facing, by `prose:<module>:<name>[<key>]`.
 
     The loader `tests/test_prose_contract.py` reads marked prose through. Names come from parsing
-    each
-    module and values from importing it, so a template assembled at module scope is read as the text
-    a model is sent. Mappings and tuples contribute one entry per member.
+    each module and values from importing it, so a template assembled at module scope is read as the
+    text a model is sent. Mappings and tuples contribute one entry per member.
     """
     found: dict[str, str] = {}
     for path in _marked_files():
@@ -355,9 +351,8 @@ def check_instruction_blocks() -> list[str]:
 
     Requirements must be bindable: middleware tools (`skill_tool_names`, `harness_tool_names`,
     `subagent_tool_names`) are attached after the prompt is narrowed, so requiring one would drop
-    the
-    block everywhere. Skill and subagent tools are always attached, so a block may name them without
-    requiring them; harness tools are neither nameable-unrequired nor requirable.
+    the block everywhere. Skill and subagent tools are always attached, so a block may name them
+    without requiring them; harness tools are neither nameable-unrequired nor requirable.
 
     `absent_unless` names must also be bindable and disjoint from `requires` (otherwise the block is
     never shown). Whether a denial clause declares every tool that would refute it cannot be checked
@@ -365,8 +360,7 @@ def check_instruction_blocks() -> list[str]:
     """
     always_bound = skill_tool_names() | set(subagent_tool_names())
     # Declared, not bound: an opt-in bundle makes these bindable, so a block keyed on one has a
-    # condition
-    # that can occur.
+    # condition that can occur.
     bindable = declared_tool_names() - always_bound - harness_tool_names()
     problems: list[str] = []
     for symbol, blocks in _block_groups():
@@ -498,8 +492,7 @@ def _connector_token_envs() -> set[str]:
     declared.add(settings.calc_server_token_env.removeprefix("CHEMCLAW_").lower())
     declared.add(settings.rxnlabel_server_token_env.removeprefix("CHEMCLAW_").lower())
     # Core's own read-only MCP face: its bearer name is a setting's value because the face must
-    # never
-    # be addressable as a connector.
+    # never be addressable as a connector.
     declared.add(settings.mcp_face_token_env.removeprefix("CHEMCLAW_").lower())
     return declared
 
@@ -580,9 +573,8 @@ def check_metric_citations() -> list[str]:
 
     Rule 8 (a whole backticked span) runs over the operator corpus only: in ADRs, backticked
     `chemclaw_*` spans are often correctly something else (a module, the Postgres role, a log
-    marker,
-    or a stale name an ADR is about). Rule 9 (a `name{…}` selector) runs over all of `docs/` except
-    the archive, because a label matcher only ever means "query this". That reach is why
+    marker, or a stale name an ADR is about). Rule 9 (a `name{…}` selector) runs over all of `docs/`
+    except the archive, because a label matcher only ever means "query this". That reach is why
     `_RETIRED_METRIC_NAMES` exists: retiring a series a merged ADR quotes lands there.
     """
     declared = _declared_including_histogram_series()
@@ -602,18 +594,15 @@ def check_metric_citations() -> list[str]:
 def check_prose_contract() -> list[str]:
     """Return one problem string per violation; empty means the prose matches the tool surface."""
     # One definition of the tool union, shared with the other validators and the agent. Declared
-    # rather
-    # than bound, so prose naming an opt-in bundle's tool validates where the bundle is off; a
-    # deleted
-    # tool is in neither set.
+    # rather than bound, so prose naming an opt-in bundle's tool validates where the bundle is off;
+    # a deleted tool is in neither set.
     tools = declared_tool_names()
     problems: list[str] = []
     for origin, text in _prose_sources().items():
         for name in sorted(referenced_tool_names(text) - tools):
             problems.append(f"{origin}: names {name} but no such agent tool is registered")
         # The effective vocabulary — core's plus the enabled bundles' — because that is what
-        # `kg-validate`
-        # accepts.
+        # `kg-validate` accepts.
         for note_type in sorted(referenced_note_types(text) - known_note_types()):
             problems.append(
                 f"{origin}: tells the agent to write a `{note_type}` note, which is not a known "

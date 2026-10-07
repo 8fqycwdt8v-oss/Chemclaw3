@@ -52,7 +52,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     try:
         # One parse for all the halves: the citation checks read the same corpus `validate` just
-        # walked, and the second `read_note` loop this used to run doubled the gate's cost.
+        # walked.
         problems, notes = validate_with_notes(notes_dir)
     except ChemclawError as exc:
         print(f"cannot determine this deployment's note vocabulary: {exc}")
@@ -60,9 +60,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if not notes:
         # Appended rather than returned early, so an unparseable sole file still reports its parse
-        # failure.
-        # A corpus of zero notes is a problem, not a pass: a mis-set `CHEMCLAW_NOTE_REPO_DIR` would
-        # otherwise turn off the only check on `[[reaction-*]]` citations.
+        # failure. A corpus of zero notes is a problem, not a pass: a mis-set
+        # `CHEMCLAW_NOTE_REPO_DIR` would otherwise turn off the only check on `[[reaction-*]]`
+        # citations.
         problems.append(
             f"no notes found under {notes_dir} — this gate would have checked nothing. "
             "Check CHEMCLAW_NOTE_REPO_DIR / CHEMCLAW_KNOWLEDGE_DIR before reading this as a pass."
@@ -83,8 +83,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
     if calc_refs:
         # The calculation half: `_calc_ref_shape` checks a ref's form; existence is checked here
-        # against
-        # `calculation_results`, with the same failure posture.
+        # against `calculation_results`, with the same failure posture.
         try:
             problems.extend(asyncio.run(unresolved_calc_refs(calc_refs, PostgresStore())))
         except Exception as exc:
@@ -102,8 +101,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     if unchecked:
         # Non-zero: a gate that cannot run its store check has not passed, and this is the only
-        # check on
-        # `[[reaction-*]]` citations.
+        # check on `[[reaction-*]]` citations.
         print(
             f"\n{unchecked} store-backed citation(s) could not be checked, so this gate did not "
             "pass. Point CHEMCLAW_POSTGRES_DSN at a migrated database and run it again."
@@ -115,8 +113,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     if not citations and not calc_refs:
         # Said out loud so a reader knows the database half had nothing to check. Not an error: the
-        # shipped
-        # tree has no external citations (a seed `calc_ref` would fail on every fresh database).
+        # shipped tree has no external citations (a seed `calc_ref` would fail on every fresh
+        # database).
         print(
             "NOTE: this corpus cites no reaction record and no calculation, so the two "
             "store-backed halves of this gate had nothing to check. "

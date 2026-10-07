@@ -29,7 +29,7 @@ _UPSERT = (
     "ON CONFLICT (source) DO UPDATE SET "
     "cursor = GREATEST(sync_cursors.cursor, EXCLUDED.cursor), updated_at = now() "
     # Return the stored mark, which may differ from the argument under `GREATEST`, so the lag gauge
-    # never reports a regression the table refused.
+    # never moves backwards when the table did not.
     "RETURNING cursor"
 )
 

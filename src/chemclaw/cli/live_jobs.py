@@ -51,15 +51,15 @@ _TERMINAL = {
 }
 
 # The job the smoke runs: a real durable job through the shared `ConnectorJobWorkflow` wrapper that
-# writes to the calculation cache, which makes the never-recompute guarantee (D-011) observable.
+# writes to the calculation cache, which makes the never-recompute guarantee observable.
 SMOKE_JOB = "compute_reaction_energy"
 
 # The temperature this run's reactions are evaluated at — chosen once per process, from the clock.
 #
-# The workflow id is a hash of the payload and a duplicate launch rejoins the existing run (D-011),
-# so a payload fixed across runs would let a second run against the same database compute nothing
-# and pass on the first run's residue. A real physical input varies instead of a nonce, constant
-# within the process so the idempotency check derives the same id.
+# The workflow id is a hash of the payload and a duplicate launch rejoins the existing run, so a
+# payload fixed across runs would let a second run against the same database compute nothing and
+# pass on the first run's residue. A real physical input varies instead of a nonce, constant within
+# the process so the idempotency check derives the same id.
 #
 # 100,000 values on a 10-µK grid give a ~27.8-hour period. The base (301.15 K) keeps this grid
 # disjoint from `storm_behaviours` (298.15) and `live_storm` (300.0); each spans base + [0, 1) K.
@@ -197,8 +197,8 @@ async def check_workflow_completed(run: SmokeRun) -> Check:
 async def check_result_cached() -> Check:
     """The calculation landed in the Postgres cache.
 
-    The D-011 guarantee made observable: a workflow that returned a number without persisting it
-    would look identical from the result alone.
+    The never-recompute guarantee made observable: a workflow that returned a number without
+    persisting it would look identical from the result alone.
     """
     count = await _scalar(
         "select count(*) from calculation_results where calc_type like %s", ("xtb%",)
@@ -255,8 +255,7 @@ async def check_pending_when_worker_wedged(run_dir: Path) -> Check:
     """A job whose connector worker is not polling comes back *pending*, not hung and not crashed.
 
     `connectors/jobs.py` has three outcomes — a result inside the turn, a bare workflow id when the
-    job
-    outlives `inline_wait_seconds`, and `ConnectorJobError` when the launch is unconfirmed; this
+    job outlives `inline_wait_seconds`, and `ConnectorJobError` when the launch is unconfirmed; this
     exercises the middle one. SIGSTOP freezes the worker mid-poll without unregistering it and is
     reversible in one signal. The payload differs from the smoke's so cache cannot answer it.
     """

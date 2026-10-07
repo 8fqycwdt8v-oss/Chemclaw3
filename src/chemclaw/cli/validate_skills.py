@@ -162,8 +162,8 @@ def _role_gate_problems(found_names: set[str]) -> list[str]:
 
     This map fails open: `RoleScopedSkills` treats an absent skill as ungated, so a typo'd key
     leaves the skill visible to every caller and nothing at run time can report it. Not an
-    escalation
-    (the tools are still gated by `authorize_tool`), but a control the operator believes is applied.
+    escalation (the tools are still gated by `authorize_tool`), but a control the operator believes
+    is applied.
     """
     unknown = sorted(set(settings.skill_role_gates) - found_names)
     return [
@@ -177,8 +177,7 @@ def _profile_skill_problems(found_names: set[str]) -> list[str]:
     """Every name in a registered profile's `skill_names` must be a skill some directory provides.
 
     `ProfileScopedSkills` narrows rather than raising, so a typo silently drops a skill. Profiles
-    are
-    loaded here (`load_profiles()`), since a CLI process would otherwise hold only `default`; a
+    are loaded here (`load_profiles()`), since a CLI process would otherwise hold only `default`; a
     `ProfileError` is reported as a problem rather than a traceback.
     """
     try:

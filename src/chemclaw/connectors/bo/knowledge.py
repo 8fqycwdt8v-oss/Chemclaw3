@@ -36,8 +36,7 @@ def note_from_campaign_result(
     recommendation is idempotent; core's appended footer may differ for a differently motivated run.
 
     The value, its provenance and the surrogate's belief lead the body, because a retrieval excerpt
-    is
-    a character prefix of the body (`retrieval.retrievers._excerpt`). Molecules are written as
+    is a character prefix of the body (`retrieval.retrievers._excerpt`). Molecules are written as
     structures (`_condition`, `_recommended_molecule`) so by-compound paths can find them. The note
     carries no `[[wikilink]]`, which `kg.record` would warn about as dangling.
     """
@@ -49,8 +48,7 @@ def note_from_campaign_result(
     )
     space = "\n".join(f"- {_parameter_range(parameter)}" for parameter in problem.parameters)
     # The "Searched over:" block describes a box; with constraints the campaign searched a polytope,
-    # and
-    # a reader seeing only the bounds would believe an unavailable corner was available.
+    # and a reader seeing only the bounds would believe an unavailable corner was available.
     limits = ""
     if problem.constraints:
         stated = "\n".join(f"- {constraint.describe()}" for constraint in problem.constraints)
@@ -81,10 +79,9 @@ def _molecule_in(parameter: Parameter | None, value: ParamValue) -> str | None:
     `solubility_max` campaign makes the SMILES itself the label, which RDKit decides.
 
     Deliberately the lenient `Chem.MolFromSmiles`, not `core.chem.require_molecule`: a false
-    positive
-    costs backticks around a non-structure, while a false negative hides a structure such as a label
-    `CN=[N+]=[N-] (2 equiv)`. `parameter` is optional so a result whose params do not match the
-    problem still yields a note rather than a `KeyError`.
+    positive costs backticks around a non-structure, while a false negative hides a structure such
+    as a label `CN=[N+]=[N-] (2 equiv)`. `parameter` is optional so a result whose params do not
+    match the problem still yields a note rather than a `KeyError`.
     """
     if not isinstance(parameter, CategoricalParameter):
         return None
@@ -100,9 +97,8 @@ def _condition(parameter: Parameter | None, name: str, value: ParamValue) -> str
 
     People and extractors find structures in `compound_smiles` and inline code spans, and a
     `bo-candidate` proposes work nobody has run, so its molecules must be legible. A non-SMILES
-    label is
-    plain text; a SMILES label is backticked; a label with a declared structure gets that structure
-    appended.
+    label is plain text; a SMILES label is backticked; a label with a declared structure gets that
+    structure appended.
     """
     smiles = _molecule_in(parameter, value)
     if smiles is None:
@@ -131,11 +127,9 @@ def _surrogate_belief(best: Observation, history: list[Observation]) -> str:
     """What the model thought of this point before it was evaluated, in one clause.
 
     A recorded sd means the surrogate proposed the point (small: exploiting, large: exploring); no
-    sd
-    means it came from the seed design, which is said explicitly. The sd is the model's prior
-    belief,
-    never the uncertainty of the reported value, and it is compared against the campaign's value
-    spread, as `ExperimentSuggestion.summary` does for the inline tool.
+    sd means it came from the seed design, which is said explicitly. The sd is the model's prior
+    belief, never the uncertainty of the reported value, and it is compared against the campaign's
+    value spread, as `ExperimentSuggestion.summary` does for the inline tool.
     """
     if best.surrogate_sd is None:
         return "a space-filling seed point, proposed before any surrogate had an opinion"

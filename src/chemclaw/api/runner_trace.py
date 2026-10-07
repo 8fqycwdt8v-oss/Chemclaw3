@@ -72,24 +72,12 @@ class ToolCallTrace:
     ) -> ToolResultEvent:
         """Record and describe one tool result — this module's one write.
 
-        Ids, numbers and values come off `text`, the full text the model read (not the truncated
-        preview), because grounding asks what was in front of the model. For a cut result only the
-        ref differs: `full_ref` names the full tool output the cut kept, so a surface fetches what
-        the tool returned; with no kept full text, the model's text (with its in-band cut notice) is
-        stored. A result the middleware already stored carries `stored_ref` and is not stored again,
-        so the event and the model's handle address the same bytes. `text` arrives without the
-        handle line. A result whose call was never announced is reported under its own id.
-
-        Args:
-            key: The call id this answers, so the result is reported under the call's tool name.
-            text: The result's text as the model received it.
-            cut: Whether the model received a cut of the result (`tool_result_size.was_cut`).
-            full_ref: The ref of the full text the cut kept, `""` when it kept none.
-            stored_ref: The ref the middleware stored this result's full text under, `""` when it
-                stored nothing.
-
-        Returns:
-            The event a surface renders for this result.
+        Ids, numbers and values come off `text`, the full text the model read, since grounding asks
+        what was in front of the model. Only the ref varies: `full_ref` (the full output a cut
+        kept), else `stored_ref` (already stored by the middleware, so not stored again), else
+        `text` is stored now. `text` arrives without the handle line. `key` names the call; `cut`
+        says the model received a cut (`tool_result_size.was_cut`). A result whose call was never
+        announced is reported under its own id.
         """
         self.outputs.append(text)
         tool = self._issued.get(key) or key

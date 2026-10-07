@@ -251,8 +251,7 @@ class ReactionRecord(BaseModel):
     conditions: ProcessConditions | None = None
     source: str = Field(min_length=1)
     # When the source reported this entry withdrawn; `None` is "not retracted". Set from
-    # `RawEntry.retracted_at`, never inferred from absence, since a fetch is a delta
-    # (D-2026-09-13-a-withdrawal-is-a-fact-a-source-reports).
+    # `RawEntry.retracted_at`, never inferred from absence, since a fetch is a delta.
     retracted_at: datetime | None = None
     # `CITATION_ONLY` when the source named a species without its structure: citable, never served
     # by structure search. Defaults to `STRUCTURED`, as the migration says of existing rows.
@@ -266,7 +265,7 @@ class ReactionRecord(BaseModel):
     @field_validator("reaction_id")
     @classmethod
     def _slug_only(cls, value: str) -> str:
-        """An entry id must stay a safe slug even though it is no longer a filename.
+        """An entry id must be a safe slug.
 
         It becomes the `reaction-<id>` citation committed into note bodies; one rule, `kg.note`'s.
         """
@@ -375,10 +374,9 @@ class ReactionRecordStore(Protocol):
     async def citation_only(self, query: str | None = None) -> CitationOnlyRecords:
         """The records no structure index holds, and which of them list `query` as drawn.
 
-        Lets every structural tool state its denominator
-        (D-2026-09-27-a-reaction-without-a-structure-is-citable-not-searchable). Withdrawn records
-        are not counted. `query` is matched as text (`drawn_species_patterns`), never through an
-        index; `None` asks for the count alone.
+        Lets every structural tool state its denominator. Withdrawn records are not counted. `query`
+        is matched as text (`drawn_species_patterns`), never through an index; `None` asks for the
+        count alone.
         """
         ...
 
@@ -394,9 +392,8 @@ class ReactionRecordStore(Protocol):
 class InMemoryReactionRecordStore:
     """Process-local `ReactionRecordStore` — the reference the SQL one is written to match.
 
-    A differential test oracle, not a deployment backend: no configuration returns it
-    (D-2026-09-07-a-reference-implementation-is-a-test-oracle-not-a-backend). Keyed by `(source,
-    reaction_id)`, the durable store's primary key.
+    A differential test oracle, not a deployment backend: no configuration returns it. Keyed by
+    `(source, reaction_id)`, the durable store's primary key.
     """
 
     def __init__(self) -> None:

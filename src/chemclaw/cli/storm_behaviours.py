@@ -14,8 +14,8 @@ The test's content, kept apart from the mock's mechanism. The storm selects a be
 
 B (tool-path truth) and G (limits) need no behaviour; E (chaos) reuses `a-cheap`, `f-slow` and a
 directly launched job.
-`tests/test_live_storm.py::test_every_declared_behaviour_is_reached_by_some_check`
-holds that every behaviour here is asserted by some check in `cli/live_storm.py`.
+`tests/test_live_storm.py::test_every_declared_behaviour_is_reached_by_some_check` holds that every
+behaviour here is asserted by some check in `cli/live_storm.py`.
 """
 
 from __future__ import annotations
@@ -25,8 +25,7 @@ import time
 from chemclaw.cli.mock_llm import Behaviour, ToolCall
 
 # The reaction the durable family launches. The workflow id is a hash of the payload, so many
-# sessions launching it at once is the D-011 idempotency collision, checked by counting database
-# rows.
+# sessions launching it at once is an idempotency collision, checked by counting database rows.
 #
 # The temperature varies per run so a second storm against one database does not find the answer
 # cached and pass every "at most one run" bound with zero; it is constant within the process so all
@@ -73,8 +72,7 @@ BEHAVIOURS: list[Behaviour] = [
     Behaviour(
         name="c-fragmented",
         # The Responses client puts the name on every fragment; this checks the shipped path emits
-        # one call
-        # event, not N carrying partial documents.
+        # one call event, not N carrying partial documents.
         calls=[ToolCall(tool="find_notes", arguments={"text": "buchwald amination"}, fragments=8)],
         text="One call, arguments delivered in eight fragments.",
     ),
@@ -112,8 +110,7 @@ BEHAVIOURS: list[Behaviour] = [
     Behaviour(
         name="f-malformed-json",
         # JSON-shaped and unclosable, not merely truncated: LangChain's `parse_partial_json` repairs
-        # a
-        # truncated document into a valid call, so only an unclosable one reaches
+        # a truncated document into a valid call, so only an unclosable one reaches
         # `AIMessage.invalid_tool_calls` and exercises `PromoteInvalidToolCalls`.
         #
         #     '{"text": "unterminated'  -> repaired to {'text': 'unterminated'}
@@ -125,8 +122,8 @@ BEHAVIOURS: list[Behaviour] = [
     Behaviour(
         name="f-cut-off",
         # A stream cut mid-string with `finish_reason: length`. `parse_partial_json` completes it to
-        # a
-        # valid call; only the finish reason says it was cut, and the call must be refused, not run.
+        # a valid call; only the finish reason says it was cut, and the call must be refused, not
+        # run.
         calls=[ToolCall(tool="find_notes", arguments={}, raw_arguments='{"text": "suzuki coup')],
         text="",
         finish_reason="length",
@@ -135,8 +132,7 @@ BEHAVIOURS: list[Behaviour] = [
     Behaviour(
         name="f-wrong-argument",
         # A wrong argument name (`find_notes` takes `text`, not `query`); the storm asserts the
-        # failure is
-        # visible.
+        # failure is visible.
         calls=[ToolCall(tool="find_notes", arguments={}, raw_arguments='{"query": "benzene"}')],
         text="",
         adversarial=True,
@@ -174,8 +170,8 @@ BEHAVIOURS: list[Behaviour] = [
     ),
     Behaviour(
         name="f-no-text",
-        # The `empty_answer` guard added earlier today: tools ran, nothing was written. Before that
-        # guard this turn produced an empty answer and no error at all.
+        # Tools ran and nothing was written: the `empty_answer` guard must report it rather than
+        # return an empty answer with no error.
         calls=[ToolCall(tool="find_notes", arguments={"text": "silent"})],
         text="",
     ),
@@ -211,10 +207,8 @@ BEHAVIOURS: list[Behaviour] = [
     Behaviour(
         name="h-impossible-args",
         # Well-formed and wrong: the symmetry-number map names species the equation does not
-        # contain. A
-        # schema check passes it, so only `_checked_symmetry_numbers`' domain validation stands
-        # between it
-        # and a plausible answer.
+        # contain. A schema check passes it, so only `_checked_symmetry_numbers`' domain validation
+        # stands between it and a plausible answer.
         calls=[
             ToolCall(
                 tool="compute_reaction_energy",
@@ -237,12 +231,9 @@ BEHAVIOURS: list[Behaviour] = [
     Behaviour(
         name="h-size-billed",
         # The one behaviour whose bill follows the request (0.5 tokens per character, about twice
-        # the
-        # chars/4 estimate), so a lane driving it moves the calibration ratio above 1 and exercises
-        # the
-        # EWMA, `agent_context_calibration_max_factor` and budget tightening. Every other entry
-        # bills a
-        # constant.
+        # the chars/4 estimate), so a lane driving it moves the calibration ratio above 1 and
+        # exercises the EWMA, `agent_context_calibration_max_factor` and budget tightening. Every
+        # other entry bills a constant.
         calls=[ToolCall(tool="find_notes", arguments={"text": "calibration"})],
         text="Billed by size, so the estimator has something to be wrong about.",
         input_tokens=None,
@@ -252,8 +243,7 @@ BEHAVIOURS: list[Behaviour] = [
         name="h-oversize",
         # The endpoint refusing the request outright: the only way a lane produces the 400 that
         # `llm_provider._is_context_length` classifies as `context_length`. Per-behaviour
-        # `http_status`
-        # injection lands on the generic `error` label, as 401 and 404 would.
+        # `http_status` injection lands on the generic `error` label, as 401 and 404 would.
         calls=[ToolCall(tool="find_notes", arguments={"text": "over the endpoint's limit"})],
         text="",
         input_tokens=None,

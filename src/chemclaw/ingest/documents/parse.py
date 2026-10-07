@@ -116,8 +116,7 @@ def read_without_a_ceiling(cause: UnclassifiedParseError) -> UnclassifiedParseEr
     Without a ceiling, an allocation failure and a malformed file are the same observation, so this
     keeps the parser's message for the operator and states that it cannot establish the cause,
     rather than blaming the document. No string in `cause` is inspected. Takes no `name` because
-    `cause`'s message already carries it
-    (D-2026-09-22-an-unbounded-parse-may-not-blame-the-document).
+    `cause`'s message already carries it.
 
     Args:
         cause: The unclassified failure, whose own words are kept verbatim.

@@ -63,10 +63,9 @@ logger = logging.getLogger(__name__)
 
 # `_T` is the item type of the index-only `_systematic_sample`. `_AB_BASELINE_PROFILE` is the A/B
 # control arm's shipped profile (`data/evals/profiles/no-tools.yaml`); a constant so "baseline"
-# means
-# one thing. It replaces the default instructions as well as the tools, so it is a prompt contrast,
-# not a tools contrast (`tools-removed` varies only tools). `_M12_SUITES` maps each M12 suite to its
-# probe file, so a missing file fails with a searchable name.
+# means one thing. It replaces the default instructions as well as the tools, so it is a prompt
+# contrast, not a tools contrast (`tools-removed` varies only tools). `_M12_SUITES` maps each M12
+# suite to its probe file, so a missing file fails with a searchable name.
 _T = TypeVar("_T")
 
 _AB_BASELINE_PROFILE = "no-tools"
@@ -153,17 +152,15 @@ def _summary(
 
     # What the broker says became of declared jobs, beside the launch count: "started" and "ran" are
     # different facts. `RUNNING` is not a failure (a campaign outlives its turn), so states are
-    # listed,
-    # not scored.
+    # listed, not scored.
     job_states = Counter(state for outcome in outcomes for state in outcome.job_outcomes.values())
     if job_states:
         summary = " · ".join(f"{state} {count}" for state, count in sorted(job_states.items()))
         signals.append(["…and what Temporal says became of them", summary])
 
     # Whether an `expects_job` probe reached the durable path, asked of the tool calls rather than
-    # of
-    # `job_started` events: a job that answers inside `inline_wait_seconds` is never announced, so
-    # counting events would call a working durable path a miss.
+    # of `job_started` events: a job that answers inside `inline_wait_seconds` is never announced,
+    # so counting events would call a working durable path a miss.
     if any(p.expects_job for p in probes):
         jobs = set(job_names())
         ran_a_job = {o.probe_id for o in outcomes if o.job_outcomes or (jobs & set(o.tools_called))}
@@ -252,10 +249,9 @@ def _reachability_status(outcomes: list[ProbeOutcome]) -> int:
     """3 when the run reached the front door for no probe at all; 0 otherwise.
 
     `transport_error` is the signal because it means the request never arrived; a front door
-    answering
-    500 is a result to report, not a refusal. Exit 3 matches `validate_template_args_live`'s "could
-    not reach something"; 2 is `_grading_status`' "reached it and graded nothing". All, not any: a
-    partial outage is reported per probe.
+    answering 500 is a result to report, not a refusal. Exit 3 matches
+    `validate_template_args_live`'s "could not reach something"; 2 is `_grading_status`' "reached it
+    and graded nothing". All, not any: a partial outage is reported per probe.
     """
     if outcomes and all(o.transport_error for o in outcomes):
         logger.error(
@@ -278,9 +274,8 @@ def _grading_status(
 
     An `unserved` on a turn with no answer is recorded without asking the judge, so it is not a
     verdict; a verdict counts only when the outcome carries an answer. A run against the scripted
-    mock
-    is always 2 (`scripted`): its answers and judge are the same fixed script, so its verdicts are
-    evidence about the mock.
+    mock is always 2 (`scripted`): its answers and judge are the same fixed script, so its verdicts
+    are evidence about the mock.
     """
     answered = {outcome.probe_id for outcome in outcomes if outcome.answered}
     judged = [g for g in grades if g.verdict != "ungraded" and g.probe_id in answered]
@@ -355,8 +350,7 @@ def _client(base_url: str | None) -> httpx.AsyncClient:
         timeout=httpx.Timeout(settings.live_probe_timeout_seconds),
         headers=headers,
         # The client carries a bearer, so an ambient proxy must not receive it;
-        # `tests/test_netguard.py`
-        # holds every client to `trust_env=False`.
+        # `tests/test_netguard.py` holds every client to `trust_env=False`.
         trust_env=False,
     )
 
@@ -370,10 +364,9 @@ def run_output_dir(suite: str) -> Path:
     """`<live_probe_transcript_dir>/<suite>/<this run's UTC stamp>` — where a live run writes.
 
     The parent stays the committed transcripts directory (`.gitignore` exempts it so live results
-    can
-    be read back); a per-run subdirectory means no run overwrites the record or dirties a tracked
-    file, and promoting a run is a deliberate copy. `live_jobs` and `live_data` write through this
-    function too.
+    can be read back); a per-run subdirectory means no run overwrites the record or dirties a
+    tracked file, and promoting a run is a deliberate copy. `live_jobs` and `live_data` write
+    through this function too.
     """
     return Path(settings.live_probe_transcript_dir) / suite / _RUN_STAMP
 
@@ -446,8 +439,7 @@ async def _run_plan_gate(args: argparse.Namespace) -> int:
     """Suite A — plan → approve → execute → re-gate, live. Exits non-zero on any failed check.
 
     Exits 3 against the scripted mock before a probe is asked: `cli.mock_llm` never writes a plan,
-    so
-    the scenario cannot be staged and any verdict would be about the mock.
+    so the scenario cannot be staged and any verdict would be about the mock.
     """
     if _scripted_gateway():
         logger.error(
@@ -600,8 +592,7 @@ async def _assert_profiles(base_url: str | None, profiles: Sequence[str]) -> Non
     Checked before any model call: a front door missing `data/evals/profiles` on
     `CHEMCLAW_PROFILES_DIR` would reject baseline turns after the other arm was paid for, or run
     identical arms. `get_profile` raises on an unknown name, so one session open per profile
-    suffices.
-    The default agent is not checked.
+    suffices. The default agent is not checked.
     """
     async with _client(base_url) as client:
         for profile in dict.fromkeys(profiles):
@@ -614,8 +605,7 @@ async def _assert_profiles(base_url: str | None, profiles: Sequence[str]) -> Non
                     "every arm here is a profile, and without it the arms would be one agent."
                 ) from exc
             # Delete the probe session so it leaves no `session_owners` row; best-effort, since
-            # failing to
-            # delete is no reason to refuse the measurement.
+            # failing to delete is no reason to refuse the measurement.
             with contextlib.suppress(httpx.HTTPError):
                 (await client.delete(f"/sessions/{session_id}")).raise_for_status()
 
@@ -644,8 +634,8 @@ async def _run_ab(args: argparse.Namespace) -> int:
         probes = probes[: args.limit]
     if args.sample:
         # A systematic sample, not the first N: the corpus is in section order, so `[:N]` would
-        # cover one
-        # or two sections. Evenly spaced indices are reproducible without a seed, so reruns compare.
+        # cover one or two sections. Evenly spaced indices are reproducible without a seed, so
+        # reruns compare.
         probes = _systematic_sample(probes, args.sample)
     if not probes:
         logger.error("--buckets/--only/--limit/--sample selected no probes")
@@ -691,10 +681,9 @@ async def _run_ab(args: argparse.Namespace) -> int:
 def _marked(probe: Probe, behaviour: str) -> Probe:
     """`probe` with the mock's behaviour selector on its question — the scripted double only.
 
-    A copy, since the corpus object is shared across arms and repeats. The marker goes on
-    `question` so it also reaches the judge (`evals/live_judge._prompt` quotes it), whose call goes
-    to
-    the same gateway. Against a real gateway nothing is marked.
+    A copy, since the corpus object is shared across arms and repeats. The marker goes on `question`
+    so it also reaches the judge (`evals/live_judge._prompt` quotes it), whose call goes to the same
+    gateway. Against a real gateway nothing is marked.
     """
     return probe.model_copy(update={"question": f"[[{behaviour}]] {probe.question}"})
 
@@ -795,8 +784,7 @@ def _write_delegation(
     """Write the runs, the report and the raw evidence beside the transcripts that produced them.
 
     `runs.json` is written first and always: it is the expensive part (one real turn per task, arm
-    and
-    repeat) and what `--compare-runs` reads back, so a refused comparison does not lose it.
+    and repeat) and what `--compare-runs` reads back, so a refused comparison does not lose it.
     """
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "runs.json").write_text(
@@ -838,8 +826,7 @@ async def _run_delegation(args: argparse.Namespace) -> int:
 
     if args.compare_runs:
         # Aggregate recorded observations without asking anything — the only way to assemble a pair
-        # whose
-        # repeats differ in whether they delegated.
+        # whose repeats differ in whether they delegated.
         runs = delegation_run.load_recorded_runs(
             [Path(item) for item in args.compare_runs.split(",")]
         )
@@ -912,9 +899,8 @@ async def _run_delegation(args: argparse.Namespace) -> int:
         return 2
     if mock and not args.compare_runs:
         # A run against the scripted double exits non-zero even when every arm reported: the double
-        # decides
-        # to delegate, so the run proves only that the runner observes delegation. Outputs are
-        # written first.
+        # decides to delegate, so the run proves only that the runner observes delegation. Outputs
+        # are written first.
         logger.error(
             "this run's gateway was the scripted mock, so its %d report(s) are evidence about this "
             "runner and not about delegation. Point CHEMCLAW_LLM_BASE_URL at a gateway to measure "
@@ -944,8 +930,7 @@ async def _main(args: argparse.Namespace) -> int:
         probes, outcomes = _load_transcripts(directory)
         if not outcomes:
             # A re-grade over no transcripts measured nothing; it must not write an empty summary
-            # over the
-            # committed record and exit 0.
+            # over the committed record and exit 0.
             logger.error("no transcripts to re-grade in %s — nothing was measured", directory)
             return 2
         logger.info("re-grading %d stored transcripts from %s", len(outcomes), directory)
@@ -977,8 +962,7 @@ async def _main(args: argparse.Namespace) -> int:
         probes = probes[: args.limit]
     if not probes:
         # Zero probes is a run that measured nothing, as the M12 suites treat it; a renamed probe id
-        # must
-        # not turn `--only` into a permanent green line.
+        # must not turn `--only` into a permanent green line.
         logger.error(
             "--only/--limit selected no probes out of %d loaded from %s",
             loaded,
@@ -1036,8 +1020,7 @@ def _positive(value: str) -> int:
 def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     """The probe lane's command line, split out of `main` so it can be tested without a live run."""
     # `configure_logging()`, not `basicConfig`: it installs the `SecretRedactingFilter` that scrubs
-    # the
-    # `live_probe_token` bearer from logged errors and tracebacks (`tests/test_logging.py`).
+    # the `live_probe_token` bearer from logged errors and tracebacks (`tests/test_logging.py`).
     configure_logging()
     parser = argparse.ArgumentParser(
         description="Run the live probe set against a running front door."

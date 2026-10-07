@@ -49,8 +49,8 @@ def point_id(doc_id: str, chunking_key: str, ordinal: int) -> str:
 def parse_point_id(reference: str) -> tuple[str, str, int] | None:
     """Read a point id back into `(doc_id, chunking_key, ordinal)`, or `None` when it is not one.
 
-    `None` rather than an exception: the store may hold points the catalogue no longer knows, and
-    one unreadable id must not fail the search.
+    `None` rather than an exception: the store may hold points the catalogue does not know, and one
+    unreadable id must not fail the search.
     """
     head, separator, ordinal = reference.rpartition("#")
     if not separator or not head:

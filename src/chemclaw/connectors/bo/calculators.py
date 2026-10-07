@@ -20,8 +20,7 @@ def properties_for(store: ResultStore) -> PropertiesFor:
         """The electronic properties of one molecule, and the `calc_ref` they can be cited by.
 
         The reference is the `calc_key` the server stamps on every result, read off the payload so
-        an
-        `experiment-proposal` note can cite it on a cache hit as well as a miss.
+        an `experiment-proposal` note can cite it on a cache hit as well as a miss.
         """
         payload, _ = await cached_remote(
             store, "compute_electronic_properties", {"smiles": smiles, "solvent": None}

@@ -15,7 +15,7 @@ def join_chunks(pieces: list[str], overlap_chars: int, max_chars: int | None = N
 
     Not arithmetic on `overlap_chars`: `_hard_split` pieces and the first piece of a new block share
     nothing with their predecessor, so slicing a fixed overlap would eat real text. The actual
-    repeat is measured instead (see `_repeat_length`).
+    repeat is detected instead (see `_repeat_length`).
 
     Args:
         pieces: The chunks' `content`, in ascending `ordinal` order.

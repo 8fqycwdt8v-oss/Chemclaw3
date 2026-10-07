@@ -1,15 +1,8 @@
 """Whether an optimization is still finding anything, judged against the assay's own noise.
 
-Answers "have we plateaued?"; the only other early stop, `space_exhausted`, is discrete-space
-exhaustion.
-
-`assay_noise` is required with no default: a plateau verdict without the chemist's stated
-reproducibility would carry a tool's authority over an invented number. A gain is measured from the
-value at the last real gain, not the running best, so a climb in sub-noise steps still counts once
-it accumulates past the noise.
-
-No BoFire import: the arithmetic needs none, and `science.bo.problem` (imported here) is loaded in
-the agent process, which must stay free of `torch`.
+`assay_noise` is required: a plateau verdict needs the chemist's stated reproducibility. Gains are
+measured from the last real gain, so a sub-noise climb counts once it accumulates. No BoFire import
+(agent process).
 """
 
 from typing import Literal
@@ -180,17 +173,8 @@ def campaign_progress(
 ) -> CampaignProgress:
     """Read a campaign's observations for a plateau, against the noise the chemist stated.
 
-    Args:
-        problem: The decision space and objective the observations belong to.
-        observations: The runs so far, **in the order performed**; the reading is order-dependent.
-        assay_noise: The assay's reproducibility, in the objective's own units. Required.
-        window: How many recent evaluations the span statement covers, defaulting to
-            `bo_plateau_window`.
-        objective: Which objective to read. Optional on a single-objective problem; required on a
-            multi-objective one, where a plateau is per axis.
-
-    Returns:
-        The reading, with a `summary` stating what it does and does not establish.
+    `observations` must be in the order performed; `objective` is required on a multi-objective
+    problem.
     """
     if assay_noise <= 0:
         raise ValueError(

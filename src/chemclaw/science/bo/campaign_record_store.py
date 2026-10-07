@@ -1,8 +1,7 @@
 """Postgres backing for the BO campaign record (`infra/sql/031_bo_campaigns.sql`).
 
-Separate so the module the connector tool imports carries no database dependency. The campaign
-upsert refreshes the problem and `last_asked_at` and **never** the opener. Suggestions are a plain
-insert: the sequence is the campaign's history.
+The upsert refreshes the problem and `last_asked_at`, never the opener; suggestions are append-only
+history.
 """
 
 from contextlib import AbstractAsyncContextManager
@@ -63,11 +62,9 @@ class PostgresCampaignStore:
     """The durable `CampaignStore`: one short-lived connection per call (the house choice)."""
 
     async def record(self, campaign: Campaign, suggestion: Suggestion) -> tuple[int, bool]:
-        """Upsert the campaign and append its suggestion **atomically**.
+        """Upsert the campaign and append its suggestion **atomically**, in one transaction.
 
-        Returns the suggestion id and whether this call created the campaign. One transaction
-        because the upsert replaces `problem`, and a failure between the writes would pair the new
-        space with the old observations. The created flag comes from the upsert (see
+        Returns the suggestion id and whether this call created the campaign (see
         `_UPSERT_CAMPAIGN`).
         """
         async with _connect() as conn, conn.transaction():

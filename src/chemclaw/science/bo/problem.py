@@ -1,16 +1,8 @@
 """Framework-neutral specification of a Bayesian-optimization problem.
 
-Describes *what* to optimize — continuous and categorical parameters, one or more objectives, and
-constraints — with no BoFire types; the BoFire mapping is isolated in `chemclaw.science.bo.engine`.
-
-Multi-objective is inline only: `suggest_next_experiment` returns the Pareto front, while the
-durable campaign's registry maps a name to a scalar callable and refuses a trade-off.
-`LinearConstraint` couples continuous parameters; `ExcludeConstraint` forbids a pairing of two
-categorical options. The seeding and proposing strategies honour both; a factorial screen honours
-neither and refuses a constrained problem.
-
-This is the campaign job's `params_model`, imported into the agent process, which must stay free of
-`torch`: nothing here may import BoFire (hence the hand-written `pareto_front`).
+Parameters, objectives and constraints with no BoFire types (the mapping is in `engine`).
+Multi-objective is inline only. Imported into the agent process, which must stay free of `torch`, so
+nothing here imports BoFire.
 """
 
 from itertools import product
@@ -53,13 +45,9 @@ class CategoricalParameter(BaseModel):
     something about an option nobody has run. `descriptors` is computed from it — leave it unset.
     """
 
-    # Rationale here, not in the docstring: pydantic publishes the docstring as the JSON-schema
-    # description, inlined in every tool schema that takes a problem.
-    #
-    # A descriptor vector per category lets the surrogate interpolate between options instead of
-    # learning each label independently (`chemclaw.science.bo.featurize` fills it from
-    # `structures`). Both are carried in the spec: `structures` records what was featurized,
-    # `descriptors` what the surrogate saw, so featurization cannot change mid-campaign.
+    # Rationale here, not in the docstring, which pydantic publishes into every tool schema.
+    # Descriptors let the surrogate interpolate between options; `structures` and `descriptors` are
+    # both kept in the spec so featurization cannot change mid-campaign.
 
     kind: Literal["categorical"] = "categorical"
     name: str = Field(min_length=1)
@@ -230,9 +218,7 @@ class OptimizationProblem(BaseModel):
     def _accept_the_singular_objective(cls, data: Any) -> Any:
         """Accept `{"objective": {...}}` forever — it is the shape already on disk.
 
-        Stored `bo_campaigns.problem` rows and in-flight `CampaignSpec`s in Temporal history use it,
-        and rejecting it would fail a running campaign at replay. Both spellings together is a
-        caller error.
+        Stored rows and in-flight Temporal histories use it; both spellings at once is an error.
         """
         if not isinstance(data, dict) or "objective" not in data:
             return data
@@ -246,9 +232,7 @@ class OptimizationProblem(BaseModel):
     def objective(self) -> Objective:
         """The lead objective: `objectives[0]`.
 
-        A property so it is not serialized. The lead objective is privileged only for display and
-        identity (the `bo_campaigns.objective`/`direction` columns, the legacy campaign-id hash);
-        anything that optimizes reads `objectives`, or refuses.
+        A property so it is not serialized; only display and identity privilege the lead.
         """
         return self.objectives[0]
 
@@ -756,11 +740,7 @@ class CampaignSpec(BaseModel):
 
 
 def require_rounds_within_ceiling(n_rounds: int) -> None:
-    """Reject a round count beyond `bo_max_rounds`.
-
-    Bounds campaign length, not cost (rounds times batch, which `require_evaluations_within_budget`
-    bounds); history growth is handled by the workflow's continue-as-new. Enforced at creation,
-    never in the `CampaignSpec` model, whose validators re-run at replay.
+    """Reject a round count beyond `bo_max_rounds`; enforced at creation, not on the replayed model.
 
     Raises:
         ValueError: When `n_rounds` exceeds the configured `bo_max_rounds`.
@@ -775,10 +755,8 @@ def require_rounds_within_ceiling(n_rounds: int) -> None:
 def require_names_do_not_clash(problem: OptimizationProblem) -> None:
     """No parameter and objective share a name — checked *outside* the model, deliberately.
 
-    Both are dataframe column keys, so a clash would make the surrogate fit against its own input.
-    Not a validator, because the model revalidates at workflow replay and on every resume, and a
-    rule older data violates would strand it; enforced at the tool boundary and campaign launch
-    instead.
+    Both are dataframe columns. Not a validator, because stored and in-flight campaigns revalidate
+    on read and replay.
 
     Raises:
         ValueError: Naming the clashing name(s).
@@ -794,9 +772,7 @@ def require_names_do_not_clash(problem: OptimizationProblem) -> None:
 def require_descriptors_distinguish_categories(problem: OptimizationProblem) -> None:
     """No two categories may carry the same descriptor row — the surrogate cannot tell them apart.
 
-    `CategoricalDescriptorInput` gives the model only the descriptor position, so identical rows
-    (e.g. two labels for one SMILES) get one prediction. Outside the model for the reason
-    `require_names_do_not_clash` gives.
+    Outside the model for the reason `require_names_do_not_clash` gives.
 
     Raises:
         ValueError: Naming the parameter and the categories that collide.
@@ -820,9 +796,7 @@ def require_descriptors_distinguish_categories(problem: OptimizationProblem) -> 
 def require_direction_matches_objective(spec: CampaignSpec) -> None:
     """The declared direction must be the one its registered objective is actually better in.
 
-    The `objectives` import is deferred because that module imports this one. The check lives here
-    because `connector.yaml` names one `precondition`, reachable from this module. An unknown name
-    raises from `registered_direction` with the known names.
+    Imports `objectives` lazily (it imports this module).
 
     Raises:
         ValueError: Naming the objective, both directions, and which one to change.
@@ -849,9 +823,7 @@ def require_direction_matches_objective(spec: CampaignSpec) -> None:
 def require_problem_supplies_what_the_objective_reads(spec: CampaignSpec) -> None:
     """The decision space must declare every parameter the registered objective reads.
 
-    Otherwise the campaign fails at evaluate time, after the seed round, with a bare `KeyError`. A
-    measured objective is skipped. Ranges are not checked: a fitted emulator extrapolates flat
-    outside its training data, which this does not guard.
+    Measured objectives are skipped; ranges are not checked.
 
     Raises:
         ValueError: Naming the objective, the parameters it reads, and the ones the space lacks.
@@ -875,12 +847,9 @@ def require_problem_supplies_what_the_objective_reads(spec: CampaignSpec) -> Non
 def require_problem_yields_one_best_point(problem: OptimizationProblem) -> None:
     """Every rule a loop that returns a single best observation needs of its problem.
 
-    One statement of the rule for both callers. A trade-off has no single best point, so a
-    multi-objective problem is refused before any evaluation budget is spent.
-
     Raises:
         ValueError: When a parameter and an objective share a name, two categories carry identical
-            descriptors, or the problem names more than one objective.
+        descriptors, or the problem names more than one objective.
     """
     require_names_do_not_clash(problem)
     require_descriptors_distinguish_categories(problem)
@@ -898,9 +867,7 @@ def require_problem_yields_one_best_point(problem: OptimizationProblem) -> None:
 def require_evaluations_within_budget(spec: CampaignSpec) -> None:
     """Reject a spec whose whole evaluation budget exceeds `bo_max_evaluations`.
 
-    The budget is seed points plus every round's batch — how many times the objective is actually
-    called; the round ceiling alone does not bound it. Enforced at creation, never on the model,
-    which revalidates at replay.
+    The budget is seed points plus rounds × batch.
 
     Raises:
         ValueError: When the spec's total evaluation budget exceeds `bo_max_evaluations`.
@@ -920,17 +887,15 @@ def require_evaluations_within_budget(spec: CampaignSpec) -> None:
 def require_campaign_startable(spec: CampaignSpec) -> None:
     """Every launch-time rule for a durable campaign, in the shape `precondition` is called with.
 
-    One function because `connector.yaml` names exactly one and `cli/validate_connectors.py` checks
-    it accepts the params model. Not on `CampaignSpec`, whose validators re-run at replay. The
-    durable campaign is single-objective (its registry returns one number per evaluation); the
-    direction and parameter checks catch a campaign that would run to completion and answer wrongly.
+    `connector.yaml` names one precondition; these rules stay off `CampaignSpec`, which revalidates
+    at replay.
 
     Raises:
         ValueError: When the round count exceeds `bo_max_rounds`, the total evaluation budget
-            exceeds `bo_max_evaluations`, the problem names more than one objective, a parameter and
-            an objective share a name, two categories carry the same descriptor row, the declared
-            direction disagrees with the registered objective's, or the decision space omits a
-            parameter that objective reads.
+        exceeds `bo_max_evaluations`, the problem names more than one objective, a parameter and an
+        objective share a name, two categories carry the same descriptor row, the declared direction
+        disagrees with the registered objective's, or the decision space omits a parameter that
+        objective reads.
     """
     require_rounds_within_ceiling(spec.n_rounds)
     require_evaluations_within_budget(spec)
@@ -986,15 +951,11 @@ class CampaignCarryOver(BaseModel):
 def observed_value(
     problem: OptimizationProblem, observation: Observation, objective: str | None = None
 ) -> float:
-    """One objective's value off an observation, whichever shape it was given in.
-
-    The single reading of the scalar/vector split in `Observation`; `objective=None` means the lead
-    one. Also refuses a non-finite number, since `values` can be mutated past its validator and
-    every reader (dominance, plateau, the BoFire frame) comes through here.
+    """One objective's value off an observation, whichever shape it was given in (`None` = lead).
 
     Raises:
         ValueError: When the observation reports no value for `objective`, or reports one that is
-            not a finite number.
+        not a finite number.
     """
     name = problem.objective.name if objective is None else objective
     if name in observation.values:
@@ -1024,11 +985,7 @@ def _require_finite(value: float, objective: str, observation: Observation) -> f
 def require_observations_cover_objectives(
     problem: OptimizationProblem, observations: list[Observation]
 ) -> None:
-    """Every observation reports every objective, and agrees with itself.
-
-    On a single-objective problem `values` may be empty or name exactly that objective. On a
-    multi-objective one it must cover all, and `values[lead]` must equal `value`, since both are
-    persisted.
+    """Every observation reports every objective, and `values[lead]` agrees with `value`.
 
     Raises:
         ValueError: Naming the offending observation's index and what it is missing.
@@ -1108,15 +1065,10 @@ def _dominates(
 def pareto_front(
     problem: OptimizationProblem, observations: list[Observation], tolerance: float = 0.0
 ) -> list[Observation]:
-    """The non-dominated observations: the trade-off the runs actually show.
+    """The non-dominated observations, in run order; duplicates both stay.
 
-    An observation is on the front when no other is at least as good on every objective and strictly
-    better on one. Order is preserved; duplicates both stay (a replicate is evidence about the
-    assay).
-
-    `tolerance` is the assay's reproducibility; pass the chemist's stated number so the front does
-    not split runs nobody can tell apart. It defaults to exact because a front over recorded values
-    is still true without it. Pure Python: this module must not import BoFire.
+    `tolerance` is the assay's reproducibility (default exact), so runs nobody can tell apart do not
+    dominate each other.
     """
     if tolerance < 0:
         raise ValueError(
@@ -1130,13 +1082,10 @@ def pareto_front(
 
 
 def discrete_candidate_count(problem: OptimizationProblem) -> int | None:
-    """Distinct candidates in a purely discrete space, or None if it is infinite or too large.
+    """Distinct feasible candidates in a purely discrete space, or None if infinite or too large.
 
-    Any continuous parameter returns None. Otherwise the product of category counts, minus cells an
-    exclusion forbids (counted by enumeration, since exclusions can overlap; skipped with no
-    exclusions). Callers act on it — seeding refuses `n` above it, `space_exhausted` stops on it —
-    so it must not over-count. The enumeration is bounded by `bo_max_enumerated_cells`; above that
-    the answer is `None` ("effectively unbounded"), which callers already handle.
+    Exclusions are applied by enumeration, bounded by `bo_max_enumerated_cells`; above it the answer
+    is `None`.
     """
     counts: list[tuple[str, list[str]]] = []
     total = 1
@@ -1164,9 +1113,7 @@ def discrete_candidate_count(problem: OptimizationProblem) -> int | None:
 def discrete_space_size(problem: OptimizationProblem) -> int | None:
     """The product of the category counts — the grid *before* any exclusion removes cells.
 
-    `None` means only that a continuous parameter makes the space infinite, unlike
-    `discrete_candidate_count`. Cheap at any magnitude. Seeding must use this, or a merely large
-    space would take the infinite-space branch and lose deduplication and the `n` check.
+    `None` only for a continuous space; seeding uses this rather than the feasible count.
     """
     total = 1
     for parameter in problem.parameters:
@@ -1194,9 +1141,7 @@ def point_is_feasible(problem: OptimizationProblem, params: dict[str, ParamValue
 def point_in_domain(problem: OptimizationProblem, params: dict[str, ParamValue]) -> bool:
     """Whether every parameter of one point lies inside its declared range or category list.
 
-    A label, not a validator: BoFire extrapolates out-of-domain points, and a `Prediction` says so
-    rather than being withheld. Constraints are not consulted, since a chemist may ask about a point
-    they cannot run.
+    A label for extrapolation, not a validator; constraints are ignored.
     """
     for parameter in problem.parameters:
         value = params.get(parameter.name)
@@ -1232,9 +1177,8 @@ def distinct_feasible_candidate_count(
 ) -> int:
     """How many distinct observed points occupy a cell of the *feasible* design space.
 
-    The history must be counted under the same feasibility filter as `discrete_candidate_count`, or
-    a run of a later-excluded pairing consumes a cell it was never part of and campaigns are
-    declared exhausted early.
+    Counted under the same filter as `discrete_candidate_count`, so later-excluded runs do not
+    exhaust a space early.
     """
     return len({params_key(o.params) for o in observations if point_is_feasible(problem, o.params)})
 
@@ -1244,8 +1188,6 @@ def space_exhausted(
 ) -> bool:
     """Whether a purely discrete space is too exhausted to propose a full batch.
 
-    Once fewer than `batch` fresh candidates remain BoFire's discrete acquisition would crash, so a
-    loop stops cleanly. `space` is None for an infinite space, which never exhausts. `problem` is
-    taken so the history is counted under the same feasibility filter as `space`.
+    `space` is None for an infinite space, which never exhausts.
     """
     return space is not None and distinct_feasible_candidate_count(problem, history) + batch > space

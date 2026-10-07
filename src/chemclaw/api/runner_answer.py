@@ -20,20 +20,11 @@ async def build_answer_event(
 ) -> tuple[AnswerEvent, TurnReview]:
     """Assemble the turn's final `AnswerEvent`, scoring the answer first.
 
-    `review_required` is the one signal a surface reads to flag an answer; `unsupported_claims`
-    carries why, whichever check spoke.
-
-    Args:
-        answer: The finished answer text.
-        tool_outputs: What this turn's tools returned, untruncated, so checks ask what this turn
-        saw.
-        tools_called: Every tool this turn invoked, for the promised-but-uncalled scan.
-
-    Returns:
-        The event and the verdict. The verdict keeps unsupported claims apart from review notes,
-        which the wire merges; the revision loop in `api/runner.py` needs only the actionable half.
-        Every finding field is what a check found or the `None`/`False` meaning nothing was found,
-        and `checks_run` says which checks ran at all.
+    `tool_outputs` are this turn's untruncated tool results, so the checks ask what this turn saw;
+    `tools_called` feeds the promised-but-uncalled scan. Returns the event and the verdict: the wire
+    merges unsupported claims with review notes, and the revision loop in `api/runner.py` needs only
+    the claims. `review_required` is the one flag a surface reads; `checks_run` says which checks
+    ran at all.
     """
     review = await score_answer(answer, tool_outputs, tools_called)
     return (

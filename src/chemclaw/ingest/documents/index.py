@@ -322,9 +322,8 @@ def _cosine(a: list[float], b: list[float], *, a_norm: float | None = None) -> f
 class InMemoryDocumentIndex:
     """Process-local `DocumentIndex` computing the reference ranking in Python.
 
-    A differential test oracle, not a deployment backend: no configuration returns it
-    (D-2026-09-07-a-reference-implementation-is-a-test-oracle-not-a-backend). Dense search is exact
-    cosine, the ordering pgvector's `<=>` produces up to HNSW recall; lexical search is a
+    A differential test oracle, not a deployment backend: no configuration returns it. Dense search
+    is exact cosine, the ordering pgvector's `<=>` produces up to HNSW recall; lexical search is a
     shared-term fraction, matching `ts_rank`'s intent but not its scores.
     """
 

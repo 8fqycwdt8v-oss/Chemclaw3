@@ -76,11 +76,10 @@ def _driver_problems(manifest: DeliveryChannelManifest) -> list[str]:
 def _config_strings(value: object, depth: int = 3) -> list[str]:
     """Every string a driver could read a destination out of, to a bounded depth.
 
-    `config:` is free-form, so a destination may be nested (`urls: [a, b]`,
-    `endpoints: {primary: …}`, `targets: [{url: …}]`). `depth` counts container hops below the
-    `config` dict; a plain string is always returned, and the guard only stops a container.
-    `depth=3` reaches strings inside a list of per-target dicts; anything deeper is outside what
-    rule 4 claims to see.
+    `config:` is free-form, so a destination may be nested (`urls: [a, b]`, `endpoints: {primary:
+    …}`, `targets: [{url: …}]`). `depth` counts container hops below the `config` dict; a plain
+    string is always returned, and the guard only stops a container. `depth=3` reaches strings
+    inside a list of per-target dicts; anything deeper is outside what rule 4 claims to see.
     """
     if isinstance(value, str):
         return [value]
@@ -101,8 +100,7 @@ def _posture_problems(manifest: DeliveryChannelManifest) -> list[str]:
     destinations, and must not depend on `PG_LOOPBACK_HOSTS` containing `''`.
 
     Asked with `enforced=True` unconditionally, since `settings.entra_required` is off in CI: a
-    manifest
-    that will be refused once enforcement is on is broken today. The rule itself is
+    manifest that will be refused once enforcement is on is broken today. The rule itself is
     `deliver.driver.plaintext_channel_refusal`, one definition for construction and validation.
     """
     token_env = str(manifest.config.get("token_env", "") or "")
@@ -126,8 +124,7 @@ def problems() -> list[str]:
         manifests = discovered()
     except (DeliveryChannelError, OSError, yaml.YAMLError) as exc:
         # One problem line rather than a traceback. `OSError`/`yaml.YAMLError` are caught too
-        # because
-        # `deliver.registry._load` does not wrap them.
+        # because `deliver.registry._load` does not wrap them.
         return [f"cannot read a delivery channel manifest: {exc}"]
 
     if not manifests:

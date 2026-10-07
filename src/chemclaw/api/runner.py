@@ -1,13 +1,9 @@
 """The per-turn run lifecycle: the caller that actually runs the agent.
 
-`run_turn` opens the turn's MCP connectors (`connectors.registry.open_connector_specs`), compiles
-the turn's graph over them, and translates its stream into the typed `chemclaw.api.events`
-(`api/graph_stream.py`). A failure becomes one `ErrorEvent` with a user-safe message, never a stack
-trace.
-
-This module is the lifecycle — the exit stack, the state snapshot and rollback, the contextvars a
-turn stamps and unstamps. The pure parts live beside it: `api/runner_trace.py` (tool-call events),
-`api/runner_usage.py` (token arithmetic) and `api/runner_answer.py` (scoring the answer).
+`run_turn` opens the turn's MCP connectors, compiles the turn's graph over them, and streams it as
+typed `chemclaw.api.events` (`api/graph_stream.py`); a failure becomes one user-safe `ErrorEvent`.
+This module owns the lifecycle (exit stack, state rollback, ambient contextvars); the pure parts are
+`runner_trace`, `runner_usage` and `runner_answer`.
 """
 
 import asyncio
@@ -188,35 +184,25 @@ async def run_turn(
     deadline: float | None = None,
     exhibit_refs: Sequence[ExhibitRef] = (),
 ) -> AsyncIterator[Event]:
-    """Run one turn and yield its events (tokens, tool calls, jobs, then the answer).
+    """Run one turn and yield its events (tokens, tool calls, jobs, then an answer or an error).
 
     Args:
-        session: The caller's conversation session (per user+thread), so the turn resumes context.
+        session: The caller's conversation session, so the turn resumes context.
         user_message: The chemist's message for this turn.
-        actor: The authenticated user's Entra oid, made ambient for the audit trail, the
-            authorization gate and job attribution. `None` off the authenticated path.
+        actor: The authenticated Entra oid, made ambient; `None` off the authenticated path.
         roles: The user's app roles, made ambient for the authorization gate.
-        dry_run: Plan the turn without launching anything expensive. Ambient rather than a tool
-            argument, so the model can neither set nor clear it.
-        connectors: This turn's unopened connector specs. Defaults to every enabled connector;
-            a profile passes its narrowed set, a test an empty list.
-        budget: The runaway-cost meter; the turn's tokens and count are booked against it at the
-            end. `None` disables metering (test/CLI).
-        history: The session's history provider, into which the transcript is projected. The
-            graph reads its own checkpointer, never this. `None` runs without a transcript.
-        profile: The session's agent profile, used only to label token spend. `None` labels it
-            `default`.
-        graph_factory: Builds this turn's compiled graph from the profile, identity and open
-            connectors; the seam that lets tests drive a turn without a model credential.
-        deadline: The loop-clock reading at which the caller's whole-turn `asyncio.timeout`
-            fires, used to tell a timeout from a stop (both arrive as `CancelledError`). `None`
-            where nothing sets a deadline, so every cancellation is an abandonment.
-        exhibit_refs: Artefacts the message points at, already resolved by the route; copied into
-            this turn's artefact note.
+        dry_run: Plan without launching anything expensive; ambient, so the model cannot change it.
+        connectors: Unopened connector specs; default every enabled connector.
+        budget: The runaway-cost meter booked at turn end; `None` disables metering.
+        history: The history provider the transcript is written to; `None` writes none.
+        profile: The agent profile, used only to label token spend (`None` is `default`).
+        graph_factory: Builds the turn's compiled graph; the seam tests use instead of a model.
+        deadline: Loop-clock time the caller's whole-turn timeout fires, to tell a timeout from a
+            stop; `None` treats every cancellation as an abandonment.
+        exhibit_refs: Artefacts the message points at, already resolved by the route.
 
     Yields:
-        `chemclaw.api.events.Event` values in the order the model produced them, ending with an
-        `AnswerEvent` on success or an `ErrorEvent` on failure.
+        `chemclaw.api.events.Event` values, ending with an `AnswerEvent` or an `ErrorEvent`.
     """
     # Adopt the request's correlation id (the pump task copies the request's context), so the
     # response header, access log, audit trail and cost ledger share one id. Off the request path a
@@ -562,13 +548,9 @@ async def run_turn(
 class _TurnLedger:
     """What one turn accumulates that more than one of its stages has to read.
 
-    The stream collector, the resume, the guard events and the teardown all read it;
-    `_book_turn_spend` turns the whole record into one `turn_costs` row.
-
-    Three distinct questions: `answered` ("did the user get an answer for the money", the
-    `completed` column; true only after the verifier and any resume, and true for a loop-capped
-    partial answer); `run_complete` (the last model run returned, so a teardown has nothing
-    half-written to roll back); and `outcome` (how the turn ended).
+    `_book_turn_spend` turns the whole record into one `turn_costs` row. `answered` (an answer was
+    delivered; the `completed` column), `run_complete` (the last model run returned, so there is
+    nothing to roll back) and `outcome` (how it ended) are three separate questions.
     """
 
     correlation_id: str
@@ -710,21 +692,10 @@ class _TurnLedger:
 async def _earlier_user_texts(history: Any | None, session: TurnSession) -> list[str]:
     """The chemist's own earlier messages in this thread, bounded, for the `stated` ambient.
 
-    Lets `require_quotes_are_verbatim` grade a `basis="stated"` slot against words from earlier
-    turns. Bounded at the query by `agent_stated_quote_turns`; the character bound is applied where
-    the ambient is bound. Best-effort: an unreachable store yields no earlier words, which refuses
-    rather than accepts a quote. The catch is narrow on purpose: any other error is a
-    provider-signature defect in this repository and should fail loudly.
-
-    Args:
-        history: The session's history provider, or `None` off the durable path. A provider
-            without `recent_user_texts` contributes nothing.
-        session: The turn's session — its id addresses the durable rows and its `state` holds
-            the in-memory provider's thread, so one call works under both.
-
-    Returns:
-        Their earlier messages, oldest first. Empty when there is no provider, no thread, or the
-        store could not be read.
+    Lets a `basis="stated"` quote cite words from earlier turns. Bounded at the query by
+    `agent_stated_quote_turns`. Best-effort: an unreachable store yields `[]`, which refuses rather
+    than accepts a quote; other errors are defects and propagate. A provider without
+    `recent_user_texts` contributes nothing.
     """
     reader = getattr(history, "recent_user_texts", None)
     if reader is None or settings.agent_stated_quote_turns <= 0:
@@ -761,25 +732,12 @@ def _turn_ambient(
 ) -> Iterator[None]:
     """Stamp the ambients only a request can supply, and unstamp every one on the way out.
 
-    Synchronous on purpose: the disconnect path reaches the resets by cancellation, where an `await`
-    would re-raise and leak this turn's identity into the next turn on the worker. A `with` block
-    makes that structural. The cap watches and token ledger are entered via
-    `agent.turn_ambient.turn_caps`, shared with the other turn drivers.
-
-    What is ambient here, and why it is not an argument:
-
-    - the session, so a job-launching tool records push-back to the right session — never a
-      model-supplied argument;
-    - the authenticated identity, for audit, authorization and attribution;
-    - one correlation id per turn (agents are cached per profile, so a build-time id would be shared
-      across users);
-    - `full_result_sink`, where a cut tool result keeps its full text, since the cutting middleware
-      is cached per profile;
-    - `dry_run` and `user_texts` (the thread's user turns, this message last), which the model must
-      neither set nor supply; `protocols` checks `basis="stated"` quotes against the latter.
-
-    Resets run in reverse: the cap ambients first, then the full-result sink, the dry-run flag and
-    the identity vars. Nothing is stamped for identity when there is no actor.
+    Synchronous on purpose: the resets run under cancellation, where an `await` would re-raise and
+    leak this turn's identity into the next. Ambient rather than arguments: the session (for job
+    push-back), the identity, the turn's correlation id, `full_result_sink`, `dry_run` and
+    `user_texts` — values the model must not set and that per-profile cached agents and middleware
+    cannot be handed at build time. The cap watches come from `agent.turn_ambient.turn_caps`. Resets
+    run in reverse order.
     """
     session_token = set_current_session_id(session_id)
     user_texts_token = set_current_user_texts(user_texts)
@@ -816,14 +774,10 @@ async def _open_turn_surface(
 ) -> tuple[list[Any], list[str]]:
     """Open this turn's out-of-process capability, and name whatever did not answer.
 
-    Connector sessions belong to exactly one turn (`chemclaw.connectors.transport`), so they are
-    opened here and torn down after; their tools exist only once a session is live. An unreachable
-    connector costs its tools, not the turn. The durable subsystem (Temporal) is probed too, so a
-    turn does not plan around launchers that will fail. The caller announces what is missing before
-    the first token: only this layer knows the surface was short.
-
-    Returns:
-        The turn's bound tools, and the names of every capability that did not answer.
+    Connector sessions belong to one turn (`chemclaw.connectors.transport`) and their tools exist
+    only once live. An unreachable connector costs its tools, not the turn; Temporal is probed too.
+    The caller announces what is missing before the first token, since only this layer knows.
+    Returns the bound tools and the unreachable names.
     """
     # Gathered: both sit on every turn's pre-first-token path and share nothing.
     (turn_tools, unreachable), durable_up = await asyncio.gather(
@@ -866,14 +820,10 @@ async def _resume_on_job_results(
 ) -> AsyncIterator[Event]:
     """Continue this same turn with the results of the durable jobs it launched.
 
-    If enabled, wait (bounded by config and the whole-turn deadline) for this turn's jobs and
-    continue the same graph and `thread_id` with their results, so "compute, then reason" is one
-    exchange. Yields nothing when off, when no job launched, or when none finished in time.
-
-    `on_signal` drops this run's job launches, so a turn cannot chain jobs indefinitely.
-    `run_complete` is cleared for the duration, since the second run can half-write like the first.
-    `carry` makes the in-graph loop and spend caps span both runs instead of granting a fresh
-    allowance.
+    If enabled, wait (bounded) for this turn's jobs and continue the same graph and thread with
+    their results; yields nothing otherwise. Job signals are dropped so a turn cannot chain jobs,
+    `run_complete` is cleared while the second run may half-write, and `carry` keeps the in-graph
+    caps per turn.
     """
     if not (ledger.started_jobs and settings.mid_turn_resume_enabled):
         return
@@ -913,20 +863,10 @@ async def _revise_answer(
 ) -> AsyncIterator[Event]:
     """Run one revision pass over an answer the verifier flagged, in the same turn.
 
-    Shaped like `_resume_on_job_results` — same graph and thread, `run_complete` cleared, same
-    `carry` — so revisions count against the loop and spend caps. Unlike the resume it clears
-    `answer_parts`: a revision replaces the answer, and `AnswerEvent.text` carries only this pass.
-    The claims are framed as data, not instruction, since they quote the model's prose back at it.
-    The caller settles what the round leaves on the thread (`_settle_revision_thread`).
-
-    Args:
-        graph: This turn's compiled graph, so the revision sees the conversation it revises.
-        config: The turn's graph config, carrying the thread id and the step ceiling.
-        trace: The turn's tool-call trace, so tools the revision runs are announced and scored.
-        ledger: The turn's ledger; its `answer_parts` are replaced by this pass.
-        carry: The caps' per-turn carry, so a revision spends the turn's allowance.
-        claims: The unsupported claims to name — `TurnReview.unsupported`, never the merged wire
-            list.
+    Like `_resume_on_job_results` — same graph and thread, `run_complete` cleared, same `carry` so
+    revisions count against the caps — but it clears `answer_parts`, because a revision replaces the
+    answer. `claims` (`TurnReview.unsupported`) are framed as data, not instruction. The caller
+    settles the thread afterwards (`_settle_revision_thread`).
     """
     ledger.run_complete = False
     ledger.answer_parts.clear()
@@ -966,18 +906,10 @@ async def _settle_revision_thread(
 ) -> None:
     """Leave the checkpointed thread ending on the answer that ships, and on nothing fabricated.
 
-    The revision prompt is persisted as a `user` message the chemist never wrote, so it must come
-    off. If the round produced the shipped answer, the retracted answer and the prompt are
-    withdrawn; if not (no text, spend cap, or a raise), everything the round added is withdrawn and
-    the thread is as before. The round's additions are removed as one contiguous run, so no
-    `tool_calls` message loses its `ToolMessage`.
-
-    Args:
-        graph: The turn's compiled graph, whose checkpointer holds the thread.
-        config: The turn's graph config, naming the thread to withdraw from.
-        retracted: The message the thread ended on before the round, from `_thread_tip`. `None`
-            means there is no durable thread and nothing to do.
-        replaced: Whether the round produced the answer that is about to ship.
+    The persisted revision prompt is a `user` message the chemist never wrote. If the round's answer
+    ships (`replaced`), the `retracted` answer and the prompt are withdrawn; otherwise everything
+    the round added is, leaving the thread as before. Removed as one contiguous run, so no
+    `tool_calls` loses its `ToolMessage`. `retracted=None` means no durable thread.
     """
     if retracted is None:
         return
@@ -1080,24 +1012,11 @@ async def _escalate_exhausted_review(
 ) -> None:
     """Ask a person to look at an answer the revision loop could not ground.
 
-    Opens a wait on `durable/awaiting.py` (question, deadline, escalation) so an exhausted,
-    still-flagged answer has somebody waiting to read it.
-
-    It runs as the turn's own authenticated principal or not at all: synthesizing a requester would
-    attribute work to a chemist who never asked. The dedup subject is the session, so the unit of
-    review is a conversation: related exhausted turns of one thread join one wait, which keeps the
-    first turn's rationale. It is routed to the requester (`asked_of=actor`), the one principal who
-    can open the thread it points at. Best-effort: the answer is already built, so every failure is
-    counted through `degraded` and swallowed.
-
-    Args:
-        session: The turn's session — the dedup key, and where the wait's push-back notice lands.
-        answer: The answer as it will ship; only `review_required` is read.
-        actor: The turn's authenticated principal. Also checked against `entra_required`, because
-            off the authenticated path it is the non-empty stand-in `dev-user`, which must never
-            be attributed a durable request.
-        claims: What the last verdict found unsupported, named in the rationale.
-        correlation_id: The turn's id, the join key to `turn_costs`, `audit_events` and logs.
+    Opens a wait (`durable/awaiting.py`) routed to the requester, who can open the thread it names,
+    and deduplicated per session so one conversation's exhausted turns share one review. Runs only
+    as the turn's authenticated principal — never the `dev-user` stand-in, hence the
+    `entra_required` check — so nobody is attributed work they did not ask for. Best-effort: the
+    answer is already built, so failures are counted through `degraded` and swallowed.
     """
     if not answer.review_required or not settings.answer_review_escalation_enabled:
         return
@@ -1268,14 +1187,9 @@ def _empty_answer_event(
 ) -> ErrorEvent | None:
     """Name a turn that produced no prose at all, or `None` if it produced some.
 
-    A turn with no prose must not fail silently: a user cannot retry what never said it went wrong.
-    An `ErrorEvent` rather than an invented answer, retryable because a narrower question may
-    succeed.
-
-    The message always states what happened — calls attempted, failed, refused (a refusal is the
-    control working, not a failure) — and only the advice branches: a tool fault takes precedence
-    (read it), then a refusal (approve it), else a narrower question. `called_tools` counts
-    announced attempts, so it is not described as "ran".
+    A silent turn must say it failed. Retryable. The message states attempted, failed and refused
+    calls (a refusal is a gate working, not a failure), and the advice follows the first that
+    applies: read the failure, approve the plan, or ask a narrower question.
     """
     if ledger.answer_text.strip():
         return None
@@ -1433,20 +1347,11 @@ def _roll_back_unfinished(
 ) -> None:
     """Undo the bookkeeping of a turn torn down before its exchange completed.
 
-    Called on teardown from outside (disconnect or wall-clock deadline). sse-starlette delivers a
-    disconnect as `CancelledError`, never `GeneratorExit`, so the caller's clause catches both.
-    `session.state` holds the harness's bookkeeping (todo list, plan hash, marks), and a
-    half-finished turn would leave the next turn reading steps never taken.
-
-    Only an incomplete exchange is rolled back, judged by `run_complete` (the last model run
-    returned and the exchange is committed and paired), not `answered`, which becomes true only
-    after the verifier and resume. Only `session.state` is restored: the graph's checkpoint is
-    committed on its own autocommit pool and is not undone.
-
-    So a teardown between the graph run and `_record_transcript` keeps an exchange the transcript
-    lacks; that branch is counted (`chemclaw_transcript_thread_divergence_total`). The same
-    divergence on other paths (a refused model call, a cancel mid-tool) is not counted here, so a
-    zero does not mean it cannot happen.
+    Restores `session.state` (todo list, plan hash, marks) when a disconnect or deadline tears down
+    a turn whose last model run had not returned (`run_complete`), so the next turn does not read
+    steps never taken. sse-starlette delivers a disconnect as `CancelledError`. The graph's
+    checkpoint is not undone, so a teardown after the graph run but before `_record_transcript`
+    leaves the two records diverged; that branch is counted.
     """
     if ledger.answered or ledger.run_complete:
         if not ledger.answered:
@@ -1477,17 +1382,9 @@ def _roll_back_unfinished(
 def _settle_outcome(ledger: _TurnLedger) -> str:
     """How this turn ended, as one value of `_OUTCOMES` — the one producer of that enum.
 
-    The order is a precedence:
-
-    - `errored` first: nothing better describes a turn that raised.
-    - `timed_out` next: the clock may have killed a turn that wrote prose.
-    - the caps before `empty_answer` (the cap is the cause, emptiness a symptom) and before
-      `answered` (a capped turn delivers a partial answer, which would otherwise hide the cap).
-    - `answered` before `abandoned`: a turn that produced its answer then lost its reader was billed
-      for real work, and booking it incomplete would make a late disconnect a free bypass of the
-      budget.
-    - `abandoned` needs the cancellation flag; otherwise the floor is `empty_answer`, the silence
-      nothing explained.
+    Precedence: `errored`; `timed_out`; the caps (a cause, not their empty-answer symptom, and
+    hidden if `answered` came first); `answered` (a late disconnect after delivery still bills as
+    answered); then `abandoned` if cancelled, else `empty_answer`.
     """
     if ledger.error_code:
         return "errored"
@@ -1548,16 +1445,10 @@ def _book_turn_spend(
 ) -> None:
     """Book what the turn cost, on every path — success, failure and disconnect alike.
 
-    Synchronous so that it cannot `await`: it runs on the cancellation path, where an `await` would
-    re-raise and skip everything after it. The duration is observed on failures too, so the
-    histogram does not look best when the service is worst. Token counters are labelled by profile
-    (`default` when none), so spend is attributable and the family sums to the whole.
-
-    `record_turn_cost` books the same numbers per actor in a table, since an oid must never be a
-    metric label (`core/metrics` caps series). Booking here bills disconnected turns too. This is
-    the one producer of a chat turn's record (outcome, error code, model, counts,
-    time-to-first-token); `durable/template_activities._book_step_spend` writes template steps
-    separately.
+    Synchronous so it cannot `await` on the cancellation path. Observes duration on failures too and
+    publishes tokens labelled by profile; `record_turn_cost` books the same per actor in a table,
+    since an oid must not be a metric label. The one producer of a chat turn's `turn_costs` row
+    (template steps book their own).
     """
     elapsed = time.perf_counter() - ledger.started
     # The budget is booked first, so a failure in any later derivation costs record precision, not
@@ -1699,13 +1590,9 @@ async def _turn_checkpointer() -> Any:
 async def turn_store() -> Any:
     """This turn's durable memory store, or `None` where the deployment keeps none.
 
-    Gated by `local_skills.personal_skills_available`, asked rather than restated. Built here so
-    `build_langgraph_agent` stays synchronous. Whether the turn has an actor is decided in
-    `scratchpad_backend`, where the namespace is computed. Public because `api/routes/skills.py`
-    reads the same store, so both answer availability from one function.
-
-    Returns:
-        A ready `AsyncPostgresStore`, or `None` for a turn with a scratchpad but no memory.
+    Gated by `local_skills.personal_skills_available`; built here so `build_langgraph_agent` stays
+    synchronous; public because `api/routes/skills.py` reads the same store. Whether the turn has an
+    actor is `scratchpad_backend`'s decision. Returns an `AsyncPostgresStore` or `None`.
     """
     if not personal_skills_available():
         return None
@@ -1738,14 +1625,9 @@ async def _durable_subsystem_reachable() -> bool:
 async def _with_pushed_job_results(session_id: str, user_message: str) -> str:
     """The turn's input, with any waiting job push-back appended as framed data.
 
-    Lets the model learn that a job it launched has finished even when no tab is open. Uses the same
-    atomic, kind-scoped claim as the SSE stream, so neither consumer double-delivers or starves the
-    other. The chemist's words lead; the push-back follows, framed with `frame_untrusted` because it
-    is workflow output. Best-effort: an unreadable or absent mailbox does not fail the turn.
-
-    Bounded: each summary is cut to `agent_max_tool_result_chars` inside the frame, with a
-    self-identifying notice, so the message cannot reach deepagents' offload threshold and a cut can
-    never remove a delimiter.
+    Lets the model learn a job it launched finished even with no tab open, via the same atomic
+    kind-scoped claim as the SSE stream. Push-back is framed (`frame_untrusted`) after the chemist's
+    words, each summary cut to `agent_max_tool_result_chars` inside the frame. Best-effort.
     """
     if settings.session_store != "postgres":
         return user_message
@@ -1815,14 +1697,10 @@ async def _record_transcript(
 ) -> None:
     """Write this turn's exchange to the session transcript, best-effort.
 
-    `session_messages` backs `GET /sessions/{id}/messages`, and the graph keeps its thread only in
-    the checkpointer, so the transcript is written here from the turn's own text. The question is
-    usually written ahead (`turn`, from `_begin_transcript_turn`); this appends the rest and settles
-    it `done` in one commit, or writes the exchange whole if the write-ahead did not land. Tool
-    exchanges are stored too, since the transcript route projects `tool_calls` and `result_ref` from
-    them and only the messages carry call ids. An empty answer is not written: the turn already said
-    nothing was produced. A teardown between the graph run and this call leaves the checkpoint and
-    transcript diverged; see `_roll_back_unfinished`.
+    `session_messages` backs `GET /sessions/{id}/messages`; the graph keeps its thread only in the
+    checkpointer. Usually appends to the written-ahead question (`turn`) and settles it `done`;
+    otherwise writes the exchange whole. Tool exchanges are included, since only messages carry call
+    ids. An empty answer is not written.
     """
     if history is None or not answer.strip():
         return
@@ -1970,14 +1848,10 @@ async def settle_interrupted_turns(
 ) -> int:
     """Mark the session's turns whose owner died `interrupted`, and book each one's outcome once.
 
-    A pod killed mid-turn runs no teardown, so whoever touches the session next — its next turn, a
-    reattach, a transcript read — asks, and the provider marks a question only once its claim lapsed
-    with no live owner. That mark is exactly-once across processes, so the booking (one `turn_costs`
-    row, one `turn.interrupted` log record, one counter increment) is too. No spend is booked: the
-    dead process's metering died with it. Best-effort: a store that cannot answer leaves the
-    question for the next reader.
-
-    Returns how many turns this call marked.
+    A killed pod runs no teardown, so the next to touch the session (its next turn, a reattach, a
+    transcript read) asks; the provider marks only questions whose claim lapsed, exactly once across
+    processes, so the zero-spend booking is once too. Best-effort. Returns how many turns this call
+    marked.
     """
     mark = getattr(history, "mark_interrupted", None)
     if mark is None:

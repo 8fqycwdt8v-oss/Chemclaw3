@@ -69,8 +69,7 @@ def _carry_on_if_history_is_filling_up(
     Safe mid-loop because the whole state is `CampaignCarryOver`; called only after a round
     completes, never between propose and evaluate. `rounds_done` travels so per-round record keys do
     not collide with the previous run's. `spent` travels because the execution timeout spans the
-    whole
-    continue-as-new chain while `workflow.info().workflow_start_time` resets per run.
+    whole continue-as-new chain while `workflow.info().workflow_start_time` resets per run.
     """
     if rounds_remaining <= 0 or not workflow.info().is_continue_as_new_suggested():
         return
@@ -99,13 +98,11 @@ async def _measure(
 
     What makes a real bench campaign expressible: propose a batch, wait for the plates, propose the
     next. A child workflow, not an activity, because a week-long wait has no start-to-close budget
-    or
-    heartbeat; the child holds the question and escalates on its own timer.
+    or heartbeat; the child holds the question and escalates on its own timer.
 
     The child id carries the round, so each round is its own wait even when conditions repeat. An
     expired wait ends the campaign with what it has rather than fitting a surrogate to a batch
-    nobody
-    ran.
+    nobody ran.
     """
     request = AwaitRequest(
         kind="measurement",
@@ -130,19 +127,17 @@ async def _measure(
             task_queue=settings.background_task_queue,
             # Not the default `TERMINATE`: a terminate never runs workflow code, so the round's
             # `pending_requests` row would stay `waiting` forever in people's inboxes (retention
-            # never
-            # collects it). `REQUEST_CANCEL` delivers the `CancelledError` the wait handles,
-            # settling the row;
-            # `ABANDON` would leave the question answerable after the campaign is gone. Pinned by
-            # `tests/test_awaiting.py` and, at this call site, `tests/test_bo_campaign.py`.
+            # never collects it). `REQUEST_CANCEL` delivers the `CancelledError` the wait handles,
+            # settling the row; `ABANDON` would leave the question answerable after the campaign is
+            # gone. Pinned by `tests/test_awaiting.py` and, at this call site,
+            # `tests/test_bo_campaign.py`.
             parent_close_policy=ParentClosePolicy.REQUEST_CANCEL,
         )
     )
     if outcome.state != "answered":
         return []
     # The answer is opaque to the wait and typed here, so a malformed one fails the campaign naming
-    # the
-    # batch rather than being coerced into plausible numbers.
+    # the batch rather than being coerced into plausible numbers.
     return [Observation.model_validate(row) for row in outcome.payload.get("observations", [])]
 
 
@@ -151,11 +146,9 @@ def dispatches_left(rounds_remaining: int, seeding: bool) -> int:
 
     The divisor `_queue_wait` shares the remaining execution budget by: two for the seed (propose,
     evaluate), three per round (propose, evaluate, record) and one terminal record. An error here is
-    a
-    fairness bug, never a safety one — each dispatch is bounded by what is left, so the sum cannot
+    a fairness bug, never a safety one — each dispatch is bounded by what is left, so the sum cannot
     exceed the budget — which is why the count may be re-synced each round. Measured campaigns open
-    a
-    child instead of an activity but have no execution ceiling, so they are unaffected.
+    a child instead of an activity but have no execution ceiling, so they are unaffected.
 
     Args:
         rounds_remaining: Rounds this campaign still owes.
@@ -175,8 +168,7 @@ class CampaignBudgetSpent(Exception):
 
     `run`'s round loop guards each round with `_cannot_afford_another_dispatch`, and the terminal
     `record_campaign_run` is wrapped. The seed's dispatches need neither: `Settings` refuses a
-    ceiling
-    that cannot fund one attempt, and a resumed run does not seed.
+    ceiling that cannot fund one attempt, and a resumed run does not seed.
     """
 
 
@@ -206,12 +198,9 @@ class BoCampaignWorkflow:
         """How long the *next* activity may sit unclaimed, given what this campaign has left.
 
         `connector_queue_wait_timeout()` funds one wait plus one attempt within the parent's
-        ceiling, but
-        a campaign dispatches several activities. So the remaining budget is divided by the
-        dispatches
-        still to come, and the result is the smaller of that share and the queue-wide bound (a
-        property of
-        the queue that does not shrink).
+        ceiling, but a campaign dispatches several activities. So the remaining budget is divided by
+        the dispatches still to come, and the result is the smaller of that share and the queue-wide
+        bound (a property of the queue that does not shrink).
 
         Returns:
             The `schedule_to_start_timeout` for the next dispatch.
@@ -228,10 +217,8 @@ class BoCampaignWorkflow:
             return queue_bound
         remaining = budget - self._spent()
         # Affordability is judged on what is left, never on the share: with many rounds the first
-        # share is
-        # smaller than one attempt even though the budget is untouched. The share may narrow a wait
-        # but must
-        # never refuse one.
+        # share is smaller than one attempt even though the budget is untouched. The share may
+        # narrow a wait but must never refuse one.
         affordable = remaining_queue_wait_timeout(remaining, settings.bo_activity_timeout_seconds)
         if affordable is None:
             raise CampaignBudgetSpent
@@ -248,9 +235,8 @@ class BoCampaignWorkflow:
         """Whether this campaign's execution ceiling can still fund a wait plus an attempt.
 
         A predicate rather than a `try`, because `_queue_wait` decrements `_dispatches_left` and a
-        probe
-        must not. Asks on the same basis as `_queue_wait` — what is left, undivided — so the two
-        agree.
+        probe must not. Asks on the same basis as `_queue_wait` — what is left, undivided — so the
+        two agree.
 
         Returns:
             True when the budget is spent and the loop must end with what it has.
@@ -294,11 +280,9 @@ class BoCampaignWorkflow:
                 heartbeat_timeout=heartbeat_timeout,
                 schedule_to_start_timeout=self._queue_wait(),
                 # `calculation_retry`, not `BAD_DATA_RETRY`: a computed objective such as
-                # `solubility_objective`
-                # calls `cached_remote`, so `CalcBusyError` from a full calc pod is possible, and
-                # Temporal's default
-                # fast backoff would exhaust attempts within seconds. Same retryable types, wider
-                # spacing.
+                # `solubility_objective` calls `cached_remote`, so `CalcBusyError` from a full calc
+                # pod is possible, and Temporal's default fast backoff would exhaust attempts within
+                # seconds. Same retryable types, wider spacing.
                 retry_policy=calculation_retry(),
             )
         )
@@ -313,14 +297,12 @@ class BoCampaignWorkflow:
         `CampaignSpec` by the generated tool and is re-validated here to get the typed object.
 
         `carried` is passed only when this workflow continues-as-new; a run receiving it skips
-        seeding
-        and resumes the loop. See `_carry_on_if_history_is_filling_up`.
+        seeding and resumes the loop. See `_carry_on_if_history_is_filling_up`.
         """
         spec = CampaignSpec.model_validate(payload)
         timeout = timedelta(seconds=settings.bo_activity_timeout_seconds)
         # Well under `timeout`, so a worker dying mid-round is noticed quickly rather than at the
-        # full
-        # start-to-close budget, with each retry repaying the round.
+        # full start-to-close budget, with each retry repaying the round.
         heartbeat_timeout = timedelta(seconds=settings.bo_activity_heartbeat_timeout_seconds)
 
         if carried is None:
@@ -336,10 +318,8 @@ class BoCampaignWorkflow:
             history = await self._evaluate(spec, seed, "seed", timeout, heartbeat_timeout)
             if not history:
                 # The seed batch nobody reported (an expired wait). With no history, `propose_next`
-                # and `best_of`
-                # would raise and the chemist would see an internal precondition message, so end
-                # here: there is no
-                # best point to record and no note to draw.
+                # and `best_of` would raise and the chemist would see an internal precondition
+                # message, so end here: there is no best point to record and no note to draw.
                 return ConnectorJobResult(
                     summary=(
                         f"campaign {spec.objective_name!r} ended with no evaluations: its seed "
@@ -369,20 +349,15 @@ class BoCampaignWorkflow:
             if space_exhausted(spec.problem, space, history, spec.batch):
                 break
             # Re-synced every round: a measured campaign opens a child instead of dispatching, so
-            # the running
-            # count drifts (safe, per `dispatches_left`).
+            # the running count drifts (safe, per `dispatches_left`).
             self._dispatches_left = dispatches_left(rounds_remaining, seeding=False)
             # Stop when the execution ceiling can no longer fund a dispatch: an activity killed by
-            # the
-            # execution timeout reaches no workflow code and loses the run.
+            # the execution timeout reaches no workflow code and loses the run.
             #
             # One check per round covers its three dispatches: `_queue_wait` hands out `R/n - w -
-            # a`, so the
-            # next dispatch sees `(R - R/n + a)/(n - 1) = R/n + a/(n-1)`, more than the `R/n` this
-            # check found
-            # to exceed `w + a`. `CampaignBudgetSpent` mid-round is therefore unreachable, and stays
-            # a named
-            # failure if the reasoning is ever wrong.
+            # a`, so the next dispatch sees `(R - R/n + a)/(n - 1) = R/n + a/(n-1)`, more than the
+            # `R/n` this check found to exceed `w + a`. `CampaignBudgetSpent` mid-round is therefore
+            # unreachable, and stays a named failure if the reasoning is ever wrong.
             if self._cannot_afford_another_dispatch():
                 budget_spent = True
                 break
@@ -405,22 +380,18 @@ class BoCampaignWorkflow:
             rounds_done += 1
             rounds_remaining -= 1
             # Record each round as it completes, so a campaign cancelled, terminated or failed
-            # mid-run is still
-            # found by `resume_campaign`; cancel-then-resume therefore serves as pause.
+            # mid-run is still found by `resume_campaign`; cancel-then-resume therefore serves as
+            # pause.
             #
             # Best-effort: `record_suggestion` swallows `_TRANSIENT_WRITE_FAILURES`, so a database
-            # blip loses
-            # that round's record with only a WARNING (making it strict is a backlog item). Keyed on
-            # the round,
-            # since `(campaign_id, job_id)` is the idempotency key. These rows carry the proposed
-            # candidates'
-            # `predicted_value`/`predicted_sd`; the terminal write records only the best point.
+            # blip loses that round's record with only a WARNING (making it strict is a backlog
+            # item). Keyed on the round, since `(campaign_id, job_id)` is the idempotency key. These
+            # rows carry the proposed candidates' `predicted_value`/`predicted_sd`; the terminal
+            # write records only the best point.
             #
             # Costs: event-history growth doubles (the continue-as-new trigger absorbs it), and each
-            # row
-            # snapshots the cumulative history, so stored bytes grow triangularly and retention does
-            # not prune
-            # `bo_campaigns`. Tracked in `docs/planning/BACKLOG.md`.
+            # row snapshots the cumulative history, so stored bytes grow triangularly and retention
+            # does not prune `bo_campaigns`. Tracked in `docs/planning/BACKLOG.md`.
             await workflow.execute_activity(
                 record_campaign_run,
                 args=[
@@ -443,14 +414,11 @@ class BoCampaignWorkflow:
         result = CampaignResult(best=best_of(spec.problem, history), history=history)
 
         # Terminal campaign record, keyed on the workflow id (stable across continue-as-new). The
-        # actor
-        # comes from the run's memo, which core sets on every connector job; the fallback is the
-        # configured
-        # service identity, as `require_actor` uses for runs started outside the wrapper. Skipped
-        # when the
-        # ceiling is spent — the per-round rows already make the campaign resumable. One dispatch is
-        # left,
-        # so the divisor is set to 1 rather than the stale value from the last round.
+        # actor comes from the run's memo, which core sets on every connector job; the fallback is
+        # the configured service identity, as `require_actor` uses for runs started outside the
+        # wrapper. Skipped when the ceiling is spent — the per-round rows already make the campaign
+        # resumable. One dispatch is left, so the divisor is set to 1 rather than the stale value
+        # from the last round.
         self._dispatches_left = 1
         try:
             campaign_id: str | None = await workflow.execute_activity(
@@ -473,10 +441,8 @@ class BoCampaignWorkflow:
             budget_spent = True
 
         # Built here (the BO→note mapping is this domain's knowledge), published by core (the one
-        # write path
-        # that stamps provenance, best-effort). Always built; whether it is published is the
-        # manifest's
-        # `publish_to_graph`.
+        # write path that stamps provenance, best-effort). Always built; whether it is published is
+        # the manifest's `publish_to_graph`.
         note = note_from_campaign_result(spec.objective_name, spec.problem, result)
         best = result.best
         ending = (

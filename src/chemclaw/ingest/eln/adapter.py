@@ -178,8 +178,7 @@ class RawEntry(BaseModel):
     #
     # An explicit field, never absence: a fetch is a delta, so "not seen this run" is normal for
     # every ingested entry. A withdrawn entry rides the same re-export channel as a correction.
-    # Re-publishing without it un-retracts, because the row is what the source last said
-    # (D-2026-09-13-a-withdrawal-is-a-fact-a-source-reports).
+    # Re-publishing without it un-retracts, because the row is what the source last said.
     retracted_at: datetime | None = None
 
 
@@ -253,8 +252,8 @@ def accepts_a_limit(adapter: object) -> bool:
     """Whether `adapter.fetch_new_entries` will take the optional `limit` this sync can offer.
 
     A capability rather than a protocol parameter: adding a parameter to `ElnAdapter` would break
-    out-of-tree adapters, contradicting D-120's promise of zero core edits per source. An adapter
-    that can bound its read declares it; the caller truncates the result either way.
+    out-of-tree adapters written to the published signature. An adapter that can bound its read
+    declares it; the caller truncates the result either way.
     """
     return _accepts(adapter, "limit")
 

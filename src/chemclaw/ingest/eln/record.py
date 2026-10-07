@@ -108,7 +108,7 @@ def _stated_outcome(
 
     A `match` with `assert_never` so mypy enforces that every `OutcomeClass` member gets a spelling;
     a dict would fail with `KeyError` at runtime and abort the whole sync. A stated success is
-    spelled; silence is `None` (D-2026-08-26-silence-is-not-a-successful-run).
+    spelled; silence is `None`.
     """
     match outcome:
         case None:
@@ -157,7 +157,7 @@ def _principal_product(reaction: OrdReaction) -> str | None:
 
 
 def _hypothesis_block(reaction: OrdReaction) -> str:
-    """Lead with what the run was testing, when the source recorded it (D-162).
+    """Lead with what the run was testing, when the source recorded it.
 
     First because it is the question the conditions answer. Empty when unrecorded; the body never
     says "no hypothesis".

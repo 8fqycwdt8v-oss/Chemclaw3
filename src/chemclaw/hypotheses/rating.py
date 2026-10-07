@@ -37,8 +37,8 @@ PRIOR_SD = 400.0
 # 0.95 is the conventional line; below it the table shows the pair as tied rather than ordered.
 DECISIVE_PROBABILITY = 0.95
 
-# Newton is quadratically convergent on this objective (it is strictly concave), so the iteration
-# count is a safety net rather than a schedule; measured, a 30-candidate fit converges in 4-5.
+# Newton converges quadratically on this strictly concave objective, so the iteration cap is a
+# safety net, not a schedule.
 _MAX_ITERATIONS = 100
 _TOLERANCE = 1e-9
 

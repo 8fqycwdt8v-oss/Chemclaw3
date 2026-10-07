@@ -132,8 +132,7 @@ async def _drive(base_url: str) -> str:
     """Ask every question in `WORKLOAD` on one session and return its id.
 
     The event stream is drained and discarded — this grades nothing — but `open_session` is reused
-    so
-    session opening cannot diverge from the probes.
+    so session opening cannot diverge from the probes.
     """
     timeout = httpx.Timeout(settings.live_probe_timeout_seconds)
     async with httpx.AsyncClient(base_url=base_url, timeout=timeout, trust_env=False) as client:
@@ -200,8 +199,7 @@ def main(argv: list[str] | None = None) -> int:
     """Drive the workload, score what it cost, and compare against the recorded case."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     # `live_probe_base_url`, not `service_host`/`service_port`: those are a bind address and the
-    # chart's
-    # port, while the live lane serves on its own.
+    # chart's port, while the live lane serves on its own.
     parser.add_argument(
         "--base-url",
         default=settings.live_probe_base_url,
@@ -220,8 +218,7 @@ def main(argv: list[str] | None = None) -> int:
     except (httpx.HTTPError, OSError) as exc:
         # `httpx.HTTPError` is the front door; `OSError` is the database (`core/db` raises
         # `ConnectionError`). Other driver errors are deliberately not caught, so a malformed query
-        # is not
-        # reported as an outage; `chemclaw.cli` may not import `psycopg`.
+        # is not reported as an outage; `chemclaw.cli` may not import `psycopg`.
         print(f"could not reach the live lane ({exc}); nothing was measured")
         return 3
     if not turns:

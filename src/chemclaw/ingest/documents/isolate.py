@@ -133,10 +133,9 @@ def _bound_allocations(budget: int) -> tuple[int | None, int | None]:
 
     Upstream size limits are read from the archive and cannot predict a parse's memory (string
     widening, shared strings, DOM construction), so the bound is a kernel ceiling on the allocating
-    process (D-2026-09-19-a-ceiling-on-the-archive-is-not-a-ceiling-on-the-parse). `RLIMIT_DATA`
-    rather than `RLIMIT_AS`: it covers heap and private anonymous mappings and excludes inherited
-    file-backed ones. The baseline is read, not assumed, because a forkserver child starts with the
-    preload resident.
+    process. `RLIMIT_DATA` rather than `RLIMIT_AS`: it covers heap and private anonymous mappings
+    and excludes inherited file-backed ones. The baseline is read, not assumed, because a forkserver
+    child starts with the preload resident.
 
     The baseline is read after `raw` is unpickled, so the budget is what a parse may allocate beyond
     the document; `binding.PARSE_COEFFICIENT_BASIS_BYTES` caps the document term. An exhausted
@@ -346,8 +345,8 @@ def parse_document_isolated(
         child = context.Process(target=_parse_into, args=(writer, name, raw, declared_type))
         child.start()
     except BaseException:
-        # Both ends, because neither is owned by anything else yet: a failed `start()` used to
-        # leave the pipe's two descriptors open for the life of the process.
+        # Both ends, because nothing else owns them yet: a failed `start()` would otherwise leak the
+        # pipe's descriptors.
         reader.close()
         writer.close()
         raise

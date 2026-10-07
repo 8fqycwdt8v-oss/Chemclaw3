@@ -79,8 +79,7 @@ class _Charged(BaseModel):
     amount_mmol: float | None = Field(default=None, ge=0.0)
     mass_mg: float | None = Field(default=None, ge=0.0)
     # Millilitres, for a species charged by volume (neat liquids, solvents). A separate field rather
-    # than a conversion, since converting needs a density the record does not carry
-    # (D-2026-08-26-a-transcription-may-not-infer-a-setpoint).
+    # than a conversion, since converting needs a density the record does not carry.
     volume_ml: float | None = Field(default=None, ge=0.0)
     # Whatever else the source recorded about this species (lot, supplier, equivalents, assay); see
     # `OrdReaction.attributes`.
@@ -99,8 +98,7 @@ class UnstructuredComponent(_Charged):
     What is left when `ord_adapter`'s exact routes to a structure (SMILES, InChI, known reagent
     name) all fail but the source still named the species. `name` is the source's text verbatim, and
     no code path may turn it into a structure: a guess would propagate into fingerprints and
-    citations. A reaction carrying one is `RecordTier.CITATION_ONLY`
-    (D-2026-09-27-a-reaction-without-a-structure-is-citable-not-searchable).
+    citations. A reaction carrying one is `RecordTier.CITATION_ONLY`.
     """
 
     name: str = Field(min_length=1)
@@ -272,10 +270,9 @@ class OrdReaction(BaseModel):
     # fingerprints as outcomes, not structure.
     purity_percent: float | None = Field(default=None, ge=0.0, le=100.0)
     impurities: list[Impurity] = Field(default_factory=list)
-    # How the experiment turned out, and (for a failure) why in the chemist's own words.
-    # `None` is "the source did not say", which is neither success nor `INCONCLUSIVE`
-    # (D-2026-08-26-silence-is-not-a-successful-run): defaulting to success would make an
-    # unstructured source report a 100% success rate.
+    # How the experiment turned out, and (for a failure) why in the chemist's own words. `None` is
+    # "the source did not say", which is neither success nor `INCONCLUSIVE`: defaulting to success
+    # would make an unstructured source report a 100% success rate.
     outcome_class: OutcomeClass | None = None
     failure_reason: str | None = None
 
@@ -289,11 +286,11 @@ class OrdReaction(BaseModel):
             raise ValueError("a reaction recorded as a failure must carry a failure_reason")
         return self
 
-    # The project/campaign this experiment belongs to — the grouping key for the semantic
-    # memory layer (a playbook distils patterns that recur across >=2 projects, plan 5.4).
+    # The project/campaign this experiment belongs to — the grouping key for the semantic memory
+    # layer (a playbook distils patterns that recur across >=2 projects).
     project: str | None = None
-    # What this run was set up to test, in the chemist's own words (D-162). Optional and never
-    # inferred: empty means "not recorded", not "no hypothesis".
+    # What this run was set up to test, in the chemist's own words. Optional and never inferred:
+    # empty means "not recorded", not "no hypothesis".
     hypothesis: str | None = None
     # The detailed procedure, when recorded: `steps` is the ordered recipe (empty for headline-only
     # sources) and `procedure_text` the verbatim prose.
@@ -309,7 +306,7 @@ class OrdReaction(BaseModel):
 
     @model_validator(mode="after")
     def _roles_are_consistent(self) -> "OrdReaction":
-        """Inputs must not be products, and outcomes must all be products (G4)."""
+        """Inputs must not be products, and outcomes must all be products."""
         if any(c.role == Role.PRODUCT for c in self.inputs):
             raise ValueError("an input component has role 'product'")
         if any(c.role != Role.PRODUCT for c in self.outcomes):
@@ -354,7 +351,7 @@ class OrdReaction(BaseModel):
 
     @model_validator(mode="after")
     def _steps_are_ordered(self) -> "OrdReaction":
-        """Step indices must be the contiguous sequence 1..n (a well-formed ordering, G4)."""
+        """Step indices must be the contiguous sequence 1..n."""
         if [s.index for s in self.steps] != list(range(1, len(self.steps) + 1)):
             raise ValueError("step indices must be contiguous starting at 1")
         return self

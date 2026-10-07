@@ -160,10 +160,8 @@ def unverified_tool_surfaces() -> dict[str, list[str]]:
 
     `chem` and `safety` are served from `Chemclaw3-mcp`, so their `tools:` lists cannot be verified
     offline. Reported rather than raised (failing would force deleting a correct manifest) and
-    rather
-    than silenced (so a pass says what it did not check). `Chemclaw3-mcp`'s
-    `assert_manifest_matches`
-    checks them against the running server.
+    rather than silenced (so a pass says what it did not check). `Chemclaw3-mcp`'s
+    `assert_manifest_matches` checks them against the running server.
     """
     try:
         found = discovered()
@@ -245,8 +243,7 @@ def _registered_workflow_names(connector: str) -> set[str] | None:
 
     Importing `connectors.<name>.workflows` registers them, as it does for the worker. A missing
     module is not reported here (it fails loudly at worker start); the silent case caught is a
-    module
-    that does not register the name the manifest promises.
+    module that does not register the name the manifest promises.
     """
     try:
         import_module(f"chemclaw.connectors.{connector}.workflows")
@@ -269,8 +266,7 @@ def _job_problems(manifest: ConnectorManifest) -> list[str]:
         except ValueError as exc:
             problems.append(f"connector {manifest.name!r}: job {job.name!r} cannot be built: {exc}")
         # `require_funded_ceiling` refuses only at launch, so building a tool no longer raises;
-        # asking it
-        # here keeps an unfunded declaration from reaching production green.
+        # asking it here keeps an unfunded declaration from reaching production green.
         try:
             require_funded_ceiling(manifest.name, job)
         except ValueError as exc:
@@ -278,9 +274,8 @@ def _job_problems(manifest: ConnectorManifest) -> list[str]:
         problems.extend(_precondition_problems(manifest.name, job))
         problems.extend(_unavailable_reason_problems(manifest.name, job))
         # `workflow` is a Temporal type name resolved at dispatch, invisible to mypy. A typo would
-        # start the
-        # child on a queue whose worker serves no such type, and the parent would wait the whole
-        # `connector_job_timeout_seconds`.
+        # start the child on a queue whose worker serves no such type, and the parent would wait the
+        # whole `connector_job_timeout_seconds`.
         if served is not None and job.workflow not in served:
             queue = bundle_queue(manifest.name)
             problems.append(
@@ -352,17 +347,14 @@ def validate_connectors() -> list[str]:
     problems.extend(_connector_urls_problems(discovered_names))
     try:
         # Two properties of the enabled set: `connectors_enabled` names bundles that exist (rule 1),
-        # and no
-        # two enabled connectors claim one tool name — job or endpoint tool (rule 4).
+        # and no two enabled connectors claim one tool name — job or endpoint tool (rule 4).
         names = [manifest.name for manifest in enabled()]
         job_tools()
     except ChemclawError as exc:
         # `ChemclawError`, not `ConnectorError`: `job_tools()` re-raises `ConnectorJobError`, a
-        # sibling
-        # under `ChemclawError`. Every such error means "misconfigured", which this entry point
-        # prints
-        # rather than raises. Appended only if `_job_problems` has not already reported it more
-        # specifically.
+        # sibling under `ChemclawError`. Every such error means "misconfigured", which this entry
+        # point prints rather than raises. Appended only if `_job_problems` has not already reported
+        # it more specifically.
         message = str(exc)
         if not any(message in problem for problem in problems):
             problems.append(message)
@@ -376,9 +368,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Validate every connector bundle; print problems and exit non-zero if any (the CI gate).
 
     The unverified-surface note prints on both paths, since it qualifies a pass as much as a
-    failure.
-    Parses arguments though it declares none, so a stray directory argument is refused rather than
-    ignored; `CHEMCLAW_CONNECTORS_DIR` is the knob.
+    failure. Parses arguments though it declares none, so a stray directory argument is refused
+    rather than ignored; `CHEMCLAW_CONNECTORS_DIR` is the knob.
     """
     argparse.ArgumentParser(
         prog="python -m chemclaw.cli.validate_connectors",

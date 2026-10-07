@@ -112,14 +112,13 @@ async def record_campaign_run(
 
     An activity because the write is I/O. `record_suggestion` is reused, so a database blip is
     swallowed (a finished campaign must not fail on its record) while a programming error is not.
-    The
-    actor and correlation id come from the run's memo, where `ConnectorJobWorkflow` puts
+    The actor and correlation id come from the run's memo, where `ConnectorJobWorkflow` puts
     `requested_by`.
 
     Args:
         problem: The decision space, which is also the campaign's identity.
-        candidates: The round's proposed candidates, or — on the terminal call — the
-            recommendation the run ended on.
+        candidates: The round's proposed candidates, or — on the terminal call — the recommendation
+            the run ended on.
         observations: Every point the campaign evaluated, which is the history a resume needs.
         actor: The Entra actor the run is attributed to, off the memo.
         correlation_id: The originating request, off the same memo.

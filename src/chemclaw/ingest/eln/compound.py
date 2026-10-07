@@ -38,8 +38,8 @@ def compound_note(smiles: str) -> Note:
     if name:
         body += f"- name: {name}\n"
     if aliases:
-        # Spelled out rather than only listed as tags, because the lexical index reads bodies:
-        # this is what lets a trivial-name query match a structure-keyed corpus (KNW-4).
+        # Spelled out in the body, not only as tags, because the lexical index reads bodies: a
+        # trivial-name query can then match a structure-keyed corpus.
         body += f"- also written: {', '.join(aliases)}\n"
     return Note(
         id=compound_id(standard),

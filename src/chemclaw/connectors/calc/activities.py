@@ -79,8 +79,7 @@ async def _subject(structure_id: str | None, smiles: str) -> Structure | None:
     which would silently compute a different conformer). A handle whose stored SMILES canonically
     disagrees with `smiles` is refused, since atom indices, reaction balance and the filed note all
     assume `smiles`. A stored geometry with no SMILES is accepted: the check is on disagreement,
-    never
-    absence.
+    never absence.
     """
     if structure_id is None:
         return None
@@ -100,8 +99,7 @@ def _acting_for(actor: str, correlation_id: str) -> Iterator[None]:
     """Stamp the run's requester and correlation id ambient for the duration of the calculation.
 
     A worker has no request context, so both arrive as activity arguments (off the run's memo,
-    outside
-    `spec` so identity cannot change the cache key) and are bound here for
+    outside `spec` so identity cannot change the cache key) and are bound here for
     `connectors.identity.turn_identity_hook`, which `connectors/calc/remote.py::calc_session` hands
     to `core.mcp_session.open_session`. The calc server's logs then name the person a durable run is
     for. Off the durable path both are empty and nothing is stamped. `durable/interceptor.py` reads
@@ -129,10 +127,9 @@ async def run_xtb_calculation(
     """Run one durable xTB task and return its typed result.
 
     Dispatches on the spec's `kind`. `summary` is written here, where the numbers are, as the one
-    line
-    completion push-backs and job listings share. `calc_refs` is collected around the whole dispatch
-    (the collector de-duplicates). `actor` and `correlation_id` come from the run's memo and are
-    stamped ambient for every remote call; both default to empty for direct callers.
+    line completion push-backs and job listings share. `calc_refs` is collected around the whole
+    dispatch (the collector de-duplicates). `actor` and `correlation_id` come from the run's memo
+    and are stamped ambient for every remote call; both default to empty for direct callers.
     """
     with _acting_for(actor, correlation_id), collecting() as calc_refs:
         result = await _dispatch(spec)
@@ -236,8 +233,7 @@ async def _dispatch(spec: XtbJobSpec) -> XtbJobResult:
         return XtbJobResult(
             kind=spec.kind,
             # The barrier and the lifetime it implies; the band is in the summary because a single
-            # half-life
-            # otherwise reads like a measurement.
+            # half-life otherwise reads like a measurement.
             summary=_rotation_summary(rotation),
             rotation=rotation,
         )
@@ -298,8 +294,7 @@ async def _dispatch(spec: XtbJobSpec) -> XtbJobResult:
         return XtbJobResult(
             kind=spec.kind,
             # Named from the result: the pair is canonically ordered (`compose.py::_ordered`), so
-            # the summary
-            # describes the calculation that actually ran.
+            # the summary describes the calculation that actually ran.
             summary=(
                 f"{interaction.smiles_a} + {interaction.smiles_b}: interaction "
                 f"{interaction.interaction_energy_kcal:+.1f} kcal/mol over "
@@ -327,8 +322,7 @@ async def _dispatch(spec: XtbJobSpec) -> XtbJobResult:
                 f"{spec.smiles}: {refined.refined_count} of {refined.total_found} conformers "
                 f"refined ({refined.refined_population_covered:.0%} of the population), "
                 # "lowest", not "dominant": with degeneracy weighting the lowest free energy need
-                # not be the most
-                # populated member.
+                # not be the most populated member.
                 f"lowest free energy at {lowest.population:.0%}"
             ),
             refined=refined,
@@ -392,8 +386,7 @@ async def _dispatch(spec: XtbJobSpec) -> XtbJobResult:
             run=_beating,
         )
         # The summary says whether the major form is the same everywhere — "shifts" versus
-        # "reorders" —
-        # since that changes what every downstream number is about.
+        # "reorders" — since that changes what every downstream number is about.
         verdict = (
             "the dominant form changes with the medium"
             if screen.dominance_changes

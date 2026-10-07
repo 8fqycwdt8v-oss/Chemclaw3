@@ -92,7 +92,7 @@ _NAME_KINDS = frozenset({"NAME", "IUPAC_NAME"})
 
 
 class OrdFormatError(ElnMappingError):
-    """A file did not match the ORD `Reaction` JSON shape (G4)."""
+    """A file did not match the ORD `Reaction` JSON shape."""
 
 
 class OrdJsonAdapter:
@@ -336,9 +336,8 @@ def _species(compound: dict[str, Any], role: Role, *, charged: bool = True) -> S
     """One ORD `Compound` as a structured `Component`, or as the name the source gave it.
 
     A structure when any identifier resolves (`_smiles`); otherwise an `UnstructuredComponent`
-    carrying the source's `NAME` verbatim, making the reaction citation-only
-    (D-2026-09-27-a-reaction-without-a-structure-is-citable-not-searchable). A compound with neither
-    is refused. `charged=False` for a product, which records measurements, not a charge.
+    carrying the source's `NAME` verbatim, making the reaction citation-only. A compound with
+    neither is refused. `charged=False` for a product, which records measurements, not a charge.
     """
     common: dict[str, Any] = {"role": role}
     if charged:

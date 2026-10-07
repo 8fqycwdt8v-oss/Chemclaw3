@@ -60,9 +60,8 @@ async def ingest_reaction(
     if reaction.tier is RecordTier.STRUCTURED:
         await _index_structure(reaction, reaction_store, molecule_store, label_index, source)
     # A citation-only record writes nothing to any structural index (no DRFP, molecule or label
-    # row), only the record (D-2026-09-27-a-reaction-without-a-structure-is-citable-not-searchable):
-    # a fingerprint of the structured subset would describe a reaction nobody ran, and the labeller
-    # would infer from a partial structure.
+    # row), only the record: a fingerprint of the structured subset would describe a reaction nobody
+    # ran, and the labeller would infer from a partial structure.
 
     # The withdrawal is stamped here, not in `record_from_ord_reaction`: it is something the source
     # said about the entry (`RawEntry`), and keeping the mapping pure keeps it a deterministic

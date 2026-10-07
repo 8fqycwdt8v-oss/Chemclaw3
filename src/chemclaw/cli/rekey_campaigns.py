@@ -61,8 +61,7 @@ async def rekey(*, dry_run: bool) -> tuple[int, int]:
         moved = 0
         for recorded_id, payload in rows:
             # A `problem` of `{}` predates migration 037's snapshot and cannot be re-derived; leave
-            # it and
-            # name it rather than guess an id.
+            # it and name it rather than guess an id.
             if not payload:
                 logger.warning(
                     "campaign %s stores no problem, so its id cannot be re-derived; left as is",

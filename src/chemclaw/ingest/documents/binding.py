@@ -100,12 +100,11 @@ class RootBinding(BaseModel):
 _CHUNK_TEXT_VERSION = "ctv2"
 
 
-#: The document size the chart's per-parse memory coefficient was measured at, and therefore the
+#: The document size the chart's per-parse memory coefficient was derived at, and therefore the
 #: largest `max_file_bytes` a binding may declare.
 #:
-#: The parse budget bounds allocation beyond the document itself, so a pod's real per-parse charge
-#: is the budget plus the document; a larger document needs the coefficient re-measured, so it is
-#: refused at load rather than silently under-charged.
+#: A pod's real per-parse charge is the parse budget plus the document, so a larger document would
+#: need the coefficient re-derived; it is refused at load rather than silently under-charged.
 PARSE_COEFFICIENT_BASIS_BYTES = 52_428_800
 
 

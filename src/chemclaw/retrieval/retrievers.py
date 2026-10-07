@@ -142,7 +142,7 @@ def _eligible_sync(directory: Path, filters: dict[str, Any], today: date) -> dic
 def _rank_by_terms(
     directory: Path, filters: dict[str, Any], terms: Sequence[str], today: date
 ) -> tuple[list[tuple[int, float, float, Note]], int]:
-    """`GraphRetriever`'s whole search in one worker-thread hop: eligible notes, scored, ranked, cut.
+    """`GraphRetriever`'s whole search in one worker-thread hop: filter, score, rank, cut.
 
     Returns:
         `(chosen, found)`: `(coverage, relevance, confidence, note)` for the best `retrieval_top_k`

@@ -1,13 +1,8 @@
 """Turn categorical BO choices into a continuous descriptor space via GFN2-xTB.
 
-A bare categorical makes the surrogate learn one effect per label and say nothing about an untried
-option. A descriptor vector gives each option a position in chemical space, so evidence about two
-electron-rich phosphines informs a third.
-
-The five descriptors are the electronic axes a reagent choice turns on: HOMO (donor), LUMO
-(acceptor), dipole, and the most positive / most negative partial charge (H-bond character). The
-HOMO-LUMO gap is excluded because it is exactly `lumo - homo` and would be a collinear column.
-Sterics are not captured: cone angles and buried volume need 3D geometry.
+Each category becomes a position in descriptor space so the surrogate can interpolate to untried
+options. Descriptors: HOMO, LUMO, dipole and the extreme partial charges; the gap is omitted as
+`lumo - homo` (collinear). Sterics are not captured.
 """
 
 from collections.abc import Awaitable, Callable
@@ -72,8 +67,7 @@ async def featurize_parameter(
 ) -> tuple[CategoricalParameter, list[str]]:
     """Return `parameter` with `descriptors` computed from its `structures`.
 
-    A parameter with no `structures` is returned unchanged (featurization is opt-in). Results come
-    from the calculation cache. Also returns the calculation keys used (`Featurized`).
+    Also returns the calculation keys used. A parameter without `structures` is returned unchanged.
 
     Raises:
         ValueError: When one of the structures cannot be featurized; the category is named.
@@ -101,9 +95,7 @@ async def featurize_problem(
 ) -> Featurized:
     """Return `problem` with every structure-carrying categorical parameter featurized.
 
-    Safe on any problem: other parameters pass through. Call once before the campaign starts, so the
-    descriptors travel with the spec and stay stable across rounds and restarts. Returns the
-    calculation keys alongside.
+    Call once before the campaign starts so descriptors travel with the spec.
     """
     parameters: list[Parameter] = []
     calc_refs: set[str] = set()

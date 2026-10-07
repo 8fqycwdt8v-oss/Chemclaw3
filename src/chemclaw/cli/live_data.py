@@ -61,8 +61,7 @@ class Dataset:
     """One published dataset, and how its CSV columns line up with the ORD records seeded from it.
 
     A binding: published columns and ORD input keys are facts about someone else's data, declared
-    here
-    rather than inferred so the check cannot assert a corpus agrees with itself. `tier` is the
+    here rather than inferred so the check cannot assert a corpus agrees with itself. `tier` is the
     declaration the lane is built around; `CITATION_ONLY` fails if a record arrives structured.
     """
 
@@ -94,8 +93,7 @@ class Dataset:
 
 
 # The five published screens, bound to the ORD keys `Chemclaw3_mock` seeds them under. No row
-# counts:
-# the CSV is the source of truth.
+# counts: the CSV is the source of truth.
 _DATASETS: tuple[Dataset, ...] = (
     Dataset(
         csv_name="bh_amination_hte.csv",
@@ -367,8 +365,7 @@ def check_adapter_matches_its_declaration(
     """Each dataset maps, whole, into exactly the tier `_DATASETS` declares — no drift either way.
 
     A refused or demoted record is a regression; a citation-only record arriving structured is
-    worse,
-    since an invented structure would reach fingerprint indexes and similarity hits.
+    worse, since an invented structure would reach fingerprint indexes and similarity hits.
     """
     checks: list[Check] = []
     for dataset in _DATASETS:
@@ -529,12 +526,10 @@ _PROSE_TIME = re.compile(r"for\s+(\d+(?:\.\d+)?)\s*h\b")
 async def check_prose_yields_its_numbers(eln_export_dir: Path) -> Check:
     """A condition stated only in prose reaches the record — as a **step**, not as a setpoint.
 
-    `D-2026-08-26-a-transcription-may-not-infer-a-setpoint` forbids deriving a headline
-    `temperature_c`/`time_h` from a procedure (the first number is usually the addition
-    temperature),
-    while `_segment_steps` records per-step values losslessly. Both halves are asserted: no step
-    temperature means the prose was lost, and a headline setpoint never stated means the fallback is
-    back.
+    A transcription may not derive a headline `temperature_c`/`time_h` from a procedure (the first
+    number is usually the addition temperature), while `_segment_steps` records per-step values
+    losslessly. Both halves are asserted: no step temperature means the prose was lost, and a
+    headline setpoint never stated means a derived fallback is back.
 
     Only records whose prose states both a temperature and a time are checked, and the count is
     reported so a check matching nothing cannot pass silently.
@@ -555,8 +550,7 @@ async def check_prose_yields_its_numbers(eln_export_dir: Path) -> Check:
                 reaction = adapter.map_to_ord(raw)
             except PatternBudgetError:
                 # Re-raised before the broad arm below: an exhausted page budget is a finding, and
-                # skipping
-                # entries would shrink the denominator silently.
+                # skipping entries would shrink the denominator silently.
                 raise
             except Exception:
                 continue
@@ -602,8 +596,8 @@ async def check_corpus_is_reachable(mapped: dict[str, list[OrdReaction]]) -> Che
     """The mapped records actually landed in `reaction_records` — asked of Postgres, not of a log.
 
     The id is the ELN's own `reaction_id` (the `reaction-` citation prefix is not stored). Counted
-    per
-    tier, since a record in the wrong tier is wrongly served by, or withheld from, structure search.
+    per tier, since a record in the wrong tier is wrongly served by, or withheld from, structure
+    search.
     """
     expected = Counter(
         (reaction.reaction_id, reaction.tier.value)
@@ -641,8 +635,7 @@ async def check_citation_only_is_not_structure_searchable(
     """No citation-only record has a row in any index a structure search reads.
 
     Asked of the tables, not a search: zero `reaction_fingerprints` and `reaction_labels` rows is
-    the
-    claim itself. A row predating an amendment to citation-only is not visible here;
+    the claim itself. A row predating an amendment to citation-only is not visible here;
     `ReactionRecordStore.structurally_withheld` keeps such a row unserved.
     """
     ids = [
@@ -681,12 +674,10 @@ async def check_the_corpus_is_findable(mapped: dict[str, list[OrdReaction]]) -> 
     """A record that arrived can actually be found — asked through the tool a chemist would use.
 
     `find_similar_reactions` is the entry point behind the agent's `similar_reactions`. Ingest
-    writes
-    the record and fingerprint row but mints no note, so an unfiltered search finds wells while one
-    filtered by `{"type": "reaction"}` returns none — both correct, and checked because nothing else
-    states it. `index_empty` is asserted too: an empty index answering "no precedents" is the defect
-    to
-    catch.
+    writes the record and fingerprint row but mints no note, so an unfiltered search finds wells
+    while one filtered by `{"type": "reaction"}` returns none — both correct, and checked because
+    nothing else states it. `index_empty` is asserted too: an empty index answering "no precedents"
+    is the defect to catch.
     """
     subject = next(
         (
@@ -733,8 +724,7 @@ async def backfill(timeout_seconds: float) -> str:
 
     client = await temporal_connect()
     # A fixed id, so a second invocation rejoins the running drain instead of racing it: the drain
-    # is
-    # long, `up.sh` starts one on every bring-up, and concurrent syncs only contend.
+    # is long, `up.sh` starts one on every bring-up, and concurrent syncs only contend.
     workflow_id = "eln-backfill-epoch"
     try:
         handle = await client.start_workflow(
@@ -753,8 +743,7 @@ async def backfill(timeout_seconds: float) -> str:
         summary = await asyncio.wait_for(handle.result(), timeout=timeout_seconds)
     except TimeoutError:
         # A drain still running is a state, not an error: it can take hours, and the reachability
-        # check
-        # below reports how far it got.
+        # check below reports how far it got.
         return (
             f"{workflow_id}: still draining after {timeout_seconds:.0f}s — the workflow keeps "
             "running on the broker, so re-running this lane later reads the finished corpus"

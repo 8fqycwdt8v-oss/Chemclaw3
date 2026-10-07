@@ -27,10 +27,8 @@ def _print_plan() -> None:
     """Print what an apply would do, computed without connecting to anything.
 
     `planned_schedules()` is pure and the prune set is `OWNED_SCHEDULE_IDS` minus the planned ids,
-    so
-    the whole plan is derivable offline. Prunes are reported as "would delete if present", since
-    only
-    Temporal knows whether a stale Schedule exists.
+    so the whole plan is derivable offline. Prunes are reported as "would delete if present", since
+    only Temporal knows whether a stale Schedule exists.
     """
     plan = planned_schedules()
     print(f"{len(plan)} schedule(s) planned by this configuration:")

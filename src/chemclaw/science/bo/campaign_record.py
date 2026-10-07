@@ -1,15 +1,8 @@
 """A BO campaign as a durable entity, and every suggestion made against it.
 
-Framing an optimization (which variables matter, which past runs seed it) is the expensive part, so
-`suggest_next_experiment` records each suggestion against a campaign a later session can resume. The
-durable `BoCampaignWorkflow` *runs* a campaign; this module remembers it.
-
-**A campaign is identified by its problem**: `campaign_id` hashes the decision space and the
-objective, so refinements of one optimization accumulate against one campaign without anyone
-"starting" it.
-
-This is the dependency-free half — models, the store contract, the in-memory backend, and the
-facades the connector tools call (`record_suggestion`, `read_campaign_thread`). The psycopg half is
+Each suggestion is recorded against a campaign so a later session can resume the framing instead of
+rebuilding it. `campaign_id` hashes the decision space and objectives, so refinements of one
+optimization accumulate on one campaign. This is the dependency-free half; the psycopg store is
 `campaign_record_store.py`, imported lazily.
 """
 
@@ -58,14 +51,10 @@ _BOUND_DECIMALS = 6
 def _identity_labels(labels: list[str]) -> dict[str, str]:
     """Every label of one categorical, mapped to the string the identity payload uses for it.
 
-    Case is chemistry in a SMILES (`C1CCNCC1` piperidine vs `c1ccncc1` pyridine), so labels are kept
-    verbatim when *every* label in the space parses whole as a molecule (`require_molecule`, the
-    strict parse); otherwise the list is names and each label folds via `canonical_text`. The space
-    decides, not each label, because many lab codes (`CO`, `N`, `B`) are legal SMILES.
-
-    A reduction that would merge two of the space's own labels is not applied to those labels (they
-    key `structures`/`descriptors`, so a collision would drop an entry); the rest still fold. This
-    does not raise, because the space is legal and raising would fail a computed suggestion.
+    Case is chemistry in SMILES (`C1CCNCC1` vs `c1ccncc1`), so labels stay verbatim when every label
+    in the space parses whole as a molecule; otherwise each folds via `canonical_text`. The space
+    decides because lab codes like `CO` are legal SMILES. A fold that would merge two of the space's
+    labels is not applied to them.
     """
     reduced = _as_structures(labels) or {label: canonical_text(label) for label in labels}
     collisions = {value for value, count in Counter(reduced.values()).items() if count > 1}
@@ -83,13 +72,9 @@ def _as_structures(labels: list[str]) -> dict[str, str] | None:
 def _space_of(parameter: Parameter) -> dict[str, Any]:
     """One parameter as the identity sees it, canonicalised.
 
-    The caller is a model re-emitting a space it read back from `resume_campaign`, so re-casing or
-    trailing spaces must not mint a new campaign: names fold (`canonical_text`), category labels are
-    reduced by `_identity_labels`, and bounds are rounded to `_BOUND_DECIMALS`.
-
-    Descriptors identify the space only when the caller supplied them directly (`structures is
-    None`); when computed from `structures`, recomputation noise must not fork the campaign and the
-    structures already identify it.
+    Names fold, labels go through `_identity_labels`, and bounds round to `_BOUND_DECIMALS`, so a
+    model re-emitting the space cannot mint a new campaign. Descriptors identify the space only when
+    supplied directly (`structures is None`).
     """
     dumped = parameter.model_dump(mode="json", include=_SPACE_FIELDS)
     dumped["name"] = canonical_text(str(dumped["name"]))
@@ -163,12 +148,9 @@ def _objective_identity(objective: Objective) -> dict[str, Any]:
 def campaign_id_for(problem: OptimizationProblem) -> str:
     """The stable id of the campaign this problem *is*.
 
-    Derived from the decision space and objectives, so asking twice about one optimization reaches
-    one campaign. Model-authored names are reduced and bounds rounded (`_space_of`,
-    `_objective_identity`), parameters and categories are sorted, and constraints canonicalized
-    (`_canonical`), so re-emission cannot fork a campaign. `objectives` keep their order: the lead
-    objective is privileged. Existing rows are re-keyed when this changes, by
-    `chemclaw.cli.rekey_campaigns`.
+    Names reduced, bounds rounded, parameters, categories and constraints canonically ordered;
+    `objectives` keep their order since the lead is privileged. Changing this needs
+    `chemclaw.cli.rekey_campaigns` to re-key stored rows.
     """
     space = sorted(
         (_space_of(parameter) for parameter in problem.parameters),
@@ -257,9 +239,8 @@ class CampaignStore(Protocol):
     async def record(self, campaign: Campaign, suggestion: Suggestion) -> tuple[int, bool]:
         """Upsert the campaign and append its suggestion **atomically**.
 
-        Returns the suggestion id and whether this call created the campaign. One method because the
-        upsert replaces `problem`, so a failure between the writes would pair the new space with old
-        evidence. The created flag comes from the write itself, since a prior read would race.
+        Returns the suggestion id and whether this call created the campaign, taken from the write
+        itself to avoid racing a read.
         """
         ...
 
@@ -290,9 +271,8 @@ def _refuse_what_jsonb_would(campaign: Campaign, suggestion: Suggestion) -> None
 class InMemoryCampaignStore:
     """The same contract for a deployment whose durable records live in-process.
 
-    Not a test double: a `session_store="memory"` deployment gets it. It upserts campaigns on id
-    keeping the original opener, appends suggestions, and refuses any payload `jsonb` would (e.g. a
-    NaN). A differential test drives both stores through one scenario list.
+    The `session_store="memory"` backend, not a test double; it refuses what `jsonb` would, and a
+    differential test holds it to the Postgres store.
     """
 
     def __init__(self) -> None:
@@ -304,8 +284,7 @@ class InMemoryCampaignStore:
     async def record(self, campaign: Campaign, suggestion: Suggestion) -> tuple[int, bool]:
         """Both writes or neither, as the Postgres sibling does.
 
-        The `jsonb` refusal runs before either write, so a refused payload leaves the store
-        untouched.
+        The `jsonb` refusal runs before either write.
 
         Raises:
             ValueError: When a payload holds a non-finite float, which `jsonb` would reject.
@@ -406,19 +385,9 @@ async def record_suggestion(
 ) -> "RecordedSuggestion":
     """Persist one suggestion against the campaign its problem defines.
 
-    **Never raises on a database failure**, always raises on our own defects: the candidates are
-    already computed, and losing the record must not cost the chemist the suggestion. Returns the
-    campaign id either way (a pure function of the problem); `opened_new_campaign` is `False` when
-    the write failed, since a failed write is ignorance.
-
-    Args:
-        problem: The decision space; identifies the campaign and is snapshotted onto the suggestion.
-        candidates: The proposed point(s).
-        observations: The evidence they were derived from.
-        calc_refs: The calculation keys the descriptors came from.
-        provenance: `(actor, session_id, correlation_id)`, as `connectors.caller` yields it.
-        job_id: The durable run that produced this, empty for the inline tool; makes the write
-            idempotent under activity retries.
+    Never raises on a database failure (the candidates are already computed), always on our own
+    defects. Returns the campaign id either way; `opened_new_campaign` is `False` when the write
+    failed. `job_id` makes the write idempotent under activity retries.
     """
     actor, session_id, correlation_id = provenance
     campaign_id = campaign_id_for(problem)
@@ -491,10 +460,8 @@ class CampaignThread(BaseModel):
 async def read_campaign_thread(campaign_id: str) -> CampaignThread:
     """Read one campaign back, or raise saying why the id did not resolve.
 
-    Raises where `record_suggestion` swallows: a read is the whole request, and an empty thread
-    would falsely answer "no history". The not-found message names the hash property because the
-    usual cause is a changed decision space, which yields a different id; resuming is a separate
-    tool so a stale id is never silently merged with a new space.
+    Raises rather than returning an empty thread. A miss usually means the decision space changed,
+    which yields a different id; the message says so.
     """
     store = campaign_store()
     campaign = await store.read_campaign(campaign_id)

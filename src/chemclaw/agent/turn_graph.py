@@ -298,8 +298,7 @@ def build_turn_graph(
                 connectors=_peer_connectors(connectors, surface),
                 store=store,
                 stored_skills=stored_skills,
-                # Same behaviour as `None` and cheaper; the turn graph's own checkpointer holds the
-                # thread.
+                # Same behaviour as `None`, cheaper; the turn graph's checkpointer holds the thread.
                 checkpointer=False,
                 handoffs=handoff_tools(
                     peers,
@@ -310,12 +309,10 @@ def build_turn_graph(
                 peer=peer_profile.name,
             ),
         )
-        # Every peer may end the turn; handing over jumps before this edge, so answering is the
-        # default.
+        # Every peer may end the turn: answering is the default, handing over the deliberate act.
         graph.add_edge(peer_profile.name, END)
 
-    # The root is `names[0]` by construction — it is appended before the roster loop — which is
-    # what `entry_peer_or_root` falls back to for a name no longer in the mesh.
+    # `names[0]` is the root, `entry_peer_or_root`'s fallback.
     names = [p.name for p, _ in peers]
     graph.add_conditional_edges(START, partial(entry_peer_or_root, peers=names), names)
     compiled = graph.compile(checkpointer=checkpointer)
