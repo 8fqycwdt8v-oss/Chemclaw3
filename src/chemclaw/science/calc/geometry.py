@@ -1,14 +1,9 @@
 """One walk over a calculation payload, used twice: keep the geometries, then take them out.
 
-A model cannot read 3N Cartesians, and an ensemble's coordinates would flood its context (a
-`find_calculations` listing of stored payloads most of all); `structure_id` is what makes a geometry
-referable. One generic walker rather than a projection per model, because `find_calculations` holds
-stored payloads of unknown type.
-
-`structures_in` finds the geometries so they can be persisted; `without_geometry` replaces those
-same geometries with their addresses, so every `structure_id` shown resolves. A geometry is
-recognised by shape (`elements` and `positions`) and then validated as a `Structure`, which also
-derives the address from normalised coordinates; anything that fails validation is left alone.
+A model cannot read 3N Cartesians, so `without_geometry` replaces each geometry with its
+`structure_id`, and `structures_in` yields the same geometries for persisting, so every address
+shown resolves. Geometries are recognised by shape and validated as `Structure`; anything that fails
+validation is left alone.
 """
 
 import logging
@@ -71,10 +66,8 @@ def structures_in(payload: Any) -> Iterator[Structure]:
 def without_geometry(payload: Any) -> Any:
     """`payload` with every embedded geometry replaced by its address and its identifying fields.
 
-    The model-facing projection: the address plus the fields that say which molecule and state
-    (default state omitted, see `_DEFAULT_STATE`), with `geometry_omitted` set so a projected
-    geometry is distinguishable from one never produced. Pure, because `CalcJobWorkflow` applies it
-    in workflow code where replay must be byte-identical.
+    Sets `geometry_omitted` so a projected geometry is not mistaken for an absent one. Pure, since
+    workflow replay needs byte-identical output.
     """
     structure = _as_structure(payload)
     if structure is not None:
@@ -101,11 +94,8 @@ def without_geometry(payload: Any) -> Any:
 def check_server_address(payload: Any) -> None:
     """Count, and say out loud, any geometry whose address we derive differently from the server's.
 
-    `structure_id` is half of every `xtb.*` key, so a divergence means a cache that misses forever.
-    The server's rounding is configurable while ours is fixed, so its `computed_field`
-    `structure_id` is read here before validation drops it. Counted through `degraded` (pinned
-    subsystem labels) so it shows on a dashboard. Logs rather than raises, and the local id wins:
-    the numbers in hand are not wrong, and this deployment's rows are keyed by the local id.
+    A divergence means cache keys that never match again. Reads the server's `structure_id` before
+    validation drops it, counts via `degraded`, and logs rather than raises: the local id wins.
     """
     if not isinstance(payload, dict | list):
         return

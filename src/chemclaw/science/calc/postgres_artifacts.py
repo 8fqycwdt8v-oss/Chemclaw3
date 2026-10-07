@@ -1,11 +1,8 @@
 """Postgres backend for the artifact store (D-124).
 
-Implements `ArtifactStore` over `artifact_blobs` + `calculation_artifacts`
-(`infra/sql/019_artifact_store.sql`), so by-products survive restarts and are shared across workers.
-`BYTEA` rather than an object store: artifacts are kilobytes to a few megabytes and Postgres is the
-durable store the deployment already has; the Protocol is the seam for adding one later.
-
-A write inserts the blob by content address (a no-op if the bytes exist) and upserts the link row.
+`BYTEA` over `artifact_blobs` + `calculation_artifacts` (`infra/sql/019_artifact_store.sql`):
+artifacts are at most a few megabytes and Postgres is the durable store already present. A write
+inserts the blob by content address and upserts the link.
 """
 
 import logging

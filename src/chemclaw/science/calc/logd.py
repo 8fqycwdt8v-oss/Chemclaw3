@@ -1,12 +1,8 @@
 """The local half of logD: a Crippen sum and one Henderson-Hasselbalch term over a remote pKa.
 
-logD has no cache key of its own: its expensive half is a cached remote pKa and the rest is a
-sub-millisecond RDKit descriptor, so it is composed here to keep the warm path warm.
-
-Domain: neutral O-H/S-H acids and the conjugate acid of aromatic or aryl nitrogen, inherited from
-the pKa predictor (aliphatic amines raise there). `_require_a_single_equilibrium` narrows it further
-— polyprotic acids and amphoterics — because one term consumes one pKa. `PkaResult.site` must be
-read: the correction runs in opposite directions for an acid and a base.
+Composed here because logD has no cache key of its own: the pKa is a cached remote primitive and the
+rest is sub-millisecond RDKit. One term consumes one pKa, so `_require_a_single_equilibrium` refuses
+molecules it cannot describe, and `PkaResult.site` decides the sign of the correction.
 """
 
 import math
@@ -24,14 +20,10 @@ from chemclaw.science.calc.uncertainty import CalculationDomainError
 # is what `_require_a_single_equilibrium` reads. `tests/test_logd.py` pins the partition.
 _ACIDIC_SITE = Chem.MolFromSmarts("[#1;D1]-[#8,#16]")
 
-# A basic site is a neutral, not four-connected nitrogen whose lone pair is available. Excluded:
-#
-# - `$([#7]#*)` — nitrile (any sp nitrogen); pKaH ~ -10.
-# - `$([n;!X1;!X2])` — pyrrole-type aromatic nitrogen, whose pair is in the aromatic sextet. The
-#   pyridine-type nitrogen has two connections and is basic (imidazole has one of each).
-# - `$([#7]-[#6,#16]=[#8,#16])` — amide, carbamate, urea, sulfonamide: the pair is conjugated into
-#   C=O/S=O and protonation occurs on oxygen. The single bond keeps aniline (aromatic bond, pKaH
-#   4.6) in, and `=` never matches an aromatic bond.
+# A basic site is a neutral, not four-connected nitrogen with an available lone pair. Excluded:
+# nitriles (`$([#7]#*)`), pyrrole-type aromatic N (`$([n;!X1;!X2])`, pair in the sextet), and
+# amide/carbamate/urea/sulfonamide N (`$([#7]-[#6,#16]=[#8,#16])`, pair conjugated; the single
+# bond keeps aniline in).
 _BASIC_SITE = Chem.MolFromSmarts(
     "[#7;+0;X1,X2,X3;!$([#7]#*);!$([n;!X1;!X2]);!$([#7]-[#6,#16]=[#8,#16])]"
 )
@@ -40,9 +32,8 @@ _BASIC_SITE = Chem.MolFromSmarts(
 class IonisableSites(NamedTuple):
     """How many acid and base sites this molecule offers a single-equilibrium model.
 
-    `predict_pka` reports one pKa, and a `PkaResult` does not reveal whether the molecule has more
-    sites. This mirrors the pKa predictor's own site enumeration (pure graph inspection, so it is
-    cheap here and needs no round trip), and is exactly as good as that enumeration.
+    Mirrors the pKa predictor's own site enumeration, since a `PkaResult` does not reveal other
+    sites.
     """
 
     acidic: int
@@ -76,16 +67,9 @@ def ionisable_sites(smiles: str) -> IonisableSites:
 def _require_a_single_equilibrium(result: PkaResult, ph: float, ionised_ratio: float) -> None:
     """Raise unless one Henderson-Hasselbalch term can describe this whole molecule.
 
-    A second ionisable site is served correctly only when it is a spectator. Refused:
-
-    - **Amphoteric** (an acid and a base site), at every pH: the predictor takes the acid branch and
-      never evaluates the base (e.g. glycine).
-    - **Polyprotic** (two or more sites of one kind) while the reported, most ionisable site is
-      ionised above `settings.logd_negligible_ionised_fraction`; below it every other site is even
-      less ionised and the single term holds (diols, sugars).
-
-    A refusal rather than an out-of-domain flag: the result would be known wrong by several log
-    units, and the composition's other domain limits are already refusals.
+    Refuses amphoterics at every pH (the base site is never evaluated), and polyprotics while the
+    reported site is ionised above `logd_negligible_ionised_fraction`. A refusal, not a flag: the
+    number would be known wrong by log units.
     """
     sites = ionisable_sites(result.smiles)
     if sites.acidic and sites.basic:
@@ -113,10 +97,8 @@ def _require_a_single_equilibrium(result: PkaResult, ph: float, ionised_ratio: f
 def logd_from_pka(pka_result: PkaResult, ph: float | None = None) -> LogdResult:
     """Combine a computed pKa with a local Crippen LogP into logD at `ph`.
 
-    Raises `CalculationDomainError` where a single Henderson-Hasselbalch term cannot describe the
-    molecule at this pH (see `_require_a_single_equilibrium`); never a guessed logD. The uncertainty
-    combines Crippen's RMSE in quadrature with the pKa residual scaled by the ionised fraction.
-    Synchronous and sub-millisecond.
+    Raises `CalculationDomainError` outside the single-equilibrium domain. The uncertainty combines
+    Crippen's RMSE and the pKa residual scaled by the ionised fraction, in quadrature.
     """
     ph = settings.logd_default_ph if ph is None else ph
     # `pka_result.smiles` is already the canonical form the pKa was computed on, so this reparse

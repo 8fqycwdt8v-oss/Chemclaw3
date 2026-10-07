@@ -80,9 +80,9 @@ class ToolCall(NamedTuple):
     latency_ms: float
     actor: str
     plan_step: str
-    # : The `AgentProfile` name of the graph that made the call, empty for the agent the chemist was
-    # : talking to (`agent/audit.AuditEvent.agent`); rendered only when non-empty. Defaulted for
-    # : positional construction in tests; the fetch always supplies it.
+    #: The `AgentProfile` name of the graph that made the call, empty for the agent the chemist was
+    #: talking to (`agent/audit.AuditEvent.agent`); rendered only when non-empty. Defaulted for
+    #: positional construction in tests; the fetch always supplies it.
     agent: str = ""
 
 

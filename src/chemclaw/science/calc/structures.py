@@ -1,10 +1,8 @@
 """Where a computed geometry lives so that its address resolves.
 
 A content-addressed `structure_id` → geometry table
-(D-2026-08-21-a-geometry-is-an-address-not-a-payload), so a reported address can be passed to the
-next calculation. Not the artifact store, whose byte addressing would fork on provenance
-`structure_id` ignores. Invariant: every `structure_id` the agent is shown resolves, because
-`geometry` strips and this module keeps the same geometries.
+(D-2026-08-21-a-geometry-is-an-address-not-a-payload). Invariant: every `structure_id` the agent is
+shown resolves, because `geometry` strips and this module keeps the same geometries.
 """
 
 import logging
@@ -63,17 +61,7 @@ class UnknownStructureError(ValueError):
 
 
 async def require_structure(store: StructureStore, structure_id: str) -> Structure:
-    """Resolve `structure_id`, or raise a message a model can act on.
-
-    An unresolvable handle almost always comes from older data, and the remedy is to re-run the
-    search; one function keeps that message identical across the MCP and Temporal callers.
-
-    Args:
-        store: Where geometries are kept.
-        structure_id: The address, as a result reported it.
-
-    Returns:
-        The geometry.
+    """Resolve `structure_id`, or raise a message telling the model to re-run the search.
 
     Raises:
         UnknownStructureError: Nothing is stored under that address.

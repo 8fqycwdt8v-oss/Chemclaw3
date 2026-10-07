@@ -44,8 +44,8 @@ from chemclaw.core.ids import stable_hash
 
 PLAN = "e2e:plan"
 
-# : The reaction the plan proposes and then runs. Fixed on purpose: the scenario tests the gate,
-# : so after the first run it is a cache hit answered inside the tool's inline wait.
+#: The reaction the plan proposes and then runs. Fixed on purpose: the scenario tests the gate,
+#: so after the first run it is a cache hit answered inside the tool's inline wait.
 PLAN_PAYLOAD: dict[str, object] = {
     "kind": "reaction",
     "reactants": ["N#N", "[H][H]", "[H][H]", "[H][H]"],
@@ -102,9 +102,9 @@ CONDITIONS = "e2e:conditions"
 PREFERENCE_KEY = "forbidden_solvent_dcm"
 PREFERENCE_VALUE = "Never use dichloromethane (DCM) as a solvent: it is forbidden in this lab."
 
-# : Candidate solvents for the amide coupling, in order of preference, each with the spellings an
-# : excluding entry would use. With no preference the answer recommends DCM, which makes a lost
-# : preferences section visible.
+#: Candidate solvents for the amide coupling, in order of preference, each with the spellings an
+#: excluding entry would use. With no preference the answer recommends DCM, which makes a lost
+#: preferences section visible.
 _SOLVENTS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("dichloromethane (DCM)", ("dichloromethane", "dcm", "ch2cl2")),
     ("DMF", ("dmf", "dimethylformamide")),
@@ -112,7 +112,7 @@ _SOLVENTS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("2-MeTHF", ("2-methf", "methyltetrahydrofuran")),
 )
 
-# : The opening words of the conditions answer in each case, exported for tests and the UI suite.
+#: The opening words of the conditions answer in each case, exported for tests and the UI suite.
 PREFERENCES_RECEIVED = "Standing preferences received:"
 PREFERENCES_ABSENT = "No standing preferences reached me."
 
@@ -166,13 +166,13 @@ def _conditions(behaviour: Behaviour, conversation: Conversation) -> Behaviour:
 
 CITE = "e2e:cite"
 
-# : The structural anchor when the message names none: benzoic acid + aniline to
-# : N-phenylbenzamide, the transformation of the mock's seeded `uspto-amide-coupling-1/2` records.
-# :
-# : The anchor decides whether anything is found: `find_similar_reactions` drops hits below
-# : `fingerprint_similarity_threshold` (0.3), and this one scores about 0.39 against the seeded
-# : records. `tests/test_mock_llm_e2e.py` recomputes the score offline, so a change of anchor,
-# : threshold or fingerprint cannot silently leave nothing to cite.
+#: The structural anchor when the message names none: benzoic acid + aniline to
+#: N-phenylbenzamide, the transformation of the mock's seeded `uspto-amide-coupling-1/2` records.
+#:
+#: The anchor decides whether anything is found: `find_similar_reactions` drops hits below
+#: `fingerprint_similarity_threshold` (0.3), and this one scores about 0.39 against the seeded
+#: records. `tests/test_mock_llm_e2e.py` recomputes the score offline, so a change of anchor,
+#: threshold or fingerprint cannot silently leave nothing to cite.
 CITE_ANCHOR = "O=C(O)c1ccccc1.Nc1ccccc1>>O=C(Nc1ccccc1)c1ccccc1"
 CITE_QUERY = "amide coupling"
 _CITE_TEMPLATES = [
@@ -183,8 +183,8 @@ _CITE_TEMPLATES = [
     ToolCall(tool="find_notes", arguments={"text": CITE_QUERY}),
 ]
 
-# : An ELN/ORD record id as `kg.note.note_id_for_reaction` mints it. A digit or `.` qualifier is
-# : required, as the UI's chip pattern requires, so "reaction-energy" is not taken for a record.
+#: An ELN/ORD record id as `kg.note.note_id_for_reaction` mints it. A digit or `.` qualifier is
+#: required, as the UI's chip pattern requires, so "reaction-energy" is not taken for a record.
 _REACTION_ID = re.compile(
     r"\breaction-(?=[A-Za-z0-9_-]*(?:[0-9]|\.[A-Za-z0-9]))[A-Za-z0-9][A-Za-z0-9_.-]*[A-Za-z0-9]"
 )
@@ -239,9 +239,9 @@ def _cite(behaviour: Behaviour, conversation: Conversation) -> Behaviour:
 
 LONG_JOB = "e2e:long-job"
 
-# : A campaign on the `measured` objective waits on a person after its seed batch for
-# : `bo_measurement_deadline_days`, so it stays running as long as a test needs at no cost, and a
-# : cancel reaches the wait (`ParentClosePolicy.REQUEST_CANCEL`).
+#: A campaign on the `measured` objective waits on a person after its seed batch for
+#: `bo_measurement_deadline_days`, so it stays running as long as a test needs at no cost, and a
+#: cancel reaches the wait (`ParentClosePolicy.REQUEST_CANCEL`).
 _CAMPAIGN_PROBLEM: dict[str, object] = {
     "parameters": [
         {"kind": "continuous", "name": "temperature_c", "lower": 20.0, "upper": 100.0},
@@ -311,8 +311,8 @@ def _long_job(behaviour: Behaviour, conversation: Conversation) -> Behaviour:
 # ------------------------------------------------------------------------------- a slow turn
 
 SLOW = "e2e:slow"
-# : How long the slow turn streams: long enough for a second participant to queue and withdraw,
-# : short enough that the scenario's timeouts are not the bound.
+#: How long the slow turn streams: long enough for a second participant to queue and withdraw,
+#: short enough that the scenario's timeouts are not the bound.
 SLOW_STREAM_SECONDS = 20.0
 SLOW_TEXT = " ".join(
     f"Part {n} of a deliberately slow answer, streamed a few words at a time." for n in range(1, 13)
@@ -323,8 +323,8 @@ SLOW_TEXT = " ".join(
 
 ARTEFACT = "e2e:artefact"
 ARTEFACT_TITLE = "Amide coupling plan"
-# : Long enough that its fragments arrive over a visible stretch of the stream, so the pane fills in
-# : rather than appearing whole.
+#: Long enough that its fragments arrive over a visible stretch of the stream, so the pane fills in
+#: rather than appearing whole.
 ARTEFACT_MARKDOWN = "\n".join(
     [
         "# Amide coupling plan",

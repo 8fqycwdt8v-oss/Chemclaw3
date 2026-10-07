@@ -43,12 +43,12 @@ from chemclaw.exhibits.models import PUSH_KIND as EXHIBIT_PUSH_KIND
 
 logger = logging.getLogger(__name__)
 
-# : How far one tailer's poll interval is spread either side of `session_event_poll_seconds`.
-# :
-# : Constant intervals keep in-phase tailers in phase, so a pod's streams would hit the pool
-# : as one burst every poll. Drawn once per stream, which de-phases a fleet within a couple of
-# : polls; the cost is a job notice up to 25% later than the configured interval. A constant,
-# : not a setting: it is a property of how pollers de-phase, not a deployment choice.
+#: How far one tailer's poll interval is spread either side of `session_event_poll_seconds`.
+#:
+#: Constant intervals keep in-phase tailers in phase, so a pod's streams would hit the pool
+#: as one burst every poll. Drawn once per stream, which de-phases a fleet within a couple of
+#: polls; the cost is a job notice up to 25% later than the configured interval. A constant,
+#: not a setting: it is a property of how pollers de-phase, not a deployment choice.
 _POLL_SPREAD = 0.25
 
 
@@ -394,12 +394,12 @@ class CheckInOut(BaseModel):
     asked_of: str = ""
     open_days: int = 0
     days_left: int = 0
-    # : The conversation the question was asked in, or `""`. Always one of the caller's own.
+    #: The conversation the question was asked in, or `""`. Always one of the caller's own.
     session_id: str = ""
-    # : Whether the notice this question arrived in was short of the asker's whole blocked set.
-    # :
-    # : A property of the claimed row, stamped on every entry it carried, since the answer is
-    # : flattened across rows.
+    #: Whether the notice this question arrived in was short of the asker's whole blocked set.
+    #:
+    #: A property of the claimed row, stamped on every entry it carried, since the answer is
+    #: flattened across rows.
     truncated: bool = False
 
 

@@ -73,8 +73,8 @@ from chemclaw.exhibits.models import UnknownExhibit
 
 logger = logging.getLogger(__name__)
 
-# : On a watch response: the correlation id of the turn being watched (its sender's own
-# : `POST …/messages` id), distinct from the watch request's `X-Chemclaw-Correlation-Id`.
+#: On a watch response: the correlation id of the turn being watched (its sender's own
+#: `POST …/messages` id), distinct from the watch request's `X-Chemclaw-Correlation-Id`.
 TURN_CORRELATION_HEADER = "X-Chemclaw-Turn-Correlation-Id"
 
 
@@ -1002,7 +1002,7 @@ async def _watch_elsewhere(
     )
 
 
-# : What a client following a turn that died with its process is told.
+#: What a client following a turn that died with its process is told.
 _INTERRUPTED_MESSAGE = (
     "This answer was interrupted: the service restarted while it was being written. Your question "
     "is in the conversation; send it again to get an answer."

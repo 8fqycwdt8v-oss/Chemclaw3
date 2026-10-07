@@ -1,19 +1,8 @@
 """One shape for "how much should this number be trusted", across every calculator.
 
-Three different questions:
-
-- *How wrong is this likely to be?* — `uncertainty`, with `method` saying how it was obtained:
-  `reported` (the model's published error, independent of this molecule) or `propagated` (an input's
-  uncertainty carried through the arithmetic, scaled by the derivative — e.g. logD scales the pKa
-  residual by the ionised fraction).
-- *Can the model speak about this molecule at all?* — `in_domain`. An out-of-domain error bar is
-  meaningless, not merely larger.
-- *Do we know?* — `None`, distinct from `False`: no declared domain is "unknown".
-
-Only a structural domain (what a model's terms are defined over) can be asserted without the
-training set; this repository ships none, so no statistical domain is invented. The structural
-screen runs with the prediction in `Chemclaw3-mcp`'s `calc` server, and `SolubilityResult.estimate`
-arrives carrying its verdict.
+`uncertainty` with `method` (`reported` published error, or `propagated` through the arithmetic),
+and `in_domain`, where `None` means no declared domain ("unknown", not "yes"). Only structural
+domains are asserted, and the screen runs with the prediction on the server.
 """
 
 from typing import Literal
@@ -38,10 +27,7 @@ _METHOD_PROSE: dict[Method, str] = {
 class CalculationDomainError(ChemclawError):
     """A calculator refuses a molecule it cannot speak about, and says why.
 
-    The refusal end of `Estimate.in_domain`: there is no number to give (e.g. no basic pKa without a
-    protonatable nitrogen). A `ChemclawError` so `agent.tool_authz.surface_domain_errors` shows the
-    message to the model verbatim; it must be caller-safe, explaining the limit in the chemist's
-    terms.
+    A `ChemclawError`, so the message reaches the model verbatim and must be caller-safe.
     """
 
 
@@ -78,11 +64,8 @@ class Estimate(BaseModel):
     def render(self, *, fmt: str = ".6g") -> str:
         """This number and how far to trust it, as one inline fragment of a note body.
 
-        Inline because retrieval excerpts truncate note bodies, and a footer would be cut. An
-        in-domain estimate adds no remark; out-of-domain and "not assessed" are both spelled out.
-
-        Args:
-            fmt: Format spec for the value and its uncertainty; the caller owns precision.
+        Inline because excerpts truncate note bodies. In-domain adds nothing; out-of-domain and "not
+        assessed" are spelled out. `fmt` is the value's format spec.
         """
         number = f"{self.value:{fmt}}"
         if self.uncertainty is not None:

@@ -1,14 +1,8 @@
 """Counting the calculations a fan-out will make, before it makes the first one.
 
-Composites multiply: a species ranking is a search, an optimization and a Hessian *per species*, so
-one tool call can be hours of CPU. The fence is a preflight, not a clock: a timeout fires only after
-the time is spent, and raising the shared `xtb_job_timeout_seconds` would weaken failure detection
-for every other job.
-
-A unit is one remote primitive, which a composite can count before it starts. The refusal is a
-`ValueError` naming the count, non-retryable under `durable/publish.py::BAD_DATA_RETRY`, so an
-over-budget request fails at once. `require_hessian_affordable` counts atoms instead, since a
-Hessian's runaway is the size of one molecule.
+A preflight, not a clock: composites multiply remote primitives per species, and a timeout fires
+only after the time is spent. Refusals are `ValueError`s naming the count, non-retryable under
+`durable/publish.py::BAD_DATA_RETRY`. `require_hessian_affordable` counts atoms instead.
 """
 
 from chemclaw.core.config import settings
@@ -30,31 +24,17 @@ _PER_SPECIES: dict[str, int] = {"quick": 2, "standard": 3, "thorough": 5}
 
 
 def estimate_units(species: int, *, level: ReactionLevel = "standard") -> int:
-    """How many remote primitives a fan-out over `species` will ask for.
-
-    Args:
-        species: How many distinct molecules the fan-out covers — tautomers, microstates,
-            stereoisomers, ensemble members, or the parent-and-fragments of each bond in a survey.
-        level: `quick`, `standard` or `thorough`, as the reaction composites take it.
-
-    Returns:
-        The number of remote calls, which is what the ceiling is expressed in.
-    """
+    """How many remote primitives a fan-out over `species` molecules will ask for at `level`."""
     return species * _PER_SPECIES[level]
 
 
 def rotation_units(points: int, passes: int, *, level: ReactionLevel = "quick") -> int:
-    """How many remote primitives a rotational profile will ask for.
+    """How many remote primitives a rotational profile will ask for, counted before anything runs.
 
-    Counted from the shape of the request, before anything runs, so `passes` is the most maxima a
-    period can hold at this step. The ladder, from `connectors/calc/compose.py::rotation_profile`:
-
-        every level    one constrained optimization per coarse point, plus the refinement points
-                       around each maximum, plus one released optimization per well
-        standard       a Hessian and a re-optimization per well
-        thorough       also a constrained optimization and a Hessian per pass
-
-    A period holds at most as many wells as maxima, so wells are counted at `passes`.
+    Per `compose.rotation_profile`: every level runs one constrained optimization per coarse point,
+    refinement points per maximum and one released optimization per well; `standard` adds a Hessian
+    and re-optimization per well; `thorough` also a constrained optimization and Hessian per pass.
+    Wells are counted at `passes`, their upper bound.
     """
     per_well = {"quick": 1, "standard": 3, "thorough": 3}[level]
     per_pass = 2 if level == "thorough" else 0
@@ -63,8 +43,6 @@ def rotation_units(points: int, passes: int, *, level: ReactionLevel = "quick") 
 
 def require_within_budget(units: int, what: str) -> None:
     """Refuse a fan-out larger than the configured ceiling, naming the count.
-
-    The count tells the caller whether to ask at a cheaper level or narrow the enumeration first.
 
     Raises:
         ValueError: the request needs more primitives than `calc_max_primitive_calls` allows.
@@ -83,14 +61,11 @@ def require_within_budget(units: int, what: str) -> None:
 def require_hessian_affordable(atom_count: int, what: str) -> None:
     """Refuse a Hessian on a molecule too large for one, naming the routes this system has.
 
-    Counted in atoms: a Hessian is 6N single points on one molecule. The message names what this
-    system offers instead — `level="quick"` (electronic energies, no Hessian) or a truncated model
-    system — because every path here uses the same `compute_hessian` primitive under the same
-    ceiling.
+    The message points at `level="quick"` (no Hessian) or a truncated model system.
 
     Raises:
-        ValueError: the molecule has more atoms than `calc_hessian_max_atoms` allows. Non-retryable
-            by `durable/publish.py::BAD_DATA_RETRY`.
+        ValueError: the molecule has more atoms than `calc_hessian_max_atoms` allows
+        (non-retryable).
     """
     ceiling = settings.calc_hessian_max_atoms
     if atom_count <= ceiling:

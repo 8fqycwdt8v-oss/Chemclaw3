@@ -1,21 +1,9 @@
 """The statistical mechanics that stays here: RRHO over a Hessian, Boltzmann over an ensemble.
 
-The Hessian and the conformer search are cached primitives computed on the server; turning them into
-a free energy or populations is cheap arithmetic that depends on a temperature the server never saw,
-so a second temperature is a cache hit plus milliseconds. Only numpy, no binaries.
-
-**Quasi-RRHO entropy (Grimme 2012).** Each mode's entropy is a Head-Gordon-damped mix of harmonic
-and free-rotor expressions, weighted 1/(1 + (w0/w)^4), so near-zero modes cannot contribute nonsense
-to G. `rrho_cutoff_cm` (w0, default 50 cm^-1 as in xtb's `--sthr`) is where the two contribute
-equally; the choice is worth about a kcal/mol on a flexible molecule (`tests/test_calc_thermo.py`).
-
-**The standard state follows the phase.** 1 atm in the gas phase, 1 mol/L in an implicit solvent
-(`HessianPayload.solvent`): they differ by RT ln(RT c0/P0) = 1.894 kcal/mol per mole of species at
-298.15 K, which cancels only when Δn = 0.
-
-**The rotational symmetry number is an input**, shifting entropy by R ln(sigma). It defaults to 1
-and an unstated value is reported, since it does not cancel across most reactions (H2 has sigma 2,
-benzene 12).
+Both depend on a temperature the cached server primitives never saw, so a new temperature is a cache
+hit plus arithmetic. Entropy is quasi-RRHO (Grimme 2012, damped at `rrho_cutoff_cm`); the standard
+state follows the phase (1 atm gas, 1 mol/L in solvent, 1.894 kcal/mol apart per species at 298.15
+K); the rotational symmetry number is an input, defaulting to 1 and reported when unstated.
 """
 
 import base64
@@ -119,9 +107,8 @@ _EXTERNAL_MODE_CM = 0.01
 class IntensityAlignmentError(ValueError):
     """The server's intensities cannot be paired with this projection's modes.
 
-    Separate so the failure is confined to the spectrum: thermochemistry reads no intensity.
-    `ThermochemistryResult.spectrum_unavailable` carries the message and every band's intensity is
-    `None`. Still a `ValueError`, so direct callers are unchanged.
+    Confined to the spectrum (`spectrum_unavailable`), since no thermochemistry term reads an
+    intensity.
     """
 
 
@@ -133,11 +120,9 @@ def _align_intensities(
 ) -> np.ndarray:
     """Pair the server's intensities with this projection's modes, by wavenumber where possible.
 
-    xtb lists all 3N entries, translations and rotations first. Counting alone is unsafe: xtb and
-    `_is_linear` judge linearity by different criteria and disagree near 180 degrees, which would
-    shift every band silently. So when the server sends wavenumbers, the zeroed external rows are
-    dropped by value and the remainder must match this projection's mode count or it raises. Older
-    cached rows without wavenumbers fall back to subtraction.
+    xtb and `_is_linear` judge linearity differently near 180 degrees, so counting alone could shift
+    every band. With server wavenumbers the zeroed external rows are dropped by value and the
+    remainder must match or it raises; older rows fall back to subtraction.
     """
     if wavenumbers_cm is not None:
         if len(wavenumbers_cm) != intensities.size:
@@ -185,10 +170,8 @@ def _is_linear(moments: np.ndarray) -> bool:
 def _vibrational_basis(masses: np.ndarray, positions: np.ndarray) -> np.ndarray:
     """An orthonormal basis of the *vibrational* subspace, in mass-weighted coordinates.
 
-    The orthogonal complement of the mass-weighted translations and rotations; diagonalizing inside
-    it makes every eigenvalue a vibration, rather than discarding the six smallest and risking a
-    real soft mode. Rotations are built about the principal axes and kept by moment of inertia, so a
-    near-linear molecule gets 3N-5 modes.
+    The complement of translations and rotations (about the principal axes, kept by moment), so
+    every eigenvalue is a vibration and a near-linear molecule gets 3N-5 modes.
     """
     count = len(masses)
     root_mass = np.sqrt(masses)
@@ -271,9 +254,8 @@ def standard_state_for(solvent: str | None) -> StandardState:
 def _reference_pressure(spec: ThermoSettings, solvent: str | None) -> tuple[float, StandardState]:
     """The pressure the translational partition function is evaluated at, and what to call it.
 
-    The only pressure-dependent term is Sackur-Tetrode's. Gas phase keeps the configured 1 atm; an
-    implicit solvent uses 1 mol/L, i.e. c0·R·T (2.479 MPa at 298.15 K), raising G by 1.894 kcal/mol
-    per species. Derived from `hessian.solvent`, since the phase is a property of the calculation.
+    1 atm in the gas phase; c0·R·T (2.479 MPa at 298.15 K) in an implicit solvent, derived from
+    `hessian.solvent`.
     """
     state = standard_state_for(solvent)
     if state == "gas-1atm":
@@ -339,14 +321,9 @@ def thermochemistry_from_hessian(
 ) -> ThermochemistryResult:
     """RRHO thermochemistry over a Hessian the server computed — the arithmetic, and only that.
 
-    The one implementation of the quasi-RRHO and symmetry handling. `structure` should be the
-    geometry the Hessian was taken at; a non-minimum is reported through `is_minimum` rather than
-    refused. The gradient the server sends is checked against `xtb_stationary_gradient_tolerance`
-    (`is_stationary`) and folded into `is_minimum`, because a non-stationary geometry can have no
-    imaginary mode yet a ZPE that is too low.
-
-    Synchronous and CPU-bound (a 3N x 3N eigendecomposition); call via `asyncio.to_thread` from an
-    event loop.
+    A non-minimum is reported via `is_minimum`, which also folds in the server's gradient check
+    (`is_stationary`), since a non-stationary geometry can lack imaginary modes. CPU-bound: call
+    through `asyncio.to_thread`.
     """
     masses = _atomic_masses(structure.elements)
     _, positions = structure.arrays()
@@ -471,9 +448,7 @@ def thermochemistry_from_hessian(
 def displaced_along(structure: Structure, direction: list[list[float]]) -> Structure:
     """Push `structure` along `direction`, scaled so the largest atom moves a fixed step.
 
-    The escape from a saddle point: a gradient optimization can converge onto a symmetric saddle
-    (e.g. an eclipsed methyl). Normalizing on the largest single-atom motion keeps the kick the same
-    physical size whether the mode is localized or delocalized.
+    The escape from a saddle point, sized the same whether the mode is localized or spread out.
     """
     step = np.asarray(direction)
     step = settings.xtb_imaginary_kick_angstrom * step / np.abs(step).max()
@@ -510,18 +485,8 @@ def half_life_from_barrier(
 ) -> Interconversion:
     """How long a rotamer survives at `temperature_k`, with the band the method's error implies.
 
-    `t½ = ln2 / k` for a first-order interconversion; the band is the same at `barrier ±
-    uncertainty` (a lower barrier gives the shorter half-life).
-
-    Args:
-        barrier_kcal: The free-energy barrier out of the populated well, in kcal/mol.
-        temperature_k: The temperature the lifetime is quoted at — the process temperature when the
-            question is racemization during manufacture.
-        uncertainty_kcal: The method's uncertainty; the configured semiempirical value by default.
-
-    Returns:
-        The rate, the half-life, and the shortest and longest half-life the barrier's uncertainty
-        allows.
+    `t½ = ln2 / k`; the band is the same at `barrier ± uncertainty_kcal` (default: the configured
+    semiempirical value). Quote it at the process temperature when the question is racemization.
     """
     band = settings.xtb_reaction_uncertainty_kcal if uncertainty_kcal is None else uncertainty_kcal
     rate = rate_from_barrier(barrier_kcal, temperature_k)
@@ -543,9 +508,7 @@ def boltzmann_populations(
 ) -> list[float]:
     """Normalized populations from relative energies in kcal/mol, weighted by degeneracy.
 
-    Shared by every ensemble weighting and averaging so they agree exactly. Each conformer stands
-    for `g` equally populated rotamers and carries `g` times the weight (n-butane anti: 59.2%,
-    matching CREST).
+    Each conformer stands for `g` equally populated rotamers.
     """
     rt = rt_kcal(temperature_k)
     smallest = min(relative_kcal)
@@ -575,12 +538,9 @@ def macrostate_free_energy_kcal(
 ) -> float:
     """The ensemble's free energy relative to its lowest member: `-RT ln sum_i g_i exp(-dE_i/RT)`.
 
-    Always <= 0, and an identity rather than a correction: equilibria between macrostates are ratios
-    of these partition functions, which is why a pKa uses it. Unlike
-    `ConformerEnsemble.ensemble_correction_kcal` (`-T*S_conf` added to the lowest member), this also
-    includes the Boltzmann-averaged energy above the lowest member; the two agree only when one
-    conformer holds all the population. Two sites within RT shift a pKa by up to RT ln 2. Takes
-    relative energies in kcal/mol, the same convention as `boltzmann_populations`.
+    Always <= 0. An identity rather than a correction, which is why pKa uses it; unlike
+    `ensemble_correction_kcal` (`-T*S_conf` on the lowest member) it includes the Boltzmann-averaged
+    energy above the lowest member.
     """
     rt = rt_kcal(temperature_k)
     smallest = min(relative_kcal)
@@ -596,9 +556,7 @@ def free_energy_populations(
 ) -> list[float]:
     """Populations from Gibbs free energies rather than from electronic energies.
 
-    A different treatment, not a better one, and the result must say which ran: weighting by G
-    carries ZPE, thermal and entropic differences but costs one Hessian per member. It is
-    `boltzmann_populations` over a different energy.
+    A different treatment, not a better one (one Hessian per member); callers report which ran.
     """
     lowest = min(gibbs_hartree)
     relative = [(value - lowest) * HARTREE_TO_KCAL for value in gibbs_hartree]
@@ -628,10 +586,8 @@ def ensemble_from_members(
 ) -> ConformerEnsemble:
     """Weight a cached search's members into an ensemble at `temperature_k`.
 
-    Not baked into the cached payload because: populations depend on temperature, so another
-    temperature is a cache hit rather than a new CREST run; degeneracy multiplies each population;
-    and `max_members` truncates only the listing — `total_found`, the populations and the entropy
-    describe the whole ensemble.
+    Done here, not in the cached payload, because populations depend on temperature. `max_members`
+    truncates only the listing; totals, populations and entropy describe the whole ensemble.
     """
     members = payload.members
     if not members:

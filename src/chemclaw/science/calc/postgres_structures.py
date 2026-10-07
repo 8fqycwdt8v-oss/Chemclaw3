@@ -1,9 +1,7 @@
-"""Postgres backend for the geometry store (D-2026-08-21-a-geometry-is-an-address-not-a-payload).
+"""Postgres backend for the geometry store (`infra/sql/047_structures.sql`).
 
-The `StructureStore` contract over the `structures` table (`infra/sql/047_structures.sql`), so a
-handle resolves across processes and over time: searches run on the `calc` queue while follow-ups
-launch from the chat service. Writes are `ON CONFLICT DO NOTHING`: the key is the content, and a
-second arrival must not disturb the first row.
+Durable so a handle resolves across processes and over time. Writes are `ON CONFLICT DO NOTHING`:
+the key is the content.
 """
 
 import json
@@ -71,10 +69,8 @@ class PostgresStructureStore:
 
 
 def default_structure_store() -> StructureStore:
-    """Return the production geometry store.
+    """Return the production geometry store; tests monkeypatch it at the importing module.
 
-    The one place that names the production backend; tests monkeypatch it at the importing module.
-    No enable switch: a geometry is small and already inside the result payload, and disabling it
-    would make every reported `structure_id` unresolvable.
+    No enable switch: disabling it would make every reported `structure_id` unresolvable.
     """
     return PostgresStructureStore()

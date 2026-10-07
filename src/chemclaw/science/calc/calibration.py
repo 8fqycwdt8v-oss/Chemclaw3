@@ -1,19 +1,10 @@
 """Close the loop between what was predicted and what actually happened.
 
-A ledger of predictions keyed on `(calc_type, calc_version, input_hash)`, reconciled against
-measurements as they arrive, so "how far should I trust this calculator?" has a numeric answer.
-`input_hash` is `stable_hash(canonical_smiles)`, not the calculation cache's molecule hash; joining
-the two needs a translation.
-
-Three figures: **bias** (runs high or low — correctable), **MAE** (typical error), and **coverage**
-(how often the truth fell inside the stated ±1σ). Coverage's target is 0.683, not 1.0: the stated
-uncertainties are 1σ RMSEs, so a well-calibrated calculator misses about a third of the time;
-materially below means error bars too tight, above too loose.
-
-Recording a prediction is best-effort and never fails a calculation. Recording a measurement and
-reading the ledger raise on failure, because there the ledger *is* the deliverable.
-`Calibration.verdict` separates a disabled ledger (the default) from an empty one and from too few
-points.
+Predictions keyed on `(calc_type, calc_version, input_hash)` (`input_hash` is over the canonical
+SMILES, not the cache's molecule hash) are reconciled against measurements as they arrive. Figures
+are bias, MAE and ±1σ coverage, whose target is 0.683, not 1.0. Recording a prediction is
+best-effort; recording a measurement and reading the ledger raise on failure. The ledger is off by
+default, and `Calibration.verdict` says so.
 """
 
 import logging
@@ -49,10 +40,8 @@ ON CONFLICT (property, input_hash, source) DO UPDATE SET
     observed_at = now()
 """
 
-# Every measurement for one property of one molecule as one row: the consensus value (mean over
-# sources), their spread, and who they were. One fragment for every reader, so the scored value
-# and the quoted value are the same number. `count(*)` counts sources; `count(DISTINCT unit)` is
-# carried because a mean over two units is meaningless (values are converted before writing).
+# All measurements for one property of one molecule as one row: the consensus (mean over
+# sources), spread and sources. One fragment for every reader, so scored and quoted values agree.
 _CONSENSUS = """
     SELECT avg(value)                                AS value,
            min(value)                                AS lowest,
@@ -282,21 +271,13 @@ async def record_observation(
 ) -> int | None:
     """Store a measured value, reconcile any matching predictions, and return how many it scored.
 
-    A measurement is identified by its source: values from different sources are separate facts, and
-    predictions are scored against their consensus (mean over sources); a second value from the same
-    source replaces the first. `report_measurement` defaults the source to `chemist-reported`. The
-    measurement is stored even when nothing predicted it, and a later prediction reconciles against
-    it on write.
-
-    Unlike `record_prediction` this does not swallow failures: storing the measurement is the call's
-    whole deliverable.
+    Values from different sources are kept separately and predictions are scored against their
+    consensus; a second value from one source replaces the first. The measurement is stored even if
+    nothing predicted it. Raises on failure, since storing is the call's whole deliverable.
 
     Returns:
-        How many predictions the measurement reconciled (zero: stored, nothing predicted it), or
-        `None` if the ledger is disabled and nothing was stored.
-
-    Raises:
-        Exception: whatever the database raises; the connector's sanitizer makes it caller-safe.
+        How many predictions were reconciled, or `None` if the ledger is disabled and nothing was
+        stored.
     """
     if not settings.calibration_enabled:
         return None
@@ -380,13 +361,8 @@ def summarize(
 async def reconciled_for(calc_type: str, calc_version: str) -> list[Residual]:
     """Every prediction of this calculator version that a measurement has since answered.
 
-    The one read of the ledger, so aggregate and listing describe the same rows. Unbounded on
-    purpose: growth is bounded by bench work, and a cap would silently drop measurements. Raises on
-    failure, because the only callers (`calculator_trust`, `calculator_outliers`) have no other
-    result, and `[]` would read as a calculator that never missed.
-
-    Raises:
-        Exception: whatever the database raises; the connector's sanitizer makes it caller-safe.
+    The one read of the ledger; unbounded because growth is bounded by bench work. Raises on
+    failure, since `[]` would read as a calculator that never missed.
     """
     if not settings.calibration_enabled:
         return []

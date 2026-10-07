@@ -1,8 +1,7 @@
 """ECFP4 fingerprints — the molecule-specific "SMILES → bits" step.
 
-A SMILES becomes an ECFP4 (Morgan radius 2, 2048-bit) fingerprint via RDKit, stored as a fixed-width
-bitstring that maps onto a Postgres `bit(2048)` column. Radius and width come from config. Ranking
-and storage are in the domain-neutral `chemclaw.science.fingerprints.store`.
+Morgan fingerprints via RDKit as fixed-width bitstrings for a Postgres `bit(N)` column; radius and
+width come from config.
 """
 
 from functools import lru_cache
@@ -14,11 +13,9 @@ from chemclaw.core.chem import STANDARDIZATION_VERSION, standardize
 from chemclaw.core.config import settings
 from chemclaw.science.fingerprints.store import FingerprintInputError
 
-# Stereochemistry is part of the bits (RDKit's default leaves it out). Otherwise enantiomers and
-# E/Z pairs fingerprint identically and tie at Tanimoto 1.0 while citing different compounds,
-# since `standardize` keeps them apart. Not a setting: it decides whether the index agrees with
-# the identity function feeding it; it is named in `molecule_definition`. Isotopes stay invisible,
-# as ECFP4's invariant has no isotope; `compound_id` distinguishes isotopologues.
+# Stereochemistry is part of the bits (not RDKit's default), so enantiomers do not tie at 1.0
+# while citing different compounds. Not a setting; recorded in `molecule_definition`. Isotopes
+# remain invisible to ECFP4; `compound_id` tells isotopologues apart.
 _INCLUDE_CHIRALITY = True
 
 
@@ -59,10 +56,9 @@ def ecfp_bitstring(smiles: str) -> str:
 def molecule_definition() -> str:
     """The current ECFP definition signature stored on each molecule row.
 
-    Fingerprints of equal width but different definition are incomparable, so the store records this
-    per row and refuses to rank across signatures. It covers radius, width, the standardization
-    version and the `chiral` token (derived from `_INCLUDE_CHIRALITY`); changing any retires old
-    rows until a re-index rebuilds them.
+    Rows of different definitions are incomparable, so the store refuses to rank across them. Covers
+    radius, width, the standardization version and chirality; changing any retires old rows until
+    re-indexed.
     """
     chirality = "chiral" if _INCLUDE_CHIRALITY else "flat"
     return (

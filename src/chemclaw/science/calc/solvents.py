@@ -1,12 +1,8 @@
 """Which solvent names GFN2-xTB's ALPB model actually has, and the launch-time check on them.
 
-An unknown name (e.g. "2-MeTHF") would otherwise fail deep inside the durable job. The check runs as
-a `JobSpec.precondition` in the chat service before any workflow starts, so this module imports only
-the standard library (no `tblite` in that process).
-
-`ALPB_SOLVENTS` is the intersection of tblite's dielectric table and its ALPB parameter table (a
-name in only one fails differently), identical for GFN1 and GFN2. `tests/test_solvents.py`
-re-derives it against the installed tblite, and pins the suggestion shortlist as a subset of it.
+A job precondition run in the chat service before any workflow starts, so this imports only the
+standard library. `ALPB_SOLVENTS` is the intersection of tblite's dielectric and ALPB parameter
+tables; `tests/test_solvents.py` re-derives it against the installed tblite.
 """
 
 from difflib import get_close_matches
@@ -120,15 +116,10 @@ def _did_you_mean(name: str) -> str:
 def require_supported_solvents(spec: Any) -> None:
     """Refuse a durable calc job naming a solvent the method cannot model, before it starts.
 
-    Duck-typed: job specs carry either `solvents` (a list) or an optional `solvent`, and
-    `connector.yaml` names one precondition per job. `None` is gas phase and passes.
-
-    Args:
-        spec: The validated params object, whatever the job declared.
+    Duck-typed over `solvents` (a list) or `solvent` (optional); `None` is gas phase.
 
     Raises:
-        ValueError: One or more named solvents have no ALPB parameters. The message names each,
-            offers the closest supported spellings, and lists the common ones.
+        ValueError: Naming each unsupported solvent with the closest spellings and the common ones.
     """
     named: list[str] = list(getattr(spec, "solvents", None) or [])
     single = getattr(spec, "solvent", None)

@@ -1,8 +1,4 @@
-"""High-level molecule search over a fingerprint store.
-
-`find_similar_molecules` (Tanimoto neighbors) and `find_substructure_matches` (molecules containing
-a fragment). Both take the store as a seam. Defaults come from config; the `reaction-search` skill
-decides how to set them.
+"""High-level molecule search over a fingerprint store: Tanimoto neighbours and substructure matches.
 """
 
 import asyncio
@@ -80,10 +76,8 @@ class MoleculeHit(BaseModel):
 async def indexed_structure(store: FingerprintStore, note_id: str) -> str | None:
     """The indexed structure whose `compound_note_id` is `note_id`, or `None` if none is.
 
-    The inverse of `MoleculeHit.for_molecule`, for `expand_note` on a hit id with no note behind it
-    (e.g. a molecule indexed from an ELN record). A scan, since the id is a hash: over the same
-    capped slice `substructure_matches` reads, hashing each stored (already standardized) label with
-    `compound_id_of_standard`. Runs only when the id names no note.
+    For `expand_note` on a hit with no note behind it; scans the capped slice hashing each stored
+    label.
     """
     for record in await store.all_records(limit=settings.substructure_scan_max_records):
         if compound_id_of_standard(record.label) == note_id:
@@ -106,13 +100,8 @@ async def find_similar_molecules(
 ) -> FingerprintSearch[MoleculeHit]:
     """Return molecules structurally similar to `smiles`, most similar first.
 
-    `top_k` and `threshold` default to the configured values. Raises `FingerprintError` on an
-    unparseable query.
-
-    Returns a `FingerprintSearch` so an empty answer says why: `index_empty` (nothing indexed),
-    `hits_truncated` (more cleared the threshold than `top_k` holds), `approximate` (the store
-    searched approximately, so empty is not proof of absence), and `index_partial` (a definition
-    rebuild is in progress and only part of the corpus is comparable).
+    Raises `FingerprintError` on an unparseable query. The `FingerprintSearch` result says why it
+    might be empty or short: `index_empty`, `hits_truncated`, `approximate`, `index_partial`.
     """
     matches, truncated = await find_matches(store, ecfp_bitstring(smiles), top_k, threshold)
     return FingerprintSearch[MoleculeHit](
@@ -130,26 +119,14 @@ async def find_substructure_matches(
 ) -> FingerprintSearch[MoleculeHit]:
     """Return stored molecules that contain the `query` fragment.
 
-    The query is SMARTS (a SMILES is valid SMARTS), with a SMILES parse as fallback; exact RDKit
-    matching, not a score. Guards on the model-supplied query: length is bounded by
-    `substructure_query_max_length` (subgraph isomorphism is worst-case exponential) and an empty
-    pattern is rejected. The scan is capped at `substructure_scan_max_records` and the result at
-    `fingerprint_max_top_k`; hitting either is reported in the result
-    (`scan_truncated`/`hits_truncated`, `verdict`) because the model never sees the log.
-    `index_partial` is not set: this reads stored SMILES, not bits, so the whole corpus is searched
-    regardless of fingerprint definition.
+    SMARTS (SMILES as fallback), matched exactly with RDKit. Query length
+    (`substructure_query_max_length`), scan size (`substructure_scan_max_records`) and result count
+    (`fingerprint_max_top_k`) are bounded, and truncation is reported in the result. Uses the cached
+    substructure index when available, else `_match_record_by_record`.
 
-    Matching uses the cached `substructure_index` (`SubstructLibrary`), falling back to
-    `_match_record_by_record` when no index is available within this caller's bounds; the index
-    build has its own budget (`substructure_index_build_timeout_seconds`), separate from the match
-    budget.
-
-    Matching runs in a worker thread bounded by `substructure_match_timeout_seconds`, and the bound
-    is passed in as a deadline the scan checks itself, since `asyncio.wait_for` cannot stop a thread
-    and the default executor is shared (e.g. with token validation). RDKit cannot be interrupted
-    mid-call, so the scan works in chunks sized in time (`substructure_scan_deadline_slice_seconds`;
-    see `CorpusIndex.labels_matching`). On timeout the caller gets a `FingerprintError` naming the
-    bound. Each hit carries the compound note to cite.
+    Matching runs in a worker thread under `substructure_match_timeout_seconds`, passed in as a
+    deadline the scan checks between time-sized chunks, since a thread cannot be cancelled. On
+    timeout the caller gets a `FingerprintError` naming the bound.
     """
     max_length = settings.substructure_query_max_length
     if len(query) > max_length:
@@ -212,9 +189,8 @@ async def find_substructure_matches(
 class ScanOutcome(NamedTuple):
     """What one substructure pass found, and the two ways it fell short of the whole corpus.
 
-    `hits_truncated` says the count is a floor; `unreadable` says the corpus was not fully examined,
-    so a miss is not a negative. No record count is carried: the two scan paths count differently,
-    and the bounded run's count is on `ScanDeadlineExceeded.reached`.
+    `hits_truncated`: the count is a floor. `unreadable`: some rows were not examined, so a miss is
+    not a negative.
     """
 
     hits: list[MoleculeHit]
@@ -227,24 +203,11 @@ def _scan_for_matches(
 ) -> ScanOutcome:
     """Match `pattern` against the corpus slice, stopping at the result cap or at `deadline`.
 
-    Synchronous so it runs in a worker thread, index build included. Unparseable records are skipped
-    and counted, so a malformed row cannot turn a search into a false negative. The search asks for
-    one more hit than it may return (`maxResults=cap + 1`), so truncation is observed rather than
-    inferred. Past the deadline it raises rather than returning a partial scan as a result.
-
-    Args:
-        records: The capped corpus slice to match, in id order.
-        pattern: The compiled query.
-        deadline: `time.monotonic()` value past which the scan stops.
-
-    Returns:
-        The hits, whether a further match was found and dropped, and how many stored rows could not
-        be parsed into the index at all.
+    Synchronous (worker thread). Asks for `cap + 1` hits so truncation is observed. Unparseable rows
+    are skipped and counted.
 
     Raises:
-        ScanDeadlineExceeded: The deadline passed before every record was examined. A
-            `TimeoutError`, so the caller handles it like `asyncio.wait_for`'s; it carries
-            `reached`.
+        ScanDeadlineExceeded: The deadline passed first; a `TimeoutError` carrying `reached`.
     """
     max_matches = settings.fingerprint_max_top_k
     index = index_for(records, deadline)
@@ -272,25 +235,10 @@ def _match_record_by_record(
 ) -> tuple[list[str], int]:
     """Match `pattern` by parsing each stored SMILES in turn — the scan with no index behind it.
 
-    The fallback when no index is available (corpus too large to index in budget, another thread
-    building it, no time to build). It keeps parsing past the hit cap so `unreadable` covers the
-    whole slice, matching the indexed path's meaning of `scan_truncated`; only the subgraph matching
-    stops at the cap.
-
-    Args:
-        records: The capped corpus slice to match, in id order.
-        pattern: The compiled query.
-        limit: How many matches to collect before matching stops — the result cap plus one.
-        deadline: `time.monotonic()` value past which the scan stops.
-
-    Returns:
-        The matching labels in stored order, at most `limit` of them, and how many stored rows could
-        not be parsed at all.
+    Keeps parsing past the hit cap so `unreadable` covers the whole slice, as on the indexed path.
 
     Raises:
-        ScanDeadlineExceeded: The deadline passed before every candidate was examined. The same
-            class the indexed path raises; `total` counts every record here, and `because`
-            distinguishes the messages since the remedies differ.
+        ScanDeadlineExceeded: The deadline passed first; `because` names this path.
     """
     found: list[str] = []
     unreadable = 0

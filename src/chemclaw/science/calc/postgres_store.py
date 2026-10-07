@@ -1,8 +1,6 @@
-"""Postgres backend for the calculation store.
+"""Postgres backend for the calculation store, over `calculation_results`.
 
-Implements `ResultStore` over `calculation_results` (`infra/sql/001_calculation_results.sql`), so
-results survive restarts and are shared across workers. A `put` is an upsert keyed by the flat
-calculation key; a `get` is a primary-key lookup.
+`put` upserts by the flat calculation key; `get` is a primary-key lookup.
 """
 
 import logging
@@ -149,10 +147,7 @@ class PostgresStore:
     async def put(self, stored: StoredResult) -> None:
         """Persist `stored`, overwriting any existing result for its key.
 
-        `checked_payload` in `cached_compute` is the check; `json_column` here is the backstop for
-        writers that bypass it (`ArrayOffloadingStore`, backfills), turning a non-finite float into
-        a `ValueError` at the offending column instead of a server-side JSON error
-        (`chemclaw.core.jsonb`).
+        `json_column` is a backstop for writers that bypass `cached_compute`'s `checked_payload`.
         """
         key = stored.key
         async with self._connection() as conn:
@@ -192,14 +187,9 @@ class PostgresStore:
     async def find(self, query: CalculationQuery) -> CalculationPage:
         """Return results matching `query`, newest first, capped at `query.limit`.
 
-        A molecule filter canonicalises the SMILES here and compares `input_hash` (not reversible,
-        so never a scan). Rows whose `epoch` is neither current nor `''` are excluded, matching
-        `store._matches` (`tests/test_postgres_store.py` pins the two agreeing).
-
-        The page carries `total_matched` (so a capped page says what it is a page of) and
-        `unreadable` (rows dropped by `_readable_row`), because the model qualifying its answer
-        never sees the log. The count runs in the same transaction but its own snapshot, so it can
-        only over-count.
+        A molecule filter compares the canonical-SMILES `input_hash`; rows from another epoch are
+        excluded, matching `store._matches`. The page carries `total_matched` and `unreadable`
+        (dropped rows); the count may over-count, never under-count.
         """
         params = {
             "calc_type": query.calc_type,

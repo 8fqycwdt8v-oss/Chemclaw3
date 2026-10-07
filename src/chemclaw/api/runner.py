@@ -115,12 +115,12 @@ logger = logging.getLogger(__name__)
 # for a bundle.
 _DURABLE_SUBSYSTEM = "durable-jobs (Temporal)"
 
-# : How a turn ended, as a closed set with exactly one producer (`_settle_outcome`).
-# :
-# : `turn_costs.completed` is derived from this and kept for existing dashboards. Turns refused
-# : for budget, shed, or 409'd never reach `run_turn`, spend nothing, and have their own
-# : counters, so they are not outcomes here. `INTERRUPTED` is recorded too but is not in this
-# : set: its producer is whichever process next touches the session, not `_settle_outcome`.
+#: How a turn ended, as a closed set with exactly one producer (`_settle_outcome`).
+#:
+#: `turn_costs.completed` is derived from this and kept for existing dashboards. Turns refused
+#: for budget, shed, or 409'd never reach `run_turn`, spend nothing, and have their own
+#: counters, so they are not outcomes here. `INTERRUPTED` is recorded too but is not in this
+#: set: its producer is whichever process next touches the session, not `_settle_outcome`.
 _OUTCOMES = (
     "answered",
     "loop_capped",
@@ -131,8 +131,8 @@ _OUTCOMES = (
     "abandoned",
 )
 
-# : A turn whose process died mid-turn, booked exactly once by whichever process next touches
-# : its session (`settle_interrupted_turns`), with zero spend: what it metered died with it.
+#: A turn whose process died mid-turn, booked exactly once by whichever process next touches
+#: its session (`settle_interrupted_turns`), with zero spend: what it metered died with it.
 INTERRUPTED = "interrupted"
 
 
@@ -945,10 +945,10 @@ def _revision_message(claims: Sequence[str]) -> str:
     return _REVISION_NOTE + "\n" + frame_untrusted(named, note_id="unsupported-claims")
 
 
-# : The revision round's instruction. It arrives in the `user` position (a provider needs a user
-# : turn after an assistant one, and `_settle_revision_thread` withdraws exactly this message),
-# : so it says who is speaking and that the reply is for the chemist, who never sees this note;
-# : otherwise the model answers as if the chemist had pushed back.
+#: The revision round's instruction. It arrives in the `user` position (a provider needs a user
+#: turn after an assistant one, and `_settle_revision_thread` withdraws exactly this message),
+#: so it says who is speaking and that the reply is for the chemist, who never sees this note;
+#: otherwise the model answers as if the chemist had pushed back.
 _REVISION_NOTE = ModelProse(
     "[System note, not from the chemist — the chemist never sees it, so do not reply to it, thank "
     "anyone for it or mention it.] An automated check compared your previous answer with the "
@@ -961,8 +961,8 @@ _REVISION_NOTE = ModelProse(
 )
 
 
-# : The five things that can become of a request to have a person read a flagged answer. A set,
-# : so tests can assert each is reachable and a typo cannot mint a silent extra series.
+#: The five things that can become of a request to have a person read a flagged answer. A set,
+#: so tests can assert each is reachable and a typo cannot mint a silent extra series.
 ESCALATION_OUTCOMES = frozenset({"opened", "joined", "no_claims", "no_actor", "unavailable"})
 
 

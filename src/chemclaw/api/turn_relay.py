@@ -31,8 +31,8 @@ from chemclaw.core.metrics import METRICS
 
 logger = logging.getLogger(__name__)
 
-# : How many frames one relayed view may hold unwritten before it is cut off as lagged — the
-# : same bound as a local reader's buffer, protecting the turn from a stalled consumer.
+#: How many frames one relayed view may hold unwritten before it is cut off as lagged — the
+#: same bound as a local reader's buffer, protecting the turn from a stalled consumer.
 _RELAY_BACKLOG = 1024
 
 

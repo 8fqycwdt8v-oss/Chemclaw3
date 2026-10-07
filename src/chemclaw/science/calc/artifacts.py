@@ -1,18 +1,9 @@
 """Content-addressed store for a calculation's by-products (D-124).
 
-The calculation cache persists the *answer*; this keeps the bytes a run produced (a Hessian, an
-optimized geometry), which make the next question cheap — thermochemistry at another temperature, IR
-at another broadening.
-
-- **Content addressing.** A blob is named by the SHA-256 of its uncompressed bytes, so identical
-  outputs store one copy; `open(content_hash)` is the read API.
-- **A named link.** `(calc_key, name)` records which run produced the blob and its role (`hessian`,
-  `xtbopt.xyz`).
-
-An artifact is optional by construction: `put` returns `None` rather than raising when the payload
-exceeds `artifact_max_bytes` or the store is disabled, so capturing a by-product can never fail its
-calculation. Mirrors `store.py`: a `Protocol`, an in-memory reference, a Postgres backend, and a
-`default_artifact_store()` seam.
+Keeps the bytes a run produced (a Hessian, a geometry), named by the SHA-256 of their uncompressed
+content and linked to the run as `(calc_key, name)`. Optional by construction: `put` returns `None`
+rather than raising when disabled or over `artifact_max_bytes`, so capturing a by-product never
+fails its calculation.
 """
 
 import base64
@@ -257,16 +248,10 @@ HESSIAN_ARRAYS: Mapping[str, str] = MappingProxyType(
 class ArrayOffloadingStore:
     """A `ResultStore` that keeps a payload's packed arrays here instead of in the result row.
 
-    A Hessian is megabytes, and `calculation_results` is never pruned (D-011), so a matrix stored
-    inline could never be reclaimed. Its arrays go to the artifact store, which eviction sweeps by
-    cost and idle time, and the row keeps their content hashes. Being a `ResultStore` wrapper keeps
-    `cached_remote` and its callers unchanged.
-
-    1. **A hit is a hit only if the blobs come back.** A missing blob (store disabled, evicted,
-       restored without artifacts) is a miss to recompute from, never an error.
-    2. **Blobs are written first, and the row only if they all landed.** A row addressing a missing
-       artifact would be a hit forever and fail every read. A refusal is logged at debug and leaves
-       the result uncached; it never raises.
+    `calculation_results` is never pruned, so megabyte Hessians go to the evictable artifact store
+    and the row keeps their hashes. A hit counts only if every blob comes back (else it is a miss to
+    recompute); blobs are written before the row, and a refusal leaves the result uncached rather
+    than raising.
     """
 
     def __init__(

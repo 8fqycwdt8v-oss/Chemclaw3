@@ -21,8 +21,8 @@ import json
 
 from chemclaw.cli.mock_llm import Behaviour, ToolCall
 
-# : The helper's own behaviour, selected by the marker the `task` description carries. It calls
-# : no tool and writes a short report, the shape a helper actually returns.
+#: The helper's own behaviour, selected by the marker the `task` description carries. It calls
+#: no tool and writes a short report, the shape a helper actually returns.
 HELPER_MARKER = "d-helper-report"
 
 
@@ -35,9 +35,9 @@ def _verdict(reason: str) -> str:
     return json.dumps({"verdict": "served", "reason": reason, "fabricated_claims": []})
 
 
-# : The catalogue, in selection order. `MockLlm.select` takes the first `[[name]]` in the request,
-# : and a caller's second pass carries both its question and the `task` arguments it wrote, so
-# : `d-delegates` must precede `d-helper-report`.
+#: The catalogue, in selection order. `MockLlm.select` takes the first `[[name]]` in the request,
+#: and a caller's second pass carries both its question and the `task` arguments it wrote, so
+#: `d-delegates` must precede `d-helper-report`.
 DELEGATION_BEHAVIOURS: list[Behaviour] = [
     # ------------------------------------------------------------------ the baseline's compliance
     Behaviour(

@@ -1,14 +1,8 @@
 """The shapes a calculation is stored, reconstructed and carried in — and nothing else.
 
-The engines live in `Chemclaw3-mcp`'s `servers/calc`; these models are what the D-011 cache
-reconstructs and what the durable jobs return over the Temporal wire, so their field shapes are
-pinned by in-flight histories. Sections follow the ladder a calculation climbs: structure, single
-point, optimization, second derivatives, composites.
-
-Nothing here computes or derives a `calc_version`. `Structure.structure_id` is a hash of coordinates
-the caller holds, so it agrees with the server's derivation. Server payloads also carry
-`calc_version` and `calc_key`, which validation ignores; `_log_prediction` reads the version off the
-payload.
+What the D-011 cache reconstructs and the durable jobs return over the Temporal wire, so field
+shapes are pinned by in-flight histories; ordered structure → single point → optimization → Hessian
+→ composites. Nothing here computes or derives a `calc_version`.
 """
 
 from typing import Literal
@@ -84,9 +78,8 @@ class Structure(BaseModel):
     def _normalize_and_validate(self) -> "Structure":
         """Round coordinates, then reject a structure that is not physically consistent.
 
-        Catches mismatched array lengths, non-3D rows, and an electron count that cannot produce the
-        declared multiplicity. Checked here too because structures are also built on this side
-        (refinement displacements).
+        Catches mismatched arrays, non-3D rows, and electron counts incompatible with the
+        multiplicity.
         """
         if len(self.positions) != len(self.elements):
             raise ValueError(f"{len(self.positions)} positions for {len(self.elements)} elements")
@@ -409,10 +402,8 @@ class SiteReactivityResult(BaseModel):
     def ranked_for(self, mode: FukuiMode) -> "SiteReactivityResult":
         """Re-rank this result for `mode` without recomputing anything.
 
-        The Fukui single points do not depend on the mode, so the server keys them without it; a
-        cache hit never reaches the server's re-ranking. Without this, a second mode would be served
-        the first mode's ordering and labels. Every site carries all three indices, so this is only
-        a sort.
+        The server keys Fukui results without the mode, so a cache hit must be re-ranked here or it
+        would carry the first mode's ordering.
         """
         if self.mode == mode:
             return self
@@ -620,10 +611,8 @@ class ThermochemistryResult(BaseModel):
     # Every normal mode, ordered by wavenumber. A caller may truncate (`strongest_bands`);
     # `mode_count` then states how many there were.
     modes: list[VibrationalMode]
-    # Why this result carries wavenumbers but no intensities, or `None` when it carries both.
-    # Pairing intensities to modes is unsafe near linearity, and that failure is confined here
-    # rather than discarding the free energy, which reads no intensity. When set, every
-    # `VibrationalMode.ir_intensity_km_per_mol` is `None`.
+    # Why this result carries wavenumbers but no intensities, or `None` when it carries both. When
+    # set, every mode's intensity is `None`; the thermochemistry is unaffected.
     spectrum_unavailable: str | None = None
     mode_count: int
     # The five lowest modes, always from the *full* set. RRHO is weakest here, so this is where
@@ -649,9 +638,7 @@ class ThermochemistryResult(BaseModel):
     def strongest_bands(self, limit: int) -> list[VibrationalMode]:
         """The `limit` most intense bands, plus every imaginary mode, by wavenumber.
 
-        What a measured IR spectrum is compared against; imaginary modes are always kept since they
-        discredit the result. With `spectrum_unavailable` set, this is an arbitrary slice of the
-        first `limit` real modes, and the field says why.
+        With `spectrum_unavailable` set this is an arbitrary slice of the first real modes.
         """
         real = [index for index, mode in enumerate(self.modes) if mode.wavenumber_cm > 0]
         real.sort(key=lambda index: self.modes[index].ir_intensity_km_per_mol or -1.0, reverse=True)

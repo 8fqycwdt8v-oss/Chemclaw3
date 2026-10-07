@@ -94,12 +94,12 @@ def _prompt(question: BenchmarkQuestion) -> str:
     )
 
 
-# : The mhchem/`siunitx` wrappers whose contents are the chemistry (`\ce{FeSO4}` is `FeSO4`):
-# : the command goes, the argument stays.
+#: The mhchem/`siunitx` wrappers whose contents are the chemistry (`\ce{FeSO4}` is `FeSO4`):
+#: the command goes, the argument stays.
 _MARKUP_WRAPPERS = ("ce", "pu", "text", "mathrm", "mathit")
-# : The symbol commands this corpus uses, each mapped to the token its Unicode spelling also maps
-# : to so a key and an answer meet. Mapped rather than deleted, so options that differ only by a
-# : symbol (ΔH vs ΔG) stay apart.
+#: The symbol commands this corpus uses, each mapped to the token its Unicode spelling also maps
+#: to so a key and an answer meet. Mapped rather than deleted, so options that differ only by a
+#: symbol (ΔH vs ΔG) stay apart.
 _SYMBOL_WORDS = {
     "circ": " deg ",
     "delta": " delta ",
