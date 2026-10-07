@@ -1,10 +1,10 @@
 """The two halves of `make kg-validate` that only a database can answer, driven end to end.
 
 In CI both arms check nothing: the seed corpus may cite no calculation
-(`tests/test_seed_corpus.py::test_the_seed_corpus_cites_no_calculation_the_store_cannot_back`),
-and CI's database has no `reaction_records`. So each arm gets a case that makes it fail and one
-that makes it pass, through `validate_kg.main` itself. Real Postgres, because the question is
-whether a row exists; skips without a database.
+(`tests/test_seed_corpus.py::test_the_seed_corpus_cites_no_calculation_the_store_cannot_back`), and
+CI's database has no `reaction_records`. So each arm gets a case that makes it fail and one that
+makes it pass, through `validate_kg.main` itself. Real Postgres, because the question is whether a
+row exists; skips without a database.
 """
 
 import asyncio

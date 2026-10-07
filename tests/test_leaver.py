@@ -620,21 +620,16 @@ async def test_the_erase_statements_are_valid_sql() -> None:
         # Composed workflows are erased like preferences: a working procedure cites no evidence, so
         # it is part of the conversation, not the record.
         "composed_workflows",
-        # A shared session's standing and authorship in sessions somebody else owns
-        # (`D-2026-09-27-in-a-shared-session-the-sender-governs`).
+        # A shared session's standing and authorship in sessions somebody else owns.
         "session_members",
         "plan_authors",
-        # A place in a session's line, by sender
-        # (`D-2026-10-01-a-queued-message-waits-in-its-senders-request`).
+        # A place in a session's line, by sender.
         "session_turn_queue",
-        # A request to a running turn on another replica, by asker
-        # (`D-2026-10-04-a-running-turn-is-reached-through-postgres-from-any-replica`).
+        # A request to a running turn on another replica, by asker.
         "session_turn_remotes",
-        # Artefacts follow `session_messages` (`D-2026-10-02-an-artefact-is-part-of-the-answer-not-
-        # an-effect`); their revisions cascade from the header.
+        # Artefacts follow `session_messages`; their revisions cascade from the header.
         "session_exhibits",
-        # Uploads, by session and by uploader
-        # (`D-2026-10-04-an-upload-is-session-state-not-pod-state`).
+        # Uploads, by session and by uploader.
         "session_attachments",
         "session_owners",
     }

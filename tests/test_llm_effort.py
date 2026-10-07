@@ -136,5 +136,5 @@ def test_effort_is_no_longer_refused_anywhere_and_reaches_the_payload(
     # The profile input — the one the settings validator could never see.
     assert build_chat_model(effort="high")._default_params["reasoning_effort"] == "high"
 
-    # And the deployment input, which the validator used to reject at construction.
+    # And the deployment setting accepts it at construction.
     assert LlmSettings(llm_effort="high").llm_effort == "high"

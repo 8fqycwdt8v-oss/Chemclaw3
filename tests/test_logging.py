@@ -758,9 +758,8 @@ def test_an_opaque_bearer_credential_is_redacted_and_the_scheme_kept() -> None:
         "D-2026-08-06-a-share-is-mounted-not-called",
         "calculation cache token count 1234567890 for reaction-aaa1",
         "chemclaw_turn_tokens_total 4096",
-        # Source lines of this repository. These are the cases whose absence let the first version
-        # of these rules through: they appear verbatim inside the tracebacks the whole mechanism
-        # exists to protect, and an over-eager rule destroyed the evidence an engineer needs.
+        # Source lines of this repository: they appear verbatim inside tracebacks, and an over-eager
+        # rule would destroy the evidence an engineer needs.
         'access_token = response.json().get("access_token")',
         "api_key=settings.llm_api_key or _KEYLESS_PLACEHOLDER,",
         "password=None)",
@@ -834,8 +833,7 @@ def test_a_variable_name_survives_the_line_that_tells_an_operator_to_set_it() ->
 
 
 #: Every key-anchored spelling, with a value whose shape the rules require (opaque, containing a
-#: digit). Applied at three escape depths by the test below, because depth is the axis the rules
-#: were blind on and `0` is the only one anything had ever measured.
+#: digit). Applied at three escape depths by the test below.
 _KEY_ANCHORED_SPELLINGS = {
     "password": ('{"password": "W4rehousePw"}', "W4rehousePw"),
     "pgpassword": ('{"PGPASSWORD": "W4rehousePw"}', "W4rehousePw"),
@@ -1033,9 +1031,8 @@ _QUADRATIC_UNITS = {
     "basic": "Authorization: Basic ",
     "aws": "AKIAAAAAAAAAAAAAAAAA",
     "slack": "xoxb-",
-    # The three shapes added on 2026-09-16. Each unit is the vendor prefix plus a tail that is one
-    # character short of matching, which is the input that makes the engine try the whole tail at
-    # every start position and then fail — the shape that found the quadratic rules above.
+    # Each unit is the vendor prefix plus a tail one character short of matching, so the engine
+    # tries the whole tail at every start position and then fails.
     "databricks": "dapi0123456789abcdef0123456789abcde",
     "gitlab": "glpat-0123456789abcde",
     # The PEM unit is the header plus an RFC 1421 header section whose body is one character short
@@ -1536,8 +1533,7 @@ _PEM_BODY_LINE = "MIIEpAIBAAKCAQEA0123abcdefghijklmnopqrstuvwxyzABCDEF"
 #: verbatim from the output while most of it survived, which needs a per-line assertion.
 _PEM_SHAPES_THAT_WALKED_PAST = {
     # `openssl genrsa -aes256` / `openssl rsa -aes256` / `ssh-keygen -m PEM -N <pass>`: two RFC 1421
-    # header lines and a blank line stand between the header and the body, and the separator window
-    # was eight whitespace characters wide. Measured before: `redacted=False`.
+    # header lines and a blank line stand between the header and the body.
     "encrypted rfc 1421 (the passphrase-protected form)": (
         "-----BEGIN RSA PRIVATE KEY-----\n"
         "Proc-Type: 4,ENCRYPTED\n"
@@ -1545,23 +1541,21 @@ _PEM_SHAPES_THAT_WALKED_PAST = {
         "\n" + _PEM_BODY_LINE + "\n"
         "-----END RSA PRIVATE KEY-----\n"
     ),
-    # A Helm Secret quoted into an error arrives as a YAML block scalar, and twelve columns of
-    # indent is more than the eight the window allowed. Measured before: `redacted=False`.
+    # A Helm Secret quoted into an error arrives as a YAML block scalar with deep indentation.
     "indented twelve columns in a yaml block scalar": (
         "key: |\n            -----BEGIN PRIVATE KEY-----\n            "
         + _PEM_BODY_LINE
         + "\n            -----END PRIVATE KEY-----\n"
     ),
-    # The discriminator asked for an unbroken 32-character base64 run, which a body wrapped
-    # narrower than that does not have on any line. Measured before: `redacted=False`.
+    # A body wrapped narrower than the discriminator's base64 run has no long unbroken run on any
+    # line.
     "wrapped at twenty-four columns": (
         "-----BEGIN PRIVATE KEY-----\n"
         + "\n".join(_PEM_BODY_LINE[i : i + 24] for i in range(0, len(_PEM_BODY_LINE), 24))
         + "\n-----END PRIVATE KEY-----\n"
     ),
-    # The run stopped after 8192 characters and `re.sub` resumed *inside the body*, where no rule
-    # has a header to anchor on. Measured before: redacted **True**, and 85 body lines survived
-    # past the `***` — the only one of the four that looks handled in the output it produces.
+    # A body longer than any fixed run bound: `re.sub` would resume inside the body, where no rule
+    # has a header to anchor on, leaving body lines after a `***` that looks like a redaction.
     "longer than the run's eight-kilobyte bound": (
         "-----BEGIN PRIVATE KEY-----\n"
         + "\n".join([_PEM_BODY_LINE] * 240)

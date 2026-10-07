@@ -98,10 +98,10 @@ def test_reagent_match_does_not_chain() -> None:
 
 
 def test_two_shared_compounds_produce_two_links() -> None:
-    """A pair sharing two product→reactant compounds yields one link per compound.
+    """A pair sharing two product-to-reactant compounds yields one link per compound.
 
-    Regression: a single edge attribute used to be overwritten per compound, silently
-    dropping all but the last handoff from the campaign's evidence.
+    A single edge attribute overwritten per compound would drop all but the last handoff from the
+    campaign's evidence.
     """
     a = _reaction("a", ["CCO"], ["CC=O", "O"])  # two products, both consumed by b
     b = _reaction("b", ["CC=O", "O"], ["CC(O)O"])
@@ -164,7 +164,7 @@ def test_growing_cluster_keeps_its_note_id() -> None:
     assert stable_id("optimization", ["r1"]) != stable_id("playbook", ["r1"])  # prefix separates
 
 
-# --- supersede on merge / shrink (D-078) ----------------------------------------------
+# --- supersede on merge / shrink ----------------------------------------------------------
 
 
 def _memory_note(
@@ -424,7 +424,7 @@ async def _build_and_propose(units: list[SynthesisUnit], submitter: FakeWriter) 
 
 
 def test_campaign_synthesis_proposes_notes_via_pr_gate() -> None:
-    """The campaign job proposes one PR-gated campaign note per detected chain."""
+    """The campaign job records one campaign note per detected chain."""
     a = _reaction("a", ["CCO"], ["CC=O"], project="proj-x")
     b = _reaction("b", ["CC=O"], ["CC(O)O"], project="proj-x")
     sub = FakeWriter()
@@ -505,7 +505,7 @@ def test_a_confirmation_is_unchanged_by_the_correction_path() -> None:
 
 
 def test_record_confirmed_answer_tool_uses_gate(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The agent tool routes a confirmed answer through the (fake) PR-gate (5.5 wiring)."""
+    """The agent tool routes a confirmed answer through the (fake) note writer."""
     from chemclaw.agent import memory_tools
 
     fake = FakeWriter()

@@ -881,7 +881,6 @@ def test_the_startup_report_never_takes_the_connector_down() -> None:
 
 
 # --- a partly re-indexed corpus ----------------------------------------------------------
-# D-2026-09-09-a-rebuild-nothing-counts-reports-as-finished------
 
 
 def _superseded(record: FingerprintRecord) -> FingerprintRecord:
@@ -1072,8 +1071,8 @@ async def test_the_reference_shelves_a_superseded_generation_rather_than_evictin
     assert [r.definition for r in await new.all_records(limit=10)] == [molecule_definition()]
 
 
-# --------------------------------------------------------------------------------------------
-# The `rdSubstructLibrary` index behind `_scan_for_matches`, and its cache:
+# -------------------------------------------------------------------------------------------- The
+# `rdSubstructLibrary` index behind `_scan_for_matches`, and its cache:
 # `chemclaw.science.fingerprints.molfp.substructure_index`.
 # --------------------------------------------------------------------------------------------
 

@@ -91,9 +91,8 @@ class _ManifestStub:
         self.name = name
 
 
-#: What `_probe_app` serves. The default allow-list rather than `()`, because a manifest may not
-#: declare an empty `tools` list any more: the empty list used to mean "everything this server
-#: offers", which is precisely the fail-open these tests would otherwise keep depending on.
+#: What `_probe_app` serves. A manifest may not declare an empty `tools` list, since that would fail
+#: open, so the default allow-list is used rather than `()`.
 _PROBE_TOOLS = ("echo", "slow")
 
 

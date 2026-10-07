@@ -243,10 +243,9 @@ def test_the_lane_runs_the_interactive_worker_the_chart_runs() -> None:
 
 
 def test_the_front_door_starts_only_after_every_worker_polls() -> None:
-    """Cold start: `worker-bo` had not polled yet and the front door died `bo (unpolled)`.
+    """The front door starts only after every worker is ready and polling the broker.
 
-    The front door used to start before the workers' readiness was even asked. Now each worker is
-    ready-checked and then asked of the broker, and only then is `api` started.
+    Otherwise the front door reports a bundle such as `bo` as unpolled on a cold start.
     """
     body = _function(_PROCESSES, "up")
     polled = body.index('wait_for_pollers "$python" "${workers[@]}"')
@@ -548,7 +547,7 @@ def test_a_note_push_never_lands_in_the_developer_checkout(
 def test_a_clone_made_under_the_old_rule_is_re_pointed_with_its_notes(
     tmp_path: Path, source_repo: Path
 ) -> None:
-    """A lane bootstrapped before the fix still pushed to the checkout on every later run."""
+    """A lane clone made under the old remote rule is re-pointed, keeping its notes."""
     clone = tmp_path / ".live/knowledge-repo"
     clone.parent.mkdir(parents=True)
     _git("clone", "-q", str(source_repo), str(clone))

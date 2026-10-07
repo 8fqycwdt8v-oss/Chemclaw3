@@ -1017,8 +1017,7 @@ def test_a_complete_judge_reply_is_graded_on_its_verdict(monkeypatch: pytest.Mon
 
     assert judgement.verdict == "served"
     assert judgement.reason == "gives the number and the method"
-    # The prompt is a system message plus the rendered answer — the shape the seam expects, rather
-    # than the vendor-specific `system=` + `messages=[]` pair this module used to post by hand.
+    # The prompt is a system message plus the rendered answer, the shape the gateway seam expects.
     prompt = list(judge.prompts[0])  # type: ignore[call-overload]
     assert [m.type for m in prompt] == ["system", "human"]
     assert "4.76" in prompt[1].content
@@ -1077,9 +1076,8 @@ def test_an_unrouted_judge_says_it_is_grading_with_the_model_under_test(
 
     caplog.clear()
     monkeypatch.setattr(settings, "model_routes", {"live-probe-judge": "big"})
-    # Deliberately *not* the shipped 4096, which is also `llm_max_tokens`' default: at equal values
-    # this assertion would pass with the `.bind` deleted. The first version of this test did exactly
-    # that and its own guard caught it.
+    # Deliberately not the shipped 4096, which is also `llm_max_tokens`' default: at equal values
+    # this assertion would pass with the `.bind` deleted.
     monkeypatch.setattr(settings, "live_probe_judge_max_tokens", 7331)
     live_judge._judge_client.cache_clear()
     try:
@@ -1184,10 +1182,10 @@ def test_the_probe_client_does_not_hand_its_bearer_to_an_ambient_proxy(
 def test_the_plan_gate_suite_refuses_to_stage_against_the_scripted_mock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Exit 3, before a probe is asked — not the 0/5 FAIL the mock used to earn.
+    """The plan-gate suite refuses the scripted mock with exit 3, before a probe is asked.
 
-    `cli.mock_llm` never writes a plan, so every approval POST is a 409 and each check failed on a
-    scenario that was never staged. "Could not reach it" is this harness's exit 3.
+    `cli.mock_llm` never writes a plan, so every approval POST would be a 409 and every check would
+    fail on a scenario never staged. "Could not reach it" is this harness's exit 3.
     """
     from chemclaw.cli.mock_llm import MOCK_BASE_URL
 
@@ -1200,9 +1198,8 @@ def test_the_plan_gate_suite_refuses_to_stage_against_the_scripted_mock(
     assert asyncio.run(live_probes._run_plan_gate(args)) == 3
 
 
-#: Openings of live answers (2026-09-27, DeepSeek V4 Pro) that replied to the verifier's revision
-#: note instead of to the chemist, verbatim — every one from a single-question probe, so there was
-#: no earlier turn for the model to be "right" about.
+#: Openings of real answers that replied to the verifier's revision note instead of to the chemist,
+#: verbatim, each from a single-question probe with no earlier turn to be "right" about.
 _LEAKED_OPENINGS = [
     "You're right — I wrote `compute_thermochemistry` in prose without calling it, which is the",
     "Understood. I am dropping both claims. Here is the corrected assessment.\n\n---\n\n## What",

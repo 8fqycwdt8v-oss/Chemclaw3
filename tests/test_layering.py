@@ -179,9 +179,8 @@ _TYPE_CHECKING_EDGES = _edges("type_checking")
 # is necessarily hand-authored.
 # ---------------------------------------------------------------------------------------------
 
-# The six package-level cycles, each direction with the one-line reason it exists. Declaring them
-# here (rather than only in the flat set below) is what makes them visible to a reader instead of
-# indistinguishable from every other allowed edge.
+# The package-level cycles, each direction with the one-line reason it exists. Declared here rather
+# than only in the flat set below so they are visible to a reader.
 _CYCLE_EDGES: dict[Edge, str] = {
     ("chemclaw.templates", "chemclaw.durable"): (
         "the template registry launches a durable TemplateWorkflow"
@@ -271,9 +270,9 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
     ("chemclaw.cli", "chemclaw.evals"),
     ("chemclaw.cli", "chemclaw.ingest"),
     ("chemclaw.cli", "chemclaw.kg"),
-    # `cli/rekey_compounds.py` is the terminal half of `memory.compound_rekey`, which supersedes a
-    # compound note a `STANDARDIZATION_VERSION` bump moved — with `memory.supersede.retire_note`,
-    # the one spelling of "how a note is retired" (D-2026-09-27). The shim holds no logic itself.
+    # `cli/rekey_compounds.py` is the terminal half of `memory.compound_rekey`, which supersedes
+    # compound notes a `STANDARDIZATION_VERSION` bump moved via `memory.supersede.retire_note`. The
+    # shim holds no logic.
     ("chemclaw.cli", "chemclaw.memory"),
     # `cli/propose_profile.py` mines `audit_events.tool`, the same model-written column
     # `operations.activity.safe_tool_name` bounds for its own readers — and a bound applied to one
@@ -338,9 +337,8 @@ _ALLOWED_MODULE_EDGES: set[Edge] = {
     # formula-injection guard rather than copying them.
     ("chemclaw.exhibits", "chemclaw.core"),
     ("chemclaw.exhibits", "chemclaw.protocols"),
-    # A `geometry` artefact may cite a calculation by-product rather than copy it
-    # (`D-2026-10-03-a-geometry-artefact-cites-the-calc-store-it-does-not-copy`), so `sources.py`
-    # reads the calc artifact store — the one module that does, and only for existence and bytes.
+    # A `geometry` artefact cites a calculation by-product rather than copying it, so `sources.py`
+    # reads the calc artifact store, for existence and bytes only.
     ("chemclaw.exhibits", "chemclaw.science"),
     # A development report requested from a conversation lands there as a `document` artefact,
     # written by the report's own activity (`durable/report_workflow.record_report_exhibit`)

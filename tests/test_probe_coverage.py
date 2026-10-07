@@ -221,7 +221,7 @@ def test_every_exemption_names_what_covers_it() -> None:
 def test_no_exemption_outlives_its_reason() -> None:
     """The other direction on the exemptions: one that is now probed should stop being exempt.
 
-    Same rule `BACKLOG.md` and `BACKLOG.md` both run on — a row that outlives its closure reads as
+    Same rule `BACKLOG.md` runs on — a row that outlives its closure reads as
     live state, so it is deleted rather than annotated.
     """
     redundant = sorted(set(EXEMPT) & _expected_tools())

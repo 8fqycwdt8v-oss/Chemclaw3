@@ -52,7 +52,7 @@ def test_either_half_left_alone_is_reported_and_neither_is_repaired() -> None:
     assert unmatched_result_ids(stranded_call) == set()
 
 
-# --- D-145: disposing of a row means disposing of the rows it is paired with -------------------
+# --- disposing of a row means disposing of the rows it is paired with -------------------------
 
 
 def test_neither_half_of_a_pair_may_be_dropped_alone() -> None:

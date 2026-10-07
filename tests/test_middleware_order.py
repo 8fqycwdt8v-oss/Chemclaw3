@@ -57,14 +57,13 @@ _EXPECTED_ORDER = (
     "AnswerAtTheCap",
     "MeterTurnSpend",
     # A `before_agent` hook, so its position carries no nesting argument: it runs once, before the
-    # first model call, and removes the `files` entries past `agent_scratch_retention_days`
-    # (`D-2026-09-26-a-chemists-scratch-write-is-bounded-and-expires`).
+    # first model call, and removes `files` entries past `agent_scratch_retention_days`.
     "expire_stale_scratch",
     "ReloadingSkillsMiddleware",
     "surface_authorization_denials",
     "surface_domain_errors",
     # Outermost of what rewrites a result, so the handle line lies outside the envelope and the
-    # defang (`D-2026-10-03-an-artefact-binds-a-value-to-the-result-it-came-from`).
+    # defang.
     "stamp_result_handles",
     # Inside both converters and outside the trail: a refusal this system composed must not be
     # wrapped in the evidence envelope, and the announcer and audit trail must read what the tool

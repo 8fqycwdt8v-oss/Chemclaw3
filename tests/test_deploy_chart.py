@@ -4919,8 +4919,8 @@ WORKER_RESIDENT_MIB = 279
 #: The forkserver's `Pss`, which sits above every pod-level delta measured for it — the property the
 #: budget relies on. `forkserver` starts its server by fork *and exec*, so it is a full second copy
 #: of the parser libraries, nothing copy-on-write. The live guard,
-#: `test_a_warm_parse_forkserver_still_costs_what_this_budget_was_derived_against`, ratchets
-#: `VmRSS` instead (see there).
+#: `test_a_warm_parse_forkserver_still_costs_what_this_budget_was_derived_against`, ratchets `VmRSS`
+#: instead (see there).
 FORKSERVER_POD_COST_MIB = 91
 
 #: What a warm forkserver's `VmRSS` may be, in MiB — the live guard on the constant above.

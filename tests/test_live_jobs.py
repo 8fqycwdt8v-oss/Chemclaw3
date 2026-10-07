@@ -124,10 +124,9 @@ def _no_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_a_launch_that_returned_pending_is_waited_for_before_it_is_judged(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The 2026-09-27 false FAIL: a 20.2 s first launch came back pending and read RUNNING.
+    """A launch that returned pending is polled to a terminal state before it is judged.
 
-    The launcher returning a bare id past `inline_wait_seconds` is the designed pending outcome, so
-    the check has to poll the broker to a terminal state before it describes one.
+    A bare id past `inline_wait_seconds` is the designed pending outcome, not a running-forever job.
     """
     running, done = WorkflowExecutionStatus.RUNNING, WorkflowExecutionStatus.COMPLETED
     broker = _Broker([running, running, done])
